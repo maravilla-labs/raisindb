@@ -6214,6 +6214,7 @@ dependencies = [
  "regex",
  "reqwest",
  "ring",
+ "rmp-serde",
  "serde",
  "serde_json",
  "tempfile",

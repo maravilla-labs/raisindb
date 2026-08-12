@@ -146,10 +146,15 @@ pub fn create_ai_completion(
             let provider =
                 create_provider_for_model(store.as_ref(), &tenant, &request.model).await?;
 
-            // Strip provider prefix from model name before sending to API
+            // Strip the provider slug from the model name before sending to the API —
+            // it routes the call, the upstream never sees it.
+            //
+            // The split is checked against this tenant's slugs rather than taken at the
+            // first colon: `qwen2.5-coder:latest` and `text-embedding-3:small` are whole
+            // model names, and splitting them blindly asks the provider for `latest`.
             let mut api_request = request;
-            if let Some((_prefix, model_name)) = api_request.model.split_once(':') {
-                api_request.model = model_name.to_string();
+            if let Ok(config) = store.get_config(&tenant).await {
+                api_request.model = config.parse_model_id(&api_request.model).1.to_string();
             }
 
             if wants_stream {
@@ -501,11 +506,16 @@ pub fn create_ai_list_models(
                     continue;
                 }
 
-                for model in provider_config.models {
+                for model in &provider_config.models {
                     models.push(serde_json::json!({
                         "id": model.model_id,
                         "name": model.display_name,
-                        "provider": provider_config.provider,
+                        // `provider` stays the KIND. Deployed user functions read this
+                        // field and compare it to "openai"/"ollama"/…; turning it into
+                        // a slug would break every one of them at once. The slug —
+                        // which is what a model id is prefixed with — is additive.
+                        "provider": provider_config.kind,
+                        "provider_slug": provider_config.slug,
                         "use_cases": model.use_cases,
                         "default_temperature": model.default_temperature,
                         "default_max_tokens": model.default_max_tokens,
@@ -611,11 +621,16 @@ pub fn create_ai_embed(
             // Use shared factory to create provider
             let provider = create_provider_for_model(store.as_ref(), &tenant, &model).await?;
 
-            // Strip provider prefix from model name before sending to API
-            let api_model = if let Some((_prefix, model_name)) = model.split_once(':') {
-                model_name.to_string()
-            } else {
-                model.clone()
+            // Strip the provider slug from the model name before sending to the API —
+            // it routes the call, the upstream never sees it.
+            //
+            // The split is checked against this tenant's slugs rather than taken at the
+            // first colon: `nomic-embed-text:latest` and `text-embedding-3:small` are
+            // whole model names, and splitting them blindly asks the provider to embed
+            // with a model called `latest`.
+            let api_model = match store.get_config(&tenant).await {
+                Ok(config) => config.parse_model_id(&model).1.to_string(),
+                Err(_) => model.clone(),
             };
 
             // Generate embedding with stripped model name

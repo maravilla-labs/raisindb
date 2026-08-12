@@ -29,12 +29,17 @@ use super::types::{ErrorResponse, TestConnectionResponse};
 
 /// Test connection to a specific provider.
 ///
-/// POST /api/tenants/{tenant_id}/ai/providers/{provider}/test
+/// POST /api/tenants/{tenant_id}/ai/providers/{slug}/test
 ///
 /// Actually tests the connection by calling the provider's API to fetch models.
+///
+/// The path segment is a provider SLUG, not a kind: two entries can share a kind and
+/// point at different hosts, and testing one must not test — or overwrite the model
+/// list of — the other. Existing URLs like `.../providers/openai/test` keep working
+/// because pre-slug entries are slugged after their kind's serde name.
 #[axum::debug_handler]
 pub async fn test_provider_connection(
-    Path((tenant_id, provider)): Path<(String, AIProvider)>,
+    Path((tenant_id, slug)): Path<(String, String)>,
     State(state): State<AppState>,
 ) -> Result<Json<TestConnectionResponse>, (StatusCode, Json<ErrorResponse>)> {
     let tenant_id_str = tenant_id.clone();
@@ -60,23 +65,21 @@ pub async fn test_provider_connection(
         })?;
 
     // Find the specific provider
-    let provider_config = config
-        .providers
-        .iter()
-        .find(|p| p.provider == provider)
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: format!("Provider {:?} not configured", provider),
-                }),
-            )
-        })?;
+    let provider_config = config.get_provider(&slug).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("Provider '{}' not configured", slug),
+            }),
+        )
+    })?;
+    let provider = provider_config.kind;
 
     // Check if API key is configured (if required)
     if provider.requires_api_key() && provider_config.api_key_encrypted.is_none() {
         return Ok(Json(TestConnectionResponse {
             success: false,
+            slug,
             provider,
             message: None,
             error: Some("No API key configured".to_string()),
@@ -109,8 +112,9 @@ pub async fn test_provider_connection(
     let endpoint = provider_config.api_endpoint.as_deref();
 
     tracing::info!(
-        "Testing connection for tenant {} provider {:?}",
+        "Testing connection for tenant {} provider '{}' ({:?})",
         tenant_id_str,
+        slug,
         provider
     );
 
@@ -135,13 +139,10 @@ pub async fn test_provider_connection(
 
             let model_count = model_configs.len();
 
-            // Update provider config with fetched models
+            // Update provider config with fetched models — by slug, so a second entry
+            // of the same kind keeps its own list.
             let mut updated_config = config.clone();
-            if let Some(pc) = updated_config
-                .providers
-                .iter_mut()
-                .find(|p| p.provider == provider)
-            {
+            if let Some(pc) = updated_config.providers.iter_mut().find(|p| p.slug == slug) {
                 pc.models = model_configs;
             }
 
@@ -151,13 +152,15 @@ pub async fn test_provider_connection(
             }
 
             tracing::info!(
-                "Successfully connected to {:?}, found {} models",
+                "Successfully connected to '{}' ({:?}), found {} models",
+                slug,
                 provider,
                 model_count
             );
 
             Ok(Json(TestConnectionResponse {
                 success: true,
+                slug,
                 provider,
                 message: Some(format!(
                     "Connected successfully. Found {} models.",
@@ -167,9 +170,10 @@ pub async fn test_provider_connection(
             }))
         }
         Err(e) => {
-            tracing::warn!("Failed to connect to {:?}: {}", provider, e);
+            tracing::warn!("Failed to connect to '{}' ({:?}): {}", slug, provider, e);
             Ok(Json(TestConnectionResponse {
                 success: false,
+                slug,
                 provider,
                 message: None,
                 error: Some(format!("Failed to connect: {}", e)),

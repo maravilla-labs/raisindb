@@ -4,25 +4,37 @@ import {
   ApiKeyDeps,
   ApiKeyFlags,
   KNOWN_PROVIDERS,
+  entrySlug,
   mergeProviderConfig,
   parseModelSpec,
   resolveApiKey,
+  validateProviderSlug,
 } from './ai-config.js';
 
 /**
  * `raisindb ai provider ...` - tenant AI provider configuration (gh-secret
  * style: the API key is never echoed, never logged).
  *
+ * A provider is addressed by its per-tenant slug, so a tenant can run several
+ * providers of the same kind; `--kind` names which kind a *new* slug is.
+ *
  * Endpoints (raisin-transport-http, handlers/ai/config.rs):
  *   GET  /api/tenants/{tenant}/ai/config
- *   PUT  /api/tenants/{tenant}/ai/config        (REPLACES the provider list;
- *        a provider's stored key is preserved when api_key_plain is omitted)
+ *   PUT  /api/tenants/{tenant}/ai/config        (MERGES by slug: an entry in
+ *        the payload is created or updated, an entry only in storage is left
+ *        alone, and a provider's stored key is preserved when api_key_plain is
+ *        omitted. The CLI still sends the full list it read, which is a no-op
+ *        under merge semantics and the correct body for a server still doing a
+ *        document replace.)
  *   GET  /api/tenants/{tenant}/ai/providers
- *   POST /api/tenants/{tenant}/ai/providers/{provider}/test
+ *   POST /api/tenants/{tenant}/ai/providers/{slug}/test
  */
 
 export interface AiProviderSetCliOptions extends ApiKeyFlags {
+  kind?: string;
   endpoint?: string;
+  displayName?: string;
+  iconUrl?: string;
   enabled?: boolean;
   disabled?: boolean;
   model?: string[];
@@ -30,14 +42,15 @@ export interface AiProviderSetCliOptions extends ApiKeyFlags {
 }
 
 export async function aiProviderSet(
-  provider: string,
+  slug: string,
   options: AiProviderSetCliOptions,
   fetchImpl?: FetchLike,
   keyDeps?: ApiKeyDeps
 ): Promise<void> {
-  if (!(KNOWN_PROVIDERS as readonly string[]).includes(provider)) {
+  // KNOWN_PROVIDERS now gates --kind, not the slug: the slug is user-chosen.
+  if (options.kind !== undefined && !(KNOWN_PROVIDERS as readonly string[]).includes(options.kind)) {
     throw new Error(
-      `Unknown provider '${provider}'. Known providers: ${KNOWN_PROVIDERS.join(', ')}`
+      `Unknown provider kind '${options.kind}'. Known kinds: ${KNOWN_PROVIDERS.join(', ')}`
     );
   }
   if (options.enabled && options.disabled) {
@@ -59,10 +72,34 @@ export async function aiProviderSet(
     throw new Error(`Failed to read AI config for tenant '${tenant}': ${getResult.errorMessage}`);
   }
 
+  const existing = (getResult.data.providers ?? []).find((p) => entrySlug(p) === slug);
+
+  // Validate on CREATE only, exactly as the server does. Slugs are immutable,
+  // so an update always carries a slug that is already stored - and a stored
+  // slug may predate the pattern (`azure_openai` is the common one). Validating
+  // updates too would leave such an entry with no way to be saved again.
+  if (!existing) {
+    validateProviderSlug(slug);
+  }
+
+  // A slug's kind is fixed at creation: there is no rename and no referential
+  // integrity behind it, so re-pointing an existing slug at another kind would
+  // silently break every model id and ai_provider_ref that names it - and would
+  // hand the stored credential to a client speaking a different protocol.
+  if (existing && options.kind !== undefined && options.kind !== existing.provider) {
+    throw new Error(
+      `Provider '${slug}' already exists with kind '${existing.provider}'; ` +
+        `a slug's kind cannot be changed. Create a new slug instead.`
+    );
+  }
+
   const enabled = options.enabled ? true : options.disabled ? false : undefined;
-  const body = mergeProviderConfig(getResult.data, provider, {
+  const body = mergeProviderConfig(getResult.data, slug, {
+    kind: options.kind,
     apiKey: resolved?.key,
     endpoint: options.endpoint,
+    displayName: options.displayName,
+    iconUrl: options.iconUrl,
     enabled,
     models,
   });
@@ -77,15 +114,27 @@ export async function aiProviderSet(
 
   const targetEntry = body.providers[body.providers.length - 1];
   const details = [
+    `kind=${targetEntry.provider}`,
     `enabled=${targetEntry.enabled}`,
     `models=${targetEntry.models.length}`,
     resolved ? `api_key=updated (from ${resolved.source})` : 'api_key=unchanged',
   ];
-  console.log(`Provider '${provider}' configured for tenant '${tenant}' (${details.join(', ')}).`);
+  console.log(`Provider '${slug}' configured for tenant '${tenant}' (${details.join(', ')}).`);
 }
 
+/**
+ * One row of GET /ai/providers - mirrors `ProviderSummary` in
+ * handlers/ai/types.rs. The optional fields are `skip_serializing_if =
+ * "Option::is_none"` on the Rust side, so they are genuinely absent (not null)
+ * whenever the provider has not set them.
+ */
 interface ProviderSummary {
+  slug: string;
+  /** provider KIND (the wire key is `provider`) */
   provider: string;
+  display_name?: string | null;
+  icon_url?: string | null;
+  api_endpoint?: string | null;
   enabled: boolean;
   has_api_key: boolean;
   model_count: number;
@@ -121,11 +170,14 @@ export async function aiProviderList(
     return;
   }
 
+  // Slug first: it is the identity every other command takes as its argument.
   console.log(
     formatTable(
-      ['PROVIDER', 'ENABLED', 'HAS API KEY', 'MODELS'],
+      ['SLUG', 'KIND', 'ENDPOINT', 'ENABLED', 'HAS API KEY', 'MODELS'],
       providers.map((p) => [
+        p.slug || p.provider,
         p.provider,
+        p.api_endpoint || '-',
         String(p.enabled),
         String(p.has_api_key),
         String(p.model_count),
@@ -139,25 +191,27 @@ export interface AiProviderTestOptions {
 }
 
 export async function aiProviderTest(
-  provider: string,
+  slug: string,
   options: AiProviderTestOptions = {},
   fetchImpl?: FetchLike
 ): Promise<void> {
   const tenant = options.tenant || 'default';
+  // The path segment is the slug now; legacy entries keep working because
+  // their shimmed slug is the old provider name.
   const result = await apiCall<{ success: boolean; message?: string; error?: string }>(
-    `/api/tenants/${encodeURIComponent(tenant)}/ai/providers/${encodeURIComponent(provider)}/test`,
+    `/api/tenants/${encodeURIComponent(tenant)}/ai/providers/${encodeURIComponent(slug)}/test`,
     { method: 'POST', fetchImpl }
   );
 
   if (!result.ok || !result.data) {
-    throw new Error(`Provider test failed for '${provider}': ${result.errorMessage}`);
+    throw new Error(`Provider test failed for '${slug}': ${result.errorMessage}`);
   }
   if (!result.data.success) {
     throw new Error(
-      `Provider '${provider}' connection test FAILED: ${result.data.error || result.data.message || 'unknown error'}`
+      `Provider '${slug}' connection test FAILED: ${result.data.error || result.data.message || 'unknown error'}`
     );
   }
   console.log(
-    `Provider '${provider}' connection OK${result.data.message ? `: ${result.data.message}` : '.'}`
+    `Provider '${slug}' connection OK${result.data.message ? `: ${result.data.message}` : '.'}`
   );
 }

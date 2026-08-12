@@ -4,7 +4,6 @@ import {
   Key,
   Eye,
   EyeOff,
-  Settings,
   CheckCircle,
   XCircle,
   Loader2,
@@ -20,8 +19,12 @@ import {
   Layers,
   Cpu,
   SlidersHorizontal,
+  Plus,
+  Trash2,
+  Image as ImageIcon,
 } from 'lucide-react'
 import GlassCard from '../components/GlassCard'
+import ConfirmDialog from '../components/ConfirmDialog'
 import { ToastContainer, useToast } from '../components/Toast'
 import HuggingFaceModelsSection from '../components/HuggingFaceModelsSection'
 import {
@@ -30,7 +33,6 @@ import {
   AIProvider,
   AIModelConfig,
   ProviderConfigResponse,
-  ProviderConfigRequest,
   UpdateAIConfigRequest,
   EmbeddingSettings,
   SplitterType,
@@ -38,91 +40,109 @@ import {
   QuantizationType,
   DEFAULT_CHUNKING_SETTINGS,
   DEFAULT_HNSW_PARAMS,
-  EMBEDDING_CAPABLE_PROVIDERS,
 } from '../api/ai'
+import {
+  PROVIDER_KINDS,
+  ProviderDraft,
+  buildProviderRequests,
+  draftsFromConfig,
+  findProviderBySlug,
+  isDraftDirty,
+  isEmbeddingCapable,
+  kindLabel,
+  providerLabel,
+  validateProviderSlug,
+} from '../utils/aiProviders'
 import { ApiError } from '../api/client'
 import { useAuth } from '../contexts/AuthContext'
 
-interface ProviderSectionProps {
-  icon: React.ReactNode
-  name: string
-  description: string
-  enabled: boolean
-  apiKeyConfigured: boolean
-  apiEndpoint?: string
-  models: AIModelConfig[]
-  onToggle: (enabled: boolean) => void
-  onApiKeyChange: (key: string) => void
-  onEndpointChange: (endpoint: string) => void
-  onTest: () => Promise<void>
-  onRefreshModels: () => Promise<void>
-  testing: boolean
-  refreshing: boolean
-  testResult?: { success: boolean; error?: string }
-  /** Provider type for custom credential UI (e.g., Bedrock needs separate Access Key + Secret Key) */
-  providerType?: string
+/**
+ * Tenant AI settings.
+ *
+ * The page edits a LIST of provider entries keyed by slug, not a fixed row per
+ * kind. Two entries can share a kind, so the kind can never be the state key: a
+ * provisioned `marvel` gateway and a hand-made `custom` one would collapse into
+ * one row, and saving would write one's endpoint under the other's name.
+ *
+ * Saving PUTs only the entries the operator touched, because the endpoint is a
+ * merge — an omitted slug keeps exactly what is stored. Removal is a separate,
+ * explicit DELETE.
+ */
+
+/** Icon for a provider KIND, used when an entry ships no `icon_url`. */
+const KIND_ICONS: Record<AIProvider, React.ReactNode> = {
+  openai: <Zap className="w-5 h-5 text-green-400" />,
+  anthropic: <Sparkles className="w-5 h-5 text-orange-400" />,
+  google: <Globe className="w-5 h-5 text-blue-400" />,
+  azure_openai: <Cloud className="w-5 h-5 text-cyan-400" />,
+  ollama: <Server className="w-5 h-5 text-blue-400" />,
+  groq: <Zap className="w-5 h-5 text-yellow-400" />,
+  openrouter: <Globe className="w-5 h-5 text-purple-400" />,
+  bedrock: <Cloud className="w-5 h-5 text-orange-400" />,
+  local: <Cpu className="w-5 h-5 text-cyan-400" />,
+  custom: <Server className="w-5 h-5 text-purple-400" />,
 }
 
-function ProviderSection({
-  icon,
-  name,
-  description,
-  enabled,
-  apiKeyConfigured,
-  apiEndpoint,
-  models,
-  onToggle,
-  onApiKeyChange,
-  onEndpointChange,
+/**
+ * An entry's icon: the `icon_url` a provisioned gateway ships, falling back to
+ * the kind glyph. A broken URL falls back too, rather than leaving a torn-image
+ * box where the provider's identity should be.
+ */
+function ProviderIcon({ kind, iconUrl }: { kind: AIProvider; iconUrl?: string }) {
+  const [failed, setFailed] = useState(false)
+  useEffect(() => setFailed(false), [iconUrl])
+
+  if (iconUrl && !failed) {
+    return (
+      <img
+        src={iconUrl}
+        alt=""
+        className="w-5 h-5 rounded object-contain"
+        onError={() => setFailed(true)}
+      />
+    )
+  }
+  return <>{KIND_ICONS[kind]}</>
+}
+
+interface ProviderEntryCardProps {
+  draft: ProviderDraft
+  /** What the server last returned for this slug; absent for a new entry. */
+  original?: ProviderConfigResponse
+  dirty: boolean
+  onChange: (patch: Partial<ProviderDraft>) => void
+  onRemove: () => void
+  onTest: () => Promise<void>
+  onRefreshModels: () => Promise<void>
+}
+
+function ProviderEntryCard({
+  draft,
+  original,
+  dirty,
+  onChange,
+  onRemove,
   onTest,
   onRefreshModels,
-  testing,
-  refreshing,
-  testResult,
-  providerType,
-}: ProviderSectionProps) {
-  const [expanded, setExpanded] = useState(enabled)
+}: ProviderEntryCardProps) {
+  const [expanded, setExpanded] = useState(draft.isNew)
   const [showApiKey, setShowApiKey] = useState(false)
-  const [apiKey, setApiKey] = useState('')
-  const [endpoint, setEndpoint] = useState(apiEndpoint || '')
-  const [showEndpoint, setShowEndpoint] = useState(false)
 
-  // Bedrock-specific state: split credentials into Access Key ID + Secret Key
-  const isBedrock = providerType === 'bedrock'
+  // Bedrock takes two credentials rather than one key; they are stored joined
+  // as "access_key_id:secret_access_key" in the same api_key field.
+  const isBedrock = draft.kind === 'bedrock'
   const [bedrockAccessKey, setBedrockAccessKey] = useState('')
   const [bedrockSecretKey, setBedrockSecretKey] = useState('')
-  const [bedrockRegion, setBedrockRegion] = useState(apiEndpoint || 'us-east-1')
+
+  const apiKeyConfigured = original?.has_api_key ?? false
+  const models: AIModelConfig[] = original?.models ?? []
 
   const handleBedrockCredentialChange = (accessKey: string, secretKey: string) => {
     setBedrockAccessKey(accessKey)
     setBedrockSecretKey(secretKey)
-    // Store as "access_key_id:secret_access_key" in the api_key field
     if (accessKey && secretKey) {
-      onApiKeyChange(`${accessKey}:${secretKey}`)
+      onChange({ apiKey: `${accessKey}:${secretKey}` })
     }
-  }
-
-  const handleBedrockRegionChange = (region: string) => {
-    setBedrockRegion(region)
-    onEndpointChange(region)
-  }
-
-  useEffect(() => {
-    if (enabled) setExpanded(true)
-  }, [enabled])
-
-  useEffect(() => {
-    setEndpoint(apiEndpoint || '')
-  }, [apiEndpoint])
-
-  const handleApiKeyChange = (value: string) => {
-    setApiKey(value)
-    onApiKeyChange(value)
-  }
-
-  const handleEndpointChange = (value: string) => {
-    setEndpoint(value)
-    onEndpointChange(value)
   }
 
   return (
@@ -132,50 +152,132 @@ function ProviderSection({
         <div className="flex items-center justify-between">
           <button
             onClick={() => setExpanded(!expanded)}
-            className="flex items-center gap-3 flex-1 text-left group"
+            className="flex items-center gap-3 flex-1 text-left group min-w-0"
           >
-            <div className={`p-2 rounded-lg ${enabled ? 'bg-purple-500/20 border border-purple-500/30' : 'bg-white/5 border border-white/10'}`}>
-              {icon}
+            <div
+              className={`p-2 rounded-lg ${draft.enabled ? 'bg-purple-500/20 border border-purple-500/30' : 'bg-white/5 border border-white/10'}`}
+            >
+              <ProviderIcon kind={draft.kind} iconUrl={draft.iconUrl || undefined} />
             </div>
-            <div className="flex-1">
-              <h2 className="text-xl font-bold text-white flex items-center gap-2">
-                {name}
-                {apiKeyConfigured && (
-                  <CheckCircle className="w-4 h-4 text-green-400" />
+            <div className="flex-1 min-w-0">
+              <h2 className="text-xl font-bold text-white flex items-center gap-2 truncate">
+                {draft.displayName.trim() || draft.slug}
+                {apiKeyConfigured && <CheckCircle className="w-4 h-4 text-green-400 flex-shrink-0" />}
+                {dirty && (
+                  <span className="px-2 py-0.5 text-xs rounded bg-yellow-500/20 border border-yellow-500/30 text-yellow-300 flex-shrink-0">
+                    unsaved
+                  </span>
                 )}
               </h2>
-              <p className="text-gray-400 text-sm">{description}</p>
+              <p className="text-gray-400 text-sm flex items-center gap-2 truncate">
+                {/* Slug and kind are both always shown: the slug is the identity an
+                    agent node or a model id names, the kind is only the protocol. */}
+                <span className="font-mono text-purple-300">{draft.slug}</span>
+                <span className="text-gray-600">·</span>
+                <span>{kindLabel(draft.kind)}</span>
+                {draft.apiEndpoint && (
+                  <>
+                    <span className="text-gray-600">·</span>
+                    <span className="truncate">{draft.apiEndpoint}</span>
+                  </>
+                )}
+              </p>
             </div>
             {expanded ? (
-              <ChevronDown className="w-5 h-5 text-gray-400 group-hover:text-white transition-colors" />
+              <ChevronDown className="w-5 h-5 text-gray-400 group-hover:text-white transition-colors flex-shrink-0" />
             ) : (
-              <ChevronRight className="w-5 h-5 text-gray-400 group-hover:text-white transition-colors" />
+              <ChevronRight className="w-5 h-5 text-gray-400 group-hover:text-white transition-colors flex-shrink-0" />
             )}
           </button>
 
-          {/* Enable Toggle */}
           <label className="flex items-center gap-3 cursor-pointer ml-4">
             <span className="text-white font-medium text-sm">Enabled</span>
             <div className="relative">
               <input
                 type="checkbox"
-                checked={enabled}
-                onChange={(e) => onToggle(e.target.checked)}
+                checked={draft.enabled}
+                onChange={(e) => onChange({ enabled: e.target.checked })}
                 className="sr-only peer"
               />
               <div className="w-11 h-6 bg-white/10 border border-white/20 rounded-full peer peer-checked:bg-purple-500 peer-checked:border-purple-400 transition-all"></div>
               <div className="absolute left-1 top-1 w-4 h-4 bg-white rounded-full transition-transform peer-checked:translate-x-5"></div>
             </div>
           </label>
+
+          <button
+            onClick={onRemove}
+            title={`Remove provider '${draft.slug}'`}
+            aria-label={`Remove provider '${draft.slug}'`}
+            className="ml-3 p-2 rounded-lg text-gray-400 hover:text-red-300 hover:bg-red-500/10 transition-colors"
+          >
+            <Trash2 className="w-4 h-4" />
+          </button>
         </div>
 
         {/* Expanded Content */}
         {expanded && (
           <div className="space-y-4 pt-4 border-t border-white/10">
+            {/* Identity: the slug is immutable and the kind is bound to it. */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-2">Slug</label>
+                <input
+                  type="text"
+                  value={draft.slug}
+                  readOnly
+                  disabled
+                  className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-gray-400 font-mono cursor-not-allowed"
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  Immutable. Model ids read <span className="font-mono">{draft.slug}:model</span>, and
+                  agents reference this provider by it.
+                </p>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-2">Kind</label>
+                <input
+                  type="text"
+                  value={kindLabel(draft.kind)}
+                  readOnly
+                  disabled
+                  className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-gray-400 cursor-not-allowed"
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  Chosen at creation. To change protocol, remove this entry and add a new one.
+                </p>
+              </div>
+            </div>
+
+            {/* Presentation */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-2">Display Name</label>
+                <input
+                  type="text"
+                  value={draft.displayName}
+                  onChange={(e) => onChange({ displayName: e.target.value })}
+                  placeholder={draft.slug}
+                  className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder:text-gray-500 focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-2 flex items-center gap-2">
+                  <ImageIcon className="w-4 h-4 text-purple-400" />
+                  Icon URL
+                </label>
+                <input
+                  type="text"
+                  value={draft.iconUrl}
+                  onChange={(e) => onChange({ iconUrl: e.target.value })}
+                  placeholder="https://…/logo.svg"
+                  className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder:text-gray-500 focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
+                />
+              </div>
+            </div>
+
             {/* Credentials */}
             {isBedrock ? (
               <>
-                {/* Bedrock: Access Key ID + Secret Access Key + Region */}
                 {apiKeyConfigured && !bedrockAccessKey && !bedrockSecretKey && (
                   <div className="flex items-center gap-2 px-3 py-2 bg-green-500/10 border border-green-500/30 rounded-lg">
                     <CheckCircle className="w-4 h-4 text-green-400" />
@@ -217,92 +319,70 @@ function ProviderSection({
                     </button>
                   </div>
                 </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-2 flex items-center gap-2">
-                    <Globe className="w-4 h-4 text-purple-400" />
-                    AWS Region
-                  </label>
-                  <input
-                    type="text"
-                    value={bedrockRegion}
-                    onChange={(e) => handleBedrockRegionChange(e.target.value)}
-                    placeholder="us-east-1"
-                    className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder:text-gray-500 focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
-                  />
-                </div>
               </>
             ) : (
-              <>
-                {/* Standard providers: API Key */}
-                <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-2 flex items-center gap-2">
-                    <Key className="w-4 h-4 text-purple-400" />
-                    API Key
-                  </label>
-                  {apiKeyConfigured && !apiKey && (
-                    <div className="flex items-center gap-2 px-3 py-2 bg-green-500/10 border border-green-500/30 rounded-lg mb-2">
-                      <CheckCircle className="w-4 h-4 text-green-400" />
-                      <span className="text-green-300 text-sm font-medium">API key configured</span>
-                    </div>
-                  )}
-                  <div className="relative">
-                    <input
-                      type={showApiKey ? 'text' : 'password'}
-                      value={apiKey}
-                      onChange={(e) => handleApiKeyChange(e.target.value)}
-                      placeholder={apiKeyConfigured ? 'Enter new API key to update' : 'Enter your API key'}
-                      className="w-full px-4 py-2 pr-12 bg-white/5 border border-white/10 rounded-lg text-white placeholder:text-gray-500 focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowApiKey(!showApiKey)}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 p-1 hover:bg-white/10 rounded transition-colors"
-                      aria-label={showApiKey ? 'Hide API key' : 'Show API key'}
-                    >
-                      {showApiKey ? (
-                        <EyeOff className="w-5 h-5 text-gray-400" />
-                      ) : (
-                        <Eye className="w-5 h-5 text-gray-400" />
-                      )}
-                    </button>
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-2 flex items-center gap-2">
+                  <Key className="w-4 h-4 text-purple-400" />
+                  API Key
+                </label>
+                {apiKeyConfigured && !draft.apiKey && (
+                  <div className="flex items-center gap-2 px-3 py-2 bg-green-500/10 border border-green-500/30 rounded-lg mb-2">
+                    <CheckCircle className="w-4 h-4 text-green-400" />
+                    <span className="text-green-300 text-sm font-medium">API key configured</span>
                   </div>
-                </div>
-
-                {/* API Endpoint (Optional) */}
-                <div>
+                )}
+                <div className="relative">
+                  <input
+                    type={showApiKey ? 'text' : 'password'}
+                    value={draft.apiKey}
+                    onChange={(e) => onChange({ apiKey: e.target.value })}
+                    placeholder={apiKeyConfigured ? 'Enter new API key to update' : 'Enter your API key'}
+                    className="w-full px-4 py-2 pr-12 bg-white/5 border border-white/10 rounded-lg text-white placeholder:text-gray-500 focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
+                  />
                   <button
-                    onClick={() => setShowEndpoint(!showEndpoint)}
-                    className="flex items-center gap-2 text-sm text-gray-400 hover:text-white transition-colors mb-2"
+                    type="button"
+                    onClick={() => setShowApiKey(!showApiKey)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 p-1 hover:bg-white/10 rounded transition-colors"
+                    aria-label={showApiKey ? 'Hide API key' : 'Show API key'}
                   >
-                    <Globe className="w-4 h-4" />
-                    Custom API Endpoint (Optional)
-                    {showEndpoint ? (
-                      <ChevronDown className="w-4 h-4" />
+                    {showApiKey ? (
+                      <EyeOff className="w-5 h-5 text-gray-400" />
                     ) : (
-                      <ChevronRight className="w-4 h-4" />
+                      <Eye className="w-5 h-5 text-gray-400" />
                     )}
                   </button>
-                  {showEndpoint && (
-                    <input
-                      type="text"
-                      value={endpoint}
-                      onChange={(e) => handleEndpointChange(e.target.value)}
-                      placeholder={`Default ${name} endpoint`}
-                      className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder:text-gray-500 focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
-                    />
-                  )}
                 </div>
-              </>
+                <p className="text-xs text-gray-500 mt-1">
+                  Leave blank to keep the stored key. It is never sent back to the browser.
+                </p>
+              </div>
             )}
 
+            {/* Endpoint. For Bedrock this field carries the AWS region. */}
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-2 flex items-center gap-2">
+                <Globe className="w-4 h-4 text-purple-400" />
+                {isBedrock ? 'AWS Region' : 'API Endpoint'}
+              </label>
+              <input
+                type="text"
+                value={draft.apiEndpoint}
+                onChange={(e) => onChange({ apiEndpoint: e.target.value })}
+                placeholder={isBedrock ? 'us-east-1' : `Default ${kindLabel(draft.kind)} endpoint`}
+                className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder:text-gray-500 focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
+              />
+            </div>
+
             {/* Test Connection */}
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-3 flex-wrap">
               <button
                 onClick={onTest}
-                disabled={!enabled || (!apiKeyConfigured && !apiKey) || testing}
+                disabled={!draft.enabled || draft.isNew || draft.testing}
+                title={draft.isNew ? 'Save this provider before testing it' : undefined}
                 className="px-4 py-2 bg-purple-500 hover:bg-purple-600 disabled:bg-white/10 disabled:text-gray-500 disabled:cursor-not-allowed text-white rounded-lg transition-all flex items-center gap-2"
               >
-                {testing ? (
+                {draft.testing ? (
                   <>
                     <Loader2 className="w-4 h-4 animate-spin" />
                     Testing...
@@ -317,10 +397,11 @@ function ProviderSection({
 
               <button
                 onClick={onRefreshModels}
-                disabled={!enabled || (!apiKeyConfigured && !apiKey) || refreshing}
+                disabled={!draft.enabled || draft.isNew || draft.refreshing}
+                title={draft.isNew ? 'Save this provider before refreshing its models' : undefined}
                 className="px-4 py-2 bg-white/10 hover:bg-white/20 disabled:bg-white/5 disabled:text-gray-500 disabled:cursor-not-allowed text-white rounded-lg transition-all flex items-center gap-2"
               >
-                {refreshing ? (
+                {draft.refreshing ? (
                   <>
                     <Loader2 className="w-4 h-4 animate-spin" />
                     Refreshing...
@@ -333,15 +414,15 @@ function ProviderSection({
                 )}
               </button>
 
-              {testResult && (
+              {draft.testResult && (
                 <div
                   className={`flex items-center gap-2 px-3 py-2 rounded-lg ${
-                    testResult.success
+                    draft.testResult.success
                       ? 'bg-green-500/10 border border-green-500/30'
                       : 'bg-red-500/10 border border-red-500/30'
                   }`}
                 >
-                  {testResult.success ? (
+                  {draft.testResult.success ? (
                     <>
                       <CheckCircle className="w-4 h-4 text-green-400" />
                       <span className="text-green-300 text-sm">Connected</span>
@@ -350,7 +431,7 @@ function ProviderSection({
                     <>
                       <XCircle className="w-4 h-4 text-red-400" />
                       <span className="text-red-300 text-sm">
-                        {testResult.error || 'Connection failed'}
+                        {draft.testResult.error || 'Connection failed'}
                       </span>
                     </>
                   )}
@@ -376,7 +457,10 @@ function ProviderSection({
                           <div className="text-white font-medium text-sm truncate">
                             {model.display_name || model.model_id}
                           </div>
-                          {/* Show architecture/embedding info from metadata if available */}
+                          {/* The addressable id, which this entry's slug prefixes. */}
+                          <div className="text-xs text-gray-500 font-mono mt-0.5 truncate">
+                            {draft.slug}:{model.model_id}
+                          </div>
                           {model.metadata && (model.metadata.architecture || model.metadata.embedding_length) && (
                             <div className="text-xs text-gray-500 mt-1">
                               {model.metadata.architecture && (
@@ -409,13 +493,13 @@ function ProviderSection({
               </div>
             )}
 
-            {models.length === 0 && enabled && (
+            {models.length === 0 && draft.enabled && !draft.isNew && (
               <div className="p-4 bg-yellow-500/10 border border-yellow-500/30 rounded-lg flex items-start gap-3">
                 <AlertCircle className="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" />
                 <div>
                   <p className="text-yellow-300 text-sm font-medium">No models available</p>
                   <p className="text-yellow-300/80 text-xs mt-1">
-                    Configure your API key and test the connection to load available models.
+                    Configure the API key, save, then refresh the model list.
                   </p>
                 </div>
               </div>
@@ -427,88 +511,112 @@ function ProviderSection({
   )
 }
 
-// Helper to convert provider array to map for local state
-function providersArrayToMap(providers: ProviderConfigResponse[]): Record<AIProvider, ProviderConfigResponse | undefined> {
-  const map: Record<AIProvider, ProviderConfigResponse | undefined> = {
-    openai: undefined,
-    anthropic: undefined,
-    google: undefined,
-    azure_openai: undefined,
-    ollama: undefined,
-    groq: undefined,
-    openrouter: undefined,
-    bedrock: undefined,
-    local: undefined,
-    custom: undefined,
-  }
-  for (const p of providers) {
-    map[p.provider] = p
-  }
-  return map
+interface AddProviderFormProps {
+  /** Slugs already in play — a slug is an address, so it has to be unique. */
+  existingSlugs: string[]
+  onAdd: (draft: ProviderDraft) => void
+  onCancel: () => void
 }
 
-// Local models section component - simpler than ProviderSection
-// Local models are enabled by default and don't require API keys
-interface LocalModelsSectionProps {
-  enabled: boolean
-  onToggle: (enabled: boolean) => void
-}
+function AddProviderForm({ existingSlugs, onAdd, onCancel }: AddProviderFormProps) {
+  const [slug, setSlug] = useState('')
+  const [kind, setKind] = useState<AIProvider>('openai')
+  const [displayName, setDisplayName] = useState('')
+  const [touched, setTouched] = useState(false)
 
-function LocalModelsSection({ enabled, onToggle }: LocalModelsSectionProps) {
+  const error = validateProviderSlug(slug, existingSlugs)
+
+  const submit = () => {
+    setTouched(true)
+    if (error) return
+    onAdd({
+      slug,
+      kind,
+      displayName,
+      iconUrl: '',
+      apiEndpoint: '',
+      enabled: true,
+      apiKey: '',
+      isNew: true,
+      testing: false,
+      refreshing: false,
+    })
+  }
+
   return (
     <GlassCard>
       <div className="space-y-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className={`p-2 rounded-lg ${enabled ? 'bg-purple-500/20 border border-purple-500/30' : 'bg-white/5 border border-white/10'}`}>
-              <Cpu className="w-5 h-5 text-cyan-400" />
-            </div>
-            <div>
-              <h2 className="text-xl font-bold text-white flex items-center gap-2">
-                Local AI Models
-                {enabled && <CheckCircle className="w-4 h-4 text-green-400" />}
-              </h2>
-              <p className="text-gray-400 text-sm">On-device AI for image captioning and embeddings</p>
-            </div>
+        <h3 className="text-lg font-bold text-white">Add Provider</h3>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-300 mb-2">
+              Slug <span className="text-red-400">*</span>
+            </label>
+            <input
+              type="text"
+              value={slug}
+              autoFocus
+              onChange={(e) => setSlug(e.target.value)}
+              onBlur={() => setTouched(true)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') submit()
+              }}
+              placeholder="marvel"
+              className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder:text-gray-500 font-mono focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
+            />
+            <p className="text-xs text-gray-500 mt-1">
+              Permanent. Becomes the model-id prefix and the name agents use.
+            </p>
           </div>
-
-          <label className="flex items-center gap-3 cursor-pointer">
-            <span className="text-white font-medium text-sm">Enabled</span>
-            <div className="relative">
-              <input
-                type="checkbox"
-                checked={enabled}
-                onChange={(e) => onToggle(e.target.checked)}
-                className="sr-only peer"
-              />
-              <div className="w-11 h-6 bg-white/10 border border-white/20 rounded-full peer peer-checked:bg-purple-500 peer-checked:border-purple-400 transition-all"></div>
-              <div className="absolute left-1 top-1 w-4 h-4 bg-white rounded-full transition-transform peer-checked:translate-x-5"></div>
-            </div>
-          </label>
+          <div>
+            <label className="block text-sm font-medium text-gray-300 mb-2">Kind</label>
+            <select
+              value={kind}
+              onChange={(e) => setKind(e.target.value as AIProvider)}
+              className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
+            >
+              {PROVIDER_KINDS.map((k) => (
+                <option key={k} value={k} className="bg-gray-900">
+                  {kindLabel(k)}
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-gray-500 mt-1">Wire protocol. Cannot be changed later.</p>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-300 mb-2">Display Name</label>
+            <input
+              type="text"
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              placeholder="Optional"
+              className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder:text-gray-500 focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
+            />
+          </div>
         </div>
 
-        <div className="p-4 bg-cyan-500/10 border border-cyan-500/30 rounded-lg">
-          <div className="flex items-start gap-3">
-            <Info className="w-5 h-5 text-cyan-400 flex-shrink-0 mt-0.5" />
-            <div>
-              <p className="text-cyan-300 text-sm font-medium mb-2">No API keys required</p>
-              <p className="text-cyan-300/80 text-xs">
-                Local models run on your server using the Candle inference engine.
-                These models are automatically available without any configuration.
-              </p>
-              <div className="mt-3 flex flex-wrap gap-2">
-                <span className="px-2 py-1 bg-cyan-500/20 border border-cyan-500/30 text-cyan-300 text-xs rounded">
-                  Moondream (vision)
-                </span>
-                <span className="px-2 py-1 bg-cyan-500/20 border border-cyan-500/30 text-cyan-300 text-xs rounded">
-                  BLIP (captions)
-                </span>
-                <span className="px-2 py-1 bg-cyan-500/20 border border-cyan-500/30 text-cyan-300 text-xs rounded">
-                  CLIP (embeddings)
-                </span>
-              </div>
-            </div>
+        {touched && error && (
+          <div className="flex items-center gap-2 px-3 py-2 bg-red-500/10 border border-red-500/30 rounded-lg">
+            <XCircle className="w-4 h-4 text-red-400" />
+            <span className="text-red-300 text-sm">{error}</span>
           </div>
+        )}
+
+        <div className="flex justify-end gap-3">
+          <button
+            onClick={onCancel}
+            className="px-4 py-2 bg-white/10 hover:bg-white/20 text-white rounded-lg transition-all"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={submit}
+            disabled={!!error}
+            className="px-4 py-2 bg-purple-500 hover:bg-purple-600 disabled:bg-white/10 disabled:text-gray-500 disabled:cursor-not-allowed text-white rounded-lg transition-all flex items-center gap-2"
+          >
+            <Plus className="w-4 h-4" />
+            Add
+          </button>
         </div>
       </div>
     </GlassCard>
@@ -528,32 +636,12 @@ export default function TenantAiSettings() {
   const [saving, setSaving] = useState(false)
   const [hasChanges, setHasChanges] = useState(false)
 
-  // Provider states (local editable state)
-  const [providers, setProviders] = useState<{
-    [key in AIProvider]: {
-      enabled: boolean
-      apiKey: string
-      apiEndpoint: string
-      testing: boolean
-      refreshing: boolean
-      testResult?: { success: boolean; error?: string }
-    }
-  }>({
-    openai: { enabled: false, apiKey: '', apiEndpoint: '', testing: false, refreshing: false },
-    anthropic: { enabled: false, apiKey: '', apiEndpoint: '', testing: false, refreshing: false },
-    google: { enabled: false, apiKey: '', apiEndpoint: '', testing: false, refreshing: false },
-    azure_openai: { enabled: false, apiKey: '', apiEndpoint: '', testing: false, refreshing: false },
-    ollama: { enabled: false, apiKey: '', apiEndpoint: '', testing: false, refreshing: false },
-    groq: { enabled: false, apiKey: '', apiEndpoint: '', testing: false, refreshing: false },
-    openrouter: { enabled: false, apiKey: '', apiEndpoint: '', testing: false, refreshing: false },
-    bedrock: { enabled: false, apiKey: '', apiEndpoint: '', testing: false, refreshing: false },
-    local: { enabled: true, apiKey: '', apiEndpoint: '', testing: false, refreshing: false }, // Enabled by default
-    custom: { enabled: false, apiKey: '', apiEndpoint: '', testing: false, refreshing: false },
-  })
-
-  // Local models enabled state (enabled by default, can be disabled)
-  // This is separate from the providers state for simpler handling
-  const [localModelsEnabled, setLocalModelsEnabled] = useState(true)
+  // The editable provider list: one draft per stored entry, in server order.
+  // Never a fixed row per kind — that is what collapsed same-kind entries.
+  const [drafts, setDrafts] = useState<ProviderDraft[]>([])
+  const [showAddForm, setShowAddForm] = useState(false)
+  const [pendingRemoval, setPendingRemoval] = useState<ProviderDraft | null>(null)
+  const [removing, setRemoving] = useState(false)
 
   // Embedding settings
   const [embeddingSettings, setEmbeddingSettings] = useState<EmbeddingSettings>({
@@ -569,35 +657,21 @@ export default function TenantAiSettings() {
   // tenant change keeps the panel honest if the value updates later).
   useEffect(() => {
     loadConfig()
-     
+
   }, [TENANT_ID])
+
+  const storedProviders = config?.providers ?? []
 
   // Track changes
   useEffect(() => {
-    // If config failed to load, allow saving if any provider is enabled or has an API key
-    if (!config) {
-      const hasAnyProviderConfig = Object.values(providers).some(
-        (p) => p.enabled || p.apiKey !== ''
-      )
-      setHasChanges(hasAnyProviderConfig || embeddingSettings.enabled)
-      return
-    }
-
-    const providerMap = providersArrayToMap(config.providers)
-    const hasProviderChanges = Object.entries(providers).some(([key, value]) => {
-      const provider = key as AIProvider
-      const configProvider = providerMap[provider]
-      return (
-        value.enabled !== (configProvider?.enabled ?? false) ||
-        value.apiKey !== '' ||
-        value.apiEndpoint !== (configProvider?.api_endpoint || '')
-      )
-    })
+    const hasProviderChanges = drafts.some((draft) =>
+      isDraftDirty(draft, findProviderBySlug(config?.providers ?? [], draft.slug))
+    )
 
     // Check chunking changes
     const chunkingChanged = (() => {
       const current = embeddingSettings.chunking
-      const original = config.embedding_settings?.chunking
+      const original = config?.embedding_settings?.chunking
       if (!current && !original) return false
       if (!current || !original) return true
       return (
@@ -611,7 +685,7 @@ export default function TenantAiSettings() {
     // Check HNSW params changes
     const hnswChanged = (() => {
       const current = embeddingSettings.hnsw_params
-      const original = config.embedding_settings?.hnsw_params
+      const original = config?.embedding_settings?.hnsw_params
       if (!current && !original) return false
       if (!current || !original) return true
       return (
@@ -622,57 +696,32 @@ export default function TenantAiSettings() {
     })()
 
     const hasEmbeddingChanges =
-      embeddingSettings.enabled !== (config.embedding_settings?.enabled ?? false) ||
-      embeddingSettings.ai_provider_ref !== config.embedding_settings?.ai_provider_ref ||
-      embeddingSettings.ai_model_ref !== config.embedding_settings?.ai_model_ref ||
-      embeddingSettings.include_name !== (config.embedding_settings?.include_name ?? true) ||
-      embeddingSettings.include_path !== (config.embedding_settings?.include_path ?? true) ||
-      embeddingSettings.max_embeddings_per_repo !== config.embedding_settings?.max_embeddings_per_repo ||
-      embeddingSettings.dimensions !== (config.embedding_settings?.dimensions ?? 1536) ||
-      embeddingSettings.default_max_distance !== config.embedding_settings?.default_max_distance ||
-      embeddingSettings.distance_metric !== config.embedding_settings?.distance_metric ||
-      embeddingSettings.quantization !== config.embedding_settings?.quantization ||
+      embeddingSettings.enabled !== (config?.embedding_settings?.enabled ?? false) ||
+      embeddingSettings.ai_provider_ref !== config?.embedding_settings?.ai_provider_ref ||
+      embeddingSettings.ai_model_ref !== config?.embedding_settings?.ai_model_ref ||
+      embeddingSettings.include_name !== (config?.embedding_settings?.include_name ?? true) ||
+      embeddingSettings.include_path !== (config?.embedding_settings?.include_path ?? true) ||
+      embeddingSettings.max_embeddings_per_repo !== config?.embedding_settings?.max_embeddings_per_repo ||
+      embeddingSettings.dimensions !== (config?.embedding_settings?.dimensions ?? 1536) ||
+      embeddingSettings.default_max_distance !== config?.embedding_settings?.default_max_distance ||
+      embeddingSettings.distance_metric !== config?.embedding_settings?.distance_metric ||
+      embeddingSettings.quantization !== config?.embedding_settings?.quantization ||
       chunkingChanged ||
       hnswChanged
 
-    // Check local models changes (enabled by default if no config)
-    const localConfig = providerMap['local']
-    const originalLocalEnabled = localConfig ? localConfig.enabled : true
-    const hasLocalChanges = localModelsEnabled !== originalLocalEnabled
-
-    setHasChanges(hasProviderChanges || hasEmbeddingChanges || hasLocalChanges)
-  }, [config, providers, embeddingSettings, localModelsEnabled])
+    setHasChanges(hasProviderChanges || hasEmbeddingChanges)
+  }, [config, drafts, embeddingSettings])
 
   const loadConfig = async () => {
     try {
       setLoading(true)
       const data = await aiApi.getConfig(TENANT_ID)
       setConfig(data)
+      setDrafts(draftsFromConfig(data.providers))
 
-      // Initialize provider states from response array
-      const providerMap = providersArrayToMap(data.providers)
-      const newProviders = { ...providers }
-      for (const key of Object.keys(newProviders) as AIProvider[]) {
-        const providerConfig = providerMap[key]
-        newProviders[key] = {
-          enabled: providerConfig?.enabled ?? false,
-          apiKey: '',
-          apiEndpoint: providerConfig?.api_endpoint || '',
-          testing: false,
-          refreshing: false,
-        }
-      }
-      setProviders(newProviders)
-
-      // Initialize embedding settings
       if (data.embedding_settings) {
         setEmbeddingSettings(data.embedding_settings)
       }
-
-      // Initialize local models state
-      // Local models are enabled by default unless explicitly disabled in config
-      const localConfig = providerMap['local']
-      setLocalModelsEnabled(localConfig ? localConfig.enabled : true)
     } catch (error) {
       console.error('Failed to load config:', error)
       toast.error('Failed to load configuration', error instanceof ApiError ? error.message : 'Unknown error')
@@ -681,52 +730,20 @@ export default function TenantAiSettings() {
     }
   }
 
+  const patchDraft = (slug: string, patch: Partial<ProviderDraft>) => {
+    setDrafts((prev) => prev.map((d) => (d.slug === slug ? { ...d, ...patch } : d)))
+  }
+
   const handleSave = async () => {
     try {
       setSaving(true)
 
-      const providerMap: Record<AIProvider, ProviderConfigResponse | undefined> = config
-        ? providersArrayToMap(config.providers)
-        : { openai: undefined, anthropic: undefined, google: undefined, azure_openai: undefined, ollama: undefined, groq: undefined, openrouter: undefined, bedrock: undefined, local: undefined, custom: undefined }
-
-      // Build providers array for request
-      const providerRequests: ProviderConfigRequest[] = (Object.keys(providers) as AIProvider[])
-        .filter((provider) => provider !== 'local') // Handle local separately
-        .map((provider) => {
-          const state = providers[provider]
-          const existingConfig = providerMap[provider]
-          return {
-            provider,
-            enabled: state.enabled,
-            api_key_plain: state.apiKey || undefined,
-            api_endpoint: state.apiEndpoint || undefined,
-            models: existingConfig?.models || [],
-          }
-        })
-
-      // Add local provider config (only if explicitly disabled, since enabled is default)
-      // We only need to save it if user wants to disable local models
-      if (!localModelsEnabled) {
-        providerRequests.push({
-          provider: 'local',
-          enabled: false,
-          api_key_plain: undefined,
-          api_endpoint: undefined,
-          models: [],
-        })
-      } else {
-        // If local is enabled, include it with enabled: true
-        providerRequests.push({
-          provider: 'local',
-          enabled: true,
-          api_key_plain: undefined,
-          api_endpoint: undefined,
-          models: [],
-        })
-      }
-
+      // Only the entries the operator touched. PUT is a merge, so everything
+      // omitted keeps its stored value — including entries this console has
+      // never displayed.
+      const providers = buildProviderRequests(drafts, storedProviders)
       const request: UpdateAIConfigRequest = {
-        providers: providerRequests,
+        providers,
         embedding_settings: embeddingSettings,
       }
 
@@ -746,52 +763,57 @@ export default function TenantAiSettings() {
   }
 
   const handleCancel = () => {
-    if (!config) return
+    setShowAddForm(false)
     loadConfig()
     setHasChanges(false)
   }
 
-  const handleProviderToggle = (provider: AIProvider, enabled: boolean) => {
-    setProviders((prev) => ({
-      ...prev,
-      [provider]: { ...prev[provider], enabled },
-    }))
+  const handleAdd = (draft: ProviderDraft) => {
+    setDrafts((prev) => [...prev, draft])
+    setShowAddForm(false)
   }
 
-  const handleApiKeyChange = (provider: AIProvider, key: string) => {
-    setProviders((prev) => ({
-      ...prev,
-      [provider]: { ...prev[provider], apiKey: key },
-    }))
+  const requestRemoval = (draft: ProviderDraft) => {
+    // An entry that was never saved has nothing on the server to delete.
+    if (draft.isNew) {
+      setDrafts((prev) => prev.filter((d) => d.slug !== draft.slug))
+      return
+    }
+    setPendingRemoval(draft)
   }
 
-  const handleEndpointChange = (provider: AIProvider, endpoint: string) => {
-    setProviders((prev) => ({
-      ...prev,
-      [provider]: { ...prev[provider], apiEndpoint: endpoint },
-    }))
-  }
-
-  const handleTest = async (provider: AIProvider) => {
+  const confirmRemoval = async () => {
+    if (!pendingRemoval) return
+    const slug = pendingRemoval.slug
     try {
-      setProviders((prev) => ({
-        ...prev,
-        [provider]: { ...prev[provider], testing: true, testResult: undefined },
-      }))
+      setRemoving(true)
+      // Removal is an explicit DELETE, never omission from the PUT payload —
+      // the merge leaves omitted slugs alone by design.
+      await aiApi.deleteProvider(TENANT_ID, slug)
+      setPendingRemoval(null)
+      await loadConfig()
+      toast.success('Provider Removed', `'${slug}' is no longer configured`)
+    } catch (error) {
+      console.error('Failed to remove provider:', error)
+      toast.error('Failed to remove provider', error instanceof ApiError ? error.message : 'Unknown error')
+    } finally {
+      setRemoving(false)
+    }
+  }
 
-      const result = await aiApi.testProvider(TENANT_ID, provider)
+  const handleTest = async (slug: string) => {
+    try {
+      patchDraft(slug, { testing: true, testResult: undefined })
 
-      setProviders((prev) => ({
-        ...prev,
-        [provider]: {
-          ...prev[provider],
-          testing: false,
-          testResult: { success: result.success, error: result.error },
-        },
-      }))
+      const result = await aiApi.testProvider(TENANT_ID, slug)
+
+      patchDraft(slug, {
+        testing: false,
+        testResult: { success: result.success, error: result.error },
+      })
 
       if (result.success) {
-        toast.success('Connection Successful', `Connected to ${provider} successfully`)
+        toast.success('Connection Successful', `Connected to '${slug}' successfully`)
         // Refresh config to get updated models
         await loadConfig()
       } else {
@@ -800,41 +822,26 @@ export default function TenantAiSettings() {
     } catch (error) {
       console.error('Failed to test connection:', error)
       const errorMessage = error instanceof ApiError ? error.message : 'Unknown error'
-      setProviders((prev) => ({
-        ...prev,
-        [provider]: {
-          ...prev[provider],
-          testing: false,
-          testResult: { success: false, error: errorMessage },
-        },
-      }))
+      patchDraft(slug, { testing: false, testResult: { success: false, error: errorMessage } })
       toast.error('Connection Test Failed', errorMessage)
     }
   }
 
-  const handleRefreshModels = async (provider: AIProvider) => {
+  const handleRefreshModels = async (slug: string) => {
     try {
-      setProviders((prev) => ({
-        ...prev,
-        [provider]: { ...prev[provider], refreshing: true },
-      }))
+      patchDraft(slug, { refreshing: true })
 
-      // Fetch models from provider API with refresh=true
-      await aiApi.getAvailableModels(TENANT_ID, { provider, refresh: true })
+      // The `provider` query parameter is a SLUG: refreshing one of two
+      // same-kind gateways must not go out to the other one's endpoint.
+      await aiApi.getAvailableModels(TENANT_ID, { provider: slug, refresh: true })
       await loadConfig()
 
-      setProviders((prev) => ({
-        ...prev,
-        [provider]: { ...prev[provider], refreshing: false },
-      }))
+      patchDraft(slug, { refreshing: false })
 
-      toast.success('Models Refreshed', `Successfully refreshed models for ${provider}`)
+      toast.success('Models Refreshed', `Successfully refreshed models for '${slug}'`)
     } catch (error) {
       console.error('Failed to refresh models:', error)
-      setProviders((prev) => ({
-        ...prev,
-        [provider]: { ...prev[provider], refreshing: false },
-      }))
+      patchDraft(slug, { refreshing: false })
       toast.error('Failed to refresh models', error instanceof ApiError ? error.message : 'Unknown error')
     }
   }
@@ -847,10 +854,15 @@ export default function TenantAiSettings() {
     )
   }
 
-  // Get provider map for rendering
-  const providerMap: Record<AIProvider, ProviderConfigResponse | undefined> = config
-    ? providersArrayToMap(config.providers)
-    : { openai: undefined, anthropic: undefined, google: undefined, azure_openai: undefined, ollama: undefined, groq: undefined, openrouter: undefined, bedrock: undefined, local: undefined, custom: undefined }
+  // Entries offered to the embedding picker, by slug. An entry qualifies on the
+  // models it actually publishes, so a `custom` gateway serving an embedding
+  // model is offered alongside OpenAI.
+  const embeddingCandidates = storedProviders.filter(isEmbeddingCapable)
+  const selectedEmbeddingProvider = findProviderBySlug(
+    storedProviders,
+    embeddingSettings.ai_provider_ref
+  )
+  const selectedEmbeddingModels = selectedEmbeddingProvider?.models ?? []
 
   return (
     <div className="space-y-6">
@@ -869,171 +881,75 @@ export default function TenantAiSettings() {
         </div>
       </div>
 
-      {/* Local AI Models - first because it requires no config */}
-      <LocalModelsSection
-        enabled={localModelsEnabled}
-        onToggle={setLocalModelsEnabled}
-      />
-
-      {/* Cloud Providers */}
+      {/* Providers */}
       <div className="space-y-4">
-        <h2 className="text-xl font-bold text-white flex items-center gap-2">
-          <Settings className="w-5 h-5 text-purple-400" />
-          Cloud AI Providers
-        </h2>
+        <div className="flex items-center justify-between">
+          <h2 className="text-xl font-bold text-white flex items-center gap-2">
+            <Layers className="w-5 h-5 text-purple-400" />
+            AI Providers ({drafts.length})
+          </h2>
+          <button
+            onClick={() => setShowAddForm(true)}
+            disabled={showAddForm}
+            className="px-4 py-2 bg-purple-500 hover:bg-purple-600 disabled:bg-white/10 disabled:text-gray-500 text-white rounded-lg transition-all flex items-center gap-2"
+          >
+            <Plus className="w-4 h-4" />
+            Add Provider
+          </button>
+        </div>
 
-        {/* OpenAI */}
-        <ProviderSection
-          icon={<Zap className="w-5 h-5 text-green-400" />}
-          name="OpenAI"
-          description="Industry-leading models for chat and embeddings"
-          enabled={providers.openai.enabled}
-          apiKeyConfigured={providerMap.openai?.has_api_key || false}
-          apiEndpoint={providers.openai.apiEndpoint}
-          models={providerMap.openai?.models || []}
-          onToggle={(enabled) => handleProviderToggle('openai', enabled)}
-          onApiKeyChange={(key) => handleApiKeyChange('openai', key)}
-          onEndpointChange={(endpoint) => handleEndpointChange('openai', endpoint)}
-          onTest={() => handleTest('openai')}
-          onRefreshModels={() => handleRefreshModels('openai')}
-          testing={providers.openai.testing}
-          refreshing={providers.openai.refreshing}
-          testResult={providers.openai.testResult}
-        />
+        {showAddForm && (
+          <AddProviderForm
+            existingSlugs={drafts.map((d) => d.slug)}
+            onAdd={handleAdd}
+            onCancel={() => setShowAddForm(false)}
+          />
+        )}
 
-        {/* Anthropic */}
-        <ProviderSection
-          icon={<Sparkles className="w-5 h-5 text-orange-400" />}
-          name="Anthropic"
-          description="Claude models for advanced reasoning and analysis"
-          enabled={providers.anthropic.enabled}
-          apiKeyConfigured={providerMap.anthropic?.has_api_key || false}
-          apiEndpoint={providers.anthropic.apiEndpoint}
-          models={providerMap.anthropic?.models || []}
-          onToggle={(enabled) => handleProviderToggle('anthropic', enabled)}
-          onApiKeyChange={(key) => handleApiKeyChange('anthropic', key)}
-          onEndpointChange={(endpoint) => handleEndpointChange('anthropic', endpoint)}
-          onTest={() => handleTest('anthropic')}
-          onRefreshModels={() => handleRefreshModels('anthropic')}
-          testing={providers.anthropic.testing}
-          refreshing={providers.anthropic.refreshing}
-          testResult={providers.anthropic.testResult}
-        />
+        {drafts.length === 0 && !showAddForm && (
+          <GlassCard>
+            <div className="flex items-start gap-3">
+              <Info className="w-5 h-5 text-blue-400 flex-shrink-0 mt-0.5" />
+              <div>
+                <p className="text-white font-medium">No providers configured</p>
+                <p className="text-gray-400 text-sm mt-1">
+                  Add one to start using AI features. Each provider gets a slug you choose —
+                  agents and model ids reference that slug, so a tenant can run several
+                  gateways of the same kind side by side.
+                </p>
+              </div>
+            </div>
+          </GlassCard>
+        )}
 
-        {/* Ollama */}
-        <ProviderSection
-          icon={<Server className="w-5 h-5 text-blue-400" />}
-          name="Ollama"
-          description="Self-hosted open source models"
-          enabled={providers.ollama.enabled}
-          apiKeyConfigured={providerMap.ollama?.has_api_key || false}
-          apiEndpoint={providers.ollama.apiEndpoint}
-          models={providerMap.ollama?.models || []}
-          onToggle={(enabled) => handleProviderToggle('ollama', enabled)}
-          onApiKeyChange={(key) => handleApiKeyChange('ollama', key)}
-          onEndpointChange={(endpoint) => handleEndpointChange('ollama', endpoint)}
-          onTest={() => handleTest('ollama')}
-          onRefreshModels={() => handleRefreshModels('ollama')}
-          testing={providers.ollama.testing}
-          refreshing={providers.ollama.refreshing}
-          testResult={providers.ollama.testResult}
-        />
+        {drafts.map((draft) => {
+          const original = findProviderBySlug(storedProviders, draft.slug)
+          return (
+            <ProviderEntryCard
+              key={draft.slug}
+              draft={draft}
+              original={original}
+              dirty={isDraftDirty(draft, original)}
+              onChange={(patch) => patchDraft(draft.slug, patch)}
+              onRemove={() => requestRemoval(draft)}
+              onTest={() => handleTest(draft.slug)}
+              onRefreshModels={() => handleRefreshModels(draft.slug)}
+            />
+          )
+        })}
 
-        {/* Google Gemini */}
-        <ProviderSection
-          icon={<Globe className="w-5 h-5 text-blue-400" />}
-          name="Google Gemini"
-          description="Google's Gemini models for multimodal AI tasks"
-          enabled={providers.google.enabled}
-          apiKeyConfigured={providerMap.google?.has_api_key || false}
-          apiEndpoint={providers.google.apiEndpoint}
-          models={providerMap.google?.models || []}
-          onToggle={(enabled) => handleProviderToggle('google', enabled)}
-          onApiKeyChange={(key) => handleApiKeyChange('google', key)}
-          onEndpointChange={(endpoint) => handleEndpointChange('google', endpoint)}
-          onTest={() => handleTest('google')}
-          onRefreshModels={() => handleRefreshModels('google')}
-          testing={providers.google.testing}
-          refreshing={providers.google.refreshing}
-          testResult={providers.google.testResult}
-        />
-
-        {/* Azure OpenAI */}
-        <ProviderSection
-          icon={<Cloud className="w-5 h-5 text-cyan-400" />}
-          name="Azure OpenAI"
-          description="Enterprise Azure-hosted OpenAI models"
-          enabled={providers.azure_openai.enabled}
-          apiKeyConfigured={providerMap.azure_openai?.has_api_key || false}
-          apiEndpoint={providers.azure_openai.apiEndpoint}
-          models={providerMap.azure_openai?.models || []}
-          onToggle={(enabled) => handleProviderToggle('azure_openai', enabled)}
-          onApiKeyChange={(key) => handleApiKeyChange('azure_openai', key)}
-          onEndpointChange={(endpoint) => handleEndpointChange('azure_openai', endpoint)}
-          onTest={() => handleTest('azure_openai')}
-          onRefreshModels={() => handleRefreshModels('azure_openai')}
-          testing={providers.azure_openai.testing}
-          refreshing={providers.azure_openai.refreshing}
-          testResult={providers.azure_openai.testResult}
-        />
-
-        {/* Groq */}
-        <ProviderSection
-          icon={<Zap className="w-5 h-5 text-yellow-400" />}
-          name="Groq"
-          description="Lightning-fast inference with open source models"
-          enabled={providers.groq.enabled}
-          apiKeyConfigured={providerMap.groq?.has_api_key || false}
-          apiEndpoint={providers.groq.apiEndpoint}
-          models={providerMap.groq?.models || []}
-          onToggle={(enabled) => handleProviderToggle('groq', enabled)}
-          onApiKeyChange={(key) => handleApiKeyChange('groq', key)}
-          onEndpointChange={(endpoint) => handleEndpointChange('groq', endpoint)}
-          onTest={() => handleTest('groq')}
-          onRefreshModels={() => handleRefreshModels('groq')}
-          testing={providers.groq.testing}
-          refreshing={providers.groq.refreshing}
-          testResult={providers.groq.testResult}
-        />
-
-        {/* OpenRouter */}
-        <ProviderSection
-          icon={<Globe className="w-5 h-5 text-purple-400" />}
-          name="OpenRouter"
-          description="Universal access to multiple AI model providers"
-          enabled={providers.openrouter.enabled}
-          apiKeyConfigured={providerMap.openrouter?.has_api_key || false}
-          apiEndpoint={providers.openrouter.apiEndpoint}
-          models={providerMap.openrouter?.models || []}
-          onToggle={(enabled) => handleProviderToggle('openrouter', enabled)}
-          onApiKeyChange={(key) => handleApiKeyChange('openrouter', key)}
-          onEndpointChange={(endpoint) => handleEndpointChange('openrouter', endpoint)}
-          onTest={() => handleTest('openrouter')}
-          onRefreshModels={() => handleRefreshModels('openrouter')}
-          testing={providers.openrouter.testing}
-          refreshing={providers.openrouter.refreshing}
-          testResult={providers.openrouter.testResult}
-        />
-
-        {/* AWS Bedrock */}
-        <ProviderSection
-          icon={<Cloud className="w-5 h-5 text-orange-400" />}
-          name="AWS Bedrock"
-          description="AWS-managed foundation models (Claude, Titan, etc.)"
-          enabled={providers.bedrock.enabled}
-          apiKeyConfigured={providerMap.bedrock?.has_api_key || false}
-          apiEndpoint={providers.bedrock.apiEndpoint}
-          models={providerMap.bedrock?.models || []}
-          onToggle={(enabled) => handleProviderToggle('bedrock', enabled)}
-          onApiKeyChange={(key) => handleApiKeyChange('bedrock', key)}
-          onEndpointChange={(endpoint) => handleEndpointChange('bedrock', endpoint)}
-          onTest={() => handleTest('bedrock')}
-          onRefreshModels={() => handleRefreshModels('bedrock')}
-          testing={providers.bedrock.testing}
-          refreshing={providers.bedrock.refreshing}
-          testResult={providers.bedrock.testResult}
-          providerType="bedrock"
-        />
+        <GlassCard>
+          <div className="flex items-start gap-3">
+            <Cpu className="w-5 h-5 text-cyan-400 flex-shrink-0 mt-0.5" />
+            <div>
+              <p className="text-cyan-300 text-sm font-medium mb-1">On-device models need no API key</p>
+              <p className="text-cyan-300/80 text-xs">
+                Add a provider of kind <span className="font-mono">Local (Candle)</span> to run
+                Moondream (vision), BLIP (captions) and CLIP (embeddings) on your own server.
+              </p>
+            </div>
+          </div>
+        </GlassCard>
       </div>
 
       {/* Embedding Settings */}
@@ -1064,43 +980,62 @@ export default function TenantAiSettings() {
 
           {embeddingSettings.enabled && (
             <div className="space-y-4 pt-4 border-t border-white/10">
-              {/* Provider Selection */}
+              {/* Provider Selection — by SLUG. `ai_provider_ref` names one
+                  configured entry, not a kind. */}
               <div>
                 <label className="block text-sm font-medium text-gray-300 mb-2">
                   Embedding Provider
                 </label>
-                <select
-                  value={embeddingSettings.ai_provider_ref || ''}
-                  onChange={(e) => {
-                    const provider = e.target.value as AIProvider | ''
-                    // Clear model selection when provider changes - user must select from available models
-                    setEmbeddingSettings({
-                      ...embeddingSettings,
-                      ai_provider_ref: provider || undefined,
-                      ai_model_ref: undefined,
-                    })
-                  }}
-                  className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
-                >
-                  <option value="" className="bg-gray-900">Select a provider...</option>
-                  {EMBEDDING_CAPABLE_PROVIDERS.map((provider) => {
-                    const providerConfig = providerMap[provider]
-                    const isConfigured = providerConfig?.enabled && providerConfig?.has_api_key
-                    return (
-                      <option
-                        key={provider}
-                        value={provider}
-                        className="bg-gray-900"
-                        disabled={!isConfigured}
-                      >
-                        {provider.charAt(0).toUpperCase() + provider.slice(1)}
-                        {!isConfigured && ' (not configured)'}
+                <div className="flex items-center gap-3">
+                  {selectedEmbeddingProvider && (
+                    <div className="p-2 rounded-lg bg-white/5 border border-white/10">
+                      <ProviderIcon
+                        kind={selectedEmbeddingProvider.provider}
+                        iconUrl={selectedEmbeddingProvider.icon_url}
+                      />
+                    </div>
+                  )}
+                  <select
+                    value={embeddingSettings.ai_provider_ref || ''}
+                    onChange={(e) => {
+                      const slug = e.target.value
+                      // Clear the model selection: model ids are provider-scoped.
+                      setEmbeddingSettings({
+                        ...embeddingSettings,
+                        ai_provider_ref: slug || undefined,
+                        ai_model_ref: undefined,
+                      })
+                    }}
+                    className="flex-1 px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
+                  >
+                    <option value="" className="bg-gray-900">Select a provider...</option>
+                    {embeddingCandidates.map((entry) => {
+                      const isConfigured =
+                        entry.enabled &&
+                        (entry.has_api_key || entry.provider === 'local' || entry.provider === 'ollama')
+                      return (
+                        <option
+                          key={entry.slug}
+                          value={entry.slug}
+                          className="bg-gray-900"
+                          disabled={!isConfigured}
+                        >
+                          {providerLabel(entry)}
+                          {!isConfigured && ' (not configured)'}
+                        </option>
+                      )
+                    })}
+                    {/* A stored slug that no longer resolves stays visible, or
+                        saving this form would silently repoint embeddings. */}
+                    {embeddingSettings.ai_provider_ref && !selectedEmbeddingProvider && (
+                      <option value={embeddingSettings.ai_provider_ref} className="bg-gray-900">
+                        {embeddingSettings.ai_provider_ref} (not configured)
                       </option>
-                    )
-                  })}
-                </select>
+                    )}
+                  </select>
+                </div>
                 <p className="text-sm text-gray-400 mt-1">
-                  Select which AI provider to use for generating embeddings. Configure providers above first.
+                  Which configured provider generates embeddings. Providers are referenced by slug.
                 </p>
               </div>
 
@@ -1114,11 +1049,7 @@ export default function TenantAiSettings() {
                     value={embeddingSettings.ai_model_ref || ''}
                     onChange={(e) => {
                       const modelId = e.target.value || undefined
-                      // Find the selected model to get its embedding_length
-                      const selectedModel = embeddingSettings.ai_provider_ref
-                        ? providerMap[embeddingSettings.ai_provider_ref]?.models
-                            .find(m => m.model_id === modelId)
-                        : undefined
+                      const selectedModel = selectedEmbeddingModels.find((m) => m.model_id === modelId)
                       const detectedDimensions = selectedModel?.metadata?.embedding_length as number | undefined
 
                       setEmbeddingSettings({
@@ -1131,17 +1062,15 @@ export default function TenantAiSettings() {
                     className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
                   >
                     <option value="" className="bg-gray-900">Select a model...</option>
-                    {providerMap[embeddingSettings.ai_provider_ref]?.models
-                      .filter(m => m.use_cases.includes('embedding'))
-                      .map(model => (
+                    {selectedEmbeddingModels
+                      .filter((m) => m.use_cases.includes('embedding'))
+                      .map((model) => (
                         <option key={model.model_id} value={model.model_id} className="bg-gray-900">
                           {model.display_name || model.model_id}
-                          {model.metadata?.embedding_length && ` (${model.metadata.embedding_length}d)`}
+                          {model.metadata?.embedding_length ? ` (${model.metadata.embedding_length}d)` : ''}
                         </option>
-                      ))
-                    }
-                    {(!providerMap[embeddingSettings.ai_provider_ref]?.models?.length ||
-                      !providerMap[embeddingSettings.ai_provider_ref]?.models.some(m => m.use_cases.includes('embedding'))) && (
+                      ))}
+                    {!selectedEmbeddingModels.some((m) => m.use_cases.includes('embedding')) && (
                       <option value="" disabled className="bg-gray-900">No embedding models - click Refresh Models above</option>
                     )}
                   </select>
@@ -1186,9 +1115,8 @@ export default function TenantAiSettings() {
                 </label>
                 {(() => {
                   // Find selected model's embedding_length
-                  const selectedModel = embeddingSettings.ai_model_ref && embeddingSettings.ai_provider_ref
-                    ? providerMap[embeddingSettings.ai_provider_ref]?.models
-                        .find(m => m.model_id === embeddingSettings.ai_model_ref)
+                  const selectedModel = embeddingSettings.ai_model_ref
+                    ? selectedEmbeddingModels.find((m) => m.model_id === embeddingSettings.ai_model_ref)
                     : undefined
                   const detectedDims = selectedModel?.metadata?.embedding_length as number | undefined
 
@@ -1219,9 +1147,8 @@ export default function TenantAiSettings() {
                   )
                 })()}
                 <p className="text-sm text-gray-400 mt-1">
-                  {embeddingSettings.ai_model_ref && embeddingSettings.ai_provider_ref &&
-                   providerMap[embeddingSettings.ai_provider_ref]?.models
-                     .find(m => m.model_id === embeddingSettings.ai_model_ref)?.metadata?.embedding_length
+                  {embeddingSettings.ai_model_ref &&
+                   selectedEmbeddingModels.find((m) => m.model_id === embeddingSettings.ai_model_ref)?.metadata?.embedding_length
                     ? "Dimensions auto-detected from selected model."
                     : "Vector size for embeddings. Select an embedding model to auto-detect."}
                 </p>
@@ -1529,7 +1456,7 @@ export default function TenantAiSettings() {
                         </div>
                         <input
                           type="number"
-                          min={embeddingSettings.chunking.overlap.type === 'Percentage' ? 0 : 0}
+                          min={0}
                           max={embeddingSettings.chunking.overlap.type === 'Percentage' ? 50 : 256}
                           value={embeddingSettings.chunking.overlap.value}
                           onChange={(e) => setEmbeddingSettings({
@@ -1593,11 +1520,11 @@ export default function TenantAiSettings() {
           <div>
             <h3 className="text-white font-medium mb-1">Configuration Tips</h3>
             <ul className="text-sm text-gray-400 space-y-1">
-              <li>Enable at least one provider to use AI features</li>
-              <li>Test connections after configuring API keys to verify setup</li>
-              <li>Refresh models to see the latest available options from each provider</li>
-              <li>Custom endpoints allow using self-hosted or proxy services</li>
-              <li>Enable embeddings and select a model for semantic search features</li>
+              <li>Each provider has a permanent slug; models are addressed as <span className="font-mono">slug:model</span></li>
+              <li>Several providers may share a kind — give each its own slug and display name</li>
+              <li>Saving only sends the providers you edited; the rest are left untouched</li>
+              <li>Removing a provider is immediate and breaks anything referencing its slug</li>
+              <li>Enable embeddings and select a provider and model for semantic search features</li>
             </ul>
           </div>
         </div>
@@ -1639,6 +1566,21 @@ export default function TenantAiSettings() {
           )}
         </button>
       </div>
+
+      <ConfirmDialog
+        open={pendingRemoval !== null}
+        variant="danger"
+        title={`Remove provider '${pendingRemoval?.slug}'?`}
+        message={
+          `This deletes the entry and its stored API key immediately — it is not part of Save.\n\n` +
+          `Anything naming this slug stops resolving: model ids '${pendingRemoval?.slug}:…', ` +
+          `agent nodes with provider '${pendingRemoval?.slug}', and an embedding configuration ` +
+          `pointing at it. Those failures surface at call time, not now.`
+        }
+        confirmText={removing ? 'Removing...' : 'Remove'}
+        onConfirm={confirmRemoval}
+        onCancel={() => setPendingRemoval(null)}
+      />
     </div>
   )
 }

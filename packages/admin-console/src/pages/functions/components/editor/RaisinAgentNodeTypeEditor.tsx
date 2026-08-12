@@ -10,7 +10,9 @@ import { Save, Undo2, Redo2, Loader2, Bot, Plus, Trash2, MessageSquare, PanelRig
 import { Allotment } from 'allotment'
 import { useFunctionsContext, useUndoRedo } from '../../hooks'
 import { nodesApi } from '../../../../api/nodes'
-import { aiApi, type AIConfig, type ProviderConfigResponse, type AIProvider, type ModelUseCase } from '../../../../api/ai'
+import { aiApi, type AIConfig, type ModelUseCase, type ProviderSlug } from '../../../../api/ai'
+import { findProviderBySlug, usableProviders } from '../../../../utils/aiProviders'
+import ProviderSlugSelect from '../../../../components/ProviderSlugSelect'
 
 /** A selectable model plus the capability info needed to flag tool support. */
 interface AvailableModel {
@@ -23,48 +25,9 @@ import { InlineFunctionPicker } from './InlineFunctionPicker'
 import { AgentTestChat } from './AgentTestChat'
 import type { EditorTab } from '../../types'
 
-// Helper to convert provider array to map
-function providersArrayToMap(providers: ProviderConfigResponse[]): Record<AIProvider, ProviderConfigResponse | undefined> {
-  const map: Record<AIProvider, ProviderConfigResponse | undefined> = {
-    openai: undefined,
-    anthropic: undefined,
-    google: undefined,
-    azure_openai: undefined,
-    ollama: undefined,
-    groq: undefined,
-    openrouter: undefined,
-    bedrock: undefined,
-    local: undefined,
-    custom: undefined,
-  }
-  for (const p of providers) {
-    map[p.provider] = p
-  }
-  return map
-}
-
-// Helper function to get display name for providers
-function getProviderDisplayName(provider: AIProvider): string {
-  const names: Record<AIProvider, string> = {
-    openai: 'OpenAI',
-    anthropic: 'Anthropic (Claude)',
-    google: 'Google Gemini',
-    azure_openai: 'Azure OpenAI',
-    ollama: 'Ollama (Local)',
-    groq: 'Groq',
-    openrouter: 'OpenRouter',
-    bedrock: 'AWS Bedrock',
-    local: 'Local (Candle)',
-    custom: 'Custom',
-  }
-  return names[provider] || provider
-}
-
 interface RaisinAgentNodeTypeEditorProps {
   tab: EditorTab
 }
-
-type Provider = 'openai' | 'anthropic' | 'google' | 'azure_openai' | 'ollama' | 'groq' | 'openrouter' | 'bedrock' | 'local' | 'custom'
 
 /** Parse tools from DB — extracts path strings from any format (string, RaisinReference, etc.) */
 function parseToolPaths(raw: unknown): string[] {
@@ -83,7 +46,12 @@ type ExecutionMode = 'automatic' | 'approve_then_auto' | 'step_by_step' | 'manua
 
 interface AgentProperties {
   system_prompt: string
-  provider: Provider
+  /**
+   * The provider SLUG that serves this node — `marvel`, `openai`, `eu-gateway`.
+   * Not a kind: a tenant can configure several entries of one kind, and the
+   * slug is what `<slug>:<model>` and the runtime resolve against.
+   */
+  provider: ProviderSlug
   model: string
   temperature: number
   max_tokens: number
@@ -113,7 +81,9 @@ interface AgentNode {
 
 const DEFAULT_PROPERTIES: AgentProperties = {
   system_prompt: '',
-  provider: 'openai',
+  // Empty rather than 'openai': there is no universal default slug, and the
+  // normalization effect picks the tenant's first usable provider.
+  provider: '',
   model: '',
   temperature: 0.7,
   max_tokens: 4096,
@@ -199,21 +169,19 @@ export function RaisinAgentNodeTypeEditor({ tab }: RaisinAgentNodeTypeEditorProp
     loadConfig()
   }, [TENANT_ID])
 
-  // If the saved provider isn't actually configured (e.g. the default
-  // 'openai' while only Groq has an API key), the provider <select> would show
-  // a configured option while state still points at the unconfigured one — so
-  // the model lookup misses and the Model field degrades to a free-text box.
-  // Select the first configured provider so the model chooser activates. Done
-  // via resetProperties so opening the editor isn't flagged as an unsaved edit.
+  // If the saved slug isn't actually configured (a provider that was removed,
+  // or a blank on a new node), the provider <select> would show a configured
+  // option while state still points elsewhere — so the model lookup misses and
+  // the Model field degrades to a free-text box. Select the first usable
+  // provider so the model chooser activates. Done via resetProperties so
+  // opening the editor isn't flagged as an unsaved edit.
   useEffect(() => {
     if (!aiConfig || isLoading || didNormalizeProviderRef.current) return
-    const configured = aiConfig.providers
-      .filter((p) => p.enabled && p.has_api_key)
-      .map((p) => p.provider)
+    const configured = usableProviders(aiConfig.providers).map((p) => p.slug)
     if (configured.length === 0) return
     didNormalizeProviderRef.current = true
     if (!configured.includes(properties.provider)) {
-      resetProperties({ ...properties, provider: configured[0] as Provider, model: '' })
+      resetProperties({ ...properties, provider: configured[0], model: '' })
     }
   }, [aiConfig, isLoading, properties, resetProperties])
 
@@ -227,8 +195,8 @@ export function RaisinAgentNodeTypeEditor({ tab }: RaisinAgentNodeTypeEditorProp
         setAvailableModels([])
         return
       }
-      const providerMap = providersArrayToMap(aiConfig.providers)
-      const providerConfig = providerMap[properties.provider]
+      // By slug: two entries can share a kind, and each has its own model list.
+      const providerConfig = findProviderBySlug(aiConfig.providers, properties.provider)
       let models: AvailableModel[] =
         providerConfig?.models?.map((m) => ({ id: m.model_id, useCases: m.use_cases })) ?? []
       if (models.length === 0) {
@@ -273,7 +241,10 @@ export function RaisinAgentNodeTypeEditor({ tab }: RaisinAgentNodeTypeEditorProp
           setAgentNode(node)
           const props: AgentProperties = {
             system_prompt: (node.properties?.system_prompt as string) || '',
-            provider: (node.properties?.provider as Provider) || 'openai',
+            // Whatever slug the node names is kept as-is, even when it no
+            // longer resolves — snapping it to a default would repoint the node
+            // at a different provider behind the author's back.
+            provider: (node.properties?.provider as ProviderSlug) || '',
             model: (node.properties?.model as string) || '',
             temperature: (node.properties?.temperature as number) ?? 0.7,
             max_tokens: (node.properties?.max_tokens as number) ?? 4096,
@@ -585,23 +556,15 @@ export function RaisinAgentNodeTypeEditor({ tab }: RaisinAgentNodeTypeEditorProp
                 <label className="block text-sm font-medium text-zinc-300 mb-2">
                   Provider
                 </label>
-                <select
+                <ProviderSlugSelect
+                  providers={aiConfig?.providers ?? []}
                   value={properties.provider}
-                  onChange={(e) => handlePropertiesChange({ provider: e.target.value as Provider })}
+                  onChange={(slug) => handlePropertiesChange({ provider: slug })}
                   className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-500/20"
-                >
-                  {aiConfig?.providers
-                    .filter(p => p.enabled && p.has_api_key)
-                    .map(p => (
-                      <option key={p.provider} value={p.provider}>
-                        {getProviderDisplayName(p.provider)}
-                      </option>
-                    ))}
-                  {/* Fallback if no providers configured */}
-                  {(!aiConfig?.providers || aiConfig.providers.filter(p => p.enabled && p.has_api_key).length === 0) && (
-                    <option value="" disabled>No providers configured</option>
-                  )}
-                </select>
+                />
+                <p className="text-xs text-zinc-500 mt-1">
+                  Stored as the provider slug, e.g. <span className="font-mono">marvel</span>
+                </p>
               </div>
 
               <div>
@@ -819,20 +782,13 @@ export function RaisinAgentNodeTypeEditor({ tab }: RaisinAgentNodeTypeEditorProp
                       <label className="block text-sm font-medium text-zinc-300 mb-2">
                         Compaction Provider <span className="text-zinc-500">(optional)</span>
                       </label>
-                      <select
+                      <ProviderSlugSelect
+                        providers={aiConfig?.providers ?? []}
                         value={properties.compaction_provider}
-                        onChange={(e) => handlePropertiesChange({ compaction_provider: e.target.value })}
+                        onChange={(slug) => handlePropertiesChange({ compaction_provider: slug })}
+                        emptyLabel="Use agent's provider"
                         className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-500/20"
-                      >
-                        <option value="">Use agent's provider</option>
-                        {aiConfig?.providers
-                          .filter(p => p.enabled && p.has_api_key)
-                          .map(p => (
-                            <option key={p.provider} value={p.provider}>
-                              {getProviderDisplayName(p.provider)}
-                            </option>
-                          ))}
-                      </select>
+                      />
                       <p className="text-xs text-zinc-500 mt-1">Override provider for summarization</p>
                     </div>
 

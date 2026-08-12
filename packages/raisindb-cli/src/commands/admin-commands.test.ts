@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { aiProviderSet } from './ai.js';
+import { aiProviderList, aiProviderSet } from './ai.js';
 import { corsAdd, corsRemove, validateOrigin, addOrigin, removeOrigin } from './cors.js';
 import { userRegister, resolvePassword } from './user.js';
 import { repoCreate, repoDelete } from './repo.js';
@@ -66,7 +66,7 @@ describe('aiProviderSet (GET -> merge -> PUT)', () => {
   const currentConfig = {
     tenant_id: 'default',
     providers: [
-      { provider: 'openai', has_api_key: true, enabled: true, models: [] },
+      { slug: 'openai', provider: 'openai', has_api_key: true, enabled: true, models: [] },
     ],
     embedding_settings: { provider: 'openai' },
   };
@@ -79,7 +79,12 @@ describe('aiProviderSet (GET -> merge -> PUT)', () => {
 
     await aiProviderSet(
       'groq',
-      { apiKeyEnv: 'TEST_GROQ_KEY', enabled: true, model: ['llama-3.3-70b-versatile'] },
+      {
+        kind: 'groq',
+        apiKeyEnv: 'TEST_GROQ_KEY',
+        enabled: true,
+        model: ['llama-3.3-70b-versatile'],
+      },
       fetchImpl,
       { env: { TEST_GROQ_KEY: 'gsk-secret' } }
     );
@@ -93,10 +98,11 @@ describe('aiProviderSet (GET -> merge -> PUT)', () => {
       embedding_settings: unknown;
     };
     // openai preserved without api_key_plain
-    const openai = putBody.providers.find((p) => p.provider === 'openai')!;
+    const openai = putBody.providers.find((p) => p.slug === 'openai')!;
     expect(openai.api_key_plain).toBeUndefined();
     // groq added with the key, default model settings
-    const groq = putBody.providers.find((p) => p.provider === 'groq')!;
+    const groq = putBody.providers.find((p) => p.slug === 'groq')!;
+    expect(groq.provider).toBe('groq');
     expect(groq.api_key_plain).toBe('gsk-secret');
     expect(groq.enabled).toBe(true);
     expect(groq.models).toEqual([
@@ -120,24 +126,172 @@ describe('aiProviderSet (GET -> merge -> PUT)', () => {
       { match: (u, m) => m === 'PUT', status: 200, body: { success: true } },
     ]);
 
-    await aiProviderSet('groq', { apiKey: 'gsk-very-secret' }, fetchImpl);
+    await aiProviderSet('groq', { kind: 'groq', apiKey: 'gsk-very-secret' }, fetchImpl);
 
     const allOutput = logSpy.mock.calls.flat().join('\n');
     expect(allOutput).not.toContain('gsk-very-secret');
     expect(allOutput).toContain('api_key=updated');
   });
 
-  it('rejects unknown providers before any network call', async () => {
+  it('rejects a malformed NEW slug client-side, naming the rule, without writing', async () => {
+    const routes = [
+      { match: (u: string, m: string) => m === 'GET' && u.includes('/ai/config'), status: 200, body: currentConfig },
+      { match: (u: string, m: string) => m === 'PUT' && u.includes('/ai/config'), status: 200, body: { success: true } },
+    ];
+
+    const upper = mockFetch(routes);
+    await expect(aiProviderSet('Marvel', { kind: 'custom' }, upper.fetchImpl)).rejects.toThrow(
+      /lowercase/
+    );
+    expect(upper.calls.filter((c) => c.method === 'PUT')).toHaveLength(0);
+
+    const colon = mockFetch(routes);
+    await expect(
+      aiProviderSet('marvel:gpt-4o', { kind: 'custom' }, colon.fetchImpl)
+    ).rejects.toThrow(/model ids/);
+    expect(colon.calls.filter((c) => c.method === 'PUT')).toHaveLength(0);
+
+    // An underscore is only tolerated when the slug IS a kind name; a new
+    // slug that merely looks like one is still rejected.
+    const underscore = mockFetch(routes);
+    await expect(
+      aiProviderSet('some_new_bad_slug', { kind: 'custom' }, underscore.fetchImpl)
+    ).rejects.toThrow(/lowercase a-z, 0-9 and '-'/);
+    expect(underscore.calls.filter((c) => c.method === 'PUT')).toHaveLength(0);
+  });
+
+  it('can still edit a stored slug the pattern would reject (grandfathered azure_openai)', async () => {
+    const withAzure = {
+      tenant_id: 'default',
+      providers: [
+        {
+          slug: 'azure_openai',
+          provider: 'azure_openai',
+          has_api_key: true,
+          api_endpoint: 'https://contoso.openai.azure.com',
+          enabled: true,
+          models: [],
+        },
+      ],
+    };
+    const { fetchImpl, calls } = mockFetch([
+      { match: (u, m) => m === 'GET' && u.includes('/ai/config'), status: 200, body: withAzure },
+      { match: (u, m) => m === 'PUT' && u.includes('/ai/config'), status: 200, body: { success: true } },
+    ]);
+
+    await aiProviderSet(
+      'azure_openai',
+      { apiKeyStdin: true },
+      fetchImpl,
+      { readStdinImpl: async () => 'rotated-azure-key\n' }
+    );
+
+    const put = calls.find((c) => c.method === 'PUT')!;
+    const entry = (put.body as { providers: Array<Record<string, unknown>> }).providers.find(
+      (p) => p.slug === 'azure_openai'
+    )!;
+    expect(entry.provider).toBe('azure_openai');
+    expect(entry.api_key_plain).toBe('rotated-azure-key');
+    expect(entry.api_endpoint).toBe('https://contoso.openai.azure.com');
+  });
+
+  it('accepts a kind-named slug on create too, so the console can add Azure at all', async () => {
+    const { fetchImpl, calls } = mockFetch([
+      { match: (u, m) => m === 'GET' && u.includes('/ai/config'), status: 200, body: currentConfig },
+      { match: (u, m) => m === 'PUT' && u.includes('/ai/config'), status: 200, body: { success: true } },
+    ]);
+
+    await aiProviderSet('azure_openai', { kind: 'azure_openai', apiKey: 'k' }, fetchImpl);
+
+    const put = calls.find((c) => c.method === 'PUT')!;
+    const entry = (put.body as { providers: Array<Record<string, unknown>> }).providers.find(
+      (p) => p.slug === 'azure_openai'
+    )!;
+    expect(entry.provider).toBe('azure_openai');
+  });
+
+  it('rejects unknown kinds before any network call', async () => {
     const { fetchImpl, calls } = mockFetch([]);
-    await expect(aiProviderSet('not-a-provider', {}, fetchImpl)).rejects.toThrow(/Unknown provider/);
+    await expect(aiProviderSet('marvel', { kind: 'not-a-kind' }, fetchImpl)).rejects.toThrow(
+      /Unknown provider kind/
+    );
     expect(calls).toHaveLength(0);
+  });
+
+  it('demands --kind for a new slug but accepts its absence for an existing one', async () => {
+    const routes = [
+      { match: (u: string, m: string) => m === 'GET' && u.includes('/ai/config'), status: 200, body: currentConfig },
+      { match: (u: string, m: string) => m === 'PUT' && u.includes('/ai/config'), status: 200, body: { success: true } },
+    ];
+
+    const forNew = mockFetch(routes);
+    await expect(aiProviderSet('marvel', { apiKey: 'k' }, forNew.fetchImpl)).rejects.toThrow(
+      /--kind/
+    );
+    // The GET happened; nothing was written.
+    expect(forNew.calls.filter((c) => c.method === 'PUT')).toHaveLength(0);
+
+    const forExisting = mockFetch(routes);
+    await aiProviderSet('openai', { apiKey: 'rotated' }, forExisting.fetchImpl);
+    const put = forExisting.calls.find((c) => c.method === 'PUT')!;
+    const entry = (put.body as { providers: Array<Record<string, unknown>> }).providers.find(
+      (p) => p.slug === 'openai'
+    )!;
+    expect(entry.provider).toBe('openai');
+    expect(entry.api_key_plain).toBe('rotated');
+  });
+
+  it('refuses to re-point an existing slug at a different kind', async () => {
+    const { fetchImpl, calls } = mockFetch([
+      { match: (u, m) => m === 'GET' && u.includes('/ai/config'), status: 200, body: currentConfig },
+      { match: (u, m) => m === 'PUT' && u.includes('/ai/config'), status: 200, body: { success: true } },
+    ]);
+    await expect(
+      aiProviderSet('openai', { kind: 'anthropic' }, fetchImpl)
+    ).rejects.toThrow(/kind cannot be changed/);
+    expect(calls.filter((c) => c.method === 'PUT')).toHaveLength(0);
   });
 
   it('rejects --enabled with --disabled', async () => {
     const { fetchImpl } = mockFetch([]);
     await expect(
-      aiProviderSet('groq', { enabled: true, disabled: true }, fetchImpl)
+      aiProviderSet('groq', { kind: 'groq', enabled: true, disabled: true }, fetchImpl)
     ).rejects.toThrow(/mutually exclusive/);
+  });
+});
+
+describe('aiProviderList (GET /ai/providers)', () => {
+  const summaries = {
+    providers: [
+      {
+        slug: 'marvel',
+        provider: 'custom',
+        display_name: 'Maravilla',
+        icon_url: 'https://www.maravilla.cloud/maravilla-logo.png',
+        api_endpoint: 'https://marvel.maravilla.cloud/v1',
+        enabled: true,
+        has_api_key: true,
+        model_count: 3,
+      },
+      // A provider on its kind's default endpoint: the server omits the field.
+      { slug: 'openai', provider: 'openai', enabled: false, has_api_key: false, model_count: 0 },
+    ],
+  };
+
+  it('renders the endpoint the server sent, not a placeholder', async () => {
+    const logSpy = console.log as ReturnType<typeof vi.fn>;
+    const { fetchImpl, calls } = mockFetch([
+      { match: (u, m) => m === 'GET' && u.includes('/ai/providers'), status: 200, body: summaries },
+    ]);
+
+    await aiProviderList({}, fetchImpl);
+
+    expect(calls[0].url).toBe('http://test-server:1234/api/tenants/default/ai/providers');
+    const table = logSpy.mock.calls.flat().join('\n');
+    expect(table).toContain('https://marvel.maravilla.cloud/v1');
+    // Only an entry that genuinely has no endpoint falls back to the dash.
+    const openaiRow = table.split('\n').find((line) => line.startsWith('openai'))!;
+    expect(openaiRow).toContain('-');
   });
 });
 

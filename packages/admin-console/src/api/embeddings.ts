@@ -1,4 +1,15 @@
 import { api } from './client'
+import type { ProviderSlug } from './ai'
+
+/**
+ * The legacy embedding provider enum.
+ *
+ * Superseded by `ai_provider_ref`, which names one of the tenant's configured
+ * AI providers by SLUG. The enum is still sent because the server still
+ * requires the field, but it only records which wire protocol the referenced
+ * entry speaks — it cannot distinguish two gateways of the same kind.
+ */
+export type LegacyEmbeddingProvider = 'OpenAI' | 'Claude' | 'Ollama' | 'HuggingFace'
 
 export interface NodeTypeEmbeddingConfig {
   enabled: boolean
@@ -8,7 +19,11 @@ export interface NodeTypeEmbeddingConfig {
 export interface ConfigResponse {
   tenant_id: string
   enabled: boolean
-  provider: 'OpenAI' | 'Claude' | 'Ollama' | 'HuggingFace'
+  /** The configured AI provider, by slug. Preferred over `provider`. */
+  ai_provider_ref?: ProviderSlug
+  /** The model within that provider. Preferred over `model`. */
+  ai_model_ref?: string
+  provider: LegacyEmbeddingProvider
   model: string
   dimensions: number
   has_api_key: boolean
@@ -23,7 +38,16 @@ export interface ConfigResponse {
 
 export interface SetConfigRequest {
   enabled: boolean
-  provider: 'OpenAI' | 'Claude' | 'Ollama' | 'HuggingFace'
+  /**
+   * The configured AI provider, by slug.
+   *
+   * POST replaces the whole document, so this MUST be resent on every save: a
+   * payload without it wipes the tenant's provider reference and drops
+   * embeddings back to whatever the legacy `provider` enum resolves to.
+   */
+  ai_provider_ref?: ProviderSlug
+  ai_model_ref?: string
+  provider: LegacyEmbeddingProvider
   model: string
   dimensions: number
   api_key_plain?: string

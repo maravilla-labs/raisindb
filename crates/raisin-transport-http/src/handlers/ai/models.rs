@@ -74,9 +74,11 @@ pub async fn list_all_models(
         let encryptor = ApiKeyEncryptor::new(&master_key);
 
         for provider_config in &mut config.providers {
-            // Skip if provider filter is set and doesn't match
-            if let Some(ref filter_provider) = query.provider {
-                if &provider_config.provider != filter_provider {
+            // Skip if provider filter is set and doesn't match. The filter is a slug:
+            // filtering by kind would refresh both of a tenant's two gateways when it
+            // asked about one.
+            if let Some(ref filter_slug) = query.provider {
+                if &provider_config.slug != filter_slug {
                     continue;
                 }
             }
@@ -96,7 +98,7 @@ pub async fn list_all_models(
 
             // Fetch models from provider
             let fetched_models = match fetch_models_from_provider(
-                provider_config.provider,
+                provider_config.kind,
                 api_key.as_deref(),
                 endpoint,
             )
@@ -105,8 +107,9 @@ pub async fn list_all_models(
                 Ok(models) => models,
                 Err(e) => {
                     tracing::warn!(
-                        "Failed to fetch models from {:?} for tenant {}: {}",
-                        provider_config.provider,
+                        "Failed to fetch models from '{}' ({:?}) for tenant {}: {}",
+                        provider_config.slug,
+                        provider_config.kind,
                         tenant_id,
                         e
                     );
@@ -162,19 +165,20 @@ pub async fn list_all_models(
     // Build response from config
     let mut models = Vec::new();
     for provider_config in config.providers {
-        // Skip if provider filter is set and doesn't match
-        if let Some(ref filter_provider) = query.provider {
-            if &provider_config.provider != filter_provider {
+        // Skip if provider filter is set and doesn't match (by slug, as above)
+        if let Some(ref filter_slug) = query.provider {
+            if &provider_config.slug != filter_slug {
                 continue;
             }
         }
 
-        for model in provider_config.models {
+        for model in &provider_config.models {
             models.push(ModelInfo {
-                model_id: model.model_id,
-                display_name: model.display_name,
-                provider: provider_config.provider,
-                use_cases: model.use_cases,
+                model_id: model.model_id.clone(),
+                display_name: model.display_name.clone(),
+                provider: provider_config.kind,
+                provider_slug: provider_config.slug.clone(),
+                use_cases: model.use_cases.clone(),
                 default_temperature: model.default_temperature,
                 default_max_tokens: model.default_max_tokens,
             });
@@ -363,13 +367,14 @@ pub async fn list_models_by_use_case(
                     continue;
                 }
 
-                for model in provider_config.models {
+                for model in &provider_config.models {
                     if model.use_cases.contains(&use_case) {
                         models.push(ModelInfo {
-                            model_id: model.model_id,
-                            display_name: model.display_name,
-                            provider: provider_config.provider,
-                            use_cases: model.use_cases,
+                            model_id: model.model_id.clone(),
+                            display_name: model.display_name.clone(),
+                            provider: provider_config.kind,
+                            provider_slug: provider_config.slug.clone(),
+                            use_cases: model.use_cases.clone(),
                             default_temperature: model.default_temperature,
                             default_max_tokens: model.default_max_tokens,
                         });

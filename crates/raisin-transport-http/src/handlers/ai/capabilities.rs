@@ -30,32 +30,28 @@ use super::types::{CapabilitiesInfo, ErrorResponse, ModelCapabilitiesResponse};
 
 /// Get capabilities for a specific model from a provider.
 ///
-/// GET /api/tenants/{tenant_id}/ai/providers/{provider}/models/{model}/capabilities
+/// GET /api/tenants/{tenant_id}/ai/providers/{slug}/models/{model}/capabilities
 ///
 /// Returns detailed capabilities information for a model, including whether it supports
 /// tool calling. This endpoint queries the provider's model list and caches results.
+///
+/// The path segment is a provider SLUG. It resolves to one entry, and the entry's kind
+/// picks the helper below — so two gateways with different endpoints report their own
+/// capabilities instead of sharing whichever entry came first. Existing URLs like
+/// `.../providers/ollama/...` keep working: pre-slug entries carry their kind's serde
+/// name as their slug.
 #[axum::debug_handler]
 pub async fn get_model_capabilities(
-    Path((tenant_id, provider, model_id)): Path<(String, AIProvider, String)>,
+    Path((tenant_id, slug, model_id)): Path<(String, String, String)>,
     State(state): State<AppState>,
 ) -> Result<Json<ModelCapabilitiesResponse>, (StatusCode, Json<ErrorResponse>)> {
     let repo_impl = state.storage().tenant_ai_config_repository();
 
-    // Get config to retrieve API key and endpoint
-    let config = match repo_impl.get_config(&tenant_id).await {
-        Ok(config) => config,
-        Err(raisin_ai::storage::StorageError::NotFound(_)) => {
-            // No config, but we can still check Ollama (doesn't need API key)
-            if provider == AIProvider::Ollama {
-                return get_ollama_model_capabilities(&model_id, None).await;
-            }
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: "No AI configuration found".to_string(),
-                }),
-            ));
-        }
+    // "No config at all" and "a config with no entry under this slug" are different
+    // cases here — see the fallback below — so keep them apart.
+    let stored_config = match repo_impl.get_config(&tenant_id).await {
+        Ok(config) => Some(config),
+        Err(raisin_ai::storage::StorageError::NotFound(_)) => None,
         Err(e) => {
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -66,40 +62,65 @@ pub async fn get_model_capabilities(
         }
     };
 
-    // Find provider config
-    let provider_config = config.providers.iter().find(|p| p.provider == provider);
+    let provider_config = stored_config
+        .as_ref()
+        .and_then(|config| config.get_provider(&slug).cloned());
+
+    let provider = match &provider_config {
+        Some(pc) => pc.kind,
+        // With no entry under this slug there is still a kind to answer for, as long as
+        // the slug is one of the kind names: the helpers below fall back to name
+        // heuristics when they have no key and no endpoint. That is what a tenant with
+        // a config but no entry for the queried kind used to get, and it is what lets
+        // the console describe a model before that provider has ever been saved.
+        None => match AIProvider::from_serde_name(&slug) {
+            // Ollama also answers for a tenant with no config at all: it is the one
+            // kind that needs neither a credential nor a stored endpoint.
+            Some(kind) if stored_config.is_some() || kind == AIProvider::Ollama => kind,
+            _ => {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorResponse {
+                        error: format!("Provider '{}' not configured", slug),
+                    }),
+                ));
+            }
+        },
+    };
 
     // Decrypt API key if present
-    let api_key = if let Some(pc) = provider_config {
-        if let Some(encrypted) = &pc.api_key_encrypted {
-            let master_key = state.get_master_key().map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: format!("Master key not configured: {}", e),
-                    }),
-                )
-            })?;
-            let encryptor = ApiKeyEncryptor::new(&master_key);
-            Some(encryptor.decrypt(encrypted).map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: format!("Failed to decrypt API key: {}", e),
-                    }),
-                )
-            })?)
-        } else {
-            None
-        }
+    let api_key = if let Some(encrypted) = provider_config
+        .as_ref()
+        .and_then(|pc| pc.api_key_encrypted.as_ref())
+    {
+        let master_key = state.get_master_key().map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Master key not configured: {}", e),
+                }),
+            )
+        })?;
+        let encryptor = ApiKeyEncryptor::new(&master_key);
+        Some(encryptor.decrypt(encrypted).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to decrypt API key: {}", e),
+                }),
+            )
+        })?)
     } else {
         None
     };
 
-    let endpoint = provider_config.and_then(|pc| pc.api_endpoint.as_deref());
+    let endpoint = provider_config
+        .as_ref()
+        .and_then(|pc| pc.api_endpoint.as_deref());
 
-    // Query provider for model capabilities
-    match provider {
+    // Query provider for model capabilities. The helpers know nothing about slugs, so
+    // the slug is stamped onto the response once, here, on the way out.
+    let response = match provider {
         AIProvider::OpenAI => {
             get_openai_model_capabilities(&model_id, api_key.as_deref(), endpoint).await
         }
@@ -125,11 +146,13 @@ pub async fn get_model_capabilities(
         AIProvider::Local => Ok(Json(ModelCapabilitiesResponse {
             model_id: model_id.clone(),
             provider,
+            provider_slug: String::new(),
             capabilities: local_model_capabilities(&model_id),
         })),
         AIProvider::Custom => Ok(Json(ModelCapabilitiesResponse {
             model_id: model_id.clone(),
             provider,
+            provider_slug: String::new(),
             // An OpenAI-compatible endpoint serves `/embeddings` and supports tool calls
             // as part of the shape it implements. Reporting `tools: false` here made the
             // console hide tool configuration for agents that would have worked.
@@ -141,7 +164,12 @@ pub async fn get_model_capabilities(
                 streaming: true,
             },
         })),
-    }
+    };
+
+    response.map(|mut r| {
+        r.0.provider_slug = slug;
+        r
+    })
 }
 
 /// Local Candle model capabilities lookup.
@@ -191,6 +219,7 @@ macro_rules! capabilities_from_provider_or_heuristic {
                     Ok(Json(ModelCapabilitiesResponse {
                         model_id: $model_id.to_string(),
                         provider: $provider_enum,
+                        provider_slug: String::new(),
                         capabilities: CapabilitiesInfo {
                             chat: model.capabilities.chat,
                             embeddings: model.capabilities.embeddings,
@@ -203,6 +232,7 @@ macro_rules! capabilities_from_provider_or_heuristic {
                     Ok(Json(ModelCapabilitiesResponse {
                         model_id: $model_id.to_string(),
                         provider: $provider_enum,
+                        provider_slug: String::new(),
                         capabilities: $heuristic,
                     }))
                 }
@@ -212,6 +242,7 @@ macro_rules! capabilities_from_provider_or_heuristic {
                 Ok(Json(ModelCapabilitiesResponse {
                     model_id: $model_id.to_string(),
                     provider: $provider_enum,
+                    provider_slug: String::new(),
                     capabilities: $heuristic,
                 }))
             }

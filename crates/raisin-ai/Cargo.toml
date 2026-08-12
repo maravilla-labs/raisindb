@@ -78,6 +78,9 @@ aws-smithy-types = { version = "1", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
+# Same encoder RocksDB persists tenant AI configs with — the back-compat slug
+# default has to be exercised through the real path, not only serde_json.
+rmp-serde = { workspace = true }
 tempfile = "3"
 image = "0.25"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

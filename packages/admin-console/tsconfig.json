@@ -27,5 +27,8 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src"]
+  "include": ["src"],
+  /* Tests are compiled by vitest, which brings its own types. The app build
+     must not fail just because the test runner is not installed. */
+  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"]
 }

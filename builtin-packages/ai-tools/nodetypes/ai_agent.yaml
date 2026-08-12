@@ -82,17 +82,21 @@ properties:
     title: Provider
     type: string
     required: true
-    default: openai
-    description: AI provider (openai, anthropic, custom)
+    # The SLUG of a provider configured on this tenant — not a provider kind.
+    #
+    # This was a fixed three-option select of kinds, which stopped being correct when
+    # providers became slug-addressed: a tenant can configure several of the same kind,
+    # and the slug is what tells them apart. A kind name still works wherever it is also
+    # the slug (`openai`, `anthropic`), which is the back-compat default for entries that
+    # predate slugs — so existing agents keep resolving — but it is a coincidence rather
+    # than the rule, and there is no default here any more because the right value depends
+    # entirely on what the tenant has configured.
+    description: >-
+      Slug of a provider configured on this tenant, e.g. `marvel` or `openai`.
+      See Admin Console > AI Settings for the available slugs.
     ui:
-      widget: select
-      options:
-        - label: OpenAI
-          value: openai
-        - label: Anthropic
-          value: anthropic
-        - label: Custom
-          value: custom
+      widget: text
+      placeholder: marvel
 
   - name: model
     title: Model

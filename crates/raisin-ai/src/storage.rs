@@ -227,6 +227,30 @@ mod tests {
         let retrieved = store.get_config("test-tenant").await.unwrap();
         assert_eq!(retrieved.tenant_id, "test-tenant");
         assert_eq!(retrieved.providers.len(), 1);
+        assert_eq!(retrieved.providers[0].slug, "openai");
+    }
+
+    #[tokio::test]
+    async fn test_store_keeps_two_entries_of_the_same_kind_apart() {
+        // A store keyed on the provider kind would collapse these into one.
+        let store = TestStore::new();
+        let mut config = TenantAIConfig::new("test-tenant".to_string());
+        config
+            .providers
+            .push(AIProviderConfig::with_slug("marvel", AIProvider::Custom));
+        config
+            .providers
+            .push(AIProviderConfig::with_slug("my-vllm", AIProvider::Custom));
+
+        store.set_config(&config).await.unwrap();
+        let retrieved = store.get_config("test-tenant").await.unwrap();
+
+        let slugs: Vec<&str> = retrieved
+            .providers
+            .iter()
+            .map(|p| p.slug.as_str())
+            .collect();
+        assert_eq!(slugs, vec!["marvel", "my-vllm"]);
     }
 
     #[tokio::test]

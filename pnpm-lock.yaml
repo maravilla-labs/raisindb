@@ -119,6 +119,9 @@ importers:
       vite:
         specifier: ^6.0.7
         version: 6.4.1(@types/node@20.19.27)(jiti@2.6.1)(lightningcss@1.30.2)(tsx@4.21.0)(yaml@2.8.2)
+      vitest:
+        specifier: ^1.6.1
+        version: 1.6.1(@types/node@20.19.27)(lightningcss@1.30.2)
 
   packages/mcp-ui-client:
     devDependencies:

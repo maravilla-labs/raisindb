@@ -210,18 +210,10 @@ where
 
             let result = match job.kind {
                 EmbeddingJobKind::AddNode => {
-                    Self::handle_add_node(
-                        storage,
-                        embedding_storage,
-                        hnsw_engine,
-                        master_key,
-                        &job,
-                    )
-                    .await
+                    Self::handle_add_node(storage, embedding_storage, hnsw_engine, master_key, &job)
+                        .await
                 }
-                EmbeddingJobKind::DeleteNode => {
-                    Self::handle_delete_node(hnsw_engine, &job).await
-                }
+                EmbeddingJobKind::DeleteNode => Self::handle_delete_node(hnsw_engine, &job).await,
                 EmbeddingJobKind::BranchCreated => {
                     Self::handle_branch_created(hnsw_engine, &job).await
                 }
@@ -300,10 +292,9 @@ where
             .map_err(|e| Error::storage(e.to_string()))?;
 
         // 2. Get embedding settings
-        let embedding_settings = ai_config
-            .embedding_settings
-            .as_ref()
-            .ok_or_else(|| Error::NotFound("No embedding settings configured for tenant".to_string()))?;
+        let embedding_settings = ai_config.embedding_settings.as_ref().ok_or_else(|| {
+            Error::NotFound("No embedding settings configured for tenant".to_string())
+        })?;
 
         if !embedding_settings.enabled {
             tracing::debug!(
@@ -316,10 +307,7 @@ where
         // 3. Find embedding provider and model
         let (provider_config, model_config) = ai_config
             .get_default_provider(AIUseCase::Embedding)
-            .and_then(|p| {
-                p.get_default_model(AIUseCase::Embedding)
-                    .map(|m| (p, m))
-            })
+            .and_then(|p| p.get_default_model(AIUseCase::Embedding).map(|m| (p, m)))
             .ok_or_else(|| Error::NotFound("No embedding provider configured".to_string()))?;
 
         // 4. Decrypt API key
@@ -328,7 +316,7 @@ where
             encryptor
                 .decrypt(encrypted)
                 .map_err(|e| Error::Backend(format!("Failed to decrypt API key: {}", e)))?
-        } else if provider_config.provider.requires_api_key() {
+        } else if provider_config.kind.requires_api_key() {
             return Err(Error::Validation(
                 "No API key configured for provider".to_string(),
             ));
@@ -337,7 +325,7 @@ where
         };
 
         // 5. Map AI provider to embedding provider (temporary until raisin-ai supports embeddings)
-        let embedding_provider = map_ai_provider_to_embedding_provider(&provider_config.provider)?;
+        let embedding_provider = map_ai_provider_to_embedding_provider(&provider_config.kind)?;
 
         // 6. Create embedding provider
         let provider = create_provider(&embedding_provider, &api_key, &model_config.model_id)?;
@@ -377,7 +365,7 @@ where
             embedding_dims = embedding.len(),
             text_length = text.len(),
             model = %model_config.model_id,
-            provider = ?provider_config.provider,
+            provider = ?provider_config.kind,
             "Generated embedding"
         );
 
@@ -385,7 +373,7 @@ where
         let embedding_data = EmbeddingData {
             vector: embedding.clone(),
             model: model_config.model_id.clone(),
-            provider: format!("{:?}", provider_config.provider),
+            provider: format!("{:?}", provider_config.kind),
             generated_at: chrono::Utc::now(),
             text_hash: hash_text(&text),
         };
@@ -445,7 +433,13 @@ where
         let workspace_id = job.workspace_id.clone();
 
         tokio::task::spawn_blocking(move || {
-            engine_clone.remove_embedding(&tenant_id, &repo_id, &branch, &workspace_id, &node_id_clone)
+            engine_clone.remove_embedding(
+                &tenant_id,
+                &repo_id,
+                &branch,
+                &workspace_id,
+                &node_id_clone,
+            )
         })
         .await
         .map_err(|e| Error::storage(format!("Blocking task failed: {}", e)))??;
@@ -472,7 +466,13 @@ where
         let workspace_id = job.workspace_id.clone();
 
         tokio::task::spawn_blocking(move || {
-            engine_clone.copy_for_branch(&tenant_id, &repo_id, &source_branch_clone, &new_branch, &workspace_id)
+            engine_clone.copy_for_branch(
+                &tenant_id,
+                &repo_id,
+                &source_branch_clone,
+                &new_branch,
+                &workspace_id,
+            )
         })
         .await
         .map_err(|e| Error::storage(format!("Blocking task failed: {}", e)))??;
@@ -587,11 +587,12 @@ fn map_ai_provider_to_embedding_provider(provider: &AIProvider) -> Result<Embedd
     match provider {
         AIProvider::OpenAI => Ok(EmbeddingProvider::OpenAI),
         AIProvider::Ollama => Ok(EmbeddingProvider::Ollama),
-        AIProvider::Anthropic | AIProvider::Google | AIProvider::AzureOpenAI | AIProvider::Custom => {
-            Err(Error::Validation(format!(
-                "Provider {:?} does not support embeddings yet",
-                provider
-            )))
-        }
+        AIProvider::Anthropic
+        | AIProvider::Google
+        | AIProvider::AzureOpenAI
+        | AIProvider::Custom => Err(Error::Validation(format!(
+            "Provider {:?} does not support embeddings yet",
+            provider
+        ))),
     }
 }

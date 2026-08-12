@@ -120,7 +120,7 @@ pub(super) fn build_ai_list_models(
                     encryptor.decrypt(encrypted).map_err(|e| {
                         raisin_error::Error::Backend(format!("Failed to decrypt API key: {}", e))
                     })?
-                } else if !provider_config.provider.requires_api_key() {
+                } else if !provider_config.kind.requires_api_key() {
                     String::new()
                 } else {
                     // Skip this provider if no API key is configured
@@ -129,7 +129,7 @@ pub(super) fn build_ai_list_models(
 
                 // Create the appropriate provider instance
                 let provider: Box<dyn raisin_ai::provider::AIProviderTrait> =
-                    match provider_config.provider {
+                    match provider_config.kind {
                         raisin_ai::config::AIProvider::OpenAI => {
                             if let Some(endpoint) = &provider_config.api_endpoint {
                                 Box::new(raisin_ai::providers::OpenAIProvider::with_base_url(
@@ -171,7 +171,14 @@ pub(super) fn build_ai_list_models(
                             all_models.push(serde_json::json!({
                                 "id": model.id,
                                 "name": model.name,
+                                // `provider` stays the KIND (what the provider client
+                                // calls itself). Deployed user functions compare this
+                                // to "openai"/"ollama"/…; turning it into a slug would
+                                // break all of them at once. `provider_slug` is the
+                                // additive half — it is what a model id is prefixed
+                                // with.
                                 "provider": provider.provider_name(),
+                                "provider_slug": provider_config.slug,
                                 "capabilities": {
                                     "chat": model.capabilities.chat,
                                     "streaming": model.capabilities.streaming,

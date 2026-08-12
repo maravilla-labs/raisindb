@@ -2,10 +2,12 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams, Link } from 'react-router-dom'
 import { ArrowLeft, Save, Bot, Plus, Trash2, ArrowUp, ArrowDown, Pencil, Check, X } from 'lucide-react'
 import GlassCard from '../../components/GlassCard'
+import ProviderSlugSelect from '../../components/ProviderSlugSelect'
 import TagSelector from '../../components/TagSelector'
 import { useToast, ToastContainer } from '../../components/Toast'
 import { agentsApi, type CreateAgentRequest, type UpdateAgentRequest } from '../../api/agents'
-import { aiApi, type AIConfig, type ProviderConfigResponse, type AIProvider, type ModelUseCase } from '../../api/ai'
+import { aiApi, type AIConfig, type ModelUseCase, type ProviderSlug } from '../../api/ai'
+import { findProviderBySlug, usableProviders } from '../../utils/aiProviders'
 
 /** A selectable model plus the capability info needed to flag tool support. */
 interface AvailableModel {
@@ -16,49 +18,15 @@ interface AvailableModel {
 import { nodesApi } from '../../api/nodes'
 import { useAuth } from '../../contexts/AuthContext'
 
-// Helper to convert provider array to map
-function providersArrayToMap(providers: ProviderConfigResponse[]): Record<AIProvider, ProviderConfigResponse | undefined> {
-  const map: Record<AIProvider, ProviderConfigResponse | undefined> = {
-    openai: undefined,
-    anthropic: undefined,
-    google: undefined,
-    azure_openai: undefined,
-    ollama: undefined,
-    groq: undefined,
-    openrouter: undefined,
-    bedrock: undefined,
-    local: undefined,
-    custom: undefined,
-  }
-  for (const p of providers) {
-    map[p.provider] = p
-  }
-  return map
-}
-
-type Provider = 'openai' | 'anthropic' | 'google' | 'azure_openai' | 'ollama' | 'groq' | 'openrouter' | 'bedrock' | 'local' | 'custom'
-
-// Helper function to get display name for providers
-function getProviderDisplayName(provider: AIProvider): string {
-  const names: Record<AIProvider, string> = {
-    openai: 'OpenAI',
-    anthropic: 'Anthropic',
-    google: 'Google Gemini',
-    azure_openai: 'Azure OpenAI',
-    ollama: 'Ollama (Local)',
-    groq: 'Groq',
-    openrouter: 'OpenRouter',
-    bedrock: 'AWS Bedrock',
-    local: 'Local (Candle)',
-    custom: 'Custom',
-  }
-  return names[provider] || provider
-}
-
 interface FormData {
   name: string
   system_prompt: string
-  provider: Provider
+  /**
+   * The provider SLUG this agent runs on. Slugs are why the field exists: a
+   * user writes `provider: marvel` / `model: maravilla/smart` and it resolves.
+   * A kind would be ambiguous — a tenant can configure several of one kind.
+   */
+  provider: ProviderSlug
   model: string
   temperature: number
   max_tokens: number
@@ -94,7 +62,9 @@ export default function AgentEditor() {
   const [formData, setFormData] = useState<FormData>({
     name: '',
     system_prompt: '',
-    provider: 'openai',
+    // Empty rather than 'openai': there is no universal default slug, and the
+    // normalization below picks the tenant's first usable provider.
+    provider: '',
     model: '',
     temperature: 0.7,
     max_tokens: 4096,
@@ -127,20 +97,18 @@ export default function AgentEditor() {
     }
   }, [repo, activeBranch, agentId, isNew, TENANT_ID])
 
-  // If the saved provider isn't actually configured (e.g. the default
-  // 'openai' while only Groq has an API key), the provider <select> shows a
-  // configured option while state still points at the unconfigured one, so the
-  // model lookup misses and the Model field degrades to a free-text box.
-  // Select the first configured provider so the model chooser activates.
+  // If the saved slug isn't actually configured (a provider that was removed,
+  // or a blank on a new agent), the provider <select> shows a configured option
+  // while state still points elsewhere, so the model lookup misses and the
+  // Model field degrades to a free-text box. Select the first usable provider
+  // so the model chooser activates.
   useEffect(() => {
     if (!aiConfig || loading || didNormalizeProviderRef.current) return
-    const configured = aiConfig.providers
-      .filter((p) => p.enabled && p.has_api_key)
-      .map((p) => p.provider)
+    const configured = usableProviders(aiConfig.providers).map((p) => p.slug)
     if (configured.length === 0) return
     didNormalizeProviderRef.current = true
     if (!configured.includes(formData.provider)) {
-      setFormData(prev => ({ ...prev, provider: configured[0] as Provider, model: '' }))
+      setFormData(prev => ({ ...prev, provider: configured[0], model: '' }))
     }
   }, [aiConfig, loading, formData.provider])
 
@@ -154,8 +122,8 @@ export default function AgentEditor() {
         setAvailableModels([])
         return
       }
-      const providerMap = providersArrayToMap(aiConfig.providers)
-      const providerConfig = providerMap[formData.provider]
+      // By slug: two entries can share a kind, and each has its own model list.
+      const providerConfig = findProviderBySlug(aiConfig.providers, formData.provider)
       let models: AvailableModel[] =
         providerConfig?.models?.map((m) => ({ id: m.model_id, useCases: m.use_cases })) ?? []
       if (models.length === 0) {
@@ -439,25 +407,16 @@ export default function AgentEditor() {
               <label htmlFor="provider" className="block text-sm font-medium text-zinc-300 mb-2">
                 Provider <span className="text-red-400">*</span>
               </label>
-              <select
+              <ProviderSlugSelect
                 id="provider"
                 required
+                providers={aiConfig?.providers ?? []}
                 value={formData.provider}
-                onChange={(e) => setFormData({ ...formData, provider: e.target.value as Provider })}
-                className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500/20"
-              >
-                {aiConfig?.providers
-                  .filter(p => p.enabled && p.has_api_key)
-                  .map(p => (
-                    <option key={p.provider} value={p.provider}>
-                      {getProviderDisplayName(p.provider)}
-                    </option>
-                  ))}
-                {/* Fallback if no providers configured */}
-                {(!aiConfig?.providers || aiConfig.providers.filter(p => p.enabled && p.has_api_key).length === 0) && (
-                  <option value="" disabled>No providers configured</option>
-                )}
-              </select>
+                onChange={(slug) => setFormData({ ...formData, provider: slug })}
+              />
+              <p className="text-xs text-zinc-500 mt-1">
+                Stored as the provider slug, e.g. <span className="font-mono">marvel</span>
+              </p>
             </div>
 
             <div>
@@ -618,21 +577,13 @@ export default function AgentEditor() {
                     <label htmlFor="compaction_provider" className="block text-sm font-medium text-zinc-300 mb-2">
                       Compaction Provider <span className="text-zinc-500">(optional)</span>
                     </label>
-                    <select
+                    <ProviderSlugSelect
                       id="compaction_provider"
+                      providers={aiConfig?.providers ?? []}
                       value={formData.compaction_provider}
-                      onChange={(e) => setFormData({ ...formData, compaction_provider: e.target.value })}
-                      className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500/20"
-                    >
-                      <option value="">Use agent's provider</option>
-                      {aiConfig?.providers
-                        .filter(p => p.enabled && p.has_api_key)
-                        .map(p => (
-                          <option key={p.provider} value={p.provider}>
-                            {getProviderDisplayName(p.provider)}
-                          </option>
-                        ))}
-                    </select>
+                      onChange={(slug) => setFormData({ ...formData, compaction_provider: slug })}
+                      emptyLabel="Use agent's provider"
+                    />
                     <p className="text-xs text-zinc-500 mt-1">Override provider for summarization</p>
                   </div>
 

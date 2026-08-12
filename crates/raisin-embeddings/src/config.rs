@@ -35,8 +35,15 @@ pub struct TenantEmbeddingConfig {
     /// Whether embeddings are enabled for this tenant
     pub enabled: bool,
 
-    /// Reference to AI provider for embeddings (by provider type, e.g., "openai").
-    /// If set, uses the provider from TenantAIConfig instead of legacy fields.
+    /// Reference to AI provider for embeddings, by the provider's per-tenant SLUG
+    /// (e.g. "openai", or "marvel" for a self-named gateway).
+    /// If set, uses that provider from TenantAIConfig instead of legacy fields.
+    ///
+    /// Nothing enforces referential integrity here, which is exactly why slugs are
+    /// immutable: a rename would leave this dangling, and the job would fail at
+    /// embedding time rather than at config time. Refs written before slugs existed
+    /// still resolve, because pre-slug entries are slugged after their kind's serde
+    /// name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_provider_ref: Option<String>,
 

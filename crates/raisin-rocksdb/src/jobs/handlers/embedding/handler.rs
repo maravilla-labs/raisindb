@@ -6,6 +6,7 @@
 use super::content_extraction::{extract_embeddable_content, hash_text};
 use crate::jobs::handlers::fulltext::IndexPlanCache;
 use crate::RocksDBStorage;
+use raisin_ai::config::AIProvider;
 use raisin_ai::storage::TenantAIConfigStore;
 use raisin_embeddings::config::{EmbeddingProvider, TenantEmbeddingConfig};
 use raisin_embeddings::crypto::ApiKeyEncryptor;
@@ -170,7 +171,14 @@ impl EmbeddingJobHandler {
             "About to generate embedding for this text"
         );
 
-        // Create embedder identity for multi-model support
+        // Create embedder identity for multi-model support.
+        //
+        // The first field MUST stay the provider KIND (here the legacy
+        // `EmbeddingProvider` enum), never a provider slug. `EmbedderId` is
+        // hashed into the RocksDB embedding key (see `EmbedderId::to_key_hash`),
+        // so feeding it a slug would change every key hash and make all
+        // existing vectors unaddressable — a silent, total loss of the
+        // embedding index with no error anywhere.
         let embedder_id = raisin_ai::config::EmbedderId::new(
             format!("{:?}", config.provider).to_lowercase(),
             config.model.clone(),
@@ -518,14 +526,6 @@ impl EmbeddingJobHandler {
         if config.uses_unified_provider() {
             // Unified provider mode - look up from TenantAIConfig
             let provider_ref = config.ai_provider_ref.as_ref().unwrap();
-            let model_ref = config.ai_model_ref.as_ref().cloned().unwrap_or_else(|| {
-                // Default model based on provider
-                match provider_ref.as_str() {
-                    "openai" => "text-embedding-3-small".to_string(),
-                    "ollama" => "nomic-embed-text".to_string(),
-                    _ => "text-embedding-3-small".to_string(),
-                }
-            });
 
             // Get TenantAIConfig
             let ai_config_repo = self.storage.tenant_ai_config_repository();
@@ -536,17 +536,33 @@ impl EmbeddingJobHandler {
                 ))
             })?;
 
-            // Find the provider in TenantAIConfig
-            let ai_provider = ai_config
-                .providers
-                .iter()
-                .find(|p| format!("{:?}", p.provider).to_lowercase() == *provider_ref)
-                .ok_or_else(|| {
-                    Error::Validation(format!(
-                        "AI provider '{}' not found in tenant config",
-                        provider_ref
-                    ))
-                })?;
+            // Find the provider in TenantAIConfig by SLUG.
+            //
+            // `ai_provider_ref` was always a string naming one provider entry, so the
+            // slug is what it is now — and matching on it fixes a bug in passing: the
+            // previous `format!("{:?}", kind).to_lowercase()` produced `azureopenai`,
+            // which can never equal the `azure_openai` a caller would write, so an
+            // Azure ref has never resolved. Legacy refs keep working because entries
+            // stored before slugs existed are slugged after the kind's serde name.
+            let ai_provider = ai_config.get_provider(provider_ref).ok_or_else(|| {
+                Error::Validation(format!(
+                    "AI provider '{}' not found in tenant config",
+                    provider_ref
+                ))
+            })?;
+
+            // The default embedding model follows the provider KIND, not the slug: a
+            // tenant may call its OpenAI entry anything, but `text-embedding-3-small`
+            // is still what OpenAI serves.
+            let model_ref =
+                config
+                    .ai_model_ref
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_else(|| match ai_provider.kind {
+                        AIProvider::Ollama => "nomic-embed-text".to_string(),
+                        _ => "text-embedding-3-small".to_string(),
+                    });
 
             // Decrypt API key from TenantAIConfig
             let api_key = if let Some(encrypted) = &ai_provider.api_key_encrypted {
@@ -560,15 +576,18 @@ impl EmbeddingJobHandler {
                 )));
             };
 
-            // Map TenantAIConfig provider to EmbeddingProvider
-            let embedding_provider = match provider_ref.as_str() {
+            // Map the provider KIND to EmbeddingProvider — which wire protocol to speak
+            // is a property of the kind, and the slug is free-form.
+            let embedding_provider = match ai_provider.kind {
                 // Everything that speaks OpenAI's `/embeddings` shape shares one client;
                 // they differ only in host, which `api_endpoint` supplies.
-                "openai" | "azure_openai" | "groq" | "openrouter" | "custom" => {
-                    EmbeddingProvider::OpenAI
-                }
-                "anthropic" | "claude" => EmbeddingProvider::Claude,
-                "ollama" => EmbeddingProvider::Ollama,
+                AIProvider::OpenAI
+                | AIProvider::AzureOpenAI
+                | AIProvider::Groq
+                | AIProvider::OpenRouter
+                | AIProvider::Custom => EmbeddingProvider::OpenAI,
+                AIProvider::Anthropic => EmbeddingProvider::Claude,
+                AIProvider::Ollama => EmbeddingProvider::Ollama,
                 _ => {
                     return Err(Error::Validation(format!(
                         "Provider '{}' does not support embeddings",

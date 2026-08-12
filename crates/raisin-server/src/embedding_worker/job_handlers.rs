@@ -37,10 +37,9 @@ where
         .map_err(|e| Error::storage(e.to_string()))?;
 
     // 2. Get embedding settings
-    let embedding_settings = ai_config
-        .embedding_settings
-        .as_ref()
-        .ok_or_else(|| Error::NotFound("No embedding settings configured for tenant".to_string()))?;
+    let embedding_settings = ai_config.embedding_settings.as_ref().ok_or_else(|| {
+        Error::NotFound("No embedding settings configured for tenant".to_string())
+    })?;
 
     if !embedding_settings.enabled {
         tracing::debug!(
@@ -62,7 +61,7 @@ where
         encryptor
             .decrypt(encrypted)
             .map_err(|e| Error::Backend(format!("Failed to decrypt API key: {}", e)))?
-    } else if provider_config.provider.requires_api_key() {
+    } else if provider_config.kind.requires_api_key() {
         return Err(Error::Validation(
             "No API key configured for provider".to_string(),
         ));
@@ -71,7 +70,7 @@ where
     };
 
     // 5. Map AI provider to embedding provider (temporary until raisin-ai supports embeddings)
-    let embedding_provider = map_ai_provider_to_embedding_provider(&provider_config.provider)?;
+    let embedding_provider = map_ai_provider_to_embedding_provider(&provider_config.kind)?;
 
     // 6. Create embedding provider
     let provider = create_provider(&embedding_provider, &api_key, &model_config.model_id)?;
@@ -112,13 +111,19 @@ where
         embedding_dims = dimensions,
         text_length = text.len(),
         model = %model_config.model_id,
-        provider = ?provider_config.provider,
+        provider = ?provider_config.kind,
         "Generated embedding"
     );
 
     // 10. Store in RocksDB embeddings CF
+    //
+    // The first field MUST stay the provider KIND, never the provider slug.
+    // `EmbedderId` is hashed into the RocksDB embedding key (see
+    // `EmbedderId::to_key_hash`), so feeding it a slug would change every key
+    // hash and make all existing vectors unaddressable — a silent, total loss
+    // of the embedding index with no error anywhere.
     let embedder_id = EmbedderId::new(
-        format!("{:?}", provider_config.provider).to_lowercase(),
+        format!("{:?}", provider_config.kind).to_lowercase(),
         model_config.model_id.clone(),
         dimensions,
     );

@@ -200,19 +200,21 @@ where
                     "Flow ai_caller callback"
                 );
 
-                let (request, tool_path_map) =
+                let (request, tool_path_map, routing_model_id) =
                     build_completion_request(&deps, &ctx, &messages, response_format_json, false)
                         .await?;
 
-                let model = request.model.clone();
                 let ai_config_store = deps.ai_config_store.as_ref().ok_or_else(|| {
                     "AI operations not configured - no ai_config_store available".to_string()
                 })?;
 
-                let provider =
-                    create_provider_for_model(ai_config_store.as_ref(), &ctx.tenant_id, &model)
-                        .await
-                        .map_err(|e| format!("Failed to create AI provider: {}", e))?;
+                let provider = create_provider_for_model(
+                    ai_config_store.as_ref(),
+                    &ctx.tenant_id,
+                    &routing_model_id,
+                )
+                .await
+                .map_err(|e| format!("Failed to create AI provider: {}", e))?;
 
                 let response = provider
                     .complete(request)
@@ -251,18 +253,20 @@ where
               response_format_json: Option<serde_json::Value>| {
             let deps = deps.clone();
             Box::pin(async move {
-                let (request, tool_path_map) =
+                let (request, tool_path_map, routing_model_id) =
                     build_completion_request(&deps, &ctx, &messages, response_format_json, true)
                         .await?;
 
-                let model = request.model.clone();
                 let ai_config_store = deps.ai_config_store.as_ref().ok_or_else(|| {
                     "AI operations not configured - no ai_config_store available".to_string()
                 })?;
-                let provider =
-                    create_provider_for_model(ai_config_store.as_ref(), &ctx.tenant_id, &model)
-                        .await
-                        .map_err(|e| format!("Failed to create AI provider: {}", e))?;
+                let provider = create_provider_for_model(
+                    ai_config_store.as_ref(),
+                    &ctx.tenant_id,
+                    &routing_model_id,
+                )
+                .await
+                .map_err(|e| format!("Failed to create AI provider: {}", e))?;
 
                 let mut stream = provider
                     .stream_complete(request)
@@ -309,13 +313,28 @@ where
 // ---------------------------------------------------------------------------
 
 /// Shared helper: load agent, build CompletionRequest and tool-path map.
+///
+/// The third element of the return is the model id used for ROUTING —
+/// `<slug>:<model>` — which is what `create_provider_for_model` needs to find the
+/// tenant entry. `request.model` is the same id with the slug stripped, because the
+/// upstream API only knows its own model names. The two are returned separately
+/// because they genuinely differ; passing the stripped one to the router would leave
+/// it guessing, and passing the qualified one to the provider would ask e.g. Groq for
+/// a model called `marvel:maravilla/smart`.
 async fn build_completion_request<S, B>(
     deps: &Arc<ExecutionDependencies<S, B>>,
     ctx: &AiCallContext,
     messages: &[serde_json::Value],
     response_format_json: Option<serde_json::Value>,
     stream: bool,
-) -> Result<(raisin_ai::types::CompletionRequest, HashMap<String, String>), String>
+) -> Result<
+    (
+        raisin_ai::types::CompletionRequest,
+        HashMap<String, String>,
+        String,
+    ),
+    String,
+>
 where
     S: Storage + TransactionalStorage + 'static,
     B: BinaryStorage + 'static,
@@ -337,25 +356,36 @@ where
         .get_string("model")
         .ok_or_else(|| "Agent missing 'model' property".to_string())?;
 
-    // Qualify the model ID with the provider prefix if not already qualified.
+    // Qualify the model ID with the provider slug if not already qualified.
     // The agent node stores `provider` and `model` as separate properties
     // (e.g., provider="ollama", model="qwen2.5-coder:latest"), but
     // `create_provider_for_model` expects a qualified ID like "ollama:qwen2.5-coder:latest"
     // for dynamic model resolution.
-    let model = if raw_model.contains(':') {
-        // Check if the prefix is already a known provider
-        let prefix = raw_model.split_once(':').map(|(p, _)| p).unwrap_or("");
-        if raisin_ai::config::AIProvider::from_serde_name(prefix).is_some() {
-            raw_model
-        } else if let Some(provider) = props.get_string("provider") {
-            format!("{}:{}", provider, raw_model)
-        } else {
-            raw_model
-        }
-    } else if let Some(provider) = props.get_string("provider") {
-        format!("{}:{}", provider, raw_model)
-    } else {
-        raw_model
+    //
+    // "Already qualified" means the part before the first colon is one of THIS tenant's
+    // provider slugs, which is why the config has to be loaded here rather than matched
+    // against the `AIProvider` enum: a tenant whose gateway is slugged `marvel` needs
+    // `marvel:…` recognised though no enum variant is called that, and a tenant with no
+    // `anthropic` entry must not have `anthropic:…` treated as routable. Model names
+    // carry colons of their own (`qwen2.5-coder:latest`), so the distinction decides
+    // whether the agent's `provider` property gets prepended at all.
+    //
+    // No config store (or an unreadable config) means no slugs exist, hence nothing can
+    // be qualified — the `provider` property is prepended and the router reports the
+    // miss with a message listing what the tenant does have.
+    let ai_config = match deps.ai_config_store.as_ref() {
+        Some(store) => store.get_config(&ctx.tenant_id).await.ok(),
+        None => None,
+    };
+    let has_slug_prefix = |id: &str| {
+        ai_config
+            .as_ref()
+            .is_some_and(|c| c.parse_model_id(id).0.is_some())
+    };
+
+    let model = match props.get_string("provider") {
+        Some(provider) if !has_slug_prefix(&raw_model) => format!("{}:{}", provider, raw_model),
+        _ => raw_model,
     };
 
     let system_prompt = props.get_string("system_prompt");
@@ -375,12 +405,13 @@ where
             .ok()
     });
 
-    // Strip provider prefix (e.g. "groq:") — only needed for provider routing, not the API call
-    let api_model = model
-        .split_once(':')
-        .filter(|(prefix, _)| raisin_ai::config::AIProvider::from_serde_name(prefix).is_some())
-        .map(|(_, name)| name.to_string())
-        .unwrap_or(model);
+    // Strip the provider slug (e.g. "marvel:") — it routes the call, the upstream API
+    // never sees it. Same tenant-slug test as the qualification above, so a colon that
+    // belongs to the model name (`qwen2.5-coder:latest`) survives untouched.
+    let api_model = ai_config
+        .as_ref()
+        .map(|c| c.parse_model_id(&model).1.to_string())
+        .unwrap_or_else(|| model.clone());
 
     let request = raisin_ai::types::CompletionRequest {
         model: api_model,
@@ -393,7 +424,7 @@ where
         response_format,
     };
 
-    Ok((request, tool_path_map))
+    Ok((request, tool_path_map, model))
 }
 
 /// Build AI messages from system prompt and input JSON messages.

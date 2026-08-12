@@ -52,7 +52,10 @@
 //!
 //! // Add provider configuration
 //! let provider_config = AIProviderConfig {
-//!     provider: AIProvider::OpenAI,
+//!     slug: "openai".to_string(), // per-tenant id, also the `slug:model` prefix
+//!     kind: AIProvider::OpenAI,
+//!     display_name: None,
+//!     icon_url: None,
 //!     api_key_encrypted: Some(encrypted),
 //!     api_endpoint: None,
 //!     enabled: true,
@@ -94,9 +97,10 @@ pub mod candle;
 // Re-export commonly used types
 pub use chunking::{ChunkingError, TextChunk, TextChunker};
 pub use config::{
-    AIModelConfig, AIProvider, AIProviderConfig, AIUseCase, ChunkingConfig, EmbedderId,
-    EmbeddingKind, EmbeddingSettings, OverlapConfig, ProcessingDefaults, SplitterType,
-    TenantAIConfig, DEFAULT_CAPTION_MODEL, DEFAULT_IMAGE_EMBEDDING_MODEL,
+    validate_slug, AIModelConfig, AIProvider, AIProviderConfig, AIUseCase, ChunkingConfig,
+    EmbedderId, EmbeddingKind, EmbeddingSettings, OverlapConfig, ProcessingDefaults, SlugError,
+    SplitterType, TenantAIConfig, DEFAULT_CAPTION_MODEL, DEFAULT_IMAGE_EMBEDDING_MODEL,
+    MAX_SLUG_LEN,
 };
 pub use crypto::{ApiKeyEncryptor, CryptoError};
 pub use model_cache::{

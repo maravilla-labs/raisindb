@@ -14,7 +14,7 @@ use crate::state::AppState;
 pub(crate) fn admin_routes(state: &AppState) -> Router<AppState> {
     use crate::middleware::optional_auth_middleware;
     use axum::middleware::from_fn_with_state;
-    use axum::routing::{get, post};
+    use axum::routing::{delete, get, post};
 
     Router::new()
         // ----------------------------------------------------------------
@@ -54,6 +54,14 @@ pub(crate) fn admin_routes(state: &AppState) -> Router<AppState> {
         .route(
             "/api/tenants/{tenant_id}/ai/providers",
             get(crate::handlers::ai::list_providers),
+        )
+        // The `{provider}` segment is a provider SLUG on all three routes below. It
+        // keeps the name `provider` because matchit rejects two routes that give the
+        // same path position different parameter names, and the `/test` and
+        // `/capabilities` URLs predate slugs.
+        .route(
+            "/api/tenants/{tenant_id}/ai/providers/{provider}",
+            delete(crate::handlers::ai::delete_ai_provider),
         )
         .route(
             "/api/tenants/{tenant_id}/ai/providers/{provider}/test",

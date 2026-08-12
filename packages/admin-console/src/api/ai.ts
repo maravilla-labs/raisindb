@@ -1,7 +1,23 @@
 import { api } from './client'
 
-// Provider types
+/**
+ * Provider KIND — which wire protocol an entry speaks.
+ *
+ * NOT an identity. A tenant can configure N entries of the same kind, each
+ * addressed by its own `slug`; the wire field keeps the name `provider` for
+ * compatibility, which is why `ProviderConfigResponse.provider` is a kind while
+ * `.slug` is the key.
+ */
 export type AIProvider = 'openai' | 'anthropic' | 'google' | 'azure_openai' | 'ollama' | 'groq' | 'openrouter' | 'bedrock' | 'local' | 'custom'
+
+/**
+ * A per-tenant provider identifier, e.g. `openai`, `marvel`, `eu-gateway`.
+ *
+ * Also the model-id prefix (`<slug>:<model>`), the value of an agent node's
+ * `provider` property, and of `ai_provider_ref`. A plain string with no
+ * referential integrity behind it — aliased for documentation only.
+ */
+export type ProviderSlug = string
 
 // Model capability types
 export type ModelCapability = 'chat' | 'embedding' | 'vision' | 'tools'
@@ -55,8 +71,11 @@ export const DEFAULT_CHUNKING_SETTINGS: ChunkingSettings = {
 // Embedding settings
 export interface EmbeddingSettings {
   enabled: boolean
-  // Unified provider reference (preferred) - references a provider from TenantAIConfig
-  ai_provider_ref?: AIProvider
+  /**
+   * Which configured provider generates embeddings — a SLUG, not a kind. A
+   * tenant with two OpenAI-compatible gateways picks one of them here.
+   */
+  ai_provider_ref?: ProviderSlug
   ai_model_ref?: string
   include_name: boolean
   include_path: boolean
@@ -69,14 +88,9 @@ export interface EmbeddingSettings {
   hnsw_params?: HnswParams
 }
 
-// List of providers that support embeddings
-export const EMBEDDING_CAPABLE_PROVIDERS: AIProvider[] = ['openai', 'ollama']
-
-// Default embedding models per provider
-export const DEFAULT_EMBEDDING_MODELS: Record<string, string> = {
-  openai: 'text-embedding-3-small',
-  ollama: 'nomic-embed-text',
-}
+// Which providers can embed is decided per ENTRY, not per kind — a `custom`
+// gateway that publishes an embedding model qualifies. See
+// `isEmbeddingCapable` in `utils/aiProviders`.
 
 // AI Model config (backend format)
 export interface AIModelConfig {
@@ -95,11 +109,29 @@ export interface AIModelConfig {
 
 // Provider configuration response (GET)
 export interface ProviderConfigResponse {
+  /** Per-tenant identity, and the model-id prefix. Unique within a tenant. */
+  slug: ProviderSlug
+  /** The kind — which wire protocol this entry speaks. Not unique. */
   provider: AIProvider
+  /** Label shipped by a provisioned entry; how two same-kind entries are told apart. */
+  display_name?: string
+  icon_url?: string
   has_api_key: boolean
   api_endpoint?: string
   enabled: boolean
   models: AIModelConfig[]
+}
+
+/** One row of GET /ai/providers — the same identity, with a model count instead of models. */
+export interface ProviderSummary {
+  slug: ProviderSlug
+  provider: AIProvider
+  display_name?: string
+  icon_url?: string
+  api_endpoint?: string
+  enabled: boolean
+  has_api_key: boolean
+  model_count: number
 }
 
 // AI Config response from backend (GET)
@@ -112,16 +144,41 @@ export interface AIConfigResponse {
 // Backward compatibility alias
 export type AIConfig = AIConfigResponse
 
-// Provider configuration request (PUT)
+/**
+ * One entry of a PUT /ai/config payload.
+ *
+ * `slug` is optional on the wire (absent defaults to the kind's serde name, for
+ * clients written before slugs existed) but this client always sends it: for a
+ * second entry of the same kind the default addresses the wrong row.
+ *
+ * The descriptive fields are three-state on the server: omitting one keeps the
+ * stored value, sending `null` clears it, sending a value sets it. `enabled`
+ * and `models` are NOT — they are written whole, so an omitted `models` clears
+ * the entry's model list.
+ */
 export interface ProviderConfigRequest {
+  slug: ProviderSlug
+  /** The kind. Immutable once the slug exists; the server rejects a change. */
   provider: AIProvider
+  /** Omit to keep the stored name; `null` clears it. */
+  display_name?: string | null
+  /** Omit to keep the stored icon; `null` clears it. */
+  icon_url?: string | null
   enabled: boolean
+  /** Omit to keep the stored key. Never send `''`. */
   api_key_plain?: string
-  api_endpoint?: string
+  /** Omit to keep the stored endpoint; `null` clears it. */
+  api_endpoint?: string | null
   models?: AIModelConfig[]
 }
 
-// Request to update AI configuration (PUT)
+/**
+ * Request to update AI configuration (PUT).
+ *
+ * `providers` is a MERGE keyed by slug: entries present are created or updated,
+ * entries only in storage are left alone. Send only what changed — an entry you
+ * omit is safe, and removal goes through `deleteProvider`.
+ */
 export interface UpdateAIConfigRequest {
   providers: ProviderConfigRequest[]
   embedding_settings?: EmbeddingSettings
@@ -136,20 +193,38 @@ export interface SuccessResponse {
 // Test connection response
 export interface TestConnectionResponse {
   success: boolean
+  /** The slug that was tested. */
+  slug: ProviderSlug
+  /** The kind behind that slug. */
   provider: AIProvider
   message?: string
   error?: string
 }
 
+/** One discovered model, tagged with the entry that serves it. */
+export interface ModelInfo {
+  model_id: string
+  display_name: string
+  /** The kind — what a client switches on to pick an icon or a protocol hint. */
+  provider: AIProvider
+  /** The slug that addresses this model as `<provider_slug>:<model_id>`. */
+  provider_slug: ProviderSlug
+  use_cases: ModelUseCase[]
+  default_temperature: number
+  default_max_tokens: number
+}
+
 // Models response
 export interface ModelsResponse {
-  models: AIModelConfig[]
+  models: ModelInfo[]
 }
 
 // Model capabilities response
 export interface ModelCapabilitiesResponse {
   model_id: string
   provider: AIProvider
+  /** The slug that was queried. */
+  provider_slug: ProviderSlug
   capabilities: {
     chat: boolean
     embeddings: boolean
@@ -214,22 +289,37 @@ export const aiApi = {
 
   /**
    * PUT /api/tenants/{tenantId}/ai/config
-   * Update AI configuration
+   * Merge provider entries into the AI configuration.
+   *
+   * Entries are matched by slug: present -> created or updated, absent -> left
+   * alone. Nothing is ever deleted here — use `deleteProvider`.
    */
   updateConfig: (tenantId: string, request: UpdateAIConfigRequest) =>
     api.put<SuccessResponse>(`/api/tenants/${tenantId}/ai/config`, request),
+
+  /**
+   * DELETE /api/tenants/{tenantId}/ai/providers/{slug}
+   * Remove one provider entry.
+   *
+   * The only way an entry goes away. Removal is by slug, so deleting one of two
+   * same-kind gateways leaves the other — and its encrypted key — alone.
+   */
+  deleteProvider: (tenantId: string, slug: ProviderSlug) =>
+    api.delete<SuccessResponse>(
+      `/api/tenants/${tenantId}/ai/providers/${encodeURIComponent(slug)}`
+    ),
 
   /**
    * GET /api/tenants/{tenantId}/ai/models
    * Get available models (dynamically fetched from configured providers)
    *
    * @param tenantId - Tenant ID
-   * @param options.provider - Filter by specific provider
+   * @param options.provider - Filter by provider SLUG
    * @param options.refresh - If true, fetch models from provider APIs instead of cached
    */
   getAvailableModels: (
     tenantId: string,
-    options?: { provider?: AIProvider; refresh?: boolean }
+    options?: { provider?: ProviderSlug; refresh?: boolean }
   ) => {
     const params = new URLSearchParams()
     if (options?.provider) params.set('provider', options.provider)
@@ -245,22 +335,26 @@ export const aiApi = {
    * List all configured providers
    */
   listProviders: (tenantId: string) =>
-    api.get<{ providers: ProviderConfigResponse[] }>(`/api/tenants/${tenantId}/ai/providers`),
+    api.get<{ providers: ProviderSummary[] }>(`/api/tenants/${tenantId}/ai/providers`),
 
   /**
-   * POST /api/tenants/{tenantId}/ai/providers/{provider}/test
-   * Test provider connection
+   * POST /api/tenants/{tenantId}/ai/providers/{slug}/test
+   * Test one entry's connection. Addressed by slug — two same-kind gateways
+   * have different credentials and endpoints.
    */
-  testProvider: (tenantId: string, provider: AIProvider) =>
-    api.post<TestConnectionResponse>(`/api/tenants/${tenantId}/ai/providers/${provider}/test`, {}),
+  testProvider: (tenantId: string, slug: ProviderSlug) =>
+    api.post<TestConnectionResponse>(
+      `/api/tenants/${tenantId}/ai/providers/${encodeURIComponent(slug)}/test`,
+      {}
+    ),
 
   /**
-   * GET /api/tenants/{tenantId}/ai/providers/{provider}/models/{model}/capabilities
+   * GET /api/tenants/{tenantId}/ai/providers/{slug}/models/{model}/capabilities
    * Get capabilities for a specific model (including tool calling support)
    */
-  getModelCapabilities: (tenantId: string, provider: AIProvider, modelId: string) =>
+  getModelCapabilities: (tenantId: string, slug: ProviderSlug, modelId: string) =>
     api.get<ModelCapabilitiesResponse>(
-      `/api/tenants/${tenantId}/ai/providers/${provider}/models/${encodeURIComponent(modelId)}/capabilities`
+      `/api/tenants/${tenantId}/ai/providers/${encodeURIComponent(slug)}/models/${encodeURIComponent(modelId)}/capabilities`
     ),
 
   // ============================================================================

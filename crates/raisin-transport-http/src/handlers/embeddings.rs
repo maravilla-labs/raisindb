@@ -239,9 +239,31 @@ pub async fn set_tenant_embedding_config(
 
         config.api_key_encrypted = Some(encrypted);
     } else {
-        // Keep existing API key if not updating
-        if let Ok(Some(existing)) = repo.get_config(&tenant_id) {
-            config.api_key_encrypted = existing.api_key_encrypted;
+        // Keep the existing API key when the request does not supply one.
+        //
+        // A failed read must NOT fall through to the write. `if let Ok(Some(_))` treated
+        // "the read blew up" and "there is no config yet" as the same case, so a
+        // deserialization error or a backend hiccup left `api_key_encrypted` at `None` and
+        // the store below happily persisted that — destroying the only copy of a credential
+        // nothing can restore, during a request that was not even trying to change it.
+        // Absent is fine; broken is a 500 with no write.
+        match repo.get_config(&tenant_id) {
+            Ok(Some(existing)) => config.api_key_encrypted = existing.api_key_encrypted,
+            Ok(None) => {}
+            Err(e) => {
+                tracing::error!(
+                    "Refusing to write embedding config for {}: the existing one could not \
+                     be read, and writing over it would drop the stored API key: {}",
+                    tenant_id,
+                    e
+                );
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("Could not read the existing configuration: {}", e),
+                    }),
+                ));
+            }
         }
     }
 

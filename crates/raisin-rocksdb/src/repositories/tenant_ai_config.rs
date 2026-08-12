@@ -178,7 +178,7 @@ mod tests {
         let retrieved = repo.get_config("test-tenant").await.unwrap();
         assert_eq!(retrieved.tenant_id, "test-tenant");
         assert_eq!(retrieved.providers.len(), 1);
-        assert_eq!(retrieved.providers[0].provider, AIProvider::OpenAI);
+        assert_eq!(retrieved.providers[0].kind, AIProvider::OpenAI);
     }
 
     #[tokio::test]
@@ -299,7 +299,90 @@ mod tests {
         let retrieved1 = repo.get_config("tenant-1").await.unwrap();
         let retrieved2 = repo.get_config("tenant-2").await.unwrap();
 
-        assert_eq!(retrieved1.providers[0].provider, AIProvider::OpenAI);
-        assert_eq!(retrieved2.providers[0].provider, AIProvider::Anthropic);
+        assert_eq!(retrieved1.providers[0].kind, AIProvider::OpenAI);
+        assert_eq!(retrieved2.providers[0].kind, AIProvider::Anthropic);
+    }
+
+    /// Two entries of the same kind are the reason slugs exist: a tenant running its
+    /// own gateway alongside a vLLM box has two `Custom` entries pointing at different
+    /// hosts. Nothing in the RocksDB round trip may collapse them — and the model-id
+    /// prefix has to keep addressing each one separately after the trip.
+    #[tokio::test]
+    async fn two_providers_of_the_same_kind_survive_the_round_trip_separately() {
+        let (_temp_dir, db) = setup_test_db();
+        let repo = TenantAIConfigRepository::new(db);
+
+        let mut config = TenantAIConfig::new("test-tenant".to_string());
+        let mut marvel = AIProviderConfig::with_slug("marvel", AIProvider::Custom);
+        marvel.api_endpoint = Some("https://marvel.maravilla.cloud/v1".to_string());
+        let mut vllm = AIProviderConfig::with_slug("my-vllm", AIProvider::Custom);
+        vllm.api_endpoint = Some("http://10.0.0.5:8000/v1".to_string());
+        config.providers.push(marvel);
+        config.providers.push(vllm);
+
+        repo.set_config(&config).await.unwrap();
+        let retrieved = repo.get_config("test-tenant").await.unwrap();
+
+        assert_eq!(retrieved.providers.len(), 2);
+        assert_eq!(
+            retrieved
+                .get_provider("marvel")
+                .expect("marvel is addressable by slug")
+                .api_endpoint
+                .as_deref(),
+            Some("https://marvel.maravilla.cloud/v1")
+        );
+        assert_eq!(
+            retrieved
+                .get_provider("my-vllm")
+                .expect("my-vllm is addressable by slug")
+                .api_endpoint
+                .as_deref(),
+            Some("http://10.0.0.5:8000/v1")
+        );
+    }
+
+    /// Every config written before slugs existed is sitting in RocksDB right now with
+    /// no `slug` field. Reading one back must yield the kind's serde name, because that
+    /// is what stored model ids (`openai:gpt-4o`) and route URLs already say. This test
+    /// writes the pre-slug MessagePack shape by hand — going through
+    /// `AIProviderConfig` would serialize a slug and prove nothing.
+    #[tokio::test]
+    async fn a_config_stored_before_slugs_existed_reads_back_addressable() {
+        #[derive(serde::Serialize)]
+        struct LegacyProvider {
+            provider: AIProvider,
+            enabled: bool,
+            models: Vec<()>,
+        }
+        #[derive(serde::Serialize)]
+        struct LegacyConfig {
+            tenant_id: String,
+            providers: Vec<LegacyProvider>,
+        }
+
+        let (_temp_dir, db) = setup_test_db();
+        let repo = TenantAIConfigRepository::new(db.clone());
+
+        let legacy = LegacyConfig {
+            tenant_id: "legacy-tenant".to_string(),
+            providers: vec![LegacyProvider {
+                provider: AIProvider::OpenAI,
+                enabled: true,
+                models: vec![],
+            }],
+        };
+        let cf = db.cf_handle(crate::cf::TENANT_AI_CONFIG).unwrap();
+        db.put_cf(
+            cf,
+            b"legacy-tenant",
+            rmp_serde::to_vec_named(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        let retrieved = repo.get_config("legacy-tenant").await.unwrap();
+        assert_eq!(retrieved.providers[0].kind, AIProvider::OpenAI);
+        assert_eq!(retrieved.providers[0].slug, "openai");
+        assert!(retrieved.get_provider("openai").is_some());
     }
 }

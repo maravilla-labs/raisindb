@@ -474,23 +474,29 @@ const aiProviderCmd = aiCmd
   .description('Manage tenant AI providers (API keys are never echoed)');
 
 aiProviderCmd
-  .command('set <provider>')
-  .description('Create or update a provider (read-modify-write; other providers and stored keys are preserved)')
+  .command('set <slug>')
+  .description('Create or update a provider by slug (read-modify-write; other providers and stored keys are preserved)')
+  .option('--kind <kind>', 'Provider kind (openai, anthropic, custom, ...); required when creating a new slug')
   .option('--api-key <value>', 'API key value (prefer --api-key-stdin or --api-key-env in CI)')
   .option('--api-key-stdin', 'Read the API key from stdin')
   .option('--api-key-env <var>', 'Read the API key from an environment variable')
   .option('--endpoint <url>', 'Custom API endpoint')
+  .option('--display-name <name>', 'Human-readable name shown in UIs')
+  .option('--icon-url <url>', 'Icon URL shown in UIs')
   .option('--enabled', 'Enable the provider')
   .option('--disabled', 'Disable the provider')
   .option('-m, --model <spec>', 'Model as model_id[:display_name] (repeatable; first becomes default)', collect, [])
   .option('--tenant <tenant>', 'Tenant ID', 'default')
-  .action((provider, options) =>
+  .action((slug, options) =>
     runAdmin(() =>
-      aiProviderSet(provider, {
+      aiProviderSet(slug, {
+        kind: options.kind,
         apiKey: options.apiKey,
         apiKeyStdin: options.apiKeyStdin,
         apiKeyEnv: options.apiKeyEnv,
         endpoint: options.endpoint,
+        displayName: options.displayName,
+        iconUrl: options.iconUrl,
         enabled: options.enabled,
         disabled: options.disabled,
         model: options.model,
@@ -501,16 +507,16 @@ aiProviderCmd
 
 aiProviderCmd
   .command('list')
-  .description('List configured providers (provider, enabled, has_api_key, model count)')
+  .description('List configured providers (slug, kind, endpoint, enabled, has_api_key, model count)')
   .option('--tenant <tenant>', 'Tenant ID', 'default')
   .option('--json', 'Machine-readable JSON output')
   .action((options) => runAdmin(() => aiProviderList({ tenant: options.tenant, json: options.json })));
 
 aiProviderCmd
-  .command('test <provider>')
-  .description('Test the live connection to a configured provider')
+  .command('test <slug>')
+  .description('Test the live connection to a configured provider (by slug)')
   .option('--tenant <tenant>', 'Tenant ID', 'default')
-  .action((provider, options) => runAdmin(() => aiProviderTest(provider, { tenant: options.tenant })));
+  .action((slug, options) => runAdmin(() => aiProviderTest(slug, { tenant: options.tenant })));
 
 // Encrypted secret store (gh-secret style: the value is never echoed).
 // There is deliberately no `secret get` — the API exposes no plaintext read,

@@ -4,94 +4,94 @@ import { Sparkles, Key, Eye, EyeOff, Settings, CheckCircle, XCircle, Loader2, In
 import GlassCard from '../components/GlassCard'
 import ConfirmDialog from '../components/ConfirmDialog'
 import { ToastContainer, useToast } from '../components/Toast'
-import { embeddingsApi, ConfigResponse, SetConfigRequest, TestConnectionResponse } from '../api/embeddings'
+import { embeddingsApi, ConfigResponse, LegacyEmbeddingProvider, SetConfigRequest, TestConnectionResponse } from '../api/embeddings'
+import { aiApi, type AIProvider, type ProviderConfigResponse, type ProviderSlug } from '../api/ai'
+import { isEmbeddingCapable, providerLabel } from '../utils/aiProviders'
 import { ApiError } from '../api/client'
 
-// Model configurations
-const OPENAI_MODELS = [
-  { id: 'text-embedding-3-small', name: 'text-embedding-3-small (1536 dims)', dims: 1536 },
-  { id: 'text-embedding-3-large', name: 'text-embedding-3-large (3072 dims)', dims: 3072 },
-  { id: 'text-embedding-ada-002', name: 'text-embedding-ada-002 (1536 dims - Legacy)', dims: 1536 },
-]
+/**
+ * Embedding configuration.
+ *
+ * The provider is chosen by SLUG (`ai_provider_ref`), naming one of the
+ * tenant's configured AI providers. The legacy `provider` enum is still on the
+ * wire and still sent, but it only records a wire protocol — it cannot tell two
+ * gateways of the same kind apart, which is why the server prefers the slug
+ * whenever one is set.
+ */
 
-const CLAUDE_MODELS = [
-  { id: 'voyage-large-2-instruct', name: 'Voyage Large 2 Instruct (1024 dims)', dims: 1024 },
-  { id: 'voyage-code-2', name: 'Voyage Code 2 (1536 dims)', dims: 1536 },
-  { id: 'voyage-3', name: 'Voyage 3 (1024 dims)', dims: 1024 },
-  { id: 'voyage-3-lite', name: 'Voyage 3 Lite (512 dims)', dims: 512 },
-]
-
-const OLLAMA_MODELS = [
-  { id: 'nomic-embed-text', name: 'Nomic Embed Text (768 dims)', dims: 768 },
-  { id: 'all-minilm', name: 'All-MiniLM (384 dims)', dims: 384 },
-  { id: 'mxbai-embed-large', name: 'mxbai-embed-large (1024 dims)', dims: 1024 },
-  { id: 'snowflake-arctic-embed', name: 'Snowflake Arctic Embed (1024 dims)', dims: 1024 },
-]
-
-const HUGGINGFACE_MODELS = [
-  { id: 'nomic-ai/nomic-embed-text-v1.5', name: 'Nomic Embed Text v1.5 (768 dims)', dims: 768 },
-  { id: 'sentence-transformers/all-MiniLM-L6-v2', name: 'All-MiniLM-L6-v2 (384 dims)', dims: 384 },
-]
-
-type Provider = 'OpenAI' | 'Claude' | 'Ollama' | 'HuggingFace'
+/**
+ * Legacy enum value for a provider KIND.
+ *
+ * Coarse by construction: the enum predates most kinds, so several map onto
+ * `OpenAI` (they speak that protocol) and nothing here is authoritative — the
+ * server uses this field only when `ai_provider_ref` is absent.
+ */
+const LEGACY_PROVIDER_BY_KIND: Record<AIProvider, LegacyEmbeddingProvider> = {
+  openai: 'OpenAI',
+  azure_openai: 'OpenAI',
+  groq: 'OpenAI',
+  openrouter: 'OpenAI',
+  custom: 'OpenAI',
+  google: 'OpenAI',
+  anthropic: 'Claude',
+  bedrock: 'Claude',
+  ollama: 'Ollama',
+  local: 'HuggingFace',
+}
 
 interface ProviderCardProps {
-  provider: Provider
+  entry: ProviderConfigResponse
   selected: boolean
-  disabled: boolean
   onSelect: () => void
 }
 
-function ProviderCard({ provider, selected, disabled, onSelect }: ProviderCardProps) {
-  const config = {
-    OpenAI: {
-      name: 'OpenAI',
-      description: 'Industry-leading embedding models',
-      icon: '🤖',
-    },
-    Claude: {
-      name: 'Claude (Voyage AI)',
-      description: 'Optimized for code and semantic search',
-      icon: '🚀',
-    },
-    Ollama: {
-      name: 'Ollama',
-      description: 'Self-hosted open source models',
-      icon: '🦙',
-    },
-    HuggingFace: {
-      name: 'HuggingFace',
-      description: 'Local models via Candle inference',
-      icon: '🤗',
-    },
-  }
-
-  const { name, description, icon } = config[provider]
+/**
+ * One configured provider, identified by slug.
+ *
+ * Shows `display_name` and `icon_url` when the entry ships them: a provisioned
+ * gateway does, and it is how an operator tells two same-kind entries apart at
+ * a glance. The endpoint is shown for the same reason.
+ */
+function ProviderCard({ entry, selected, onSelect }: ProviderCardProps) {
+  const [iconFailed, setIconFailed] = useState(false)
+  const usable = entry.enabled && (entry.has_api_key || entry.provider === 'local' || entry.provider === 'ollama')
 
   return (
     <button
       onClick={onSelect}
-      disabled={disabled}
+      disabled={!usable}
       className={`
         relative glass rounded-xl p-4 transition-all duration-200
         ${selected ? 'border-2 border-purple-500 shadow-lg shadow-purple-500/20' : 'border border-white/10 hover:border-white/20'}
-        ${disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:scale-[1.02]'}
+        ${!usable ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:scale-[1.02]'}
       `}
       aria-pressed={selected}
-      aria-disabled={disabled}
+      aria-disabled={!usable}
     >
-      {disabled && (
+      {!usable && (
         <div className="absolute top-2 right-2 px-2 py-1 bg-yellow-500/20 border border-yellow-500/30 rounded text-xs text-yellow-300">
-          Coming Soon
+          Not configured
         </div>
       )}
       <div className="flex items-center gap-3">
-        <div className="text-3xl">{icon}</div>
-        <div className="flex-1 text-left">
-          <h3 className="text-white font-medium">{name}</h3>
-          <p className="text-gray-400 text-sm">{description}</p>
+        {entry.icon_url && !iconFailed ? (
+          <img
+            src={entry.icon_url}
+            alt=""
+            className="w-8 h-8 rounded object-contain"
+            onError={() => setIconFailed(true)}
+          />
+        ) : (
+          <div className="text-3xl">🤖</div>
+        )}
+        <div className="flex-1 text-left min-w-0">
+          <h3 className="text-white font-medium truncate">{entry.display_name?.trim() || entry.slug}</h3>
+          <p className="text-gray-400 text-sm font-mono truncate">{entry.slug}</p>
+          {entry.api_endpoint && (
+            <p className="text-gray-500 text-xs truncate">{entry.api_endpoint}</p>
+          )}
         </div>
-        {selected && !disabled && (
+        {selected && usable && (
           <CheckCircle className="w-5 h-5 text-purple-400" />
         )}
       </div>
@@ -115,9 +115,13 @@ export default function TenantEmbeddingSettings() {
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [showConfirmEnable, setShowConfirmEnable] = useState(false)
 
+  // The tenant's configured AI providers, which is what the slug picker offers.
+  const [aiProviders, setAiProviders] = useState<ProviderConfigResponse[]>([])
+
   // Form state (derived from config)
   const [enabled, setEnabled] = useState(false)
-  const [provider, setProvider] = useState<Provider>('OpenAI')
+  /** `ai_provider_ref` — the slug of the provider that generates embeddings. */
+  const [providerSlug, setProviderSlug] = useState<ProviderSlug>('')
   const [model, setModel] = useState('')
   const [dimensions, setDimensions] = useState(1536)
   const [includeName, setIncludeName] = useState(true)
@@ -143,8 +147,8 @@ export default function TenantEmbeddingSettings() {
 
     const hasChanged =
       enabled !== config.enabled ||
-      provider !== config.provider ||
-      model !== config.model ||
+      providerSlug !== (config.ai_provider_ref ?? '') ||
+      model !== (config.ai_model_ref ?? config.model) ||
       dimensions !== config.dimensions ||
       includeName !== config.include_name ||
       includePath !== config.include_path ||
@@ -154,7 +158,7 @@ export default function TenantEmbeddingSettings() {
       apiKey !== ''
 
     setHasChanges(hasChanged)
-  }, [config, enabled, provider, model, dimensions, includeName, includePath, maxEmbeddings, apiKey, defaultMaxDistance, quantization])
+  }, [config, enabled, providerSlug, model, dimensions, includeName, includePath, maxEmbeddings, apiKey, defaultMaxDistance, quantization])
 
   const loadConfig = async () => {
     try {
@@ -162,10 +166,21 @@ export default function TenantEmbeddingSettings() {
       const data = await embeddingsApi.getConfig(tenant)
       setConfig(data)
 
+      // The provider list is a separate resource; a failure there must not stop
+      // the rest of the form from loading.
+      try {
+        const aiConfig = await aiApi.getConfig(tenant)
+        setAiProviders(aiConfig.providers)
+      } catch (aiError) {
+        console.error('Failed to load AI providers:', aiError)
+        setAiProviders([])
+      }
+
       // Initialize form state
       setEnabled(data.enabled)
-      setProvider(data.provider)
-      setModel(data.model)
+      setProviderSlug(data.ai_provider_ref ?? '')
+      // Prefer the slug-scoped model reference; `model` is the legacy mirror.
+      setModel(data.ai_model_ref ?? data.model)
       setDimensions(data.dimensions)
       setIncludeName(data.include_name)
       setIncludePath(data.include_path)
@@ -186,7 +201,15 @@ export default function TenantEmbeddingSettings() {
       setSaving(true)
 
       // Validate
-      if (enabled && provider !== 'Ollama' && !config?.has_api_key && !apiKey) {
+      if (enabled && !providerSlug) {
+        toast.error('Provider Required', 'Select which configured provider generates embeddings')
+        return
+      }
+
+      const selected = aiProviders.find((p) => p.slug === providerSlug)
+      const needsKey =
+        selected !== undefined && selected.provider !== 'ollama' && selected.provider !== 'local'
+      if (enabled && needsKey && !selected?.has_api_key && !config?.has_api_key && !apiKey) {
         toast.error('API Key Required', 'Please enter an API key to enable embeddings')
         return
       }
@@ -203,7 +226,14 @@ export default function TenantEmbeddingSettings() {
 
       const request: SetConfigRequest = {
         enabled,
-        provider,
+        // Always resent. This POST replaces the whole document, so omitting the
+        // slug reference would silently drop embeddings back onto whatever the
+        // legacy enum resolves to — a different provider entirely once a tenant
+        // runs two of one kind.
+        ai_provider_ref: providerSlug || undefined,
+        ai_model_ref: model || undefined,
+        // Legacy mirror, kept coherent with the selected entry's kind.
+        provider: selected ? LEGACY_PROVIDER_BY_KIND[selected.provider] : (config?.provider ?? 'OpenAI'),
         model,
         dimensions,
         api_key_plain: apiKey || undefined,
@@ -263,8 +293,8 @@ export default function TenantEmbeddingSettings() {
 
     // Reset to original values
     setEnabled(config.enabled)
-    setProvider(config.provider)
-    setModel(config.model)
+    setProviderSlug(config.ai_provider_ref ?? '')
+    setModel(config.ai_model_ref ?? config.model)
     setDimensions(config.dimensions)
     setIncludeName(config.include_name)
     setIncludePath(config.include_path)
@@ -276,26 +306,36 @@ export default function TenantEmbeddingSettings() {
     setTestResult(null)
   }
 
-  const handleProviderChange = (newProvider: Provider) => {
-    setProvider(newProvider)
+  const handleProviderChange = (slug: ProviderSlug) => {
+    setProviderSlug(slug)
 
-    // Reset model selection when provider changes
-    const models = newProvider === 'OpenAI' ? OPENAI_MODELS : newProvider === 'Claude' ? CLAUDE_MODELS : newProvider === 'HuggingFace' ? HUGGINGFACE_MODELS : OLLAMA_MODELS
+    // Model ids are provider-scoped, so a provider change invalidates the
+    // model. Pick the entry's first embedding model when it publishes one.
+    const models = embeddingModelsFor(slug)
     if (models.length > 0) {
-      setModel(models[0].id)
-      setDimensions(models[0].dims)
+      setModel(models[0].model_id)
+      const dims = models[0].metadata?.embedding_length as number | undefined
+      if (dims) setDimensions(dims)
+    } else {
+      setModel('')
     }
   }
 
   const handleModelChange = (modelId: string) => {
     setModel(modelId)
 
-    // Update dimensions based on selected model
-    const models = provider === 'OpenAI' ? OPENAI_MODELS : provider === 'Claude' ? CLAUDE_MODELS : provider === 'HuggingFace' ? HUGGINGFACE_MODELS : OLLAMA_MODELS
-    const selectedModel = models.find(m => m.id === modelId)
-    if (selectedModel) {
-      setDimensions(selectedModel.dims)
+    // Dimensions come from the model's own metadata when the provider reports it.
+    const selectedModel = embeddingModelsFor(providerSlug).find((m) => m.model_id === modelId)
+    const dims = selectedModel?.metadata?.embedding_length as number | undefined
+    if (dims) {
+      setDimensions(dims)
     }
+  }
+
+  /** The embedding models one configured entry publishes. */
+  function embeddingModelsFor(slug: ProviderSlug) {
+    const entry = aiProviders.find((p) => p.slug === slug)
+    return (entry?.models ?? []).filter((m) => m.use_cases.includes('embedding'))
   }
 
   const handleEnableToggle = (newEnabled: boolean) => {
@@ -312,21 +352,6 @@ export default function TenantEmbeddingSettings() {
     setShowConfirmEnable(false)
   }
 
-  const getAvailableModels = () => {
-    switch (provider) {
-      case 'OpenAI':
-        return OPENAI_MODELS
-      case 'Claude':
-        return CLAUDE_MODELS
-      case 'Ollama':
-        return OLLAMA_MODELS
-      case 'HuggingFace':
-        return HUGGINGFACE_MODELS
-      default:
-        return []
-    }
-  }
-
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -335,8 +360,14 @@ export default function TenantEmbeddingSettings() {
     )
   }
 
-  const availableModels = getAvailableModels()
-  const canTestConnection = enabled && (config?.has_api_key || apiKey) && model
+  // Only entries that can actually embed are offered. Capability is decided per
+  // ENTRY, so a `custom` gateway publishing an embedding model qualifies.
+  const embeddingProviders = aiProviders.filter(isEmbeddingCapable)
+  const selectedProvider = aiProviders.find((p) => p.slug === providerSlug)
+  const availableModels = embeddingModelsFor(providerSlug)
+  const isOllamaLike = selectedProvider?.provider === 'ollama'
+  const canTestConnection =
+    enabled && (selectedProvider?.has_api_key || config?.has_api_key || apiKey) && model
 
   return (
     <div className="space-y-6">
@@ -381,38 +412,51 @@ export default function TenantEmbeddingSettings() {
         </label>
       </div>
 
-      {/* Provider Selection */}
+      {/* Provider Selection — by SLUG. These are the tenant's configured
+          providers, not a fixed list of vendors. */}
       <GlassCard className={!enabled ? 'opacity-50 pointer-events-none' : ''}>
         <h2 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
           <Sparkles className="w-5 h-5 text-purple-400" />
           Select Provider
         </h2>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <ProviderCard
-            provider="OpenAI"
-            selected={provider === 'OpenAI'}
-            disabled={false}
-            onSelect={() => handleProviderChange('OpenAI')}
-          />
-          <ProviderCard
-            provider="Claude"
-            selected={provider === 'Claude'}
-            disabled={false}
-            onSelect={() => handleProviderChange('Claude')}
-          />
-          <ProviderCard
-            provider="Ollama"
-            selected={provider === 'Ollama'}
-            disabled={false}
-            onSelect={() => handleProviderChange('Ollama')}
-          />
-          <ProviderCard
-            provider="HuggingFace"
-            selected={provider === 'HuggingFace'}
-            disabled={true}
-            onSelect={() => handleProviderChange('HuggingFace')}
-          />
-        </div>
+        {embeddingProviders.length === 0 ? (
+          <div className="flex items-start gap-3 p-4 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
+            <AlertCircle className="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" />
+            <div>
+              <p className="text-yellow-300 text-sm font-medium">No embedding-capable provider configured</p>
+              <p className="text-yellow-300/80 text-xs mt-1">
+                Add one in Admin Console &gt; AI Settings, then refresh its models.
+              </p>
+            </div>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {embeddingProviders.map((entry) => (
+              <ProviderCard
+                key={entry.slug}
+                entry={entry}
+                selected={providerSlug === entry.slug}
+                onSelect={() => handleProviderChange(entry.slug)}
+              />
+            ))}
+          </div>
+        )}
+        {providerSlug && !selectedProvider && (
+          // The stored slug no longer names a configured provider. Saying so is
+          // the point: the value is kept, so saving will not repoint it.
+          <div className="flex items-center gap-2 mt-4 px-3 py-2 bg-red-500/10 border border-red-500/30 rounded-lg">
+            <XCircle className="w-4 h-4 text-red-400" />
+            <span className="text-red-300 text-sm">
+              Configured provider '{providerSlug}' no longer exists. Embeddings will fail until
+              another is selected.
+            </span>
+          </div>
+        )}
+        {selectedProvider && (
+          <p className="text-sm text-gray-400 mt-4">
+            Embeddings run through <span className="font-mono text-purple-300">{providerLabel(selectedProvider)}</span>.
+          </p>
+        )}
       </GlassCard>
 
       {/* Model Selection */}
@@ -426,17 +470,35 @@ export default function TenantEmbeddingSettings() {
             <label className="block text-sm font-medium text-gray-300 mb-2">
               Model
             </label>
-            <select
-              value={model}
-              onChange={(e) => handleModelChange(e.target.value)}
-              className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
-            >
-              {availableModels.map((m) => (
-                <option key={m.id} value={m.id} className="bg-gray-900">
-                  {m.name}
-                </option>
-              ))}
-            </select>
+            {availableModels.length > 0 ? (
+              <select
+                value={model}
+                onChange={(e) => handleModelChange(e.target.value)}
+                className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
+              >
+                <option value="" className="bg-gray-900">Select a model...</option>
+                {availableModels.map((m) => (
+                  <option key={m.model_id} value={m.model_id} className="bg-gray-900">
+                    {m.display_name || m.model_id}
+                    {m.metadata?.embedding_length ? ` (${m.metadata.embedding_length}d)` : ''}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              // The provider has not reported its models yet; a free-text id
+              // still works, since the runtime resolves `<slug>:<model>`.
+              <input
+                type="text"
+                value={model}
+                onChange={(e) => handleModelChange(e.target.value)}
+                placeholder="text-embedding-3-small"
+                className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder:text-gray-500 focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
+              />
+            )}
+            <p className="text-sm text-gray-400 mt-1">
+              Addressed as <span className="font-mono">{providerSlug || 'slug'}:{model || 'model'}</span>.
+              Refresh the provider's models in AI Settings to choose from a list.
+            </p>
           </div>
 
           <div>
@@ -461,11 +523,11 @@ export default function TenantEmbeddingSettings() {
       <GlassCard className={!enabled ? 'opacity-50 pointer-events-none' : ''}>
         <h2 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
           <Key className="w-5 h-5 text-purple-400" />
-          {provider === 'Ollama' ? 'Connection Settings' : 'API Key'}
+          {isOllamaLike ? 'Connection Settings' : 'API Key'}
         </h2>
         <div className="space-y-4">
           {/* Base URL field for Ollama */}
-          {provider === 'Ollama' && (
+          {isOllamaLike && (
             <div>
               <label className="block text-sm text-gray-400 mb-1">Base URL</label>
               <input
@@ -487,13 +549,13 @@ export default function TenantEmbeddingSettings() {
           )}
 
           <div>
-            {provider === 'Ollama' && <label className="block text-sm text-gray-400 mb-1">API Key (optional, for authenticated instances)</label>}
+            {isOllamaLike && <label className="block text-sm text-gray-400 mb-1">API Key (optional, for authenticated instances)</label>}
             <div className="relative">
               <input
                 type={showApiKey ? 'text' : 'password'}
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
-                placeholder={provider === 'Ollama' ? 'Optional API key for remote Ollama' : config?.has_api_key ? 'Enter new API key to update' : 'Enter your API key'}
+                placeholder={isOllamaLike ? 'Optional API key for remote Ollama' : config?.has_api_key ? 'Enter new API key to update' : 'Enter your API key'}
                 className="w-full px-4 py-2 pr-12 bg-white/5 border border-white/10 rounded-lg text-white focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
               />
             <button

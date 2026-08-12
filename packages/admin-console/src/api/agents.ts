@@ -1,7 +1,14 @@
 import { nodesApi, type Node, type CreateNodeRequest, type UpdateNodeRequest } from './nodes'
+import type { ProviderSlug } from './ai'
 
-// Supported AI providers
-export type AIProviderType = 'openai' | 'anthropic' | 'google' | 'azure_openai' | 'ollama' | 'groq' | 'openrouter' | 'bedrock' | 'local' | 'custom'
+/**
+ * An agent's provider is a per-tenant SLUG, not a fixed kind.
+ *
+ * `provider: marvel` with `model: maravilla/smart` is the point of the feature:
+ * the slug names one of the tenant's configured entries, several of which may
+ * share a kind. Kept as an alias so the intent survives the plain `string`.
+ */
+export type AIProviderType = ProviderSlug
 
 export type ExecutionMode = 'automatic' | 'step_by_step' | 'manual'
 
@@ -99,7 +106,9 @@ function nodeToAgent(node: Node): Agent {
     path: node.path,
     properties: {
       system_prompt: (node.properties?.system_prompt as string) || '',
-      provider: (node.properties?.provider as AIProviderType) || 'openai',
+      // Kept exactly as stored: an unresolvable slug must stay visible rather
+      // than being silently rewritten to some default provider.
+      provider: (node.properties?.provider as AIProviderType) || '',
       model: (node.properties?.model as string) || '',
       temperature: (node.properties?.temperature as number) ?? 0.7,
       max_tokens: (node.properties?.max_tokens as number) ?? 4096,

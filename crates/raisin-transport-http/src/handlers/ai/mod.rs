@@ -4,7 +4,7 @@
 //!
 //! Provides REST API endpoints for:
 //! - Getting and setting full AI configuration
-//! - Listing configured providers
+//! - Listing configured providers, and removing one
 //! - Testing provider connections
 //! - Discovering available models dynamically
 //! - Querying per-model capabilities
@@ -19,7 +19,7 @@ pub mod types;
 
 // Re-export all handler functions to preserve `crate::handlers::ai::*` paths
 pub use capabilities::get_model_capabilities;
-pub use config::{get_ai_config, list_providers, set_ai_config};
+pub use config::{delete_ai_provider, get_ai_config, list_providers, set_ai_config};
 pub use huggingface::{delete_huggingface_model, get_huggingface_model, list_huggingface_models};
 #[cfg(feature = "storage-rocksdb")]
 pub use huggingface::{download_huggingface_model, list_local_caption_models};
