@@ -101,7 +101,11 @@ test('attachments become raisin:Asset children, metadata only', () => {
   assert.equal(out.children.length, 2);
   const [quote, logo] = out.children;
   assert.equal(quote.node_type, 'raisin:Asset');
-  assert.equal(quote.name, 'quote.pdf');
+  // The attachment ID, not the filename. `name` is what the child's node PATH is
+  // built from, and a filename is not unique: two `scan.pdf` attachments on one
+  // message resolved onto a single path and the engine silently kept the last.
+  assert.equal(quote.name, 'a1');
+  assert.equal(quote.properties.title, 'quote.pdf', 'the filename stays displayable');
   assert.equal(quote.external_id, 'a1');
   assert.equal(quote.properties.file_size, 2048);
   // NO `file`. Its absence is what the engine's on-demand get_content keys off;

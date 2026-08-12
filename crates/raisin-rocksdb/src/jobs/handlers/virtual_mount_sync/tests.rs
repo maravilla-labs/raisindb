@@ -423,6 +423,13 @@ async fn list_virtual(mat: &RocksDbMaterializer, scope: &MountScope) -> Vec<Virt
     mat.load_index(scope).await.unwrap().virtual_nodes()
 }
 
+/// Node paths in a stable order, for asserting that a re-run moved nothing.
+fn sorted_paths(nodes: &[VirtualNodeRef]) -> Vec<String> {
+    let mut out: Vec<String> = nodes.iter().map(|n| n.path.clone()).collect();
+    out.sort();
+    out
+}
+
 // ---- tests ----
 
 #[tokio::test(flavor = "multi_thread")]
@@ -934,6 +941,140 @@ fn path_template_collapses_empty_segments() {
         super::config::resolve_path_template("/{c}//{name}/", &item).unwrap(),
         "T1/a.txt"
     );
+}
+
+/// A delta cursor with unread pages behind it must SURVIVE a backfill chunk.
+///
+/// `phases::run_phases` runs the delta pass and then a backfill chunk in the
+/// same run, and the delta pass ends with pages outstanding whenever it spends
+/// its item budget or its clock — by design, so the next run resumes from it.
+/// The backfill chunk then called `capture_delta_baseline`, which asks the
+/// provider for "changes from now on" and overwrote that resume token. Every
+/// change behind it was skipped permanently: moves and renames kept stale paths,
+/// upstream deletions never propagated (the resumed walk's reconcile is gated by
+/// `resuming`), and the run reported `ok`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_backfill_chunk_never_overwrites_a_live_delta_cursor() {
+    let env = setup().await;
+    let mount = mk_mount(SyncConfig::default());
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+
+    // A mount mid-enumeration: the delta pass stored T5 with pages still to go.
+    let mock = MockAdapter::default();
+    mock.set_list("root", json!({ "items": [ext_item("A", "a", false, "v1")] }));
+    mock.push_changes(json!({ "items": [], "next_token": "BASELINE" }));
+
+    let mut state = MountState {
+        last_sync_token: Some("T5".to_string()),
+        ..MountState::default()
+    };
+    super::full::run(&ctx(&env, &mount, &mock, &mat), &mut state)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        state.last_sync_token.as_deref(),
+        Some("T5"),
+        "the resume token must survive; a baseline over it discards every change behind it"
+    );
+
+    // The converse still holds: a mount with NO cursor is exactly what a
+    // baseline is for, and capturing one is what lets it go incremental.
+    let mock = MockAdapter::default();
+    mock.set_list("root", json!({ "items": [ext_item("A", "a", false, "v1")] }));
+    mock.push_changes(json!({ "items": [], "next_token": "BASELINE" }));
+
+    let mut fresh = MountState::default();
+    super::full::run(&ctx(&env, &mount, &mock, &mat), &mut fresh)
+        .await
+        .unwrap();
+    assert_eq!(fresh.last_sync_token.as_deref(), Some("BASELINE"));
+}
+
+/// A WIDE tree — many folders, each fitting in one page — must respect the
+/// per-run budget and leave a resume point, exactly like a deep one.
+///
+/// It did not. The budget and wall-clock test sat AFTER the `next_cursor` match,
+/// so on any folder whose listing fit a single page the match broke the page
+/// loop first and the check was never reached. A Drive or SharePoint tree — all
+/// small folders — therefore ignored `max_items_per_sync` entirely and ran past
+/// the 480s wall-clock budget into the 600s watchdog, which aborts at an await
+/// point and skips `finalize`. Nothing persisted a resume point (the cursor had
+/// already been `take`n), so the next run restarted at the root and died at the
+/// same depth, forever, while the console reported "Nothing was lost; the
+/// resume point is intact."
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wide_tree_of_single_page_folders_still_honours_the_budget() {
+    let env = setup().await;
+    let mount = mk_mount(SyncConfig {
+        max_items_per_sync: 2,
+        ..SyncConfig::default()
+    });
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let mock = MockAdapter::default();
+
+    // Root holds two folders; each holds two files. Every listing is ONE page —
+    // `next_cursor` is null everywhere, which is what made the budget check
+    // unreachable.
+    mock.set_list(
+        "root",
+        json!({ "items": [ext_item("F1", "f1", true, "v1"), ext_item("F2", "f2", true, "v1")],
+                "next_cursor": null }),
+    );
+    mock.set_list(
+        "F1",
+        json!({ "items": [ext_item("A", "a", false, "v1"), ext_item("B", "b", false, "v1")],
+                "next_cursor": null }),
+    );
+    mock.set_list(
+        "F2",
+        json!({ "items": [ext_item("C", "c", false, "v1"), ext_item("D", "d", false, "v1")],
+                "next_cursor": null }),
+    );
+
+    let mut state = MountState::default();
+
+    // Run 1 stops at the cap with folders still queued, and says so.
+    super::full::run(&ctx(&env, &mount, &mock, &mat), &mut state)
+        .await
+        .unwrap();
+    assert!(
+        !state.backfill_complete,
+        "the walk did not reach the end of the provider"
+    );
+    assert!(
+        !state.backfill_stack.is_empty(),
+        "a folder left unwalked must be on the resume stack, or the next run \
+         restarts at the root and dies at the same depth forever"
+    );
+    let after_first = list_virtual(&mat, &scope()).await.len();
+    assert!(
+        after_first < 6,
+        "the budget must bound a wide walk too; imported {after_first} of 6"
+    );
+
+    // Subsequent runs resume and finish. Bounded so a walk that fails to make
+    // progress fails the test instead of hanging it.
+    for _ in 0..6 {
+        if state.backfill_complete {
+            break;
+        }
+        super::full::run(&ctx(&env, &mount, &mock, &mat), &mut state)
+            .await
+            .unwrap();
+    }
+
+    assert!(state.backfill_complete, "the walk must eventually finish");
+    assert!(state.backfill_cursor.is_none());
+    assert!(state.backfill_stack.is_empty());
+
+    let mut ids: Vec<String> = list_virtual(&mat, &scope())
+        .await
+        .into_iter()
+        .map(|n| n.external_id)
+        .collect();
+    ids.sort();
+    assert_eq!(ids, vec!["A", "B", "C", "D", "F1", "F2"]);
 }
 
 /// A mailbox larger than `max_items_per_sync` must import COMPLETELY, across
@@ -2562,11 +2703,15 @@ async fn a_duplicated_external_id_in_one_page_yields_one_node() {
     );
 }
 
-/// Two DIFFERENT items resolving to the same path collapse to one node, and only
-/// one of them may claim it — otherwise both would be re-imported every sync,
-/// each overwriting the other's `__external_id` forever.
+/// Two DIFFERENT items resolving to the same path each get their own node.
+///
+/// Collapsing them onto one — the old behaviour — lost the loser silently and
+/// then alternated the survivor between the two on every run, because the next
+/// walk etag-skipped whichever was indexed and staged the other onto the same
+/// path. Both ids were already in `seen`, so reconcile could not see it either.
+/// A stable per-item suffix breaks the collision and the two settle immediately.
 #[tokio::test(flavor = "multi_thread")]
-async fn two_items_at_the_same_resolved_path_keep_a_single_owner() {
+async fn two_items_at_the_same_resolved_path_each_get_a_node() {
     let env = setup().await;
     let mat = RocksDbMaterializer::new(env.storage.clone());
     let mut index = mat.load_index(&scope()).await.unwrap();
@@ -2583,10 +2728,31 @@ async fn two_items_at_the_same_resolved_path_keep_a_single_owner() {
         .await
         .unwrap();
 
-    assert_eq!(stats.written, 1);
+    assert_eq!(stats.written, 2, "neither item may be silently dropped");
+    assert_eq!(stats.failed, 0);
+
     let nodes = list_virtual(&mat, &scope()).await;
-    assert_eq!(nodes.len(), 1);
-    assert_eq!(nodes[0].external_id, "B", "the last item wins the path");
+    assert_eq!(nodes.len(), 2);
+    let mut ids: Vec<&str> = nodes.iter().map(|n| n.external_id.as_str()).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, vec!["A", "B"]);
+
+    // Re-applying the identical page must not move either node: the suffix is a
+    // digest of the item's own external id, not of its position in the page.
+    let paths_before = sorted_paths(&nodes);
+    mat.apply_batch(
+        &scope(),
+        &mut index,
+        vec![
+            upsert_op("A", "clash.txt", "v2"),
+            upsert_op("B", "clash.txt", "v2"),
+        ],
+    )
+    .await
+    .unwrap();
+    let after = list_virtual(&mat, &scope()).await;
+    assert_eq!(after.len(), 2, "no node was created or destroyed");
+    assert_eq!(paths_before, sorted_paths(&after), "the paths are stable");
 }
 
 /// Deletes and upserts share ONE ordered queue.

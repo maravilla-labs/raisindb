@@ -68,10 +68,7 @@ impl RocksDbMaterializer {
                         error = %e,
                         "virtual mount item rejected; continuing with the rest of the batch"
                     );
-                    stats.failed += 1;
-                    if stats.first_error.is_none() {
-                        stats.first_error = Some(e.to_string());
-                    }
+                    stats.note_failure(op.external_id(), &e.to_string());
                 }
                 // Infrastructural: the transaction itself is suspect. Abandon it.
                 Err(e) => {
@@ -140,10 +137,7 @@ impl RocksDbMaterializer {
                             error = %e,
                             "virtual mount item failed on replay; skipping it"
                         );
-                        stats.failed += 1;
-                        if stats.first_error.is_none() {
-                            stats.first_error = Some(e.to_string());
-                        }
+                        stats.note_failure(op.external_id(), &e.to_string());
                     }
                 }
             }

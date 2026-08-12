@@ -174,6 +174,11 @@ pub const BULK_REVISION_THRESHOLD: usize = 50;
 /// permanently — the walk is the only thing that can see a delete at all.
 pub const MAX_PENDING_DELETES: usize = 500;
 
+/// How many rejected item ids a mount parks. Past this the failure is systemic
+/// rather than per-item, and the batcher's failure budget is the mechanism that
+/// applies — an unbounded list would put a whole mailbox into mount state.
+pub const MAX_FAILED_ITEMS: usize = 100;
+
 /// A tripped safety rail, recorded on the mount until an operator releases it.
 ///
 /// The soft-block half of §9.4. Nothing is discarded when a rail trips: the
@@ -323,6 +328,20 @@ pub struct MountState {
     pub backfill_complete: bool,
     #[serde(default)]
     pub last_error: Option<String>,
+    /// External ids the materializer rejected and that have not been recovered.
+    ///
+    /// A rejected item used to be counted and forgotten while the cursor
+    /// advanced past it, so the change was never re-delivered: the item stayed
+    /// permanently stale or absent and the run reported `ok` with a `failed`
+    /// count nobody reads. Parking the ids gives the failure somewhere durable
+    /// to live, so the page can be retried once, the run can refuse to call
+    /// itself clean, and an operator can see WHICH items are missing rather than
+    /// only how many.
+    ///
+    /// Bounded by [`MAX_FAILED_ITEMS`]. A mount failing wholesale is a different
+    /// problem, and the batcher's failure budget is what catches it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_items: Vec<String>,
     #[serde(default)]
     pub consecutive_failures: u64,
     /// Epoch seconds before which this mount must not be synced again, because

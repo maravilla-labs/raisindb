@@ -138,12 +138,38 @@ pub async fn run_with(
             // under this run's lease — a mount mid-import must not make its
             // user wait for the import to finish before an edit is pushed.
             super::write::drain_pending(ctx, state, batcher).await;
+
+            // Does this folder have another page? Computed BEFORE the budget
+            // check, because the resume point differs: a folder mid-listing goes
+            // back on the stack, a folder that just returned its last page is
+            // finished and must not be re-walked.
+            let next_cursor = match page.next_cursor.clone() {
+                Some(c) if !c.is_empty() => Some(c),
+                _ => None,
+            };
+
+            // Make the resume point DURABLE with every flushed page, not only
+            // when the walk decides to stop.
+            //
+            // `state.backfill_cursor.take()` above means the stored cursor is
+            // already None by the time the first page lands, and
+            // `publish_progress` persists that None. So a walk killed by the
+            // watchdog — or failing on any later page — left NO resume point at
+            // all and restarted from the root, which on a wide tree meant the
+            // same prefix forever while the console reported "the resume point
+            // is intact".
+            state.backfill_stack = {
+                let mut resume = stack.clone();
+                if next_cursor.is_some() {
+                    resume.push((folder_id.clone(), prefix.clone()));
+                }
+                resume
+            };
+            state.backfill_cursor = next_cursor.clone();
+
             published =
                 publish_progress(ctx, state, &page, processed, published, stack.len()).await?;
-            match page.next_cursor {
-                Some(c) if !c.is_empty() => cursor = Some(c),
-                _ => break,
-            }
+
             // Two reasons to stop with work left: the item budget, and the CLOCK.
             //
             // The clock one is what stops the watchdog reaping us. A walk that
@@ -153,23 +179,45 @@ pub async fn run_with(
             // nothing that would ever schedule the run that could clear it. Ending
             // ourselves here instead makes it an ordinary truncated chunk, which
             // this function already knows how to resume from.
+            //
+            // CHECKED BEFORE the `next_cursor` break, not after it. Sitting after
+            // it made the whole check unreachable for any folder whose listing
+            // fit in one page — which is most folders in a Drive or SharePoint
+            // tree — so the walk sailed past both its item budget and its
+            // wall-clock budget and was killed by the watchdog at every run,
+            // forever, at the same depth.
+            //
+            // Only when there is actually work left. A walk that spent its
+            // budget on the very last page of the very last folder DID cover the
+            // provider end to end, and calling that "truncated" would gate the
+            // reconcile forever on any mount whose item count sits at the cap.
             let out_of_time = ctx.out_of_time(Utc::now().timestamp());
-            if processed >= max || out_of_time {
+            let work_left = next_cursor.is_some() || !stack.is_empty();
+            if work_left && (processed >= max || out_of_time) {
                 truncated = true;
                 if out_of_time {
                     tracing::info!(
                         mount_id = %ctx.mount.mount_id,
                         processed,
-                        folders_pending = stack.len() + 1,
+                        folders_pending = stack.len() + usize::from(next_cursor.is_some()),
                         "wall-clock budget spent; ending this chunk cleanly so the run is not \
                          killed mid-walk. The next tick resumes from the persisted cursor."
                     );
                 }
-                // Save the resume point: this folder is unfinished, so it goes
-                // back on the stack with the cursor that continues it.
-                stack.push((folder_id.clone(), prefix.clone()));
-                state.backfill_cursor = cursor.clone();
+                // Save the resume point: an unfinished folder goes back on the
+                // stack with the cursor that continues it. A finished one does
+                // not — re-walking its first page every run is how a bounded
+                // budget turns into an infinite loop.
+                if next_cursor.is_some() {
+                    stack.push((folder_id.clone(), prefix.clone()));
+                }
+                state.backfill_cursor = next_cursor.clone();
                 break 'outer;
+            }
+
+            match next_cursor {
+                Some(c) => cursor = Some(c),
+                None => break,
             }
         }
     }

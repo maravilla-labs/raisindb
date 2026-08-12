@@ -81,6 +81,17 @@ impl<'a> SyncBatcher<'a> {
         self.stats.clone()
     }
 
+    /// The external ids rejected so far, cleared as they are read.
+    ///
+    /// Read by the read phases at a page boundary, because a rejected item is
+    /// the one thing a cursor must not silently advance past: the change is
+    /// never re-delivered, so the item stays stale or absent forever while the
+    /// run reports `ok`. Draining rather than copying means each page sees only
+    /// ITS OWN failures and the caller can attribute them to the right cursor.
+    pub fn take_failed_ids(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.stats.failed_ids)
+    }
+
     /// Whether this item can be skipped without running the mapper at all.
     ///
     /// The etag skip-write is decided entirely by `external_id` + `etag`, both of

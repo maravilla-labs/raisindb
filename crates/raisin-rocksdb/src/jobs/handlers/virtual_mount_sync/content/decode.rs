@@ -58,6 +58,25 @@ pub(crate) fn decode_content(result: &Value, node: &Node) -> Result<(Vec<u8>, St
         ));
     };
 
+    // A ZERO-LENGTH PAYLOAD IS NOT A SUCCESSFUL FETCH.
+    //
+    // Storing it as one latches the failure: the node ends up with `file` set
+    // and a content hash of nothing, so it looks fetched, and no later run will
+    // ever try again — only an explicit `?force=true` clears it. The triggers
+    // are all transient (a `body: null` from Graph, an empty 200, a truncated
+    // response), which is exactly the case where retrying would have worked.
+    //
+    // An adapter with a genuinely empty object to represent must say so, rather
+    // than leaving "the provider gave us nothing" and "the file is empty"
+    // spelled the same way.
+    if bytes.is_empty() && result.get("empty").and_then(|v| v.as_bool()) != Some(true) {
+        return Err(Error::Validation(
+            "get_content returned an empty payload; treating it as a failed fetch rather than \
+             an empty file (set `empty: true` if the object really is empty)"
+                .to_string(),
+        ));
+    }
+
     if bytes.len() > MAX_CONTENT_BYTES {
         return Err(Error::Validation(format!(
             "get_content returned {} bytes, over the {MAX_CONTENT_BYTES}-byte ceiling",
@@ -122,6 +141,31 @@ mod tests {
         let (bytes, mime) = decode_content(&result, &asset("q.pdf")).unwrap();
         assert_eq!(bytes, pdf);
         assert_eq!(mime, "application/pdf");
+    }
+
+    /// An empty payload is a FAILED fetch, not an empty file.
+    ///
+    /// Accepting it latches: the node ends up with `file` set and a hash of
+    /// nothing, so it looks fetched and no later run tries again — only an
+    /// explicit `?force=true` clears it. Every trigger is transient (a
+    /// `body: null`, an empty 200, a truncated response), which is exactly when
+    /// retrying would have worked.
+    #[test]
+    fn an_empty_payload_is_a_failed_fetch_not_an_empty_file() {
+        for shape in [json!({ "content": "" }), json!({ "content_base64": "" })] {
+            let err = decode_content(&shape, &asset("empty.bin")).unwrap_err();
+            assert!(
+                err.to_string().contains("empty payload"),
+                "{shape} should be rejected, got: {err}"
+            );
+        }
+
+        // An adapter with a genuinely empty object to represent says so, so
+        // "the provider gave us nothing" and "the file is empty" stay
+        // distinguishable.
+        let (bytes, _) =
+            decode_content(&json!({ "content": "", "empty": true }), &asset("empty.bin")).unwrap();
+        assert!(bytes.is_empty());
     }
 
     #[test]

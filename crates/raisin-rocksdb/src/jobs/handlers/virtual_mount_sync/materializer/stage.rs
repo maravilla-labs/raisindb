@@ -5,7 +5,13 @@
 use raisin_error::Result;
 use raisin_models::nodes::Node;
 use raisin_storage::transactional::TransactionalContext;
+use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
+
+/// Properties the ENGINE owns on the read path, written by `store_content`
+/// rather than by a mapper. Carried across a rebuild so an upsert cannot orphan
+/// a blob it never knew about; see the carry-forward in `stage_upsert`.
+const CONTENT_KEYS: &[&str] = &["file", "file_size", "content_hash"];
 
 use super::index::{MountScope, SyncIndex, VirtualNodeRef};
 use super::node_paths::join_path;
@@ -212,9 +218,19 @@ impl RocksDbMaterializer {
         // remote, and the delete-reconcile walk owns what the local delete
         // meant.
         //
-        // Deliberately NOT gated on `scope.force_rewrite`: a remap's contract
-        // is "re-apply the mapper to unchanged remote data", not "resolve
-        // conflicts in remote's favour", so it inherits the preserve step.
+        // A REMAP INHERITS THE PRESERVE STEP ON EVERY MOUNT, not only the
+        // `local_wins` ones. The comment below has always said a remap's
+        // contract is "re-apply the mapper to unchanged remote data", not
+        // "resolve conflicts in remote's favour" — but the `read_local_wins`
+        // gate contradicted it, so on any other policy a `force_rewrite` both
+        // reverted a pending edit to the remote value AND reseeded
+        // `__pushed_state` from mapper output, which de-nominated it. The edit
+        // vanished from the node, from pending, and from the next drain, in one
+        // step, with nothing counted and no conflict having occurred: a remap is
+        // not a remote change, so there was never anything to resolve.
+        //
+        // Deliberately NOT gated on `scope.force_rewrite` on the `local_wins`
+        // side either: a remap's contract is the same there.
         //
         // Known edge, documented rather than solved: `name` is not a property
         // and not pushable via `state_only`, so a name derived from a pending
@@ -228,16 +244,32 @@ impl RocksDbMaterializer {
         let carried = index
             .by_external(&virt.external_id)
             .and_then(|existing| existing.pushed_state().cloned());
-        let preserved = if scope.read_local_wins
+        let matched_existing = index.by_external(&virt.external_id).is_some();
+        let wants_preserve = (scope.read_local_wins || scope.force_rewrite)
             && !scope.watched_fields.is_empty()
-            && index.by_external(&virt.external_id).is_some()
-        {
-            match tx.get_node(&scope.workspace, &id).await? {
-                Some(live) => write_view_of(&live, &scope.watched_fields).and_then(|view| {
+            && matched_existing;
+        // Content properties are written by `store_content` AFTER the upsert
+        // that created the node, so the mapper never emits them and a wholesale
+        // rebuild erases them — see the carry-forward below.
+        let wants_content_carry =
+            matched_existing && CONTENT_KEYS.iter().any(|k| !mapped.properties.contains_key(*k));
+
+        // At most ONE live read, shared by both. Both need the node as it stands
+        // inside this transaction rather than the run-start index, which is
+        // refreshed only by this run's own writes and so cannot see an edit that
+        // landed mid-run.
+        let live = if wants_preserve || wants_content_carry {
+            tx.get_node(&scope.workspace, &id).await?
+        } else {
+            None
+        };
+
+        let preserved = if wants_preserve {
+            live.as_ref().and_then(|node| {
+                write_view_of(node, &scope.watched_fields).and_then(|view| {
                     preserve_pending_edits(&mapped.properties, &view, &scope.watched_fields)
-                }),
-                None => None,
-            }
+                })
+            })
         } else {
             None
         };
@@ -270,7 +302,41 @@ impl RocksDbMaterializer {
                 watched_subset(&mapped.properties, &scope.watched_fields).or(carried),
             ),
         };
-        let effective_props = merged_props.as_ref().unwrap_or(&mapped.properties);
+        let base_props = merged_props.as_ref().unwrap_or(&mapped.properties);
+
+        // CONTENT PROPERTIES SURVIVE A REBUILD.
+        //
+        // `file`, `file_size` and `content_hash` are written by `store_content`
+        // after the node exists — the mapper cannot know a blob id it has never
+        // seen — so an upsert that rebuilds the property map from mapper output
+        // erases them. The trigger is ordinary: an attachment child inherits its
+        // parent's etag, so any change to the message re-stages the child and
+        // orphaned its blob, leaving a node that claims a file and points at
+        // nothing.
+        //
+        // Carried forward from the live node only when the mapper did not supply
+        // them itself, so an adapter that genuinely owns these keys still wins.
+        // The carry is keyed on the child's own change token by construction: a
+        // child whose provider etag really moved is re-fetched by `store_content`
+        // anyway, and one that did not never needed to lose them.
+        let carried_content: Option<Map<String, Value>> = live.as_ref().and_then(|node| {
+            let mut out: Option<Map<String, Value>> = None;
+            for key in CONTENT_KEYS {
+                if base_props.contains_key(*key) {
+                    continue;
+                }
+                if let Some(value) = node
+                    .properties
+                    .get(*key)
+                    .and_then(|pv| serde_json::to_value(pv).ok())
+                {
+                    out.get_or_insert_with(|| base_props.clone())
+                        .insert((*key).to_string(), value);
+                }
+            }
+            out
+        });
+        let effective_props = carried_content.as_ref().unwrap_or(base_props);
 
         let node = Node {
             id,

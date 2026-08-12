@@ -2,7 +2,7 @@
 //! and how the byte budget is estimated.
 
 use serde_json::{Map, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::index::VirtualMeta;
 use super::node_paths::join_path;
@@ -135,9 +135,38 @@ pub struct BatchStats {
     /// forbids its node type fails the same way, so the first one is the whole
     /// story and the last is just the newest copy of it.
     pub first_error: Option<String>,
+    /// The external ids of the rejected items — WHICH ones, not just how many.
+    ///
+    /// A count is not actionable and, worse, is not recoverable: the read paths
+    /// persisted their cursor past a rejected item and the change was never
+    /// re-delivered, so the item stayed permanently stale or absent while the
+    /// run reported `ok`. Carrying the ids is what lets the caller park them,
+    /// retry them, and refuse to call the run clean while any are outstanding.
+    ///
+    /// Bounded by [`MAX_FAILED_IDS`]: a mount failing wholesale is already
+    /// caught by the failure budget, and an unbounded list would put a whole
+    /// mailbox into mount state.
+    pub failed_ids: Vec<String>,
 }
 
+/// How many rejected ids one batch carries. Past this the failure is systemic,
+/// not per-item, and `check_failure_budget` is the mechanism that applies.
+pub const MAX_FAILED_IDS: usize = 100;
+
 impl BatchStats {
+    /// Record an item-level rejection: the count, the reason, and the id.
+    pub fn note_failure(&mut self, external_id: &str, error: &str) {
+        self.failed += 1;
+        if self.first_error.is_none() {
+            self.first_error = Some(error.to_string());
+        }
+        if self.failed_ids.len() < MAX_FAILED_IDS
+            && !self.failed_ids.iter().any(|id| id == external_id)
+        {
+            self.failed_ids.push(external_id.to_string());
+        }
+    }
+
     pub fn merge(&mut self, other: BatchStats) {
         self.written += other.written;
         self.skipped += other.skipped;
@@ -146,6 +175,14 @@ impl BatchStats {
         self.failed += other.failed;
         if self.first_error.is_none() {
             self.first_error = other.first_error;
+        }
+        for id in other.failed_ids {
+            if self.failed_ids.len() >= MAX_FAILED_IDS {
+                break;
+            }
+            if !self.failed_ids.iter().any(|existing| *existing == id) {
+                self.failed_ids.push(id);
+            }
         }
     }
 }
@@ -179,41 +216,93 @@ pub fn dedup_ops(ops: Vec<BatchOp>, mount_path: &str) -> Vec<BatchOp> {
             }
         }
     }
-    let mut keep_by_path: HashMap<String, usize> = HashMap::new();
+    // Two DIFFERENT items landing on one path is not a duplicate — it is two
+    // pieces of real content whose names happen to collide, and dropping either
+    // loses it.
+    //
+    // Dropping the loser is what this used to do, with a WARN that counted as
+    // neither a write nor a failure. The consequences compounded: the dropped
+    // item was already in the walk's `seen` set, so reconcile saw nothing wrong;
+    // the next run etag-skipped the survivor and staged the loser instead, which
+    // resolved to the same path and rewrote the node with the other item's
+    // content; and the run after that swapped them back. One node alternating
+    // between two messages forever, one revision and one trigger fan-out per
+    // run, reported as `written: 2, failed: 0`.
+    //
+    // Both are kept instead, with the colliding paths disambiguated by a short
+    // digest of each item's own external id. That is stable per item and
+    // independent of page order, so the two nodes settle immediately rather than
+    // trading places. The mount is still misconfigured — a `path_template` that
+    // is not unique, or a mapper naming children after a filename — and the WARN
+    // still says so.
+    let mut path_owners: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, op) in ops.iter().enumerate() {
         if keep_by_external.get(op.external_id()) != Some(&i) {
             continue;
         }
         if let BatchOp::Upsert { rel_path, .. } = op {
-            let path = join_path(mount_path, rel_path);
-            if let Some(prev) = keep_by_path.insert(path.clone(), i) {
-                tracing::warn!(
-                    path = %path,
-                    first = %ops[prev].external_id(),
-                    second = %op.external_id(),
-                    "two external items resolve to the same node path; keeping the last. \
-                     Check the mount's path_template or mapping function — the losing item \
-                     will be re-imported and overwrite this one on every sync."
-                );
-            }
+            path_owners
+                .entry(join_path(mount_path, rel_path))
+                .or_default()
+                .push(i);
         }
+    }
+    let mut disambiguate: HashSet<usize> = HashSet::new();
+    for (path, owners) in &path_owners {
+        if owners.len() < 2 {
+            continue;
+        }
+        tracing::warn!(
+            path = %path,
+            colliding = owners.len(),
+            ids = ?owners.iter().map(|i| ops[*i].external_id()).collect::<Vec<_>>(),
+            "several external items resolve to the same node path; each is being given a \
+             distinct suffix so none is lost. Check the mount's path_template or mapping \
+             function — a node path must be unique per item."
+        );
+        disambiguate.extend(owners.iter().copied());
     }
 
     ops.iter()
         .enumerate()
-        .filter(|(i, op)| {
-            if keep_by_external.get(op.external_id()) != Some(i) {
-                return false;
-            }
-            match op {
-                BatchOp::Upsert { rel_path, .. } => {
-                    keep_by_path.get(&join_path(mount_path, rel_path)) == Some(i)
+        .filter(|(i, op)| keep_by_external.get(op.external_id()) == Some(i))
+        .map(|(i, op)| match op {
+            BatchOp::Upsert { rel_path, .. } if disambiguate.contains(&i) => {
+                let mut cloned = op.clone();
+                if let BatchOp::Upsert { rel_path: p, .. } = &mut cloned {
+                    *p = suffix_path(rel_path, op.external_id());
                 }
-                BatchOp::Delete { .. } | BatchOp::StampVirtual { .. } => true,
+                cloned
             }
+            _ => op.clone(),
         })
-        .map(|(_, op)| op.clone())
         .collect()
+}
+
+/// Append a short, stable digest of `external_id` to the last segment of
+/// `rel_path`, before any extension, so two items that collide on a name become
+/// two distinct paths that do not move between runs.
+fn suffix_path(rel_path: &str, external_id: &str) -> String {
+    let digest = short_digest(external_id);
+    match rel_path.rfind('.') {
+        // Only a real extension on the FINAL segment; a dot inside a directory
+        // name is not one.
+        Some(dot) if dot > rel_path.rfind('/').map_or(0, |s| s + 1) => {
+            format!("{}-{}{}", &rel_path[..dot], digest, &rel_path[dot..])
+        }
+        _ => format!("{rel_path}-{digest}"),
+    }
+}
+
+/// FNV-1a, truncated to 8 hex chars. Not cryptographic and does not need to be:
+/// it only has to separate two names inside one mount, deterministically.
+fn short_digest(value: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    format!("{:08x}", (hash >> 32) as u32)
 }
 
 /// Approximate serialized size of an item, for the batch byte budget. Mail and

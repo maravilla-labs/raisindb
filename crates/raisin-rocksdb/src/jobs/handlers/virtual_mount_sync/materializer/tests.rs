@@ -77,15 +77,48 @@ fn create_then_delete_in_one_page_resolves_to_the_delete() {
     assert!(matches!(out[0], BatchOp::Delete { .. }));
 }
 
+/// Two DIFFERENT items on one path are two pieces of real content, and neither
+/// may be dropped.
+///
+/// This used to keep the last and discard the first with a WARN that counted as
+/// neither a write nor a failure — and because both ids were already in the
+/// walk's `seen` set, reconcile never noticed. The two then traded places on
+/// every subsequent run. Each now gets a stable suffix derived from its own
+/// external id, so both materialize and neither moves again.
 #[test]
-fn dedup_keeps_the_last_op_per_resolved_path() {
-    let ops = vec![
+fn two_items_on_one_path_are_both_kept_at_distinct_paths() {
+    let paths_of = |ops: Vec<BatchOp>| -> Vec<String> {
+        dedup_ops(ops, "/docs")
+            .iter()
+            .map(|op| match op {
+                BatchOp::Upsert { rel_path, .. } => rel_path.clone(),
+                _ => panic!("expected upserts"),
+            })
+            .collect()
+    };
+
+    let paths = paths_of(vec![
         upsert_op("a", "same.txt", Some("v1")),
         upsert_op("b", "same.txt", Some("v1")),
-    ];
-    let out = dedup_ops(ops, "/docs");
-    assert_eq!(out.len(), 1);
-    assert_eq!(out[0].external_id(), "b");
+    ]);
+    assert_eq!(paths.len(), 2, "neither item may be dropped");
+    assert_ne!(paths[0], paths[1], "the collision must be broken");
+    for path in &paths {
+        assert!(
+            path.starts_with("same-") && path.ends_with(".txt"),
+            "the suffix goes before the extension, not after it: {path}"
+        );
+    }
+
+    // Stable across runs: the suffix is a digest of the item's own external id,
+    // so the same two items always land on the same two paths.
+    assert_eq!(
+        paths,
+        paths_of(vec![
+            upsert_op("a", "same.txt", Some("v2")),
+            upsert_op("b", "same.txt", Some("v2")),
+        ])
+    );
 }
 
 #[test]

@@ -25,7 +25,7 @@ pub(crate) use props::{parse_object, parse_object_checked};
 pub use run::SyncRun;
 pub use state::{
     DrainSummary, MountState, PendingDelete, ReconcileSummary, WritebackBlock,
-    BULK_REVISION_THRESHOLD, MAX_PENDING_DELETES, MAX_RUN_HISTORY,
+    BULK_REVISION_THRESHOLD, MAX_FAILED_ITEMS, MAX_PENDING_DELETES, MAX_RUN_HISTORY,
 };
 
 /// The workspace that holds integration/mount configuration in every repo.

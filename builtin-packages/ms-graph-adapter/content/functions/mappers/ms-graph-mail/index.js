@@ -147,6 +147,16 @@ function toNode(input) {
  * message — the engine namespaces it under the message's own external id, so
  * two messages carrying attachment "1" do not collide.
  *
+ * `name` is that id TOO, not the filename, because name is what the child's node
+ * PATH is built from and a filename is not unique. One message carrying two
+ * `scan.pdf` attachments resolved both children onto one path; the engine kept
+ * whichever came last, dropped the other with a warning that counted as neither
+ * a write nor a failure, and then alternated the surviving node between the two
+ * on every subsequent run. The mail node itself already follows this rule —
+ * "external_id / name / relative_path are ALWAYS the Graph item id, never the
+ * subject/title/filename" — and the filename keeps its home in `title`, where it
+ * is displayable and searchable without being load-bearing.
+ *
  * Returns null (not []) when the adapter reported nothing, so "attachments were
  * not synced" and "this message has none" stay distinguishable: an empty array
  * would tell the engine to reconcile away every attachment node it had.
@@ -158,7 +168,7 @@ function attachmentChildren(list) {
     var a = list[i];
     if (!a || !a.external_id) continue;
     out.push({
-      name: a.name || a.external_id,
+      name: a.external_id,
       node_type: "raisin:Asset",
       external_id: a.external_id,
       properties: {

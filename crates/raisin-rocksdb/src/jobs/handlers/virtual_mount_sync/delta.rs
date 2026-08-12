@@ -35,6 +35,15 @@ pub async fn run_with(
     // Items actually staged, as opposed to returned by the provider. The two
     // diverge on filtered-out changes, and the console must report the former.
     let mut materialized: u64 = 0;
+    // How much of `materialized` has already been folded into
+    // `state.delta_items_done`, so each page adds only its own increment.
+    //
+    // Without this watermark the running TOTAL was added once per page — 100,
+    // then 300, then 600 for three pages of 100 — so the reported figure grew
+    // quadratically. The same regression was fixed once already for
+    // `backfill_items_done`; the full walk's watermark (`full.rs`) is the shape
+    // being mirrored here.
+    let mut published: u64 = 0;
 
     // Self-healing baseline.
     //
@@ -77,6 +86,60 @@ pub async fn run_with(
         // before it is written.
         batcher.flush().await?;
 
+        // A REJECTED ITEM IS NOT A LANDED PAGE.
+        //
+        // The materializer rejects individual items (validation, RLS, a unique
+        // clash) without failing the batch, which is right — one bad item must
+        // not stall a mount. But the cursor was then persisted anyway, so the
+        // change was never re-delivered: that item stayed permanently stale or
+        // absent while the run reported `ok`.
+        //
+        // Exactly one automatic retry, and no more. The first time a page rejects
+        // an item, the ids are parked and the cursor is left where it was, so the
+        // next run re-pages the same window (upserts are idempotent through the
+        // etag skip, so the items that did land cost nothing). If the same ids
+        // fail again they are already parked, the cursor advances past them, and
+        // they stay on `failed_items` — visible, and keeping the run off `ok` —
+        // rather than blocking the feed forever behind one poison item.
+        let rejected = batcher.take_failed_ids();
+        // A parked item that came round again and landed is recovered. Cleared
+        // here rather than on a timer, because "this id was in the page and was
+        // not rejected" is the only evidence that actually settles it.
+        if !state.failed_items.is_empty() {
+            state.failed_items.retain(|parked| {
+                let in_page = page
+                    .items
+                    .iter()
+                    .any(|change| change.item.external_id == *parked);
+                let still_failing = rejected.iter().any(|id| id == parked);
+                still_failing || !in_page
+            });
+        }
+        let first_failure = rejected
+            .iter()
+            .any(|id| !state.failed_items.iter().any(|parked| parked == id));
+        for id in rejected {
+            if state.failed_items.len() >= super::config::MAX_FAILED_ITEMS {
+                break;
+            }
+            if !state.failed_items.iter().any(|parked| *parked == id) {
+                state.failed_items.push(id);
+            }
+        }
+        if first_failure {
+            tracing::warn!(
+                mount_id = %ctx.mount.mount_id,
+                parked = state.failed_items.len(),
+                "delta page rejected items the store would not accept; holding the cursor so \
+                 the page is re-delivered once before it is passed over"
+            );
+            state.delta_items_done = state
+                .delta_items_done
+                .saturating_add(materialized.saturating_sub(published));
+            let _ = persist_state(ctx, state).await;
+            break;
+        }
+
         // Persist the cursor after the whole page materialized — but ONLY when
         // the adapter actually returned one. A `None` next_token means "no more
         // pages"; overwriting the stored cursor with `None` would clear it and
@@ -95,7 +158,10 @@ pub async fn run_with(
                 // items imported" and an import that could never complete.
                 // Keeping the visibility the original change wanted, without
                 // corrupting the number it borrowed.
-                state.delta_items_done = state.delta_items_done.saturating_add(materialized);
+                state.delta_items_done = state
+                    .delta_items_done
+                    .saturating_add(materialized.saturating_sub(published));
+                published = materialized;
                 if !persist_state(ctx, state)
                     .await
                     .map(StateWrite::is_written)
@@ -183,6 +249,12 @@ pub async fn run_with(
         token = next;
     }
     batcher.flush().await?;
+    // The final page carries no `next_token`, so it never reached the counter
+    // update above — the reported figure was short by exactly the last page of
+    // every catch-up. Fold in whatever is left over.
+    state.delta_items_done = state
+        .delta_items_done
+        .saturating_add(materialized.saturating_sub(published));
     Ok(())
 }
 

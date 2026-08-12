@@ -8,20 +8,51 @@
 import { mailMeta } from "./mail.js";
 import { calendarMeta } from "./calendar.js";
 
+// A driveItem's facets, resolved through `remoteItem` when it has one.
+//
+// An item added with "Add to my OneDrive" — a shared folder or file living in
+// SOMEONE ELSE'S drive — is returned as a shortcut: the top level carries only
+// `remoteItem`, and the `folder` / `file` / `size` facets that say what the thing
+// actually IS are nested inside it. Reading only the top level made every such
+// shortcut look like a leaf with no file facet, so a shared folder was stored as
+// a zero-byte file and its entire subtree was never walked.
+//
+// The remote drive id travels too: recursing into a shortcut means addressing a
+// different drive than the mount's own, and `parentReference.driveId` on the
+// remoteItem is the only place that id appears.
+function driveFacets(v) {
+  var r = v.remoteItem || null;
+  var folder = v.folder || (r && r.folder) || null;
+  var file = v.file || (r && r.file) || null;
+  var size = v.size != null ? v.size : r && r.size != null ? r.size : null;
+  return {
+    folder: folder,
+    file: file,
+    size: size,
+    remoteDriveId: r && r.parentReference ? r.parentReference.driveId || null : null,
+    remoteId: r ? r.id || null : null,
+  };
+}
+
 // OneDrive driveItem: is_folder from the `folder` facet, mime_type/size from the
 // `file` facet. The real filename lives in metadata.filename (name = id, below).
 export function filesMeta(v) {
+  var f = driveFacets(v);
   return {
     filename: v.name || null,
-    is_folder: !!v.folder,
-    mime_type: v.file && v.file.mimeType ? v.file.mimeType : null,
-    size_bytes: v.size != null ? v.size : null,
+    is_folder: !!f.folder,
+    mime_type: f.file && f.file.mimeType ? f.file.mimeType : null,
+    size_bytes: f.size,
     parent_id: v.parentReference ? v.parentReference.id || null : null,
     parent_path: v.parentReference ? v.parentReference.path || null : null,
-    child_count: v.folder && v.folder.childCount != null ? v.folder.childCount : null,
+    child_count: f.folder && f.folder.childCount != null ? f.folder.childCount : null,
     download_url: v["@microsoft.graph.downloadUrl"] || null,
     web_url: v.webUrl || null,
     ctag: v.cTag || null,
+    // Null for an ordinary item. Present means "this node stands for something
+    // in another drive", which is what `opList` needs to recurse into it.
+    remote_drive_id: f.remoteDriveId,
+    remote_item_id: f.remoteId,
   };
 }
 
@@ -45,9 +76,10 @@ export function toExternalItem(v, resource, mount) {
     metadata: null,
   };
   if (resource === "files") {
-    item.is_folder = !!v.folder;
-    item.mime_type = v.file && v.file.mimeType ? v.file.mimeType : null;
-    item.size_bytes = v.size != null ? v.size : null;
+    var f = driveFacets(v);
+    item.is_folder = !!f.folder;
+    item.mime_type = f.file && f.file.mimeType ? f.file.mimeType : null;
+    item.size_bytes = f.size;
     item.parent_id = v.parentReference ? v.parentReference.id || null : null;
     item.download_url = v["@microsoft.graph.downloadUrl"] || null;
     item.metadata = filesMeta(v);

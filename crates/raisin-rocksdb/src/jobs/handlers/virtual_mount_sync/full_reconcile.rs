@@ -167,7 +167,41 @@ pub(super) async fn reconcile_deletes(
 ///
 /// We have just materialized everything, so what we want is "changes from
 /// now on" — which providers expose directly (Graph: `$deltatoken=latest`).
+///
+/// ONLY when there is no cursor yet. A baseline means "changes from now on", so
+/// writing one over a cursor that still has unread pages behind it discards
+/// every one of those changes, permanently and silently.
+///
+/// That is not a corner case: `phases::run_phases` runs the delta pass and then
+/// a backfill chunk in the same run, and the delta pass ends with pages
+/// outstanding whenever it spends its item budget or its clock — by design, so
+/// the next run resumes. The backfill chunk that followed then overwrote the
+/// resume token with a baseline, and the moves, renames and upstream deletions
+/// behind it were never applied. The run reported `ok`.
+///
+/// Capturing on the FIRST chunk of a long backfill is still correct and still
+/// wanted: it is what lets new mail arrive through the delta path while history
+/// imports behind it. The narrow window it leaves — a change to an
+/// already-walked item during that first chunk — is closed by the next full
+/// reconcile, not by capturing a second baseline over a live cursor.
 pub(super) async fn capture_delta_baseline(ctx: &SyncCtx<'_>, state: &mut MountState) {
+    if state.last_sync_token.is_some() {
+        tracing::debug!(
+            mount_id = %ctx.mount.mount_id,
+            "delta cursor already established; not capturing a baseline over it"
+        );
+        if !persist_state(ctx, state)
+            .await
+            .map(StateWrite::is_written)
+            .unwrap_or(false)
+        {
+            tracing::warn!(
+                mount_id = %ctx.mount.mount_id,
+                "final full-walk state write was refused; this pass is not reflected on the mount"
+            );
+        }
+        return;
+    }
     match ctx
         .call(
             "get_changes",

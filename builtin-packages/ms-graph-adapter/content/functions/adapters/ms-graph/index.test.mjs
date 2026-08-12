@@ -75,28 +75,126 @@ test('a drive list with no folder_id lists the mount root', () => {
 
 // ---- get_changes: has_more ------------------------------------------------
 
+// Mint a cursor the way the engine gets one: from a first, token-less call. A
+// bare Graph URL is no longer a usable `since_token` — see the identity tests
+// below — so anything that resumes must resume from a real one.
+function mintCursor(mount, link) {
+  stubHttp([{ body: { value: [], '@odata.deltaLink': link || 'https://graph/seed' } }])
+  return opGetChanges(CREDENTIAL, mount, {}).next_token
+}
+
 test('has_more distinguishes a mid-enumeration page from a caught-up cursor', () => {
+  const token = mintCursor(mailMount())
+
   // A nextLink means "more pages right now".
   stubHttp([{ body: { value: [], '@odata.nextLink': 'https://graph/next' } }])
-  const paging = opGetChanges(CREDENTIAL, mailMount(), { since_token: 't0' })
+  const paging = opGetChanges(CREDENTIAL, mailMount(), { since_token: token })
   assert.equal(paging.has_more, true)
-  assert.equal(paging.next_token, 'https://graph/next')
+  assert.match(paging.next_token, /graph\/next/)
 
   // A deltaLink means "caught up — this token is the NEXT RUN's resume point".
-  // Reporting has_more here is what span the loop against an idle feed.
+  // Reporting has_more here is what spun the loop against an idle feed.
   stubHttp([{ body: { value: [], '@odata.deltaLink': 'https://graph/delta' } }])
-  const caught = opGetChanges(CREDENTIAL, mailMount(), { since_token: 't0' })
+  const caught = opGetChanges(CREDENTIAL, mailMount(), { since_token: token })
   assert.equal(caught.has_more, false)
-  assert.equal(caught.next_token, 'https://graph/delta')
+  assert.match(caught.next_token, /graph\/delta/)
 })
 
 test('get_changes never returns a null cursor', () => {
   // Null reads to the engine as "no resumable cursor exists" — the stored
   // cursor must survive a page that carries neither link.
+  const token = mintCursor(mailMount(), 'https://graph/keep-me')
   stubHttp([{ body: { value: [] } }])
-  const out = opGetChanges(CREDENTIAL, mailMount(), { since_token: 'keep-me' })
-  assert.equal(out.next_token, 'keep-me')
+  const out = opGetChanges(CREDENTIAL, mailMount(), { since_token: token })
+  assert.match(out.next_token, /graph\/keep-me/)
   assert.equal(out.has_more, false)
+})
+
+// ---- get_changes: cursor identity -----------------------------------------
+//
+// Graph bakes the query INTO the delta link: $select and the calendarView date
+// range are frozen at mint time and replayed on every later poll. A stored token
+// therefore encodes configuration that may since have changed, and the engine —
+// which treats it as opaque — cannot notice. Two data-loss bugs came from
+// exactly this: turning on `include_body` was a permanent no-op, and a calendar
+// window never slid forward, so meetings past `days_ahead` stopped arriving.
+
+test('widening the projection invalidates a cursor minted for the old one', () => {
+  const narrow = mintCursor(mailMount())
+
+  // Same mount, same projection: the cursor is accepted.
+  stubHttp([{ body: { value: [], '@odata.deltaLink': 'https://graph/d2' } }])
+  assert.doesNotThrow(() => opGetChanges(CREDENTIAL, mailMount(), { since_token: narrow }))
+
+  // include_body widens $select, which the stored link cannot carry.
+  const wide = { sync_config: { resource: 'mail', include_body: true } }
+  stubHttp([{ body: { value: [] } }])
+  assert.throws(
+    () => opGetChanges(CREDENTIAL, wide, { since_token: narrow }),
+    (e) => e.code === 'cursor_invalid' && /different query/.test(e.message)
+  )
+})
+
+test('a cursor minted before identity existed is resynced once, not trusted', () => {
+  // A bare Graph URL is what every pre-upgrade mount has stored. It cannot be
+  // checked against the current projection precisely because nothing recorded
+  // what minted it, so it is discarded rather than grandfathered — the two bugs
+  // above are both silent, and a grandfathered token carries them forward
+  // indefinitely.
+  stubHttp([{ body: { value: [] } }])
+  assert.throws(
+    () => opGetChanges(CREDENTIAL, mailMount(), { since_token: 'https://graph/legacy' }),
+    (e) => e.code === 'cursor_invalid' && /predates cursor identity/.test(e.message)
+  )
+})
+
+// ---- get_changes: drive deletions -----------------------------------------
+
+test('a driveItem deletion is a delete, not an update', () => {
+  // TWO removal vocabularies. Outlook marks a deletion with `@removed`; a
+  // driveItem marks it with a `deleted` FACET and no annotation, so testing only
+  // for `@removed` meant every OneDrive and SharePoint deletion arrived as an
+  // ordinary update and the file persisted in the workspace indefinitely.
+  const token = mintCursor(filesMount())
+  stubHttp([
+    {
+      body: {
+        value: [
+          { id: 'GONE', name: 'old.txt', file: {}, deleted: { state: 'deleted' } },
+          { id: 'LIVE', name: 'new.txt', file: {} },
+        ],
+        '@odata.deltaLink': 'https://graph/d',
+      },
+    },
+  ])
+  const out = opGetChanges(CREDENTIAL, filesMount(), { since_token: token })
+  const kinds = out.items.map((c) => c.type)
+  assert.deepEqual(kinds, ['deleted', 'updated'])
+  assert.equal(out.items[0].item.external_id, 'GONE')
+})
+
+// ---- shared/shortcut drive items ------------------------------------------
+
+test('a shared folder shortcut is a folder, not a zero-byte file', () => {
+  // "Add to my OneDrive" returns a shortcut whose `folder` facet is nested under
+  // `remoteItem`. Reading only the top level stored it as an empty leaf file and
+  // its entire subtree was never walked.
+  const item = toExternalItem(
+    {
+      id: 'SHORTCUT',
+      name: 'Team Docs',
+      remoteItem: {
+        id: 'REMOTE-1',
+        folder: { childCount: 12 },
+        parentReference: { driveId: 'DRIVE-B' },
+      },
+    },
+    'files',
+    filesMount()
+  )
+  assert.equal(item.is_folder, true, 'a shortcut to a folder IS a folder')
+  assert.equal(item.metadata.remote_drive_id, 'DRIVE-B', 'recursing needs the real drive')
+  assert.equal(item.metadata.remote_item_id, 'REMOTE-1')
 })
 
 // ---- error taxonomy -------------------------------------------------------

@@ -228,8 +228,33 @@ pub async fn stage_item(
     let Some(mapped) = map_item(ctx, item).await? else {
         return Ok(Vec::new());
     };
+    // "I could not enumerate this item's children" is NOT "this item has no
+    // children", and the walk cannot tell them apart on its own: both arrive as
+    // an empty `children` list, and an empty list means every existing child
+    // falls out of `seen` and is pruned.
+    //
+    // That is a data-destruction path with a routine trigger — one throttled
+    // attachment listing on a busy mailbox deleted Asset nodes that had already
+    // been imported, permanently, because the parent's etag had not moved and
+    // nothing would ever re-enumerate them. An adapter that cannot answer says
+    // so with `metadata.children_unknown`, and the live children stay seen.
+    let children_unknown = item
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("children_unknown"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let children = mapped.children;
     batcher.stage_upsert(item, rel_path, mapped.node).await?;
+
+    if children_unknown && children.is_empty() {
+        tracing::debug!(
+            mount_id = %ctx.mount.mount_id,
+            external_id = %item.external_id,
+            "adapter could not enumerate children; keeping the ones already materialized"
+        );
+        return Ok(batcher.child_external_ids(&item.external_id));
+    }
 
     // Children AFTER the parent, in the same buffer, so they apply in that
     // order: `upsert_deep_node` would otherwise auto-create the mail's path as a

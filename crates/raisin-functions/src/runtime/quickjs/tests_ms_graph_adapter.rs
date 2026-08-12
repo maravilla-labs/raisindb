@@ -144,10 +144,15 @@ async fn capabilities_declare_update_for_mail_and_submit_for_mail_and_calendar()
     .expect("mail capabilities");
     assert_eq!(mail["can_write"], json!(true));
     assert_eq!(mail["can_update"], json!(true));
-    assert_eq!(mail["mutable_fields"], json!(["unread"]));
-    // The NODE property name, never the Graph name: the engine intersects this
-    // with the mount's write_config.mutable_fields, which is authored in node
-    // terms, and hands the survivors to the mapper.
+    // BOTH spellings of the read flag. `unread` is the global nodetype's
+    // property and `is_read` is Graph-truth; a mount's write_config may be
+    // authored in either, and the engine INTERSECTS the two lists — so
+    // declaring only one silently drops the other's edits (an empty
+    // intersection is refused loudly, a partial one is not).
+    assert_eq!(mail["mutable_fields"], json!(["unread", "is_read"]));
+    // NODE property names, never the Graph name: the mount's
+    // write_config.mutable_fields is authored in node terms, and the survivors
+    // of the intersection are what the mapper receives.
     assert_ne!(mail["mutable_fields"], json!(["isRead"]));
 
     // Mail is the only resource with an UPDATE, and both mail and calendar have

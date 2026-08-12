@@ -301,16 +301,27 @@ export function pageSize(params) {
     : 100;
 }
 
-// calendarView/delta bounds. days_back/days_ahead default to a 7d/30d window.
-export function windowBounds(mount) {
+// The CONFIGURED calendar window, in days. Separated from `windowBounds` because
+// the two are used for opposite purposes: the bounds are relative to `now` and
+// therefore change on every call, while the config is stable and is what a
+// cursor's identity is compared against. Hashing the bounds instead would
+// invalidate the cursor on every single run.
+export function windowConfig(mount) {
   var sc = (mount && mount.sync_config) || {};
   var win = sc.window || {};
-  var daysAhead = win.days_ahead != null ? win.days_ahead : 30;
-  var daysBack = win.days_back != null ? win.days_back : 7;
+  return {
+    daysAhead: win.days_ahead != null ? win.days_ahead : 30,
+    daysBack: win.days_back != null ? win.days_back : 7,
+  };
+}
+
+// calendarView/delta bounds. days_back/days_ahead default to a 7d/30d window.
+export function windowBounds(mount) {
+  var win = windowConfig(mount);
   var now = Date.now();
   return {
-    start: new Date(now - daysBack * 86400000).toISOString(),
-    end: new Date(now + daysAhead * 86400000).toISOString(),
+    start: new Date(now - win.daysBack * 86400000).toISOString(),
+    end: new Date(now + win.daysAhead * 86400000).toISOString(),
   };
 }
 

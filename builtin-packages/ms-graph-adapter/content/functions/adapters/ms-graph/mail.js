@@ -7,7 +7,7 @@
 //! attachment enrichment pass.
 
 import { enc } from "./common.js";
-import { GRAPH, graphFetch } from "./http.js";
+import { GRAPH, graphFetch, raiseForStatus } from "./http.js";
 import { includeAttachments, outlookHeaders, principal } from "./mount.js";
 
 // ---- address formatting ---------------------------------------------------
@@ -91,54 +91,79 @@ export function mailMeta(v) {
 // The engine materializes these as raisin:Asset children and fetches a blob
 // through `get_content` only when something opens it.
 //
-// A failure here is swallowed: the MESSAGE is real content and must still
-// sync. Losing its attachment list costs the child nodes, not the mail.
-// Attach `metadata.attachments` to every mail item that reports having any.
+// Attach `metadata.attachments` to every mail item, or `attachments_unknown`
+// when the listing could not be read. Applied in one helper called from both the
+// list and the delta path, because a mail whose attachments the full walk
+// materialized and the delta did not would have those child nodes reconciled
+// away on the next full run and recreated on the one after.
 //
-// Driven by `has_attachments`, so a mailbox of plain messages costs ZERO extra
-// requests — the flag comes free in the projection. Applied in one helper called
-// from both the list and the delta path, because a mail whose attachments the
-// full walk materialized and the delta did not would have those child nodes
-// reconciled away on the next full run and recreated on the one after.
+// NOT gated on `has_attachments`. Microsoft documents that flag as excluding
+// INLINE attachments, so every HTML newsletter and every pasted screenshot
+// reported `false` and its images were never imported — and because the walk and
+// the delta shared the gate, neither path could ever repair the other. The gate
+// bought one saved request per plain message; it cost every inline image in the
+// mailbox. `include_attachments` is already an opt-in whose documented cost is
+// one request per message, so paying it uniformly is the honest reading of the
+// flag.
+//
+// A FAILURE IS NOT AN EMPTY LIST. Returning null on error let the engine read a
+// throttled listing as "this message has no attachments" — so the Asset children
+// it had already imported fell out of the walk's `seen` set and reconcile
+// DELETED them, permanently, since the message's own etag had not moved. The
+// distinction now travels explicitly: `attachments` present means we know, and
+// `children_unknown` — an engine-level contract key, not a mail one — means we
+// do not, so the engine keeps the children it already has instead of pruning
+// them.
 export function enrichAttachments(credential, mount, items) {
   if (!includeAttachments(mount)) return items;
   for (var i = 0; i < items.length; i++) {
     var meta = items[i] && items[i].metadata;
-    if (!meta || meta.has_attachments !== true) continue;
+    if (!meta) continue;
     var list = mailAttachments(credential, mount, items[i].external_id);
     if (list) meta.attachments = list;
+    else meta.children_unknown = true;
   }
   return items;
 }
 
+// The attachment listing for one message, or null when the message itself is
+// gone. Anything else THROWS.
+//
+// A 404 is the one error that genuinely means "no attachments to list": the
+// message was deleted between the page fetch and this call, and the walk will
+// reconcile it away anyway. Every other failure — 429, 5xx, an expired token —
+// is a statement about the request, not about the message, and must reach the
+// engine so it backs off rather than acting on a listing it never got.
 export function mailAttachments(credential, mount, messageId) {
-  try {
-    var resp = graphFetch(
-      credential,
-      "GET",
-      GRAPH +
-        principal(mount) +
-        "/messages/" +
-        enc(messageId) +
-        "/attachments?$select=id,name,contentType,size,isInline,contentId",
-      { context: "list attachments", headers: outlookHeaders(mount) }
-    );
-    var list = (resp.body && resp.body.value) || [];
-    var out = [];
-    for (var i = 0; i < list.length; i++) {
-      var a = list[i];
-      if (!a || !a.id) continue;
-      out.push({
-        external_id: a.id,
-        name: a.name || a.id,
-        mime_type: a.contentType || null,
-        size: a.size != null ? a.size : null,
-        inline: a.isInline === true,
-        content_id: a.contentId || null,
-      });
+  var resp = graphFetch(
+    credential,
+    "GET",
+    GRAPH +
+      principal(mount) +
+      "/messages/" +
+      enc(messageId) +
+      "/attachments?$select=id,name,contentType,size,isInline,contentId",
+    {
+      context: "list attachments",
+      headers: outlookHeaders(mount),
+      rawStatusOk: true,
     }
-    return out;
-  } catch (e) {
-    return null;
+  );
+  if (resp.status === 404) return null;
+  raiseForStatus(resp, "list attachments");
+  var list = (resp.body && resp.body.value) || [];
+  var out = [];
+  for (var i = 0; i < list.length; i++) {
+    var a = list[i];
+    if (!a || !a.id) continue;
+    out.push({
+      external_id: a.id,
+      name: a.name || a.id,
+      mime_type: a.contentType || null,
+      size: a.size != null ? a.size : null,
+      inline: a.isInline === true,
+      content_id: a.contentId || null,
+    });
   }
+  return out;
 }

@@ -183,7 +183,13 @@ async fn the_delta_emits_an_exception_alongside_its_master_but_not_an_occurrence
             "operation": "get_changes",
             "credential": { "access_token": "T" },
             "mount": calendar_mount(false),
-            "params": { "since_token": "https://graph.microsoft.com/v1.0/me/calendarView/delta?$deltatoken=x" },
+            // No stored token: a raw Graph URL is no longer a usable cursor.
+            // Graph freezes $select and the calendarView date range inside the
+            // delta link, so a cursor now travels wrapped with the identity of
+            // the query that minted it and an unverifiable one is resynced.
+            // What this test is about — collapsing occurrences into their series
+            // — is the same on either path.
+            "params": {},
         }),
         vec![json!({
             "status": 200,

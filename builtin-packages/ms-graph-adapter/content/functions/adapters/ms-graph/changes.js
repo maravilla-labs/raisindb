@@ -6,9 +6,9 @@
 //! The incremental feed: the first delta URL, `get_changes`, and the collapse
 //! that keeps a recurring series ONE node instead of one per occurrence.
 
-import { enc } from "./common.js";
+import { coded, enc } from "./common.js";
 import { GRAPH, graphFetch, raiseForStatus } from "./http.js";
-import { calendarSupportsDelta, driveContainer, eventSelect, mailFolderId, mailSelect, outlookHeaders, principal, resourceOf, windowBounds } from "./mount.js";
+import { calendarSupportsDelta, driveContainer, eventSelect, mailFolderId, mailSelect, outlookHeaders, principal, resourceOf, useImmutableIds, windowBounds, windowConfig } from "./mount.js";
 import { enrichAttachments } from "./mail.js";
 import { toExternalItem } from "./items.js";
 import { seriesExceptions } from "./read.js";
@@ -56,13 +56,124 @@ export function initialDeltaUrl(mount, resource, baselineOnly) {
   );
 }
 
+// ---- cursor identity ------------------------------------------------------
+//
+// A delta cursor is NOT just a resume point: Graph bakes the query that minted
+// it INTO the link. $select, the calendarView date range and the folder are all
+// frozen at mint time and replayed verbatim on every subsequent poll. So a
+// stored token silently encodes configuration that has since changed, and the
+// engine — which treats the token as opaque — has no way to notice.
+//
+// Two real failures came from this:
+//   * Turning on `include_body` was a permanent no-op. The widened $select
+//     never reached the feed, so bodies never arrived, on old messages or new,
+//     with nothing anywhere to say why.
+//   * A primary calendar's `calendarView` window never slid forward. Roughly
+//     `days_ahead` after the mount was created, newly scheduled meetings simply
+//     stopped arriving.
+//
+// The fix is to give the cursor an IDENTITY and check it before use. The token
+// is ours to shape — the engine stores whatever string we return — so the
+// identity travels inside it. When it no longer matches the mount's current
+// configuration we report `cursor_invalid`, which the engine already recovers
+// from in-run by discarding the cursor and running a full reconcile.
+//
+// Deliberately NOT a hash: these strings are short, and a mismatch an operator
+// can read in a log beats one they have to reproduce.
+var CURSOR_PREFIX = "rsn-cur-1:";
+
+export function cursorIdentity(mount, resource) {
+  var ids = useImmutableIds(mount) ? "immutable" : "default";
+  if (resource === "calendar") {
+    var win = windowConfig(mount);
+    return "calendar|" + principal(mount) + "|" + ids +
+      "|win=" + win.daysBack + "/" + win.daysAhead +
+      "|sel=" + eventSelect(mount);
+  }
+  if (resource === "files") {
+    // Drive delta carries no projection and no window; the container is the
+    // whole of what the link encodes.
+    return "files|" + driveContainer(mount);
+  }
+  return "mail|" + principal(mount) + "|" + mailFolderId(mount) + "|" + ids +
+    "|sel=" + mailSelect(mount);
+}
+
+// How long a calendar cursor may be reused before the window it froze is
+// refreshed. A quarter of `days_ahead` keeps coverage at 75% of the configured
+// window at worst, and floors at a day so a tiny window still makes progress.
+function calendarCursorMaxAgeMs(mount) {
+  var daysAhead = windowConfig(mount).daysAhead;
+  return Math.max(86400000, Math.floor((daysAhead * 86400000) / 4));
+}
+
+export function wrapCursor(url, identity, mintedMs) {
+  return CURSOR_PREFIX + JSON.stringify({ u: url, k: identity, m: mintedMs });
+}
+
+// Returns `{u, k, m}`, or null when this is not one of ours — which means a
+// token minted before cursor identity existed.
+export function unwrapCursor(token) {
+  if (typeof token !== "string" || token.indexOf(CURSOR_PREFIX) !== 0) return null;
+  try {
+    var o = JSON.parse(token.slice(CURSOR_PREFIX.length));
+    return o && typeof o.u === "string" ? o : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Resolve a stored token to the URL to fetch, or throw `cursor_invalid` when it
+// can no longer be trusted.
+//
+// A LEGACY token — one minted before this wrapper existed — is invalidated
+// rather than grandfathered. It cannot be trusted precisely because we cannot
+// tell what minted it, and the two bugs above are both silent-data-loss paths
+// that a grandfathered token would carry forward indefinitely. The cost is one
+// full reconcile per existing mount, once.
+function resolveCursor(mount, resource, token) {
+  var wrapped = unwrapCursor(token);
+  if (!wrapped) {
+    throw coded(
+      "stored delta cursor predates cursor identity and cannot be verified " +
+        "against the mount's current projection; resyncing once",
+      "cursor_invalid"
+    );
+  }
+  var want = cursorIdentity(mount, resource);
+  if (wrapped.k !== want) {
+    throw coded(
+      "delta cursor was minted for a different query and Graph freezes the " +
+        "query inside the link (stored: " + wrapped.k + " / current: " + want + ")",
+      "cursor_invalid"
+    );
+  }
+  if (resource === "calendar" && typeof wrapped.m === "number") {
+    var age = Date.now() - wrapped.m;
+    if (age > calendarCursorMaxAgeMs(mount)) {
+      throw coded(
+        "calendarView cursor froze its date window " +
+          Math.floor(age / 86400000) + " days ago and the window no longer " +
+          "reaches days_ahead; resyncing to slide it forward",
+        "cursor_invalid"
+      );
+    }
+  }
+  return wrapped;
+}
+
 export function opGetChanges(credential, mount, params) {
   var resource = resourceOf(mount);
   var token = params.since_token;
   // Only meaningful when there is no token yet — a stored token already IS a
   // resume point and must be used verbatim.
   var baselineOnly = !token && params.baseline_only === true;
-  var url = token || initialDeltaUrl(mount, resource, baselineOnly);
+  // A cursor still mid-enumeration keeps the mint time of the link that started
+  // it, so a long paging catch-up cannot outrun the calendar window check.
+  var wrapped = token ? resolveCursor(mount, resource, token) : null;
+  var identity = cursorIdentity(mount, resource);
+  var mintedMs = wrapped && typeof wrapped.m === "number" ? wrapped.m : Date.now();
+  var url = wrapped ? wrapped.u : initialDeltaUrl(mount, resource, baselineOnly);
   var resp = graphFetch(credential, "GET", url, {
     context: "get_changes",
     headers: outlookHeaders(mount),
@@ -73,7 +184,14 @@ export function opGetChanges(credential, mount, params) {
     resource === "calendar"
       ? calendarChanges(credential, mount, values)
       : values.map(function (v) {
-          if (v["@removed"]) {
+          // TWO removal vocabularies, not one. Outlook resources mark a
+          // deletion with the `@removed` annotation; a driveItem marks it with a
+          // `deleted` FACET and no annotation at all. Testing only for
+          // `@removed` meant every OneDrive and SharePoint deletion arrived as
+          // an ordinary update, so files deleted at the provider persisted in
+          // the workspace indefinitely — the walk's reconcile being the only
+          // other thing that removes a node.
+          if (v["@removed"] || (resource === "files" && v.deleted)) {
             return { type: "deleted", item: { external_id: v.id }, relative_path: v.id };
           }
           var item = toExternalItem(v, resource, mount);
@@ -98,10 +216,12 @@ export function opGetChanges(credential, mount, params) {
   // "the token stopped changing" never happens, and before this field the
   // delta loop spun empty deltaLink pages at request speed until the job
   // watchdog killed the run.
-  var next = body["@odata.nextLink"] || body["@odata.deltaLink"] || token || url;
+  var next = body["@odata.nextLink"] || body["@odata.deltaLink"] || url;
   return {
     items: items,
-    next_token: next,
+    // Wrapped with the identity of the query that minted it, so the next run can
+    // tell whether the mount's projection or window has moved underneath it.
+    next_token: wrapCursor(next, identity, mintedMs),
     has_more: Boolean(body["@odata.nextLink"]),
   };
 }

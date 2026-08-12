@@ -64,15 +64,51 @@ impl VirtualMountSyncHandler {
         let retryable_err = match result {
             Ok(()) => {
                 if !write_only {
-                    state.status = Some("ok".to_string());
                     state.consecutive_failures = 0;
-                    state.last_error = None;
                     state.last_sync_at = Some(now);
                 }
                 // A run that got through means the throttle is over, whatever
                 // the last one was told to wait.
                 state.retry_after = None;
-                run.finish(now, "ok", None);
+
+                // ITEMS THE STORE REFUSED ARE NOT AN `ok` RUN.
+                //
+                // The adapter side succeeded — the provider answered, the pages
+                // paged, the cursor advanced — so this arm is reached with items
+                // that were rejected and are now parked. Reporting that as a
+                // clean sync is exactly how the failure stayed invisible: a
+                // `failed` count on a green run is read as noise, and the items
+                // themselves are absent or stale in the workspace with nothing
+                // saying which.
+                //
+                // `degraded` rather than `error`: the mount is working, some of
+                // its content is not there, and both halves are true.
+                if !write_only && !state.failed_items.is_empty() {
+                    let detail = format!(
+                        "{} item(s) rejected by the store and not yet recovered (first: {})",
+                        state.failed_items.len(),
+                        counts
+                            .first_error
+                            .as_deref()
+                            .unwrap_or("no reason recorded")
+                    );
+                    tracing::warn!(
+                        mount_id = %ctx.mount.mount_id,
+                        parked = state.failed_items.len(),
+                        ids = ?state.failed_items,
+                        "sync completed but some items could not be materialized; \
+                         reporting degraded rather than ok"
+                    );
+                    state.status = Some("degraded".to_string());
+                    state.last_error = Some(detail.clone());
+                    run.finish(now, "degraded", Some(detail));
+                } else {
+                    if !write_only {
+                        state.status = Some("ok".to_string());
+                        state.last_error = None;
+                    }
+                    run.finish(now, "ok", None);
+                }
                 None
             }
             Err(AdapterError::AuthExpired) => {
