@@ -751,6 +751,26 @@ export default function MountEditor({
                     </select>
                   </div>
                 )}
+                {isMsGraph && msGraphResource === 'mail' && (
+                  <div className="col-span-2 flex items-end gap-6 pb-1">
+                    <label className="flex items-center gap-2 text-sm text-white/80">
+                      <input
+                        type="checkbox"
+                        checked={sync.include_body === true}
+                        onChange={(e) => patchSync({ include_body: e.target.checked || undefined })}
+                      />
+                      Full message bodies
+                    </label>
+                    <label className="flex items-center gap-2 text-sm text-white/80">
+                      <input
+                        type="checkbox"
+                        checked={sync.include_attachments === true}
+                        onChange={(e) => patchSync({ include_attachments: e.target.checked || undefined })}
+                      />
+                      Attachments
+                    </label>
+                  </div>
+                )}
                 {isCalendar && (
                   <>
                     <div>

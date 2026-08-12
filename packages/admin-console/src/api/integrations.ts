@@ -268,6 +268,19 @@ export interface SyncConfig {
    */
   resource?: 'mail' | 'calendar' | 'files'
   /**
+   * ms-graph connector, mail only: sync the FULL message body onto the node
+   * (`body_html` / `body_text`). Off by default — bodies multiply the delta
+   * payload by whole HTML documents on every page of every run; mail syncs
+   * link-only until this is on.
+   */
+  include_body?: boolean
+  /**
+   * ms-graph connector, mail only: list attachment metadata and materialize
+   * attachments as child asset nodes (bytes are fetched lazily on open, never
+   * inlined into the sync).
+   */
+  include_attachments?: boolean
+  /**
    * ms-graph connector: WHOSE mailbox / calendar / OneDrive to read. Absent
    * means the connected account's own (`/me`). An address makes this a SHARED
    * MAILBOX mount, which additionally requires the `.Shared` delegated scopes
