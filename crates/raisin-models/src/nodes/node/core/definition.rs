@@ -41,6 +41,36 @@ pub fn is_reserved_property_key(key: &str) -> bool {
     key.starts_with('$')
 }
 
+/// The actor the virtual-mount sync engine writes as. Lives here, not in the
+/// sync crate, because the WRITE paths in raisin-core need to recognize it and
+/// the dependency points the other way.
+pub const SYNC_ACTOR: &str = "virtual-mount-sync";
+
+/// Engine-owned property keys on a mount-owned node. The convention is a
+/// leading `__`: `__pushed_state`, `__etag`, `__synced_at`, `__external_id`,
+/// `__mount_id`, `__virtual`, `__write_seq`.
+///
+/// Unlike `$` keys these are DECLARED properties (the `raisin:VirtualNode`
+/// mixin), so strict types accept them from any client — which is exactly the
+/// problem: a client that loads a node, edits one field and saves the whole map
+/// back echoes a STALE `__pushed_state` and `__etag` over the sync engine's
+/// current ones. The engine's divergence check then reads "already pushed" for
+/// the very value the user just set, and the edit is silently never written to
+/// the provider. A stale `__etag` likewise rolls back the concurrency base the
+/// next push sends. So the write paths preserve the STORED values of these keys
+/// on every mount-owned node unless the writer is [`SYNC_ACTOR`] itself.
+pub fn is_engine_owned_property_key(key: &str) -> bool {
+    key.starts_with("__")
+}
+
+/// Whether this property map marks a node as owned by a virtual mount.
+pub fn is_mount_owned(properties: &HashMap<String, PropertyValue>) -> bool {
+    matches!(
+        properties.get("__virtual"),
+        Some(PropertyValue::Boolean(true))
+    )
+}
+
 fn read_string_array(properties: &HashMap<String, PropertyValue>, key: &str) -> Vec<String> {
     match properties.get(key) {
         Some(PropertyValue::Array(items)) => items

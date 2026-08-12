@@ -96,7 +96,25 @@ impl<'a, S: Storage + TransactionalStorage> UpdateBuilder<'a, S> {
             .ok_or(raisin_error::Error::NotFound("node".into()))?;
 
         // 2. Apply updates (ONLY mutable fields)
-        if let Some(props) = self.properties {
+        if let Some(mut props) = self.properties {
+            // On a mount-owned node the `__` properties are the sync engine's
+            // bookkeeping, not content — and this path REPLACES the map
+            // wholesale, so a client that omits them would detach the node
+            // from its mount and one that echoes a stale snapshot would roll
+            // the engine's divergence baseline back (the edit is then read as
+            // "already pushed" and silently never written to the provider).
+            // The stored values win either way unless the writer is the sync
+            // engine itself.
+            if models::nodes::is_mount_owned(&node.properties)
+                && self.service.commit_actor() != models::nodes::SYNC_ACTOR
+            {
+                props.retain(|key, _| !models::nodes::is_engine_owned_property_key(key));
+                for (key, value) in &node.properties {
+                    if models::nodes::is_engine_owned_property_key(key) {
+                        props.insert(key.clone(), value.clone());
+                    }
+                }
+            }
             node.properties = props;
         }
         if let Some(trans) = self.translations {

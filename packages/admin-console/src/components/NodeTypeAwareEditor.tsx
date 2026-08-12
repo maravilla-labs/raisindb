@@ -376,10 +376,19 @@ export default function NodeTypeAwareEditor({
         }
         onCancel() // Close editor after save
       } else {
-        // Normal mode: save all properties
+        // Normal mode: save all properties — except the engine-owned `__` ones.
+        // The form's snapshot of `__pushed_state` / `__etag` goes stale the
+        // moment the sync engine pushes, and echoing it back rolls the engine's
+        // divergence baseline back to exactly the value being toggled, so the
+        // edit reads as "already pushed" and never reaches the provider. The
+        // server shields these keys too; stripping them here keeps the payload
+        // honest about what the user actually edited.
+        const editable = Object.fromEntries(
+          Object.entries(properties).filter(([key]) => !key.startsWith('__'))
+        )
         await onSave({
           ...editedNode,
-          properties
+          properties: editable
         })
       }
     } catch (error) {

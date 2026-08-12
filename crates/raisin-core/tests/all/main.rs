@@ -19,6 +19,7 @@
 
 mod branch_isolation_tests;
 mod child_listing_keyset_test;
+mod engine_owned_property_shield;
 mod indexed_validation_test;
 mod multi_tenant_integration;
 mod node_service_integration;

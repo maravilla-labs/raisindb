@@ -41,7 +41,12 @@ pub const SYSTEM_WORKSPACE: &str = "raisin:system";
 /// `created_by` / `updated_by`, and which takes precedence over the raw actor
 /// in `put_node` / `add_node`). Setting only the former left every synced node
 /// attributed to `"system"`.
-pub const SYNC_ACTOR: &str = "virtual-mount-sync";
+///
+/// Re-exported from raisin-models rather than defined here: the raisin-core
+/// write paths shield engine-owned `__` properties from every OTHER actor, so
+/// the string they compare against and the string the engine writes as must be
+/// one definition or the shield would lock the engine out of its own metadata.
+pub use raisin_models::nodes::SYNC_ACTOR;
 
 /// Default number of consecutive failures before a mount is marked degraded.
 pub const DEGRADE_THRESHOLD: u64 = 5;
