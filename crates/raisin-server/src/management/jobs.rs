@@ -9,6 +9,7 @@ use axum::{
     response::Json,
     Extension,
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use raisin_storage::BackgroundJobs;
 use raisin_transport_http::middleware::TenantInfo;
 
@@ -30,6 +31,62 @@ fn job_lookup_status(err: &raisin_error::Error) -> StatusCode {
         raisin_error::Error::NotFound(_) => StatusCode::NOT_FOUND,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
+}
+
+/// One explicitly requested, bounded history-index backfill batch.
+#[derive(Debug, serde::Deserialize)]
+pub struct HistoryBackfillRequest {
+    pub cursor: Option<String>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct HistoryBackfillResponse {
+    pub indexed: usize,
+    pub next_cursor: Option<String>,
+}
+
+/// Backfill a capped page of the durable job-history index.
+///
+/// This endpoint is RocksDB-only because it deliberately scans persistent
+/// metadata. It is never used by the jobs page, SSE stream, or polling loop.
+#[cfg(feature = "storage-rocksdb")]
+pub async fn backfill_job_history_index(
+    State(state): State<ManagementState<raisin_rocksdb::RocksDBStorage>>,
+    Extension(tenant_info): Extension<TenantInfo>,
+    Json(req): Json<HistoryBackfillRequest>,
+) -> Result<Json<ApiResponse<HistoryBackfillResponse>>, StatusCode> {
+    let cursor = match req.cursor {
+        Some(cursor) => URL_SAFE_NO_PAD
+            .decode(cursor)
+            .map_err(|_| StatusCode::BAD_REQUEST)?,
+        None => Vec::new(),
+    };
+    let limit = req.limit.unwrap_or(500).clamp(1, 1_000);
+    let store = state.storage.job_metadata_store().clone();
+    let tenant = tenant_info.tenant_id.clone();
+    let tenant_for_task = tenant.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        store.backfill_history_index_page(
+            &tenant_for_task,
+            limit,
+            (!cursor.is_empty()).then_some(cursor.as_slice()),
+        )
+    })
+    .await
+    .map_err(|error| {
+        tracing::error!(%error, "Job history backfill task panicked");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?
+    .map_err(|error| {
+        tracing::error!(%error, tenant = %tenant, "Job history backfill failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(Json(ApiResponse::ok(HistoryBackfillResponse {
+        indexed: result.0,
+        next_cursor: result.1.map(|cursor| URL_SAFE_NO_PAD.encode(cursor)),
+    })))
 }
 
 // ---------------------------------------------------------------------------

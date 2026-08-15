@@ -57,16 +57,14 @@ export default function RepositoryExecutionLogs() {
   const [searchFilter, setSearchFilter] = useState('')
   const [showFilters, setShowFilters] = useState(false)
 
-  // Filter to only show FunctionExecution and FlowExecution jobs for this repo.
-  // The server already filters by ?repo= on the initial fetch; the scope
-  // check here re-applies the same rule to rows added live via SSE (jobs
-  // without a recorded scope are kept, matching the server's behavior).
+  // Repository pages are strict: a job without a persisted repository scope
+  // must not appear here, even if it is a legacy/system job.
   const executionJobs = useMemo(() => {
     return jobs.filter(job => {
       const jobTypeStr = typeof job.job_type === 'string' ? job.job_type : JSON.stringify(job.job_type)
       const isExecution = jobTypeStr.startsWith('FunctionExecution') || jobTypeStr.startsWith('FlowExecution')
       if (!isExecution) return false
-      if (repo && job.scope && job.scope.repo !== repo) return false
+      if (!repo || job.scope?.repo !== repo) return false
       return true
     })
   }, [jobs, repo])
@@ -138,6 +136,7 @@ export default function RepositoryExecutionLogs() {
     const cleanup = sseManager.connect('jobs', {
       onJobUpdate: (event: JobEvent) => {
         setJobs((prevJobs) => {
+          if (!repo || event.scope?.repo !== repo) return prevJobs
           const existingIndex = prevJobs.findIndex((j) => j.id === event.job_id)
 
           if (existingIndex >= 0) {
@@ -183,7 +182,7 @@ export default function RepositoryExecutionLogs() {
       onError: () => setConnected(false),
     })
     return cleanup
-  }, [])
+  }, [repo])
 
   const handleDeleteJob = async (jobId: string) => {
     try {

@@ -165,6 +165,9 @@ export default function DatabaseManagementShared({
     const cleanup = sseManager.connect('jobs', {
       onJobUpdate: (event: JobEvent) => {
         setActiveJobs(prev => {
+          // This panel is repository-scoped. Do not show unscoped system or
+          // legacy jobs, and never show a different repository's execution.
+          if (!selectedRepo || event.scope?.repo !== selectedRepo) return prev
           const existingIndex = prev.findIndex(j => j.id === event.job_id)
 
           if (existingIndex >= 0) {
@@ -215,7 +218,7 @@ export default function DatabaseManagementShared({
     })
 
     return cleanup
-  }, [])
+  }, [selectedRepo])
 
   // SSE hook for reindex job progress
   useEffect(() => {

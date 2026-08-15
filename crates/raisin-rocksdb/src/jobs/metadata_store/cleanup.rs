@@ -1,7 +1,7 @@
 //! Cleanup, delete, and purge operations for job metadata
 
 use super::{JobMetadataStore, PersistedJobEntry};
-use crate::keys::{job_key, job_tenant_prefix};
+use crate::keys::{is_job_history_key, job_history_key, job_key, job_tenant_prefix};
 use crate::{cf, cf_handle};
 use chrono::{DateTime, Utc};
 use raisin_error::Result;
@@ -35,7 +35,7 @@ impl JobMetadataStore {
         let cf_data = cf_handle(&self.db, cf::JOB_DATA)?;
 
         let mut deleted_count = 0;
-        let mut keys_to_delete: Vec<Vec<u8>> = Vec::new();
+        let mut keys_to_delete: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
 
         let prefix = tenant_filter.map(job_tenant_prefix);
         let iter = if let Some(ref p) = prefix {
@@ -49,6 +49,10 @@ impl JobMetadataStore {
             let (key_bytes, value_bytes) = item.map_err(|e| {
                 raisin_error::Error::storage(format!("Failed to iterate job metadata: {}", e))
             })?;
+
+            if is_job_history_key(&key_bytes) {
+                continue;
+            }
 
             if let Some(ref p) = prefix {
                 if !key_bytes.starts_with(p) {
@@ -65,7 +69,7 @@ impl JobMetadataStore {
                         error = %e,
                         "Cleaning up undeserializable job entry (orphaned/corrupted)"
                     );
-                    keys_to_delete.push(key_bytes.to_vec());
+                    keys_to_delete.push((key_bytes.to_vec(), None));
                     continue;
                 }
             };
@@ -84,7 +88,14 @@ impl JobMetadataStore {
             if is_terminal {
                 if let Some(completed_at) = entry.completed_at {
                     if completed_at < older_than {
-                        keys_to_delete.push(key_bytes.to_vec());
+                        keys_to_delete.push((
+                            key_bytes.to_vec(),
+                            Some(job_history_key(
+                                &entry.tenant,
+                                entry.started_at.timestamp_millis(),
+                                &entry.id,
+                            )),
+                        ));
                     }
                 }
             }
@@ -92,9 +103,12 @@ impl JobMetadataStore {
 
         if !keys_to_delete.is_empty() {
             let mut batch = WriteBatch::default();
-            for key in &keys_to_delete {
+            for (key, history_key) in &keys_to_delete {
                 batch.delete_cf(cf_metadata, key);
                 batch.delete_cf(cf_data, key);
+                if let Some(history_key) = history_key {
+                    batch.delete_cf(cf_metadata, history_key);
+                }
                 deleted_count += 1;
             }
             self.db.write(batch).map_err(|e| {
@@ -110,10 +124,22 @@ impl JobMetadataStore {
         let cf_metadata = cf_handle(&self.db, cf::JOB_METADATA)?;
         let cf_data = cf_handle(&self.db, cf::JOB_DATA)?;
         let key = job_key(tenant, job_id.as_str());
+        let history_key = self
+            .db
+            .get_cf(cf_metadata, &key)
+            .ok()
+            .flatten()
+            .and_then(|value| rmp_serde::from_slice::<PersistedJobEntry>(&value).ok())
+            .map(|entry| {
+                job_history_key(tenant, entry.started_at.timestamp_millis(), job_id.as_str())
+            });
 
         let mut batch = WriteBatch::default();
         batch.delete_cf(cf_metadata, &key);
         batch.delete_cf(cf_data, &key);
+        if let Some(history_key) = history_key {
+            batch.delete_cf(cf_metadata, history_key);
+        }
 
         self.db
             .write(batch)
@@ -153,6 +179,14 @@ impl JobMetadataStore {
                             if can_delete {
                                 batch.delete_cf(cf_metadata, &key);
                                 batch.delete_cf(cf_data, &key);
+                                batch.delete_cf(
+                                    cf_metadata,
+                                    job_history_key(
+                                        tenant,
+                                        entry.started_at.timestamp_millis(),
+                                        job_id.as_str(),
+                                    ),
+                                );
                                 deleted_count += 1;
                             } else {
                                 tracing::debug!(
@@ -240,11 +274,14 @@ impl JobMetadataStore {
                 .iterator_cf(cf_metadata, rocksdb::IteratorMode::Start)
         };
 
-        let mut keys: Vec<Vec<u8>> = Vec::new();
+        let mut keys: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
         for item in iter {
             let (key_bytes, value_bytes) = item.map_err(|e| {
                 raisin_error::Error::storage(format!("Failed to iterate job metadata: {}", e))
             })?;
+            if is_job_history_key(&key_bytes) {
+                continue;
+            }
             if let Some(ref p) = prefix {
                 if !key_bytes.starts_with(p) {
                     break;
@@ -253,26 +290,45 @@ impl JobMetadataStore {
 
             if only_orphaned {
                 if rmp_serde::from_slice::<PersistedJobEntry>(&value_bytes).is_err() {
-                    keys.push(key_bytes.to_vec());
+                    keys.push((key_bytes.to_vec(), None));
                 }
             } else if let Some(t) = tenant_filter {
                 // Belt-and-braces tenant equality.
                 match rmp_serde::from_slice::<PersistedJobEntry>(&value_bytes) {
-                    Ok(entry) if entry.tenant == t => keys.push(key_bytes.to_vec()),
+                    Ok(entry) if entry.tenant == t => keys.push((
+                        key_bytes.to_vec(),
+                        Some(job_history_key(
+                            &entry.tenant,
+                            entry.started_at.timestamp_millis(),
+                            &entry.id,
+                        )),
+                    )),
                     Ok(_) => {}
-                    Err(_) => keys.push(key_bytes.to_vec()),
+                    Err(_) => keys.push((key_bytes.to_vec(), None)),
                 }
             } else {
-                keys.push(key_bytes.to_vec());
+                let history_key = rmp_serde::from_slice::<PersistedJobEntry>(&value_bytes)
+                    .ok()
+                    .map(|entry| {
+                        job_history_key(
+                            &entry.tenant,
+                            entry.started_at.timestamp_millis(),
+                            &entry.id,
+                        )
+                    });
+                keys.push((key_bytes.to_vec(), history_key));
             }
         }
 
         let count = keys.len();
         if count > 0 {
             let mut batch = WriteBatch::default();
-            for key in &keys {
+            for (key, history_key) in &keys {
                 batch.delete_cf(cf_metadata, key);
                 batch.delete_cf(cf_data, key);
+                if let Some(history_key) = history_key {
+                    batch.delete_cf(cf_metadata, history_key);
+                }
             }
             self.db.write(batch).map_err(|e| {
                 raisin_error::Error::storage(format!("Failed to purge jobs: {}", e))

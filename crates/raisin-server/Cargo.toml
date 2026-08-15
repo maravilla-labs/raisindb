@@ -106,6 +106,7 @@ raisin-locks = { path = "../raisin-locks" }
 raisin-deps = { path = "../raisin-deps" }
 include_dir = "0.7"
 zip = "2.2"
+base64 = { workspace = true }
 
 [[bin]]
 name = "raisin-server"

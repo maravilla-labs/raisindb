@@ -156,3 +156,54 @@ fn test_list_for_tenant_isolation() {
     let none = store.list_for_tenant("tenant-c").unwrap();
     assert!(none.is_empty());
 }
+
+#[test]
+fn history_page_uses_newest_first_write_index() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db = crate::open_db(temp_dir.path()).unwrap();
+    let store = JobMetadataStore::new(Arc::new(db));
+    let context = create_test_context();
+
+    let first_id = JobId::new();
+    let mut first = create_test_entry(&first_id.0);
+    first.started_at = Utc::now() - chrono::Duration::seconds(10);
+    store.put_with_context(&first_id, &first, &context).unwrap();
+
+    let second_id = JobId::new();
+    let mut second = create_test_entry(&second_id.0);
+    second.started_at = Utc::now();
+    store
+        .put_with_context(&second_id, &second, &context)
+        .unwrap();
+
+    let (page_one, cursor) = store.list_history_page("test-tenant", 1, None).unwrap();
+    assert_eq!(page_one[0].0, second_id);
+    let (page_two, _) = store
+        .list_history_page("test-tenant", 1, cursor.as_deref())
+        .unwrap();
+    assert_eq!(page_two[0].0, first_id);
+}
+
+#[test]
+fn history_backfill_is_bounded_and_resumable() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db = crate::open_db(temp_dir.path()).unwrap();
+    let store = JobMetadataStore::new(Arc::new(db));
+    let context = create_test_context();
+
+    for _ in 0..2 {
+        let id = JobId::new();
+        let entry = create_test_entry(&id.0);
+        store.put_with_context(&id, &entry, &context).unwrap();
+    }
+
+    let (first_indexed, cursor) = store
+        .backfill_history_index_page("test-tenant", 1, None)
+        .unwrap();
+    assert_eq!(first_indexed, 1);
+    let (second_indexed, next_cursor) = store
+        .backfill_history_index_page("test-tenant", 1, cursor.as_deref())
+        .unwrap();
+    assert_eq!(second_indexed, 1);
+    assert!(next_cursor.is_some());
+}

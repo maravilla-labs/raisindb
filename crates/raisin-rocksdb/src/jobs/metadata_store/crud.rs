@@ -1,7 +1,7 @@
 //! Core CRUD operations for job metadata
 
 use super::{JobMetadataStore, PersistedJobEntry};
-use crate::keys::job_key;
+use crate::keys::{job_history_key, job_key};
 use crate::{cf, cf_handle};
 use raisin_error::Result;
 use raisin_storage::jobs::{JobContext, JobId};
@@ -22,6 +22,11 @@ impl JobMetadataStore {
         let cf_data = cf_handle(&self.db, cf::JOB_DATA)?;
 
         let key = job_key(&context.tenant_id, job_id.as_str());
+        let history_key = job_history_key(
+            &context.tenant_id,
+            entry.started_at.timestamp_millis(),
+            job_id.as_str(),
+        );
 
         // Serialize both metadata and context
         let metadata_value = rmp_serde::to_vec(entry).map_err(|e| {
@@ -35,6 +40,9 @@ impl JobMetadataStore {
         // Atomic write using WriteBatch
         let mut batch = WriteBatch::default();
         batch.put_cf(cf_metadata, &key, metadata_value);
+        // The index record carries the metadata key, keeping page reads to
+        // `limit` point lookups instead of one history-wide scan.
+        batch.put_cf(cf_metadata, history_key, &key);
         batch.put_cf(cf_data, &key, context_value);
 
         self.db.write(batch).map_err(|e| {
@@ -50,12 +58,20 @@ impl JobMetadataStore {
     pub fn update(&self, job_id: &JobId, entry: &PersistedJobEntry) -> Result<()> {
         let cf = cf_handle(&self.db, cf::JOB_METADATA)?;
         let key = job_key(&entry.tenant, job_id.as_str());
+        let history_key = job_history_key(
+            &entry.tenant,
+            entry.started_at.timestamp_millis(),
+            job_id.as_str(),
+        );
 
         let value = rmp_serde::to_vec(entry).map_err(|e| {
             raisin_error::Error::storage(format!("Failed to serialize job metadata: {}", e))
         })?;
 
-        self.db.put_cf(cf, &key, value).map_err(|e| {
+        let mut batch = WriteBatch::default();
+        batch.put_cf(cf, &key, value);
+        batch.put_cf(cf, history_key, &key);
+        self.db.write(batch).map_err(|e| {
             raisin_error::Error::storage(format!("Failed to update job metadata: {}", e))
         })?;
 

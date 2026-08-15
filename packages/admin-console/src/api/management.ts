@@ -202,6 +202,11 @@ export interface JobQueueStats {
   categories?: CategoryQueueDepthStats[]
 }
 
+export interface HistoryBackfillResponse {
+  indexed: number
+  next_cursor?: string
+}
+
 export interface QueueDepthStats {
   high_queue_len: number
   high_queue_capacity: number
@@ -227,6 +232,7 @@ export interface WorkerStats {
 }
 
 export interface PersistedStats {
+  count_known?: boolean
   total_entries: number
   orphaned_entries: number
 }
@@ -394,6 +400,12 @@ export const managementApi = {
   // Job queue management endpoints
   getJobQueueStats: () =>
     api.get<ApiResponse<JobQueueStats>>('/management/jobs/stats'),
+
+  backfillJobHistory: (cursor?: string) =>
+    api.post<ApiResponse<HistoryBackfillResponse>>(
+      '/management/jobs/history/backfill',
+      { cursor, limit: 500 }
+    ),
 
   purgeAllJobs: () =>
     api.post<ApiResponse<{ purged: number }>>('/management/jobs/purge-all'),

@@ -6863,6 +6863,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "bcrypt 0.16.0",
  "bytes",
  "chrono",

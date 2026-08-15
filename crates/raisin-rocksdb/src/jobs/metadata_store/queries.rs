@@ -1,10 +1,11 @@
 //! Query operations for job metadata (list by status, list all)
 
 use super::{JobMetadataStore, PersistedJobEntry};
-use crate::keys::job_tenant_prefix;
+use crate::keys::{is_job_history_key, job_history_key, job_history_prefix, job_tenant_prefix};
 use crate::{cf, cf_handle};
 use raisin_error::Result;
 use raisin_storage::jobs::{JobId, JobStatus};
+use rocksdb::WriteBatch;
 
 /// Split a `{tenant}\0{job_id}` key into (tenant, job_id). Returns None for
 /// malformed keys (no separator).
@@ -16,6 +17,120 @@ fn split_key(key: &[u8]) -> Option<(String, JobId)> {
 }
 
 impl JobMetadataStore {
+    /// Write up to `limit` missing history-index records for one tenant.
+    ///
+    /// This is an explicit migration operation, not a read path. `cursor` is
+    /// the last raw metadata key scanned and is intentionally opaque so a
+    /// caller can resume in a later bounded request.
+    pub fn backfill_history_index_page(
+        &self,
+        tenant: &str,
+        limit: usize,
+        cursor: Option<&[u8]>,
+    ) -> Result<(usize, Option<Vec<u8>>)> {
+        let cf = cf_handle(&self.db, cf::JOB_METADATA)?;
+        let prefix = job_tenant_prefix(tenant);
+        let start = cursor.unwrap_or(&prefix);
+        let mut batch = WriteBatch::default();
+        let mut indexed = 0;
+        let mut scanned = 0;
+        let mut next = None;
+
+        for item in self.db.iterator_cf(
+            cf,
+            rocksdb::IteratorMode::From(start, rocksdb::Direction::Forward),
+        ) {
+            let (metadata_key, value) = item.map_err(|e| {
+                raisin_error::Error::storage(format!(
+                    "Failed to scan job metadata for backfill: {e}"
+                ))
+            })?;
+            if !metadata_key.starts_with(&prefix) {
+                break;
+            }
+            if cursor.is_some_and(|cursor| metadata_key.as_ref() == cursor) {
+                continue;
+            }
+
+            scanned += 1;
+            next = Some(metadata_key.to_vec());
+            if let Ok(entry) = rmp_serde::from_slice::<PersistedJobEntry>(&value) {
+                if entry.tenant == tenant {
+                    batch.put_cf(
+                        cf,
+                        job_history_key(tenant, entry.started_at.timestamp_millis(), &entry.id),
+                        &metadata_key,
+                    );
+                    indexed += 1;
+                }
+            }
+            if scanned == limit {
+                break;
+            }
+        }
+
+        if indexed > 0 {
+            self.db.write(batch).map_err(|e| {
+                raisin_error::Error::storage(format!(
+                    "Failed to write job history index backfill: {e}"
+                ))
+            })?;
+        }
+
+        // A cursor is returned only after a full page. An extra empty request
+        // is harmless and lets the caller determine that it reached the end.
+        Ok((indexed, (scanned == limit).then_some(next).flatten()))
+    }
+
+    /// Read one newest-first history page from the write-maintained index.
+    /// `cursor` is the last index key from the previous page; callers keep it
+    /// opaque. This performs at most `limit` metadata point reads.
+    pub fn list_history_page(
+        &self,
+        tenant: &str,
+        limit: usize,
+        cursor: Option<&[u8]>,
+    ) -> Result<(Vec<(JobId, PersistedJobEntry)>, Option<Vec<u8>>)> {
+        let cf = cf_handle(&self.db, cf::JOB_METADATA)?;
+        let prefix = job_history_prefix(tenant);
+        let mut out = Vec::with_capacity(limit);
+        let mut next = None;
+        let start = cursor.unwrap_or(&prefix);
+
+        for item in self.db.iterator_cf(
+            cf,
+            rocksdb::IteratorMode::From(start, rocksdb::Direction::Forward),
+        ) {
+            let (index_key, metadata_key) = item.map_err(|e| {
+                raisin_error::Error::storage(format!("Failed to iterate job history index: {e}"))
+            })?;
+            if !index_key.starts_with(&prefix) {
+                break;
+            }
+            if cursor.is_some_and(|cursor| index_key.as_ref() == cursor) {
+                continue;
+            }
+            let Some(value) = self.db.get_cf(cf, &metadata_key).map_err(|e| {
+                raisin_error::Error::storage(format!("Failed to read indexed job metadata: {e}"))
+            })?
+            else {
+                continue;
+            };
+            let Ok(entry) = rmp_serde::from_slice::<PersistedJobEntry>(&value) else {
+                continue;
+            };
+            let job_id = split_key(&metadata_key)
+                .map(|(_, id)| id)
+                .unwrap_or_else(|| JobId::from_string(entry.id.clone()));
+            out.push((job_id, entry));
+            next = Some(index_key.to_vec());
+            if out.len() == limit {
+                break;
+            }
+        }
+
+        Ok((out, next))
+    }
     /// List all jobs matching specific statuses across every tenant.
     ///
     /// Used for crash recovery to find pending/running jobs that need restoration.
@@ -111,9 +226,12 @@ impl JobMetadataStore {
             .db
             .iterator_cf(cf_metadata, rocksdb::IteratorMode::Start);
         for item in iter {
-            let (_, value_bytes) = item.map_err(|e| {
+            let (key_bytes, value_bytes) = item.map_err(|e| {
                 raisin_error::Error::storage(format!("Failed to iterate job metadata: {}", e))
             })?;
+            if is_job_history_key(&key_bytes) {
+                continue;
+            }
 
             total += 1;
             if rmp_serde::from_slice::<PersistedJobEntry>(&value_bytes).is_err() {
@@ -137,6 +255,9 @@ impl JobMetadataStore {
             let (key_bytes, value_bytes) = item.map_err(|e| {
                 raisin_error::Error::storage(format!("Failed to iterate job metadata: {}", e))
             })?;
+            if is_job_history_key(&key_bytes) {
+                continue;
+            }
             if !key_bytes.starts_with(&prefix) {
                 break;
             }

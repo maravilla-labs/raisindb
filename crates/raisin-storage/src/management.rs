@@ -127,20 +127,20 @@ pub trait BackgroundJobs: Send + Sync {
     /// branch / workspace from its persisted job context), optionally
     /// filtered to a repository.
     ///
-    /// Jobs whose scope is unknown (no persisted context — system jobs,
-    /// legacy entries) are always included, even when a `repo` filter is
-    /// given, so a repository view never silently hides work it may own.
-    /// Backends without context storage return every job unscoped.
+    /// When `repo` is supplied, only jobs whose persisted execution context
+    /// names that exact repository may be returned. Jobs with an unknown scope
+    /// (legacy or system jobs) belong only in the tenant-wide view: including
+    /// them in a repository page would leak work from other repositories.
+    /// Backends without context storage return no rows for a repository filter.
     async fn list_jobs_with_scope(
         &self,
         tenant: &str,
         repo: Option<&str>,
     ) -> Result<Vec<crate::ScopedJobInfo>> {
-        let _ = repo;
-        Ok(self
-            .list_jobs(tenant)
-            .await?
+        let jobs = self.list_jobs(tenant).await?;
+        Ok(jobs
             .into_iter()
+            .filter(|_| repo.is_none())
             .map(|info| crate::ScopedJobInfo { info, scope: None })
             .collect())
     }
@@ -270,6 +270,13 @@ pub struct WorkerStats {
 /// Persisted job storage statistics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedStats {
+    /// Whether these values were obtained without a full history scan.
+    ///
+    /// `false` means the server intentionally did not count persisted history
+    /// on this request. A real-time queue view must never deserialize an
+    /// unbounded archive merely to render a counter.
+    #[serde(default)]
+    pub count_known: bool,
     pub total_entries: usize,
     pub orphaned_entries: usize,
 }

@@ -154,6 +154,10 @@ pub fn management_router(
         // ops filter by tenant. The true cross-tenant variants live under
         // `/management/admin/jobs/*`.
         .route("/management/jobs", get(jobs::list_jobs))
+        .route(
+            "/management/jobs/history/backfill",
+            post(jobs::backfill_job_history_index),
+        )
         .route("/management/jobs/{id}", get(jobs::get_job_status))
         .route("/management/jobs/{id}/info", get(jobs::get_job_info))
         .route(

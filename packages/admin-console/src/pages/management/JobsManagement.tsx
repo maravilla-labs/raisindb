@@ -86,7 +86,6 @@ function formatRelativeTime(dateStr: string): string {
 export default function JobsManagement() {
   const [jobs, setJobs] = useState<JobInfo[]>([])
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
   const [connected, setConnected] = useState(false)
   const [expandedJobId, setExpandedJobId] = useState<string | null>(null)
   const [showDetailsModal, setShowDetailsModal] = useState<{ job: JobInfo } | null>(null)
@@ -104,6 +103,8 @@ export default function JobsManagement() {
   // Queue stats state
   const [queueStats, setQueueStats] = useState<JobQueueStats | null>(null)
   const [purgeConfirm, setPurgeConfirm] = useState<{ type: 'all' | 'orphaned' | 'force-fail'; message: string } | null>(null)
+  const [historyCursor, setHistoryCursor] = useState<string | undefined>()
+  const [historyBackfillRunning, setHistoryBackfillRunning] = useState(false)
 
   // Real-time streaming logs per job
   const [jobLogs, setJobLogs] = useState<Map<string, JobLogEvent[]>>(new Map())
@@ -166,11 +167,35 @@ export default function JobsManagement() {
   }, [jobs, typeFilter, statusFilter, pathFilter])
 
   const hasActiveFilters = typeFilter !== 'all' || statusFilter !== 'all' || pathFilter !== ''
+  const persistedCountKnown = queueStats?.persisted.count_known !== false
 
   const clearFilters = () => {
     setTypeFilter('all')
     setStatusFilter('all')
     setPathFilter('')
+  }
+
+  // A single explicit, capped maintenance page. This is intentionally not an
+  // automatic loop: each click scans at most 500 legacy records and the
+  // opaque cursor lets an operator resume the next page.
+  const backfillHistoryIndex = async () => {
+    setHistoryBackfillRunning(true)
+    try {
+      const response = await managementApi.backfillJobHistory(historyCursor)
+      if (!response.success || !response.data) {
+        throw new Error(response.error || 'History index backfill failed')
+      }
+      setHistoryCursor(response.data.next_cursor)
+      showSuccess(
+        response.data.next_cursor
+          ? `Indexed ${response.data.indexed} jobs. Another 500-record page is available.`
+          : `Indexed ${response.data.indexed} jobs. History index is complete.`
+      )
+    } catch (error) {
+      showError(error instanceof Error ? error.message : 'History index backfill failed')
+    } finally {
+      setHistoryBackfillRunning(false)
+    }
   }
 
   // Auto-scroll log container when new logs arrive for expanded job
@@ -188,7 +213,9 @@ export default function JobsManagement() {
     return () => clearInterval(interval)
   }, [])
 
-  // Poll queue stats every 5 seconds
+  // One cheap queue snapshot is enough for the static capacities and worker
+  // count. Job state itself is driven by the SSE stream below: polling this
+  // endpoint used to make the live page repeatedly scan persisted history.
   useEffect(() => {
     const fetchStats = async () => {
       try {
@@ -201,28 +228,7 @@ export default function JobsManagement() {
       }
     }
     fetchStats()
-    const interval = setInterval(fetchStats, 5000)
-    return () => clearInterval(interval)
-  }, [])
-
-  // Fetch initial jobs
-  useEffect(() => {
-    const fetchJobs = async () => {
-      try {
-        const response = await managementApi.listJobs()
-        if (response.success && response.data) {
-          setJobs(response.data)
-        } else {
-          setError(response.error || 'Failed to fetch jobs')
-        }
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to fetch jobs')
-      } finally {
-        setLoading(false)
-      }
-    }
-
-    fetchJobs()
+    // No interval: live job transitions arrive through SSE.
   }, [])
 
   // Connect to SSE for live job updates
@@ -279,6 +285,7 @@ export default function JobsManagement() {
       },
       onOpen: () => {
         setConnected(true)
+        setLoading(false)
       },
       onError: () => {
         setConnected(false)
@@ -512,16 +519,6 @@ export default function JobsManagement() {
     )
   }
 
-  if (error) {
-    return (
-      <div className="pt-8">
-        <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-4 text-red-300">
-          {error}
-        </div>
-      </div>
-    )
-  }
-
   const handlePurge = async (type: 'all' | 'orphaned' | 'force-fail') => {
     try {
       if (type === 'force-fail') {
@@ -649,9 +646,9 @@ export default function JobsManagement() {
                   Workers: <span className="font-mono text-white">{queueStats.workers.pool_size}</span>
                 </span>
                 <span>
-                  Persisted: <span className="font-mono text-white">{queueStats.persisted.total_entries}</span>
+                  Archive: <span className="font-mono text-white">{persistedCountKnown ? queueStats.persisted.total_entries : 'not indexed'}</span>
                 </span>
-                {queueStats.persisted.orphaned_entries > 0 && (
+                {persistedCountKnown && queueStats.persisted.orphaned_entries > 0 && (
                   <span className="text-yellow-400 flex items-center gap-1">
                     <AlertTriangle className="w-3 h-3" />
                     {queueStats.persisted.orphaned_entries} orphaned
@@ -712,8 +709,8 @@ export default function JobsManagement() {
                   <span className="text-xs text-zinc-500">workers</span>
                 </div>
                 <div className="flex items-center gap-2 mt-1">
-                  <span className="text-xs text-zinc-400">{queueStats.persisted.total_entries} stored</span>
-                  {queueStats.persisted.orphaned_entries > 0 && (
+                  <span className="text-xs text-zinc-400">{persistedCountKnown ? `${queueStats.persisted.total_entries} stored` : 'archive count not indexed'}</span>
+                  {persistedCountKnown && queueStats.persisted.orphaned_entries > 0 && (
                     <span className="text-xs text-yellow-400 flex items-center gap-1">
                       <AlertTriangle className="w-3 h-3" />
                       {queueStats.persisted.orphaned_entries} orphaned
@@ -724,15 +721,22 @@ export default function JobsManagement() {
             </div>
           )}
           {/* Purge Actions */}
-          {queueStats.persisted.total_entries > 0 && (
-            <div className="mt-3 pt-3 border-t border-white/10 flex items-center gap-2">
-              <button
+          <div className="mt-3 pt-3 border-t border-white/10 flex items-center gap-2">
+            <button
+              onClick={backfillHistoryIndex}
+              disabled={historyBackfillRunning}
+              className="px-3 py-1.5 text-xs bg-primary-500/20 text-primary-300 border border-primary-500/30 rounded hover:bg-primary-500/30 transition-colors disabled:opacity-50"
+              title="Explicitly index one bounded 500-record page of historical jobs. This never runs automatically."
+            >
+              {historyBackfillRunning ? 'Indexing…' : historyCursor ? 'Index Next 500 History Jobs' : 'Index 500 History Jobs'}
+            </button>
+            <button
                 onClick={() => setPurgeConfirm({ type: 'force-fail', message: 'Force-fail all jobs stuck in Running/Executing state for more than 10 minutes?' })}
                 className="px-3 py-1.5 text-xs bg-orange-500/20 text-orange-300 border border-orange-500/30 rounded hover:bg-orange-500/30 transition-colors"
               >
                 Force Fail Stuck
               </button>
-              {queueStats.persisted.orphaned_entries > 0 && (
+              {persistedCountKnown && queueStats.persisted.orphaned_entries > 0 && (
                 <button
                   onClick={() => setPurgeConfirm({ type: 'orphaned', message: `Purge ${queueStats.persisted.orphaned_entries} orphaned (undeserializable) job entries?` })}
                   className="px-3 py-1.5 text-xs bg-yellow-500/20 text-yellow-300 border border-yellow-500/30 rounded hover:bg-yellow-500/30 transition-colors"
@@ -741,13 +745,12 @@ export default function JobsManagement() {
                 </button>
               )}
               <button
-                onClick={() => setPurgeConfirm({ type: 'all', message: `Purge ALL ${queueStats.persisted.total_entries} job entries from persistent storage? This cannot be undone.` })}
+                onClick={() => setPurgeConfirm({ type: 'all', message: persistedCountKnown ? `Purge ALL ${queueStats.persisted.total_entries} job entries from persistent storage? This cannot be undone.` : 'Purge all persisted job entries? The archive count is intentionally not scanned. This cannot be undone.' })}
                 className="px-3 py-1.5 text-xs bg-red-500/20 text-red-300 border border-red-500/30 rounded hover:bg-red-500/30 transition-colors"
               >
                 Purge All Jobs
               </button>
-            </div>
-          )}
+          </div>
         </GlassCard>
       )}
 

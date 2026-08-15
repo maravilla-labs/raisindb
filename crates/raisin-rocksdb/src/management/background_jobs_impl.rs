@@ -25,7 +25,7 @@ const MAX_LISTED_JOBS: usize = 1_000;
 const MAX_INLINE_RESULT_BYTES: usize = 64 * 1024;
 
 impl RocksDBStorage {
-    /// List a tenant's jobs by merging the persisted metadata store with the
+    /// List a tenant's jobs by merging the indexed persisted history with the
     /// in-memory registry.
     ///
     /// Persisted entries survive restarts and registry eviction (24h
@@ -39,19 +39,29 @@ impl RocksDBStorage {
         &self,
         tenant: &str,
     ) -> Result<Vec<raisin_storage::JobInfo>> {
-        // Bounded: newest MAX_LISTED_JOBS with oversized results truncated.
-        // An unbounded scan here detonated production RSS the moment the
-        // admin-console jobs page (or its SSE stream) was opened against a
-        // runaway backlog.
-        let persisted = self.job_metadata_store().list_recent_for_tenant(
-            tenant,
-            MAX_LISTED_JOBS,
-            MAX_INLINE_RESULT_BYTES,
-        )?;
+        // Bounded: the write-maintained newest-first index reaches only this
+        // page's records and each index entry causes one metadata point read.
+        // Do not replace this with a tenant-prefix scan: that was the source
+        // of the production page-open RSS/CPU spike. Legacy records appear
+        // after the explicitly triggered cursor backfill has indexed them.
+        let (persisted, _) =
+            self.job_metadata_store()
+                .list_history_page(tenant, MAX_LISTED_JOBS, None)?;
 
         let mut merged: std::collections::HashMap<JobId, raisin_storage::JobInfo> = persisted
             .into_iter()
-            .map(|(job_id, entry)| {
+            .map(|(job_id, mut entry)| {
+                if let Some(result) = &entry.result {
+                    let size = serde_json::to_vec(result)
+                        .map(|value| value.len())
+                        .unwrap_or(0);
+                    if size > MAX_INLINE_RESULT_BYTES {
+                        entry.result = Some(serde_json::json!({
+                            "$truncated": true,
+                            "size": size,
+                        }));
+                    }
+                }
                 (
                     job_id.clone(),
                     raisin_storage::JobInfo {
@@ -182,7 +192,8 @@ impl BackgroundJobs for RocksDBStorage {
     }
 
     /// List jobs with their execution scope from the persisted job context,
-    /// optionally filtered to a repository (unknown scopes pass the filter).
+    /// optionally filtered to a repository. Repository views are strict:
+    /// unknown scopes never pass a repository filter.
     async fn list_jobs_with_scope(
         &self,
         tenant: &str,
@@ -201,8 +212,8 @@ impl BackgroundJobs for RocksDBStorage {
                     branch: ctx.branch,
                     workspace: ctx.workspace_id,
                 });
-            if let (Some(want), Some(s)) = (repo, scope.as_ref()) {
-                if s.repo != want {
+            if let Some(want) = repo {
+                if scope.as_ref().is_none_or(|scope| scope.repo != want) {
                     continue;
                 }
             }
@@ -342,9 +353,6 @@ impl BackgroundJobs for RocksDBStorage {
 
     /// Get job queue statistics for the given tenant.
     async fn get_job_queue_stats(&self, tenant: &str) -> Result<JobQueueStats> {
-        let (total_entries, orphaned_entries) =
-            self.job_metadata_store().count_entries_for_tenant(tenant)?;
-
         let (queue, pool_size, categories) = if let Some(stats) = self.job_dispatcher_stats() {
             // Build per-category breakdown
             let mut cat_stats: Vec<CategoryQueueDepthStats> = stats
@@ -400,8 +408,14 @@ impl BackgroundJobs for RocksDBStorage {
             queue,
             workers: WorkerStats { pool_size },
             persisted: PersistedStats {
-                total_entries,
-                orphaned_entries,
+                // Never scan and deserialize an entire tenant job archive on
+                // the request path. This endpoint backs the live console and
+                // is called while jobs are being processed. Historical counts
+                // are deliberately reported as unknown; the separate history
+                // index is maintained for bounded archive browsing instead.
+                count_known: false,
+                total_entries: 0,
+                orphaned_entries: 0,
             },
             categories,
         })

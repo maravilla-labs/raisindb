@@ -23,7 +23,7 @@ use axum::{
     Extension,
 };
 use futures::stream::Stream;
-use raisin_storage::jobs::{JobEvent, JobInfo, JobLogEntry, JobMonitor};
+use raisin_storage::jobs::{JobEvent, JobInfo, JobLogEntry, JobMonitor, JobRegistry};
 use raisin_storage::BackgroundJobs;
 use raisin_transport_http::middleware::TenantInfo;
 use std::{convert::Infallible, sync::Arc, time::Duration};
@@ -40,23 +40,56 @@ pub(crate) enum SseEvent {
 /// SSE monitor that sends job events and log entries to connected clients
 pub struct SseJobMonitor {
     sender: mpsc::Sender<SseEvent>,
+    tenant_id: Option<String>,
+    registry: Option<Arc<JobRegistry>>,
 }
 
 impl SseJobMonitor {
     /// Create a new SSE monitor with the given channel sender
     pub(crate) fn new(sender: mpsc::Sender<SseEvent>) -> Self {
-        Self { sender }
+        Self {
+            sender,
+            tenant_id: None,
+            registry: None,
+        }
+    }
+
+    /// A monitor dedicated to one authenticated tenant. Filtering here, at
+    /// the subscription boundary, is essential for logs: log entries carry a
+    /// job ID but not a tenant ID.
+    pub(crate) fn for_tenant(
+        sender: mpsc::Sender<SseEvent>,
+        tenant_id: String,
+        registry: Arc<JobRegistry>,
+    ) -> Self {
+        Self {
+            sender,
+            tenant_id: Some(tenant_id),
+            registry: Some(registry),
+        }
+    }
+
+    fn accepts_job(&self, job: &JobInfo) -> bool {
+        self.tenant_id
+            .as_deref()
+            .is_none_or(|tenant| job.tenant == tenant)
     }
 }
 
 #[async_trait]
 impl JobMonitor for SseJobMonitor {
     async fn on_job_update(&self, event: JobEvent) {
+        if !self.accepts_job(&event.job_info) {
+            return;
+        }
         // Ignore send errors (client disconnected)
         let _ = self.sender.send(SseEvent::JobUpdate(Box::new(event))).await;
     }
 
     async fn on_job_created(&self, job: &JobInfo) {
+        if !self.accepts_job(job) {
+            return;
+        }
         // Create a synthetic event for job creation
         let event = JobEvent {
             job_id: job.id.clone(),
@@ -102,6 +135,14 @@ impl JobMonitor for SseJobMonitor {
     }
 
     async fn on_job_log(&self, entry: JobLogEntry) {
+        if let (Some(tenant), Some(registry)) = (&self.tenant_id, &self.registry) {
+            let Ok(job) = registry.get_job_info(&entry.job_id).await else {
+                return;
+            };
+            if job.tenant != *tenant {
+                return;
+            }
+        }
         tracing::debug!(
             job_id = %entry.job_id,
             level = %entry.level,
@@ -135,33 +176,39 @@ pub async fn job_events_stream_rocksdb(
     let (tx, rx) = mpsc::channel::<SseEvent>(100);
 
     // Create and register the monitor with the instance-based registry
-    let monitor = Arc::new(SseJobMonitor::new(tx.clone()));
     let registry = storage.job_registry();
+    let monitor = Arc::new(SseJobMonitor::for_tenant(
+        tx.clone(),
+        tenant_id.clone(),
+        registry.clone(),
+    ));
     // Held by the stream below, so the registration goes away with the
     // connection. `add_monitor` on its own is process-lifetime and would leak
     // one monitor per connect — including every EventSource auto-reconnect.
     let monitor_guard = registry.monitors().register(monitor).await;
 
-    // Send initial state - only jobs for this tenant
+    // Send bounded live state only. Loading persisted history here used to
+    // prefix-scan and deserialize a tenant's entire job archive every time an
+    // EventSource connected or reconnected. The registry is the operational
+    // view (active jobs plus its bounded retention window); history is a
+    // separate, cursor-paginated surface.
     let storage_clone = storage.clone();
     let tx_clone = tx.clone();
     let tenant_id_clone = tenant_id.clone();
     tokio::spawn(async move {
-        if let Ok(jobs) = storage_clone.list_jobs(&tenant_id_clone).await {
-            for job in jobs {
-                // Defensive: should already be tenant-scoped by list_jobs.
-                if job.tenant != tenant_id_clone {
-                    continue;
-                }
-                let event = JobEvent {
-                    job_id: job.id.clone(),
-                    job_info: job.clone(),
-                    old_status: None,
-                    new_status: job.status.clone(),
-                    timestamp: chrono::Utc::now(),
-                };
-                let _ = tx_clone.send(SseEvent::JobUpdate(Box::new(event))).await;
-            }
+        let jobs = storage_clone
+            .job_registry()
+            .list_jobs_by_tenant(&tenant_id_clone)
+            .await;
+        for job in jobs {
+            let event = JobEvent {
+                job_id: job.id.clone(),
+                job_info: job.clone(),
+                old_status: None,
+                new_status: job.status.clone(),
+                timestamp: chrono::Utc::now(),
+            };
+            let _ = tx_clone.send(SseEvent::JobUpdate(Box::new(event))).await;
         }
     });
 
@@ -172,13 +219,9 @@ pub async fn job_events_stream_rocksdb(
             // SECURITY: Only stream events for the authenticated tenant
             match sse_event {
                 SseEvent::JobUpdate(event) => event.job_info.tenant == tenant_id,
-                SseEvent::JobLog(entry) => {
-                    // Log entries are associated with jobs; tenant filtering is done via the
-                    // monitor registration (only jobs for this tenant emit logs)
-                    // We trust the job system to only emit logs for properly-scoped jobs
-                    let _ = entry;
-                    true
-                }
+                // Logs are filtered by the tenant-bound monitor before they
+                // reach this channel. Their payload has no tenant field.
+                SseEvent::JobLog(_) => true,
             }
         })
         .map(move |sse_event| {
