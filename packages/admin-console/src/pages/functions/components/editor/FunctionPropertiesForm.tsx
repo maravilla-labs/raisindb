@@ -6,9 +6,9 @@
  */
 
 import { useState } from 'react'
-import { ToggleLeft, ToggleRight, Braces, Check, ChevronDown, ChevronRight, Globe, Cpu } from 'lucide-react'
+import { ToggleLeft, ToggleRight, Braces, Check, ChevronDown, ChevronRight, Globe, Cpu, KeyRound, Mail } from 'lucide-react'
 import Editor from '@monaco-editor/react'
-import type { FunctionProperties, FunctionLanguage, ExecutionMode, NetworkPolicy, ResourceLimits } from '../../types'
+import type { FunctionProperties, FunctionLanguage, ExecutionMode, NetworkPolicy, ResourceLimits, SecretPolicy, EmailPolicy } from '../../types'
 
 /** Default network policy values */
 const DEFAULT_NETWORK_POLICY: NetworkPolicy = {
@@ -16,6 +16,24 @@ const DEFAULT_NETWORK_POLICY: NetworkPolicy = {
   allowed_urls: [],
   request_timeout_ms: 30000,
   max_concurrent_requests: 10,
+}
+
+/**
+ * Defaults for the two deny-by-default policies.
+ *
+ * Both start `enabled: false` with an empty list, matching the server: an omitted
+ * block grants nothing. Unlike the network policy — whose `http_enabled` default
+ * is `true` — there is no permissive default to preserve here, so the form must
+ * not invent one.
+ */
+const DEFAULT_SECRET_POLICY: SecretPolicy = {
+  enabled: false,
+  allowed_names: [],
+}
+
+const DEFAULT_EMAIL_POLICY: EmailPolicy = {
+  enabled: false,
+  allowed_recipients: [],
 }
 
 /** Default resource limits values */
@@ -68,6 +86,79 @@ function Field({ label, children, hint }: FieldProps) {
       {children}
       {hint && <p className="text-xs text-gray-500 mt-1">{hint}</p>}
     </div>
+  )
+}
+
+/** Enabled/disabled pill, shared by the two policy sections. */
+function PolicyToggle({
+  label,
+  enabled,
+  disabled,
+  onToggle,
+}: {
+  label: string
+  enabled: boolean
+  disabled: boolean
+  onToggle: () => void
+}) {
+  return (
+    <div className="flex items-center justify-between">
+      <label className="text-xs text-gray-400">{label}</label>
+      <button
+        type="button"
+        onClick={onToggle}
+        disabled={disabled}
+        className={`flex items-center gap-1.5 px-2 py-1 rounded text-xs transition-colors
+          ${enabled
+            ? 'bg-green-500/20 text-green-300 hover:bg-green-500/30'
+            : 'bg-red-500/20 text-red-300 hover:bg-red-500/30'
+          }
+          disabled:opacity-50 disabled:cursor-not-allowed
+        `}
+      >
+        {enabled ? (
+          <>
+            <ToggleRight className="w-3 h-3" />
+            Enabled
+          </>
+        ) : (
+          <>
+            <ToggleLeft className="w-3 h-3" />
+            Disabled
+          </>
+        )}
+      </button>
+    </div>
+  )
+}
+
+/**
+ * Newline-separated allow-list editor, shared by the two policy sections.
+ *
+ * Keeps empty lines while typing (so a newline is not eaten mid-edit) and only
+ * prunes them on blur — the same two-handler pattern the allowed_urls field uses.
+ */
+function PolicyList({
+  value,
+  placeholder,
+  disabled,
+  onChange,
+}: {
+  value: string[]
+  placeholder: string
+  disabled: boolean
+  onChange: (next: string[]) => void
+}) {
+  return (
+    <textarea
+      value={value.join('\n')}
+      onChange={(e) => onChange(e.target.value.split('\n'))}
+      onBlur={(e) => onChange(e.target.value.split('\n').filter((v) => v.trim()))}
+      placeholder={placeholder}
+      disabled={disabled}
+      rows={3}
+      className="w-full px-2 py-1.5 bg-white/5 border border-white/10 rounded text-sm text-gray-200 placeholder:text-gray-600 focus:outline-none focus:border-blue-500/50 disabled:opacity-50 font-mono text-xs resize-none"
+    />
   )
 }
 
@@ -421,6 +512,121 @@ export function FunctionPropertiesForm({
               className={`${inputClass} w-24`}
             />
             <span className="text-xs text-gray-500">requests</span>
+          </div>
+        </div>
+      </CollapsibleSection>
+
+      {/* Secret Policy Section */}
+      <CollapsibleSection
+        title="Secret Policy"
+        icon={<KeyRound className="w-4 h-4 text-amber-400" />}
+        defaultOpen={!!(properties.secret_policy?.allowed_names?.length)}
+      >
+        <div className="space-y-3">
+          <p className="text-xs text-gray-500">
+            Gates <code className="bg-white/10 px-1 rounded">raisin.secrets.*</code>. Deny-by-default:
+            left off, or on with an empty list, it grants <strong>no access at all</strong>.
+          </p>
+
+          <PolicyToggle
+            label="Secrets Enabled"
+            enabled={properties.secret_policy?.enabled ?? false}
+            disabled={disabled}
+            onToggle={() => {
+              const current = properties.secret_policy || DEFAULT_SECRET_POLICY
+              onChange({
+                ...properties,
+                secret_policy: { ...current, enabled: !current.enabled },
+              })
+            }}
+          />
+
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">Allowed Names</label>
+            <p className="text-xs text-gray-500 mb-2">
+              One glob per line, e.g. <code className="bg-white/10 px-1 rounded">stripe/*</code>.
+              Namespace by prefix so one function cannot read another integration&apos;s credentials.
+            </p>
+            <PolicyList
+              value={properties.secret_policy?.allowed_names || []}
+              placeholder={'stripe/platform-key\nstripe/account-id/*'}
+              disabled={disabled}
+              onChange={(allowed_names) => {
+                const current = properties.secret_policy || DEFAULT_SECRET_POLICY
+                onChange({ ...properties, secret_policy: { ...current, allowed_names } })
+              }}
+            />
+            {properties.secret_policy?.enabled &&
+              !(properties.secret_policy?.allowed_names || []).some((n) => n.trim()) && (
+                <p className="text-xs text-amber-300/80 mt-1">
+                  Enabled with an empty list still denies everything.
+                </p>
+              )}
+            {(properties.secret_policy?.allowed_names || []).some((n) => n.trim() === '*') && (
+              <p className="text-xs text-red-300/80 mt-1">
+                <code className="bg-white/10 px-1 rounded">*</code> grants every secret in the
+                repository. A function with this and HTTP access can exfiltrate all of them.
+              </p>
+            )}
+          </div>
+        </div>
+      </CollapsibleSection>
+
+      {/* Email Policy Section */}
+      <CollapsibleSection
+        title="Email Policy"
+        icon={<Mail className="w-4 h-4 text-sky-400" />}
+        defaultOpen={!!(properties.email_policy?.allowed_recipients?.length)}
+      >
+        <div className="space-y-3">
+          <p className="text-xs text-gray-500">
+            Gates <code className="bg-white/10 px-1 rounded">raisin.email.send</code>.
+            Deny-by-default. Mail leaves from the tenant&apos;s verified sending domain, so an
+            ungated function can send authenticated mail <em>as the tenant</em> — the secret policy
+            governs who may read the provider credential, not who may be written to.
+          </p>
+
+          <PolicyToggle
+            label="Email Enabled"
+            enabled={properties.email_policy?.enabled ?? false}
+            disabled={disabled}
+            onToggle={() => {
+              const current = properties.email_policy || DEFAULT_EMAIL_POLICY
+              onChange({
+                ...properties,
+                email_policy: { ...current, enabled: !current.enabled },
+              })
+            }}
+          />
+
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">Allowed Recipients</label>
+            <p className="text-xs text-gray-500 mb-2">
+              One recipient <strong>domain</strong> per line, e.g.{' '}
+              <code className="bg-white/10 px-1 rounded">example.com</code> — a domain, not a full
+              address.
+            </p>
+            <PolicyList
+              value={properties.email_policy?.allowed_recipients || []}
+              placeholder={'example.com\npartners.example.org'}
+              disabled={disabled}
+              onChange={(allowed_recipients) => {
+                const current = properties.email_policy || DEFAULT_EMAIL_POLICY
+                onChange({ ...properties, email_policy: { ...current, allowed_recipients } })
+              }}
+            />
+            {properties.email_policy?.enabled &&
+              !(properties.email_policy?.allowed_recipients || []).some((r) => r.trim()) && (
+                <p className="text-xs text-amber-300/80 mt-1">
+                  Enabled with an empty list still denies everything.
+                </p>
+              )}
+            {(properties.email_policy?.allowed_recipients || []).some((r) => r.trim() === '*') && (
+              <p className="text-xs text-red-300/80 mt-1">
+                <code className="bg-white/10 px-1 rounded">*</code> allows mail to any address on the
+                internet.
+              </p>
+            )}
           </div>
         </div>
       </CollapsibleSection>

@@ -29,6 +29,8 @@ export interface FunctionDetails {
   entrypoint?: string
   resource_limits?: ResourceLimits
   network_policy?: NetworkPolicy
+  secret_policy?: SecretPolicy
+  email_policy?: EmailPolicy
   triggers?: TriggerCondition[]
   input_schema?: Record<string, unknown>
   output_schema?: Record<string, unknown>
@@ -55,6 +57,18 @@ export interface ResourceLimits {
 export interface NetworkPolicy {
   allowed_hosts: string[]
   max_requests_per_execution: number
+}
+
+/** Gates `raisin.secrets.*`. Deny-by-default: absent, disabled, or an empty list all mean no access. */
+export interface SecretPolicy {
+  enabled: boolean
+  allowed_names: string[]
+}
+
+/** Gates `raisin.email.send`. Deny-by-default; `allowed_recipients` holds DOMAINS, not addresses. */
+export interface EmailPolicy {
+  enabled: boolean
+  allowed_recipients: string[]
 }
 
 export interface TriggerCondition {

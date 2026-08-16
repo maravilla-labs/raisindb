@@ -150,6 +150,34 @@ export interface NetworkPolicy {
 }
 
 /**
+ * Secret access policy — gates `raisin.secrets.*`.
+ *
+ * DENY-BY-DEFAULT: an omitted block, `enabled: false`, or an empty
+ * `allowed_names` all mean no access at all. "Opted in" never silently means
+ * "unrestricted", which is why the form surfaces both halves separately.
+ */
+export interface SecretPolicy {
+  enabled: boolean
+  /** Glob patterns, e.g. `stripe/*`. A bare `*` grants every secret. */
+  allowed_names: string[]
+}
+
+/**
+ * Email policy — gates `raisin.email.send`.
+ *
+ * DENY-BY-DEFAULT, for the same reason as SecretPolicy and then some: the
+ * tenant's verified sending domain plus the provider credential is an ambient
+ * capability, so an ungated function could send SPF/DKIM-passing mail as the
+ * tenant. The secret policy governs who may READ the credential; it says nothing
+ * about who may be WRITTEN to.
+ */
+export interface EmailPolicy {
+  enabled: boolean
+  /** Recipient DOMAINS, lowercased, e.g. `example.com`. A bare `*` allows any. */
+  allowed_recipients: string[]
+}
+
+/**
  * Function node properties (from raisin:Function)
  */
 export interface FunctionProperties {
@@ -166,6 +194,8 @@ export interface FunctionProperties {
   version: number
   resource_limits?: ResourceLimits
   network_policy?: NetworkPolicy
+  secret_policy?: SecretPolicy
+  email_policy?: EmailPolicy
   triggers?: TriggerCondition[]
   input_schema?: Record<string, unknown>
   output_schema?: Record<string, unknown>

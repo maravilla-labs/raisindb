@@ -151,6 +151,15 @@ export function RaisinFunctionNodeTypeEditor({ tab }: RaisinFunctionNodeTypeEdit
             input_schema: node.properties?.input_schema,
             output_schema: node.properties?.output_schema,
             network_policy: node.properties?.network_policy,
+            // This map is a whitelist of what the form can see, so both policies
+            // have to be listed or their sections render empty against a node
+            // that actually has them. (The save path spreads the node's own
+            // properties first, so an omission here would not have destroyed the
+            // stored value — it would just have shown the operator a blank
+            // policy for a function that was in fact restricted, which is the
+            // more dangerous of the two failures.)
+            secret_policy: node.properties?.secret_policy,
+            email_policy: node.properties?.email_policy,
             resource_limits: node.properties?.resource_limits,
           }
           resetProperties(props)
