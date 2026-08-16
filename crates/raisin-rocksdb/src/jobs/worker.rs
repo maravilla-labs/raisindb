@@ -532,6 +532,20 @@ async fn execute_handler_task(
                     "Job failed after max retries"
                 );
                 let _ = job_registry.mark_failed(&job.id, error_msg).await;
+
+                // Delete job context data (cleanup). A retry still needs the
+                // context to run again, so the retry arm above deliberately
+                // keeps it; once retries are exhausted nothing will ever read
+                // it again, and leaving it behind would strand whatever the
+                // context carries (e.g. a magic-link plaintext token) in the
+                // store indefinitely.
+                if let Err(e) = job_data_store.delete(&job.tenant, &job.id) {
+                    tracing::warn!(
+                        job_id = %job.id,
+                        error = %e,
+                        "Failed to delete job context after permanent failure"
+                    );
+                }
             }
         }
     }
