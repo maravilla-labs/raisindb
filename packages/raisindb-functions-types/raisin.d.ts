@@ -298,6 +298,44 @@ declare namespace raisin {
     function diffDays(ts1: number, ts2: number): Promise<number>;
   }
 
+  /**
+   * One outbound transactional email. The sender is deliberately absent:
+   * `from`, the display name and `replyTo` come from the tenant's
+   * `/config/email` node, so a function cannot send as an unverified address.
+   */
+  interface EmailMessage {
+    /** One recipient address, or several. */
+    to: string | string[];
+    subject: string;
+    /** Plain-text body. Always required, even alongside `html`. */
+    text: string;
+    html?: string;
+  }
+
+  /** Proof that the provider accepted a message. Acceptance is not delivery. */
+  interface EmailReceipt {
+    /** The provider's message id — what a later bounce/webhook correlates to. */
+    message_id: string;
+    /** The provider that issued it, e.g. "resend" or "brevo". */
+    provider: string;
+  }
+
+  namespace email {
+    /**
+     * Send one transactional email through the tenant's configured provider.
+     *
+     * Every recipient must be allowed by the function's `email_policy`
+     * (`{ enabled, allowed_recipients }` in its `.node.yaml`, matched against
+     * the recipient DOMAIN); with no block declared the function cannot send,
+     * and one disallowed recipient rejects the whole message.
+     *
+     * Also rejects when email is not configured or not enabled for the tenant,
+     * when the function's `secret_policy` does not grant the credential the
+     * config references, or when the provider refuses the message.
+     */
+    function send(message: EmailMessage): Promise<EmailReceipt>;
+  }
+
   namespace events {
     function emit(eventType: string, data: any): Promise<void>;
   }

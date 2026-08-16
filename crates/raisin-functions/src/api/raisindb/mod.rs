@@ -27,6 +27,7 @@ mod ai_ops;
 mod branches;
 mod context;
 mod crypto;
+mod email;
 mod events;
 mod functions;
 mod http;
@@ -53,7 +54,7 @@ use std::sync::{Arc, Mutex};
 
 use super::callbacks::RaisinFunctionApiCallbacks;
 use super::FunctionApi;
-use crate::types::{ExecutionContext, LogEntry, NetworkPolicy, SecretPolicy};
+use crate::types::{EmailPolicy, ExecutionContext, LogEntry, NetworkPolicy, SecretPolicy};
 
 /// Real FunctionApi implementation for RaisinDB
 ///
@@ -71,6 +72,13 @@ pub struct RaisinFunctionApi {
     /// gets no secrets rather than silently inheriting someone else's grant.
     /// Opt in with [`RaisinFunctionApi::with_secret_policy`].
     pub(crate) secret_policy: SecretPolicy,
+    /// Outbound-email policy for `raisin.email.*` access control.
+    ///
+    /// Not a constructor argument for the same reason `secret_policy` is not:
+    /// [`EmailPolicy::default`] denies everything, so a call site that has not
+    /// thought about email cannot send any. Opt in with
+    /// [`RaisinFunctionApi::with_email_policy`].
+    pub(crate) email_policy: EmailPolicy,
     /// Callbacks for operations
     pub(crate) callbacks: RaisinFunctionApiCallbacks,
     /// Captured logs
@@ -93,6 +101,7 @@ impl RaisinFunctionApi {
             context,
             network_policy,
             secret_policy: SecretPolicy::default(),
+            email_policy: EmailPolicy::default(),
             callbacks,
             logs: Arc::new(Mutex::new(Vec::new())),
         }
@@ -105,6 +114,19 @@ impl RaisinFunctionApi {
     /// therefore has no declared grant to honour).
     pub fn with_secret_policy(mut self, policy: SecretPolicy) -> Self {
         self.secret_policy = policy;
+        self
+    }
+
+    /// Grant this API surface the function's declared email policy.
+    ///
+    /// Without it the API refuses every `raisin.email.*` call, which is the
+    /// intended state for any surface that does not load a function node (and
+    /// therefore has no declared grant to honour). NOTE there is more than one
+    /// place that builds this API from a `FunctionMetadata` — the executor and
+    /// the WS handlers — and missing one silently degrades that transport to
+    /// "email never works", with no error until a function tries to send.
+    pub fn with_email_policy(mut self, policy: EmailPolicy) -> Self {
+        self.email_policy = policy;
         self
     }
 
@@ -710,6 +732,12 @@ impl FunctionApi for RaisinFunctionApi {
         opts: Option<Value>,
     ) -> Result<Value> {
         self.impl_imap_fetch_message(conn, uid, opts).await
+    }
+
+    // ========== Email (native transactional email) ==========
+
+    async fn email_send(&self, message: Value) -> Result<Value> {
+        self.impl_email_send(message).await
     }
 
     // ========== Crypto (native primitives) ==========

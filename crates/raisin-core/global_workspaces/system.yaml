@@ -3,6 +3,7 @@ description: System workspace for global authentication and configuration
 allowed_node_types:
   - raisin:AuthConfig
   - raisin:RepoAuthConfig
+  - raisin:EmailConfig
   - raisin:ProviderConfig
   - raisin:Identity
   - raisin:Session
@@ -48,6 +49,18 @@ initial_structure:
             rate_limiting:
               max_attempts_per_minute: 5
               lockout_duration_minutes: 15
+        # Outbound email configuration. Seeded disabled and without a sender
+        # identity or base_url, so a freshly created tenant cannot send until
+        # an operator fills these in and stores the API key at the referenced
+        # secret. credential_ref is seeded because it names the convention,
+        # not a value - the secret it points at does not exist yet.
+        - node_type: raisin:EmailConfig
+          name: email
+          properties:
+            enabled: false
+            provider: resend
+            credential_ref: "secret://email/api_key"
+            redirect_allowlist: []
         # Repository-level auth configurations
         # Nodes created dynamically at /config/repos/{repo_id}
         - node_type: raisin:AclFolder

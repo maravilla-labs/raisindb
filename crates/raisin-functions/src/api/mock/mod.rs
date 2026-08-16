@@ -44,6 +44,11 @@ pub struct MockFunctionApi {
     /// "never existed" exactly as the real store does.
     #[allow(clippy::type_complexity)]
     secrets: std::sync::Mutex<std::collections::HashMap<String, Vec<Option<String>>>>,
+    /// Every message passed to `email_send`, in order. Nothing is sent — the
+    /// point of recording them is that a test can assert on the exact subject
+    /// and body a function produced (a magic link in particular) without a
+    /// provider account.
+    emails_sent: std::sync::Mutex<Vec<Value>>,
 }
 
 impl MockFunctionApi {
@@ -58,7 +63,13 @@ impl MockFunctionApi {
             http_responses: std::sync::Mutex::new(std::collections::VecDeque::new()),
             http_calls: std::sync::Mutex::new(Vec::new()),
             secrets: std::sync::Mutex::new(std::collections::HashMap::new()),
+            emails_sent: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// Every `{ to, subject, text, html? }` handed to `email_send` so far.
+    pub fn emails_sent(&self) -> Vec<Value> {
+        self.emails_sent.lock().unwrap().clone()
     }
 
     /// Script the responses `raisin.http.fetch` will return, in order. Each
@@ -844,6 +855,21 @@ impl FunctionApi for MockFunctionApi {
             "snippet": format!("Body of message {uid}."),
             "flags": ["\\Seen"],
             "message_id": format!("<{uid}@mock.example.org>"),
+        }))
+    }
+
+    // ========== Email (recorded, never sent) ==========
+
+    async fn email_send(&self, message: Value) -> Result<Value> {
+        self.check_all_errors()?;
+        let mut sent = self.emails_sent.lock().unwrap();
+        sent.push(message);
+        // Sequence-numbered so a test asserting on the second send does not
+        // depend on the first, and obviously fake so a mock id can never be
+        // mistaken for a provider one.
+        Ok(serde_json::json!({
+            "message_id": format!("mock-email-{}", sent.len()),
+            "provider": "resend",
         }))
     }
 

@@ -844,6 +844,31 @@ globalThis.raisin = {
             return r;
         },
     },
+    // Transactional email (raisin.email.*).
+    // The sender identity (from, replyTo) and the provider credential come from
+    // the tenant's /config/email node, NOT from the caller — a function chooses
+    // who receives a message, never who it appears to be from.
+    email: {
+        // send({ to, subject, text, html? }) -> { message_id, provider }
+        // `to` is one address or an array of them. The receipt means the
+        // provider ACCEPTED the message; delivery is a later, separate event.
+        // Gated by the function's `email_policy` in its .node.yaml:
+        //
+        //   email_policy:
+        //     enabled: true
+        //     allowed_recipients: ["example.com", "*.example.com"]
+        //
+        // With no email_policy the function cannot send at all, and one
+        // disallowed recipient refuses the whole message — there is no partial
+        // send. Throws for that, when email is not configured/enabled for the
+        // tenant, when the function's secret_policy does not grant the
+        // configured credential, or when the provider rejects the send.
+        send: (message) => {
+            const r = __call('email_send', [message]);
+            if (r && r.error) throw new Error(r.message || r.error);
+            return r;
+        },
+    },
     pdf: {
         // Extract text from PDF - base64Data is the PDF content
         // Returns { text, pages, isScanned, pageCount }

@@ -674,6 +674,23 @@ pub trait FunctionApi: Send + Sync {
     async fn imap_fetch_message(&self, conn: Value, uid: i64, opts: Option<Value>)
         -> Result<Value>;
 
+    // ========== Email Operations (native transactional email) ==========
+
+    /// Send one transactional email through the tenant's configured provider.
+    ///
+    /// `message` is `{ to, subject, text, html? }` (`to` is one address or an
+    /// array of them). The SENDER is not part of it: `from`, `reply_to` and the
+    /// provider credential come from the tenant's `raisin:EmailConfig` node at
+    /// `/config/email` in `raisin:system`, so a function cannot send as an
+    /// address the tenant has not verified.
+    ///
+    /// Returns the provider's receipt `{ message_id, provider }` — the provider
+    /// ACCEPTED the message; delivery is a later, separate event. Sending is
+    /// refused (before any socket is opened) when email is not configured, not
+    /// enabled, or the function's `secret_policy` does not grant the credential
+    /// the config references.
+    async fn email_send(&self, message: Value) -> Result<Value>;
+
     // ========== Crypto Operations (native primitives) ==========
 
     /// Verify an RS256/ES256-signed JWT/OIDC token against a JWKS.

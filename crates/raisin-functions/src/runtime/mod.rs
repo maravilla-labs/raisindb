@@ -10,6 +10,7 @@
 
 pub mod bindings;
 pub mod crypto;
+pub mod email;
 pub mod fetch;
 pub mod imap;
 mod quickjs;

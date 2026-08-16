@@ -6507,6 +6507,7 @@ dependencies = [
  "tokio",
  "tokio-rustls 0.26.4",
  "tracing",
+ "url",
  "uuid",
  "webpki-roots 1.0.6",
 ]
@@ -7086,6 +7087,7 @@ dependencies = [
  "raisin-models",
  "raisin-packages",
  "raisin-query",
+ "raisin-ratelimit",
  "raisin-replication",
  "raisin-rocksdb",
  "raisin-sql-execution",

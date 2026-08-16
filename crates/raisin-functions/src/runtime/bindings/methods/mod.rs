@@ -14,6 +14,7 @@ pub mod branches;
 pub mod context;
 pub mod crypto;
 pub mod date;
+pub mod email;
 pub mod events;
 pub mod flows;
 pub mod functions;
@@ -52,6 +53,7 @@ pub fn build_registry() -> BindingsRegistry {
     methods.extend(locks::methods());
     methods.extend(integrations::methods());
     methods.extend(imap::methods());
+    methods.extend(email::methods());
     methods.extend(secrets::methods());
 
     // Resource operations
@@ -301,6 +303,8 @@ mod tests {
             "imap_fetch_since",
             "imap_list_mailboxes",
             "imap_fetch_message",
+            // Email operations (1)
+            "email_send",
             // Crypto operations (1)
             "crypto_verify_jwt",
         ];

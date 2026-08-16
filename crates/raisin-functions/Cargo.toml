@@ -20,6 +20,8 @@ raisin-locks = { path = "../raisin-locks" }
 # Outbound MCP client, for executing proxy functions. Acyclic: the protocol
 # crate deliberately does NOT depend on raisin-functions.
 raisin-mcp-protocol = { path = "../raisin-mcp-protocol" }
+# Parsing a request URL before the egress guard judges its addresses.
+url = { workspace = true }
 raisin-context = { path = "../raisin-context" }
 raisin-ai = { path = "../raisin-ai", features = ["pdf", "pdf-markdown", "ocr"] }
 

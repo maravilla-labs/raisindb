@@ -1819,6 +1819,7 @@ async fn test_raisin_api_surface_snapshot() {
                 inventory: names(raisin.inventory),
                 integrations: names(raisin.integrations),
                 imap: names(raisin.imap),
+                email: names(raisin.email),
                 pdf: names(raisin.pdf),
                 tx: txKeys,
                 admin: names(admin),
@@ -1865,6 +1866,7 @@ async fn test_raisin_api_surface_snapshot() {
             "branches",
             "context",
             "crypto",
+            "email",
             "events",
             "flows",
             "functions",
@@ -1923,6 +1925,9 @@ async fn test_raisin_api_surface_snapshot() {
     expect("inventory", vec!["claim", "release"]);
     expect("integrations", vec!["syncNow", "sync_now"]);
     expect("imap", vec!["fetchMessage", "fetchSince", "listMailboxes"]);
+    // Only `send`: the sender identity lives in /config/email, so there is
+    // deliberately no per-call "from" surface to widen this to.
+    expect("email", vec!["send"]);
     expect(
         "pdf",
         vec!["extractText", "getPageCount", "ocr", "processFromStorage"],
