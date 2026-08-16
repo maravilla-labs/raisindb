@@ -29,9 +29,14 @@ properties:
     http_enabled: true
     request_timeout_ms: 180000
     max_concurrent_requests: 10
+    # `**`, NOT `*`. A single star does not cross `/`, so `host/*` matches the
+    # root and nothing else — and every real path here is multi-segment
+    # (`/v1/messages`, `/v1/chat/completions`, `/calendar/v3/...`). A request
+    # refused by this list never leaves the sandbox and comes back with NO HTTP
+    # status, which is unusually hard to diagnose.
     allowed_urls:
-      - "https://www.googleapis.com/*"
-      - "https://oauth2.googleapis.com/*"
+      - "https://www.googleapis.com/**"
+      - "https://oauth2.googleapis.com/**"
   input_schema:
     type: object
     required:
