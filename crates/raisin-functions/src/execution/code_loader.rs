@@ -25,7 +25,7 @@ use raisin_models::nodes::Node;
 use raisin_storage::{ListOptions, NodeRepository, Storage, StorageScope};
 
 use crate::types::{
-    FunctionLanguage, FunctionMetadata, NetworkPolicy, ResourceLimits, SecretPolicy,
+    EmailPolicy, FunctionLanguage, FunctionMetadata, NetworkPolicy, ResourceLimits, SecretPolicy,
 };
 
 /// Load a function node from the functions workspace by exact path.
@@ -136,6 +136,7 @@ where
     let entry_file = extract_entry_file(func_node)?;
     let network_policy = extract_network_policy(func_node);
     let secret_policy = extract_secret_policy(func_node);
+    let email_policy = extract_email_policy(func_node);
     let resource_limits = extract_resource_limits(func_node);
 
     // Resolve entry file path
@@ -161,6 +162,7 @@ where
     let mut metadata = FunctionMetadata::new(name, language).with_entry_file(handler_name);
     metadata.network_policy = network_policy;
     metadata.secret_policy = secret_policy;
+    metadata.email_policy = email_policy;
     metadata.resource_limits = resource_limits;
 
     Ok((code, metadata))
@@ -259,6 +261,36 @@ pub fn extract_secret_policy(node: &Node) -> SecretPolicy {
                  this function has NO secret access."
             );
             SecretPolicy::default()
+        }
+    }
+}
+
+/// Extract email_policy from node properties.
+///
+/// Returns the function's `raisin.email.*` policy. An absent or malformed block
+/// yields the DEFAULT, which denies everything — a function that never declared
+/// `email_policy` must not be able to send a single message under the tenant's
+/// verified sending domain. See [`EmailPolicy`] for why that default is
+/// load-bearing.
+///
+/// Malformed is loud for the same reason it is in [`extract_secret_policy`]:
+/// denying is the right behaviour but a terrible diagnostic, so the serde error
+/// (which names the offending key, `EmailPolicy` being `deny_unknown_fields`)
+/// is warned rather than swallowed.
+pub fn extract_email_policy(node: &Node) -> EmailPolicy {
+    let Some(raw) = node.properties.get("email_policy") else {
+        return EmailPolicy::default();
+    };
+    match serde_json::to_value(raw) {
+        Ok(v) => EmailPolicy::parse_or_deny(v, &node.path),
+        Err(e) => {
+            tracing::warn!(
+                function_path = %node.path,
+                error = %e,
+                "email_policy could not be read from the node and was ignored; \
+                 this function CANNOT send email."
+            );
+            EmailPolicy::default()
         }
     }
 }

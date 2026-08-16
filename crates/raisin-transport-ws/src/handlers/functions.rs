@@ -411,7 +411,8 @@ mod inner {
                 metadata.network_policy.clone(),
                 callbacks,
             )
-            .with_secret_policy(metadata.secret_policy.clone()),
+            .with_secret_policy(metadata.secret_policy.clone())
+            .with_email_policy(metadata.email_policy.clone()),
         );
 
         let context = ExecutionContext::new(&tenant_id, &repo, DEFAULT_BRANCH, "system")

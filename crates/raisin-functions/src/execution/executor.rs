@@ -286,15 +286,20 @@ where
 
     // 5. Create API with callbacks
     // Use the function's network_policy from metadata instead of global config
-    // The secret policy comes from the same function node as the network
-    // policy; without this the API denies every raisin.secrets.* call.
+    // The secret and email policies come from the same function node as the
+    // network policy; without them the API denies every raisin.secrets.* and
+    // raisin.email.* call. There is more than one site that builds this API
+    // (see also the WS function and sql_query handlers) — missing one degrades
+    // that transport alone, which is invisible until a function is executed
+    // through it.
     let api: Arc<dyn FunctionApi> = Arc::new(
         RaisinFunctionApi::new(
             exec_context.clone(),
             metadata.network_policy.clone(),
             api_callbacks,
         )
-        .with_secret_policy(metadata.secret_policy.clone()),
+        .with_secret_policy(metadata.secret_policy.clone())
+        .with_email_policy(metadata.email_policy.clone()),
     );
 
     // 6. Create loaded function with sibling files for module resolution

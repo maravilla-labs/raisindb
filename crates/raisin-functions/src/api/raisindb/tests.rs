@@ -497,3 +497,156 @@ async fn a_write_refuses_a_pinned_reference() {
         );
     }
 }
+
+// ========== Email policy tests ==========
+//
+// Same construction as the secret-policy tests: no email-capable callbacks and
+// no `/config/email` node, so a denial can only have come from the policy. If
+// the gate ran after `authorize_email`, these calls would surface the
+// "outbound email is not configured for this tenant" state error instead —
+// which is exactly what proves the recipient check runs first, before the
+// config is read, before the credential is decrypted, and long before a socket.
+
+use crate::types::EmailPolicy;
+
+fn api_with_email_policy(policy: EmailPolicy) -> RaisinFunctionApi {
+    let ctx = ExecutionContext::new("tenant1", "repo1", "main", "test-user");
+    RaisinFunctionApi::new(
+        ctx,
+        NetworkPolicy::default(),
+        RaisinFunctionApiCallbacks::default(),
+    )
+    .with_email_policy(policy)
+}
+
+fn message_to(to: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "to": to,
+        "subject": "Sign in",
+        "text": "https://app.example.com/verify?token=…",
+    })
+}
+
+/// A function that never declared `email_policy` cannot send. The default is
+/// the whole point of the type.
+#[tokio::test]
+async fn email_send_denied_without_policy() {
+    let api = api_with_email_policy(EmailPolicy::default());
+    let err = api
+        .impl_email_send(message_to(&["user@example.com"]))
+        .await
+        .expect_err("no policy must deny");
+
+    assert!(
+        matches!(err, raisin_error::Error::PermissionDenied(_)),
+        "expected PermissionDenied, got: {err}"
+    );
+    let msg = err.to_string();
+    assert!(msg.contains("email:policy_denied"), "unexpected: {msg}");
+    assert!(
+        msg.contains("no email_policy"),
+        "the denial must name what is missing: {msg}"
+    );
+}
+
+/// `enabled: true` with nothing listed is still a denial — "enabled but
+/// unconfigured" never means "send anywhere".
+#[tokio::test]
+async fn email_send_denied_when_allowlist_empty() {
+    let api = api_with_email_policy(EmailPolicy {
+        enabled: true,
+        allowed_recipients: Vec::new(),
+    });
+    let err = api
+        .impl_email_send(message_to(&["user@example.com"]))
+        .await
+        .expect_err("an empty allow-list must deny");
+    assert!(matches!(err, raisin_error::Error::PermissionDenied(_)));
+}
+
+/// One forbidden recipient refuses the WHOLE message. Dropping it silently
+/// would let the caller believe mail went somewhere it did not.
+#[tokio::test]
+async fn email_send_denied_when_any_recipient_is_disallowed() {
+    let api = api_with_email_policy(EmailPolicy::allow_recipients(vec![
+        "example.com".to_string()
+    ]));
+    let err = api
+        .impl_email_send(message_to(&["ok@example.com", "nope@elsewhere.test"]))
+        .await
+        .expect_err("a mixed list must be refused whole");
+
+    let msg = err.to_string();
+    assert!(matches!(err, raisin_error::Error::PermissionDenied(_)));
+    assert!(
+        msg.contains("nope@elsewhere.test") && !msg.contains("ok@example.com"),
+        "the denial should name only what was refused: {msg}"
+    );
+}
+
+/// The complement: an ALLOWED recipient gets past the policy and fails at the
+/// next gate instead. Without this the tests above would also pass if the gate
+/// denied everything unconditionally.
+#[tokio::test]
+async fn an_allowed_recipient_reaches_the_config_gate() {
+    let api = api_with_email_policy(EmailPolicy::allow_recipients(vec![
+        "example.com".to_string()
+    ]));
+    let err = api
+        .impl_email_send(message_to(&["user@example.com"]))
+        .await
+        .expect_err("there is no /config/email node in this test");
+
+    assert!(
+        !matches!(err, raisin_error::Error::PermissionDenied(_)),
+        "an allowed recipient must not be refused by the email policy: {err}"
+    );
+    // With no node callback wired up in this test, the next gate is the
+    // `/config/email` LOOKUP failing — which is still proof the call got past
+    // the policy and into `authorize_email`.
+    assert!(
+        err.to_string().contains("Node get"),
+        "expected the config lookup to be what refused: {err}"
+    );
+}
+
+// ========== is_url_allowed divergence (issue #13) ==========
+
+/// The PERMISSIVE half of the divergence, pinned deliberately: on this path
+/// `http_enabled: true` with an empty `allowed_urls` allows everything. The
+/// strict half is pinned by `types::config::tests::network_policy_denies_an_empty_allowlist`.
+/// Unifying the two is a follow-up needing a deprecation window — until then a
+/// change to either behaviour must break one of these two tests, not slip
+/// through.
+#[test]
+fn an_empty_allowlist_still_allows_everything_on_this_path() {
+    let api = api_with_allowed(&[]);
+    assert!(api.is_url_allowed("https://anything.example.com/whatever"));
+}
+
+/// ...but only when HTTP was enabled at all.
+#[test]
+fn an_empty_allowlist_allows_nothing_when_http_is_disabled() {
+    let ctx = ExecutionContext::new("tenant1", "repo1", "main", "test-user");
+    let api = RaisinFunctionApi::new(
+        ctx,
+        NetworkPolicy::default(),
+        RaisinFunctionApiCallbacks::default(),
+    );
+    assert!(!api.is_url_allowed("https://anything.example.com/whatever"));
+}
+
+/// Both paths now run the SAME matcher, so `*` stops at `/` here too. This is
+/// the half of issue #13 that HAS been unified.
+#[test]
+fn both_paths_agree_on_what_a_single_star_means() {
+    let api = api_with_allowed(&["https://api.example.com/*"]);
+    assert!(api.is_url_allowed("https://api.example.com/users"));
+    assert!(!api.is_url_allowed("https://api.example.com/users/123"));
+
+    let policy = NetworkPolicy::allow_urls(vec!["https://api.example.com/*".to_string()]);
+    assert_eq!(
+        policy.is_url_allowed("https://api.example.com/users/123"),
+        api.is_url_allowed("https://api.example.com/users/123"),
+    );
+}

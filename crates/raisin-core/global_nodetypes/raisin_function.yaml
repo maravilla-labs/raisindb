@@ -95,6 +95,23 @@ properties:
       This node type is `strict`, so the property has to be declared here
       before it can be set at all.
 
+  - name: email_policy
+    type: Object
+    required: false
+    title: Email Policy
+    description: |
+      Which recipients this function may send to through `raisin.email.*`.
+      Structure: { enabled, allowed_recipients }
+
+      Deny-by-default: an absent block, `enabled: false`, or an empty
+      `allowed_recipients` all mean no sending. `allowed_recipients` entries are
+      globs matched against the recipient DOMAIN (`example.com`,
+      `*.example.com`, or `*` for any domain) — the sender identity is never a
+      function's choice, it comes from the tenant's `/config/email` node.
+
+      This node type is `strict`, so the property has to be declared here
+      before it can be set at all.
+
   - name: triggers
     type: Array
     required: false

@@ -122,6 +122,13 @@ impl FunctionLoader {
             .map(|v| crate::types::SecretPolicy::parse_or_deny(v.clone(), &name))
             .unwrap_or_default();
 
+        // Parse email policy (absent = no sending; see EmailPolicy). Same
+        // parse_or_deny as execution::code_loader, for the same reason.
+        let email_policy = props
+            .get("email_policy")
+            .map(|v| crate::types::EmailPolicy::parse_or_deny(v.clone(), &name))
+            .unwrap_or_default();
+
         let metadata = FunctionMetadata {
             name,
             title,
@@ -146,6 +153,7 @@ impl FunctionLoader {
             resource_limits,
             network_policy,
             secret_policy,
+            email_policy,
             triggers: props
                 .get("triggers")
                 .map(|v| serde_json::from_value(v.clone()).unwrap_or_default())

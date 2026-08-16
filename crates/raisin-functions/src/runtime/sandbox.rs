@@ -211,12 +211,22 @@ mod tests {
     fn test_url_allowlist() {
         let config = SandboxConfig {
             limits: ResourceLimits::default(),
-            network: NetworkPolicy::allow_urls(vec!["https://api.example.com/*".to_string()]),
+            network: NetworkPolicy::allow_urls(vec!["https://api.example.com/**".to_string()]),
         };
         let sandbox = Sandbox::new(config);
 
         assert!(sandbox.is_url_allowed("https://api.example.com/v1/test"));
         assert!(!sandbox.is_url_allowed("https://other.com/api"));
+
+        // The pattern above says `**` because since issue #13 a single `*` stops
+        // at `/` on both URL paths — which is how the shipped adapter scaffold
+        // has always spelled a subtree grant.
+        let single_star = Sandbox::new(SandboxConfig {
+            limits: ResourceLimits::default(),
+            network: NetworkPolicy::allow_urls(vec!["https://api.example.com/*".to_string()]),
+        });
+        assert!(single_star.is_url_allowed("https://api.example.com/test"));
+        assert!(!single_star.is_url_allowed("https://api.example.com/v1/test"));
     }
 
     #[tokio::test]

@@ -419,7 +419,8 @@ where
                         loaded.metadata.network_policy.clone(),
                         callbacks,
                     )
-                    .with_secret_policy(loaded.metadata.secret_policy.clone()),
+                    .with_secret_policy(loaded.metadata.secret_policy.clone())
+                    .with_email_policy(loaded.metadata.email_policy.clone()),
                 );
 
                 // Execute function

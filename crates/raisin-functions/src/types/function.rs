@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use super::{NetworkPolicy, ResourceLimits, SecretPolicy, TriggerCondition};
+use super::{EmailPolicy, NetworkPolicy, ResourceLimits, SecretPolicy, TriggerCondition};
 
 /// Supported function runtime languages
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -129,6 +129,13 @@ pub struct FunctionMetadata {
     #[serde(default)]
     pub secret_policy: SecretPolicy,
 
+    /// Outbound-email policy for `raisin.email.*`.
+    ///
+    /// Absent means **no sending at all** — see [`EmailPolicy`] for why the
+    /// default has to be the denying one.
+    #[serde(default)]
+    pub email_policy: EmailPolicy,
+
     /// Inline triggers (events that invoke this function)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub triggers: Vec<TriggerCondition>,
@@ -174,6 +181,7 @@ impl FunctionMetadata {
             resource_limits: ResourceLimits::default(),
             network_policy: NetworkPolicy::default(),
             secret_policy: SecretPolicy::default(),
+            email_policy: EmailPolicy::default(),
             triggers: Vec::new(),
             input_schema: None,
             output_schema: None,
@@ -252,6 +260,12 @@ impl FunctionMetadata {
     /// Set secret policy
     pub fn with_secret_policy(mut self, policy: SecretPolicy) -> Self {
         self.secret_policy = policy;
+        self
+    }
+
+    /// Set email policy
+    pub fn with_email_policy(mut self, policy: EmailPolicy) -> Self {
+        self.email_policy = policy;
         self
     }
 
