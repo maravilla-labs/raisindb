@@ -1,0 +1,59 @@
+node_type: raisin:Function
+properties:
+  title: Send Magic Link
+  description: >
+    Renders and sends the passwordless sign-in email for a magic-link
+    request. Invoked by the AuthMagicLinkSend job handler with a link that
+    was already built from the tenant's configured base_url — this function
+    never constructs the URL itself.
+  language: JavaScript
+  entry_file: index.js:sendMagicLink
+  execution_mode: Async
+  enabled: true
+  resource_limits:
+    timeout_ms: 15000
+    max_memory_bytes: 33554432
+  # Sending is deny-by-default. "*" is written out rather than implied,
+  # because it IS the honest setting here: a sign-in link goes to whatever
+  # address the person typed, and the tenant does not own those domains. Narrow
+  # it to your own domains on a deployment where only staff may sign in — that
+  # is the one edit that turns this into a closed-audience mailer.
+  email_policy:
+    enabled: true
+    allowed_recipients:
+      - "*"
+  # The provider API key referenced by /config/email. Scoped to the email
+  # namespace so a change to this function can never reach another
+  # subsystem's credentials.
+  secret_policy:
+    enabled: true
+    allowed_names:
+      - "email/*"
+  input_schema:
+    type: object
+    required:
+      - email
+      - magic_link_url
+      - expires_in_minutes
+    properties:
+      email:
+        type: string
+        description: Address the sign-in link is sent to
+      magic_link_url:
+        type: string
+        description: Fully built verification URL (already allowlisted server-side)
+      expires_in_minutes:
+        type: integer
+        description: Link lifetime, shown in the email body
+      template:
+        type: string
+        description: Optional template name; unset uses the built-in wording
+  output_schema:
+    type: object
+    properties:
+      sent:
+        type: boolean
+      message_id:
+        type: string
+      provider:
+        type: string

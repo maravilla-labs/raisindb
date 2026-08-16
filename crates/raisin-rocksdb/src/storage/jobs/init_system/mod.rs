@@ -123,9 +123,11 @@ impl RocksDBStorage {
         let (copy_tree_handler, restore_tree_handler, revision_history_copy_handler) =
             flow_handlers::create_tree_handlers(&self, copy_tree_executor, restore_tree_executor);
 
-        // Clone function_executor for AI + virtual-mount handlers before consuming
+        // Clone function_executor for AI + virtual-mount + magic-link handlers
+        // before consuming
         let function_executor_for_ai = function_executor.clone();
         let function_executor_for_vmount = function_executor.clone();
+        let function_executor_for_magic_link = function_executor.clone();
 
         let function_execution_handler = flow_handlers::create_function_execution_handler(
             self.job_registry.clone(),
@@ -215,6 +217,8 @@ impl RocksDBStorage {
         let relation_consistency_handler = ai_handlers::create_relation_consistency_handler(&self);
         let auth_create_user_node_handler =
             ai_handlers::create_auth_user_node_handler(self.clone());
+        let auth_magic_link_send_handler =
+            ai_handlers::create_auth_magic_link_send_handler(function_executor_for_magic_link);
 
         let resumable_upload_handler = ai_handlers::create_resumable_upload_handler(
             self.clone(),
@@ -305,6 +309,12 @@ impl RocksDBStorage {
         )
         .with_spatial_index(spatial_index_handler)
         .with_calendar_expand(calendar_expand_handler);
+        // Same reason as the MCP attach below: the registry is not Clone, so
+        // an optional handler has to be folded in before it is wrapped.
+        let registry = match auth_magic_link_send_handler {
+            Some(h) => registry.with_auth_magic_link_send(h),
+            None => registry,
+        };
         // Applied before the Arc: the registry is not Clone, so attaching after
         // wrapping would mean unwrapping it again.
         let registry = match mcp_tool_discovery_handler {
@@ -357,7 +367,11 @@ impl RocksDBStorage {
 
         worker_pool.start().await?;
 
-        worker_setup::start_background_tasks(&self, ai_tool_call_execution_handler.clone());
+        worker_setup::start_background_tasks(
+            &self,
+            self.clone(),
+            ai_tool_call_execution_handler.clone(),
+        );
 
         tracing::info!(
             realtime_workers = pools_config.realtime.dispatcher_workers,

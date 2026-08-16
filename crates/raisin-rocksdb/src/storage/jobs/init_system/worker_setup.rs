@@ -184,9 +184,19 @@ pub async fn restore_and_dispatch_jobs(
     Ok(restore_stats)
 }
 
-/// Start background maintenance tasks (timeout watchdog, job cleanup)
+/// How often expired one-time tokens are swept.
+///
+/// Hourly, against a 15-minute link lifetime, so a consumed or abandoned token
+/// node outlives its usefulness by at most an hour. Deliberately not tighter:
+/// nothing reads an expired token — `OneTimeToken::is_valid` rejects it long
+/// before this deletes it — so the sweep is storage hygiene, not a security
+/// boundary, and it costs a workspace scan each time it runs.
+const TOKEN_PRUNE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Start background maintenance tasks (timeout watchdog, job cleanup, token prune)
 pub fn start_background_tasks(
     storage: &RocksDBStorage,
+    storage_arc: Arc<RocksDBStorage>,
     ai_tool_call_handler: Arc<AIToolCallExecutionHandler<RocksDBStorage>>,
 ) {
     let job_data_store = storage.job_data_store.clone();
@@ -249,5 +259,62 @@ pub fn start_background_tasks(
     .with_registry(storage.job_registry.clone());
     tokio::spawn(async move {
         cleanup.run().await;
+    });
+
+    // Sweep expired magic-link tokens.
+    //
+    // Tokens are ordinary nodes in each repo's `raisin:system` workspace, so
+    // nothing reclaims them on its own — without this they accumulate for the
+    // life of the deployment. Enumerating tenants and repos each pass rather
+    // than caching keeps a repo created after boot from being missed forever.
+    //
+    // Best-effort throughout: a failure to list, or to prune one repo, logs and
+    // moves on. This is hygiene, and it must never be able to take the process
+    // down or wedge the other maintenance tasks.
+    tokio::spawn(async move {
+        use raisin_storage::RepositoryManagementRepository;
+
+        let mut ticker = tokio::time::interval(TOKEN_PRUNE_INTERVAL);
+        // The first tick fires immediately; skip it so boot is not competing
+        // with a scan of every repo in the deployment.
+        ticker.tick().await;
+
+        loop {
+            ticker.tick().await;
+
+            // One listing covers every tenant — `RepositoryInfo` carries its own
+            // `tenant_id`, so there is no separate tenant enumeration to do. Re-listed
+            // each pass rather than cached, so a repo created after boot is not
+            // missed forever.
+            let repos = match storage_arc.repository_management.list_repositories().await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Token prune: could not list repositories");
+                    continue;
+                }
+            };
+
+            let mut pruned_total = 0usize;
+            for repo in repos {
+                let store = crate::one_time_token::OneTimeTokenStore::new(
+                    storage_arc.clone(),
+                    &repo.tenant_id,
+                    &repo.repo_id,
+                );
+                match store.prune_expired().await {
+                    Ok(n) => pruned_total += n,
+                    Err(e) => tracing::warn!(
+                        tenant_id = %repo.tenant_id,
+                        repo_id = %repo.repo_id,
+                        error = %e,
+                        "Token prune failed for this repo"
+                    ),
+                }
+            }
+
+            if pruned_total > 0 {
+                tracing::info!(pruned = pruned_total, "Pruned expired one-time tokens");
+            }
+        }
     });
 }

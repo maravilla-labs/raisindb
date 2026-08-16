@@ -34,6 +34,7 @@
 //! - Separation of concerns (handler logic vs. infrastructure)
 
 mod access_notification;
+mod function_email_sender;
 mod magic_link;
 mod rocksdb_user_node;
 mod session_cleanup;
@@ -44,7 +45,8 @@ mod user_node;
 mod tests;
 
 pub use self::access_notification::{AccessNotificationEmailSender, AuthAccessNotificationHandler};
-pub use self::magic_link::{AuthMagicLinkSendHandler, MagicLinkEmailSender};
+pub use self::function_email_sender::{FunctionMagicLinkEmailSender, SEND_MAGIC_LINK_PATH};
+pub use self::magic_link::{AuthMagicLinkSendHandler, MagicLinkEmailSender, MagicLinkScope};
 pub use self::rocksdb_user_node::RocksDBUserNodeCreator;
 pub use self::session_cleanup::{AuthSessionCleanupHandler, SessionCleanupStore};
 pub use self::token_cleanup::{AuthTokenCleanupHandler, TokenCleanupStore};

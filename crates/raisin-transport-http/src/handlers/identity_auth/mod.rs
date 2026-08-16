@@ -14,6 +14,7 @@
 //! - `POST /auth/login` - Local identity auth (email/password)
 //! - `POST /auth/magic-link` - Request magic link
 //! - `GET /auth/magic-link/verify` - Verify magic link token
+//! - `GET /auth/{repo}/magic-link/verify` - Verify a repo-scoped magic link token
 //! - `GET /auth/oidc/{provider}` - Start OIDC flow
 //! - `GET /auth/oidc/{provider}/callback` - OIDC callback
 //! - `POST /auth/refresh` - Refresh tokens
@@ -61,7 +62,9 @@ pub use config::{get_auth_config, update_auth_config};
 pub use local::{login, login_for_repo, register, register_for_repo};
 
 #[cfg(feature = "storage-rocksdb")]
-pub use magic_link::{request_magic_link, request_magic_link_for_repo, verify_magic_link};
+pub use magic_link::{
+    request_magic_link, request_magic_link_for_repo, verify_magic_link, verify_magic_link_for_repo,
+};
 
 #[cfg(feature = "storage-rocksdb")]
 pub use oidc::{oidc_authorize, oidc_callback};

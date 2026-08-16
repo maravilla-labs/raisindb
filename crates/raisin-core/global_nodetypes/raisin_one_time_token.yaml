@@ -5,7 +5,11 @@ version: 1
 strict: false
 indexable: true
 index_types: [Property]
-versionable: true
+# NOT versionable. A one-time token is short-lived and single-use: it is created,
+# marked used once, and pruned. Keeping revisions would mint one on every
+# mark-used and retain the token's own metadata after it has been consumed and
+# deleted, which is the opposite of what a single-use credential wants.
+versionable: false
 publishable: false
 auditable: true
 properties:

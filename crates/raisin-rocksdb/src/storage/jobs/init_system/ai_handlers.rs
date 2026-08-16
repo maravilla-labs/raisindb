@@ -6,8 +6,9 @@
 use std::sync::Arc;
 
 use crate::jobs::{
-    AIToolCallExecutionHandler, AuthCreateUserNodeHandler, BinaryRetrievalCallback,
-    BinaryUploadCallback, FunctionExecutorCallback, NodeCreatorCallback, RocksDBUserNodeCreator,
+    AIToolCallExecutionHandler, AuthCreateUserNodeHandler, AuthMagicLinkSendHandler,
+    BinaryRetrievalCallback, BinaryUploadCallback, FunctionExecutorCallback,
+    FunctionMagicLinkEmailSender, NodeCreatorCallback, RocksDBUserNodeCreator,
 };
 use crate::storage::RocksDBStorage;
 use raisin_storage::jobs::JobRegistry;
@@ -46,6 +47,21 @@ pub fn create_auth_user_node_handler(
 ) -> Option<Arc<AuthCreateUserNodeHandler<RocksDBUserNodeCreator>>> {
     let user_node_creator = Arc::new(RocksDBUserNodeCreator::new(storage));
     Some(Arc::new(AuthCreateUserNodeHandler::new(user_node_creator)))
+}
+
+/// Create the magic-link email send handler.
+///
+/// `None` without a function executor: delivery goes through the
+/// `send-magic-link` FUNCTION, so there is nothing to send with. The dispatch
+/// arm turns a job arriving in that state into a hard error rather than a
+/// silent success — see `JobHandlerRegistry::dispatch`.
+pub fn create_auth_magic_link_send_handler(
+    function_executor: Option<FunctionExecutorCallback>,
+) -> Option<Arc<AuthMagicLinkSendHandler<FunctionMagicLinkEmailSender>>> {
+    let executor = function_executor?;
+    Some(Arc::new(AuthMagicLinkSendHandler::new(Arc::new(
+        FunctionMagicLinkEmailSender::new(executor),
+    ))))
 }
 
 /// Create the resumable upload handler

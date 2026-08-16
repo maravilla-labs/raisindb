@@ -28,6 +28,7 @@ use tokio::sync::Mutex;
 // Mock email sender for testing
 struct MockEmailSender {
     sent_magic_links: Mutex<Vec<MagicLinkJobData>>,
+    sent_scopes: Mutex<Vec<MagicLinkScope>>,
     sent_notifications: Mutex<Vec<AccessNotificationJobData>>,
 }
 
@@ -35,6 +36,7 @@ impl MockEmailSender {
     fn new() -> Self {
         Self {
             sent_magic_links: Mutex::new(Vec::new()),
+            sent_scopes: Mutex::new(Vec::new()),
             sent_notifications: Mutex::new(Vec::new()),
         }
     }
@@ -42,7 +44,8 @@ impl MockEmailSender {
 
 #[async_trait]
 impl MagicLinkEmailSender for MockEmailSender {
-    async fn send_magic_link(&self, data: &MagicLinkJobData) -> Result<()> {
+    async fn send_magic_link(&self, scope: &MagicLinkScope, data: &MagicLinkJobData) -> Result<()> {
+        self.sent_scopes.lock().await.push(scope.clone());
         self.sent_magic_links.lock().await.push(data.clone());
         Ok(())
     }
@@ -187,6 +190,12 @@ async fn test_magic_link_handler() {
     let sent = sender.sent_magic_links.lock().await;
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].email, "user@example.com");
+
+    // The sender needs a repo and a branch to resolve the sending function,
+    // and the only place those can come from is the job context.
+    let scopes = sender.sent_scopes.lock().await;
+    assert_eq!(scopes[0].repo_id, "repo-1");
+    assert_eq!(scopes[0].branch, "main");
 }
 
 #[tokio::test]

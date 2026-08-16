@@ -28,6 +28,7 @@ provides:
     - raisin:access_control/roles/editor
     - raisin:access_control/users/system/anonymous
     - functions/lib/raisin/auth/create-user-node
+    - functions/lib/raisin/auth/send-magic-link
 
 # Sync configuration for package updates
 # Defines which paths this package owns to prevent conflicts with other packages

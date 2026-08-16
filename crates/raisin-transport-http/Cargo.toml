@@ -25,6 +25,7 @@ raisin-sql-execution = { path = "../raisin-sql-execution", optional = true }
 raisin-storage-memory = { path = "../raisin-storage-memory", optional = true }
 # Optional RocksDB backend
 raisin-rocksdb = { path = "../raisin-rocksdb", optional = true }
+raisin-ratelimit = { path = "../raisin-ratelimit", optional = true }
 raisin-indexer = { path = "../raisin-indexer", optional = true }
 raisin-hnsw = { path = "../raisin-hnsw", optional = true }
 # Future backends (placeholders):
@@ -85,4 +86,4 @@ fs = []
 s3 = ["raisin-binary/s3"]
 store-memory = ["dep:raisin-storage-memory"]
 store-mongo = []
-storage-rocksdb = ["dep:raisin-rocksdb", "dep:raisin-indexer", "dep:raisin-hnsw", "dep:raisin-sql-execution", "dep:rocksdb", "dep:raisin-replication", "dep:raisin-flow-runtime", "dep:raisin-auth"]
+storage-rocksdb = ["dep:raisin-rocksdb", "dep:raisin-ratelimit", "dep:raisin-indexer", "dep:raisin-hnsw", "dep:raisin-sql-execution", "dep:rocksdb", "dep:raisin-replication", "dep:raisin-flow-runtime", "dep:raisin-auth"]

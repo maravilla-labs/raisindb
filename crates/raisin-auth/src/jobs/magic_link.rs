@@ -35,6 +35,14 @@ pub struct MagicLinkJobData {
     pub expires_in_minutes: u32,
     /// Optional custom email template name
     pub template: Option<String>,
+    /// Path the link points at, relative to `base_url`.
+    ///
+    /// `None` means the tenant-wide `/auth/magic-link/verify`. It is set to the
+    /// repo-scoped `/auth/{repo}/magic-link/verify` whenever the request was,
+    /// because the token NODE lives in that repo's `raisin:system` workspace
+    /// and a verify request carrying no repo has nowhere to look it up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify_path: Option<String>,
 }
 
 impl MagicLinkJobData {
@@ -55,6 +63,7 @@ impl MagicLinkJobData {
             base_url: base_url.into(),
             expires_in_minutes,
             template: None,
+            verify_path: None,
         }
     }
 
@@ -64,12 +73,19 @@ impl MagicLinkJobData {
         self
     }
 
+    /// Point the link at a specific verify route (see [`Self::verify_path`]).
+    pub fn with_verify_path(mut self, verify_path: impl Into<String>) -> Self {
+        self.verify_path = Some(verify_path.into());
+        self
+    }
+
     /// Build the magic link URL
     pub fn build_link(&self) -> String {
-        format!(
-            "{}/auth/magic-link/verify?token={}",
-            self.base_url, self.token
-        )
+        let path = self
+            .verify_path
+            .as_deref()
+            .unwrap_or("/auth/magic-link/verify");
+        format!("{}{}?token={}", self.base_url, path, self.token)
     }
 
     /// Convert to metadata HashMap for JobContext
@@ -94,6 +110,9 @@ impl MagicLinkJobData {
         if let Some(template) = &self.template {
             map.insert("template".to_string(), serde_json::json!(template));
         }
+        if let Some(verify_path) = &self.verify_path {
+            map.insert("verify_path".to_string(), serde_json::json!(verify_path));
+        }
         map
     }
 
@@ -108,6 +127,10 @@ impl MagicLinkJobData {
             expires_in_minutes: metadata.get("expires_in_minutes")?.as_u64()? as u32,
             template: metadata
                 .get("template")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            verify_path: metadata
+                .get("verify_path")
                 .and_then(|v| v.as_str())
                 .map(String::from),
         })
@@ -206,5 +229,26 @@ mod tests {
         assert_eq!(restored.email, original.email);
         assert_eq!(restored.token, original.token);
         assert_eq!(restored.template, original.template);
+    }
+
+    #[test]
+    fn a_repo_scoped_link_points_at_the_repo_that_holds_the_token() {
+        // The tenant-wide verify route cannot find the token node: it lives in
+        // ONE repo's raisin:system workspace, and nothing in the URL would say
+        // which without this.
+        let data = MagicLinkJobData::new(
+            "identity-123",
+            "user@example.com",
+            "token-id-456",
+            "abc123",
+            "https://app.example.com",
+            15,
+        )
+        .with_verify_path("/auth/docs/magic-link/verify");
+
+        assert_eq!(
+            data.build_link(),
+            "https://app.example.com/auth/docs/magic-link/verify?token=abc123"
+        );
     }
 }

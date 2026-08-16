@@ -50,7 +50,10 @@ pub use ai_tool_result_aggregation::AIToolResultAggregationHandler;
 #[allow(deprecated)]
 // TODO(v0.2): AssetProcessingHandler is deprecated but still actively used
 pub use asset_processing::AssetProcessingHandler;
-pub use auth::{AuthCreateUserNodeHandler, RocksDBUserNodeCreator};
+pub use auth::{
+    AuthCreateUserNodeHandler, AuthMagicLinkSendHandler, FunctionMagicLinkEmailSender,
+    MagicLinkEmailSender, MagicLinkScope, RocksDBUserNodeCreator, SEND_MAGIC_LINK_PATH,
+};
 pub use bulk_sql::{BulkSqlHandler, SqlExecutorCallback};
 pub use calendar_expand::CalendarExpandHandler;
 pub use compound_index::CompoundIndexJobHandler;
@@ -157,6 +160,11 @@ pub struct JobHandlerRegistry {
     pub ai_tool_call_execution: Arc<AIToolCallExecutionHandler<RocksDBStorage>>,
     pub ai_tool_result_aggregation: Arc<AIToolResultAggregationHandler<RocksDBStorage>>,
     pub auth_create_user_node: Option<Arc<AuthCreateUserNodeHandler<RocksDBUserNodeCreator>>>,
+    /// Magic-link email delivery. `None` when the server supplied no function
+    /// executor, in which case a dispatched job HARD ERRORS — see the dispatch
+    /// arm for why this one may not warn-and-succeed. Attached via
+    /// [`JobHandlerRegistry::with_auth_magic_link_send`].
+    pub auth_magic_link_send: Option<Arc<AuthMagicLinkSendHandler<FunctionMagicLinkEmailSender>>>,
     pub resumable_upload: Arc<ResumableUploadHandler<RocksDBStorage>>,
     pub upload_session_cleanup: Arc<UploadSessionCleanupHandler>,
     pub huggingface_model: Option<Arc<HuggingFaceModelHandler>>,
@@ -220,6 +228,7 @@ impl JobHandlerRegistry {
             // server binary has.
             mcp_tool_discovery: None,
             calendar_expand: None,
+            auth_magic_link_send: None,
             fulltext,
             embedding,
             snapshot,
@@ -274,6 +283,19 @@ impl JobHandlerRegistry {
     /// lock manager, which is assembled in the server binary.
     pub fn with_calendar_expand(mut self, handler: Arc<CalendarExpandHandler>) -> Self {
         self.calendar_expand = Some(handler);
+        self
+    }
+
+    /// Attach the magic-link email send handler.
+    ///
+    /// Separate from `new()` for the same reason as the others: that
+    /// constructor already takes ~34 positional arguments, and this handler
+    /// needs the function executor callback, which the server binary assembles.
+    pub fn with_auth_magic_link_send(
+        mut self,
+        handler: Arc<AuthMagicLinkSendHandler<FunctionMagicLinkEmailSender>>,
+    ) -> Self {
+        self.auth_magic_link_send = Some(handler);
         self
     }
 
@@ -447,6 +469,19 @@ impl JobHandlerRegistry {
                     Ok(None)
                 }
             }
+            JobType::AuthMagicLinkSend { .. } => match &self.auth_magic_link_send {
+                Some(handler) => handler.handle(job, context).await.map(|_| None),
+                // Fail loudly, unlike AuthCreateUserNode above. A user-node
+                // job that no-ops leaves a user who can still log in; a
+                // magic-link job that "completes" without sending leaves a
+                // login the user never receives, with the job history
+                // recording a success. Retries and the operator alert are the
+                // only things that can recover that.
+                None => Err(raisin_error::Error::storage(
+                    "AuthMagicLinkSend job dispatched but no magic link send handler is registered"
+                        .to_string(),
+                )),
+            },
             JobType::ResumableUploadComplete { .. } => {
                 // Resumable upload completion reassembles chunks and creates node
                 self.resumable_upload.handle(job, context).await

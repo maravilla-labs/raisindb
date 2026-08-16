@@ -131,6 +131,13 @@ pub(crate) fn auth_routes(state: &AppState) -> Router<AppState> {
             "/auth/{repo}/magic-link",
             post(crate::handlers::identity_auth::request_magic_link_for_repo),
         )
+        // The route the emailed link actually points at. The token node lives
+        // in this repo's raisin:system workspace, so the tenant-wide verify
+        // route above has nothing to look it up in.
+        .route(
+            "/auth/{repo}/magic-link/verify",
+            get(crate::handlers::identity_auth::verify_magic_link_for_repo),
+        )
         .route(
             "/auth/{repo}/providers",
             get(crate::handlers::identity_auth::get_providers_for_repo),

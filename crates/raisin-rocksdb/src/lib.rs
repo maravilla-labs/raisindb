@@ -58,6 +58,7 @@ pub mod management;
 pub mod mcp_listener;
 pub mod monitoring;
 pub mod oauth_store;
+pub mod one_time_token;
 mod prefix_transform;
 pub mod replication;
 pub mod repositories;
@@ -137,6 +138,7 @@ pub use jobs::{
 pub use lazy_indexing::{BuildResult, LazyIndexManager};
 pub use management::{DimensionMismatch, HnswManagement, VectorRebuildStats, VerificationReport};
 pub use oauth_store::RocksDbOAuthStore;
+pub use one_time_token::OneTimeTokenStore;
 pub use replication::OperationCapture;
 pub use repositories::{
     OpLogRepository, OpLogStats, ProximityResult, RocksDBAuditRepo, RocksDBEmbeddingJobStore,
