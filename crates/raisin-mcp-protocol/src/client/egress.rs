@@ -106,20 +106,50 @@ impl EgressPolicy {
     /// [`validate_url`]: Self::validate_url
     pub async fn guard(&self, url: &Url) -> Result<()> {
         self.validate_url(url)?;
+        self.guard_addresses(url).await
+    }
 
-        // A literal IP was already judged by validate_url; only a domain needs
-        // resolving, and resolving one costs a DNS round trip we should not pay
-        // for an address we can read straight out of the URL.
-        let Some(Host::Domain(domain)) = url.host() else {
-            return Ok(());
-        };
-        let port = url.port_or_known_default().unwrap_or(443);
-        let addresses: Vec<IpAddr> = tokio::net::lookup_host((domain, port))
-            .await
-            .map_err(|e| RemoteToolError::Transient(format!("could not resolve `{domain}`: {e}")))?
-            .map(|socket| socket.ip())
-            .collect();
-        self.validate_resolved(domain, &addresses)
+    /// The ADDRESS half of [`guard`], without the scheme rule or the host
+    /// allowlist.
+    ///
+    /// Split out so a second caller can reuse the SSRF check without inheriting
+    /// MCP's other policy. `raisin.http.fetch` is that caller: a function may
+    /// legitimately call plain `http://`, and its permitted hosts are already
+    /// decided by the function's own `network_policy`, but it must still never
+    /// be able to reach loopback, RFC1918 or link-local — `169.254.169.254` is
+    /// cloud instance metadata, and adapters run privileged with `raisin.secrets`
+    /// in reach.
+    ///
+    /// Keeping this in one place is deliberate. The codebase already carries two
+    /// `is_url_allowed` implementations that drifted into disagreeing (see the
+    /// tracking issue); a second copy of "is this address public" would drift the
+    /// same way, and the failure mode would be an SSRF hole rather than a
+    /// confusing error.
+    ///
+    /// [`guard`]: Self::guard
+    pub async fn guard_addresses(&self, url: &Url) -> Result<()> {
+        match url.host() {
+            // A literal IP can be judged immediately — no DNS round trip for an
+            // address that is already in the URL.
+            Some(Host::Ipv4(addr)) => {
+                self.validate_resolved(&addr.to_string(), &[IpAddr::V4(addr)])
+            }
+            Some(Host::Ipv6(addr)) => {
+                self.validate_resolved(&addr.to_string(), &[IpAddr::V6(addr)])
+            }
+            Some(Host::Domain(domain)) => {
+                let port = url.port_or_known_default().unwrap_or(443);
+                let addresses: Vec<IpAddr> = tokio::net::lookup_host((domain, port))
+                    .await
+                    .map_err(|e| {
+                        RemoteToolError::Transient(format!("could not resolve `{domain}`: {e}"))
+                    })?
+                    .map(|socket| socket.ip())
+                    .collect();
+                self.validate_resolved(domain, &addresses)
+            }
+            None => Err(RemoteToolError::Config("URL has no host".into())),
+        }
     }
 
     /// Validate the addresses a host actually resolved to, just before dialling.
