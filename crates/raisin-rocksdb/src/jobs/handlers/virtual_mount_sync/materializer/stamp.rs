@@ -133,6 +133,10 @@ impl RocksDbMaterializer {
             id: node.id.clone(),
             path: node.path.clone(),
             external_id: external_id.to_string(),
+            is_command: scope
+                .command_node_types
+                .iter()
+                .any(|t| t == &node.node_type),
             etag: etag
                 .map(str::to_string)
                 .or_else(|| match node.properties.get("__etag") {

@@ -94,6 +94,16 @@ pub struct VirtualNodeRef {
     pub id: String,
     pub path: String,
     pub external_id: String,
+    /// Whether this node is an OUTBOX COMMAND rather than a mirror of a remote
+    /// item — its `node_type` is one the mount declares in `command_node_types`.
+    ///
+    /// Read by reconcile: a command is AUTHORED LOCALLY, so "not seen upstream"
+    /// is its normal condition and must never mean "deleted upstream". Some
+    /// providers answer a send with no id at all (Graph's `sendMail` is a 202
+    /// with an empty body), leaving the node stamped `cmd:{node_id}` — an id no
+    /// listing can ever return, so an unguarded reconcile would delete every
+    /// command it had just sent.
+    pub is_command: bool,
     pub etag: Option<String>,
     /// `__synced_at` as unix epoch seconds (used by ephemeral TTL cleanup).
     /// Tolerates both `String` (ISO 8601) and `Date` stored representations.
@@ -163,6 +173,7 @@ impl SyncIndex {
         mount_id: &str,
         mount_path: &str,
         watched_fields: &[String],
+        command_node_types: &[String],
     ) -> Self {
         let mut idx = Self::default();
         for node in nodes {
@@ -184,12 +195,14 @@ impl SyncIndex {
             }
             if let Some(ext) = node_external_id(&node) {
                 let write_view = write_view_of(&node, watched_fields);
+                let is_command = command_node_types.iter().any(|t| t == &node.node_type);
                 idx.by_external.insert(
                     ext.to_string(),
                     VirtualNodeRef {
                         id: node.id.clone(),
                         path: node.path.clone(),
                         external_id: ext.to_string(),
+                        is_command,
                         etag,
                         synced_secs: node_synced_secs(&node),
                         pushed_state: carried_pushed_state(&node, &write_view),
@@ -199,6 +212,57 @@ impl SyncIndex {
             }
         }
         idx
+    }
+
+    /// Record a node this RUN has just adopted an external id for.
+    ///
+    /// The index is read once at the start of a run, but the outbox drain runs
+    /// BEFORE the walk in that same run (`phases.rs`) and stamps
+    /// `__external_id` on the command node it just sent — straight to the
+    /// materializer, bypassing this index. The walk then looked the item up,
+    /// missed, fell back to a path match, found nothing at the provider-derived
+    /// path and CREATED A SECOND NODE: one at `/checkout/order-123` and another
+    /// at `/checkout/cs_test_…`, both claiming the same `__external_id`, with
+    /// the original silently renamed on top.
+    ///
+    /// That mattered more than a stray node. Path is the natural way to address
+    /// anything in RaisinDB, and the duplicate made a command node's path
+    /// unreliable the moment it succeeded — for the one node type an
+    /// application authors itself. The `by_external` hit already keeps the
+    /// existing path (see the upsert's first branch), so paths were always meant
+    /// to be stable here; this closes the one window where the index could not
+    /// answer.
+    pub fn adopt(
+        &mut self,
+        node_id: &str,
+        path: &str,
+        external_id: &str,
+        etag: Option<String>,
+        is_command: bool,
+    ) {
+        self.by_path.insert(
+            path.to_string(),
+            PathEntry {
+                id: Some(node_id.to_string()),
+                mount_owned: true,
+                etag: etag.clone(),
+            },
+        );
+        self.by_external.insert(
+            external_id.to_string(),
+            VirtualNodeRef {
+                id: node_id.to_string(),
+                path: path.to_string(),
+                external_id: external_id.to_string(),
+                is_command,
+                etag,
+                // Unset on purpose: the TTL cleanup reads `__synced_at` from the
+                // stored node, and this run has not written one yet.
+                synced_secs: None,
+                write_view: None,
+                pushed_state: None,
+            },
+        );
     }
 
     /// Every mount-owned virtual node, for reconcile and TTL cleanup.

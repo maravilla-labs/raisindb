@@ -86,6 +86,7 @@ mod tests {
             id: id.to_string(),
             path: path.to_string(),
             external_id: id.to_string(),
+            is_command: false,
             etag: None,
             synced_secs: None,
             // No `pushed` at all, so every watched field counts as diverged —

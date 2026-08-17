@@ -134,6 +134,17 @@ pub(super) async fn reconcile_deletes(
     } else {
         let mut deleted = 0usize;
         for node in existing {
+            // A COMMAND IS NOT A MIRROR. It was authored locally and sent, so
+            // "not seen in the provider's listing" is its ordinary condition,
+            // not evidence it was deleted upstream. Several providers answer a
+            // send with no id at all — Graph's `sendMail` is a 202 with an empty
+            // body — which leaves the node stamped `cmd:{node_id}`, an id no
+            // listing can ever return. Without this an outbox that also lists
+            // would delete every command it had just successfully sent, and the
+            // record of the send with it.
+            if node.is_command {
+                continue;
+            }
             if !seen.contains(&node.external_id) {
                 batcher.stage_delete(&node.external_id).await?;
                 deleted += 1;

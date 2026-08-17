@@ -389,7 +389,7 @@ pub(super) async fn drain(
         // through this one; the two have opposite retry semantics, and a shared
         // loop is how the read path's "unrecognized means retry" default would
         // eventually reach a send.
-        WriteMode::Submit(plan) => return submit::drain_submit(ctx, state, plan).await,
+        WriteMode::Submit(plan) => return submit::drain_submit(ctx, state, batcher, plan).await,
         WriteMode::StateOnly(fields) => (fields.clone(), None),
         WriteMode::Mirror(plan) => (plan.fields.clone(), Some(plan)),
     };

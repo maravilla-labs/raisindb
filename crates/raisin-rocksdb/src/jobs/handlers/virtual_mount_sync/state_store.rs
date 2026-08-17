@@ -87,7 +87,7 @@ impl StateWrite {
 pub(super) async fn persist_state(ctx: &SyncCtx<'_>, state: &mut MountState) -> Result<StateWrite> {
     // Mount state lives with the mount config on the CONFIG branch, never on the
     // materialization target branch.
-    persist_mount_state_detailed(
+    let first = persist_mount_state_detailed(
         &ctx.storage,
         &ctx.scope.tenant,
         &ctx.scope.repo,
@@ -95,8 +95,83 @@ pub(super) async fn persist_state(ctx: &SyncCtx<'_>, state: &mut MountState) -> 
         &ctx.scope.mount_id,
         state,
     )
-    .await
+    .await?;
+    if first != StateWrite::Superseded {
+        return Ok(first);
+    }
+
+    // SUPERSEDED IS NOT A REASON TO DROP THE RUN'S WORK.
+    //
+    // Giving up here threw away the one field that must never be lost: the
+    // delta cursor. The run had already consumed those events, so nothing would
+    // re-offer them — the mount sat at `status: "syncing"` with a stale
+    // `last_sync_token`, every later run reported "previous run never
+    // finalized", and only a full walk recovered it. Observed on a live Stripe
+    // mount after a paid subscription.
+    //
+    // The other writer is the push-delivery counter, which the webhook fan-out
+    // stamps on the very mount it just enqueued a run for. That makes the
+    // collision PROPORTIONAL TO TRAFFIC rather than rare: the busier the
+    // account, the more often a run finishes into a seq that moved under it.
+    // The fan-out now records before enqueueing, which removes the common case,
+    // but any concurrent writer can do this and losing a cursor is too
+    // expensive to leave to ordering luck.
+    //
+    // So: re-read, carry the other writer's fields onto OUR state, and write
+    // again at the fresh seq. Only the `push_*` counters are taken from the
+    // stored copy — everything else on a mount's state is owned by the run and
+    // ours is the newer truth.
+    for _ in 0..STATE_WRITE_RETRIES {
+        let Some(stored) = read_mount_state(
+            &ctx.storage,
+            &ctx.scope.tenant,
+            &ctx.scope.repo,
+            &ctx.config_branch,
+            &ctx.scope.mount_id,
+        )
+        .await?
+        else {
+            // The mount was deleted while this run was working. Nothing to
+            // write, and nothing wrong.
+            return Ok(StateWrite::MountMissing);
+        };
+
+        state.state_seq = stored.state_seq;
+        state.push_mount_token = stored.push_mount_token;
+        state.push_expires_at = stored.push_expires_at;
+        state.push_status = stored.push_status;
+        state.push_last_error = stored.push_last_error;
+        state.push_last_delivery_at = stored.push_last_delivery_at;
+        state.push_last_rejected_at = stored.push_last_rejected_at;
+        state.push_last_rejected_reason = stored.push_last_rejected_reason;
+        state.push_deliveries_ok = stored.push_deliveries_ok;
+        state.push_deliveries_rejected = stored.push_deliveries_rejected;
+
+        let again = persist_mount_state_detailed(
+            &ctx.storage,
+            &ctx.scope.tenant,
+            &ctx.scope.repo,
+            &ctx.config_branch,
+            &ctx.scope.mount_id,
+            state,
+        )
+        .await?;
+        if again != StateWrite::Superseded {
+            return Ok(again);
+        }
+    }
+
+    // Bounded on purpose. A mount being written this hard is a problem of its
+    // own, and spinning here would hold the per-mount lease while doing it.
+    Ok(StateWrite::Superseded)
 }
+
+/// How many times a superseded state write is re-attempted before giving up.
+///
+/// Small: the contention this exists for is a single concurrent counter write,
+/// which one retry already clears. More attempts would only extend how long a
+/// pathologically contended mount holds its lease.
+const STATE_WRITE_RETRIES: usize = 3;
 
 /// Whether an operator has asked the running sync to stop.
 ///

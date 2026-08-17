@@ -232,6 +232,7 @@ impl NodeMaterializer for RocksDbMaterializer {
             &scope.mount_id,
             &scope.mount_path,
             &scope.watched_fields,
+            &scope.command_node_types,
         ))
     }
 

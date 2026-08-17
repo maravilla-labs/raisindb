@@ -19,7 +19,14 @@ use super::submit_record::{map_command, sent_stamp};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Issued {
     /// The provider accepted it. Terminal.
-    Sent,
+    ///
+    /// Carries the id the command was adopted under so the caller can register
+    /// it in THIS RUN's index — the walk that follows in the same run would
+    /// otherwise miss it and duplicate the node. See `SyncIndex::adopt`.
+    Sent {
+        external_id: String,
+        etag: Option<String>,
+    },
     /// Explicitly refused before the provider looked at it (`rate_limited`),
     /// so it is back at `queued` and will be tried again.
     ///
@@ -176,8 +183,16 @@ pub(super) async fn issue_one(
             let etag = value.get("etag").and_then(|v| v.as_str());
             let mut set = sent_stamp(&node.id, &ctx.scope.mount_id, external_id, etag);
             merge_created_item(ctx, node, &value, &mut set).await;
+            // The same fallback `sent_stamp` uses, so the index records the id
+            // the node actually carries.
+            let adopted = external_id
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("cmd:{}", node.id));
             apply(ctx, node, claim_seq, status::SENT, set).await;
-            Issued::Sent
+            Issued::Sent {
+                external_id: adopted,
+                etag: etag.map(str::to_string),
+            }
         }
         // A non-object answer is NOT the `gone` an `update` gets. There is no
         // object here that could be gone: the call was made, the adapter

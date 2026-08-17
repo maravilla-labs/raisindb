@@ -131,6 +131,31 @@ pub async fn connect_event(
             }
             matched += 1;
 
+            // RECORDED BEFORE THE ENQUEUE, and the order is load-bearing.
+            //
+            // Both writes touch the same mount state and both bump `state_seq`.
+            // Enqueueing first started a run that read the state at seq N while
+            // this counter write was still in flight; the counter landed at
+            // N+1, and the run's own `finalize` was then refused for writing
+            // against a superseded seq. The run had already done its work, so
+            // the visible symptom was a mount stuck at `status: "syncing"` with
+            // its DELTA CURSOR NEVER ADVANCING — the events it had just consumed
+            // were silently not committed, and the next scheduled run reported
+            // "previous run never finalized". Only a full walk recovered it.
+            //
+            // The race is not incidental, it is proportional to push volume:
+            // every delivery starts a job that runs within milliseconds, so the
+            // busier the account, the more often the fan-out collides with the
+            // run it just triggered. Recording first closes it by construction —
+            // the counter write happens while nothing is running, and the run
+            // reads a seq that is already current.
+            //
+            // The delivery ALSO gets counted when the enqueue then fails, which
+            // is the honest answer: the provider did deliver, and a mount whose
+            // enqueue is broken should show deliveries arriving beside the
+            // error, not look as though nothing reached it.
+            record_delivery(&state, &tenant.tenant_id, &repo, &mount.id).await;
+
             match super::notifications::enqueue_delta_sync(
                 &state,
                 &tenant.tenant_id,
@@ -143,13 +168,8 @@ pub async fn connect_event(
                 // `false` means a sync for this mount is already in flight — the
                 // idempotency key collapsed it. That is a success, not a miss: a burst of
                 // events for one account should cost one sync.
-                Ok(true) => {
-                    queued += 1;
-                    record_delivery(&state, &tenant.tenant_id, &repo, &mount.id).await;
-                }
-                Ok(false) => {
-                    record_delivery(&state, &tenant.tenant_id, &repo, &mount.id).await;
-                }
+                Ok(true) => queued += 1,
+                Ok(false) => {}
                 Err(e) => {
                     tracing::warn!(
                         mount_id = %mount.id, repo = %repo, error = %e,

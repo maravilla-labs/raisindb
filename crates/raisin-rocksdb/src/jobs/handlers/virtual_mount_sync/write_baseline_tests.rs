@@ -659,3 +659,71 @@ async fn an_ordinary_node_still_takes_its_status_from_the_provider() {
         "a provider status must keep tracking the provider"
     );
 }
+
+// ---------------------------------------------------------------------------
+// a concurrent writer must not cost the run its cursor
+// ---------------------------------------------------------------------------
+
+/// A superseded state write is retried, not dropped.
+///
+/// The push-delivery counter is stamped by the webhook fan-out on the very
+/// mount it just enqueued a run for, so the counter and the run's `finalize`
+/// race on `state_seq`. Losing that race used to discard the run's whole state
+/// write — including `last_sync_token`. Nothing re-offers events a delta has
+/// already consumed, so the mount sat at `status: "syncing"` with a stale
+/// cursor, every later run reported "previous run never finalized", and only a
+/// full walk recovered it. Seen on a live Stripe mount after a paid
+/// subscription.
+///
+/// The collision is proportional to traffic, not rare: the busier the account,
+/// the more often a run finishes into a seq that moved under it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_state_write_beaten_by_a_concurrent_writer_is_retried() {
+    let env = setup().await;
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let mock = StateOnlyMock::new();
+    let mount = state_only_mount();
+    let c = ctx(&env, &mount, &mock, &mat);
+
+    // The state lives on the mount CONFIG node, so there has to be one.
+    super::write_mount_on_branch(&env, "main").await;
+
+    // The run's own view, read at the start of its work.
+    let mut state = sync::config::MountState {
+        last_sync_token: Some("cursor-after-this-run".to_string()),
+        ..Default::default()
+    };
+
+    // Meanwhile the fan-out stamps a delivery, bumping the stored seq past the
+    // one this run is holding.
+    assert!(
+        crate::record_push_delivery(&env.storage, TENANT, REPO, "main", MOUNT_ID, true)
+            .await
+            .unwrap(),
+        "the counter write must land first for this test to mean anything"
+    );
+
+    let wrote = sync::state_store::persist_state(&c, &mut state)
+        .await
+        .unwrap();
+    assert!(
+        wrote.is_written(),
+        "a run beaten by the delivery counter must still record its progress, got {wrote:?}"
+    );
+
+    let stored = sync::state_store::read_mount_state(&env.storage, TENANT, REPO, "main", MOUNT_ID)
+        .await
+        .unwrap()
+        .expect("mount state must exist");
+
+    // THE CURSOR SURVIVED — the whole point.
+    assert_eq!(
+        stored.last_sync_token.as_deref(),
+        Some("cursor-after-this-run")
+    );
+    // ...and the other writer's counter was carried across rather than reverted.
+    assert_eq!(
+        stored.push_deliveries_ok, 1,
+        "the concurrent writer's field must not be clobbered by the retry"
+    );
+}

@@ -32,6 +32,9 @@ enum Answer {
     /// what makes "did it send?" genuinely unanswerable.
     DiedAfterSending,
     Err(AdapterError),
+    /// Accepted, but the provider returned NO id — Graph's `sendMail` is a 202
+    /// with an empty body.
+    NoId,
     /// Answered with the OBJECT THE COMMAND CREATED, the way an adapter that
     /// mints something has to. Carries an etag as well, because it is the etag
     /// that makes dropping the item lethal rather than merely lossy: the stamp
@@ -135,6 +138,7 @@ impl AdapterInvoker for SubmitMock {
                         "adapter panicked after the provider call".to_string(),
                     )),
                     Some(Answer::Err(e)) => Err(e),
+                    Some(Answer::NoId) => Ok(json!({})),
                     Some(Answer::OkWithItem { id, url }) => Ok(json!({
                         "external_id": id,
                         "etag": "etag-after-create",
@@ -675,5 +679,95 @@ async fn an_ordinary_node_still_takes_its_status_from_the_provider() {
         str_prop(&node_of(&env, &id).await, "status").as_deref(),
         Some("canceled"),
         "a provider status must keep tracking the provider"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// a sent command keeps its path
+// ---------------------------------------------------------------------------
+
+/// The walk that follows a send must find the command node, not duplicate it.
+///
+/// The drain runs before the walk and shares its index, but stamps
+/// `__external_id` straight onto the node — so the walk missed it on
+/// `by_external`, fell back to a path match, found nothing at the
+/// provider-derived path and created a SECOND node. Observed live: one node at
+/// `/checkout/test-ticket-2` and another at `/checkout/cs_test_…`, both
+/// claiming the same external id, the original renamed on top.
+///
+/// That is worse than a stray node. Path is how anything in RaisinDB is
+/// addressed, and this made a command node's path unreliable precisely when it
+/// succeeded — for the one node type an application authors itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sent_command_is_registered_in_this_runs_index() {
+    let env = setup().await;
+    let mount = submit_mount();
+    let mock = SubmitMock::new(vec![Answer::Ok("SENT-1")]);
+    let id = command(&env, "m1", "queued").await;
+
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let c = ctx(&env, &mount, mock.as_ref(), &mat);
+    let mut state = MountState::default();
+    let mut batcher = sync::batch::SyncBatcher::new(&c).await.unwrap();
+
+    // Before the send the index knows nothing about this external id — which is
+    // exactly the window the duplicate was created in.
+    assert!(
+        !batcher
+            .virtual_nodes()
+            .iter()
+            .any(|n| n.external_id == "SENT-1"),
+        "precondition: the index must not know the id before the send"
+    );
+
+    sync::write::drain(&c, &mut state, &mut batcher, &submit_mode()).await;
+
+    let adopted = batcher
+        .virtual_nodes()
+        .into_iter()
+        .find(|n| n.external_id == "SENT-1")
+        .expect("the walk later in this run must be able to resolve the sent command");
+    assert_eq!(adopted.id, id, "it must resolve to the command node itself");
+    assert!(
+        adopted.path.ends_with("/m1"),
+        "and keep its authored path, got {}",
+        adopted.path
+    );
+    assert!(adopted.is_command, "it must be marked as a command");
+}
+
+/// A command is never reconciled away as "gone upstream".
+///
+/// Some providers answer a send with no id at all — Graph's `sendMail` is a 202
+/// with an empty body — so the node is stamped `cmd:{node_id}`, an id no listing
+/// can ever return. An unguarded reconcile deletes every command it just sent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_command_with_no_provider_id_is_not_reconciled_away() {
+    let env = setup().await;
+    let mount = submit_mount();
+    // No external id in the answer — the shape a mail send takes.
+    let mock = SubmitMock::new(vec![Answer::NoId]);
+    let id = command(&env, "m1", "queued").await;
+
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let c = ctx(&env, &mount, mock.as_ref(), &mat);
+    let mut state = MountState::default();
+    let mut batcher = sync::batch::SyncBatcher::new(&c).await.unwrap();
+    sync::write::drain(&c, &mut state, &mut batcher, &submit_mode()).await;
+
+    let adopted = batcher
+        .virtual_nodes()
+        .into_iter()
+        .find(|n| n.id == id)
+        .expect("the command must be in the index");
+    assert_eq!(
+        adopted.external_id,
+        format!("cmd:{id}"),
+        "a send with no provider id falls back to the node-derived stamp"
+    );
+    assert!(
+        adopted.is_command,
+        "which is exactly why it must be flagged: no listing can ever return it, \
+         so reconcile would otherwise delete a command it had just sent"
     );
 }

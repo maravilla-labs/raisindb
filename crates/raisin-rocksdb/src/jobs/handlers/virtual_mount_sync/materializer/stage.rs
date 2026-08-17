@@ -437,6 +437,8 @@ impl RocksDbMaterializer {
             id: node.id,
             path,
             external_id: virt.external_id.clone(),
+            // Already computed above for the lifecycle carry.
+            is_command,
             etag: virt.etag.clone(),
             synced_secs: chrono::DateTime::parse_from_rfc3339(&virt.synced_at)
                 .ok()

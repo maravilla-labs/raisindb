@@ -151,7 +151,7 @@ fn index_serves_external_path_and_foreign_lookups() {
         ..Default::default()
     };
 
-    let idx = SyncIndex::from_nodes(vec![mount_owned, foreign, outside], "m1", "/docs", &[]);
+    let idx = SyncIndex::from_nodes(vec![mount_owned, foreign, outside], "m1", "/docs", &[], &[]);
 
     assert_eq!(idx.by_external("ext-a").map(|n| n.id.as_str()), Some("n1"));
     assert_eq!(
@@ -178,6 +178,7 @@ fn index_serves_external_path_and_foreign_lookups() {
 fn recording_a_write_also_marks_its_ancestor_folders_occupied() {
     let mut idx = SyncIndex::default();
     idx.record_upsert(VirtualNodeRef {
+        is_command: false,
         id: "n1".to_string(),
         path: "/docs/thread-1/msg.txt".to_string(),
         external_id: "ext-a".to_string(),

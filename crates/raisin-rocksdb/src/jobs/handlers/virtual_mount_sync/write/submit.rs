@@ -53,6 +53,7 @@ const STOP_CHECK_EVERY: usize = 5;
 pub(super) async fn drain_submit(
     ctx: &SyncCtx<'_>,
     state: &mut MountState,
+    batcher: &mut super::super::batch::SyncBatcher<'_>,
     plan: &SubmitPlan,
 ) -> DrainStats {
     let mut stats = DrainStats::default();
@@ -200,7 +201,15 @@ pub(super) async fn drain_submit(
 
         let mut stop_drain = false;
         match submit_step::issue_one(ctx, node, plan).await {
-            Issued::Sent => stats.submitted += 1,
+            Issued::Sent { external_id, etag } => {
+                stats.submitted += 1;
+                // REGISTER IN THIS RUN'S INDEX. The walk runs after this drain
+                // and shares the index; without this it misses the command node
+                // on `by_external`, falls back to a path match, and creates a
+                // second node under the provider-derived path — leaving the
+                // original renamed and its path unusable. See `SyncIndex::adopt`.
+                batcher.adopt(&node.id, &node.path, &external_id, etag, true);
+            }
             // A THROTTLE STOPS THE DRAIN. It is a statement about the TENANT, so
             // every remaining command would be refused the same way — the drain
             // used to carry on and put 499 more calls into a provider that had

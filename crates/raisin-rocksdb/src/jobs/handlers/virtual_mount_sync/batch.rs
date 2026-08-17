@@ -76,6 +76,24 @@ impl<'a> SyncBatcher<'a> {
         self.index.virtual_len()
     }
 
+    /// Record that a node has just adopted an external id, so the WALK LATER IN
+    /// THIS RUN resolves it instead of duplicating it.
+    ///
+    /// The outbox drain runs before the walk and stamps `__external_id`
+    /// straight onto the node, bypassing this index — see `SyncIndex::adopt`
+    /// for what that cost.
+    pub fn adopt(
+        &mut self,
+        node_id: &str,
+        path: &str,
+        external_id: &str,
+        etag: Option<String>,
+        is_command: bool,
+    ) {
+        self.index
+            .adopt(node_id, path, external_id, etag, is_command);
+    }
+
     /// Outcome counts accumulated across every flush so far.
     pub fn stats(&self) -> BatchStats {
         self.stats.clone()
