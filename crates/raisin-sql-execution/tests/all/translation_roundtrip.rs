@@ -281,6 +281,83 @@ async fn without_the_repository_config_a_locale_predicate_is_a_silent_no_op() {
     );
 }
 
+/// An `ElementField` — an element held DIRECTLY on a property, like a page's
+/// `hero` — is addressed by field name (`/hero/headline`). Only elements inside an
+/// ARRAY were navigable, so translating an embedded element made the whole page
+/// fail to load in that language: `Cannot navigate through non-object property at
+/// path segment 'hero'`, a 400 on the read, with the base language unreachable too.
+#[tokio::test]
+async fn a_translated_element_field_resolves_instead_of_failing_the_read() {
+    let (storage, _td) = setup().await;
+    let e = engine(&storage, config(&["en", "de"]));
+
+    // `hero` is a single embedded element; `content` is the array case beside it.
+    let props = serde_json::json!({
+        "title": "Home",
+        "hero": { "uuid": "masthead", "headline": "Hello", "lead": "Untouched" },
+        "content": [{ "uuid": BLOCK, "headline": "Hello", "tagline": "Untouched" }],
+    })
+    .to_string();
+    run(
+        &e,
+        &format!(
+            "INSERT INTO {WS} (id, path, node_type, properties) VALUES \
+             ('page-1','/page','test:Page','{props}'::JSONB)"
+        ),
+    )
+    .await;
+
+    run(
+        &e,
+        &format!("UPDATE {WS} FOR LOCALE 'de' SET hero.headline = 'Hallo' WHERE path = '/page'"),
+    )
+    .await;
+
+    let de = read_props(&e, "de").await;
+    assert_eq!(
+        de.pointer("/hero/headline").and_then(|v| v.as_str()),
+        Some("Hallo"),
+        "a field inside an embedded element must translate"
+    );
+    assert_eq!(
+        de.pointer("/hero/lead").and_then(|v| v.as_str()),
+        Some("Untouched"),
+        "its untranslated siblings must survive"
+    );
+}
+
+/// A pointer whose target has changed shape is STALE, not fatal. It used to abort
+/// the entire localized read, which meant one bad pointer could take a page down in
+/// a language with no way to fix it from the editor.
+#[tokio::test]
+async fn a_pointer_that_cannot_be_navigated_is_skipped_not_fatal() {
+    let (storage, _td) = setup().await;
+    let e = engine(&storage, config(&["en", "de"]));
+    insert_page(&e).await;
+
+    // `/title/nested` navigates THROUGH a string — impossible by construction.
+    run(
+        &e,
+        &format!("UPDATE {WS} FOR LOCALE 'de' SET title.nested = 'Nirgendwo' WHERE path = '/page'"),
+    )
+    .await;
+    run(
+        &e,
+        &format!(
+            "UPDATE {WS} FOR LOCALE 'de' SET content[uuid='{BLOCK}'].headline = 'Hallo' \
+             WHERE path = '/page'"
+        ),
+    )
+    .await;
+
+    let de = read_props(&e, "de").await;
+    assert_eq!(
+        headline(&de),
+        "Hallo",
+        "the good pointer still applies alongside the impossible one"
+    );
+}
+
 /// Merging makes a translation sticky, so there has to be a way to take one back:
 /// setting a pointer to NULL clears it and the field falls back to the base
 /// language again. Without it, "this shouldn't be translated after all" could only

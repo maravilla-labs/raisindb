@@ -302,6 +302,30 @@ pub(super) fn merge_into_map(
 
     match current.get_mut(segment) {
         Some(PropertyValue::Object(obj)) => merge_into_map(obj, remaining, value),
+        // An ELEMENT held directly on a property — an `ElementField`, e.g. a page's
+        // `hero` — is a keyed container like an object, and its fields are addressed
+        // by name: `/hero/headline`. Only elements INSIDE an array were handled, so
+        // the moment anyone translated an embedded element the whole localized read
+        // failed with "Cannot navigate through non-object property" — not the field
+        // skipped, the entire page 400ing in that language.
+        Some(PropertyValue::Element(element)) => {
+            merge_into_map(&mut element.content, remaining, value)
+        }
+        // A COMPOSITE navigates by item uuid, exactly like an array.
+        Some(PropertyValue::Composite(composite)) => {
+            let uuid = remaining[0];
+            let field_segments = &remaining[1..];
+            for item in composite.items.iter_mut() {
+                if item.uuid == uuid {
+                    return if field_segments.is_empty() {
+                        Ok(())
+                    } else {
+                        merge_into_map(&mut item.content, field_segments, value)
+                    };
+                }
+            }
+            Ok(()) // uuid not found — skip, as the array case does
+        }
         Some(PropertyValue::Array(arr)) => {
             // Array navigation: next segment is a UUID, rest are field path
             let uuid = remaining[0];
@@ -331,10 +355,19 @@ pub(super) fn merge_into_map(
             }
             Ok(()) // UUID not found — skip silently
         }
-        Some(_) => Err(Error::Validation(format!(
-            "Cannot navigate through non-object property at path segment '{}'",
-            segment
-        ))),
+        // A pointer that cannot be navigated is a STALE pointer, not a corrupt node:
+        // the content changed shape under a translation written against the old one.
+        // Skip that field — it falls back to the base language — rather than failing
+        // the read, which took the whole page down in that locale and left no way to
+        // fix it from the editor. Consistent with the uuid-not-found cases above and
+        // with the renderer-side overlay, which also skips unknown pointers.
+        Some(_) => {
+            tracing::debug!(
+                "translation overlay skipped: cannot navigate path segment '{}'",
+                segment
+            );
+            Ok(())
+        }
         None => unreachable!("We just inserted this key"),
     }
 }
