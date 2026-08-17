@@ -270,7 +270,20 @@ VALUES ($1, 'myapp:Page', $2::jsonb)
 
 ## Real-Time Reactivity
 
-RaisinDB pushes events over the WebSocket when nodes change. **This is the standard pattern for all data that can change** — content pages, file uploads, dashboards, precomputed views, navigation. Never use `setTimeout` or polling. Always subscribe to events.
+**This is not a feature you add at the end; it is what the WebSocket is for.** The
+client's connection is already open — every read you make travels over it — and the
+server pushes a node event the moment anything changes. So the default way to learn
+that something happened is to be told, not to ask.
+
+Concretely: **subscribing is the standard pattern for all data that can change** —
+content pages, file uploads, dashboards, precomputed views, navigation, the state of
+a long-running job. A polling loop asks a question the server has already answered,
+costs a query per tick per client, and is still late by up to one interval.
+
+> **Never poll.** No `setInterval`, no `setTimeout` retry, no "check the status every
+> two seconds". If you are about to write a loop that re-reads a node until something
+> changes, you want a subscription. See "When polling is genuinely the answer" below
+> for the two narrow exceptions — and note that both are SERVER-side, never in an app.
 
 The pattern:
 1. **Render current state** immediately (show placeholder/skeleton for data not yet available)
@@ -308,6 +321,46 @@ onDestroy(() => subscription.unsubscribe());
 - Navigation: update when pages are added/removed
 
 **DO NOT** use `setTimeout`, `setInterval`, or polling to wait for server-side processing. The WebSocket event will arrive when the data is ready.
+
+### The shape to reach for, whatever you are waiting on
+
+Anything asynchronous in RaisinDB reports its progress by **writing to a node** —
+a job, a publish, an import, a render, an order. That is deliberate: it means you
+never need a status endpoint or a poll loop, because a node write is already an
+event you can subscribe to.
+
+```typescript
+// Waiting for a long-running server-side job: subscribe to the node it writes.
+const sub = await workspace.events().subscribe(
+  { workspace: WORKSPACE_NAME, path: jobPath, event_types: ['node:updated'] },
+  async () => {
+    const job = await workspace.nodes().getByPath(jobPath);
+    render(job.properties.status, job.properties.percent);   // ticks as it advances
+    if (job.properties.status === 'completed' || job.properties.status === 'failed') {
+      await sub.unsubscribe();
+    }
+  },
+);
+```
+
+The same shape covers "did my write land", "is the upload processed", "has the
+publish finished". Subscribe first, then read — subscribing after the read leaves a
+gap in which the event you needed can fire unseen.
+
+### When polling is genuinely the answer
+
+Two cases, both SERVER-side, and both should say so in a comment where they appear:
+
+1. **A third-party system with no push** — an external API that only offers a status
+   endpoint. Poll it from a *scheduled function*, one step per invocation
+   (never a loop inside one invocation, which pins the isolate), bounded by a maximum
+   attempt count, and **write each step onto a node** so every client watching gets
+   pushed updates instead of polling too. One poller, many subscribers.
+2. **A read-back after a write that must be confirmed** — indexed queries are
+   eventually consistent, so a just-written node can be briefly invisible. Re-read
+   until it appears, bounded, and only when correctness depends on the confirmation.
+
+Everything else — including every client-facing app — subscribes.
 
 ## Component Registries
 
