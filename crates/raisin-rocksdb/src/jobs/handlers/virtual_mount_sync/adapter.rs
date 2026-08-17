@@ -258,7 +258,11 @@ impl Capabilities {
     /// an adapter that updates and deletes is a complete mirror for every mount
     /// that does not. Demanding the capability unconditionally refused correct
     /// adapters for an op they would never be called with.
-    pub fn missing_mirror_ops(&self, needs_create: bool) -> Vec<&'static str> {
+    pub fn missing_mirror_ops(
+        &self,
+        needs_create: bool,
+        propagates_deletes: bool,
+    ) -> Vec<&'static str> {
         let mut missing = Vec::new();
         if !self.can_write {
             missing.push("can_write");
@@ -269,7 +273,11 @@ impl Capabilities {
         if !self.can_update {
             missing.push("can_update");
         }
-        if !self.can_delete {
+        // Only from a mount that actually deletes upstream. A `detach` mount
+        // unhooks the node locally and never calls the adapter, so demanding
+        // the capability refused mounts for an operation they are configured
+        // never to perform — see the note at the call site in `resolve_mirror`.
+        if propagates_deletes && !self.can_delete {
             missing.push("can_delete");
         }
         missing

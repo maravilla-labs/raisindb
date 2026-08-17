@@ -448,3 +448,214 @@ async fn a_walk_that_found_nothing_is_still_ok() {
         .check_completed_walk()
         .expect("an empty listing is not a misconfiguration");
 }
+
+/// A HEALTHY mount with one bad item is not condemned.
+///
+/// This is the regression the end-of-walk guard could easily have introduced.
+/// `written` counts upserts that actually landed, so a mount in steady state
+/// writes nothing on a re-walk — every item is unchanged and skipped on its
+/// etag. Judging on "nothing written and something failed" alone would mark a
+/// perfectly working mount `misconfigured` and stop it the moment one item went
+/// bad: thousands skipped, one rejected, nothing written.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_steady_state_mount_with_one_bad_item_is_left_alone() {
+    let env = setup().await;
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let mock = StateOnlyMock::new();
+    let mount = state_only_mount();
+    let c = ctx(&env, &mount, &mock, &mat);
+    let mut batcher = sync::batch::SyncBatcher::new(&c).await.unwrap();
+
+    // One good item, imported and then re-offered unchanged so it skips.
+    let good: sync::config::ExternalItem = serde_json::from_value(json!({
+        "external_id": "GOOD1", "name": "good1", "is_folder": false, "etag": "v1",
+    }))
+    .unwrap();
+    let mapped = || MappedNode {
+        node_type: "raisin:Node".to_string(),
+        name: Some("good1".to_string()),
+        properties: serde_json::Map::new(),
+    };
+    batcher
+        .stage_upsert(&good, "good1", mapped())
+        .await
+        .unwrap();
+    batcher.flush().await.unwrap();
+    batcher
+        .stage_upsert(&good, "good1", mapped())
+        .await
+        .unwrap();
+
+    // ...and one item the workspace will not accept.
+    let bad: sync::config::ExternalItem = serde_json::from_value(json!({
+        "external_id": "BAD1", "name": "bad1", "is_folder": false, "etag": "v1",
+    }))
+    .unwrap();
+    batcher
+        .stage_upsert(
+            &bad,
+            "bad1",
+            MappedNode {
+                node_type: "raisin:NotARealNodeType".to_string(),
+                name: Some("bad1".to_string()),
+                properties: serde_json::Map::new(),
+            },
+        )
+        .await
+        .unwrap();
+    batcher.flush().await.unwrap();
+
+    let stats = batcher.stats();
+    assert!(
+        stats.skipped > 0,
+        "the good item must have skipped: {stats:?}"
+    );
+    assert!(stats.failed > 0, "the bad item must have failed: {stats:?}");
+
+    batcher
+        .check_completed_walk()
+        .expect("a mount that is skipping real items is working, not misconfigured");
+}
+
+// ---------------------------------------------------------------------------
+// the outbox lifecycle survives re-materialization
+// ---------------------------------------------------------------------------
+
+/// A re-sync must not erase the record that a command was sent.
+///
+/// A command node is BOTH a command and a synced item, and an upsert rebuilds
+/// the property map from mapper output. The submit lifecycle is engine-written
+/// and appears nowhere in that output, so the first sync after a send erased it:
+/// a paid Stripe checkout session went from `status: sent` to no status at all,
+/// taking `attempt_id`, `sent_at` and `sent_external_id` with it.
+///
+/// It never double-charged — the drain claims only `queued` — but it destroyed
+/// exactly the states that matter most. `unknown` means "this may or may not
+/// have charged someone", and erasing it makes an ambiguous command look fresh;
+/// `attempt_id` is what makes such a case answerable at the provider at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_re_sync_does_not_erase_the_outbox_lifecycle() {
+    let env = setup().await;
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let scope = MountScope {
+        command_node_types: vec!["raisin:Node".to_string()],
+        ..watched_scope()
+    };
+
+    // Materialized by the sync, so the index genuinely owns it.
+    let id = import_mail(&mat, &scope, "CMD1", false, "v1").await;
+
+    // The engine stamps the lifecycle when the command is sent.
+    {
+        let tx = begin(&env).await;
+        let mut node = tx.get_node(TARGET_WS, &id).await.unwrap().unwrap();
+        for (k, v) in [
+            ("status", "sent"),
+            ("attempt_id", "att-1"),
+            ("sent_at", "2026-08-17T00:00:00Z"),
+            ("sent_external_id", "CMD1"),
+        ] {
+            node.properties
+                .insert(k.to_string(), PropertyValue::String(v.to_string()));
+        }
+        tx.upsert_node(TARGET_WS, &node).await.unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    // The provider now reports the object again, with a moved etag so the
+    // upsert rebuilds rather than skipping. The mapper knows nothing about the
+    // lifecycle and does not emit it.
+    let mut index = mat.load_index(&scope).await.unwrap();
+    let mut properties = serde_json::Map::new();
+    properties.insert("unread".to_string(), Value::Bool(true));
+    mat.apply_batch(
+        &scope,
+        &mut index,
+        vec![BatchOp::Upsert {
+            rel_path: "CMD1.eml".to_string(),
+            mapped: MappedNode {
+                node_type: "raisin:Node".to_string(),
+                name: Some("CMD1".to_string()),
+                properties,
+            },
+            virt: VirtualMeta {
+                mount_id: MOUNT_ID.to_string(),
+                external_id: "CMD1".to_string(),
+                etag: Some("v2".to_string()),
+                synced_at: Utc::now().to_rfc3339(),
+            },
+        }],
+    )
+    .await
+    .unwrap();
+
+    let node = node_by_id(&env, &id).await;
+    // The rebuild really happened: the provider's new value landed.
+    assert_eq!(
+        node.properties.get("unread"),
+        Some(&PropertyValue::Boolean(true)),
+        "the upsert must have rebuilt the node, or this test proves nothing"
+    );
+    // ...and the lifecycle survived it.
+    assert_eq!(
+        str_prop(&node, "status").as_deref(),
+        Some("sent"),
+        "the re-sync erased the command lifecycle"
+    );
+    assert_eq!(str_prop(&node, "attempt_id").as_deref(), Some("att-1"));
+    assert_eq!(str_prop(&node, "sent_external_id").as_deref(), Some("CMD1"));
+    assert!(node.properties.contains_key("sent_at"));
+}
+
+/// ...but only for a type the mount declares as a command.
+///
+/// `status` is an ordinary provider field elsewhere — `stripe:Subscription` and
+/// `stripe:PaymentIntent` both report one — so a blanket carry would freeze
+/// those at whatever they were first synced as.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_ordinary_node_still_takes_its_status_from_the_provider() {
+    let env = setup().await;
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    // No `command_node_types`: an ordinary mount.
+    let scope = watched_scope();
+    let id = import_mail(&mat, &scope, "SUB1", false, "v1").await;
+
+    {
+        let tx = begin(&env).await;
+        let mut node = tx.get_node(TARGET_WS, &id).await.unwrap().unwrap();
+        node.properties
+            .insert("status".to_string(), PropertyValue::String("active".into()));
+        tx.upsert_node(TARGET_WS, &node).await.unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    let mut index = mat.load_index(&scope).await.unwrap();
+    let mut properties = serde_json::Map::new();
+    properties.insert("status".to_string(), Value::String("canceled".to_string()));
+    mat.apply_batch(
+        &scope,
+        &mut index,
+        vec![BatchOp::Upsert {
+            rel_path: "SUB1.eml".to_string(),
+            mapped: MappedNode {
+                node_type: "raisin:Node".to_string(),
+                name: Some("SUB1".to_string()),
+                properties,
+            },
+            virt: VirtualMeta {
+                mount_id: MOUNT_ID.to_string(),
+                external_id: "SUB1".to_string(),
+                etag: Some("v2".to_string()),
+                synced_at: Utc::now().to_rfc3339(),
+            },
+        }],
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        str_prop(&node_by_id(&env, &id).await, "status").as_deref(),
+        Some("canceled"),
+        "a provider status must keep tracking the provider"
+    );
+}

@@ -82,6 +82,7 @@ fn scope() -> MountScope {
         force_rewrite: false,
         watched_fields: Vec::new(),
         read_local_wins: false,
+        command_node_types: Vec::new(),
     }
 }
 
@@ -3080,7 +3081,7 @@ fn write_capabilities_round_trip() {
     assert_eq!(caps.default_delete_policy.as_deref(), Some("trash"));
     assert_eq!(caps.default_move_policy.as_deref(), Some("push"));
     assert!(caps.supports_trash && caps.supports_idempotency_key && caps.can_submit);
-    assert!(caps.missing_mirror_ops(true).is_empty());
+    assert!(caps.missing_mirror_ops(true, true).is_empty());
 }
 
 /// A mount asking for write-through against a read-only adapter is reported as
@@ -3112,12 +3113,31 @@ fn writeback_unsupported_names_the_missing_ops() {
         can_update: true,
         ..Default::default()
     };
+    // `purge`, because `can_delete` is demanded only from a mount that actually
+    // pushes deletes. On the default `detach` this same adapter is now a
+    // perfectly good mirror — it never calls delete — and that is deliberate:
+    // requiring the capability there is what silently demoted every Stripe
+    // catalogue mount to read-only.
+    let pushes_deletes = WriteConfig {
+        writeback: "write_through".to_string(),
+        delete_policy: Some("purge".to_string()),
+        ..Default::default()
+    };
     let (supported, reason) =
-        super::write::writeback_verdict(&wc, &partial, &MapperWriteback::Supported);
+        super::write::writeback_verdict(&pushes_deletes, &partial, &MapperWriteback::Supported);
     assert_eq!(supported, Some(false));
     assert_eq!(
         reason.as_deref(),
         Some("adapter does not declare can_delete")
+    );
+
+    // The same adapter, detaching: supported.
+    let (supported, reason) =
+        super::write::writeback_verdict(&wc, &partial, &MapperWriteback::Supported);
+    assert_eq!(
+        supported,
+        Some(true),
+        "detach needs no can_delete: {reason:?}"
     );
 }
 

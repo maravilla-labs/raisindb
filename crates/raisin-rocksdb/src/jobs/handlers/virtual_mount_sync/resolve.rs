@@ -139,6 +139,7 @@ impl VirtualMountSyncHandler {
             // the teardown and renew callers must never rewrite content.
             force_rewrite: false,
             watched_fields: mount.write_config.declared_mutable_fields().to_vec(),
+            command_node_types: mount.write_config.command_node_types.clone(),
             // Pure config parsing, safe to resolve before capabilities are
             // probed — the same rationale as `watched_fields` above: what the
             // read path PRESERVES must not depend on what the adapter happens

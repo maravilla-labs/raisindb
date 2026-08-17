@@ -170,25 +170,11 @@ fn resolve_mirror(
     mapper: &MapperWriteback,
 ) -> WriteMode {
     let mut reasons = Vec::new();
-    // `can_create` is demanded only from a mount that actually creates. The
-    // engine calls `create` for a node the user authored locally under a mount
-    // that opted in by type (`create_node_types`); a mirror mount that has not
-    // opted in never reaches the create path, so requiring the capability there
-    // would refuse an otherwise correct adapter for an operation it would never
-    // be asked to perform. Google Drive is the only shipped adapter declaring
-    // the full set, and gating every mirror mount on the rarest capability is
-    // what made `mirror` look unimplementable against providers that update and
-    // delete perfectly well.
-    let missing = capabilities.missing_mirror_ops(write_config.creates_locally());
-    if !missing.is_empty() {
-        reasons.push(format!("adapter does not declare {}", missing.join(", ")));
-    }
-    if let Some(reason) = mapper.reason() {
-        reasons.push(reason);
-    }
-    // Both policies resolve even when the adapter probe already failed, so one
-    // pass reports every shortfall. Fixing the adapter only to be refused again
-    // for a typo in `delete_policy` is the round trip an honest message avoids.
+    // RESOLVED FIRST, because whether this mount deletes upstream decides which
+    // capabilities it actually needs. Both policies resolve even when the
+    // adapter probe fails, so one pass reports every shortfall — fixing the
+    // adapter only to be refused again for a typo in `delete_policy` is the
+    // round trip an honest message avoids.
     let delete = match resolve_delete_policy(write_config, capabilities) {
         Ok(p) => Some(p),
         Err(e) => {
@@ -196,6 +182,38 @@ fn resolve_mirror(
             None
         }
     };
+    // A `detach` mount NEVER CALLS `delete`. A local delete just unhooks the
+    // node and leaves the provider alone, so demanding `can_delete` refused
+    // mounts for an operation they are configured never to perform.
+    //
+    // That is not hypothetical: it made the Stripe catalogue uncreatable.
+    // Creating a product or price requires `mirror` (`creates_locally` is gated
+    // on it), Stripe has no trash and nothing here deletes upstream, so the
+    // adapter correctly declares `can_delete: false` with `detach` — and every
+    // prices mount was then refused with "adapter does not declare can_delete"
+    // and silently demoted to read-only. The package's own claim to make a
+    // pricing page the source of truth could not hold.
+    //
+    // Unresolvable policy stays STRICT: if we could not work out whether this
+    // mount deletes, assume it does and keep demanding the capability.
+    let propagates_deletes = delete.is_none_or(|p| p.pushes());
+    // `can_create` is demanded only from a mount that actually creates, for the
+    // same reason. The engine calls `create` for a node the user authored
+    // locally under a mount that opted in by type (`create_node_types`); a
+    // mirror mount that has not opted in never reaches the create path, so
+    // requiring the capability there would refuse an otherwise correct adapter
+    // for an operation it would never be asked to perform. Google Drive is the
+    // only shipped adapter declaring the full set, and gating every mirror mount
+    // on the rarest capabilities is what made `mirror` look unimplementable
+    // against providers that update perfectly well.
+    let missing =
+        capabilities.missing_mirror_ops(write_config.creates_locally(), propagates_deletes);
+    if !missing.is_empty() {
+        reasons.push(format!("adapter does not declare {}", missing.join(", ")));
+    }
+    if let Some(reason) = mapper.reason() {
+        reasons.push(reason);
+    }
     let move_policy = match resolve_move_policy(write_config, capabilities) {
         Ok(p) => Some(p),
         Err(e) => {

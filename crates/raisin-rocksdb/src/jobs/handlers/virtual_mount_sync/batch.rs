@@ -309,7 +309,21 @@ impl<'a> SyncBatcher<'a> {
     /// coming and a stopped one was interrupted, and neither has seen enough to
     /// conclude anything.
     pub fn check_completed_walk(&self) -> std::result::Result<(), AdapterError> {
-        if self.stats.written > 0 || self.stats.failed == 0 {
+        // `skipped == 0` is what keeps this from firing on a HEALTHY mount.
+        //
+        // `written` counts upserts that actually landed, so a mount in steady
+        // state writes NOTHING on a re-walk — every item is unchanged and
+        // skipped on its etag. Judging on `written == 0 && failed > 0` alone
+        // would therefore condemn a fully-working mount the moment one single
+        // item went bad: thousands skipped, one rejected, nothing written, and
+        // the whole mount marked `misconfigured` and stopped. That would be a
+        // far worse bug than the one this exists to catch.
+        //
+        // Requiring all three — nothing written, nothing skipped, something
+        // rejected — narrows it to a walk that accomplished literally nothing,
+        // which is the only case where "every item failed the same way" is a
+        // safe conclusion.
+        if self.stats.written > 0 || self.stats.skipped > 0 || self.stats.failed == 0 {
             return Ok(());
         }
         let reason = self

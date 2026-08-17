@@ -13,6 +13,42 @@ use std::collections::{HashMap, HashSet};
 /// a blob it never knew about; see the carry-forward in `stage_upsert`.
 const CONTENT_KEYS: &[&str] = &["file", "file_size", "content_hash"];
 
+/// The submit lifecycle, which the ENGINE owns and the mapper never reports.
+///
+/// A command node is both a command and a synced item, and an upsert rebuilds
+/// the property map from mapper output — so the first sync after a send erased
+/// the whole record of it. Observed on a paid Stripe checkout session: `status`
+/// went from `sent` to absent, taking `attempt_id`, `sent_at` and
+/// `sent_external_id` with it, leaving no way to tell from the node whether the
+/// command had ever been issued.
+///
+/// It never caused a double charge — the drain claims only `queued`, and an
+/// absent status is inert — but the states that most need to survive are
+/// exactly the ones it destroyed. `unknown` means "this may or may not have
+/// charged someone", and erasing it makes an ambiguous command indistinguishable
+/// from a fresh one; `attempt_id` is the value that makes such a case
+/// answerable at the provider at all. A node mid-flight at `sending` is worse
+/// still: the recording CAS expects that status, so a concurrent sync could
+/// wipe it and strand a command whose provider call had already happened.
+///
+/// Unlike [`CONTENT_KEYS`], the LIVE value wins unconditionally rather than
+/// only filling a gap. On a command node these names belong to the engine, and
+/// a mapper reporting a provider field called `status` is the collision this
+/// exists to survive — not an adapter legitimately owning the key.
+///
+/// Applied ONLY to node types the mount declares in `command_node_types`.
+/// `status` is an ordinary provider field elsewhere — `stripe:Subscription` and
+/// `stripe:PaymentIntent` both report one — and blanket-preserving it would
+/// freeze those at their first synced value.
+const COMMAND_KEYS: &[&str] = &[
+    "status",
+    "sent_at",
+    "attempt_id",
+    "attempted_at",
+    "sent_external_id",
+    "last_error",
+];
+
 use super::index::{MountScope, SyncIndex, VirtualNodeRef};
 use super::node_paths::join_path;
 use super::ops::BatchOp;
@@ -338,7 +374,32 @@ impl RocksDbMaterializer {
             }
             out
         });
-        let effective_props = carried_content.as_ref().unwrap_or(base_props);
+        let base_props = carried_content.as_ref().unwrap_or(base_props);
+
+        // The submit lifecycle survives a rebuild — see `COMMAND_KEYS`.
+        let is_command = scope
+            .command_node_types
+            .iter()
+            .any(|t| t == &mapped.node_type);
+        let carried_command: Option<Map<String, Value>> = if is_command {
+            live.as_ref().and_then(|node| {
+                let mut out: Option<Map<String, Value>> = None;
+                for key in COMMAND_KEYS {
+                    if let Some(value) = node
+                        .properties
+                        .get(*key)
+                        .and_then(|pv| serde_json::to_value(pv).ok())
+                    {
+                        out.get_or_insert_with(|| base_props.clone())
+                            .insert((*key).to_string(), value);
+                    }
+                }
+                out
+            })
+        } else {
+            None
+        };
+        let effective_props = carried_command.as_ref().unwrap_or(base_props);
 
         let node = Node {
             id,

@@ -270,8 +270,25 @@ fn a_mirror_on_a_read_only_adapter_is_refused_with_the_missing_ops() {
         mutable_fields: vec!["title".to_string()],
         ..Default::default()
     };
+    // A DETACHING mirror is fine without `can_delete`: it never calls the
+    // adapter's delete at all, so demanding the capability refused mounts for an
+    // operation they are configured never to perform. That is what made the
+    // Stripe catalogue uncreatable — creating a product or price needs `mirror`,
+    // Stripe has no trash, and every prices mount was silently demoted to
+    // read-only with "adapter does not declare can_delete".
     match sync::write::resolve_mode(
         &mirror_mount("detach").write_config,
+        &caps,
+        &MapperWriteback::Supported,
+    ) {
+        sync::write::WriteMode::Mirror(_) => {}
+        other => panic!("a detaching mirror needs no can_delete, got {other:?}"),
+    }
+
+    // A mount that DOES push deletes still has to have it, and the refusal
+    // still names which capability is missing rather than saying "unsupported".
+    match sync::write::resolve_mode(
+        &mirror_mount("purge").write_config,
         &caps,
         &MapperWriteback::Supported,
     ) {

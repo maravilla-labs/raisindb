@@ -467,6 +467,11 @@ async fn a_refused_mode_pushes_nothing() {
     let env = setup().await;
     let mut mount = state_only_mount();
     mount.write_config.mode = "mirror".to_string();
+    // `purge` is what makes this mount genuinely refusable against the
+    // update-only adapter below. On the default `detach` a mirror no longer
+    // needs `can_delete` — it never calls delete — so the mount would resolve
+    // and push, and this test would be asserting nothing.
+    mount.write_config.delete_policy = Some("purge".to_string());
     let mat = RocksDbMaterializer::new(env.storage.clone());
     let mock = StateOnlyMock::new();
     let ids = sync_in_mails(&mat, 1).await;

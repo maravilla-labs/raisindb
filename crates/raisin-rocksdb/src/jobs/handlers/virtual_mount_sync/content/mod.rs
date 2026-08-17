@@ -143,6 +143,9 @@ impl VirtualMountSyncHandler {
             // Moot while `watched_fields` is empty, but explicitly off: a
             // content fetch never merges anything.
             read_local_wins: false,
+            // Empty for the same reason: this scope exists only to invoke
+            // `get_content`, and nothing on that path stages a node.
+            command_node_types: Vec::new(),
         };
         let result = invoker
             .invoke(&scope, &adapter_path, input)

@@ -64,6 +64,18 @@ pub struct MountScope {
     /// recovered. The adapter's `mutable_fields` narrows what is actually SENT
     /// (see `write::plan`), not what is recorded.
     pub watched_fields: Vec<String>,
+    /// Node types this mount treats as OUTBOX COMMANDS
+    /// (`write_config.command_node_types`).
+    ///
+    /// The read path needs it because a command node is both a command and a
+    /// synced item, and an upsert rebuilds the property map from mapper output.
+    /// The submit lifecycle — `status`, `attempt_id`, `sent_at` — is written by
+    /// the engine and appears nowhere in that output, so the first sync after a
+    /// send erased it. See `COMMAND_KEYS` in `stage.rs`.
+    ///
+    /// Empty for every mount that is not an outbox, which is all of them by
+    /// default, and the carry is skipped entirely in that case.
+    pub command_node_types: Vec<String>,
 }
 
 /// Reserved virtual metadata stamped on every synced node.

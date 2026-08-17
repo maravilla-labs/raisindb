@@ -625,3 +625,55 @@ async fn an_answer_without_an_item_still_lands_at_sent() {
     assert_eq!(str_prop(&node, "__external_id").as_deref(), Some("SENT-1"));
     assert!(!node.properties.contains_key("url"));
 }
+
+/// ...but only for a type the mount declares as a command.
+///
+/// `status` is an ordinary provider field elsewhere — `stripe:Subscription` and
+/// `stripe:PaymentIntent` both report one — so a blanket carry would freeze
+/// those at whatever they were first synced as.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_ordinary_node_still_takes_its_status_from_the_provider() {
+    let env = setup().await;
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    // No `command_node_types`: an ordinary read-only mount.
+    let scope = super::scope();
+
+    let upsert = |status: &'static str, etag: &'static str| {
+        let mut properties = serde_json::Map::new();
+        properties.insert("status".to_string(), json!(status));
+        super::BatchOp::Upsert {
+            rel_path: "sub1".to_string(),
+            mapped: super::MappedNode {
+                node_type: "raisin:Node".to_string(),
+                name: Some("sub1".to_string()),
+                properties,
+            },
+            virt: super::VirtualMeta {
+                mount_id: MOUNT_ID.to_string(),
+                external_id: "sub_1".to_string(),
+                etag: Some(etag.to_string()),
+                synced_at: chrono::Utc::now().to_rfc3339(),
+            },
+        }
+    };
+
+    let mut index = mat.load_index(&scope).await.unwrap();
+    mat.apply_batch(&scope, &mut index, vec![upsert("active", "v1")])
+        .await
+        .unwrap();
+    mat.apply_batch(&scope, &mut index, vec![upsert("canceled", "v2")])
+        .await
+        .unwrap();
+
+    let id = index
+        .virtual_nodes()
+        .into_iter()
+        .find(|n| n.external_id == "sub_1")
+        .expect("node must be indexed")
+        .id;
+    assert_eq!(
+        str_prop(&node_of(&env, &id).await, "status").as_deref(),
+        Some("canceled"),
+        "a provider status must keep tracking the provider"
+    );
+}
