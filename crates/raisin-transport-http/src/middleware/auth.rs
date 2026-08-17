@@ -270,6 +270,61 @@ pub async fn optional_auth_middleware(
         }
     };
 
+    // API KEY (`raisin_*`). These were previously honoured only on the pgwire
+    // surface — `validate_api_key` had no caller on HTTP — so a key presented
+    // here matched none of the token shapes below and fell through to the
+    // unauthenticated context. The visible effect was a key that looked valid
+    // but behaved as an anonymous caller: reads returned zero rows with a 200,
+    // and writes failed with "Permission denied: cannot create node of type
+    // …". That made an API key unusable for the CLI and for SSR renderers,
+    // which speak HTTP exclusively.
+    //
+    // A key today can only be minted by an admin, for themselves
+    // (`POST /api/raisindb/me/api-keys` takes its owner from the caller's own
+    // claims), so it is issued by a principal that already resolves to
+    // `AuthContext::system()` on this surface. Granting the key the same
+    // elevation therefore matches the authority its owner already has, and
+    // brings HTTP to parity with pgwire.
+    //
+    // Per-key scoping is the next step: once a key can carry its own
+    // permissions, this should resolve the OWNER's RLS-scoped context instead
+    // of elevating unconditionally. Both wires should call one shared resolver
+    // then, so a key cannot mean different things depending on how it arrived.
+    if token.starts_with("raisin_") {
+        if let Ok(Some(api_key)) = auth_service.validate_api_key(token) {
+            let now = chrono::Utc::now().timestamp();
+            let admin_claims = raisin_rocksdb::AdminClaims {
+                sub: api_key.user_id.clone(),
+                username: api_key.name.clone(),
+                tenant_id: api_key.tenant_id.clone(),
+                access_flags: raisin_models::admin_user::AdminAccessFlags {
+                    console_login: false,
+                    cli_access: true,
+                    api_access: true,
+                    pgwire_access: true,
+                    can_impersonate: false,
+                },
+                must_change_password: false,
+                // Never leaves the request extensions; the key's own
+                // `is_active` flag is what actually governs revocation.
+                exp: now + 60 * 60,
+                iat: now,
+            };
+
+            tracing::debug!(
+                user = %api_key.user_id,
+                key = %api_key.key_prefix,
+                "API key authenticated for HTTP endpoint (system context)"
+            );
+
+            req.extensions_mut().insert(admin_claims);
+            req.extensions_mut().insert(AuthContext::system());
+            return Ok(next.run(req).await);
+        }
+
+        tracing::debug!("Bearer token looked like an API key but did not validate");
+    }
+
     // Try admin token first, then user token.
     //
     // These are `debug`, not `warn`: an OAuth 2.1 resource token fails *both* of
