@@ -49,6 +49,9 @@ enum Answer {
 /// One invoker playing both the adapter and the bidirectional mapper, as
 /// `StateOnlyMock` does for the update path.
 struct SubmitMock {
+    /// When set, `to_external` answers null — what a mapper does for a command
+    /// that is unfinished or has ALREADY BEEN SENT.
+    decline: bool,
     answers: Mutex<VecDeque<Answer>>,
     /// `params` of every `submit` that REACHED the adapter, in order. The
     /// at-most-once claim is a claim about the length of this list.
@@ -58,7 +61,16 @@ struct SubmitMock {
 impl SubmitMock {
     fn new(answers: Vec<Answer>) -> Arc<Self> {
         Arc::new(Self {
+            decline: false,
             answers: Mutex::new(answers.into()),
+            submits: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn declining() -> Arc<Self> {
+        Arc::new(Self {
+            decline: true,
+            answers: Mutex::new(VecDeque::new()),
             submits: Mutex::new(Vec::new()),
         })
     }
@@ -110,6 +122,7 @@ impl AdapterInvoker for SubmitMock {
                     },
                 }))
             }
+            "to_external" if self.decline => Ok(Value::Null),
             "to_external" => {
                 let props = input
                     .get("node")
@@ -770,4 +783,46 @@ async fn a_command_with_no_provider_id_is_not_reconciled_away() {
         "which is exactly why it must be flagged: no listing can ever return it, \
          so reconcile would otherwise delete a command it had just sent"
     );
+}
+
+/// A command the mapper declines is FAILED with a usable reason, not left
+/// looking pending.
+///
+/// The common cause is a command that has already been sent — re-queueing a
+/// Stripe refund that already went through lands exactly here — so it must not
+/// sit at `queued` looking like work still to do, and the reason must not read
+/// as a broken mapper. An operator told their mapping function is confused goes
+/// and debugs the wrong thing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_declined_command_fails_with_a_reason_rather_than_looking_pending() {
+    let env = setup().await;
+    let mount = submit_mount();
+    let mock = SubmitMock::declining();
+    let id = command(&env, "m1", "queued").await;
+
+    let stats = drain(&env, &mount, mock.as_ref()).await;
+
+    assert_eq!(
+        mock.submit_count(),
+        0,
+        "a declined command must reach no provider"
+    );
+    assert_eq!(stats.submitted, 0);
+
+    let node = node_of(&env, &id).await;
+    assert_eq!(
+        str_prop(&node, "status").as_deref(),
+        Some("failed"),
+        "a command that will never send must not keep looking queued"
+    );
+    let why = str_prop(&node, "last_error").unwrap_or_default();
+    assert!(
+        why.contains("already been sent"),
+        "the reason must name the common cause rather than implying a broken mapper: {why}"
+    );
+
+    // Terminal: it does not reappear in the next drain.
+    let stats = drain(&env, &mount, mock.as_ref()).await;
+    assert_eq!(stats.submitted, 0);
+    assert_eq!(mock.submit_count(), 0);
 }

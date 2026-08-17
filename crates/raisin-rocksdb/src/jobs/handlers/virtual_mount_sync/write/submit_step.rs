@@ -89,6 +89,17 @@ pub(super) async fn issue_one(
         // node is not something this mount knows how to send. Terminal, so it
         // stops appearing in every drain, and stated on the node so the author
         // can see why.
+        //
+        // THE MESSAGE NAMES BOTH ORDINARY CAUSES, because the old wording —
+        // "does not know how to send this node" — reads as a broken mapper, and
+        // the far more common cause is a command that has ALREADY BEEN SENT. A
+        // mapper is expected to decline one: re-queueing a Stripe refund that
+        // already went through lands here, and an operator told their mapping
+        // function is confused will go and debug the wrong thing entirely.
+        //
+        // The engine cannot be more specific than this without inventing a
+        // decline-reason channel in the mapper contract, and a message that
+        // states the two real possibilities beats one that asserts the rarer.
         Ok(None) => {
             return terminal(
                 ctx,
@@ -96,8 +107,9 @@ pub(super) async fn issue_one(
                 command_seq(node),
                 status::QUEUED,
                 status::FAILED,
-                "the mount's mapping function does not know how to send this node \
-                 (to_external returned null)",
+                "the mount's mapping function declined this command (to_external \
+                 returned null) — either it is not finished being authored, or it \
+                 has already been sent and must not be sent again",
             )
             .await
         }
