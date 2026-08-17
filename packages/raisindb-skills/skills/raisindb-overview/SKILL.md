@@ -142,11 +142,20 @@ provides:
 ### Reconciling updates — `.raisin-sync.yaml`
 
 `raisindb deploy --install` / `raisindb package install` **create** new content
-nodes the first time, but on every *re*-install they deliberately **skip**
-content nodes that already exist — install never clobbers content a user has
-since edited (seed pages, an admin's data). That's the right default, but it
-also means a shipped fix to a function/trigger, or a new seed node you added,
-silently never reaches an already-installed repo. Two ways to push it there:
+nodes the first time. What happens to nodes that already exist on a *re*-install
+is decided by THIS FILE, and there is no safe rule to fall back on: measured
+2026-08-17 against a local server, a package with no `.raisin-sync.yaml` had a
+seed node **replaced** by the package's YAML on a plain `deploy --install`,
+reverting an edit a user had made in the editor. Adding `defaults: {mode: skip}`
+and changing nothing else preserved that same edit.
+
+So treat the policy as REQUIRED for any package that ships content: `skip` keeps
+what a user has since edited (seed pages, an admin's data), and without it you
+are trusting an install default that has been observed doing the destructive
+thing. The mirror-image failure is just as real — a shipped fix to a
+function/trigger, or a new seed node you added, silently never reaching an
+already-installed repo — which is why the policy is per-path rather than global.
+Two ways to push a change deliberately:
 
 1. **Manually**, once: `raisindb sync ./package --push --force --yes` (verify
    the change actually landed on the server — don't trust "success" output).
