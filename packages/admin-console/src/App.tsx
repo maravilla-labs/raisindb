@@ -60,6 +60,7 @@ import Integrations from './pages/Integrations'
 import McpConnections from './pages/McpConnections'
 import Mounts from './pages/Mounts'
 import Secrets from './pages/Secrets'
+import EmailSettings from './pages/EmailSettings'
 import MountDetail from './pages/MountDetail'
 
 /**
@@ -196,6 +197,10 @@ function App() {
               rewrites to the `:branch` form (see RepositoryLayout's routeTypes). */}
           <Route path="secrets" element={<Secrets />} />
           <Route path=":branch/secrets" element={<Secrets />} />
+          {/* The email config node lives in a branch's raisin:system workspace,
+              so it is branch-scoped for the same reason secrets are. */}
+          <Route path="email" element={<EmailSettings />} />
+          <Route path=":branch/email" element={<EmailSettings />} />
           <Route path="query" element={<SqlQuery />} />
           <Route path="logs" element={<RepositoryExecutionLogs />} />
           <Route path="flows" element={<RepositoryFlows />} />

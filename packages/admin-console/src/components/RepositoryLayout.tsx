@@ -38,7 +38,8 @@ import {
   Plug,
   PlugZap,
   HardDrive,
-  KeyRound
+  KeyRound,
+  Mail
 } from 'lucide-react'
 
 export default function RepositoryLayout() {
@@ -107,7 +108,7 @@ export default function RepositoryLayout() {
     }
 
     // Routes with potential branch segment: /repo/branch/type/* or /repo/type/*
-    const routeTypes = ['nodetypes', 'mixins', 'archetypes', 'elementtypes', 'users', 'roles', 'groups', 'circles', 'relation-types', 'agents', 'packages', 'models', 'access-control', 'integrations', 'mcp-connections', 'mounts', 'secrets']
+    const routeTypes = ['nodetypes', 'mixins', 'archetypes', 'elementtypes', 'users', 'roles', 'groups', 'circles', 'relation-types', 'agents', 'packages', 'models', 'access-control', 'integrations', 'mcp-connections', 'mounts', 'secrets', 'email']
 
     for (const type of routeTypes) {
       // Pattern with branch: /repo/branch/type/*
@@ -598,6 +599,18 @@ export default function RepositoryLayout() {
             >
               <KeyRound className="w-5 h-5 flex-shrink-0" />
               {!sidebarCollapsed && <span>Secrets</span>}
+            </Link>
+            <Link
+              to={`/${repo}/email`}
+              className={`flex items-center rounded-lg transition-colors ${
+                isActive('/email')
+                  ? 'bg-primary-500 text-white font-semibold'
+                  : 'text-white/80 hover:bg-white/5 hover:text-white'
+              } ${sidebarCollapsed ? 'mx-auto w-10 h-10 justify-center' : 'gap-3 px-4 py-2'}`}
+              title={sidebarCollapsed ? 'Email' : ''}
+            >
+              <Mail className="w-5 h-5 flex-shrink-0" />
+              {!sidebarCollapsed && <span>Email</span>}
             </Link>
             <Link
               to={`/${repo}/query`}
