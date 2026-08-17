@@ -82,6 +82,19 @@ looking at the wrong layer wastes an afternoon.
    As with `secret_policy`, `enabled: true` with an empty `allowed_recipients`
    still denies everything. "Opted in" never silently means "unrestricted".
 
+   **Mail to your own users needs `*`, and that is not a lapse.** A sign-in
+   link, a registration confirmation or a password reset goes to whatever
+   address the person typed; you do not own those domains and cannot enumerate
+   them. The built-in `send-magic-link` function ships with `*` for exactly this
+   reason, so **sign-up and passwordless sign-in work out of the box** — the
+   policy only constrains functions you write yourself.
+
+   A domain list is the right shape for mail with a known audience: staff
+   notifications, internal alerts, or a deployment where only your own people
+   may sign in. Narrowing the magic-link function is the single edit that turns
+   it into a closed-audience mailer, which is a deliberate choice rather than a
+   default.
+
 2. **`enabled` on the config node.** Absent or anything other than `true` reads
    as off. That is what stops a tenant sending the moment the node appears, but
    it is also the most common cause of "I configured it and nothing happens".

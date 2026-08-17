@@ -604,7 +604,17 @@ export function FunctionPropertiesForm({
             <p className="text-xs text-gray-500 mb-2">
               One recipient <strong>domain</strong> per line, e.g.{' '}
               <code className="bg-white/10 px-1 rounded">example.com</code> — a domain, not a full
-              address.
+              address. Or <code className="bg-white/10 px-1 rounded">*</code> for any address.
+            </p>
+            <p className="text-xs text-gray-500 mb-2">
+              <strong className="text-gray-400">Mail to your users needs</strong>{' '}
+              <code className="bg-white/10 px-1 rounded">*</code>. A sign-in link, a registration
+              confirmation or a password reset goes to whatever address the person typed, and you
+              cannot know those domains in advance — the built-in{' '}
+              <code className="bg-white/10 px-1 rounded">send-magic-link</code> function ships with{' '}
+              <code className="bg-white/10 px-1 rounded">*</code> for exactly this reason. Use a
+              domain list for mail with a known audience: staff notifications, internal alerts, or a
+              deployment where only your own people may sign in.
             </p>
             <PolicyList
               value={properties.email_policy?.allowed_recipients || []}
@@ -621,10 +631,15 @@ export function FunctionPropertiesForm({
                   Enabled with an empty list still denies everything.
                 </p>
               )}
+            {/* Informational, NOT red. `*` is the correct setting for any mail
+                addressed to end users, so styling it as an error tells the
+                operator the right answer is wrong and invites them to break
+                sign-in by narrowing it. */}
             {(properties.email_policy?.allowed_recipients || []).some((r) => r.trim() === '*') && (
-              <p className="text-xs text-red-300/80 mt-1">
-                <code className="bg-white/10 px-1 rounded">*</code> allows mail to any address on the
-                internet.
+              <p className="text-xs text-sky-300/80 mt-1">
+                <code className="bg-white/10 px-1 rounded">*</code> allows mail to any address —
+                correct for user-facing mail, worth narrowing if this function only writes to a
+                known audience.
               </p>
             )}
           </div>
