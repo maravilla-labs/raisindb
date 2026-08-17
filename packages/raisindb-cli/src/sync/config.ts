@@ -5,6 +5,8 @@
 import fs from 'fs';
 import path from 'path';
 import yaml from 'yaml';
+import { hasEnvTokens, substituteEnvTokens } from '../env/substitute.js';
+import { loadEnvContext, EnvLoadOptions } from '../env/load.js';
 
 /**
  * Sync configuration stored in .raisin-sync.yaml
@@ -34,6 +36,9 @@ const DEFAULT_CONFIG: Partial<SyncConfig> = {
     '.raisin-sync.yaml',
     'node_modules/',
     '.git/',
+    // Env files feed {env:...} substitution; their values are pushed, they are not.
+    '.env',
+    '.env.*',
   ],
 };
 
@@ -56,16 +61,39 @@ export function findSyncConfig(startDir: string): string | null {
 }
 
 /**
- * Load sync config from a directory
+ * Load sync config from a directory.
+ *
+ * `{env:NAME}` tokens are resolved before parsing, so one checked-in
+ * .raisin-sync.yaml can target local, staging and prod:
+ *
+ *   server: "{env:RAISIN_SERVER:-http://localhost:8080}"
+ *   branch: "{env:RAISIN_BRANCH:-main}"
  */
-export function loadSyncConfig(directory: string): SyncConfig | null {
+export function loadSyncConfig(
+  directory: string,
+  envOptions: EnvLoadOptions = {}
+): SyncConfig | null {
   const configPath = findSyncConfig(directory);
   if (!configPath) {
     return null;
   }
 
   try {
-    const content = fs.readFileSync(configPath, 'utf-8');
+    const raw = fs.readFileSync(configPath, 'utf-8');
+    // Env files sit next to the sync config, not necessarily next to `directory`.
+    const env = loadEnvContext(path.dirname(configPath), envOptions);
+    const { text: content, unresolved } = substituteEnvTokens(raw, env);
+
+    if (unresolved.length > 0) {
+      const list = unresolved.map((t) => `${t.raw} (line ${t.line})`).join(', ');
+      console.error(
+        `Error loading sync config: unresolved token(s) in ${configPath}: ${list}. ` +
+          'Set the variable in the environment or a .env file, or add an inline ' +
+          'default {env:NAME:-fallback}'
+      );
+      return null;
+    }
+
     const config = yaml.parse(content) as SyncConfig;
     return {
       ...DEFAULT_CONFIG,
@@ -78,10 +106,26 @@ export function loadSyncConfig(directory: string): SyncConfig | null {
 }
 
 /**
- * Save sync config to a directory
+ * Save sync config to a directory.
+ *
+ * Refuses to overwrite a config that uses {env:...} tokens: the in-memory
+ * config holds RESOLVED values, so writing it back would replace the tokens
+ * with whatever this machine happened to have set.
  */
 export function saveSyncConfig(directory: string, config: SyncConfig): void {
   const configPath = path.join(directory, SYNC_CONFIG_FILENAME);
+
+  if (fs.existsSync(configPath)) {
+    const existing = fs.readFileSync(configPath, 'utf-8');
+    if (hasEnvTokens(existing)) {
+      console.warn(
+        `Not overwriting ${configPath}: it uses {env:...} tokens, and saving ` +
+          'would replace them with resolved values. Edit the file directly.'
+      );
+      return;
+    }
+  }
+
   const content = yaml.stringify(config);
   fs.writeFileSync(configPath, content, 'utf-8');
 }

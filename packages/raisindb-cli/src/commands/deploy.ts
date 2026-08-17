@@ -5,6 +5,8 @@ import { createPackage } from './package.js';
 import { uploadPackage, installPackage } from './package.js';
 import { getDefaultRepo } from '../config.js';
 import { getWorkspaceRaw, putWorkspaceRaw } from '../api.js';
+import { EnvContext, emptyEnvContext, substituteEnvTokens } from '../env/substitute.js';
+import { assertEnvFilesExist, loadEnvContext } from '../env/load.js';
 
 interface DeployOptions {
   server?: string;
@@ -13,6 +15,10 @@ interface DeployOptions {
   branch?: string;
   /** Also install the package after upload (deploy alone only uploads). */
   install?: boolean;
+  /** Profile for {env:...} substitution: --env production → .env.production */
+  env?: string;
+  /** Extra env files from --env-file, applied after the conventional ones. */
+  envFile?: string[];
 }
 
 /**
@@ -36,7 +42,15 @@ export async function deployPackage(folder: string, options: DeployOptions): Pro
     throw new Error('No manifest.yaml or manifest.yml found in folder');
   }
 
-  const manifest = yaml.parse(fs.readFileSync(manifestPath, 'utf-8'));
+  assertEnvFilesExist(options.envFile);
+  const env = loadEnvContext(resolvedFolder, {
+    profile: options.env,
+    envFiles: options.envFile,
+  });
+
+  const manifest = yaml.parse(
+    substituteEnvTokens(fs.readFileSync(manifestPath, 'utf-8'), env).text
+  );
   if (!manifest.name || !manifest.version) {
     throw new Error('Package manifest must have "name" and "version" fields');
   }
@@ -45,7 +59,10 @@ export async function deployPackage(folder: string, options: DeployOptions): Pro
 
   // Step 1+2: Validate and create .rap (createPackage does both)
   console.log(`\nDeploying ${manifest.name} v${manifest.version}...\n`);
-  await createPackage(resolvedFolder, rapFile);
+  await createPackage(resolvedFolder, rapFile, {
+    env: options.env,
+    envFile: options.envFile,
+  });
 
   // Step 3: Upload
   console.log(`\nUploading ${path.basename(rapFile)}...`);
@@ -66,7 +83,7 @@ export async function deployPackage(folder: string, options: DeployOptions): Pro
     // partially allowed_node_types), so the package YAML drifts from the server.
     // Re-apply both from each workspaces/*.yaml over the (operator) HTTP API.
     const targetRepo = options.repo || getDefaultRepo() || 'default';
-    await reconcileWorkspaceAllowedTypes(resolvedFolder, targetRepo);
+    await reconcileWorkspaceAllowedTypes(resolvedFolder, targetRepo, env);
   }
 
   console.log(`\nDeployed ${manifest.name} v${manifest.version} successfully${options.install ? ' (installed)' : ''}.`);
@@ -88,7 +105,11 @@ function sameTypes(a: unknown, b: string[]): boolean {
  * current workspace, overlays the two arrays, and PUTs it back — preserving all
  * other fields. New workspaces are left to the install path.
  */
-export async function reconcileWorkspaceAllowedTypes(folder: string, repo: string): Promise<void> {
+export async function reconcileWorkspaceAllowedTypes(
+  folder: string,
+  repo: string,
+  env: EnvContext = emptyEnvContext()
+): Promise<void> {
   const wsDir = path.join(folder, 'workspaces');
   if (!fs.existsSync(wsDir) || !fs.statSync(wsDir).isDirectory()) return;
 
@@ -102,7 +123,9 @@ export async function reconcileWorkspaceAllowedTypes(folder: string, repo: strin
   for (const file of files) {
     let def: Record<string, unknown>;
     try {
-      def = (yaml.parse(fs.readFileSync(file, 'utf-8')) ?? {}) as Record<string, unknown>;
+      def = (yaml.parse(
+        substituteEnvTokens(fs.readFileSync(file, 'utf-8'), env).text
+      ) ?? {}) as Record<string, unknown>;
     } catch {
       continue; // malformed YAML is a validation concern, not this reconciler's
     }

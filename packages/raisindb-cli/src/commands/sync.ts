@@ -38,6 +38,8 @@ import {
   SyncOperationOptions,
   Conflict,
 } from '../sync/operations.js';
+import { EnvContext } from '../env/substitute.js';
+import { assertEnvFilesExist, loadEnvContext } from '../env/load.js';
 
 /**
  * Sync command options
@@ -53,6 +55,10 @@ export interface SyncOptions {
   server?: string;
   branch?: string;
   init?: boolean;
+  /** Profile for {env:...} substitution: --env production → .env.production */
+  env?: string;
+  /** Extra env files from --env-file, applied after the conventional ones. */
+  envFile?: string[];
 }
 
 /**
@@ -81,8 +87,14 @@ export async function syncPackage(
     return;
   }
 
+  // Environment for {env:...} substitution — shared by the sync config itself
+  // and by every file pushed, so the two can never resolve differently.
+  assertEnvFilesExist(options.envFile);
+  const envOptions = { profile: options.env, envFiles: options.envFile };
+  const env = loadEnvContext(packageDir, envOptions);
+
   // Load or create sync config
-  let config = loadSyncConfig(packageDir);
+  let config = loadSyncConfig(packageDir, envOptions);
   if (!config) {
     if (options.repo) {
       // Non-interactive: build an ephemeral config from flags/env. No
@@ -112,9 +124,9 @@ export async function syncPackage(
 
   // Execute appropriate sync mode
   if (options.watch) {
-    await runWatchMode(packageDir, config, options);
+    await runWatchMode(packageDir, config, options, env);
   } else if (options.push) {
-    await runPushOnly(packageDir, config, options);
+    await runPushOnly(packageDir, config, options, env);
   } else if (options.pull) {
     await runPullOnly(packageDir, config, options);
   } else {
@@ -269,7 +281,8 @@ async function runBidirectionalSync(
 async function runPushOnly(
   packageDir: string,
   config: SyncConfig,
-  options: SyncOptions
+  options: SyncOptions,
+  env: EnvContext
 ): Promise<void> {
   console.log('Pushing local changes to server...');
 
@@ -296,6 +309,7 @@ async function runPushOnly(
     config,
     dryRun: false,
     force: options.force,
+    env,
   };
 
   let successCount = 0;
@@ -373,7 +387,8 @@ async function runPullOnly(
 async function runWatchMode(
   packageDir: string,
   config: SyncConfig,
-  options: SyncOptions
+  options: SyncOptions,
+  env: EnvContext
 ): Promise<void> {
   // Push-only watch mode: skip server watcher (avoids @raisindb/client dependency)
   const pushOnly = options.push && !options.pull;
@@ -387,6 +402,8 @@ async function runWatchMode(
       '**/.raisin-sync.yaml',
       '**/dist/**',
       '**/*.log',
+      '**/.env',
+      '**/.env.*',
     ],
     watchExtensions: ['.yaml', '.yml', '.json', '.md', '.js', '.py', '.star'],
     localOnly: pushOnly,
@@ -406,6 +423,7 @@ async function runWatchMode(
     config,
     dryRun: options.dryRun,
     force: options.force,
+    env,
   };
 
   // Default conflict strategy

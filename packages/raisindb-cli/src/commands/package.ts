@@ -26,6 +26,15 @@ import {
 import type { PackageValidationResults, ValidationError } from '../wasm/types.js';
 import { UploadProgress } from '../components/UploadProgress.js';
 import { PackageValidator } from '../components/PackageValidator.js';
+import {
+  EnvContext,
+  UnresolvedToken,
+  emptyEnvContext,
+  formatUnresolvedError,
+  hasEnvTokens,
+  substituteEnvTokens,
+} from '../env/substitute.js';
+import { assertEnvFilesExist, isSubstitutableFile, loadEnvContext } from '../env/load.js';
 
 /**
  * Default patterns that are always ignored when creating packages
@@ -61,6 +70,11 @@ export const DEFAULT_IGNORE_PATTERNS = [
   '*.log',
   '*.tmp',
   '*.temp',
+
+  // Environment files feeding {env:...} substitution. Their VALUES are baked
+  // into the YAML at pack time; the files themselves must never ship.
+  '.env',
+  '.env.*',
 ];
 
 interface PackageManifest {
@@ -75,6 +89,10 @@ interface PackageManifest {
 export interface CreatePackageOptions {
   noValidate?: boolean;
   validateOnly?: boolean;
+  /** Profile for {env:...} substitution: --env production → .env.production */
+  env?: string;
+  /** Extra env files from --env-file, applied after the conventional ones. */
+  envFile?: string[];
 }
 
 /**
@@ -113,11 +131,12 @@ function printPlainValidationReport(results: PackageValidationResults): void {
  * is not a TTY, e.g. CI or piped output).
  */
 async function runValidationWithProgress(
-  packageDir: string
+  packageDir: string,
+  env: EnvContext = emptyEnvContext()
 ): Promise<PackageValidationResults> {
   if (!process.stdout.isTTY) {
     console.log(`Validating package: ${packageDir}`);
-    const results = await validatePackageDirectory(packageDir);
+    const results = await validatePackageDirectory(packageDir, env);
     printPlainValidationReport(results);
     return results;
   }
@@ -146,7 +165,7 @@ async function runValidationWithProgress(
     updateState({ phase: 'collecting' });
     await new Promise(resolve => setTimeout(resolve, 100)); // Brief pause for visual
 
-    const files = collectPackageFiles(packageDir);
+    const files = collectPackageFiles(packageDir, env);
     const fileCount = Object.keys(files).length;
     updateState({ filesCollected: fileCount });
 
@@ -167,7 +186,7 @@ async function runValidationWithProgress(
     }, 50);
 
     // Run the actual validation
-    const results = await validatePackageDirectory(packageDir);
+    const results = await validatePackageDirectory(packageDir, env);
 
     clearInterval(progressInterval);
     validated = fileCount;
@@ -225,8 +244,19 @@ export async function createPackage(
     throw new Error('No manifest.yaml or manifest.yml found in folder');
   }
 
-  // Read manifest
-  const manifestContent = fs.readFileSync(manifestPath, 'utf-8');
+  // Environment for {env:...} substitution — built once and used by both
+  // validation and packing, so the two can never see different bytes.
+  assertEnvFilesExist(options.envFile);
+  const env = loadEnvContext(resolvedFolder, {
+    profile: options.env,
+    envFiles: options.envFile,
+  });
+
+  // Read manifest (substituted, in case the name/version themselves are bound)
+  const manifestContent = substituteEnvTokens(
+    fs.readFileSync(manifestPath, 'utf-8'),
+    env
+  ).text;
   const manifest: PackageManifest = yaml.parse(manifestContent);
 
   if (!manifest.name) {
@@ -239,7 +269,7 @@ export async function createPackage(
 
   // Validate package unless --no-validate is passed
   if (!options.noValidate || options.validateOnly) {
-    const validationResults = await runValidationWithProgress(resolvedFolder);
+    const validationResults = await runValidationWithProgress(resolvedFolder, env);
     const summary = getValidationSummary(validationResults);
 
     // If validate-only mode, exit after showing results
@@ -271,7 +301,7 @@ export async function createPackage(
 
   try {
     // Create a proper ZIP archive
-    createZipPackage(resolvedFolder, output);
+    createZipPackage(resolvedFolder, output, env);
     console.log(`\nPackage created successfully: ${output}`);
   } catch (error) {
     throw new Error(`Failed to create package: ${error instanceof Error ? error.message : String(error)}`);
@@ -332,9 +362,21 @@ export function collectFiles(dir: string, baseDir: string, files: string[] = [])
 }
 
 /**
- * Creates a ZIP package from the source directory, respecting .gitignore and .rapignore
+ * Creates a ZIP package from the source directory, respecting .gitignore and .rapignore.
+ *
+ * Text files containing `{env:NAME}` tokens are substituted on the way in, so
+ * the shipped `.rap` carries resolved values. Everything else is copied
+ * byte-for-byte — reading a binary as utf-8 and writing it back would corrupt it.
+ *
+ * Throws (before writing anything) if any token could not be resolved: a
+ * half-written package with a literal `{env:PREVIEW_SERVER}` in a `base_url` is
+ * worse than no package at all.
  */
-export function createZipPackage(sourceDir: string, outputPath: string): void {
+export function createZipPackage(
+  sourceDir: string,
+  outputPath: string,
+  env: EnvContext = emptyEnvContext()
+): void {
   const zip = new AdmZip();
 
   // Create ignore filter from .gitignore and .rapignore
@@ -351,14 +393,41 @@ export function createZipPackage(sourceDir: string, outputPath: string): void {
     console.log(`  Excluding ${ignoredCount} file(s) based on ignore patterns`);
   }
 
+  const unresolvedEntries: Array<{ path: string; unresolved: UnresolvedToken[] }> = [];
+  let substitutedCount = 0;
+
   // Add each non-ignored file to the archive
   for (const file of includedFiles) {
     const fullPath = path.join(sourceDir, file);
     const dir = path.dirname(file);
+
+    if (isSubstitutableFile(file)) {
+      const raw = fs.readFileSync(fullPath, 'utf-8');
+      if (hasEnvTokens(raw)) {
+        const { text, unresolved } = substituteEnvTokens(raw, env);
+        if (unresolved.length > 0) {
+          unresolvedEntries.push({ path: file, unresolved });
+          continue;
+        }
+        // addFile takes a full entry name (addLocalFile takes a directory),
+        // and zip entries always use forward slashes.
+        zip.addFile(file.split(path.sep).join('/'), Buffer.from(text, 'utf-8'));
+        substitutedCount++;
+        continue;
+      }
+    }
+
     zip.addLocalFile(fullPath, dir === '.' ? '' : dir);
   }
 
+  if (unresolvedEntries.length > 0) {
+    throw new Error(formatUnresolvedError(unresolvedEntries, env));
+  }
+
   console.log(`  Including ${includedFiles.length} file(s) in package`);
+  if (substitutedCount > 0) {
+    console.log(`  Resolved {env:...} tokens in ${substitutedCount} file(s)`);
+  }
 
   zip.writeZip(outputPath);
 }

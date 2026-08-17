@@ -15,6 +15,12 @@ import {
 } from './translation-validator.js';
 import { validateBundledResources } from './bundled-resource-validator.js';
 import { mergeFlowResults, validatePackageFlows } from '../flow/package-doctor.js';
+import {
+  EnvContext,
+  UnresolvedToken,
+  emptyEnvContext,
+  substituteEnvTokens,
+} from '../env/substitute.js';
 
 // Dynamic import for WASM module (nodejs target)
 let wasmModule: typeof import('@raisindb/schema-wasm') | null = null;
@@ -175,9 +181,19 @@ export async function applyFix(
 }
 
 /**
- * Read all YAML files from a package directory and return as a map
+ * Read all YAML files from a package directory and return as a map.
+ *
+ * `{env:NAME}` tokens are resolved as the files are read, so the validator sees
+ * exactly the bytes that `package create` will ship. Tokens that resolve to
+ * nothing are collected in `unresolved` (keyed by relative path) and reported as
+ * validation errors by the caller — they must never be validated as literals and
+ * then silently packed.
  */
-export function collectPackageFiles(packageDir: string): Record<string, string> {
+export function collectPackageFiles(
+  packageDir: string,
+  env: EnvContext = emptyEnvContext(),
+  unresolved?: Record<string, UnresolvedToken[]>
+): Record<string, string> {
   const files: Record<string, string> = {};
 
   function walkDir(dir: string, prefix: string = '') {
@@ -191,7 +207,12 @@ export function collectPackageFiles(packageDir: string): Record<string, string> 
         walkDir(fullPath, relativePath);
       } else if (entry.isFile() && /\.ya?ml$/i.test(entry.name)) {
         try {
-          files[relativePath] = fs.readFileSync(fullPath, 'utf-8');
+          const raw = fs.readFileSync(fullPath, 'utf-8');
+          const { text, unresolved: missing } = substituteEnvTokens(raw, env);
+          files[relativePath] = text;
+          if (unresolved && missing.length > 0) {
+            unresolved[relativePath] = missing;
+          }
         } catch (error) {
           // Skip files that can't be read
         }
@@ -204,6 +225,39 @@ export function collectPackageFiles(packageDir: string): Record<string, string> 
 }
 
 /**
+ * Turn unresolved `{env:...}` tokens into validation errors, so a missing
+ * variable is discovered by `package validate` with a file and line rather than
+ * as a mysterious YAML value later.
+ */
+function envTokenResults(
+  unresolved: Record<string, UnresolvedToken[]>
+): PackageValidationResults {
+  const results: PackageValidationResults = {};
+
+  for (const [filePath, tokens] of Object.entries(unresolved)) {
+    results[filePath] = {
+      success: false,
+      file_type: 'content',
+      errors: tokens.map((token) => ({
+        file_path: filePath,
+        line: token.line,
+        column: token.column,
+        field_path: '',
+        error_code: 'UNRESOLVED_ENV_TOKEN',
+        message:
+          `${token.raw} could not be resolved. Set ${token.name} in the environment ` +
+          `or a .env file, or give it an inline default: {env:${token.name}:-fallback}`,
+        severity: 'error' as const,
+        fix_type: 'manual' as const,
+      })),
+      warnings: [],
+    };
+  }
+
+  return results;
+}
+
+/**
  * Validate a package directory.
  *
  * Runs the WASM schema validator, the translation validator, and the flow
@@ -211,9 +265,11 @@ export function collectPackageFiles(packageDir: string): Record<string, string> 
  * single pass; flow doctor errors fail validation like schema errors.
  */
 export async function validatePackageDirectory(
-  packageDir: string
+  packageDir: string,
+  env: EnvContext = emptyEnvContext()
 ): Promise<PackageValidationResults> {
-  const files = collectPackageFiles(packageDir);
+  const unresolved: Record<string, UnresolvedToken[]> = {};
+  const files = collectPackageFiles(packageDir, env, unresolved);
   const { translationFiles, nonTranslationFiles } = partitionTranslationFiles(files);
   const wasmResults = await validatePackage(nonTranslationFiles);
   const translationResults = validateTranslationFiles(translationFiles, files);
@@ -225,7 +281,8 @@ export async function validatePackageDirectory(
     { ...wasmResults, ...translationResults },
     flowResults
   );
-  return mergeFlowResults(merged, bundledResults);
+  const withBundled = mergeFlowResults(merged, bundledResults);
+  return mergeFlowResults(withBundled, envTokenResults(unresolved));
 }
 
 /**

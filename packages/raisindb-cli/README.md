@@ -59,6 +59,27 @@ raisindb package upload my-package.rap
 raisindb package upload my-package.rap --server http://localhost:8080
 ```
 
+Keep environment-specific values out of the YAML with `{env:...}` tokens:
+
+```yaml
+# content/stories/my-site/.node.yaml
+properties:
+  dev_url: "{env:PREVIEW_SERVER:-http://localhost:5173}"
+```
+
+```bash
+raisindb package create ./my-package                          # uses the default
+PREVIEW_SERVER=https://preview.example.ch \
+  raisindb package create ./my-package                        # uses the env value
+raisindb package create ./my-package --env production         # reads .env.production
+```
+
+Values resolve from `.env`, `.env.<profile>`, `.env.local`, `--env-file`, and
+the process environment (highest precedence). `.env*` files are never packaged
+or pushed. A token with no value and no inline default fails the command
+instead of shipping a literal. The same substitution applies to
+`package validate`, `deploy`, `sync --push/--watch`, and `.raisin-sync.yaml`.
+
 ## Shell Commands
 
 ### Connection & Authentication

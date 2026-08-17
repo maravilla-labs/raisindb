@@ -43,6 +43,8 @@ packageCmd
   .option('-o, --output <file>', 'Output file path')
   .option('--no-validate', 'Skip schema validation')
   .option('--check', 'Only validate (check), do not create package')
+  .option('-e, --env <profile>', 'Env profile for {env:...} tokens (loads .env.<profile>)')
+  .option('--env-file <path...>', 'Additional env file(s) for {env:...} tokens')
   .action(async (folder, options) => {
     try {
       // Commander.js: --no-validate sets options.validate = false
@@ -50,7 +52,9 @@ packageCmd
       //               no flag: validate then create
       await createPackage(folder, options.output, {
         noValidate: options.validate === false,  // --no-validate was passed
-        validateOnly: options.check === true     // --check was passed
+        validateOnly: options.check === true,    // --check was passed
+        env: options.env,
+        envFile: options.envFile,
       });
       process.exit(0);
     } catch (error) {
@@ -62,9 +66,15 @@ packageCmd
 packageCmd
   .command('validate <folder>')
   .description('Validate a package folder (schema + flow doctor) without building a .rap')
-  .action(async (folder) => {
+  .option('-e, --env <profile>', 'Env profile for {env:...} tokens (loads .env.<profile>)')
+  .option('--env-file <path...>', 'Additional env file(s) for {env:...} tokens')
+  .action(async (folder, options) => {
     try {
-      await createPackage(folder, undefined, { validateOnly: true });
+      await createPackage(folder, undefined, {
+        validateOnly: true,
+        env: options.env,
+        envFile: options.envFile,
+      });
       process.exit(0);
     } catch (error) {
       console.error('Error:', error instanceof Error ? error.message : String(error));
@@ -132,6 +142,8 @@ packageCmd
   .option('-s, --server <url>', 'Server URL')
   .option('-b, --branch <name>', 'Target branch (default: "main")')
   .option('--init', 'Initialize sync configuration')
+  .option('-e, --env <profile>', 'Env profile for {env:...} tokens (loads .env.<profile>)')
+  .option('--env-file <path...>', 'Additional env file(s) for {env:...} tokens')
   .action(async (directory, options) => {
     try {
       await syncPackage(directory || process.cwd(), options);
@@ -199,6 +211,8 @@ packageCmd
   .option('-r, --repo <name>', 'Repository name')
   .option('-b, --branch <name>', 'Target branch (default: "main")')
   .option('-i, --install', 'Install the package after upload')
+  .option('-e, --env <profile>', 'Env profile for {env:...} tokens (loads .env.<profile>)')
+  .option('--env-file <path...>', 'Additional env file(s) for {env:...} tokens')
   .action(async (folder, options) => {
     try {
       await deployPackage(folder, options);
@@ -241,6 +255,8 @@ program
   .option('-r, --repo <name>', 'Repository name')
   .option('-b, --branch <name>', 'Target branch (default: "main")')
   .option('-i, --install', 'Install the package after upload')
+  .option('-e, --env <profile>', 'Env profile for {env:...} tokens (loads .env.<profile>)')
+  .option('--env-file <path...>', 'Additional env file(s) for {env:...} tokens')
   .action(async (folder, options) => {
     try {
       await deployPackage(folder, options);
@@ -264,6 +280,8 @@ program
   .option('-s, --server <url>', 'Server URL')
   .option('-b, --branch <name>', 'Target branch (default: "main")')
   .option('--init', 'Initialize sync configuration')
+  .option('-e, --env <profile>', 'Env profile for {env:...} tokens (loads .env.<profile>)')
+  .option('--env-file <path...>', 'Additional env file(s) for {env:...} tokens')
   .action(async (directory, options) => {
     try {
       await syncPackage(directory || process.cwd(), options);

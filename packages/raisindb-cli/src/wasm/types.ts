@@ -107,4 +107,7 @@ export const ErrorCodes = {
 
   // Bundled-binary warnings
   MISSING_BUNDLED_BINARY: 'MISSING_BUNDLED_BINARY',
+
+  // Environment substitution
+  UNRESOLVED_ENV_TOKEN: 'UNRESOLVED_ENV_TOKEN',
 } as const;

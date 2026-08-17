@@ -7,11 +7,12 @@ import { SuccessMessage, ErrorMessage } from './StatusMessages.js';
 import fs from 'fs';
 import path from 'path';
 import yaml from 'yaml';
-import AdmZip from 'adm-zip';
 import {
   validatePackageDirectory,
   getValidationSummary,
 } from '../wasm/schema-validator.js';
+import { createZipPackage } from '../commands/package.js';
+import { loadEnvContext } from '../env/load.js';
 import type { PackageValidationResults, ValidationError } from '../wasm/types.js';
 
 interface PackageCreatorProps {
@@ -125,7 +126,10 @@ const PackageCreator: React.FC<PackageCreatorProps> = ({ onExit, onSuccess }) =>
     setStep('validating');
 
     try {
-      const results = await validatePackageDirectory(selectedDir);
+      const results = await validatePackageDirectory(
+        selectedDir,
+        loadEnvContext(selectedDir)
+      );
       setValidationResults(results);
       setStep('validation-results');
     } catch (err) {
@@ -142,8 +146,10 @@ const PackageCreator: React.FC<PackageCreatorProps> = ({ onExit, onSuccess }) =>
     try {
       const outputPath = path.join(process.cwd(), `${manifest.name}-${manifest.version}.rap`);
 
-      // Create ZIP archive
-      createZipPackage(selectedDir, outputPath);
+      // Create ZIP archive. Uses the shared builder from commands/package.js so
+      // the interactive flow gets the same ignore filter and {env:...}
+      // substitution as `raisindb package create`.
+      createZipPackage(selectedDir, outputPath, loadEnvContext(selectedDir));
 
       setCreatedPackage(outputPath);
       setStep('done');
@@ -155,13 +161,6 @@ const PackageCreator: React.FC<PackageCreatorProps> = ({ onExit, onSuccess }) =>
       setError(`Failed to create package: ${err instanceof Error ? err.message : String(err)}`);
       setStep('error');
     }
-  };
-
-  // Create a ZIP package from the source directory
-  const createZipPackage = (sourceDir: string, outputPath: string): void => {
-    const zip = new AdmZip();
-    zip.addLocalFolder(sourceDir);
-    zip.writeZip(outputPath);
   };
 
   // Helper to collect files

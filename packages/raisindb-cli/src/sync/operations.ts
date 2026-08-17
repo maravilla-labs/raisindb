@@ -9,6 +9,13 @@ import { SyncConfig } from './config.js';
 import { getToken } from '../auth.js';
 import { ChangeEvent } from './watcher.js';
 import { mapChangeToNode, parseTranslationLocale, type SchemaKind } from './mapping.js';
+import {
+  EnvContext,
+  emptyEnvContext,
+  hasEnvTokens,
+  substituteEnvTokens,
+} from '../env/substitute.js';
+import { isSubstitutableFile } from '../env/load.js';
 
 export { parseTranslationLocale } from './mapping.js';
 
@@ -70,6 +77,45 @@ export interface SyncOperationOptions {
   dryRun?: boolean;
   /** Force overwrite */
   force?: boolean;
+  /** Environment for {env:...} substitution. Defaults to inline defaults only. */
+  env?: EnvContext;
+}
+
+/**
+ * Read a text file, resolving `{env:NAME}` tokens.
+ *
+ * Every push path reads through this — a path that read the file directly would
+ * upload a literal `{env:PREVIEW_SERVER}` while its neighbours upload resolved
+ * values, and the difference would only show up at runtime.
+ *
+ * Unresolved tokens are reported as an error string rather than thrown: sync is
+ * per-file, so one bad file should fail on its own without aborting the run.
+ */
+function readSubstituted(
+  fullPath: string,
+  relPath: string,
+  env: EnvContext = emptyEnvContext()
+): { text: string; error?: string } {
+  const raw = fs.readFileSync(fullPath, 'utf-8');
+
+  if (!isSubstitutableFile(relPath) || !hasEnvTokens(raw)) {
+    return { text: raw };
+  }
+
+  const { text, unresolved } = substituteEnvTokens(raw, env);
+  if (unresolved.length > 0) {
+    const list = unresolved
+      .map((t) => `${t.raw} (line ${t.line})`)
+      .join(', ');
+    return {
+      text,
+      error:
+        `Unresolved {env:...} token(s): ${list}. Set the variable in the ` +
+        'environment or a .env file, or add an inline default {env:NAME:-fallback}',
+    };
+  }
+
+  return { text };
 }
 
 /**
@@ -190,7 +236,14 @@ export async function pushTranslationFile(
       };
     }
 
-    const content = fs.readFileSync(fullPath, 'utf-8');
+    const { text: content, error: envError } = readSubstituted(
+      fullPath,
+      filePath,
+      options.env
+    );
+    if (envError) {
+      return { success: false, path: filePath, operation: 'push', error: envError, timestamp };
+    }
     const rawTranslations = yaml.parse(content) || {};
 
     const token = getToken();
@@ -342,7 +395,14 @@ async function pushSchemaFile(
       };
     }
 
-    const content = fs.readFileSync(fullPath, 'utf-8');
+    const { text: content, error: envError } = readSubstituted(
+      fullPath,
+      filePath,
+      options.env
+    );
+    if (envError) {
+      return { success: false, path: filePath, operation: 'push', error: envError, timestamp };
+    }
     const definition = yaml.parse(content);
     if (!definition || typeof definition !== 'object') {
       return {
@@ -430,7 +490,14 @@ async function pushCodeInline(
       };
     }
 
-    const code = fs.readFileSync(fullPath, 'utf-8');
+    const { text: code, error: envError } = readSubstituted(
+      fullPath,
+      filePath,
+      options.env
+    );
+    if (envError) {
+      return { success: false, path: filePath, operation: 'push', error: envError, timestamp };
+    }
     const headers = {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${token}`,
@@ -807,8 +874,21 @@ export async function pushFile(
       return pushCodeFile(filePath, options);
     }
 
-    // Read file content
-    const content = fs.readFileSync(fullPath, 'utf-8');
+    // Read file content, resolving {env:...} tokens
+    const { text: content, error: envError } = readSubstituted(
+      fullPath,
+      filePath,
+      options.env
+    );
+    if (envError) {
+      return {
+        success: false,
+        path: filePath,
+        operation: 'push',
+        error: envError,
+        timestamp,
+      };
+    }
 
     // Get authentication token
     const token = getToken();
@@ -898,6 +978,23 @@ export async function pullFile(
     // Check if local file exists and we're not forcing
     if (fs.existsSync(fullPath) && !force && !dryRun) {
       // Could check modification time here for better conflict detection
+
+      // A local file with {env:...} tokens must not be overwritten: the server
+      // only ever saw the RESOLVED value, so writing it back would bake this
+      // environment's URL into the package permanently — and it looks like an
+      // ordinary content change in the diff.
+      const existing = fs.readFileSync(fullPath, 'utf-8');
+      if (hasEnvTokens(existing)) {
+        return {
+          success: false,
+          path: filePath,
+          operation: 'pull',
+          error:
+            'local file contains {env:...} tokens; pull would replace them with ' +
+            'this environment\'s resolved values (use --force to overwrite anyway)',
+          timestamp,
+        };
+      }
     }
 
     const token = getToken();
