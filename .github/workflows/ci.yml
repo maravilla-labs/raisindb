@@ -21,8 +21,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # No `toolchain:` on purpose — `rust-toolchain.toml` pins it, and cargo
+      # honours that pin over whatever rustup installed here. This used to say
+      # `1.89.0`, which was never the version that ran: the CI log showed it
+      # syncing 1.94.1 from the pin. Naming a version it does not use makes a
+      # formatting failure look like local-vs-CI rustfmt drift and sends whoever
+      # investigates chasing a difference that does not exist.
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.89.0
           components: rustfmt
       - run: cargo fmt --all -- --check
