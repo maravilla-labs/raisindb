@@ -349,3 +349,102 @@ async fn a_stamp_does_not_disarm_the_wholesale_rejection_guard() {
         "the stamp still happened, and still counts"
     );
 }
+
+/// A SMALL mount that rejects everything is caught too.
+///
+/// `check_failure_budget` is an early abort and waits for `max_item_failures`,
+/// 500 by default. A mount with four items therefore never reaches it: the run
+/// ended `outcome: "ok"` with `written: 0, failed: 4`, and the operator saw a
+/// green mount that had imported nothing. That is not a hypothetical — it is
+/// what a Stripe products mount did in production against a workspace whose
+/// `allowed_node_types` did not list `stripe:Product`.
+///
+/// The damage outlived the run. The walk had reached the end without being
+/// truncated or stopped, so `backfill_complete` was set and the mount switched
+/// to delta-only; the change feed does not replay objects that already existed,
+/// so those four items could never arrive again even after the workspace was
+/// fixed. `check_completed_walk` closes both halves: once the listing is
+/// exhausted, "wrote nothing while rejecting something" is conclusive at any
+/// scale, and it returns before the flag is set.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_four_item_mount_that_rejects_everything_is_not_reported_ok() {
+    let env = setup().await;
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let mock = StateOnlyMock::new();
+
+    // The DEFAULT budget, not a lowered one — the whole point is that four is
+    // nowhere near it.
+    let mount = state_only_mount();
+    assert!(
+        mount.sync_config.max_item_failures > 4,
+        "this test is meaningless unless the early-abort threshold is out of reach"
+    );
+
+    let c = ctx(&env, &mount, &mock, &mat);
+    let mut batcher = sync::batch::SyncBatcher::new(&c).await.unwrap();
+
+    for i in 0..4 {
+        let item: sync::config::ExternalItem = serde_json::from_value(json!({
+            "external_id": format!("prod_{i}"),
+            "name": format!("prod_{i}"),
+            "is_folder": false,
+            "etag": "v1",
+        }))
+        .unwrap();
+        batcher
+            .stage_upsert(
+                &item,
+                &format!("prod_{i}"),
+                MappedNode {
+                    node_type: "stripe:Product".to_string(),
+                    name: Some(format!("prod_{i}")),
+                    properties: serde_json::Map::new(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    // The flush itself must NOT fail: four is under the early-abort threshold,
+    // and that behaviour is deliberate — a big import must not die on its first
+    // few bad items.
+    batcher
+        .flush()
+        .await
+        .expect("four rejections is under the early-abort budget");
+    let stats = batcher.stats();
+    assert_eq!(stats.written, 0);
+    assert_eq!(stats.failed, 4);
+
+    // The end-of-walk judgement is where it is caught.
+    let err = batcher.check_completed_walk().expect_err(
+        "a completed walk that wrote nothing while rejecting four items is misconfigured",
+    );
+    assert!(
+        matches!(err, sync::AdapterError::Config(_)),
+        "must be Config so `finalize` marks the mount `misconfigured` and does not retry: {err:?}"
+    );
+    assert!(
+        format!("{err}").contains("all 4 item(s) were rejected"),
+        "the message must name the scale it caught: {err}"
+    );
+}
+
+/// An empty walk is not a failure.
+///
+/// A provider with nothing to offer writes nothing and rejects nothing, which
+/// must stay a perfectly ordinary successful run — the checkout-sessions mount
+/// starts exactly here.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_walk_that_found_nothing_is_still_ok() {
+    let env = setup().await;
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let mock = StateOnlyMock::new();
+    let mount = state_only_mount();
+    let c = ctx(&env, &mount, &mock, &mat);
+    let batcher = sync::batch::SyncBatcher::new(&c).await.unwrap();
+
+    batcher
+        .check_completed_walk()
+        .expect("an empty listing is not a misconfiguration");
+}

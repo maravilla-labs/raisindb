@@ -231,6 +231,15 @@ pub async fn run_with(
         truncated,
         stopped,
     };
+    // BEFORE `settle_resume_point`, deliberately. A walk that reached the end
+    // having written nothing while rejecting something is misconfigured at any
+    // scale, and returning here is what stops `backfill_complete` being set on
+    // it — which is the difference between a mount that re-walks once the cause
+    // is fixed and one that is permanently empty and delta-only.
+    if !truncated && !stopped {
+        batcher.check_completed_walk()?;
+    }
+
     settle_resume_point(state, &stack, flags, processed, &ctx.mount.mount_id);
     reconcile_deletes(ctx, batcher, &seen, flags, processed, max).await?;
     capture_delta_baseline(ctx, state).await;

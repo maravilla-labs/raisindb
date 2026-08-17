@@ -282,6 +282,47 @@ impl<'a> SyncBatcher<'a> {
             self.stats.failed, reason
         )))
     }
+
+    /// The same judgement at the END of a completed walk, with no threshold.
+    ///
+    /// [`Self::check_failure_budget`] is an EARLY ABORT: it exists to stop a
+    /// large import that is clearly never going to work, so it waits for
+    /// `max_item_failures` (500 by default) before saying so. That threshold is
+    /// right for aborting early and useless for judging the finished result — a
+    /// mount with four items that rejected all four never reaches it, so the run
+    /// ended `outcome: "ok"` with `written: 0`.
+    ///
+    /// It did not stop at cosmetic. The walk had reached the end without being
+    /// truncated or stopped, so `settle_resume_point` set `backfill_complete`,
+    /// which switches the mount to delta-only. A provider whose change feed does
+    /// not replay existing objects then never offers those items again, and a
+    /// misconfiguration that was one workspace edit away from fixed became a
+    /// permanently empty mount. Both halves happened in production.
+    ///
+    /// So: once the listing is exhausted, "wrote nothing while rejecting
+    /// something" is conclusive at ANY scale. Four is as diagnostic as four
+    /// hundred — more so, because nobody waits out four hundred. Returning
+    /// `Config` here also lands BEFORE `settle_resume_point`, so the flag is
+    /// never set and the mount re-walks once the cause is fixed.
+    ///
+    /// Only for a walk that genuinely finished: a truncated chunk has more pages
+    /// coming and a stopped one was interrupted, and neither has seen enough to
+    /// conclude anything.
+    pub fn check_completed_walk(&self) -> std::result::Result<(), AdapterError> {
+        if self.stats.written > 0 || self.stats.failed == 0 {
+            return Ok(());
+        }
+        let reason = self
+            .stats
+            .first_error
+            .as_deref()
+            .unwrap_or("no reason recorded");
+        Err(AdapterError::Config(format!(
+            "the walk finished having written nothing: all {} item(s) were rejected. \
+             First rejection: {}",
+            self.stats.failed, reason
+        )))
+    }
 }
 
 /// Map a storage error onto the adapter error taxonomy.

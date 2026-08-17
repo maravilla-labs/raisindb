@@ -32,6 +32,15 @@ enum Answer {
     /// what makes "did it send?" genuinely unanswerable.
     DiedAfterSending,
     Err(AdapterError),
+    /// Answered with the OBJECT THE COMMAND CREATED, the way an adapter that
+    /// mints something has to. Carries an etag as well, because it is the etag
+    /// that makes dropping the item lethal rather than merely lossy: the stamp
+    /// marks the node current at that version, so the next walk skips it and the
+    /// created object's fields never arrive by any other route.
+    OkWithItem {
+        id: &'static str,
+        url: &'static str,
+    },
 }
 
 /// One invoker playing both the adapter and the bidirectional mapper, as
@@ -78,6 +87,26 @@ impl AdapterInvoker for SubmitMock {
                 "supports_idempotency_key": false,
             })),
             "mapper_capabilities" => Ok(json!({ "to_external": true })),
+            // The SAME mapper the read path uses, which is the point: a created
+            // object must land on the node through the translation that every
+            // later sync of that object will use, not as raw provider keys.
+            // Note it drops `kind` — proving the merge is mapped, not verbatim.
+            "to_node" => {
+                let meta = input
+                    .get("external_item")
+                    .and_then(|i| i.get("metadata"))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                Ok(json!({
+                    "node_type": "raisin:OutboundMail",
+                    "properties": {
+                        "url": meta.get("url").cloned().unwrap_or(Value::Null),
+                        // Deliberately echoed: the merge must NOT let a provider
+                        // field called `status` overwrite the command lifecycle.
+                        "status": "open",
+                    },
+                }))
+            }
             "to_external" => {
                 let props = input
                     .get("node")
@@ -106,6 +135,17 @@ impl AdapterInvoker for SubmitMock {
                         "adapter panicked after the provider call".to_string(),
                     )),
                     Some(Answer::Err(e)) => Err(e),
+                    Some(Answer::OkWithItem { id, url }) => Ok(json!({
+                        "external_id": id,
+                        "etag": "etag-after-create",
+                        "item": {
+                            "external_id": id,
+                            "name": id,
+                            "is_folder": false,
+                            "etag": "etag-after-create",
+                            "metadata": { "url": url, "kind": "checkout_session" },
+                        },
+                    })),
                     None => Ok(json!({ "external_id": "AUTO" })),
                 }
             }
@@ -495,4 +535,93 @@ fn submit_is_refused_unless_both_the_adapter_and_the_mapper_can_send() {
         WriteMode::Refused(r) => assert!(r.contains("to_external"), "{r}"),
         other => panic!("expected a refusal, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// a command that MINTS something must keep it
+// ---------------------------------------------------------------------------
+
+/// The object a command created lands on the command node.
+///
+/// For a send, the command IS the whole object and there is nothing at the
+/// provider to learn. For a command that mints something — a Stripe Checkout
+/// Session — the created object carries the only thing anyone wanted: the pay
+/// `url`.
+///
+/// Dropping it is not merely lossy, it is unrecoverable, and the etag is why.
+/// `sent_stamp` writes `__etag` and `__synced_at` from the same answer, which
+/// asserts the node is current at that version — so the next full walk compares
+/// etags, matches, and SKIPS the item. Stripe seals the trap from the other
+/// side by emitting no `checkout.session.created`, so the delta feed never lists
+/// a fresh session either. Live, this showed up as `items_done: 1, skipped: 1,
+/// written: 0` and a node stuck at `sent` with no url, forever.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_created_object_is_folded_back_onto_its_command_node() {
+    let env = setup().await;
+    let mount = submit_mount();
+    let mock = SubmitMock::new(vec![Answer::OkWithItem {
+        id: "cs_test_1",
+        url: "https://pay.test/cs_test_1",
+    }]);
+    let id = command(&env, "m1", "queued").await;
+
+    let stats = drain(&env, &mount, mock.as_ref()).await;
+    assert_eq!(stats.submitted, 1);
+
+    let node = node_of(&env, &id).await;
+
+    // The whole point.
+    assert_eq!(
+        str_prop(&node, "url").as_deref(),
+        Some("https://pay.test/cs_test_1"),
+        "the created object's fields must reach the node at submit time — it is \
+         the only moment they are available"
+    );
+
+    // MAPPED, not verbatim. The adapter's metadata carried `kind`; the mapper
+    // did not translate it, so it must not appear. Writing the receipt raw would
+    // store provider-shaped keys the nodetype never declared, and would diverge
+    // from what the next sync writes for the very same object.
+    assert!(
+        !node.properties.contains_key("kind"),
+        "the item must go through `to_node`, not be written raw"
+    );
+
+    // The lifecycle is the CAS's, not the provider's. The mapper deliberately
+    // returned `status: "open"`; letting that through would overwrite `sent`
+    // with a value the outbox cannot read, stranding the command.
+    assert_eq!(
+        str_prop(&node, "status").as_deref(),
+        Some("sent"),
+        "a provider field named `status` must never overwrite the command lifecycle"
+    );
+
+    // The stamp still wins on the reserved keys.
+    assert_eq!(
+        str_prop(&node, "__external_id").as_deref(),
+        Some("cs_test_1")
+    );
+    assert_eq!(
+        str_prop(&node, "__etag").as_deref(),
+        Some("etag-after-create")
+    );
+}
+
+/// An adapter that answers without an `item` is unaffected.
+///
+/// This is what makes the change safe to ship in either order, and safe for
+/// every adapter that predates it: no `item`, no merge, same node as before.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_answer_without_an_item_still_lands_at_sent() {
+    let env = setup().await;
+    let mount = submit_mount();
+    let mock = SubmitMock::new(vec![Answer::Ok("SENT-1")]);
+    let id = command(&env, "m1", "queued").await;
+
+    drain(&env, &mount, mock.as_ref()).await;
+
+    let node = node_of(&env, &id).await;
+    assert_eq!(str_prop(&node, "status").as_deref(), Some("sent"));
+    assert_eq!(str_prop(&node, "__external_id").as_deref(), Some("SENT-1"));
+    assert!(!node.properties.contains_key("url"));
 }

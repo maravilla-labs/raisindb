@@ -7,7 +7,9 @@
 use chrono::Utc;
 use serde_json::{json, Map, Value};
 
+use super::super::item::map_item;
 use super::super::materializer::{command_seq, CasOutcome, CommandCas};
+use super::super::ExternalItem;
 use super::super::{AdapterError, SyncCtx};
 use super::plan::SubmitPlan;
 use super::submit_outcome::{disposition, status, Disposition};
@@ -172,7 +174,8 @@ pub(super) async fn issue_one(
                 .or_else(|| value.get("provider_id"))
                 .and_then(|v| v.as_str());
             let etag = value.get("etag").and_then(|v| v.as_str());
-            let set = sent_stamp(&node.id, &ctx.scope.mount_id, external_id, etag);
+            let mut set = sent_stamp(&node.id, &ctx.scope.mount_id, external_id, etag);
+            merge_created_item(ctx, node, &value, &mut set).await;
             apply(ctx, node, claim_seq, status::SENT, set).await;
             Issued::Sent
         }
@@ -321,6 +324,95 @@ async fn apply(
             to = %to,
             error = %e,
             "could not record a command's outcome"
+        ),
+    }
+}
+
+/// Fold the object the command CREATED back onto the command node.
+///
+/// Optional and additive: an adapter that answers a submit with only
+/// `{external_id, etag}` — every adapter written before this — reaches the
+/// `else` and nothing changes.
+///
+/// # Why a stamp alone is not enough
+///
+/// `sent_stamp` writes `__etag` and `__synced_at` from the adapter's answer,
+/// which asserts "this node is up to date at that version". For a mail send that
+/// is true and complete: the command IS the whole object, and there is nothing
+/// at the provider to learn. For a command that MINTS an object it is a lie, and
+/// an expensive one — the next walk compares etags, finds a match, and skips the
+/// item, so the properties that only exist at the provider never arrive at all.
+///
+/// Stripe made that concrete. Creating a Checkout Session returns the pay `url`,
+/// and the url is the entire point of the command. But Stripe emits no
+/// `checkout.session.created` event, so the delta feed never surfaces a fresh
+/// session, and the full walk that would list it skipped it on the etag the
+/// submit had just stamped. The node reached `sent` — correctly, the session was
+/// real — carrying no url, forever. Dropping the etag instead would only trade
+/// that for "never, because delta never lists it".
+///
+/// So the data has to be taken at the one moment it is in hand: the answer.
+///
+/// # Through the mapper, never raw
+///
+/// The item is mapped with the SAME `to_node` the read path uses. Writing the
+/// adapter's metadata straight onto the node would bypass the mapper's
+/// translation and store provider-shaped keys the nodetype never declared —
+/// `kind`, a nested `metadata` bag — and would diverge from what the next sync
+/// writes for the very same object. One object must have one mapping.
+///
+/// # Precedence
+///
+/// The stamp WINS. Mapped properties are inserted only where the stamp has not
+/// already spoken, so `__external_id`, `__etag` and `__synced_at` keep the
+/// values the submit protocol chose. `status` is excluded outright: it is the
+/// command lifecycle, owned by the CAS in `apply`, and a provider's own status
+/// field arriving under that name would overwrite `sent` with something the
+/// outbox cannot read.
+async fn merge_created_item(
+    ctx: &SyncCtx<'_>,
+    node: &raisin_models::nodes::Node,
+    answer: &Value,
+    set: &mut Map<String, Value>,
+) {
+    let Some(raw) = answer.get("item") else {
+        return;
+    };
+    let item: ExternalItem = match serde_json::from_value(raw.clone()) {
+        Ok(item) => item,
+        Err(e) => {
+            // Not fatal: the command WAS sent, and refusing to record that
+            // because the optional half of the answer was malformed would strand
+            // a node the provider has already acted on.
+            tracing::warn!(
+                mount_id = %ctx.scope.mount_id,
+                node_id = %node.id,
+                error = %e,
+                "submit answered with an `item` that is not an ExternalItem; \
+                 recording the send without it"
+            );
+            return;
+        }
+    };
+
+    match map_item(ctx, &item).await {
+        Ok(Some(mapped)) => {
+            for (key, value) in mapped.node.properties {
+                if key == "status" {
+                    continue;
+                }
+                set.entry(key).or_insert(value);
+            }
+        }
+        // The mapper filtering the item out is a legitimate answer, not an
+        // error — and it is the mapper's business, so it is not second-guessed.
+        Ok(None) => {}
+        Err(e) => tracing::warn!(
+            mount_id = %ctx.scope.mount_id,
+            node_id = %node.id,
+            error = %e,
+            "could not map the submitted item back onto its command node; \
+             recording the send without it"
         ),
     }
 }
