@@ -205,10 +205,25 @@ async fn a_wholesale_replace_keeps_the_stored_engine_keys() {
         .unwrap();
 
     let after = service.get_by_path("/lamp-replace").await.unwrap().unwrap();
-    assert_eq!(after.properties.get("on"), Some(&PropertyValue::Boolean(true)));
-    assert_eq!(prop_str(&after, "__etag"), "etag-current", "stale echo dropped");
-    assert_eq!(prop_str(&after, "__pushed_state"), "{\"on\":false}", "omitted key carried");
-    assert_eq!(prop_str(&after, "__mount_id"), "mount-1", "mount ownership survives a save");
+    assert_eq!(
+        after.properties.get("on"),
+        Some(&PropertyValue::Boolean(true))
+    );
+    assert_eq!(
+        prop_str(&after, "__etag"),
+        "etag-current",
+        "stale echo dropped"
+    );
+    assert_eq!(
+        prop_str(&after, "__pushed_state"),
+        "{\"on\":false}",
+        "omitted key carried"
+    );
+    assert_eq!(
+        prop_str(&after, "__mount_id"),
+        "mount-1",
+        "mount ownership survives a save"
+    );
     assert_eq!(
         after.properties.get("__virtual"),
         Some(&PropertyValue::Boolean(true))
@@ -232,7 +247,10 @@ async fn ordinary_nodes_are_not_shielded() {
     let created = service.get_by_path("/plain").await.unwrap().unwrap();
 
     let mut tx = service.transaction();
-    tx.update(created.id.clone(), serde_json::json!({ "__etag": "imported" }));
+    tx.update(
+        created.id.clone(),
+        serde_json::json!({ "__etag": "imported" }),
+    );
     tx.commit("import", "importer").await.unwrap();
 
     let after = service.get_by_path("/plain").await.unwrap().unwrap();

@@ -278,7 +278,10 @@ fn a_master_with_only_local_time_still_expands() {
     let master = parse_master(&node).unwrap();
 
     // 09:00 Europe/Zurich on 2026-03-10 is CET (UTC+1).
-    assert_eq!(format_utc(master.start_utc.unwrap()), "2026-03-10T08:00:00Z");
+    assert_eq!(
+        format_utc(master.start_utc.unwrap()),
+        "2026-03-10T08:00:00Z"
+    );
 
     let out = expand(
         &master,
@@ -287,7 +290,10 @@ fn a_master_with_only_local_time_still_expands() {
         10,
     )
     .unwrap();
-    assert!(!out.occurrences.is_empty(), "a local-only master must expand");
+    assert!(
+        !out.occurrences.is_empty(),
+        "a local-only master must expand"
+    );
 
     // The end must be derived too, or every occurrence is zero-length while
     // still looking like a successful expansion.
@@ -308,7 +314,10 @@ fn a_stored_utc_instant_still_wins_over_its_local_twin() {
     node.properties
         .insert("start_local".into(), s("2026-03-10T17:00:00"));
     let master = parse_master(&node).unwrap();
-    assert_eq!(format_utc(master.start_utc.unwrap()), "2026-03-10T08:00:00Z");
+    assert_eq!(
+        format_utc(master.start_utc.unwrap()),
+        "2026-03-10T08:00:00Z"
+    );
 }
 
 #[test]
@@ -317,7 +326,10 @@ fn the_ambiguous_dst_hour_resolves_to_the_earlier_instant() {
     let node = local_only_master("m-ambiguous", "2026-10-25T02:30:00", "2026-10-25T03:00:00");
     let master = parse_master(&node).unwrap();
     // The first pass through 02:30 is 00:30Z (UTC+2); the second is 01:30Z.
-    assert_eq!(format_utc(master.start_utc.unwrap()), "2026-10-25T00:30:00Z");
+    assert_eq!(
+        format_utc(master.start_utc.unwrap()),
+        "2026-10-25T00:30:00Z"
+    );
 }
 
 #[test]
@@ -326,7 +338,10 @@ fn the_nonexistent_dst_hour_steps_forward_instead_of_vanishing() {
     let node = local_only_master("m-gap", "2026-03-29T02:30:00", "2026-03-29T03:00:00");
     let master = parse_master(&node).unwrap();
     // Must resolve to the first instant that exists, not drop the master.
-    assert_eq!(format_utc(master.start_utc.unwrap()), "2026-03-29T01:00:00Z");
+    assert_eq!(
+        format_utc(master.start_utc.unwrap()),
+        "2026-03-29T01:00:00Z"
+    );
 }
 
 #[test]
@@ -335,7 +350,10 @@ fn an_all_day_local_date_resolves_to_local_midnight() {
     let master = parse_master(&node).unwrap();
     // Midnight in Zurich, NOT midnight UTC — the whole reason the mapper
     // refuses to convert all-day values without a tz database.
-    assert_eq!(format_utc(master.start_utc.unwrap()), "2026-03-09T23:00:00Z");
+    assert_eq!(
+        format_utc(master.start_utc.unwrap()),
+        "2026-03-09T23:00:00Z"
+    );
 }
 
 #[test]

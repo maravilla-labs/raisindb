@@ -251,8 +251,10 @@ impl RocksDbMaterializer {
         // Content properties are written by `store_content` AFTER the upsert
         // that created the node, so the mapper never emits them and a wholesale
         // rebuild erases them — see the carry-forward below.
-        let wants_content_carry =
-            matched_existing && CONTENT_KEYS.iter().any(|k| !mapped.properties.contains_key(*k));
+        let wants_content_carry = matched_existing
+            && CONTENT_KEYS
+                .iter()
+                .any(|k| !mapped.properties.contains_key(*k));
 
         // At most ONE live read, shared by both. Both need the node as it stands
         // inside this transaction rather than the run-start index, which is

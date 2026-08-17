@@ -60,7 +60,9 @@ pub use node_paths::is_item_level;
 // the index applies when it decides what is IN one. Two spellings of "under the
 // mount path" is how a node ends up detached by one half and still indexed by
 // the other.
-pub(crate) use node_paths::{ancestor_paths, node_external_id, node_mount_id, node_str_prop, under};
+pub(crate) use node_paths::{
+    ancestor_paths, node_external_id, node_mount_id, node_str_prop, under,
+};
 pub use ops::{dedup_ops, estimate_node_bytes, estimate_op_bytes, BatchOp, BatchStats};
 pub use write_view::{write_view_of, WriteView, PUSHED_STATE_PROP};
 

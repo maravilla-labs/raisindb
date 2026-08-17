@@ -163,8 +163,11 @@ mod tests {
         // An adapter with a genuinely empty object to represent says so, so
         // "the provider gave us nothing" and "the file is empty" stay
         // distinguishable.
-        let (bytes, _) =
-            decode_content(&json!({ "content": "", "empty": true }), &asset("empty.bin")).unwrap();
+        let (bytes, _) = decode_content(
+            &json!({ "content": "", "empty": true }),
+            &asset("empty.bin"),
+        )
+        .unwrap();
         assert!(bytes.is_empty());
     }
 

@@ -961,7 +961,10 @@ async fn a_backfill_chunk_never_overwrites_a_live_delta_cursor() {
 
     // A mount mid-enumeration: the delta pass stored T5 with pages still to go.
     let mock = MockAdapter::default();
-    mock.set_list("root", json!({ "items": [ext_item("A", "a", false, "v1")] }));
+    mock.set_list(
+        "root",
+        json!({ "items": [ext_item("A", "a", false, "v1")] }),
+    );
     mock.push_changes(json!({ "items": [], "next_token": "BASELINE" }));
 
     let mut state = MountState {
@@ -981,7 +984,10 @@ async fn a_backfill_chunk_never_overwrites_a_live_delta_cursor() {
     // The converse still holds: a mount with NO cursor is exactly what a
     // baseline is for, and capturing one is what lets it go incremental.
     let mock = MockAdapter::default();
-    mock.set_list("root", json!({ "items": [ext_item("A", "a", false, "v1")] }));
+    mock.set_list(
+        "root",
+        json!({ "items": [ext_item("A", "a", false, "v1")] }),
+    );
     mock.push_changes(json!({ "items": [], "next_token": "BASELINE" }));
 
     let mut fresh = MountState::default();

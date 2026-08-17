@@ -210,9 +210,8 @@ impl<S: TransactionalStorage> Transaction<S> {
                 // "already pushed" and silently never writes it to the
                 // provider. Only the sync engine itself may move these keys;
                 // everyone else's copy is dropped, never merged.
-                let shield_engine_keys = raisin_models::nodes::is_mount_owned(
-                    &node.properties,
-                ) && actor != raisin_models::nodes::SYNC_ACTOR;
+                let shield_engine_keys = raisin_models::nodes::is_mount_owned(&node.properties)
+                    && actor != raisin_models::nodes::SYNC_ACTOR;
 
                 if let Some(props) = properties.as_object() {
                     for (key, value) in props {
