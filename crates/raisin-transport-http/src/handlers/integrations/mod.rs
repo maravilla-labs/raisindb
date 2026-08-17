@@ -20,6 +20,7 @@ mod adapter_invoke;
 mod browse;
 mod client_secret;
 mod config_secrets;
+mod connect_event;
 mod connections;
 mod manage;
 mod mount_content;
@@ -37,6 +38,7 @@ mod test_connection;
 pub use browse::browse;
 pub use client_secret::set_client_secret;
 pub use config_secrets::set_config_secrets;
+pub use connect_event::connect_event;
 pub use connections::{create_connection, delete_connection, list_connections, update_connection};
 pub use manage::{disconnect, sync_mount};
 #[cfg(feature = "storage-rocksdb")]
@@ -401,7 +403,9 @@ mod connect_broker_tests {
         assert!(is_connect_broker_url(
             "https://connect.maravilla.cloud/authorize"
         ));
-        assert!(is_connect_broker_url("https://connect.example.test/authorize"));
+        assert!(is_connect_broker_url(
+            "https://connect.example.test/authorize"
+        ));
         // Providers reached directly are not brokered.
         assert!(!is_connect_broker_url(
             "https://accounts.google.com/o/oauth2/v2/auth"
@@ -410,7 +414,9 @@ mod connect_broker_tests {
             "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
         ));
         // The token endpoint of Connect itself is not an authorize URL.
-        assert!(!is_connect_broker_url("https://connect.maravilla.cloud/token"));
+        assert!(!is_connect_broker_url(
+            "https://connect.maravilla.cloud/token"
+        ));
         assert!(!is_connect_broker_url(""));
     }
 

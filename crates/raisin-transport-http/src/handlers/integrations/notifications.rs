@@ -157,7 +157,19 @@ pub async fn notify(
 
     // 4. Enqueue a delta sync idempotently (mirrors manage.rs::sync_mount) and
     //    ack immediately — never block on the sync itself.
-    enqueue_delta_sync(&state, &tenant.tenant_id, &repo, &mount.id).await
+    let branch = super::config_branch(&state, &tenant.tenant_id, &repo).await;
+    let registered =
+        enqueue_delta_sync(&state, &tenant.tenant_id, &repo, &branch, &mount.id).await?;
+    let status = if registered {
+        "queued"
+    } else {
+        "already_running"
+    };
+    Ok((
+        StatusCode::OK,
+        axum::Json(serde_json::json!({ "status": status })),
+    )
+        .into_response())
 }
 
 /// Stamp webhook DELIVERY health onto the mount's `state`.
@@ -198,15 +210,26 @@ async fn record_delivery(state: &AppState, tenant: &str, repo: &str, mount_id: &
 #[cfg(not(feature = "storage-rocksdb"))]
 async fn record_delivery(_: &AppState, _: &str, _: &str, _: &str, _: bool) {}
 
-/// Enqueue a `VirtualMountSync { mode: "delta" }` for `mount_id`, deduped on the
-/// in-flight key `vmount-sync:{mount_id}`. Returns a 200 ack either way.
 #[cfg(feature = "storage-rocksdb")]
-async fn enqueue_delta_sync(
+/// Enqueue a `VirtualMountSync { mode: "delta" }` for one mount, deduped on the in-flight
+/// key `vmount-sync:{mount_id}`.
+///
+/// `branch` is a PARAMETER rather than something this function resolves. It used to call
+/// `config_branch()` internally, which meant one request resolved the branch twice — and
+/// the two resolutions could disagree, which is the bug documented at the call site
+/// above. The caller already knows the branch it read the mount from; passing it is the
+/// only way to guarantee the job runs against the same one.
+///
+/// Returns whether the job was newly registered. The idempotency key
+/// `vmount-sync:{mount_id}` is shared with the scheduler's own enqueue, so a burst of
+/// provider events collapses to one run per mount for free.
+pub(crate) async fn enqueue_delta_sync(
     state: &AppState,
     tenant_id: &str,
     repo: &str,
+    branch: &str,
     mount_id: &str,
-) -> Result<Response, ApiError> {
+) -> Result<bool, ApiError> {
     let rocksdb = state
         .rocksdb_storage
         .as_ref()
@@ -224,7 +247,7 @@ async fn enqueue_delta_sync(
     let context = raisin_storage::jobs::JobContext {
         tenant_id: tenant_id.to_string(),
         repo_id: repo.to_string(),
-        branch: super::config_branch(state, tenant_id, repo).await,
+        branch: branch.to_string(),
         workspace_id: "raisin:system".to_string(),
         revision: raisin_hlc::HLC::now(),
         metadata: std::collections::HashMap::new(),
@@ -244,16 +267,7 @@ async fn enqueue_delta_sync(
         .await
         .map_err(|e| ApiError::internal(format!("failed to enqueue sync job: {e}")))?;
 
-    let status = if registered {
-        "queued"
-    } else {
-        "already_running"
-    };
-    Ok((
-        StatusCode::OK,
-        axum::Json(serde_json::json!({ "status": status })),
-    )
-        .into_response())
+    Ok(registered)
 }
 
 /// Non-RocksDB stub. The route is only registered under `storage-rocksdb`, so

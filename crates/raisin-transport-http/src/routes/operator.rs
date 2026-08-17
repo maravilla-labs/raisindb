@@ -90,6 +90,21 @@ pub fn operator_package_routes(state: AppState) -> Router {
             "/management/integrations/{repo}/oauth/client-secret",
             post(crate::handlers::integrations::set_client_secret),
         )
+        // A provider-push invalidation, relayed by the control plane.
+        //
+        // No `{repo}` on purpose: the caller does not know which repo, only which tenant
+        // and which connected account. That is the whole reason this route exists —
+        // providers like Stripe Connect give a platform ONE webhook for every connected
+        // account, so there is no per-mount token to address and no repo in the event.
+        // The handler resolves repo and mount from the account.
+        //
+        // Belongs here for the same reason as the route above: the caller is the control
+        // plane holding the superadmin token, which `require_auth_middleware` does not
+        // accept. Same door, same key, no new auth surface.
+        .route(
+            "/management/integrations/connect-event",
+            post(crate::handlers::integrations::connect_event),
+        )
         .layer(from_fn(admin_system_auth_context))
         .with_state(state)
 }
