@@ -14,6 +14,39 @@ use raisin_storage::{NodeRepository, Storage};
 
 use super::NodeService;
 
+/// Carry a node's BLOCK-level overlays onto the copy.
+///
+/// The node-level loop beside every call site copies `translations` records, which
+/// are keyed by node id alone. Block overlays are keyed by node id AND block uuid,
+/// in their own column family, so they are invisible to `list_translations_for_node`
+/// and were simply left behind — the copy arrived with the same `properties`, the
+/// same block uuids, and fewer translations, reporting success. The branch fork has
+/// always carried both (`branches/cf_registry.rs` copies `TRANSLATION_DATA` *and*
+/// `BLOCK_TRANSLATIONS`); this brings COPY in line with it.
+///
+/// The block uuids live inside the copied `properties`, which are cloned verbatim,
+/// so the overlays stay addressable under the new id without rewriting anything.
+async fn copy_block_translations(
+    ctx: &dyn raisin_storage::transactional::TransactionalContext,
+    workspace_id: &str,
+    source_id: &str,
+    target_id: &str,
+) -> Result<()> {
+    for (block_uuid, locale) in ctx
+        .list_block_translations_for_node(workspace_id, source_id)
+        .await?
+    {
+        if let Some(overlay) = ctx
+            .get_block_translation(workspace_id, source_id, &block_uuid, &locale)
+            .await?
+        {
+            ctx.store_block_translation(workspace_id, target_id, &block_uuid, &locale, overlay)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
 impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeService<S> {
     /// Copies a single node to a new parent location.
     ///
@@ -123,6 +156,14 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
                     .await?;
             }
         }
+
+        copy_block_translations(
+            ctx.as_ref(),
+            &self.workspace_id,
+            &source_node.id,
+            &copied_node.id,
+        )
+        .await?;
 
         ctx.commit().await?;
 
@@ -264,6 +305,9 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
                             .await?;
                     }
                 }
+
+                copy_block_translations(ctx, workspace_id, &source_node.id, &copied_node.id)
+                    .await?;
 
                 let children = ctx.list_children(workspace_id, &source_node.path).await?;
                 for source_child in children {

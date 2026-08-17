@@ -283,6 +283,52 @@ UPDATE Page FOR LOCALE 'de'
 Each `array[uuid='…']` level flattens to `/array/<uuid>/…` in the overlay, the
 same pointer the REST command uses.
 
+### Writes MERGE, and `NULL` removes
+
+A write updates the locale's overlay; it does not replace it. Two statements
+against the same node and locale accumulate, so you can translate a page block by
+block, or let a machine-translation pass follow a human one, without the second
+write erasing the first.
+
+Because of that, setting a field back to the base text does NOT stop it being
+translated — the old value simply stays. Assign `NULL` to remove one pointer, and
+the field falls back to the base language again:
+
+```sql
+-- Stop translating the title; the headline translation is untouched.
+UPDATE Page FOR LOCALE 'de' SET title = NULL WHERE path = '/content/home';
+```
+
+To drop a whole locale at once, use the `raisin:cmd/delete-translation` command
+rather than nulling every field.
+
+### Reading a locale in SQL is the same resolution as REST `?lang=`
+
+`SELECT … WHERE locale = 'de'` and `GET …?lang=de` run the identical resolver,
+including recursion into uuid-indexed arrays and embedded elements. Neither is
+shallower than the other; use whichever fits the transport you already have.
+`locale IN ('en','de')` returns one row per locale per node.
+
+Two things to know:
+
+- **Fallback chains resolve most-specific-wins.** For `de-CH` the chain is
+  `de-CH → de → <default>`; a field translated in `de-CH` beats the `de` value,
+  and a field only `de` translates still shows through.
+- **A server function must build its query engine with the repository config.**
+  Without it a locale predicate is silently ignored and the base language comes
+  back — no error, no empty result, just untranslated text. This is wired for you
+  in the HTTP, WebSocket and function runtimes; it matters if you embed the engine
+  yourself.
+
+### Block-level overlays
+
+There is a second, separate key space keyed by `(node_id, block_uuid, locale)`,
+written through the block-translation service rather than by either statement
+above. It is resolved on the same reads, independently of whether the node itself
+has an overlay, and it is carried by both `COPY` and a branch fork. Prefer the
+node-level pointers (`content[uuid='…'].field`) unless you specifically need
+per-block records — everything in this skill uses those.
+
 ## Frontend Locale Store
 
 Track the active language and generate SQL clauses. The key function is `localeClause()`:

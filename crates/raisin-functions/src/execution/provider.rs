@@ -287,7 +287,7 @@ where
     use raisin_models::auth::AuthContext;
     use raisin_models::nodes::properties::PropertyValue;
     use raisin_sql_execution::{QueryEngine, StaticCatalog};
-    use raisin_storage::{RepoScope, WorkspaceRepository};
+    use raisin_storage::{RepoScope, RepositoryManagementRepository, WorkspaceRepository};
 
     Arc::new(
         move |sql: String,
@@ -319,6 +319,16 @@ where
                     .with_catalog(Arc::new(catalog))
                     .with_auth(auth)
                     .with_default_actor(actor);
+                // Same reason as `callbacks::sql::build_engine`: without the
+                // repository config a locale predicate resolves nothing and the
+                // statement reads base-language content without saying so.
+                if let Some(repository) = storage
+                    .repository_management()
+                    .get_repository(&tenant_id, &repo_id)
+                    .await?
+                {
+                    engine = engine.with_repository_config(repository.config);
+                }
                 if let Some(idx) = &indexing_engine {
                     engine = engine.with_indexing_engine(idx.clone());
                 }

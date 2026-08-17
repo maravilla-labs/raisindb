@@ -52,10 +52,50 @@ impl<S: Storage> TranslationService<S> {
             .get_head(tenant_id, repo_id, branch)
             .await?;
 
-        // Create the translation overlay
-        let overlay = LocaleOverlay::Properties {
-            data: translations.clone(),
+        // Create the translation overlay by MERGING over whatever this locale
+        // already has.
+        //
+        // A store is a whole-overlay put, so building it from just this call's
+        // pointers made every update a silent replace: translating a page field
+        // by field, or letting a machine-translation pass follow a human one,
+        // dropped everything the previous write had put there. Nothing surfaced
+        // it — the fields simply fell back to the base language again.
+        //
+        // Merging is the semantic callers already assume. Clearing a locale goes
+        // through `delete_translation`, which stores an empty overlay on purpose;
+        // to drop individual fields, delete and re-write the set you want.
+        let mut data = match self
+            .storage
+            .translations()
+            .get_translation(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                node_id,
+                locale,
+                &current_revision,
+            )
+            .await
+        {
+            // A `Hidden` tombstone is not a partial overlay to merge into: the
+            // node is hidden in this locale, and writing translations for it is
+            // how the previous behaviour un-hid it. Preserved deliberately.
+            Ok(Some(LocaleOverlay::Properties { data })) => data,
+            _ => HashMap::new(),
         };
+        for (pointer, value) in &translations {
+            // A null value CLEARS that pointer, so a field can stop being
+            // translated (it falls back to the base language) without dropping
+            // the whole locale — which merging alone would otherwise make the
+            // only way back.
+            if matches!(value, PropertyValue::Null) {
+                data.remove(pointer);
+            } else {
+                data.insert(pointer.clone(), value.clone());
+            }
+        }
+        let overlay = LocaleOverlay::Properties { data };
 
         // Create translation metadata
         let timestamp = Utc::now();

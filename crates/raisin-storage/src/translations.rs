@@ -177,6 +177,22 @@ pub trait TranslationRepository: Send + Sync {
         revision: &HLC,
     ) -> Result<Vec<LocaleCode>>;
 
+    /// List every `(block_uuid, locale)` that has a BLOCK-level overlay for this node.
+    ///
+    /// Block overlays live in their own key space and are invisible to
+    /// `list_translations_for_node`: a block can be translated in a locale where the
+    /// node itself has no overlay. One scan answers both "are there any?" — which
+    /// lets the resolver skip its property-tree walk entirely on the common path —
+    /// and "which?", which is what copying a node needs in order not to lose them.
+    async fn list_block_translations_for_node(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        node_id: &str,
+    ) -> Result<Vec<(String, LocaleCode)>>;
+
     /// List all nodes that have translations in a specific locale.
     ///
     /// Used for reverse lookups: "which nodes are translated to French?"

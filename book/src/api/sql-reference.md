@@ -1222,19 +1222,40 @@ COPY TREE 'workspace' SET path='/templates/section' TO path='/content'
 
 ### TRANSLATE
 
-Set locale-specific translations for node properties:
+Set locale-specific translations for node properties.
+
+The `SET` path is relative to the node's **properties** — write `title`, not
+`properties.title`, which addresses a `properties` key inside them and resolves to
+nothing. Array items are addressed by their `uuid`, at any depth:
 
 ```sql
 UPDATE 'workspace' FOR LOCALE 'de'
-SET properties.title = 'Deutscher Titel',
-    properties.description = 'Deutsche Beschreibung'
+SET title = 'Deutscher Titel',
+    description = 'Deutsche Beschreibung'
 WHERE path = '/content/article-1';
 
--- Translate block content
+-- Translate block content: field[uuid='…'], not field['…']
 UPDATE 'workspace' FOR LOCALE 'fr'
-SET blocks['block-uuid-1'].text = 'Texte en francais'
+SET blocks[uuid='block-uuid-1'].text = 'Texte en francais',
+    sections[uuid='s1'].features[uuid='f1'].title = 'Développement rapide'
 WHERE path = '/content/article-1';
 ```
+
+A write **merges** into whatever the locale already holds, so translating a
+document one statement at a time accumulates rather than replacing. Assign `NULL`
+to remove a single translated field — it then falls back to the base language
+again; use the `raisin:cmd/delete-translation` command to drop a whole locale:
+
+```sql
+UPDATE 'workspace' FOR LOCALE 'de' SET title = NULL WHERE path = '/content/article-1';
+```
+
+Read it back with a `locale` predicate — `SELECT … WHERE locale = 'de'` — which
+resolves the overlay recursively, exactly as the REST `?lang=de` read does.
+
+A `SET` path is not validated against the node's content: a `uuid` that does not
+exist is stored and silently skipped at read time, while the statement still
+reports the node as affected. Verify a translation by reading it back.
 
 ### RELATE / UNRELATE
 

@@ -158,6 +158,44 @@ pub trait TransactionalContext: Send + Sync {
         node_id: &str,
     ) -> Result<Vec<String>>;
 
+    /// Store a BLOCK-level translation within the transaction.
+    ///
+    /// Block overlays live in their own key space, keyed by the block's stable
+    /// uuid as well as the node's, and are therefore invisible to the node-level
+    /// methods above. Anything that copies a node's translations has to copy
+    /// these too, or the copy silently loses them.
+    ///
+    /// # Arguments
+    /// * `block_uuid` - The block's stable uuid inside the node's properties
+    async fn store_block_translation(
+        &self,
+        workspace: &str,
+        node_id: &str,
+        block_uuid: &str,
+        locale: &str,
+        overlay: LocaleOverlay,
+    ) -> Result<()>;
+
+    /// Get a BLOCK-level translation within the transaction (sees uncommitted changes).
+    async fn get_block_translation(
+        &self,
+        workspace: &str,
+        node_id: &str,
+        block_uuid: &str,
+        locale: &str,
+    ) -> Result<Option<LocaleOverlay>>;
+
+    /// List every `(block_uuid, locale)` pair that has a block translation for this node.
+    ///
+    /// The enumeration the node-level `list_translations_for_node` cannot give:
+    /// a block may be translated in a locale where the NODE itself has no overlay
+    /// at all, so the two lists are genuinely independent.
+    async fn list_block_translations_for_node(
+        &self,
+        workspace: &str,
+        node_id: &str,
+    ) -> Result<Vec<(String, String)>>;
+
     /// List children of a node by parent path
     ///
     /// Returns all child nodes in fractional index order.

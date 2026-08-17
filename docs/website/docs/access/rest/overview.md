@@ -184,7 +184,7 @@ Manage multilingual content with built-in translation support.
 
 **Query with Locale:**
 - Add `?lang={locale}` to any GET endpoint to fetch localized content
-- Use `LOCALE '{locale}'` in SQL queries for locale-aware results
+- Add `AND locale = '{locale}'` to a SQL `WHERE` clause for locale-aware results
 
 See the [Translation API](./translations.md) for end-to-end workflows.
 

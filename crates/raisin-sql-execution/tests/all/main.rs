@@ -40,3 +40,6 @@ mod restore_workspace;
 mod rocksdb_integration_tests;
 mod spatial_pushdown_tests;
 mod throughput_sql;
+mod translation_blocks;
+mod translation_roundtrip;
+mod translation_throughput;

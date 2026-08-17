@@ -97,6 +97,19 @@ impl TranslationRepository for NoopTranslationRepo {
         Ok(Vec::new())
     }
 
+    async fn list_block_translations_for_node(
+        &self,
+        _tenant_id: &str,
+        _repo_id: &str,
+        _branch: &str,
+        _workspace: &str,
+        _node_id: &str,
+    ) -> Result<Vec<(String, LocaleCode)>> {
+        // Consistent with the rest of this backend's translation surface: the
+        // in-memory storage stores no overlays, so it lists none.
+        Ok(Vec::new())
+    }
+
     async fn list_nodes_with_translation(
         &self,
         _tenant_id: &str,

@@ -111,6 +111,26 @@ pub(super) fn block_translation_prefix(
     key
 }
 
+/// Encode a NODE-scoped block translation prefix — every block, every locale.
+///
+/// Format: `{tenant}\0{repo}\0{branch}\0{ws}\0block_trans\0{node_id}\0`
+///
+/// One scan over this answers "does this node have any block overlays at all, and
+/// which?", which is what both the resolver (so it can skip the property walk
+/// entirely) and COPY (so it can carry them) need.
+pub(super) fn block_translations_node_prefix(
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    workspace: &str,
+    node_id: &str,
+) -> Vec<u8> {
+    let mut key = base_key(tenant_id, repo_id, branch, workspace, "block_trans");
+    key.extend_from_slice(node_id.as_bytes());
+    key.push(b'\0');
+    key
+}
+
 /// Encode a translation index key (reverse lookup: locale -> nodes)
 ///
 /// Format: `{tenant}\0{repo}\0translation_index\0{locale}\0{~revision}\0{node_id}`

@@ -119,6 +119,59 @@ pub(super) async fn store_block_translation(
     Ok(())
 }
 
+/// List every `(block_uuid, locale)` that has a block overlay for this node.
+///
+/// One prefix scan over the node's block-translation key space. It replaces the
+/// resolver's old shape — walk the whole property tree, then issue a point read
+/// per block uuid found, per locale in the fallback chain — which cost N reads on
+/// every localized read of every node, including the overwhelmingly common case of
+/// a node with no block overlays at all, where the answer was always "none".
+///
+/// Orphan markers (`…\0{block_uuid}\0orphaned\0…`) are skipped: `orphaned` sits in
+/// the locale position but is a marker, not a locale.
+pub(super) async fn list_block_translations_for_node(
+    db: &Arc<DB>,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    workspace: &str,
+    node_id: &str,
+) -> Result<Vec<(String, LocaleCode)>> {
+    let cf = crate::cf_handle(db, crate::cf::BLOCK_TRANSLATIONS)?;
+    let prefix =
+        keys::block_translations_node_prefix(tenant_id, repo_id, branch, workspace, node_id);
+
+    let mut found = std::collections::HashSet::new();
+    for item in db.prefix_iterator_cf(&cf, &prefix) {
+        let (key, _value) = item.rocksdb_err()?;
+        // `prefix_iterator_cf` can run past the prefix; stop when it does.
+        let Some(suffix) = key.strip_prefix(prefix.as_slice()) else {
+            break;
+        };
+        // {block_uuid}\0{locale}\0{~revision} — split on BYTES. The trailing
+        // encoded revision is not valid UTF-8, so decoding the whole suffix first
+        // throws the entry away; only the two leading segments are text.
+        let mut parts = suffix.splitn(3, |b| *b == 0);
+        let (Some(block_uuid), Some(locale)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let (Ok(block_uuid), Ok(locale)) =
+            (std::str::from_utf8(block_uuid), std::str::from_utf8(locale))
+        else {
+            continue;
+        };
+        // `orphaned` occupies the locale position but is a marker, not a locale.
+        if locale == "orphaned" {
+            continue;
+        }
+        if let Ok(locale) = LocaleCode::parse(locale) {
+            found.insert((block_uuid.to_string(), locale));
+        }
+    }
+
+    Ok(found.into_iter().collect())
+}
+
 /// Mark blocks as orphaned
 pub(super) async fn mark_blocks_orphaned(
     db: &Arc<DB>,

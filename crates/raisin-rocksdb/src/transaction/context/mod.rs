@@ -379,6 +379,36 @@ impl TransactionalContext for RocksDBTransaction {
         translations::list_translations_for_node(self, workspace, node_id).await
     }
 
+    async fn store_block_translation(
+        &self,
+        workspace: &str,
+        node_id: &str,
+        block_uuid: &str,
+        locale: &str,
+        overlay: LocaleOverlay,
+    ) -> Result<()> {
+        translations::store_block_translation(self, workspace, node_id, block_uuid, locale, overlay)
+            .await
+    }
+
+    async fn get_block_translation(
+        &self,
+        workspace: &str,
+        node_id: &str,
+        block_uuid: &str,
+        locale: &str,
+    ) -> Result<Option<LocaleOverlay>> {
+        translations::get_block_translation(self, workspace, node_id, block_uuid, locale).await
+    }
+
+    async fn list_block_translations_for_node(
+        &self,
+        workspace: &str,
+        node_id: &str,
+    ) -> Result<Vec<(String, String)>> {
+        translations::list_block_translations_for_node(self, workspace, node_id).await
+    }
+
     /// List ordered children of a parent node
     ///
     /// Delegates to NodeRepository's list_children which uses the ORDERED_CHILDREN index.

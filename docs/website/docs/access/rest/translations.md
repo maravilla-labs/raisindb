@@ -23,12 +23,12 @@ Translations are revision-tracked just like base content. You can:
 Translations work seamlessly with RaisinSQL queries:
 
 ```sql
--- Automatic locale resolution
-SELECT * FROM articles WHERE title LIKE 'Einführung%' LOCALE 'de';
+-- Automatic locale resolution: the locale is a PREDICATE, not a trailing clause
+SELECT * FROM articles WHERE title LIKE 'Einführung%' AND locale = 'de';
 
 -- Fallback chain traversal
-SELECT * FROM articles WHERE status = 'published' LOCALE 'de-CH';
--- Falls back: de-CH → de → en (configurable)
+SELECT * FROM articles WHERE status = 'published' AND locale = 'de-CH';
+-- Falls back: de-CH → de → en (configurable), most specific wins
 ```
 
 ### 4. Git-like Workflows
@@ -344,36 +344,40 @@ GET /api/repository/{repo}/{branch}/head/{ws}/{*path}?lang=de
 }
 ```
 
-### SQL Queries with LOCALE
+### SQL Queries with a locale
 
-RaisinSQL supports locale-aware queries using the `LOCALE` clause:
+RaisinSQL resolves locales through a `locale` predicate in the `WHERE` clause —
+there is no trailing `LOCALE '…'` clause, and one will fail to parse:
 
 ```sql
 -- Query with specific locale
 SELECT id, properties ->> 'title' AS title
 FROM products
 WHERE status = 'published'
-LOCALE 'de';
+  AND locale = 'de';
 
 -- Locale is applied to all property access automatically
 SELECT *
 FROM articles
 WHERE properties ->> 'category' = 'Technology'
   AND properties ->> 'status' = 'published'
-LOCALE 'fr';
+  AND locale = 'fr';
 
 -- Time-travel with locale
 SELECT *
 FROM products@revision_100
 WHERE path LIKE '/catalog/%'
-LOCALE 'de-CH';
+  AND locale = 'de-CH';
 ```
 
-**LOCALE Behavior:**
-- Applies translations to all `properties ->>` operations
-- Follows configured fallback chains
-- Hidden nodes are filtered out for specified locale
-- Default locale used if LOCALE clause omitted
+**Locale behaviour:**
+- Resolves the overlay recursively, including fields nested inside uuid-addressed
+  array items — the same resolution the REST `?lang=` read performs
+- Follows configured fallback chains, most specific first: a `de-CH` value beats
+  the `de` one it falls back to, and a field only `de` translates still shows through
+- Hidden nodes are filtered out for the specified locale
+- The repository's default language is used when no `locale` predicate is given
+- `locale IN ('en','de')` returns one row per locale per node
 
 ### Historical Translation Queries
 

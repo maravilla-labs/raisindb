@@ -17,6 +17,47 @@ use raisin_models::nodes::properties::PropertyValue;
 use raisin_sql::analyzer::{AnalyzedTranslateFilter, AnalyzedTranslationValue};
 use raisin_storage::{NodeRepository, Storage, StorageScope};
 
+/// Merge this statement's pointers onto whatever the node already has for the
+/// locale.
+///
+/// A store is a whole-overlay put, so building the overlay from just the SET list
+/// made every `UPDATE … FOR LOCALE` a silent replace of that locale: translating a
+/// page one block per statement, or running a machine pass after a human one, kept
+/// only the last write and let everything else fall back to the base language with
+/// nothing reported. `get_translation` here is read-your-writes, so several
+/// statements inside one transaction accumulate correctly.
+///
+/// A `Hidden` tombstone is not a partial overlay: writing translations for a node
+/// hidden in this locale replaces the tombstone, which is how it was un-hidden
+/// before and stays so.
+async fn merged_overlay(
+    txn_ctx: &dyn raisin_storage::transactional::TransactionalContext,
+    workspace_id: &str,
+    node_id: &str,
+    locale: &str,
+    incoming: &std::collections::HashMap<raisin_models::translations::JsonPointer, PropertyValue>,
+) -> Result<raisin_models::translations::LocaleOverlay, Error> {
+    use raisin_models::translations::LocaleOverlay;
+
+    let mut data = match txn_ctx.get_translation(workspace_id, node_id, locale).await {
+        Ok(Some(LocaleOverlay::Properties { data })) => data,
+        _ => std::collections::HashMap::new(),
+    };
+    for (pointer, value) in incoming {
+        // NULL CLEARS one pointer. Merging alone would make a translation
+        // permanent: once a field had a locale value there was no way to take it
+        // back short of dropping the whole locale, so "this shouldn't be
+        // translated after all" was not expressible. The field then falls back to
+        // the base language, which is what removing a translation means.
+        if matches!(value, PropertyValue::Null) {
+            data.remove(pointer);
+        } else {
+            data.insert(pointer.clone(), value.clone());
+        }
+    }
+    Ok(LocaleOverlay::Properties { data })
+}
+
 /// Execute a physical TRANSLATE operation.
 ///
 /// Updates translations for nodes in a specific locale by:
@@ -77,11 +118,9 @@ pub async fn execute_translate<
         overlay_data.insert(JsonPointer::new(json_pointer), prop_value);
     }
 
-    let overlay = LocaleOverlay::properties(overlay_data);
-
     tracing::debug!(
         "TRANSLATE: Built overlay with {} fields for {} node(s)",
-        overlay.len(),
+        overlay_data.len(),
         node_ids.len()
     );
 
@@ -105,8 +144,16 @@ pub async fn execute_translate<
 
         for node_id in &node_ids {
             tracing::debug!("TRANSLATE storing translation for node {}", node_id);
+            let overlay = merged_overlay(
+                txn_ctx.as_ref(),
+                workspace_id,
+                node_id,
+                locale,
+                &overlay_data,
+            )
+            .await?;
             txn_ctx
-                .store_translation(workspace_id, node_id, locale, overlay.clone())
+                .store_translation(workspace_id, node_id, locale, overlay)
                 .await?;
         }
         drop(tx_lock);
@@ -143,8 +190,16 @@ pub async fn execute_translate<
 
         for node_id in &node_ids {
             tracing::debug!("TRANSLATE storing translation for node {}", node_id);
+            let overlay = merged_overlay(
+                txn_ctx.as_ref(),
+                workspace_id,
+                node_id,
+                locale,
+                &overlay_data,
+            )
+            .await?;
             txn_ctx
-                .store_translation(workspace_id, node_id, locale, overlay.clone())
+                .store_translation(workspace_id, node_id, locale, overlay)
                 .await?;
         }
 

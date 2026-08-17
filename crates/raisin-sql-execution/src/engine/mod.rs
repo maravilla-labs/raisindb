@@ -281,8 +281,18 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         self
     }
 
-    /// Set the repository configuration for locale-aware queries
+    /// Set the repository configuration for locale-aware queries.
+    ///
+    /// This also adopts the repository's own default language. The two are not
+    /// independent: `resolve_node_for_locale` skips translation entirely when the
+    /// queried locale equals `default_language`, and `get_locales_to_use` falls
+    /// back to it when a query names no locale. Left at the `"en"` default while
+    /// a repository declared something else, a `WHERE locale = '<repo default>'`
+    /// read went looking for an overlay that by definition does not exist, and a
+    /// locale-less read resolved against the wrong base — silently, since a
+    /// missing overlay is not an error.
     pub fn with_repository_config(mut self, config: RepositoryConfig) -> Self {
+        self.default_language = config.default_language.clone();
         self.repository_config = Some(config);
         self
     }

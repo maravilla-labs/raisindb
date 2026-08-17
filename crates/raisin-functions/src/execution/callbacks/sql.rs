@@ -23,7 +23,7 @@ use raisin_models::nodes::properties::PropertyValue;
 use raisin_sql_execution::{QueryEngine, StaticCatalog};
 use raisin_storage::scope::RepoScope;
 use raisin_storage::transactional::TransactionalStorage;
-use raisin_storage::{Storage, WorkspaceRepository};
+use raisin_storage::{RepositoryManagementRepository, Storage, WorkspaceRepository};
 use serde_json::Value;
 
 use super::super::types::ExecutionDependencies;
@@ -59,6 +59,19 @@ where
 
     let mut engine =
         QueryEngine::new(deps.storage.clone(), tenant, repo, branch).with_catalog(catalog);
+
+    // Locale-aware reads need the repository config, exactly as the HTTP and WS
+    // paths wire it. Without it `resolve_node_for_locale` returns every node
+    // untranslated, so `WHERE locale = 'de'` inside a function silently yielded
+    // base-language content — no error, no empty result, just the wrong text.
+    if let Some(repository) = deps
+        .storage
+        .repository_management()
+        .get_repository(tenant, repo)
+        .await?
+    {
+        engine = engine.with_repository_config(repository.config);
+    }
 
     if let Some(idx) = &deps.indexing_engine {
         engine = engine.with_indexing_engine(idx.clone());

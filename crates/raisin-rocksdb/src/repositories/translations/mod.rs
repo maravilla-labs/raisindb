@@ -171,6 +171,20 @@ impl TranslationRepository for RocksDBTranslationRepository {
         .await
     }
 
+    async fn list_block_translations_for_node(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        node_id: &str,
+    ) -> Result<Vec<(String, LocaleCode)>> {
+        blocks::list_block_translations_for_node(
+            &self.db, tenant_id, repo_id, branch, workspace, node_id,
+        )
+        .await
+    }
+
     async fn list_nodes_with_translation(
         &self,
         tenant_id: &str,

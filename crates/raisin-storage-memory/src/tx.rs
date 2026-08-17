@@ -305,6 +305,35 @@ impl TransactionalContext for InMemoryTx {
         Ok(Vec::new())
     }
 
+    async fn store_block_translation(
+        &self,
+        _workspace: &str,
+        _node_id: &str,
+        _block_uuid: &str,
+        _locale: &str,
+        _overlay: LocaleOverlay,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn get_block_translation(
+        &self,
+        _workspace: &str,
+        _node_id: &str,
+        _block_uuid: &str,
+        _locale: &str,
+    ) -> Result<Option<LocaleOverlay>> {
+        Ok(None)
+    }
+
+    async fn list_block_translations_for_node(
+        &self,
+        _workspace: &str,
+        _node_id: &str,
+    ) -> Result<Vec<(String, String)>> {
+        Ok(Vec::new())
+    }
+
     async fn list_children(&self, _workspace: &str, _parent_path: &str) -> Result<Vec<Node>> {
         Ok(Vec::new())
     }
