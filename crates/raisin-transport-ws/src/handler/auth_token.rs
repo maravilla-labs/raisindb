@@ -5,11 +5,21 @@
 //! Supports two JWT formats:
 //! 1. WebSocket JWT (admin users) - validated with the WebSocket secret
 //! 2. Identity JWT (identity users) - decoded without validation (already validated when issued)
+//!
+//! Identity users additionally get their ACL permissions resolved here, the
+//! same way the message-based path does in `handlers/auth.rs` (see
+//! `handle_authenticate_jwt`). Skipping that step does not fail loudly: the
+//! connection authenticates fine, but `AuthContext.resolved_permissions` stays
+//! `None`, the RLS filter fail-closes on every row
+//! (`raisin-core/src/services/rls_filter/mod.rs:22-82`) and every read comes
+//! back as an empty result set. Browsers cannot set WebSocket headers, so the
+//! Studio SPA never hit this — but the CLI, SSR and Node SDK all authenticate
+//! by header and were reading nothing.
 
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::{connection::ConnectionState, error::WsError};
-use raisin_models::auth::AuthContext;
+use raisin_models::{auth::AuthContext, permissions::ResolvedPermissions};
 
 use super::state::WsState;
 
@@ -66,6 +76,17 @@ where
 
             conn_state.set_user_id(claims.sub.clone());
 
+            // Resolve ACL permissions in the SAME tenant/repo this connection
+            // was just constructed with (see the tenant/repo note on
+            // `resolve_identity_permissions`).
+            let resolved = resolve_identity_permissions(
+                state,
+                &conn_state.tenant_id,
+                conn_state.repository.as_deref(),
+                &claims.sub,
+            )
+            .await;
+
             let mut auth_context = AuthContext::for_user(&claims.sub);
             if !claims.email.is_empty() {
                 auth_context = auth_context.with_email(claims.email.clone());
@@ -73,6 +94,7 @@ where
             if let Some(home) = claims.home.clone() {
                 auth_context = auth_context.with_home(home);
             }
+            auth_context = auth_context.with_permissions(resolved);
             conn_state.set_auth_context(auth_context);
 
             return Ok(conn_state);
@@ -102,6 +124,20 @@ where
 
                 conn_state.set_user_id(sub.clone());
 
+                // NO permission resolution here, deliberately - unlike the
+                // verified branch above.
+                //
+                // This branch decoded the JWT payload WITHOUT checking its
+                // signature, so `sub` is an unauthenticated claim: anyone who
+                // can reach a dev-mode server can assert any identity. Calling
+                // resolve_identity_permissions here would hand them that
+                // identity's real roles. Leaving `resolved_permissions` as None
+                // keeps this path fail-closed (the RLS filter denies every row,
+                // rls_filter/mod.rs:22-82) - which is what it has always been,
+                // by accident rather than by intent until now.
+                //
+                // Dev clients that need real permissions should present a
+                // properly signed token and take branch 2.
                 let mut auth_context = AuthContext::for_user(&sub);
                 if let Some(email) = email {
                     auth_context = auth_context.with_email(email);
@@ -122,6 +158,85 @@ where
     Err(WsError::AuthError(crate::auth::AuthError::InvalidToken(
         "Invalid JWT token".to_string(),
     )))
+}
+
+/// Resolve a header-authenticated identity user's ACL permissions.
+///
+/// Mirrors `handlers/auth.rs::handle_authenticate_jwt` (lines 200-213): resolve
+/// against the `raisin:access_control` workspace by identity id, and on miss
+/// warn and fall back to an *empty* permission set rather than to `None`.
+/// Empty and `None` both deny, but only empty says "we asked and the answer was
+/// nothing" — `None` is the state that silently turns every query into `200 []`.
+///
+/// TENANT/REPO: `handle_authenticate_jwt` deliberately takes tenant/repo from
+/// the connection URL, because by the time that message arrives the connection
+/// already exists and the URL is what scoped it. The header path cannot do the
+/// same: it *builds* the `ConnectionState`, and `handle_socket`
+/// (`handler/socket.rs:59`) does not hand the URL's tenant/repo to
+/// `authenticate_with_token` — the token claims are the only source available.
+/// So we resolve against the connection state we just built, which keeps the
+/// invariant that actually matters: permissions are resolved in exactly the
+/// tenant/repo the connection will run its queries in. Claims and URL
+/// disagreeing is a pre-existing property of this path (the claims already win
+/// for routing); this change does not widen it, and fixing it belongs in
+/// `socket.rs`, which owns both values.
+async fn resolve_identity_permissions<S, B>(
+    state: &WsState<S, B>,
+    tenant_id: &str,
+    repository: Option<&str>,
+    user_id: &str,
+) -> ResolvedPermissions
+where
+    S: raisin_storage::Storage,
+    B: raisin_binary::BinaryStorage,
+{
+    let repo_id = repository.unwrap_or("default");
+
+    // "main", not the repository's default branch: the raisin:access_control
+    // workspace pins its own branch to main
+    // (raisin-core/global_workspaces/access_control.yaml), so roles and users
+    // live there regardless of what the repository defaults to. Every other
+    // resolve_for_identity_id call site passes the same literal; see the
+    // ACCESS_CONTROL_BRANCH note in
+    // raisin-transport-http/src/handlers/identity_auth/user_node.rs.
+    let permission_service = raisin_core::PermissionService::new(state.storage.clone());
+    match permission_service
+        .resolve_for_identity_id(tenant_id, repo_id, "main", user_id)
+        .await
+    {
+        Ok(Some(resolved)) => {
+            info!(
+                user_id = %user_id,
+                tenant_id = %tenant_id,
+                repo_id = %repo_id,
+                roles = ?resolved.effective_roles,
+                "Resolved permissions for header-authenticated identity user"
+            );
+            resolved
+        }
+        Ok(None) => {
+            // No raisin:User node matches this identity id. The orphaned-ACL-node
+            // incident looked exactly like this: the node existed at its
+            // email-derived path but still carried the *old* identity's user_id.
+            warn!(
+                user_id = %user_id,
+                tenant_id = %tenant_id,
+                repo_id = %repo_id,
+                "No permissions found for header-authenticated user; connection will read nothing"
+            );
+            ResolvedPermissions::empty(user_id)
+        }
+        Err(e) => {
+            warn!(
+                user_id = %user_id,
+                tenant_id = %tenant_id,
+                repo_id = %repo_id,
+                error = %e,
+                "Failed to resolve permissions for header-authenticated user; denying"
+            );
+            ResolvedPermissions::empty(user_id)
+        }
+    }
 }
 
 /// Decoded JWT identity claims: (sub, email, tenant_id, repository, home)
