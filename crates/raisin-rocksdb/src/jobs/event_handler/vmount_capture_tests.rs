@@ -269,15 +269,28 @@ async fn edits_that_must_not_wake_a_mount() {
     h.vmount_routes.seed(TENANT, REPO, vec![route()]).await;
     let e = event(NodeEventKind::Updated, "/mail/m00.eml", Some("alice"));
 
-    // An ordinary node.
-    h.capture_virtual_write(&e, Some(&Node::default())).await;
+    // An ordinary node, OUTSIDE any mount path.
+    //
+    // The path matters now. This case used to pass an unstamped node with a
+    // path *inside* the mount, which under id-only routing was unambiguously
+    // "ordinary". Once locally-born nodes route by path — so that outbox
+    // commands, which never carry stamps, reach their mount without waiting for
+    // the poll — that same fixture means the opposite: a node created inside a
+    // mount's subtree, which SHOULD wake it. Moved outside so the case still
+    // tests what it is named for.
+    h.capture_virtual_write(
+        &event(NodeEventKind::Updated, "/elsewhere/note.md", Some("alice")),
+        Some(&Node::default()),
+    )
+    .await;
     // The sync engine's own write.
     h.capture_virtual_write(
         &event(NodeEventKind::Updated, "/mail/m00.eml", Some(SYNC_ACTOR)),
         Some(&mounted_node()),
     )
     .await;
-    // No post-write node data.
+    // No post-write node data — rejected before any routing happens, so the
+    // in-mount path here is deliberate and still yields nothing.
     h.capture_virtual_write(&e, None).await;
     // A mount that asks for no writes is simply not in the route set.
     h.vmount_routes.seed(TENANT, REPO, Vec::new()).await;
@@ -438,4 +451,43 @@ async fn a_replicated_edit_is_never_captured() {
     h.handle_node_delete(&deleted).await.unwrap();
 
     assert!(queued_vmount(&registry).await.is_empty());
+}
+
+/// An OUTBOX COMMAND is born locally and carries no mount stamps.
+///
+/// The materializer stamps `__virtual` + `__mount_id` on everything it creates,
+/// so a mirrored edit routes by id. A command node — a checkout session the shop
+/// writes and queues — has never been to the provider and has neither stamp.
+///
+/// `mount_id_of` therefore says "not mine", and before the path fallback that
+/// ended capture right there: the command waited for the poll interval instead
+/// of being sent. At the default 300s that is five minutes of a buyer watching a
+/// spinner, on the one write where latency is a person.
+///
+/// The delete arm has always routed by path for the mirror-image reason, so the
+/// fallback reuses it rather than inventing a second mechanism.
+#[test]
+fn a_locally_born_command_still_finds_its_mount_by_path() {
+    let routes = vec![route()];
+
+    // The shape create-order writes: inside the mount path, no stamps.
+    let mut command = Node::default();
+    command.path = "/mail/cs-ord-abc".to_string();
+    assert_eq!(
+        mount_id_of(&command),
+        None,
+        "a locally-born node must not claim a mount id it was never given"
+    );
+
+    // ...and is still routed, by the same helper the delete arm uses.
+    assert!(
+        route_for_delete(&routes, "main", "default", &command.path).is_some(),
+        "a node created inside a mount's path must reach that mount, stamps or not"
+    );
+
+    // Scope still applies — the fallback widens WHICH nodes are considered,
+    // never which mounts may claim them.
+    assert!(route_for_delete(&routes, "feature", "default", &command.path).is_none());
+    assert!(route_for_delete(&routes, "main", "other-ws", &command.path).is_none());
+    assert!(route_for_delete(&routes, "main", "default", "/elsewhere/cs-ord-abc").is_none());
 }

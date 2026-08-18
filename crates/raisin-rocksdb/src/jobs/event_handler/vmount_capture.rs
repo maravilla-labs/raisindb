@@ -15,6 +15,17 @@
 //! a provider call — it enqueues a job and returns. The bus is on the commit
 //! path; a network call here would stall every write in the process.
 //!
+//! # Two kinds of node reach a mount, and only one carries stamps
+//!
+//! A node the materializer created carries `__virtual` + `__mount_id`, and
+//! routes by id. A node BORN LOCALLY inside a mount's path carries neither — it
+//! has never been to the provider — and an OUTBOX COMMAND is exactly that: a
+//! node the application writes and queues to be sent.
+//!
+//! Requiring the stamps therefore skipped the latency path for every command,
+//! which is the one case where latency is a person waiting. Locally-born nodes
+//! fall back to routing by PATH, the same way deletes always have.
+//!
 //! # Why it sits where it does
 //!
 //! Beside trigger evaluation, in `handle_local_node_change` /
@@ -278,9 +289,6 @@ impl UnifiedJobEventHandler {
         if is_sync_echo(node_event) {
             return;
         }
-        let Some(mount_id) = mount_id_of(node) else {
-            return;
-        };
         let routes = self
             .vmount_routes
             .routes(
@@ -289,12 +297,44 @@ impl UnifiedJobEventHandler {
                 &node_event.repository_id,
             )
             .await;
-        let Some(route) = route_for_edit(
-            &routes,
-            mount_id,
-            &node_event.branch,
-            &node_event.workspace_id,
-        ) else {
+
+        // Two ways to find the mount, because there are two ways a node gets
+        // into one.
+        //
+        // A node the materializer created carries `__virtual` + `__mount_id`, so
+        // it routes by id — the cheap, exact path, and the one every mirrored
+        // edit takes.
+        //
+        // A node BORN LOCALLY inside a mount's path carries neither stamp: it
+        // has never been to the provider. That is exactly what an OUTBOX COMMAND
+        // is — a `stripe:CheckoutSession` written by the shop and queued to be
+        // sent — and requiring the stamps meant capture returned early on every
+        // one of them. The instant path was skipped and the command waited for
+        // the poll: five minutes, at the default interval, of a buyer staring at
+        // "getting your payment link" while the session sat `queued`.
+        //
+        // The delete arm has always routed by PATH, for the same reason in
+        // mirror image (a deleted node has no data to read stamps off). So the
+        // fallback here is not a new mechanism, it is the existing one applied
+        // to the other case that has no stamps.
+        let route = match mount_id_of(node) {
+            Some(mount_id) => route_for_edit(
+                &routes,
+                mount_id,
+                &node_event.branch,
+                &node_event.workspace_id,
+            ),
+            None => match node_event.path.as_deref() {
+                Some(path) => route_for_delete(
+                    &routes,
+                    &node_event.branch,
+                    &node_event.workspace_id,
+                    path,
+                ),
+                None => None,
+            },
+        };
+        let Some(route) = route else {
             return;
         };
         // Note the node FIRST, before the drain job is enqueued: if a sync run
