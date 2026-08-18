@@ -1236,3 +1236,99 @@ async fn cross_branch_copy_validation_failures() -> Result<()> {
 
     Ok(())
 }
+
+/// REGRESSION: a node carrying a translation overlay must survive promotion.
+///
+/// `collect_translations_for_copy` located the key's HLC revision by walking
+/// FORWARD from the locale and taking 8 bytes. An HLC is 16 (8 timestamp + 8
+/// counter) and its descending encoding is a bitwise NOT, so it readily
+/// contains interior NULL bytes — the slice was half an HLC and
+/// `decode_descending` failed unconditionally.
+///
+/// The blast radius was the whole promotion, not one overlay: the error
+/// propagated out of `copy_nodes_across_branches`, so a single translated node
+/// anywhere in the copied set aborted the entire publish with
+/// "Failed to decode translation revision". A site that had ever been
+/// translated could not publish at all.
+#[tokio::test]
+async fn cross_branch_copy_carries_translation_overlay() -> Result<()> {
+    use raisin_hlc::HLC;
+    use raisin_models::nodes::properties::PropertyValue;
+    use raisin_models::translations::{JsonPointer, LocaleCode, LocaleOverlay, TranslationMeta};
+    use raisin_storage::TranslationRepository;
+
+    let t = TestStorage::new().await?;
+    let storage = &t.storage;
+    let nodes = storage.nodes();
+    let main = || StorageScope::new(TENANT, REPO, "main", WORKSPACE);
+
+    let mut node = make_node("/doc", "raisin:Page");
+    node.properties.insert(
+        "title".to_string(),
+        PropertyValue::String("Hello world".to_string()),
+    );
+    let node_id = node.id.clone();
+    nodes.create(main(), node, no_validation()).await?;
+
+    let locale = LocaleCode::parse("de").expect("valid locale");
+    let mut overlay_map = HashMap::new();
+    overlay_map.insert(
+        JsonPointer::new("/title"),
+        PropertyValue::String("Hallo Welt".to_string()),
+    );
+    let overlay = LocaleOverlay::properties(overlay_map);
+    let meta = TranslationMeta::system(locale.clone(), HLC::new(11, 0), "init".to_string());
+    storage
+        .translations()
+        .store_translation(
+            TENANT, REPO, "main", WORKSPACE, &node_id, &locale, &overlay, &meta,
+        )
+        .await?;
+
+    create_empty_branch(storage, "publish").await?;
+
+    // Before the fix this returned Err("Failed to decode translation revision").
+    let summary = raisin_storage::NodeRepository::copy_nodes_across_branches(
+        nodes,
+        TENANT,
+        REPO,
+        "main",
+        "publish",
+        WORKSPACE,
+        &["/doc".to_string()],
+        true,
+        false,
+        None,
+    )
+    .await?;
+    assert_eq!(summary.copied, 1, "the translated node must be copied");
+
+    // The overlay must land on the TARGET branch, under the SAME node id —
+    // ids are preserved by promotion, and overlays are addressed by node id.
+    let copied = storage
+        .translations()
+        // "at or before this revision" — a far-future stamp asks for the latest,
+        // since promotion writes the overlay under a fresh target-branch revision.
+        .get_translation(
+            TENANT,
+            REPO,
+            "publish",
+            WORKSPACE,
+            &node_id,
+            &locale,
+            &HLC::new(u64::MAX, u64::MAX),
+        )
+        .await?
+        .expect("the de overlay must exist on the publish branch");
+
+    match copied {
+        LocaleOverlay::Properties { data } => assert_eq!(
+            data.get(&JsonPointer::new("/title")),
+            Some(&PropertyValue::String("Hallo Welt".to_string())),
+            "the translated value must survive the copy"
+        ),
+        other => panic!("expected a properties overlay, got {other:?}"),
+    }
+
+    Ok(())
+}

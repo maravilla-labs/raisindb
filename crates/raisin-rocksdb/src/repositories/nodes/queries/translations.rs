@@ -161,19 +161,22 @@ impl NodeRepositoryImpl {
                 continue;
             }
 
-            let remaining = &suffix[locale_end + 1..];
-            if remaining.len() < 8 {
-                return Err(raisin_error::Error::storage(format!(
-                    "Invalid revision encoding for translation {} on node {}",
+            // The revision is the LAST 16 BYTES of the key, and must be taken
+            // from the end rather than by walking forward from the locale.
+            //
+            // An HLC is 16 bytes (8 timestamp + 8 counter) and its descending
+            // encoding is a bitwise NOT, which readily produces interior NULL
+            // bytes — so neither null-splitting nor a fixed 8-byte slice can
+            // locate or carry it. Taking `remaining[..8]` fed `decode_descending`
+            // half an HLC, which fails unconditionally: `copy_nodes_across_branches`
+            // could never copy a node that had ANY translation overlay, and the
+            // whole promotion aborted with "Failed to decode translation revision".
+            // `extract_revision_from_key` is the helper that encodes this rule.
+            let parent_revision = keys::extract_revision_from_key(&key).map_err(|_| {
+                raisin_error::Error::storage(format!(
+                    "Failed to decode translation revision for {} on node {}",
                     locale_str, node_id
-                )));
-            }
-
-            let rev_bytes: [u8; 8] = remaining[..8].try_into().map_err(|_| {
-                raisin_error::Error::storage("Failed to decode translation revision bytes")
-            })?;
-            let parent_revision = keys::decode_descending_revision(&rev_bytes).map_err(|_| {
-                raisin_error::Error::storage("Failed to decode translation revision")
+                ))
             })?;
 
             let overlay: LocaleOverlay = serde_json::from_slice(&value).map_err(|e| {
@@ -257,18 +260,12 @@ impl NodeRepositoryImpl {
                 continue;
             }
 
-            let revision_bytes = &remaining[locale_end + 1..];
-            if revision_bytes.len() < 8 {
-                return Err(raisin_error::Error::storage(format!(
-                    "Invalid revision encoding for block translation {}::{} on node {}",
+            // Last 16 bytes, for the same reason as the node-level overlay above.
+            let parent_revision = keys::extract_revision_from_key(&key).map_err(|_| {
+                raisin_error::Error::storage(format!(
+                    "Failed to decode block translation revision for {}::{} on node {}",
                     locale_str, block_uuid, node_id
-                )));
-            }
-            let rev_bytes: [u8; 8] = revision_bytes[..8].try_into().map_err(|_| {
-                raisin_error::Error::storage("Failed to decode block translation revision bytes")
-            })?;
-            let parent_revision = keys::decode_descending_revision(&rev_bytes).map_err(|_| {
-                raisin_error::Error::storage("Failed to decode block translation revision")
+                ))
             })?;
 
             let overlay: LocaleOverlay = serde_json::from_slice(&value).map_err(|e| {
