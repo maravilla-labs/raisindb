@@ -328,6 +328,7 @@ fn ctx<'a>(
     mat: &'a dyn NodeMaterializer,
 ) -> SyncCtx<'a> {
     SyncCtx {
+        pushed_events: None,
         // Tests never race the wall clock; far-future so the budget never trips.
         deadline: i64::MAX,
         write_mode: std::sync::OnceLock::new(),

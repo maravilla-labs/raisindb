@@ -325,12 +325,9 @@ impl UnifiedJobEventHandler {
                 &node_event.workspace_id,
             ),
             None => match node_event.path.as_deref() {
-                Some(path) => route_for_delete(
-                    &routes,
-                    &node_event.branch,
-                    &node_event.workspace_id,
-                    path,
-                ),
+                Some(path) => {
+                    route_for_delete(&routes, &node_event.branch, &node_event.workspace_id, path)
+                }
                 None => None,
             },
         };

@@ -187,11 +187,7 @@ enum RebindReason {
 ///     We still rebind (email uniqueness says it is the same human, and
 ///     refusing means a broken session), but it is logged loudly because it
 ///     means either the cascade failed or two identities share an email.
-fn reconcile_action(
-    facts: &FoundNodeFacts<'_>,
-    identity_id: &str,
-    email: &str,
-) -> ReconcileAction {
+fn reconcile_action(facts: &FoundNodeFacts<'_>, identity_id: &str, email: &str) -> ReconcileAction {
     // 1. Already bound to this identity: the only question left is status.
     //    Email is deliberately not consulted here - a user who changed their
     //    email address still owns this node.
@@ -252,10 +248,7 @@ fn reconcile_action(
 
 /// Read a string property off a node, if present and actually a string.
 #[cfg_attr(not(feature = "storage-rocksdb"), allow(dead_code))]
-fn prop_str<'a>(
-    node: &'a raisin_models::nodes::Node,
-    key: &str,
-) -> Option<&'a str> {
+fn prop_str<'a>(node: &'a raisin_models::nodes::Node, key: &str) -> Option<&'a str> {
     match node.properties.get(key) {
         Some(raisin_models::nodes::properties::PropertyValue::String(s)) => Some(s.as_str()),
         _ => None,
@@ -408,10 +401,7 @@ async fn reconcile_user_node(
     let mut writes: Vec<(&'static str, PropertyValue)> = Vec::new();
 
     if facts.existing_user_id != Some(identity_id) {
-        writes.push((
-            "user_id",
-            PropertyValue::String(identity_id.to_string()),
-        ));
+        writes.push(("user_id", PropertyValue::String(identity_id.to_string())));
     }
     if facts.existing_status != Some("active") {
         writes.push(("status", PropertyValue::String("active".to_string())));
@@ -421,10 +411,7 @@ async fn reconcile_user_node(
     // user set in the repo with an email-derived placeholder.
     if let Some(name) = display_name {
         if prop_str(&existing, "display_name") != Some(name) {
-            writes.push((
-                "display_name",
-                PropertyValue::String(name.to_string()),
-            ));
+            writes.push(("display_name", PropertyValue::String(name.to_string())));
         }
     }
     // Email can drift, so refresh it as part of a rebind. Note this only ever
@@ -443,7 +430,10 @@ async fn reconcile_user_node(
     }
 
     for (field, value) in writes {
-        match node_service.update_property_by_path(&path, field, value).await {
+        match node_service
+            .update_property_by_path(&path, field, value)
+            .await
+        {
             Ok(()) => changed.push(field),
             Err(e) => {
                 tracing::error!(
@@ -649,7 +639,6 @@ pub async fn ensure_user_node(
         node_name
     };
 
-
     // Build role references (bare role_id strings, not paths)
     let role_refs: Vec<PropertyValue> = default_roles
         .iter()
@@ -807,7 +796,11 @@ mod tests {
         // Reached by the user_id lookup after the identity changed address:
         // the node is ours, the email property is simply stale.
         assert_eq!(
-            reconcile_action(&facts(Some(ME), Some("active"), Some("old@example.com")), ME, EMAIL),
+            reconcile_action(
+                &facts(Some(ME), Some("active"), Some("old@example.com")),
+                ME,
+                EMAIL
+            ),
             ReconcileAction::LeaveAsIs
         );
     }
@@ -869,7 +862,11 @@ mod tests {
     fn different_email_is_a_conflict_and_never_stolen() {
         assert_eq!(
             reconcile_action(
-                &facts(Some(OTHER), Some("active"), Some("someone.else@example.com")),
+                &facts(
+                    Some(OTHER),
+                    Some("active"),
+                    Some("someone.else@example.com")
+                ),
                 ME,
                 EMAIL
             ),
@@ -877,7 +874,11 @@ mod tests {
         );
         assert_eq!(
             reconcile_action(
-                &facts(Some(OTHER), Some("deleted"), Some("someone.else@example.com")),
+                &facts(
+                    Some(OTHER),
+                    Some("deleted"),
+                    Some("someone.else@example.com")
+                ),
                 ME,
                 EMAIL
             ),
@@ -897,7 +898,11 @@ mod tests {
     fn email_comparison_is_case_insensitive() {
         assert_eq!(
             reconcile_action(
-                &facts(Some(OTHER), Some("deleted"), Some("Ada@AIOpenHouse.Example")),
+                &facts(
+                    Some(OTHER),
+                    Some("deleted"),
+                    Some("Ada@AIOpenHouse.Example")
+                ),
                 ME,
                 EMAIL
             ),
@@ -932,7 +937,10 @@ mod tests {
     #[test]
     fn email_slug_suffix_is_deterministic_and_distinguishing() {
         assert_eq!(email_slug_suffix(EMAIL), email_slug_suffix(EMAIL));
-        assert_eq!(email_slug_suffix(EMAIL), email_slug_suffix(&EMAIL.to_uppercase()));
+        assert_eq!(
+            email_slug_suffix(EMAIL),
+            email_slug_suffix(&EMAIL.to_uppercase())
+        );
         assert_ne!(
             email_slug_suffix("ada.lovelace@example.com"),
             email_slug_suffix("ada-lovelace@example.com")

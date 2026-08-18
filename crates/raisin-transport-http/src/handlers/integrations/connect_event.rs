@@ -43,13 +43,23 @@ pub struct ConnectEventRequest {
     pub provider: String,
     /// The connected account the event belongs to, e.g. `acct_…`.
     pub account: String,
-    /// For logging only — this handler never branches on it. The control plane has
-    /// already decided the event is worth acting on, and a delta sync re-reads the
-    /// resource regardless of which event prompted it.
+    /// The provider's event type, e.g. `checkout.session.completed`.
+    ///
+    /// Logging only when nothing rides along — a delta sync re-reads the resource
+    /// regardless of which event prompted it. It becomes load-bearing once `object` is
+    /// present, because the adapter needs it to tell an update from a delete.
     #[serde(default)]
     pub event_type: String,
     #[serde(default)]
     pub event_id: String,
+    /// The changed resource itself, when the control plane's delivery carried one.
+    ///
+    /// Optional and purely an accelerant. Present, it lets the mount apply the change
+    /// without asking the provider to describe what was just delivered; absent, every
+    /// mount behaves exactly as before. A control plane that does not send it, or an
+    /// adapter that does not read it, both keep working.
+    #[serde(default)]
+    pub object: Option<serde_json::Value>,
 }
 
 /// Fan one provider event out to the mounts that care about it.
@@ -73,6 +83,20 @@ pub async fn connect_event(
         raisin_rocksdb::management::list_repos_with_virtual_mounts(storage, &tenant.tenant_id)
             .await
             .map_err(|e| ApiError::internal(format!("failed to list repos with mounts: {e}")))?;
+
+    // Shaped once, for every mount that wants it: `[{ type, object }]`. The array form is
+    // what `get_changes` already takes, so an adapter applies a push through exactly the
+    // same mapping as a polled page rather than a second code path that can drift from it.
+    let pushed = body
+        .object
+        .as_ref()
+        .filter(|o| !o.is_null())
+        .map(|object| json!([{ "type": body.event_type, "object": object }]));
+    let dedupe = if body.event_id.is_empty() {
+        None
+    } else {
+        Some(body.event_id.clone())
+    };
 
     let mut matched = 0usize;
     let mut queued = 0usize;
@@ -156,12 +180,17 @@ pub async fn connect_event(
             // error, not look as though nothing reached it.
             record_delivery(&state, &tenant.tenant_id, &repo, &mount.id).await;
 
-            match super::notifications::enqueue_delta_sync(
+            match super::notifications::enqueue_delta_sync_with_events(
                 &state,
                 &tenant.tenant_id,
                 &repo,
                 &branch,
                 &mount.id,
+                pushed.as_ref(),
+                // Keyed per event so a burst is not collapsed into one job that carries
+                // only the first body. Without a payload there is nothing to lose, so the
+                // plain key keeps collapsing as before.
+                pushed.as_ref().and(dedupe.as_deref()),
             )
             .await
             {
@@ -348,5 +377,48 @@ mod tests {
     #[test]
     fn an_absent_account_ref_matches() {
         assert!(check(json!({ "mode": "hybrid" }), Value::Null));
+    }
+
+    // ---------------------------------------------------------------- pushed payload
+
+    fn parse(body: Value) -> super::ConnectEventRequest {
+        serde_json::from_value(body).expect("request should deserialize")
+    }
+
+    /// The field is additive: a control plane that has not been updated still works, and
+    /// its events still reach the mounts through the ordinary re-read.
+    #[test]
+    fn a_request_without_an_object_still_parses() {
+        let req = parse(json!({ "provider": "stripe", "account": "acct_1" }));
+        assert!(req.object.is_none());
+        assert_eq!(req.event_type, "");
+    }
+
+    #[test]
+    fn a_forwarded_object_is_carried_on_the_request() {
+        let req = parse(json!({
+            "provider": "stripe",
+            "account": "acct_1",
+            "event_type": "checkout.session.completed",
+            "event_id": "evt_1",
+            "object": { "id": "cs_1", "payment_status": "paid" },
+        }));
+        let object = req.object.expect("object should be present");
+        assert_eq!(object["payment_status"], "paid");
+        assert_eq!(req.event_type, "checkout.session.completed");
+    }
+
+    /// An explicit null is the same as absent. Forwarding it as a payload would hand the
+    /// adapter an event with no resource, which it would skip — while the per-event
+    /// dedupe key suppressed the re-read that would have caught the change.
+    #[test]
+    fn an_explicit_null_object_is_treated_as_absent() {
+        let req = parse(json!({
+            "provider": "stripe",
+            "account": "acct_1",
+            "object": Value::Null,
+        }));
+        let pushed = req.object.as_ref().filter(|o| !o.is_null());
+        assert!(pushed.is_none());
     }
 }

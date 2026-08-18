@@ -62,12 +62,25 @@ pub async fn run_with(
     // a walk that cannot converge.
     let want_baseline = token.is_none() && state.backfill_complete;
 
+    // Only the FIRST request carries them. The adapter answers a push with
+    // `has_more: false`, so this normally runs once — but resending the same events on a
+    // second page would re-apply them, and an adapter that paged would never converge.
+    let mut pushed = ctx.pushed_events.clone();
+
     loop {
-        let params = json!({
+        let mut params = json!({
             "since_token": token,
             "folder_id": ctx.mount.remote_root,
             "baseline_only": want_baseline,
         });
+        // `.take()` so the events are consumed exactly once.
+        //
+        // Nothing forces the adapter to use them: one that does not know the field re-reads
+        // from the provider exactly as before, which is what makes this safe to send to
+        // every connector rather than only the ones that opted in.
+        if let Some(events) = pushed.take() {
+            params["events"] = events;
+        }
         let resp = ctx.call("get_changes", params).await?;
         let page: ChangesPage = serde_json::from_value(resp)
             .map_err(|e| AdapterError::Transient(format!("bad get_changes response: {e}")))?;

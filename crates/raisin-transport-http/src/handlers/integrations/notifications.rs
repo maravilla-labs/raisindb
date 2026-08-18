@@ -230,6 +230,30 @@ pub(crate) async fn enqueue_delta_sync(
     branch: &str,
     mount_id: &str,
 ) -> Result<bool, ApiError> {
+    enqueue_delta_sync_with_events(state, tenant_id, repo, branch, mount_id, None, None).await
+}
+
+/// As above, but carrying events the control plane already received.
+///
+/// # The idempotency key changes when a payload rides along
+///
+/// The plain key collapses a burst to one run per mount, which is right when the run
+/// re-reads everything: whatever the collapsed deliveries carried is picked up anyway.
+/// It is WRONG once the job carries the payload, because collapsing then discards the
+/// second event's body — it would be dropped until the safety-net poll happened to
+/// re-read that window. So a keyed push gets its own slot per event.
+///
+/// A burst is affordable here precisely because these runs are cheap: applying a pushed
+/// event costs no provider request at all.
+pub(crate) async fn enqueue_delta_sync_with_events(
+    state: &AppState,
+    tenant_id: &str,
+    repo: &str,
+    branch: &str,
+    mount_id: &str,
+    events: Option<&serde_json::Value>,
+    dedupe_suffix: Option<&str>,
+) -> Result<bool, ApiError> {
     let rocksdb = state
         .rocksdb_storage
         .as_ref()
@@ -244,13 +268,17 @@ pub(crate) async fn enqueue_delta_sync(
         trigger: "push".to_string(),
     };
     let job_id = raisin_storage::jobs::JobId::new();
+    let mut metadata = std::collections::HashMap::new();
+    if let Some(events) = events {
+        metadata.insert("pushed_events".to_string(), events.clone());
+    }
     let context = raisin_storage::jobs::JobContext {
         tenant_id: tenant_id.to_string(),
         repo_id: repo.to_string(),
         branch: branch.to_string(),
         workspace_id: "raisin:system".to_string(),
         revision: raisin_hlc::HLC::now(),
-        metadata: std::collections::HashMap::new(),
+        metadata,
     };
     job_data_store
         .put(&job_id, &context)
@@ -261,7 +289,10 @@ pub(crate) async fn enqueue_delta_sync(
             job_id.clone(),
             job_type,
             tenant_id.to_string(),
-            format!("vmount-sync:{mount_id}"),
+            match dedupe_suffix {
+                Some(suffix) => format!("vmount-sync:{mount_id}:{suffix}"),
+                None => format!("vmount-sync:{mount_id}"),
+            },
             None,
         )
         .await

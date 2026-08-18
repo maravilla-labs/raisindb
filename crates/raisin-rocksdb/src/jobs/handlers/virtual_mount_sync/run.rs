@@ -72,8 +72,19 @@ impl VirtualMountSyncHandler {
         // `scope` (built by `build_ctx_parts`) targets `mount.target_branch` for
         // materialization; mount/integration config and mount state stay on the
         // config branch (`ctx.config_branch`).
+        // Forwarded by the control plane when the webhook that woke this run carried the
+        // resource itself. An empty list is treated as absent, so a delivery carrying
+        // nothing this mount cares about still gets a normal re-read rather than a run
+        // that asks the adapter to apply zero events and calls it done.
+        let pushed_events = context
+            .metadata
+            .get("pushed_events")
+            .filter(|v| v.as_array().is_some_and(|a| !a.is_empty()))
+            .cloned();
+
         let mut ctx = SyncCtx {
             public_origin,
+            pushed_events,
             storage: self.storage.clone(),
             scope: scope.clone(),
             config_branch: config_branch.clone(),

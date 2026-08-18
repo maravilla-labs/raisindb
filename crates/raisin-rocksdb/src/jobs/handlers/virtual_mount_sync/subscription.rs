@@ -81,6 +81,9 @@ pub fn adapter_ctx<'a>(
     public_origin: Option<String>,
 ) -> SyncCtx<'a> {
     SyncCtx {
+        // Subscription maintenance never comes from a delivery, so there is nothing to
+        // apply — and it does not call `get_changes` at all.
+        pushed_events: None,
         public_origin,
         storage,
         scope,

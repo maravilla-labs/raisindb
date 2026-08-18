@@ -77,6 +77,17 @@ pub struct SyncCtx<'a> {
     /// while this run holds the lease — without threading the mode through
     /// every phase signature. A `OnceLock` because the batcher already borrows
     /// the context by the time the mode is resolved.
+    /// Events the control plane already received and forwarded, if this run was started
+    /// by a push that carried them.
+    ///
+    /// A provider webhook usually delivers the whole resource under a verified signature,
+    /// so a run woken by one need not ask the provider to describe what it was just
+    /// handed. Passed straight through to `get_changes`; an adapter that ignores the field
+    /// simply does its normal re-read, which is why this is safe for every connector that
+    /// has not opted in.
+    ///
+    /// `None` for scheduled runs and for pushes that carried no body.
+    pub pushed_events: Option<Value>,
     pub write_mode: std::sync::OnceLock<write::WriteMode>,
 }
 
