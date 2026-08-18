@@ -329,6 +329,36 @@ has an overlay, and it is carried by both `COPY` and a branch fork. Prefer the
 node-level pointers (`content[uuid='…'].field`) unless you specifically need
 per-block records — everything in this skill uses those.
 
+## Moving Translations Between Branches
+
+Overlays live in their own key space, keyed by `(branch, node_id, locale)`. They
+are NOT columns on the node, so nothing that copies a node by reading and
+re-writing its fields can carry them — a hand-rolled
+`SELECT … / INSERT INTO ws (__branch, …)` copies the base language and silently
+leaves every translation behind. The copy reports success and the other
+languages are simply absent on the target branch.
+
+Two operations carry them, because they work below the field level:
+
+```ts
+// Promote named nodes onto another branch — overlays travel, ids are preserved
+await db.branches().copyNodes('main', 'live', {
+  workspace: 'content',
+  roots: ['/products/kettle'],
+  sourceRevision: await db.branches().getHead('main'),   // pin the read
+});
+```
+
+A branch fork and a branch merge carry them too.
+
+One consequence worth designing around: **writing an overlay does not touch the
+node row.** `updated_at`, `version` and the node's revision are byte-identical
+before and after a translation write. Anything that decides "has this changed
+since I last copied it" from a timestamp will never see a translation edit, and
+the stale copy stays live forever. Compare the resolved properties per locale,
+or use `db.branches().diff(branch, base)`, whose entries carry
+`translation_locale` and are the only change signal that reports one.
+
 ## Frontend Locale Store
 
 Track the active language and generate SQL clauses. The key function is `localeClause()`:
