@@ -92,6 +92,10 @@ pub struct BranchCopyNodesPayload {
     pub recursive: bool,
     #[serde(default)]
     pub delete_missing: bool,
+    /// Read the source branch AS OF this revision instead of at its head, so a
+    /// long promotion cannot absorb writes that land while it runs.
+    #[serde(default)]
+    pub source_revision: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

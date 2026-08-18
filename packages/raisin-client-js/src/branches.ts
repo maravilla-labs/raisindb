@@ -226,6 +226,13 @@ export class Branches {
    * Each root's parent path must already exist on the target branch. With
    * `deleteMissing`, target nodes under the roots that are absent from the
    * copied source set are pruned (one-way sync).
+   *
+   * `sourceRevision` pins the read to a point in time. A promotion of a large
+   * set is not instantaneous, so without it the copy reads each node when its
+   * turn comes and a writer working in parallel lands partly inside the result
+   * — a torn snapshot. Pass the revision captured when the operation was
+   * decided (see `getHead`) to copy exactly that state. The target branch is
+   * always resolved at its head: the pin says WHAT to copy, never where.
    */
   async copyNodes(
     sourceBranch: string,
@@ -235,6 +242,7 @@ export class Branches {
       roots: string[];
       recursive?: boolean;
       deleteMissing?: boolean;
+      sourceRevision?: string;
     }
   ): Promise<CrossBranchCopySummary> {
     return this.sendRequest(
@@ -244,7 +252,8 @@ export class Branches {
         workspace: opts.workspace,
         roots: opts.roots,
         recursive: opts.recursive ?? true,
-        delete_missing: opts.deleteMissing ?? false
+        delete_missing: opts.deleteMissing ?? false,
+        source_revision: opts.sourceRevision ?? null
       },
       RequestType.BranchCopyNodes
     ) as Promise<CrossBranchCopySummary>;

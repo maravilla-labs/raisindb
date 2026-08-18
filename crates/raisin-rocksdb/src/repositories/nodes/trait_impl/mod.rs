@@ -770,6 +770,7 @@ impl NodeRepository for NodeRepositoryImpl {
         roots: &[String],
         recursive: bool,
         delete_missing: bool,
+        source_revision: Option<&raisin_hlc::HLC>,
         operation_meta: Option<raisin_models::operations::OperationMeta>,
     ) -> Result<raisin_storage::CrossBranchCopySummary> {
         self.copy_nodes_across_branches_impl(
@@ -781,6 +782,7 @@ impl NodeRepository for NodeRepositoryImpl {
             roots,
             recursive,
             delete_missing,
+            source_revision,
             operation_meta,
         )
         .await

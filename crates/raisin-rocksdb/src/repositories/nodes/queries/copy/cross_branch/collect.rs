@@ -18,6 +18,7 @@ impl NodeRepositoryImpl {
         workspace: &str,
         root_ctxs: &[RootContext],
         recursive: bool,
+        source_revision: Option<&raisin_hlc::HLC>,
     ) -> Result<(Vec<CopyEntry>, HashSet<String>)> {
         // ========== STEP 2: collect the source node set (BFS, parents first) ==========
         let mut entries: Vec<CopyEntry> = Vec::new();
@@ -32,7 +33,7 @@ impl NodeRepositoryImpl {
                     source_branch,
                     workspace,
                     &rc.node.id,
-                    None,
+                    source_revision,
                 )?
             } else {
                 vec![(rc.node.clone(), 0)]

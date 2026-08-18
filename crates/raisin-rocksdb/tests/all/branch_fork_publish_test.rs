@@ -721,6 +721,7 @@ async fn cross_branch_copy_new_preserves_ids_and_order() -> Result<()> {
         &["/page".to_string()],
         true,  // recursive
         false, // delete_missing
+        None,  // source_revision — unpinned
         None,
     )
     .await?;
@@ -792,7 +793,7 @@ async fn cross_branch_copy_update_replaces_old_values() -> Result<()> {
     let roots = vec!["/doc".to_string()];
     nodes
         .copy_nodes_across_branches(
-            TENANT, REPO, "main", "publish", WORKSPACE, &roots, true, false, None,
+            TENANT, REPO, "main", "publish", WORKSPACE, &roots, true, false, None, None,
         )
         .await?;
 
@@ -810,7 +811,7 @@ async fn cross_branch_copy_update_replaces_old_values() -> Result<()> {
     tokio::time::sleep(std::time::Duration::from_millis(2)).await;
     let summary = nodes
         .copy_nodes_across_branches(
-            TENANT, REPO, "main", "publish", WORKSPACE, &roots, true, false, None,
+            TENANT, REPO, "main", "publish", WORKSPACE, &roots, true, false, None, None,
         )
         .await?;
 
@@ -892,7 +893,7 @@ async fn cross_branch_copy_delete_missing_prunes() -> Result<()> {
     let roots = vec!["/page".to_string()];
     nodes
         .copy_nodes_across_branches(
-            TENANT, REPO, "main", "publish", WORKSPACE, &roots, true, false, None,
+            TENANT, REPO, "main", "publish", WORKSPACE, &roots, true, false, None, None,
         )
         .await?;
 
@@ -902,7 +903,7 @@ async fn cross_branch_copy_delete_missing_prunes() -> Result<()> {
         .await?;
     let summary = nodes
         .copy_nodes_across_branches(
-            TENANT, REPO, "main", "publish", WORKSPACE, &roots, true, true, None,
+            TENANT, REPO, "main", "publish", WORKSPACE, &roots, true, true, None, None,
         )
         .await?;
 
@@ -968,7 +969,7 @@ async fn cross_branch_copy_replays_source_reorder() -> Result<()> {
     let roots = vec!["/page".to_string()];
     nodes
         .copy_nodes_across_branches(
-            TENANT, REPO, "main", "publish", WORKSPACE, &roots, true, false, None,
+            TENANT, REPO, "main", "publish", WORKSPACE, &roots, true, false, None, None,
         )
         .await?;
 
@@ -988,7 +989,7 @@ async fn cross_branch_copy_replays_source_reorder() -> Result<()> {
 
     nodes
         .copy_nodes_across_branches(
-            TENANT, REPO, "main", "publish", WORKSPACE, &roots, true, false, None,
+            TENANT, REPO, "main", "publish", WORKSPACE, &roots, true, false, None, None,
         )
         .await?;
 
@@ -1053,6 +1054,7 @@ async fn cross_branch_copy_reference_index_queryable_on_target() -> Result<()> {
             true,
             false,
             None,
+            None,
         )
         .await?;
 
@@ -1111,6 +1113,7 @@ async fn cross_branch_copy_visible_in_branch_diff() -> Result<()> {
             &["/page".to_string()],
             true,
             false,
+            None,
             None,
         )
         .await?;
@@ -1173,6 +1176,7 @@ async fn cross_branch_copy_validation_failures() -> Result<()> {
             false,
             false,
             None,
+            None,
         )
         .await
         .expect_err("copying under a missing target parent must fail");
@@ -1209,6 +1213,7 @@ async fn cross_branch_copy_validation_failures() -> Result<()> {
             true,
             false,
             None,
+            None,
         )
         .await
         .expect_err("copying onto a protected branch must fail");
@@ -1228,6 +1233,7 @@ async fn cross_branch_copy_validation_failures() -> Result<()> {
             &["/does-not-exist".to_string()],
             true,
             false,
+            None,
             None,
         )
         .await
@@ -1299,6 +1305,7 @@ async fn cross_branch_copy_carries_translation_overlay() -> Result<()> {
         true,
         false,
         None,
+        None,
     )
     .await?;
     assert_eq!(summary.copied, 1, "the translated node must be copied");
@@ -1329,6 +1336,106 @@ async fn cross_branch_copy_carries_translation_overlay() -> Result<()> {
         ),
         other => panic!("expected a properties overlay, got {other:?}"),
     }
+
+    Ok(())
+}
+
+/// A pinned promotion copies the source AS OF the pin, not as of now.
+///
+/// Without a pin, a promotion of a large set reads each node when its turn
+/// comes, so a writer working in parallel lands partly inside the result — a
+/// torn snapshot split at whatever boundary the batching happened to use. This
+/// asserts the property that makes a promotion reviewable: what was decided is
+/// what gets copied, however long the copy takes and whoever else is typing.
+#[tokio::test]
+async fn cross_branch_copy_pins_the_source_revision() -> Result<()> {
+    use raisin_models::nodes::properties::PropertyValue;
+
+    let t = TestStorage::new().await?;
+    let storage = &t.storage;
+    let nodes = storage.nodes();
+    let main = || StorageScope::new(TENANT, REPO, "main", WORKSPACE);
+
+    let mut node = make_node("/doc", "raisin:Page");
+    node.properties
+        .insert("title".to_string(), PropertyValue::String("v1".to_string()));
+    let node_id = node.id.clone();
+    nodes.create(main(), node, no_validation()).await?;
+
+    // The revision an operator would capture when pressing the button.
+    let pin = storage
+        .branches()
+        .get_branch(TENANT, REPO, "main")
+        .await?
+        .map(|b| b.head)
+        .expect("main must have a head");
+
+    // …then someone keeps working while the promotion is still being decided.
+    let mut edited = nodes
+        .get(main(), &node_id, None)
+        .await?
+        .expect("node must exist");
+    edited
+        .properties
+        .insert("title".to_string(), PropertyValue::String("v2".to_string()));
+    nodes
+        .update(
+            main(),
+            edited,
+            raisin_storage::UpdateNodeOptions {
+                validate_schema: false,
+                allow_type_change: true,
+                operation_meta: None,
+            },
+        )
+        .await?;
+
+    create_empty_branch(storage, "publish").await?;
+
+    raisin_storage::NodeRepository::copy_nodes_across_branches(
+        nodes,
+        TENANT,
+        REPO,
+        "main",
+        "publish",
+        WORKSPACE,
+        &["/doc".to_string()],
+        true,
+        false,
+        Some(&pin),
+        None,
+    )
+    .await?;
+
+    let live = nodes
+        .get(
+            StorageScope::new(TENANT, REPO, "publish", WORKSPACE),
+            &node_id,
+            None,
+        )
+        .await?
+        .expect("the node must be on publish");
+    assert_eq!(
+        live.properties.get("title"),
+        Some(&PropertyValue::String("v1".to_string())),
+        "a pinned promotion must copy the pinned state, not the later edit"
+    );
+
+    // And unpinned still means "now", so the pin is doing the work.
+    raisin_storage::NodeRepository::copy_nodes_across_branches(
+        nodes, TENANT, REPO, "main", "publish", WORKSPACE,
+        &["/doc".to_string()], true, false, None, None,
+    )
+    .await?;
+    let now = nodes
+        .get(StorageScope::new(TENANT, REPO, "publish", WORKSPACE), &node_id, None)
+        .await?
+        .expect("still there");
+    assert_eq!(
+        now.properties.get("title"),
+        Some(&PropertyValue::String("v2".to_string())),
+        "an unpinned promotion must copy the current state"
+    );
 
     Ok(())
 }

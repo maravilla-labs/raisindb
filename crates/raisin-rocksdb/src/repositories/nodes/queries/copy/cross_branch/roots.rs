@@ -19,6 +19,7 @@ impl NodeRepositoryImpl {
         target_branch: &str,
         workspace: &str,
         roots: &[String],
+        source_revision: Option<&raisin_hlc::HLC>,
     ) -> Result<(raisin_context::Branch, Vec<RootContext>)> {
         // ========== VALIDATION ==========
         if roots.is_empty() {
@@ -73,7 +74,8 @@ impl NodeRepositoryImpl {
                     source_branch,
                     workspace,
                     root_path,
-                    None,
+                    // Pinned when the caller asked for a point-in-time copy.
+                    source_revision,
                 )
                 .await?
                 .ok_or_else(|| {

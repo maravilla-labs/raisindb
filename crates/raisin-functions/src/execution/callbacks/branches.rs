@@ -140,6 +140,21 @@ where
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
 
+                // Optional point-in-time pin. A promotion of a large set is not
+                // instantaneous; without this the copy reads each node when its
+                // turn comes, so a writer working in parallel lands partly
+                // inside the result. Accepts the HLC string form a revision is
+                // reported as; an unparseable value is a caller error rather
+                // than a silent fall back to "latest", because silently
+                // publishing newer data is exactly what the pin exists to
+                // prevent.
+                let source_revision = match opts.get("sourceRevision").and_then(|v| v.as_str()) {
+                    Some(s) if !s.is_empty() => Some(s.parse::<raisin_hlc::HLC>().map_err(|e| {
+                        Error::Validation(format!("copyNodes: invalid 'sourceRevision' {s:?}: {e}"))
+                    })?),
+                    _ => None,
+                };
+
                 let summary = storage
                     .nodes()
                     .copy_nodes_across_branches(
@@ -151,6 +166,7 @@ where
                         &roots,
                         recursive,
                         delete_missing,
+                        source_revision.as_ref(),
                         None,
                     )
                     .await?;

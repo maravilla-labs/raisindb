@@ -98,6 +98,7 @@ impl NodeRepositoryImpl {
         roots: &[String],
         recursive: bool,
         delete_missing: bool,
+        source_revision: Option<&raisin_hlc::HLC>,
         operation_meta: Option<raisin_models::operations::OperationMeta>,
     ) -> Result<CrossBranchCopySummary> {
         let (target, root_ctxs) = self
@@ -108,6 +109,7 @@ impl NodeRepositoryImpl {
                 target_branch,
                 workspace,
                 roots,
+                source_revision,
             )
             .await?;
 
@@ -122,6 +124,7 @@ impl NodeRepositoryImpl {
             workspace,
             &root_ctxs,
             recursive,
+            source_revision,
         )?;
 
         // ========== STEP 3: build the single WriteBatch ==========

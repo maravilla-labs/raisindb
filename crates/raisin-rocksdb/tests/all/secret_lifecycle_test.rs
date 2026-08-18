@@ -304,6 +304,7 @@ async fn a_promoted_node_can_still_reveal_its_secret_on_the_target_branch() -> R
             true,
             false,
             None,
+            None,
         )
         .await?;
 

@@ -366,6 +366,13 @@ where
         .as_ref()
         .ok_or_else(|| WsError::InvalidRequest("Repository required".to_string()))?;
 
+    let source_revision = match payload.source_revision.as_deref() {
+        Some(r) if !r.is_empty() => Some(r.parse::<raisin_hlc::HLC>().map_err(|e| {
+            WsError::InvalidRequest(format!("branch_copy_nodes: invalid source_revision {r:?}: {e}"))
+        })?),
+        _ => None,
+    };
+
     let summary = state
         .storage
         .nodes()
@@ -378,6 +385,7 @@ where
             &payload.roots,
             payload.recursive,
             payload.delete_missing,
+            source_revision.as_ref(),
             None, // OperationMeta: actor attribution TODO (see other branch ops)
         )
         .await?;

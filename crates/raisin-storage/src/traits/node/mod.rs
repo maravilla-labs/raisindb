@@ -687,6 +687,14 @@ pub trait NodeRepository: Send + Sync {
     /// * `recursive` - also copy all descendants of each root
     /// * `delete_missing` - tombstone target-branch nodes under the roots
     ///   whose ids are absent from the copied source set (one-way sync)
+    /// * `source_revision` - read the source branch AS OF this revision instead
+    ///   of at its head. A promotion of a large set is not instantaneous, so
+    ///   without a pin the copy reads whatever each node happens to hold when
+    ///   its turn comes and a writer working in parallel lands partly inside
+    ///   the result — a torn snapshot, split at whatever boundary the batching
+    ///   happened to use. With it the whole promotion sees one consistent
+    ///   point in time. The target branch is always resolved at its head: the
+    ///   pin says what to copy, never where to put it.
     /// * `operation_meta` - optional actor/message recorded in the revision
     ///   metadata (defaults to a system commit)
     ///
@@ -709,6 +717,7 @@ pub trait NodeRepository: Send + Sync {
         roots: &[String],
         recursive: bool,
         delete_missing: bool,
+        source_revision: Option<&raisin_hlc::HLC>,
         operation_meta: Option<models::operations::OperationMeta>,
     ) -> impl std::future::Future<Output = Result<CrossBranchCopySummary>> + Send;
 

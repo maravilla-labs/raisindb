@@ -748,6 +748,7 @@ impl NodeRepository for InMemoryNodeRepo {
         _roots: &[String],
         _recursive: bool,
         _delete_missing: bool,
+        _source_revision: Option<&raisin_hlc::HLC>,
         _operation_meta: Option<raisin_models::operations::OperationMeta>,
     ) -> impl std::future::Future<Output = Result<CrossBranchCopySummary>> + Send {
         // The in-memory backend has degraded branch semantics (no revision
