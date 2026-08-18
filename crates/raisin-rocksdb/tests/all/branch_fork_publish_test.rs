@@ -1423,12 +1423,25 @@ async fn cross_branch_copy_pins_the_source_revision() -> Result<()> {
 
     // And unpinned still means "now", so the pin is doing the work.
     raisin_storage::NodeRepository::copy_nodes_across_branches(
-        nodes, TENANT, REPO, "main", "publish", WORKSPACE,
-        &["/doc".to_string()], true, false, None, None,
+        nodes,
+        TENANT,
+        REPO,
+        "main",
+        "publish",
+        WORKSPACE,
+        &["/doc".to_string()],
+        true,
+        false,
+        None,
+        None,
     )
     .await?;
     let now = nodes
-        .get(StorageScope::new(TENANT, REPO, "publish", WORKSPACE), &node_id, None)
+        .get(
+            StorageScope::new(TENANT, REPO, "publish", WORKSPACE),
+            &node_id,
+            None,
+        )
         .await?
         .expect("still there");
     assert_eq!(

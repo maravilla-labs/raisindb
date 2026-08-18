@@ -149,9 +149,13 @@ where
                 // publishing newer data is exactly what the pin exists to
                 // prevent.
                 let source_revision = match opts.get("sourceRevision").and_then(|v| v.as_str()) {
-                    Some(s) if !s.is_empty() => Some(s.parse::<raisin_hlc::HLC>().map_err(|e| {
-                        Error::Validation(format!("copyNodes: invalid 'sourceRevision' {s:?}: {e}"))
-                    })?),
+                    Some(s) if !s.is_empty() => {
+                        Some(s.parse::<raisin_hlc::HLC>().map_err(|e| {
+                            Error::Validation(format!(
+                                "copyNodes: invalid 'sourceRevision' {s:?}: {e}"
+                            ))
+                        })?)
+                    }
                     _ => None,
                 };
 

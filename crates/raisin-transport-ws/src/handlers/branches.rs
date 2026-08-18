@@ -368,7 +368,9 @@ where
 
     let source_revision = match payload.source_revision.as_deref() {
         Some(r) if !r.is_empty() => Some(r.parse::<raisin_hlc::HLC>().map_err(|e| {
-            WsError::InvalidRequest(format!("branch_copy_nodes: invalid source_revision {r:?}: {e}"))
+            WsError::InvalidRequest(format!(
+                "branch_copy_nodes: invalid source_revision {r:?}: {e}"
+            ))
         })?),
         _ => None,
     };
