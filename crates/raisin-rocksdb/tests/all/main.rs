@@ -37,6 +37,7 @@ mod hnsw_integration_test;
 mod index_parity_test;
 mod integration_tests;
 mod move_tree_compound_reindex_test;
+mod move_tree_readback_test;
 mod multi_node_crdt_integration;
 mod one_time_token_store_test;
 mod oplog_write_read_test;

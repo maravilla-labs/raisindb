@@ -194,6 +194,10 @@ pub async fn move_node_tree(
     // Track moved node IDs for change tracking
     let mut moved_node_ids = Vec::new();
 
+    // (old_path, new_path, node_id) per moved node, so the read cache can be
+    // updated in step 9 — both halves of the move, not just the vacated path.
+    let mut moved_paths: Vec<(String, String, String)> = Vec::new();
+
     // 8. For each node (root + descendants): update paths
     for (node, depth) in &descendants {
         moved_node_ids.push(node.id.clone());
@@ -239,6 +243,8 @@ pub async fn move_node_tree(
             &tenant_id, &repo_id, &branch, workspace, &node.id, &revision,
         );
         batch.put_cf(cf_node_path, node_path_key, node_new_path.as_bytes());
+
+        moved_paths.push((node.path.clone(), node_new_path.clone(), node.id.clone()));
 
         // A move is mostly index-only, because `Node` stores its parent's NAME
         // rather than a path. Two kinds of node still go stale and need their
@@ -290,11 +296,27 @@ pub async fn move_node_tree(
             .lock()
             .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
 
-        for (node, _) in &descendants {
-            // Mark old path as deleted in cache
+        // Vacate the old paths first, THEN claim the new ones. Doing it in one
+        // pass would let a node moved onto a sibling's vacated path be erased
+        // again by that sibling's removal.
+        for (old_path, _, _) in &moved_paths {
             cache
                 .paths
-                .insert((workspace.to_string(), node.path.clone()), None);
+                .insert((workspace.to_string(), old_path.clone()), None);
+        }
+
+        // Register the new paths. Without this the moved node was unreachable
+        // by path for the REST OF THE TRANSACTION — the batch had already
+        // written the new PATH_INDEX entry, but an in-transaction read still
+        // resolved through the cache and saw nothing. A caller that moved a
+        // node and then upserted it at its new path therefore took the CREATE
+        // branch and minted a duplicate, which for a node type with a
+        // `unique: true` property failed the whole write.
+        for (_, new_path, node_id) in &moved_paths {
+            cache.paths.insert(
+                (workspace.to_string(), new_path.clone()),
+                Some(node_id.clone()),
+            );
         }
     }
 
