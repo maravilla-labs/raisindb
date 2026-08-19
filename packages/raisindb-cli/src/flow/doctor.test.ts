@@ -316,17 +316,44 @@ describe('flow doctor: template expressions', () => {
 });
 
 describe('flow doctor: human tasks', () => {
-  it('flags missing assignee/task_type and unknown task_type', () => {
+  it('flags a missing task_type and a missing assignee', () => {
     const def = {
-      nodes: [
-        step('t1', { step_type: 'human_task' }),
-        step('t2', { step_type: 'human_task', task_type: 'celebration', assignee: '/users/a' }),
-      ],
+      nodes: [step('t1', { step_type: 'human_task' })],
     };
     const found = codes(check(def));
     expect(found).toContain('MISSING_TASK_TYPE');
     expect(found).toContain('MISSING_ASSIGNEE');
-    expect(found).toContain('UNKNOWN_TASK_TYPE');
+  });
+
+  it('accepts an application-defined task_type slug', () => {
+    // `task_type` is an OPEN set: approval/input/review/action are the types
+    // the runtime understands semantically, but any slug is valid and is
+    // carried through verbatim. This used to report UNKNOWN_TASK_TYPE from a
+    // closed enum that lived in four places and drifted between them.
+    const def = {
+      nodes: [
+        step('t2', {
+          step_type: 'human_task',
+          task_type: 'celebration',
+          assignee: '/users/a',
+        }),
+      ],
+    };
+    expect(codes(check(def))).toEqual([]);
+  });
+
+  it('flags a task_type that is not a valid slug', () => {
+    // Shape is checked, membership is not.
+    const def = {
+      nodes: [
+        step('t3', {
+          step_type: 'human_task',
+          task_type: 'Not A Slug',
+          assignee: '/users/a',
+        }),
+      ],
+    };
+    expect(codes(check(def))).toContain('INVALID_TASK_TYPE');
   });
 
   it('warns on approval without options and input without schema', () => {
