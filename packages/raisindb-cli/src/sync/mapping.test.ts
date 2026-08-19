@@ -36,9 +36,18 @@ describe('mapChangeToNode', () => {
       expect(m.nodePath).toBe('shifts/fri-evening');
     });
 
-    it('strips the .yml extension too', () => {
+    it('does NOT treat a bare .yml as a node — it is an asset', () => {
+      // `.yaml` declares a node; `.yml` is a data file and installs as a
+      // raisin:Asset, matching the server installer. Accepting both here made
+      // one file a node to sync and an asset to deploy.
       const m = mapChangeToNode('staffing/staff/anna.yml');
-      expect(m.kind).toBe('node-file');
+      expect(m.kind).toBe('asset');
+      expect(m.nodePath).toBe('staff/anna.yml');
+    });
+
+    it('still treats .node.yml as a node — the prefix declares it, not the ext', () => {
+      const m = mapChangeToNode('staffing/staff/anna/.node.yml');
+      expect(m.kind).toBe('node-yaml');
       expect(m.nodePath).toBe('staff/anna');
     });
 
@@ -111,9 +120,8 @@ describe('mapChangeToNode', () => {
   });
 
   describe('skipped files', () => {
-    it('skips asset metadata files (.node.index.js.yaml)', () => {
-      const m = mapChangeToNode('functions/lib/tool/.node.index.js.yaml');
-      expect(m.kind).toBe('skip');
+    it('skips an unrecognised .node.* file', () => {
+      expect(mapChangeToNode('functions/lib/tool/.node.').kind).toBe('skip');
     });
 
     it('skips hidden files', () => {
@@ -126,6 +134,31 @@ describe('mapChangeToNode', () => {
 
     it('skips empty paths', () => {
       expect(mapChangeToNode('').kind).toBe('skip');
+    });
+  });
+
+  describe('asset metadata', () => {
+    it('maps .node.{file}.yaml to the sibling asset node, not a node of its own', () => {
+      const m = mapChangeToNode('functions/lib/tool/.node.index.js.yaml');
+      expect(m.kind).toBe('asset-metadata');
+      expect(m.workspace).toBe('functions');
+      expect(m.nodePath).toBe('lib/tool/index.js');
+    });
+
+    it('handles a binary with a dotted name', () => {
+      const m = mapChangeToNode('launchpad/images/.node.logo.png.yaml');
+      expect(m.kind).toBe('asset-metadata');
+      expect(m.nodePath).toBe('images/logo.png');
+    });
+
+    it('does not mistake a translation overlay for asset metadata', () => {
+      const m = mapChangeToNode('launchpad/home/.node.de.yaml');
+      expect(m.kind).toBe('translation');
+    });
+
+    it('does not mistake the folder definition for asset metadata', () => {
+      const m = mapChangeToNode('launchpad/home/.node.yaml');
+      expect(m.kind).toBe('node-yaml');
     });
   });
 

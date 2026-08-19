@@ -8,8 +8,10 @@
  *
  * - `{dir}/.node.yaml`        → the node for `{dir}` itself
  * - `{dir}/{name}.yaml`       → node `{dir}/{name}` (extension stripped)
+ *                               `.yaml` only — a bare `{name}.yml` is an asset
  * - `{dir}/index.js|.py|.star`→ code asset child node `{dir}/index.js`
  * - other non-YAML files      → binary asset child node (full filename)
+ * - `{dir}/.node.{file}.yaml` → metadata for the sibling asset `{dir}/{file}`
  * - `.node.{locale}.yaml` / `{name}.{locale}.yaml` → translation overlay
  * - nodetypes/, archetypes/, elementtypes/, mixins/
  *                             → schema: live-synced to the management API (upsert)
@@ -29,6 +31,7 @@ export type ChangeKind =
   | 'node-file' // {name}.yaml describing a named node
   | 'code' // .js / .py / .star function code (pushed as inline `code` property)
   | 'asset' // other binary/asset file (pushed via multipart upload)
+  | 'asset-metadata' // .node.{filename}.yaml — title/description/props for a sibling asset
   | 'translation' // {base}.{locale}.yaml translation overlay
   | 'schema' // nodetype/archetype/elementtype/mixin → management API (upsert)
   | 'structural' // manifest / workspaces — needs re-deploy
@@ -170,12 +173,28 @@ export function mapChangeToNode(
     };
   }
 
-  // Asset metadata files (.node.index.js.yaml) — handled at install time
+  // Asset metadata: `.node.{filename}.yaml` carries the title/description/extra
+  // properties for the sibling file `{filename}` (e.g. `.node.logo.png.yaml`
+  // describes `logo.png`). The `.node.` prefix is what makes it metadata rather
+  // than a node named `logo.png` — see `parse_asset_metadata_filename` in
+  // crates/raisin-rocksdb/.../package_install/content_types.rs.
+  //
+  // Translations (`.node.de.yaml`) and the folder definition (`.node.yaml`) are
+  // both matched above, so anything still here names a sibling file.
+  if (filename.startsWith('.node.') && filename.endsWith('.yaml')) {
+    const target = filename.slice('.node.'.length, -'.yaml'.length);
+    if (target) {
+      return {
+        kind: 'asset-metadata',
+        workspace,
+        nodePath: [...rest.slice(0, -1), target].join('/'),
+      };
+    }
+  }
+
+  // Any other dot-prefixed file
   if (filename.startsWith('.node.')) {
-    return {
-      kind: 'skip',
-      reason: 'asset metadata files are applied at install time',
-    };
+    return { kind: 'skip', reason: 'unrecognised .node.* file' };
   }
 
   // Hidden files
@@ -185,8 +204,17 @@ export function mapChangeToNode(
 
   const ext = extOf(filename);
 
-  // Named node YAML: {name}.yaml → node {name} (extension stripped)
-  if (ext === '.yaml' || ext === '.yml') {
+  // Named node YAML: {name}.yaml → node {name} (extension stripped).
+  //
+  // `.yaml` ONLY, matching the server installer (`zip_collector.rs`). A bare
+  // `{name}.yml` is NOT a node declaration — it falls through to the asset
+  // branch below and installs as a `raisin:Asset`, which is how a data file
+  // gets into a package. This used to accept `.yml` too, so the same file was
+  // a node here and an asset on the server.
+  //
+  // `.node.yml` IS a node (handled above): the `.node.` prefix is the
+  // declaration, not the extension.
+  if (ext === '.yaml') {
     const stem = filename.slice(0, -ext.length);
     const name = explicitName || stem;
     return {
