@@ -13,8 +13,13 @@ use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use zip::ZipArchive;
 
-use super::super::content_types::{derive_content_path, resource_ref_filename, ContentNodeDef};
+use raisin_packages::namespace_encoding::decode_namespace;
+
+use super::super::content_types::{
+    derive_content_path, parse_asset_metadata_filename, resource_ref_filename, ContentNodeDef,
+};
 use super::super::handler::PackageInstallHandler;
+use super::super::translation::parse_translation_locale;
 use super::super::types::{
     resolve_install_policy_for_path, DryRunActionCounts, DryRunLogEntry, InstallMode,
 };
@@ -81,7 +86,12 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                     continue;
                 }
 
-                let workspace = path_parts[1].to_string();
+                // Decode `_raisin__access_control` → `raisin:access_control`, the
+                // same as the real collector. Without this the simulation
+                // reported (and looked up) a workspace that does not exist, so
+                // every node in a namespaced workspace previewed as "create"
+                // no matter what was actually on the server.
+                let workspace = decode_namespace(path_parts[1]);
                 let filename = path_parts.last().unwrap_or(&"").to_string();
 
                 // Read content for size estimation and parsing
@@ -89,7 +99,16 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                 file.read_to_end(&mut content_bytes)
                     .map_err(|e| Error::storage(format!("Failed to read file {}: {}", name, e)))?;
 
-                if filename == ".node.yaml" {
+                // Node definitions: `.node.yaml` AND flat `{name}.yaml`, minus
+                // translation overlays and asset metadata. This mirrors
+                // `zip_collector::collect_content_entries`; previewing only
+                // `.node.yaml` meant flat node files never appeared in a dry
+                // run at all.
+                let is_node_def = filename.ends_with(".yaml")
+                    && parse_translation_locale(&filename).is_none()
+                    && parse_asset_metadata_filename(&filename).is_none();
+
+                if is_node_def {
                     let content_def: ContentNodeDef = serde_yaml::from_slice(&content_bytes)
                         .map_err(|e| {
                             Error::Validation(format!("Invalid content YAML in {}: {}", name, e))

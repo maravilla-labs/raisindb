@@ -29,6 +29,13 @@ use super::types::{
 /// Creates a background job to process the installation asynchronously.
 ///
 /// POST /api/repos/{repo}/packages/{name}/install
+///
+/// Delegates to [`install_package_impl`], which is also what the unified
+/// command endpoint uses. This route used to carry its own copy of the lookup
+/// and the already-installed guard, and the two drifted: this one ignored
+/// `?mode=` entirely and returned early whenever `installed == true`, so a
+/// `deploy --install` over an existing package was a silent no-op that never
+/// examined a single content node. One implementation, one behaviour.
 pub async fn install_package(
     State(state): State<AppState>,
     Path((repo, package_name)): Path<(String, String)>,
@@ -39,86 +46,18 @@ pub async fn install_package(
     let auth_context = auth.map(|Extension(ctx)| ctx);
     let tenant_id = tenant_info.tenant_id.as_str();
     let branch = query.branch.as_deref().unwrap_or("main");
-    let workspace = "packages";
 
-    let node_service =
-        state.node_service_for_context(tenant_id, &repo, branch, workspace, auth_context);
-
-    let node = node_service
-        .get_by_path(&format!("/{}", package_name))
-        .await
-        .map_err(|e| ApiError::storage_error(format!("Failed to get package node: {}", e)))?
-        .ok_or_else(|| ApiError::not_found(format!("Package '{}' not found", package_name)))?;
-
-    let already_installed = node
-        .properties
-        .get("installed")
-        .and_then(|v| match v {
-            PropertyValue::Boolean(b) => Some(*b),
-            _ => None,
-        })
-        .unwrap_or(false);
-
-    let version = node
-        .properties
-        .get("version")
-        .and_then(|v| match v {
-            PropertyValue::String(s) => Some(s.clone()),
-            _ => None,
-        })
-        .unwrap_or_else(|| "unknown".to_string());
-
-    if already_installed {
-        let installed_at = node.properties.get("installed_at").and_then(|v| match v {
-            PropertyValue::String(s) => Some(s.clone()),
-            PropertyValue::Date(dt) => Some(dt.to_string()),
-            _ => None,
-        });
-
-        return Ok(Json(InstallResponse {
-            package_name,
-            version,
-            installed: true,
-            installed_at,
-            job_id: None,
-        }));
-    }
-
-    let resource = node
-        .properties
-        .get("resource")
-        .ok_or_else(|| ApiError::validation_failed("Package has no resource"))?;
-
-    let resource_obj = match resource {
-        PropertyValue::Object(obj) => obj,
-        _ => {
-            return Err(ApiError::validation_failed(
-                "Resource is not a valid object",
-            ))
-        }
-    };
-
-    let resource_key = resource_obj
-        .get("key")
-        .and_then(|v| match v {
-            PropertyValue::String(s) => Some(s.clone()),
-            _ => None,
-        })
-        .ok_or_else(|| ApiError::validation_failed("Resource has no key"))?;
-
-    create_install_job(
+    install_package_impl(
         &state,
         tenant_id,
         &repo,
         branch,
-        workspace,
         &package_name,
-        &version,
-        &node.id,
-        &resource_key,
-        None, // no install_mode override
+        query.mode,
+        auth_context,
     )
     .await
+    .map(Json)
 }
 
 /// Uninstall a package (mark as not installed).

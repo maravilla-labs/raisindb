@@ -88,6 +88,20 @@ pub(super) fn resolve_install_policy_for_path(
     let mode = match sync_mode {
         raisin_packages::SyncMode::Skip => InstallMode::Skip,
         raisin_packages::SyncMode::Replace => InstallMode::Overwrite,
+        // `merge`/`update` are not decisions, they are deferrals: the package
+        // is saying "keep this path current, on whatever terms the operator
+        // set". So the operator's mode stands.
+        //
+        // Read this together with the operator-side default. `InstallMode`'s
+        // own default is `Skip`, so for a long time NOTHING ever reached here
+        // with `Sync`: `deploy --install` sent no `mode` at all, the server
+        // defaulted to `Skip`, and every `mode: merge` path — the builtins
+        // included — resolved to "never update anything already installed".
+        // That is why declared roles drifted from live ones. The fix is that
+        // `deploy --install` now sends `mode=sync` explicitly
+        // (packages/raisindb-cli/src/commands/deploy.ts), NOT a coercion here:
+        // an operator who asks for `skip` must still get `skip`, or the safe
+        // option stops being safe.
         raisin_packages::SyncMode::Merge | raisin_packages::SyncMode::Update => install_mode,
     };
     let mode_label = match sync_mode {
