@@ -375,32 +375,96 @@ disabled for the session to confirm or kill the enforcement hypothesis.
 limitation: that only finds roles, groups, and users whose paths you can
 already guess, so it does not scale to *discovering* unknown ones.
 
-### 2.7 [P2] Access-control content cannot be updated by deploy or sync
+### 2.7 [RESOLVED] Access-control content cannot be updated by deploy or sync
 
-**Symptom:** `deploy --install` **creates** new nodes in
-`raisin:access_control` cleanly, but does not update existing ones, and a
-force push of the workspace fails outright. Every subsequent change to a
-role's permission list is therefore a manual admin-console edit, and the
-declarative package copy silently drifts from what is live. A workspace
-introduced with a package needs a hand-applied grant on day one before an
-application-level (non-function) caller can write to it at all.
+**Symptom (as reported):** roles declared in a package under
+`content/_raisin__access_control/roles/*` never landed. `deploy --install`
+created nodes on a fresh repo but never updated them, and re-pushing a set of
+roles failed wholesale.
 
-**Root cause:** the workspace is deliberately special — it is the store
-that backs authorization itself, so the ordinary content write paths are not
-open to it.
+**The old root cause recorded here was wrong.** It read: *"the workspace is
+deliberately special -- it is the store that backs authorization itself, so the
+ordinary content write paths are not open to it."* There is no such
+special-casing anywhere. The install job runs as `AuthContext::system()`
+(`install_content/node_installer.rs`), which bypasses RLS entirely, and
+`raisin:Role` is in `allowed_root_node_types` for the workspace. Roles were
+always packageable -- `builtin-packages/raisin-auth` ships three.
 
-**Verdict: worth fixing in the engine, carefully.** "Declarative
-everywhere except the one workspace that decides who can do anything" is a
-real gap, and drift between the declared and live permission sets is a
-security problem, not a convenience one. But a package that can silently
-rewrite roles is an obvious privilege-escalation path, so this needs a
-designed answer — an explicit, separately-authorized reconcile step that
-diffs declared against live and requires an operator to approve the diff —
-rather than simply opening the workspace to `deploy --install`.
+**Actual root cause: the node's path was decided by `properties.name`, and the
+CLI and the server disagreed about it.** `ContentNodeDef::derive_name` ranked
+`properties.name` above the file's own location, so
+`roles/author/.node.yaml` with `properties.name: "Author"` installed to
+`/roles/Author`. The CLI sync mapper
+(`packages/raisindb-cli/src/sync/mapping.ts`) derives the path from the
+directory and targeted `/roles/author`. One source file, two nodes, both
+carrying `role_id: "author"` -- which is `unique: true`. The second write failed
+`check_unique_constraints`, and that error propagated with `?` out of the batch
+loop, failing the **entire install job**. One colliding role took every role
+down with it, which is why the symptom looked like "the workspace is closed".
 
-**Until then:** treat the package copy as the source of truth, apply changes
-by hand through the admin console, and verify with a by-path REST read of
-the role node (see 2.6 — do not trust a SQL enumeration here).
+The admin console never tripped this because it sets the node name to `role_id`
+and keeps the display name in properties only.
+
+**Fixed:**
+- `derive_name` is now path-authoritative: explicit top-level `name:`, else the
+  folder name (`.node.yaml`), else the filename stem. `properties.name` is not
+  consulted. A test asserts it agrees with
+  `translation::derive_node_name_from_base_path`, which already worked this way.
+- Nodes installed under the old rule are **adopted**, not duplicated: the
+  installer probes the legacy `properties.name` path and `move_node_tree`s the
+  existing node (same id, so history and the unique index follow it).
+- A per-node failure no longer aborts the batch. Validation-class errors are
+  collected into `InstallStats::content_errors`, every other entry still gets
+  its chance, and the job fails at the end listing all of them -- before
+  `finalize_installation` marks the package installed.
+- `POST /api/repos/{repo}/packages/{name}/install` carried a second, drifted
+  copy of the already-installed guard: it ignored `?mode=` and returned early
+  whenever `installed == true`, so `deploy --install` over an existing package
+  examined nothing while reporting success. It now delegates to
+  `install_package_impl`.
+- `raisindb deploy --install` sends `--mode sync` by default (was: no mode at
+  all, so the server default `skip` applied and nothing was ever updated).
+  `--mode skip|sync|overwrite` is selectable.
+- `raisindb sync` could never create a flat `{name}.yaml` node: the
+  create-on-404 fallback was gated on the literal string `.node.yaml`, so such
+  a file 404'd on every push forever. It now keys off the change
+  classification, covering `.node.yaml`, `.node.yml` and `{name}.yaml`.
+- The dry-run simulator did not namespace-decode the workspace at all, so a
+  preview of a namespaced workspace matched nothing and reported every node as
+  a create. It now uses the shared `decode_namespace`, as does the real
+  collector (which had an inline copy). It also previewed only `.node.yaml`,
+  never flat `{name}.yaml` nodes.
+- `raisindb sync` classified `.node.{filename}.yaml` asset metadata as **skip**
+  ("applied at install time"), so editing an asset's title or description did
+  nothing until the next `deploy --install`. It now pushes onto the sibling
+  asset node, read-modify-write so the binary-derived properties (`file`,
+  `file_type`, `file_size`, `content_hash`) survive a PUT — which replaces ALL
+  properties, and dropping `file` would unbind the asset from its bytes. Those
+  four are stripped from the authored side too, so a metadata file cannot
+  overwrite them. Batches now push binaries before the metadata describing
+  them, since the metadata updates a node the binary creates.
+- `move_node_tree` marked the vacated path as deleted in the transaction read
+  cache but never registered the new one, so a moved node was **unreachable by
+  path for the rest of the transaction** even though the batch had already
+  written its new `PATH_INDEX` entry. Any caller that moved a node and then
+  wrote it at its new path in the same transaction took the CREATE branch and
+  minted a duplicate. Harmless for most node types; fatal for one with a
+  `unique: true` property. Found via the adoption path above, but it was never
+  specific to it.
+
+**Still true, and deliberately so:** a package install writes as system, so a
+package *can* define roles. If that is judged too much authority for a package,
+the answer is an authorization step in front of install -- not the accidental
+breakage this entry used to describe.
+
+**Resolved alongside it:** a bare `{name}.yml` used to be a node to `raisindb
+sync` and a binary ASSET to the installer. The installer is right — a `.yml`
+data file belongs in a package as a `raisin:Asset`, which is the mechanism for
+shipping assets at all — so the CLI was narrowed to `.yaml`. Nothing in the tree
+shipped a `.yml` content file, so nothing moved. `.node.yml` remains a node on
+both sides: there the `.node.` prefix is the declaration, not the extension, and
+the installer previously skipped it as a hidden file while sync pushed it
+happily.
 
 ### 2.8 [P3] Reference and section field type constraints are advisory only
 

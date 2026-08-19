@@ -243,10 +243,16 @@ anonymous_enabled: false    # Whether anonymous access is enabled
 
 ### Via YAML (in a package)
 
-Create a role node in \`content/raisin:access_control/roles/\`:
+Create a role node in \`content/_raisin__access_control/roles/\`. The workspace
+name is namespace-encoded on disk (\`raisin:access_control\` →
+\`_raisin__access_control\`) because a colon is not a legal filename on Windows.
+
+The file's LOCATION decides the node's path: this file creates
+\`/roles/content-editor\`. \`properties.name\` is the display name and does not
+move the node; set a top-level \`name:\` to override the filename.
 
 \`\`\`yaml
-# content/raisin:access_control/roles/content-editor/.node.yaml
+# content/_raisin__access_control/roles/content-editor/.node.yaml
 node_type: raisin:Role
 properties:
   role_id: "content_editor"

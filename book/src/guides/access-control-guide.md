@@ -715,24 +715,53 @@ The `raisin-stewardship` package is also built-in. It depends on `raisin-relatio
 
 You can include custom roles, groups, and security configurations in your own [RAP packages](../guides/packages.md). This is useful for distributing a consistent authorization setup across environments or tenants.
 
-In your package's `content/` directory, place role and group nodes under the `raisin:access_control` workspace:
+In your package's `content/` directory, place role and group nodes under the
+`raisin:access_control` workspace. The workspace name is
+**namespace-encoded** on disk -- `raisin:access_control` becomes
+`_raisin__access_control`, because a colon is not a legal filename on Windows:
 
 ```
 my-auth-package-1.0.0.rap
   manifest.yaml
   content/
-    raisin:access_control/
+    _raisin__access_control/
       roles/
         custom-editor/
-          node.yaml
-        custom-viewer/
-          node.yaml
+          .node.yaml
+        custom-viewer.yaml
       groups/
         default-team/
-          node.yaml
+          .node.yaml
 ```
 
-Each `node.yaml` defines the node type and properties, just as they would be created via the API. When the package is installed, these nodes are created in the `raisin:access_control` workspace.
+Both layouts shown above work and mean the same thing: a directory with a
+`.node.yaml` inside it, or a single `{name}.yaml` file. Note the **leading dot**
+on `.node.yaml` -- a file called `node.yaml` is treated as a node literally named
+`node`.
+
+**The file's location decides the node's path**, not anything inside it. A role
+at `roles/custom-editor/.node.yaml` is created at `/roles/custom-editor` even
+though its `properties.name` is a human-readable display name like
+`"Custom Editor"`. Set a top-level `name:` if you want to override the filename:
+
+```yaml
+# content/_raisin__access_control/roles/custom-editor/.node.yaml
+node_type: raisin:Role
+properties:
+  role_id: "custom_editor"
+  name: "Custom Editor"        # display name -- does NOT move the node
+  description: "Can create and edit content"
+  permissions:
+    - path: "**"
+      operations: ["create", "read", "update"]
+      workspace: "main"
+```
+
+When the package is installed, these nodes are created in the
+`raisin:access_control` workspace. Re-deploying updates them, provided the
+install runs in a mode that touches existing content -- `raisindb deploy
+--install` uses `--mode sync` by default; `--mode skip` leaves anything that
+already exists alone.
 
 ## Troubleshooting
 
