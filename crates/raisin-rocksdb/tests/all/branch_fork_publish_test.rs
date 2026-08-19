@@ -1452,3 +1452,110 @@ async fn cross_branch_copy_pins_the_source_revision() -> Result<()> {
 
     Ok(())
 }
+
+/// A node RE-CREATED on the source with a fresh id must REPLACE the previous
+/// occupant of that path on the target, not shadow it.
+///
+/// PATH_INDEX carries the node id in its value, not its key, so before the fix
+/// the second promotion overwrote the mapping and stranded the first node: its
+/// blob and indexes stayed live, visible to a table scan and to nothing else.
+/// The damage compounds, because `CHILD_OF` resolves a parent by path and then
+/// walks ORDERED_CHILDREN under that ONE id — children filed under a superseded
+/// generation simply vanish, with no error anywhere.
+///
+/// This is the storage-level reproduction of a live incident: a publish branch
+/// held 88 nodes across 34 paths after three `deploy --install` regenerations,
+/// and an event page rendered an empty programme because its tracks hung off a
+/// parent id that `CHILD_OF` no longer resolved to.
+#[tokio::test]
+async fn cross_branch_copy_replaces_a_different_id_at_the_same_path() -> Result<()> {
+    let t = TestStorage::new().await?;
+    let storage = &t.storage;
+    let nodes = storage.nodes();
+
+    let main = || StorageScope::new(TENANT, REPO, "main", WORKSPACE);
+    let publish = || StorageScope::new(TENANT, REPO, "publish", WORKSPACE);
+    let roots = vec!["/page".to_string()];
+
+    nodes
+        .create(main(), make_node("/page", "raisin:Folder"), no_validation())
+        .await?;
+    nodes
+        .create(main(), make_node("/page/a", "raisin:Page"), no_validation())
+        .await?;
+    create_empty_branch(storage, "publish").await?;
+    nodes
+        .copy_nodes_across_branches(
+            TENANT, REPO, "main", "publish", WORKSPACE, &roots, true, false, None, None,
+        )
+        .await?;
+
+    let first_root_id = nodes.get_by_path(publish(), "/page", None).await?.unwrap().id;
+    let first_child_id = nodes
+        .get_by_path(publish(), "/page/a", None)
+        .await?
+        .unwrap()
+        .id;
+
+    // Re-create the subtree on main under FRESH ids — what a package install
+    // does. `publish` still holds the previous generation.
+    // Deepest-first: delete_by_path is not a cascade.
+    nodes
+        .delete_by_path(main(), "/page/a", DeleteNodeOptions::default())
+        .await?;
+    nodes
+        .delete_by_path(main(), "/page", DeleteNodeOptions::default())
+        .await?;
+    nodes
+        .create(main(), make_node("/page", "raisin:Folder"), no_validation())
+        .await?;
+    nodes
+        .create(main(), make_node("/page/a", "raisin:Page"), no_validation())
+        .await?;
+    let second_root_id = nodes.get_by_path(main(), "/page", None).await?.unwrap().id;
+    let second_child_id = nodes.get_by_path(main(), "/page/a", None).await?.unwrap().id;
+    assert_ne!(
+        first_root_id, second_root_id,
+        "the re-created node must carry a new id, or this test proves nothing"
+    );
+
+    let summary = nodes
+        .copy_nodes_across_branches(
+            TENANT, REPO, "main", "publish", WORKSPACE, &roots, true, false, None, None,
+        )
+        .await?;
+
+    // The displaced generation is reported, not silently dropped.
+    assert!(
+        summary.changes.iter().any(|c| c.node_id == first_root_id
+            && c.operation == raisin_models::tree::ChangeOperation::Deleted),
+        "the displaced node must be reported as Deleted: {:?}",
+        summary.changes
+    );
+
+    // The path resolves to the new generation...
+    let live_root = nodes.get_by_path(publish(), "/page", None).await?.unwrap();
+    assert_eq!(live_root.id, second_root_id, "path must own the new node");
+
+    // ...and the old generation is gone, not merely unreachable by path.
+    for stale in [&first_root_id, &first_child_id] {
+        assert!(
+            nodes.get(publish(), stale, None).await?.is_none(),
+            "displaced node '{stale}' must be tombstoned, not left as an orphan"
+        );
+    }
+
+    // The relationship CHILD_OF depends on: children resolve under the id the
+    // path now points at. This is the assertion that fails loudest in prod.
+    let children = nodes
+        .list_children(publish(), "/page", ListOptions::default())
+        .await?;
+    assert_eq!(
+        child_names(&children),
+        vec!["a"],
+        "the new generation's child must be reachable from the new parent"
+    );
+    assert_eq!(children[0].id, second_child_id);
+
+    Ok(())
+}

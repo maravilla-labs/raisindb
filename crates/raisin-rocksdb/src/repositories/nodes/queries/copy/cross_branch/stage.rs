@@ -38,6 +38,40 @@ impl NodeRepositoryImpl {
             ChangeOperation::Added
         };
 
+        // A DIFFERENT node already sitting on the destination path must be
+        // retired, not shadowed. `old_dst` above answers "same id, is this an
+        // update?"; it cannot see "same path, different id", which is what a
+        // source-side re-create produces (`deploy --install` mints fresh ids).
+        // Left alone the incoming node overwrites the path mapping and the
+        // previous occupant becomes a scan-only orphan — see
+        // `displace_path_occupant` for what that does to a live site.
+        //
+        // Ordering is load-bearing: this runs BEFORE the node is staged,
+        // because the tombstone and the new mapping share one PATH_INDEX key.
+        let displaced = self
+            .get_by_path_impl(
+                scope.tenant_id,
+                scope.repo_id,
+                scope.target_branch,
+                scope.workspace,
+                &src_node.path,
+                None,
+            )
+            .await?
+            .filter(|occ| occ.id != src_node.id);
+        if let Some(occ) = &displaced {
+            self.displace_path_occupant(
+                batch,
+                occ,
+                scope.tenant_id,
+                scope.repo_id,
+                scope.target_branch,
+                scope.workspace,
+                scope.revision,
+            )
+            .await?;
+        }
+
         let mut node = src_node.clone();
         node.parent = Node::extract_parent_name_from_path(&node.path);
         node.has_children = None; // computed field, never stored
@@ -186,6 +220,24 @@ impl NodeRepositoryImpl {
             .or_insert_with(|| order_label.clone());
         if order_label > *slot {
             *slot = order_label.clone();
+        }
+
+        // Report the displacement as its own Deleted change. A subscriber that
+        // only saw the Added would keep a cache entry for a node that no longer
+        // exists, at a path now owned by someone else.
+        if let Some(occ) = displaced {
+            acc.changes.push(CrossBranchNodeChange {
+                node_id: occ.id.clone(),
+                path: occ.path.clone(),
+                node_type: occ.node_type.clone(),
+                operation: ChangeOperation::Deleted,
+            });
+            acc.change_infos.push(NodeChangeInfo {
+                node_id: occ.id,
+                workspace: scope.workspace.to_string(),
+                operation: ChangeOperation::Deleted,
+                translation_locale: None,
+            });
         }
 
         acc.changes.push(CrossBranchNodeChange {
