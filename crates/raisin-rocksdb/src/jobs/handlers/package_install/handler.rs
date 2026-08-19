@@ -397,6 +397,34 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         .await?;
 
         // Phase 6: Finalize - update package node (90-100%)
+        // Content entries are installed best-effort so one bad node cannot
+        // silence the rest (see `is_per_node_error` in `node_installer.rs`).
+        // Fail here, before `finalize_installation` flips `installed` to true —
+        // a package that half-applied must not report itself as installed, or
+        // the next `deploy --install` will skip it and the gap becomes
+        // permanent.
+        if !stats.content_errors.is_empty() {
+            let detail = stats
+                .content_errors
+                .iter()
+                .map(|e| format!("  - {e}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            tracing::error!(
+                job_id = %job.id,
+                package_name = %package_name,
+                rejected = stats.content_errors.len(),
+                "Package installation rejected content entries"
+            );
+            return Err(raisin_error::Error::Validation(format!(
+                "Package '{}' installed {} content node(s) but {} were rejected:\n{}",
+                package_name,
+                stats.content_nodes_created + stats.content_nodes_synced,
+                stats.content_errors.len(),
+                detail
+            )));
+        }
+
         self.report_progress(&job.id, 0.9, "Finalizing installation")
             .await;
         self.finalize_installation(

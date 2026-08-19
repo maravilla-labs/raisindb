@@ -17,7 +17,7 @@
 //! asset files inside transactional batches.
 
 use raisin_binary::StoredObject;
-use raisin_error::Result;
+use raisin_error::{Error, Result};
 use raisin_models::auth::AuthContext;
 use raisin_models::nodes::properties::value::{PropertyValue, Resource};
 use raisin_models::nodes::Node;
@@ -36,6 +36,50 @@ use crate::jobs::handlers::package_install::translation::derive_node_name_from_b
 use crate::jobs::handlers::package_install::types::{effective_install_mode_for_path, InstallMode};
 
 use super::resolve_folder_type;
+
+/// Is this error the fault of one content node, or of the machinery?
+///
+/// A per-node error (a schema violation, a unique-constraint collision, a
+/// disallowed node type) says nothing about the other 99 nodes in the batch, so
+/// it must not abort them. A backend/lock/internal error says the storage layer
+/// is unwell and continuing would just produce noise, so it propagates.
+///
+/// This distinction exists because the installer used to `?` on every error:
+/// a single role whose `role_id` collided with an existing node failed the
+/// entire install job, and the operator saw five roles vanish with one message.
+fn is_per_node_error(err: &Error) -> bool {
+    matches!(
+        err,
+        Error::Validation(_)
+            | Error::AlreadyExists(_)
+            | Error::NotFound(_)
+            | Error::Conflict(_)
+            | Error::Forbidden(_)
+            | Error::PermissionDenied(_)
+            | Error::Unauthorized(_)
+    )
+}
+
+/// A short, operator-readable label for a content entry, used in error
+/// reporting so a rejection names the file it came from.
+fn describe_entry(entry: &ContentEntry) -> String {
+    match entry {
+        ContentEntry::NodeDef {
+            workspace, node, ..
+        } => format!("{}:{} ({})", workspace, node.path, node.node_type),
+        ContentEntry::BinaryFile {
+            workspace,
+            zip_path,
+            ..
+        } => format!("{workspace}:{zip_path}"),
+        ContentEntry::TranslationFile {
+            workspace,
+            base_node_yaml_path,
+            locale,
+            ..
+        } => format!("{workspace}:{base_node_yaml_path} [{locale}]"),
+    }
+}
 
 impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
     /// Install sorted content entries in batches
@@ -74,127 +118,162 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             tx.set_auth_context(AuthContext::system())?;
 
             for entry in batch {
-                match entry {
-                    ContentEntry::NodeDef {
-                        workspace, node, ..
-                    } => {
-                        let folder_type = resolve_folder_type(folder_type_map, workspace);
+                // Isolate per-entry failures. A schema violation or a
+                // unique-constraint collision on one node says nothing about
+                // the other 99 in this batch; `?` here used to fail the whole
+                // install job, so one bad role took every role down with it.
+                //
+                // Continuing on a shared transaction is safe because every
+                // per-node check runs BEFORE any batch write: `put_node`
+                // validates and checks unique constraints at step 5, and only
+                // allocates a revision and touches the batch at step 7. The
+                // most a rejected entry can leave behind is the parent folders
+                // `ensure_parent_folders` created for it, which are idempotent
+                // and would be created by the next node under that path anyway.
+                let outcome: Result<()> = async {
+                    match entry {
+                        ContentEntry::NodeDef {
+                            workspace,
+                            node,
+                            legacy_path,
+                            ..
+                        } => {
+                            let folder_type = resolve_folder_type(folder_type_map, workspace);
 
-                        // Rebind authored Resource properties to any binaries
-                        // bundled beside this node, ingesting the bytes into
-                        // blob storage. No-op (borrows the original) when none.
-                        let mut owned_node;
-                        let node: &Node = match bundled.get(&(workspace.clone(), node.path.clone()))
-                        {
-                            Some(binaries) if !binaries.is_empty() => {
-                                owned_node = node.as_ref().clone();
-                                self.ingest_bundled_binaries(
-                                    &mut owned_node,
-                                    binaries,
-                                    binary_store,
+                            // Rebind authored Resource properties to any binaries
+                            // bundled beside this node, ingesting the bytes into
+                            // blob storage. No-op (borrows the original) when none.
+                            let mut owned_node;
+                            let node: &Node =
+                                match bundled.get(&(workspace.clone(), node.path.clone())) {
+                                    Some(binaries) if !binaries.is_empty() => {
+                                        owned_node = node.as_ref().clone();
+                                        self.ingest_bundled_binaries(
+                                            &mut owned_node,
+                                            binaries,
+                                            binary_store,
+                                            job_id,
+                                            stats,
+                                        )
+                                        .await?;
+                                        &owned_node
+                                    }
+                                    _ => node.as_ref(),
+                                };
+
+                            let is_deferred = node.properties.contains_key("__deferred_references");
+
+                            if is_deferred {
+                                // Strip path-based references and install skeleton first
+                                let stripped_props = strip_path_references(&node.properties);
+                                let mut skeleton = node.clone();
+                                skeleton.properties = stripped_props;
+
+                                tracing::debug!(
+                                    job_id = %job_id,
+                                    workspace = %workspace,
+                                    path = %node.path,
+                                    "Installing skeleton for circular-reference node"
+                                );
+
+                                self.install_content_node(
+                                    tx.as_ref(),
+                                    workspace,
+                                    &skeleton,
+                                    legacy_path.as_deref(),
                                     job_id,
+                                    install_mode,
+                                    sync_config,
+                                    folder_type,
                                     stats,
                                 )
                                 .await?;
-                                &owned_node
+
+                                // Save original node for second pass
+                                let mut original = node.clone();
+                                original.properties.remove("__deferred_references");
+                                deferred_nodes.push((
+                                    workspace.clone(),
+                                    original,
+                                    folder_type.to_string(),
+                                ));
+                            } else {
+                                self.install_content_node(
+                                    tx.as_ref(),
+                                    workspace,
+                                    node,
+                                    legacy_path.as_deref(),
+                                    job_id,
+                                    install_mode,
+                                    sync_config,
+                                    folder_type,
+                                    stats,
+                                )
+                                .await?;
                             }
-                            _ => node.as_ref(),
-                        };
-
-                        let is_deferred = node.properties.contains_key("__deferred_references");
-
-                        if is_deferred {
-                            // Strip path-based references and install skeleton first
-                            let stripped_props = strip_path_references(&node.properties);
-                            let mut skeleton = node.clone();
-                            skeleton.properties = stripped_props;
-
-                            tracing::debug!(
-                                job_id = %job_id,
-                                workspace = %workspace,
-                                path = %node.path,
-                                "Installing skeleton for circular-reference node"
-                            );
-
-                            self.install_content_node(
-                                tx.as_ref(),
-                                workspace,
-                                &skeleton,
-                                job_id,
-                                install_mode,
-                                sync_config,
-                                folder_type,
-                                stats,
-                            )
-                            .await?;
-
-                            // Save original node for second pass
-                            let mut original = node.clone();
-                            original.properties.remove("__deferred_references");
-                            deferred_nodes.push((
-                                workspace.clone(),
-                                original,
-                                folder_type.to_string(),
-                            ));
-                        } else {
-                            self.install_content_node(
-                                tx.as_ref(),
-                                workspace,
-                                node,
-                                job_id,
-                                install_mode,
-                                sync_config,
-                                folder_type,
-                                stats,
-                            )
-                            .await?;
                         }
-                    }
-                    ContentEntry::BinaryFile {
-                        workspace,
-                        zip_path,
-                        filename,
-                        parent_path,
-                        data,
-                        metadata,
-                        content_hash,
-                    } => {
-                        let folder_type = resolve_folder_type(folder_type_map, workspace);
-                        self.install_binary_file(
-                            tx.as_ref(),
+                        ContentEntry::BinaryFile {
                             workspace,
                             zip_path,
                             filename,
                             parent_path,
                             data,
-                            metadata.as_ref(),
+                            metadata,
                             content_hash,
-                            job_id,
-                            install_mode,
-                            sync_config,
-                            folder_type,
-                            binary_store,
-                            stats,
-                        )
-                        .await?;
-                    }
-                    ContentEntry::TranslationFile {
-                        workspace,
-                        base_node_yaml_path,
-                        locale,
-                        overlay,
-                    } => {
-                        self.install_translation(
-                            tx.as_ref(),
+                        } => {
+                            let folder_type = resolve_folder_type(folder_type_map, workspace);
+                            self.install_binary_file(
+                                tx.as_ref(),
+                                workspace,
+                                zip_path,
+                                filename,
+                                parent_path,
+                                data,
+                                metadata.as_ref(),
+                                content_hash,
+                                job_id,
+                                install_mode,
+                                sync_config,
+                                folder_type,
+                                binary_store,
+                                stats,
+                            )
+                            .await?;
+                        }
+                        ContentEntry::TranslationFile {
                             workspace,
                             base_node_yaml_path,
                             locale,
                             overlay,
-                            job_id,
-                            stats,
-                        )
-                        .await?;
+                        } => {
+                            self.install_translation(
+                                tx.as_ref(),
+                                workspace,
+                                base_node_yaml_path,
+                                locale,
+                                overlay,
+                                job_id,
+                                stats,
+                            )
+                            .await?;
+                        }
                     }
+                    Ok(())
+                }
+                .await;
+
+                if let Err(err) = outcome {
+                    if !is_per_node_error(&err) {
+                        return Err(err);
+                    }
+                    let label = describe_entry(entry);
+                    tracing::error!(
+                        job_id = %job_id,
+                        entry = %label,
+                        error = %err,
+                        "Package install: content entry rejected, continuing with the rest"
+                    );
+                    stats.content_errors.push(format!("{label}: {err}"));
                 }
             }
 
@@ -246,11 +325,13 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
     }
 
     /// Install a single content node within a transaction
+    #[allow(clippy::too_many_arguments)]
     async fn install_content_node(
         &self,
         tx: &dyn TransactionalContext,
         workspace: &str,
         node: &Node,
+        legacy_path: Option<&str>,
         job_id: &JobId,
         install_mode: InstallMode,
         sync_config: Option<&raisin_packages::SyncConfig>,
@@ -262,7 +343,47 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             effective_install_mode_for_path(install_mode, sync_config, workspace, &node_path);
 
         // Check if node exists at this path
-        let existing = tx.get_node_by_path(workspace, &node_path).await?;
+        let mut existing = tx.get_node_by_path(workspace, &node_path).await?;
+
+        // Nothing here yet, but an earlier install may have placed this same
+        // definition elsewhere: `properties.name` used to decide the node's
+        // location, so `roles/author/.node.yaml` landed at `/roles/Author`.
+        // Creating at the new path now would leave two nodes for one file —
+        // and for a type with a `unique: true` property (`raisin:Role.role_id`)
+        // the second write fails the unique check and takes the batch with it.
+        // Move the existing node instead; `move_node_tree` keeps its id, so
+        // history, references and the unique index all follow it across.
+        if existing.is_none() {
+            if let Some(legacy_path) = legacy_path {
+                if let Some(legacy_node) = tx.get_node_by_path(workspace, legacy_path).await? {
+                    if legacy_node.node_type == node.node_type {
+                        tracing::info!(
+                            job_id = %job_id,
+                            workspace = %workspace,
+                            from = %legacy_path,
+                            to = %node_path,
+                            node_id = %legacy_node.id,
+                            "Adopting node installed under the legacy properties.name path"
+                        );
+                        tx.move_node_tree(workspace, &legacy_node.id, &node_path)
+                            .await?;
+                        existing = tx.get_node_by_path(workspace, &node_path).await?;
+                    } else {
+                        // Same path, different type - not ours. Leave it alone
+                        // and let the ordinary create run; if that collides the
+                        // per-node error reporting will say so.
+                        tracing::warn!(
+                            job_id = %job_id,
+                            workspace = %workspace,
+                            legacy_path = %legacy_path,
+                            expected_type = %node.node_type,
+                            found_type = %legacy_node.node_type,
+                            "Legacy path holds a different node type, not adopting"
+                        );
+                    }
+                }
+            }
+        }
 
         tracing::info!(
             job_id = %job_id,
