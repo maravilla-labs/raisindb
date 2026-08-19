@@ -22,6 +22,41 @@ impl NodeRepositoryImpl {
                 raisin_error::Error::NotFound(format!("Target parent '{}' not found", parent_path))
             })
     }
+
+    /// The same check, except that the WORKSPACE ROOT is a legitimate parent.
+    ///
+    /// `/` addresses a workspace's top level, and no node is stored for it — so
+    /// `validate_parent_exists` can only ever fail there, and with it every
+    /// move or copy that targets the top level of a workspace. That was latent
+    /// until the package installer began adopting nodes whose name changed
+    /// (`properties.name` → path-derived): adopting `mcp:/Studio` to
+    /// `mcp:/studio` is a move whose target parent is `/`, so the entry was
+    /// rejected and the whole package install failed.
+    ///
+    /// `Ok(None)` means "the root, which has no node". Callers must skip the
+    /// checks that need a parent NODE (`validate_parent_allows_child`) and keep
+    /// the ones that do not: `validate_workspace_allows_node_type` — whose
+    /// `is_root_target` flag exists precisely for this — plus the circular and
+    /// unique-name checks, all of which are meaningful at a root.
+    ///
+    /// Mirrors `resolve_parent_id_opt` in the cross-branch copy helpers, which
+    /// has always answered `/` this way; that is why PUBLISHING a root-level
+    /// node works while moving one did not.
+    pub(in crate::repositories::nodes) async fn validate_parent_exists_opt(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        parent_path: &str,
+    ) -> Result<Option<Node>> {
+        if parent_path == "/" {
+            return Ok(None);
+        }
+        self.validate_parent_exists(tenant_id, repo_id, branch, workspace, parent_path)
+            .await
+            .map(Some)
+    }
     /// Validate no circular reference (target is not source or source's descendant)
     pub(in crate::repositories::nodes) async fn validate_no_circular_reference(
         &self,

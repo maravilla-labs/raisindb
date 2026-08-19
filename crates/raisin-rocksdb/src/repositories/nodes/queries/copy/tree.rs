@@ -59,7 +59,13 @@ impl NodeRepositoryImpl {
 
         // VALIDATION 4 (MINIMAL): Check target doesn't exist
         let name = new_name.unwrap_or(&source.name);
-        let new_path = format!("{}/{}", target_parent, name);
+        // At the workspace root `target_parent` is already "/", so joining
+        // naively would produce "//name".
+        let new_path = if target_parent == "/" {
+            format!("/{}", name)
+        } else {
+            format!("{}/{}", target_parent, name)
+        };
 
         // Reserve the destination ROOT before the existence check below
         // (reserve-then-check, same registry contract as create). The guard
@@ -97,16 +103,22 @@ impl NodeRepositoryImpl {
 
         // VALIDATION 5 (MINIMAL): Check parent allows child type
         // Only validate the root of the copied tree - assume source tree is internally valid
+        //
+        // `None` means the WORKSPACE ROOT, which is a legitimate destination
+        // that stores no node of its own — there is then no parent schema to
+        // consult, so the child check is skipped (see validate_parent_exists_opt).
         let target_parent_node = self
-            .validate_parent_exists(tenant_id, repo_id, branch, workspace, target_parent)
+            .validate_parent_exists_opt(tenant_id, repo_id, branch, workspace, target_parent)
             .await?;
 
-        self.validate_parent_allows_child(
-            BranchScope::new(tenant_id, repo_id, branch),
-            &target_parent_node.node_type,
-            &source.node_type,
-        )
-        .await?;
+        if let Some(parent) = &target_parent_node {
+            self.validate_parent_allows_child(
+                BranchScope::new(tenant_id, repo_id, branch),
+                &parent.node_type,
+                &source.node_type,
+            )
+            .await?;
+        }
 
         // STEP 1: Allocate SINGLE revision for entire tree copy operation
         let revision = self.revision_repo.allocate_revision();
@@ -249,7 +261,12 @@ impl NodeRepositoryImpl {
 
             // Determine the NEW parent ID for ORDERED_CHILDREN index
             let new_parent_id: Option<String> = if depth == 0 {
-                Some(target_parent_node.id.clone())
+                // Root-level nodes are indexed with parent_id = "/" (listing.rs).
+                Some(
+                    target_parent_node
+                        .as_ref()
+                        .map_or_else(|| "/".to_string(), |p| p.id.clone()),
+                )
             } else if let Some(_source_parent_name) = &source_node.parent {
                 let source_parent_path = source_node
                     .path

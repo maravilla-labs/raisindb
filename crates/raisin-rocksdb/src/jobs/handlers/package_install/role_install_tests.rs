@@ -284,6 +284,61 @@ async fn a_node_left_at_the_legacy_path_is_adopted_not_duplicated() {
     );
 }
 
+/// Adoption at the WORKSPACE ROOT — the case that broke two live tenants.
+///
+/// `/roles/Author` -> `/roles/author` has a real parent node to move under.
+/// A node that sits at the TOP LEVEL of a workspace does not: its parent is
+/// `/`, which stores no node, so the adoption move was rejected with
+/// `Target parent '/' not found` and one rejected entry failed the whole
+/// package install. That is exactly the shape of the studio package's
+/// `mcp:/Studio` node, whose display name and directory disagreed.
+#[tokio::test]
+async fn a_root_level_node_at_the_legacy_path_is_adopted_too() {
+    let env = setup().await;
+
+    // What a pre-fix install left at the top level of the workspace.
+    let (seed, _) = install(
+        &env,
+        vec![role_entry("/Studio", "studio-mcp", "Studio")],
+        InstallMode::Sync,
+    )
+    .await;
+    assert!(seed.is_ok(), "seed failed: {:?}", seed.err());
+    let legacy_id = node_at(&env, "/Studio").await.unwrap().id;
+
+    // The same definition as the fixed collector emits it: path-derived name.
+    let (result, stats) = install(
+        &env,
+        vec![role_entry_with_legacy(
+            "/studio",
+            "studio-mcp",
+            "Studio",
+            Some("/Studio"),
+        )],
+        InstallMode::Sync,
+    )
+    .await;
+
+    assert!(result.is_ok(), "install failed: {:?}", result.err());
+    assert!(
+        stats.content_errors.is_empty(),
+        "a root-level adoption must not be rejected: {:?}",
+        stats.content_errors
+    );
+
+    let adopted = node_at(&env, "/studio")
+        .await
+        .expect("the node should now live at the path-derived location");
+    assert_eq!(
+        adopted.id, legacy_id,
+        "the existing node must be MOVED, keeping its id"
+    );
+    assert!(
+        node_at(&env, "/Studio").await.is_none(),
+        "exactly one node must remain -- a twin beside it is the bug this guards"
+    );
+}
+
 #[tokio::test]
 async fn one_rejected_role_does_not_take_the_others_down() {
     let env = setup().await;

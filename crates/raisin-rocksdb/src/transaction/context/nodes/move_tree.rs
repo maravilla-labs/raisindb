@@ -76,15 +76,24 @@ pub async fn move_node_tree(
         })
         .unwrap_or_else(|| ("/".to_string(), new_path.to_string()));
 
-    // 5. Get target parent node (must exist in committed state)
-    let target_parent = super::read::get_node_by_path(tx, workspace, &target_parent_path)
-        .await?
-        .ok_or_else(|| {
-            raisin_error::Error::NotFound(format!(
-                "Target parent '{}' not found",
-                target_parent_path
-            ))
-        })?;
+    // 5. Get the target parent's id (it must exist in committed state) — EXCEPT
+    // the WORKSPACE ROOT, which is a legitimate destination that stores no node
+    // of its own. Root-level nodes are indexed with `parent_id = "/"` (see
+    // listing.rs), so that literal IS the parent id here and every ordered-children
+    // key below lands in the right place.
+    let target_parent_id = if target_parent_path == "/" {
+        "/".to_string()
+    } else {
+        super::read::get_node_by_path(tx, workspace, &target_parent_path)
+            .await?
+            .ok_or_else(|| {
+                raisin_error::Error::NotFound(format!(
+                    "Target parent '{}' not found",
+                    target_parent_path
+                ))
+            })?
+            .id
+    };
 
     // Get old parent info BEFORE locking batch (to avoid holding non-Send lock across await)
     let old_parent_id = if let Some(source_parent_path) = source_node
@@ -120,7 +129,7 @@ pub async fn move_node_tree(
             &repo_id,
             &branch,
             workspace,
-            &target_parent.id,
+            &target_parent_id,
             node_id,
         )?;
         if let Some(label) = existing {
@@ -132,7 +141,7 @@ pub async fn move_node_tree(
                 &repo_id,
                 &branch,
                 workspace,
-                &target_parent.id,
+                &target_parent_id,
             )?;
             if let Some(ref l) = last {
                 crate::fractional_index::inc(l).unwrap_or_else(|_| crate::fractional_index::first())
@@ -179,7 +188,7 @@ pub async fn move_node_tree(
         &repo_id,
         &branch,
         workspace,
-        &target_parent.id,
+        &target_parent_id,
         &new_order_label,
         &revision,
         node_id,
@@ -188,7 +197,7 @@ pub async fn move_node_tree(
 
     // Update new parent's cached last-child metadata
     let new_metadata_key =
-        keys::last_child_metadata_key(&tenant_id, &repo_id, &branch, workspace, &target_parent.id);
+        keys::last_child_metadata_key(&tenant_id, &repo_id, &branch, workspace, &target_parent_id);
     batch.put_cf(cf_ordered, new_metadata_key, new_order_label.as_bytes());
 
     // Track moved node IDs for change tracking
@@ -354,7 +363,7 @@ pub async fn move_node_tree(
             workspace.to_string(),
             revision,
             old_parent_id,
-            Some(target_parent.id.clone()),
+            Some(target_parent_id.clone()),
             None, // Order label not computed in transaction
         );
     }

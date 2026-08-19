@@ -31,9 +31,11 @@ impl NodeRepositoryImpl {
             .await?
             .ok_or_else(|| raisin_error::Error::NotFound("Source node not found".to_string()))?;
 
-        // Validation 3: Target parent must exist
+        // Validation 3: Target parent must exist — except the WORKSPACE ROOT,
+        // which is a legitimate destination that stores no node of its own.
+        // `None` means the root (see validate_parent_exists_opt).
         let target_parent_node = self
-            .validate_parent_exists(tenant_id, repo_id, branch, workspace, target_parent)
+            .validate_parent_exists_opt(tenant_id, repo_id, branch, workspace, target_parent)
             .await?;
 
         // Validation 4: Check workspace allows this node type
@@ -45,16 +47,27 @@ impl NodeRepositoryImpl {
         )
         .await?;
 
-        // Validation 5: Check if this child node type is allowed under parent's NodeType schema
-        self.validate_parent_allows_child(
-            BranchScope::new(tenant_id, repo_id, branch),
-            &target_parent_node.node_type,
-            &source.node_type,
-        )
-        .await?;
+        // Validation 5: Check if this child node type is allowed under parent's
+        // NodeType schema. Skipped at the root — no parent node means no parent
+        // schema, and Validation 4 already asked the workspace, which is the
+        // authority on what may sit at its top level.
+        if let Some(parent) = &target_parent_node {
+            self.validate_parent_allows_child(
+                BranchScope::new(tenant_id, repo_id, branch),
+                &parent.node_type,
+                &source.node_type,
+            )
+            .await?;
+        }
 
         let name = new_name.unwrap_or(&source.name);
-        let new_path = format!("{}/{}", target_parent, name);
+        // At the root `target_parent` is already "/", so joining naively would
+        // yield "//name".
+        let new_path = if is_root_node {
+            format!("/{}", name)
+        } else {
+            format!("{}/{}", target_parent, name)
+        };
 
         // Validation 6: Destination path must be free — and stay free.
         // copy bypasses dispatch_create (it calls add_impl directly), so it
@@ -84,7 +97,8 @@ impl NodeRepositoryImpl {
             repo_id,
             branch,
             workspace,
-            &target_parent_node.id,
+            // Root-level nodes are indexed with parent_id = "/" (listing.rs).
+            target_parent_node.as_ref().map_or("/", |p| p.id.as_str()),
             name,
         )
         .await?;

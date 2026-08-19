@@ -76,9 +76,11 @@ impl NodeRepositoryImpl {
             })
             .unwrap_or_else(|| ("/".to_string(), new_path.to_string()));
 
-        // Validation 2: Target parent must exist
+        // Validation 2: Target parent must exist — EXCEPT the workspace root,
+        // which is a legitimate destination that stores no node of its own.
+        // `None` here means "the root"; see validate_parent_exists_opt.
         let target_parent_node = self
-            .validate_parent_exists(tenant_id, repo_id, branch, workspace, &target_parent_path)
+            .validate_parent_exists_opt(tenant_id, repo_id, branch, workspace, &target_parent_path)
             .await?;
 
         // Validation 3: Check workspace allows this node type
@@ -90,25 +92,32 @@ impl NodeRepositoryImpl {
         )
         .await?;
 
-        // Validation 4: Check if root node type is allowed under target parent's schema
-        self.validate_parent_allows_child(
-            BranchScope::new(tenant_id, repo_id, branch),
-            &target_parent_node.node_type,
-            &root_node.node_type,
-        )
-        .await?;
+        // Validation 4: Check if root node type is allowed under target parent's
+        // schema. Skipped at the root: there is no parent node whose schema
+        // could allow or refuse a child, and Validation 3 has already asked the
+        // WORKSPACE — which is the authority on what may sit at its top level.
+        if let Some(parent) = &target_parent_node {
+            self.validate_parent_allows_child(
+                BranchScope::new(tenant_id, repo_id, branch),
+                &parent.node_type,
+                &root_node.node_type,
+            )
+            .await?;
+        }
 
         // Validation 5: No circular reference
         self.validate_no_circular_reference(&old_root_path, &target_parent_path)
             .await?;
 
-        // Validation 6: Check for duplicate names in target location
+        // Validation 6: Check for duplicate names in target location. Root-level
+        // nodes are indexed with `parent_id = "/"` (see listing.rs), so the
+        // uniqueness check reaches the workspace's top level with that literal.
         self.validate_unique_child_name(
             tenant_id,
             repo_id,
             branch,
             workspace,
-            &target_parent_node.id,
+            target_parent_node.as_ref().map_or("/", |p| p.id.as_str()),
             &new_name,
         )
         .await?;
@@ -183,8 +192,12 @@ impl NodeRepositoryImpl {
             }
         }
 
-        // Add root node to new parent's ORDERED_CHILDREN
-        let new_parent_id = target_parent_node.id.clone();
+        // Add root node to new parent's ORDERED_CHILDREN. At the workspace root
+        // that index is keyed by the literal "/" — the same convention
+        // add_impl/update_impl use for root-level nodes (see listing.rs).
+        let new_parent_id = target_parent_node
+            .as_ref()
+            .map_or_else(|| "/".to_string(), |p| p.id.clone());
 
         let order_label = match self.get_order_label_for_child(
             tenant_id,

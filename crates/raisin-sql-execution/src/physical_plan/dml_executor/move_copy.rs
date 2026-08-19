@@ -77,21 +77,26 @@ pub async fn execute_move<
         })?;
 
     // Step 3: Verify target_parent exists
-    let _target_parent_node = ctx
-        .storage
-        .nodes()
-        .get_by_path(
-            StorageScope::new(&ctx.tenant_id, &ctx.repo_id, branch, workspace_id),
-            &target_parent_path,
-            None,
-        )
-        .await?
-        .ok_or_else(|| {
-            Error::NotFound(format!(
-                "Target parent node at path '{}' not found",
-                target_parent_path
-            ))
-        })?;
+    // The WORKSPACE ROOT is a legitimate destination and stores no node of its
+    // own, so it cannot be looked up — skip the existence check there rather
+    // than failing every move/copy to a workspace's top level. Step 6 below
+    // already special-cases `/` when building the new path.
+    if target_parent_path != "/" {
+        ctx.storage
+            .nodes()
+            .get_by_path(
+                StorageScope::new(&ctx.tenant_id, &ctx.repo_id, branch, workspace_id),
+                &target_parent_path,
+                None,
+            )
+            .await?
+            .ok_or_else(|| {
+                Error::NotFound(format!(
+                    "Target parent node at path '{}' not found",
+                    target_parent_path
+                ))
+            })?;
+    }
 
     // Step 4: Check for circular reference
     if target_parent_path.starts_with(&format!("{}/", source_path)) {
@@ -271,21 +276,26 @@ pub async fn execute_copy<
         })?;
 
     // Step 4: Verify target_parent exists
-    let _target_parent_node = ctx
-        .storage
-        .nodes()
-        .get_by_path(
-            StorageScope::new(&ctx.tenant_id, &ctx.repo_id, branch, workspace_id),
-            &target_parent_path,
-            None,
-        )
-        .await?
-        .ok_or_else(|| {
-            Error::NotFound(format!(
-                "Target parent node at path '{}' not found",
-                target_parent_path
-            ))
-        })?;
+    // The WORKSPACE ROOT is a legitimate destination and stores no node of its
+    // own, so it cannot be looked up — skip the existence check there rather
+    // than failing every move/copy to a workspace's top level. Step 6 below
+    // already special-cases `/` when building the new path.
+    if target_parent_path != "/" {
+        ctx.storage
+            .nodes()
+            .get_by_path(
+                StorageScope::new(&ctx.tenant_id, &ctx.repo_id, branch, workspace_id),
+                &target_parent_path,
+                None,
+            )
+            .await?
+            .ok_or_else(|| {
+                Error::NotFound(format!(
+                    "Target parent node at path '{}' not found",
+                    target_parent_path
+                ))
+            })?;
+    }
 
     // Step 5: Determine copy name
     let copy_name = new_name.clone().unwrap_or_else(|| source_node.name.clone());
