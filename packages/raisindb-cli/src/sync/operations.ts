@@ -651,10 +651,13 @@ async function createNodeFromYaml(
   content: string,
   options: SyncOperationOptions,
   token: string,
-  timestamp: number
+  timestamp: number,
+  explicitName?: string
 ): Promise<SyncResult> {
   const { config, force } = options;
-  const { url, nodePath } = buildServerUrl(config, filePath);
+  // Must use the SAME name the caller used to build the PUT url, or the node
+  // is created at a path the next push will 404 on again.
+  const { url, nodePath } = buildServerUrl(config, filePath, explicitName);
 
   // Derive parent URL and node name from the node path
   const lastSlash = url.lastIndexOf('/');
@@ -756,39 +759,178 @@ async function createNodeFromYaml(
 }
 
 /**
+ * Properties of a `raisin:Asset` node that are derived from the BINARY, not
+ * authored. The installer recomputes all of these from the stored blob every
+ * time (`install_binary_file` in
+ * crates/raisin-rocksdb/.../install_content/node_installer.rs), so a metadata
+ * file must never push them: `file` in particular is the Resource pointing at
+ * the blob, and overwriting it with an authored value unbinds the asset from
+ * its bytes.
+ */
+const ASSET_SERVER_OWNED_PROPS = [
+  'file',
+  'file_type',
+  'file_size',
+  'content_hash',
+];
+
+/**
+ * Push a `.node.{filename}.yaml` asset-metadata file.
+ *
+ * Applies the same fields the installer's `AssetFileDef` accepts -- `title`
+ * (defaulting to the filename), `description`, and any extra `properties` --
+ * onto the existing asset node, leaving the binary-derived properties alone.
+ *
+ * This used to be classified as `skip` ("applied at install time"), so editing
+ * an asset's title did nothing until the next `deploy --install`.
+ */
+async function pushAssetMetadata(
+  filePath: string,
+  options: SyncOperationOptions,
+  nodePath: string
+): Promise<SyncResult> {
+  const { contentBase, config } = options;
+  const timestamp = Date.now();
+  const fullPath = path.join(contentBase, filePath);
+
+  try {
+    const token = getToken();
+    if (!token) {
+      return {
+        success: false,
+        path: filePath,
+        operation: 'push',
+        error: 'Not authenticated',
+        timestamp,
+      };
+    }
+
+    const { text: content, error: envError } = readSubstituted(
+      fullPath,
+      filePath,
+      options.env
+    );
+    if (envError) {
+      return { success: false, path: filePath, operation: 'push', error: envError, timestamp };
+    }
+
+    const parsed = yaml.parse(content) || {};
+    const targetFilename = nodePath.split('/').pop() || '';
+
+    // Mirror AssetFileDef: title defaults to the filename, description is
+    // optional, and `properties` carries anything else.
+    const authored: Record<string, unknown> = { ...(parsed.properties || {}) };
+    authored.title =
+      typeof parsed.title === 'string' ? parsed.title : targetFilename;
+    if (typeof parsed.description === 'string') {
+      authored.description = parsed.description;
+    }
+    for (const owned of ASSET_SERVER_OWNED_PROPS) {
+      delete authored[owned];
+    }
+
+    // The mapping already resolved this to the SIBLING asset's node path, so
+    // buildServerUrl points at the asset node, not at the metadata file.
+    const { url } = buildServerUrl(config, filePath);
+    const headers = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    };
+
+    // Read-modify-write: PUT replaces ALL properties, so the binary-derived
+    // ones have to be read back and re-sent or the asset loses its bytes.
+    const existing = await fetch(url, { headers });
+    if (existing.status === 404) {
+      return {
+        success: false,
+        path: filePath,
+        operation: 'push',
+        error: `No asset node at '${nodePath}' yet`,
+        details:
+          `Asset metadata describes a sibling file. Push '${targetFilename}' ` +
+          'first (or re-save this file afterwards) so the asset node exists.',
+        timestamp,
+      };
+    }
+    if (!existing.ok) {
+      const errorText = await existing.text();
+      return {
+        success: false,
+        path: filePath,
+        operation: 'push',
+        error: `${existing.status} ${existing.statusText}`,
+        details: `GET ${url}\n${existing.status} ${existing.statusText}: ${errorText}`,
+        timestamp,
+      };
+    }
+
+    const node = (await existing.json()) as {
+      properties?: Record<string, unknown>;
+    };
+    const properties = { ...(node.properties || {}), ...authored };
+
+    const response = await fetch(url, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ properties }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      return {
+        success: false,
+        path: filePath,
+        operation: 'push',
+        error: `${response.status} ${response.statusText}`,
+        details: `PUT ${url}\n${response.status} ${response.statusText}: ${errorText}`,
+        timestamp,
+      };
+    }
+
+    return { success: true, path: filePath, operation: 'push', timestamp };
+  } catch (error) {
+    const { message, details } = formatError(error);
+    return {
+      success: false,
+      path: filePath,
+      operation: 'push',
+      error: message,
+      details,
+      timestamp,
+    };
+  }
+}
+
+/**
  * Build the request body for a push, depending on the file type.
  */
 function buildPushBody(
   filePath: string,
   content: string
 ): Record<string, unknown> {
-  const filename = path.basename(filePath);
   const ext = path.extname(filePath);
 
-  if (filename === '.node.yaml') {
-    // .node.yaml: parse YAML and send properties (and node_type if present)
+  if (['.yaml', '.yml'].includes(ext)) {
+    // Every node YAML, `.node.yaml` and flat `{name}.yaml` alike, is read the
+    // same way. The flat form used to skip the structural-key strip and push
+    // `node_type` in as an ordinary property.
+    //
+    // On `name`, see `nodeNameOverride` below: it is a node-name override ONLY
+    // when the file separates structure from content with a `properties:`
+    // block. In a flat file it is just another property, which is what a
+    // required `name` field (e.g. `raisin:Role`) needs it to be.
     const parsed = yaml.parse(content) || {};
     const body: Record<string, unknown> = {};
     if (parsed.properties) {
       body.properties = parsed.properties;
     } else {
-      // The whole file is properties (minus node_type/archetype)
-      const { node_type, archetype, ...rest } = parsed;
+      const { node_type: _nt, archetype: _at, ...rest } = parsed;
       body.properties = rest;
     }
     if (parsed.archetype) {
       body.archetype = parsed.archetype;
     }
     return body;
-  }
-
-  if (['.yaml', '.yml'].includes(ext)) {
-    // Other YAML files: parse and send as properties
-    const parsed = yaml.parse(content) || {};
-    if (parsed.properties) {
-      return { properties: parsed.properties };
-    }
-    return { properties: parsed };
   }
 
   if (ext === '.json') {
@@ -815,7 +957,6 @@ export async function pushFile(
     // structural kinds are resolved before the content-base existence check
     // because they don't live under contentBase (schema dirs sit at the
     // package root; skip/structural don't read a content file at all).
-    const filename = path.basename(filePath);
     const mapped = mapChangeToNode(filePath);
 
     if (mapped.kind === 'skip') {
@@ -853,6 +994,13 @@ export async function pushFile(
 
     if (mapped.kind === 'translation') {
       return pushTranslationFile(filePath, options);
+    }
+
+    if (mapped.kind === 'asset-metadata' && mapped.nodePath) {
+      if (dryRun) {
+        return { success: true, path: filePath, operation: 'push', timestamp };
+      }
+      return pushAssetMetadata(filePath, options, mapped.nodePath);
     }
 
     if (dryRun) {
@@ -902,13 +1050,26 @@ export async function pushFile(
       };
     }
 
-    // Build URL and body. For named node YAML files an explicit `name`
-    // (or properties.name) overrides the filename-derived node name.
+    // Build URL and body.
+    //
+    // `properties.name` is deliberately NOT consulted as a name override: it is
+    // content (a role's display name, a page's title), and letting it decide
+    // the node's location is what made the installer and this pusher disagree
+    // about where a file belongs. The server applies the same rule — see
+    // `ContentNodeDef::derive_name` in
+    // crates/raisin-rocksdb/.../package_install/content_types.rs.
+    //
+    // A TOP-LEVEL `name:` is only an override when the file also has a
+    // `properties:` block, i.e. it distinguishes structure from content.
+    // Without that block the whole file IS the properties, so `name` there is a
+    // property — and has to be, for a node type that requires one.
     let explicitName: string | undefined;
     if (mapped.kind === 'node-file') {
       try {
         const parsed = yaml.parse(content) || {};
-        explicitName = parsed.name || parsed.properties?.name;
+        if (parsed.properties && typeof parsed.name === 'string') {
+          explicitName = parsed.name;
+        }
       } catch {
         // Invalid YAML — fall back to the filename-derived name
       }
@@ -927,9 +1088,25 @@ export async function pushFile(
     });
 
     if (!response.ok) {
-      // If node doesn't exist and this is a .node.yaml, create it via POST
-      if (response.status === 404 && filename === '.node.yaml') {
-        return createNodeFromYaml(filePath, content, options, token, timestamp);
+      // The node doesn't exist yet — create it via POST to its parent.
+      //
+      // This used to be gated on `filename === '.node.yaml'`, so a flat
+      // `{name}.yaml` node (a layout the server installer accepts, see
+      // zip_collector.rs) 404'd on every push and could never be created at
+      // all. `.node.yml` failed the same way. Key off the classification
+      // instead, which already knows both spellings.
+      if (
+        response.status === 404 &&
+        (mapped.kind === 'node-yaml' || mapped.kind === 'node-file')
+      ) {
+        return createNodeFromYaml(
+          filePath,
+          content,
+          options,
+          token,
+          timestamp,
+          explicitName
+        );
       }
 
       const errorText = await response.text();
@@ -1203,13 +1380,29 @@ export async function deleteLocal(
 /**
  * Process a batch of local changes
  */
+/**
+ * Push order within one batch.
+ *
+ * Asset metadata (`.node.logo.png.yaml`) updates a node the BINARY creates, so
+ * it has to go last or a first-time sync fails with "no asset node yet" purely
+ * because the watcher happened to report the files in that order.
+ */
+function pushOrder(change: ChangeEvent): number {
+  if (change.type === 'unlink' || change.type === 'unlinkDir') return 0;
+  return mapChangeToNode(change.path).kind === 'asset-metadata' ? 1 : 0;
+}
+
 export async function processLocalChanges(
   changes: ChangeEvent[],
   options: SyncOperationOptions
 ): Promise<SyncResult[]> {
   const results: SyncResult[] = [];
 
-  for (const change of changes) {
+  // Stable sort: everything keeps its relative order except asset metadata,
+  // which moves behind the binaries it describes.
+  const ordered = [...changes].sort((a, b) => pushOrder(a) - pushOrder(b));
+
+  for (const change of ordered) {
     let result: SyncResult;
 
     if (change.type === 'unlink' || change.type === 'unlinkDir') {
