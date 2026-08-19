@@ -211,6 +211,11 @@ packageCmd
   .option('-r, --repo <name>', 'Repository name')
   .option('-b, --branch <name>', 'Target branch (default: "main")')
   .option('-i, --install', 'Install the package after upload')
+  .option(
+    '--mode <mode>',
+    'With --install, how to treat existing content: skip | sync | overwrite',
+    'sync'
+  )
   .option('-e, --env <profile>', 'Env profile for {env:...} tokens (loads .env.<profile>)')
   .option('--env-file <path...>', 'Additional env file(s) for {env:...} tokens')
   .action(async (folder, options) => {
@@ -255,6 +260,11 @@ program
   .option('-r, --repo <name>', 'Repository name')
   .option('-b, --branch <name>', 'Target branch (default: "main")')
   .option('-i, --install', 'Install the package after upload')
+  .option(
+    '--mode <mode>',
+    'With --install, how to treat existing content: skip | sync | overwrite',
+    'sync'
+  )
   .option('-e, --env <profile>', 'Env profile for {env:...} tokens (loads .env.<profile>)')
   .option('--env-file <path...>', 'Additional env file(s) for {env:...} tokens')
   .action(async (folder, options) => {

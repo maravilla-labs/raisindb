@@ -4,7 +4,7 @@ import yaml from 'yaml';
 import { createPackage } from './package.js';
 import { uploadPackage, installPackage } from './package.js';
 import { getDefaultRepo } from '../config.js';
-import { getWorkspaceRaw, putWorkspaceRaw } from '../api.js';
+import { getWorkspaceRaw, putWorkspaceRaw, type PackageInstallMode } from '../api.js';
 import { EnvContext, emptyEnvContext, substituteEnvTokens } from '../env/substitute.js';
 import { assertEnvFilesExist, loadEnvContext } from '../env/load.js';
 
@@ -15,6 +15,14 @@ interface DeployOptions {
   branch?: string;
   /** Also install the package after upload (deploy alone only uploads). */
   install?: boolean;
+  /**
+   * How the install treats content that already exists on the server.
+   *
+   * Defaults to `sync` — re-deploying a package is meant to APPLY the package,
+   * and the server's own default of `skip` made `deploy --install` over an
+   * existing package do nothing at all while reporting success.
+   */
+  mode?: PackageInstallMode;
   /** Profile for {env:...} substitution: --env production → .env.production */
   env?: string;
   /** Extra env files from --env-file, applied after the conventional ones. */
@@ -75,7 +83,13 @@ export async function deployPackage(folder: string, options: DeployOptions): Pro
 
   // Step 4 (optional): Install
   if (options.install) {
-    await installPackage(manifest.name, options.server, options.repo, options.branch || 'main');
+    await installPackage(
+      manifest.name,
+      options.server,
+      options.repo,
+      options.branch || 'main',
+      options.mode || 'sync'
+    );
 
     // Step 5: Reconcile EXISTING workspaces' allowed types. Package install
     // seeds a NEW workspace with the full definition, but for an already-

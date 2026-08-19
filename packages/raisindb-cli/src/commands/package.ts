@@ -8,6 +8,7 @@ import { render } from 'ink';
 import { getServer, getDefaultRepo } from '../config.js';
 import { getToken } from '../auth.js';
 import {
+  type PackageInstallMode,
   uploadPackage as apiUploadPackage,
   listPackages as apiListPackages,
   installPackage as apiInstallPackage,
@@ -740,7 +741,13 @@ async function waitForInstalled(
  * Waits for the background install job and reports the final lifecycle
  * state ('installed' = success, 'failed' = error with detail).
  */
-export async function installPackage(packageName: string, serverUrl?: string, repo?: string, branch = 'main'): Promise<void> {
+export async function installPackage(
+  packageName: string,
+  serverUrl?: string,
+  repo?: string,
+  branch = 'main',
+  mode?: PackageInstallMode
+): Promise<void> {
   const server = serverUrl || getServer();
   if (!server) {
     throw new Error('No server configured. Use --server option or run /connect first.');
@@ -757,11 +764,18 @@ export async function installPackage(packageName: string, serverUrl?: string, re
   console.log(`Installing package '${packageName}' in repository '${targetRepo}' (branch: ${branch})...`);
 
   try {
-    const response = await apiInstallPackage(targetRepo, packageName, branch);
+    const response = await apiInstallPackage(targetRepo, packageName, branch, mode);
 
     if (response.installed && !response.job_id) {
-      // Already installed (server-side no-op)
-      console.log(`\nPackage '${packageName}' is already installed.`);
+      // The server declined to do anything: the package is already installed
+      // and the mode says leave existing content alone. Say so plainly — this
+      // used to print "is already installed" and exit 0, which read as success
+      // while not one content node had been looked at.
+      console.log(
+        `\nPackage '${packageName}' is already installed, and mode '${mode || 'skip'}' ` +
+          'leaves existing content untouched — nothing was applied.'
+      );
+      console.log("Re-apply the package's content with: --mode sync");
       return;
     }
 

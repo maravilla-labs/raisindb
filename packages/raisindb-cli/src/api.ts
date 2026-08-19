@@ -312,10 +312,28 @@ export interface InstallResponse {
 /**
  * Install a package (starts a background install job)
  */
-export async function installPackage(repo: string, packageName: string, branch = 'main'): Promise<InstallResponse> {
+/**
+ * How an install treats content that already exists on the server.
+ *
+ * - `skip`      - leave existing nodes untouched (server default)
+ * - `sync`      - update existing nodes, create new ones
+ * - `overwrite` - force; bypasses the package's own `sync:` policy
+ */
+export type PackageInstallMode = 'skip' | 'sync' | 'overwrite';
+
+export async function installPackage(
+  repo: string,
+  packageName: string,
+  branch = 'main',
+  mode?: PackageInstallMode
+): Promise<InstallResponse> {
   const baseUrl = getBaseUrl();
-  const branchQuery = branch && branch !== 'main' ? `?branch=${encodeURIComponent(branch)}` : '';
-  const url = `${baseUrl}/api/repos/${repo}/packages/${encodeURIComponent(packageName)}/install${branchQuery}`;
+  const params = new URLSearchParams();
+  if (branch && branch !== 'main') params.set('branch', branch);
+  // Omitted entirely when unset, so the server default still applies.
+  if (mode) params.set('mode', mode);
+  const query = params.toString() ? `?${params.toString()}` : '';
+  const url = `${baseUrl}/api/repos/${repo}/packages/${encodeURIComponent(packageName)}/install${query}`;
 
   const response = await fetch(url, {
     method: 'POST',
