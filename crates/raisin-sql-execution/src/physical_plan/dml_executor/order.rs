@@ -176,6 +176,27 @@ async fn reorder_in_txn(
 }
 
 /// Resolve a NodeReference (path or ID) to an actual path.
+/// Resolve a MOVE/COPY *destination parent*, where the workspace root is valid.
+///
+/// `resolve_node_reference` answers by LOADING the node at the path, which the
+/// workspace root can never satisfy — it addresses a top level, not a node. Used
+/// for a destination it therefore refused every move or copy to the top level of
+/// a workspace with `Node at path '/' not found`, which is the executor-side
+/// half of the same assumption the analyzer made.
+pub(super) async fn resolve_target_parent_reference<S: Storage + 'static>(
+    node_ref: &raisin_sql::ast::order::NodeReference,
+    workspace: &str,
+    branch: &str,
+    ctx: &ExecutionContext<S>,
+) -> Result<String, Error> {
+    if let raisin_sql::ast::order::NodeReference::Path(path) = node_ref {
+        if path == "/" {
+            return Ok("/".to_string());
+        }
+    }
+    resolve_node_reference(node_ref, workspace, branch, ctx).await
+}
+
 pub(super) async fn resolve_node_reference<S: Storage + 'static>(
     node_ref: &raisin_sql::ast::order::NodeReference,
     workspace: &str,

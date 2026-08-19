@@ -16,7 +16,7 @@ use raisin_models::auth::AuthContext;
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_storage::{NodeRepository, Storage, StorageScope};
 
-use super::order::resolve_node_reference;
+use super::order::{resolve_node_reference, resolve_target_parent_reference};
 
 /// Threshold for large tree move operations.
 const MOVE_LARGE_TREE_THRESHOLD: usize = 5000;
@@ -53,8 +53,10 @@ pub async fn execute_move<
 
     // Step 1: Resolve node references to paths
     let source_path = resolve_node_reference(source, workspace_id, branch, ctx).await?;
+    // The workspace root is a valid destination and cannot be resolved by
+    // loading a node — see resolve_target_parent_reference.
     let target_parent_path =
-        resolve_node_reference(target_parent, workspace_id, branch, ctx).await?;
+        resolve_target_parent_reference(target_parent, workspace_id, branch, ctx).await?;
 
     tracing::debug!(
         "MOVE: Resolved source={} target_parent={}",
@@ -243,8 +245,10 @@ pub async fn execute_copy<
 
     // Step 1: Resolve node references to paths
     let source_path = resolve_node_reference(source, workspace_id, branch, ctx).await?;
+    // The workspace root is a valid destination and cannot be resolved by
+    // loading a node — see resolve_target_parent_reference.
     let target_parent_path =
-        resolve_node_reference(target_parent, workspace_id, branch, ctx).await?;
+        resolve_target_parent_reference(target_parent, workspace_id, branch, ctx).await?;
 
     tracing::debug!(
         "COPY: Resolved source={} target_parent={} recursive={}",

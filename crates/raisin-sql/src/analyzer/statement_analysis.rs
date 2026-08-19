@@ -95,11 +95,16 @@ pub(super) fn analyze_move(catalog: &dyn Catalog, stmt: &MoveStatement) -> Resul
         .resolve_workspace_name(&stmt.table)
         .ok_or_else(|| AnalysisError::TableNotFound(stmt.table.clone()))?;
 
-    // Validate source reference
+    // Validate source reference. The root itself cannot be moved — reported as a
+    // MOVE error, not the ORDER one this used to borrow.
+    if matches!(&stmt.source, NodeReference::Path(p) if p == "/") {
+        return Err(AnalysisError::MoveRootNodeNotAllowed);
+    }
     validate_node_reference(&stmt.source)?;
 
-    // Validate target parent reference
-    validate_node_reference(&stmt.target_parent)?;
+    // Validate target parent reference — `/` (the workspace root) is a valid
+    // destination.
+    validate_target_parent_reference(&stmt.target_parent)?;
 
     // Check for self-reference (cannot move into self)
     // This is a basic static check - deeper validation happens at execution
@@ -147,11 +152,16 @@ pub(super) fn analyze_copy(catalog: &dyn Catalog, stmt: &CopyStatement) -> Resul
         .resolve_workspace_name(&stmt.table)
         .ok_or_else(|| AnalysisError::TableNotFound(stmt.table.clone()))?;
 
-    // Validate source reference
+    // Validate source reference. The root itself cannot be copied — reported as a
+    // COPY error, not the ORDER one this used to borrow.
+    if matches!(&stmt.source, NodeReference::Path(p) if p == "/") {
+        return Err(AnalysisError::CopyRootNodeNotAllowed);
+    }
     validate_node_reference(&stmt.source)?;
 
-    // Validate target parent reference
-    validate_node_reference(&stmt.target_parent)?;
+    // Validate target parent reference — `/` (the workspace root) is a valid
+    // destination.
+    validate_target_parent_reference(&stmt.target_parent)?;
 
     // Check for self-reference (cannot copy into self)
     // This is a basic static check - deeper validation happens at execution
@@ -415,7 +425,12 @@ pub(super) fn analyze_unrelate(stmt: &UnrelateStatement) -> Result<AnalyzedUnrel
     })
 }
 
-/// Validate a node reference (path or ID)
+/// Validate a node reference that names a node — `/` is refused.
+///
+/// The workspace root is not a node: it cannot be ordered, restored, or moved
+/// as a thing in itself. For the DESTINATION of a MOVE or COPY it is a
+/// legitimate answer, and that is what `validate_target_parent_reference`
+/// below is for.
 fn validate_node_reference(node_ref: &NodeReference) -> Result<()> {
     match node_ref {
         NodeReference::Path(path) => {
@@ -450,6 +465,22 @@ fn validate_node_reference(node_ref: &NodeReference) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Validate a MOVE/COPY *destination parent*, where the workspace root IS valid.
+///
+/// `/` addresses a workspace's top level. Moving or copying a node there is an
+/// ordinary thing to want — it is where every root-level node already lives —
+/// and the storage layer supports it. Sharing the strict validator meant
+/// `MOVE … TO path='/'` was refused during analysis, with an ORDER-flavoured
+/// message for a statement that is not an ORDER.
+fn validate_target_parent_reference(node_ref: &NodeReference) -> Result<()> {
+    if let NodeReference::Path(path) = node_ref {
+        if path == "/" {
+            return Ok(());
+        }
+    }
+    validate_node_reference(node_ref)
 }
 
 /// Validate a RELATE/UNRELATE node reference (path or ID)

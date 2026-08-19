@@ -107,6 +107,9 @@ pub enum AnalysisError {
     #[error("MOVE: Cannot move a node into itself")]
     MoveSelfReference,
 
+    #[error("MOVE: The workspace root '/' cannot itself be moved")]
+    MoveRootNodeNotAllowed,
+
     #[error("MOVE: Cannot move a node into its own descendant. Source '{source_path}' cannot be moved into '{target_path}'")]
     MoveCircularReference {
         source_path: String,
@@ -116,6 +119,9 @@ pub enum AnalysisError {
     // COPY statement errors
     #[error("COPY: Cannot copy a node into itself")]
     CopySelfReference,
+
+    #[error("COPY: The workspace root '/' cannot itself be copied")]
+    CopyRootNodeNotAllowed,
 
     #[error("COPY: Cannot copy a node into its own descendant. Source '{source_path}' cannot be copied into '{target_path}'")]
     CopyCircularReference {
