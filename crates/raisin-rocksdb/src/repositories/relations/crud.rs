@@ -121,6 +121,7 @@ pub(super) async fn remove_relation(
     source_node_id: &str,
     target_workspace: &str,
     target_node_id: &str,
+    relation_type: Option<&str>,
 ) -> Result<bool> {
     // Get relation column family handle
     let cf_relation = get_relation_cf(db)?;
@@ -155,8 +156,12 @@ pub(super) async fn remove_relation(
             // Parse key to extract relation_type
             let key_parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
             if key_parts.len() >= 7 {
-                let relation_type = String::from_utf8_lossy(key_parts[6]).to_string();
-                relations_to_remove.push(relation_type);
+                let found_type = String::from_utf8_lossy(key_parts[6]).to_string();
+                // A typed removal takes only its own edge.
+                if relation_type.is_some_and(|want| want != found_type) {
+                    continue;
+                }
+                relations_to_remove.push(found_type);
                 found_any = true;
             }
         }

@@ -107,6 +107,7 @@ impl RelationRepository for RelationRepositoryImpl {
         source_node_id: &str,
         target_workspace: &str,
         target_node_id: &str,
+        relation_type: Option<&str>,
     ) -> Result<bool> {
         let StorageScope {
             tenant_id,
@@ -128,6 +129,7 @@ impl RelationRepository for RelationRepositoryImpl {
                 source_node_id,
                 target_workspace,
                 target_node_id,
+                relation_type,
             )
             .await?;
 
@@ -142,6 +144,7 @@ impl RelationRepository for RelationRepositoryImpl {
             source_node_id,
             target_workspace,
             target_node_id,
+            relation_type,
         )
         .await
     }

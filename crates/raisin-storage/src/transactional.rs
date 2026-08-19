@@ -405,6 +405,7 @@ pub trait TransactionalContext: Send + Sync {
         source_node_id: &str,
         target_workspace: &str,
         target_node_id: &str,
+        relation_type: Option<&str>,
     ) -> Result<bool>;
 
     /// Scan all nodes in a workspace (collects all into memory)

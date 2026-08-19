@@ -95,6 +95,7 @@ impl PackedRelationRepository {
         source_node_id: &str,
         _target_workspace: &str, // Ignored for packed storage (assumes same workspace or stored in target_id)
         target_node_id: &str,
+        relation_type: Option<&str>,
     ) -> Result<bool> {
         // Read previous state
         let prev_relations = self
@@ -111,8 +112,14 @@ impl PackedRelationRepository {
         if let Some(mut relations) = prev_relations {
             let initial_len = relations.len();
 
-            // Remove relations matching target_node_id
-            relations.retain(|r| r.target_id != target_node_id);
+            // Remove relations matching target_node_id — and, when a type is
+            // given, only that type. A CompactRelation carries its own
+            // relation_type, so the pair's other edges are kept.
+            relations.retain(|r| {
+                let same_target = r.target_id == target_node_id;
+                let same_type = relation_type.is_none_or(|want| want == r.relation_type);
+                !(same_target && same_type)
+            });
 
             if relations.len() != initial_len {
                 // Write new version

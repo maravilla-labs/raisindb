@@ -83,12 +83,16 @@ pub trait RelationRepository: Send + Sync {
     /// # Returns
     ///
     /// `true` if the relationship existed and was removed, `false` if it didn't exist
+    /// * `relation_type` - Remove only this type; `None` removes every relation
+    ///   between the two nodes. Storage keys embed the type, so a typed removal
+    ///   is a filter on the scan, not a separate index.
     fn remove_relation(
         &self,
         scope: StorageScope<'_>,
         source_node_id: &str,
         target_workspace: &str,
         target_node_id: &str,
+        relation_type: Option<&str>,
     ) -> impl std::future::Future<Output = Result<bool>> + Send;
 
     /// Get all outgoing relationships from a node

@@ -178,8 +178,10 @@ pub async fn add_relation(
 /// Scans the forward index to find all relations from source to target, then writes
 /// tombstones to all three indexes (forward, reverse, global) for each relation found.
 ///
-/// Since the method doesn't specify relation_type, this removes ALL relations
-/// between the two nodes.
+/// `relation_type` selects WHICH relations go: `Some("employer")` tombstones only
+/// that type, `None` removes every relation between the two nodes. The scan
+/// already parses each relation's type out of its key, so this is a filter on a
+/// walk it was doing anyway.
 ///
 /// Each removed relation is tracked via ChangeTracker for CRDT replication.
 ///
@@ -190,6 +192,7 @@ pub async fn add_relation(
 /// * `source_node_id` - ID of the source node
 /// * `target_workspace` - Workspace containing the target node
 /// * `target_node_id` - ID of the target node
+/// * `relation_type` - Only this type, or `None` for all
 ///
 /// # Returns
 ///
@@ -200,6 +203,7 @@ pub async fn remove_relation(
     source_node_id: &str,
     target_workspace: &str,
     target_node_id: &str,
+    relation_type: Option<&str>,
 ) -> Result<bool> {
     // 1. Get metadata
     let (tenant_id, repo_id, branch) = {
@@ -261,8 +265,13 @@ pub async fn remove_relation(
             // Parse key to extract relation_type
             let key_parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
             if key_parts.len() >= 7 {
-                let relation_type = String::from_utf8_lossy(key_parts[6]).to_string();
-                relations_to_remove.push(relation_type);
+                let found_type = String::from_utf8_lossy(key_parts[6]).to_string();
+                // A typed removal takes only its own edge; the others between
+                // this pair must survive.
+                if relation_type.is_some_and(|want| want != found_type) {
+                    continue;
+                }
+                relations_to_remove.push(found_type);
                 found_any = true;
             }
         }

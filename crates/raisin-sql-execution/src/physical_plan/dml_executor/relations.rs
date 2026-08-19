@@ -134,13 +134,9 @@ pub async fn execute_unrelate<
     let target_id =
         resolve_relate_node_id(&target.node_ref, &target.workspace, branch, ctx).await?;
 
-    // Step 3: Remove the relation
-    if relation_type.is_some() {
-        tracing::warn!(
-            "UNRELATE with TYPE filter is not yet fully supported - removing all relations between nodes"
-        );
-    }
-
+    // Step 3: Remove the relation. `TYPE 'x'` removes ONLY that type; without it
+    // every relation between the pair goes. Both scan paths (packed + legacy)
+    // already parse each relation's type, so this is a filter on that walk.
     let removed = ctx
         .storage
         .relations()
@@ -149,6 +145,7 @@ pub async fn execute_unrelate<
             &source_id,
             &target.workspace,
             &target_id,
+            relation_type.as_deref(),
         )
         .await?;
 

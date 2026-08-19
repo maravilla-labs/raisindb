@@ -101,6 +101,80 @@ async fn test_add_and_get_relationships() {
 }
 
 #[tokio::test]
+async fn test_remove_relationship_by_type_keeps_the_others() {
+    // Two nodes can be related in several ways at once — a person may be both a
+    // colleague and an employee of the same company. Removing ONE of those must
+    // leave the rest alone.
+    //
+    // This is a regression test: `remove_relation` used to take no type at all,
+    // so `UNRELATE ... TYPE 'x'` warned and deleted EVERY relation between the
+    // pair. The caller saw the relationship it asked about disappear, which
+    // looked correct, and lost the others silently.
+    let (storage, tenant_id, repo_id, branch, workspace) = setup_storage().await;
+    let scope = || StorageScope::new(&tenant_id, &repo_id, &branch, &workspace);
+
+    for relation_type in ["employer", "colleague"] {
+        storage
+            .relations()
+            .add_relation(
+                scope(),
+                "node1",
+                "raisin:Page",
+                RelationRef::simple(
+                    "node2".to_string(),
+                    workspace.clone(),
+                    "raisin:Page".to_string(),
+                    relation_type.to_string(),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+
+    let outgoing = storage
+        .relations()
+        .get_outgoing_relations(scope(), "node1", None)
+        .await
+        .unwrap();
+    assert_eq!(outgoing.len(), 2, "both typed relations should be stored");
+
+    // Remove ONLY the employer edge.
+    let removed = storage
+        .relations()
+        .remove_relation(scope(), "node1", &workspace, "node2", Some("employer"))
+        .await
+        .unwrap();
+    assert!(removed);
+
+    let outgoing = storage
+        .relations()
+        .get_outgoing_relations(scope(), "node1", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        outgoing.len(),
+        1,
+        "removing one type must not take the other with it"
+    );
+    assert_eq!(outgoing[0].relation_type, "colleague");
+
+    // And `None` still means "all of them".
+    storage
+        .relations()
+        .remove_relation(scope(), "node1", &workspace, "node2", None)
+        .await
+        .unwrap();
+    let outgoing = storage
+        .relations()
+        .get_outgoing_relations(scope(), "node1", None)
+        .await
+        .unwrap();
+    assert!(outgoing.is_empty(), "None must remove every relation");
+
+    println!("✅ Test passed: remove_relationship_by_type_keeps_the_others");
+}
+
+#[tokio::test]
 async fn test_remove_relationship() {
     let (storage, tenant_id, repo_id, branch, workspace) = setup_storage().await;
 
@@ -143,6 +217,7 @@ async fn test_remove_relationship() {
             "node1",
             &workspace,
             "node2",
+            None,
         )
         .await
         .unwrap();
@@ -584,6 +659,7 @@ async fn test_revision_time_travel() {
             "node1",
             &workspace,
             "node2",
+            None,
         )
         .await
         .unwrap();

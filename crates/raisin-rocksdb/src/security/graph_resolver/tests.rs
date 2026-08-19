@@ -27,6 +27,7 @@ impl RelationRepository for MockRelationRepo {
         _source_node_id: &str,
         _target_workspace: &str,
         _target_node_id: &str,
+        _relation_type: Option<&str>,
     ) -> impl std::future::Future<Output = Result<bool>> + Send {
         async { unimplemented!() }
     }

@@ -236,6 +236,11 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
                 &source_node.id,
                 target_workspace,
                 &target_node.id,
+                // `None` = every relation between the pair. This service method
+                // takes no type argument, so removing all of them is its
+                // contract; it is passed explicitly rather than implied by a
+                // signature that could not express anything else.
+                None,
             )
             .await?;
 
