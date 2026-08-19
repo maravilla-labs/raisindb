@@ -47,6 +47,13 @@ pub(super) struct InstallStats {
     pub package_assets_installed: usize,
     pub translations_applied: usize,
     pub translations_skipped: usize,
+    /// Per-entry rejections, one message each.
+    ///
+    /// Content entries no longer abort the install on the first bad node, so
+    /// this is how the operator learns *which* ones were refused and why.
+    /// Non-empty means the install failed, but only after every other entry
+    /// had its chance.
+    pub content_errors: Vec<String>,
 }
 
 /// Content node definition from YAML
@@ -69,31 +76,49 @@ pub(super) struct ContentNodeDef {
 }
 
 impl ContentNodeDef {
-    /// Derive node name from file path if not explicitly set.
+    /// Derive the node name from the file path.
+    ///
     /// Priority:
-    /// 1. Explicit `name` field
-    /// 2. `properties.name` (for nodes where name is a property)
-    /// 3. Parent folder name (for `node.yaml` or `.node.yaml` folder definition files)
-    /// 4. Filename without extension (for `something.yaml` files)
+    /// 1. Explicit top-level `name:` field
+    /// 2. Parent folder name (for `node.yaml` / `.node.yaml` folder definitions)
+    /// 3. Filename without extension (for `something.yaml` files)
+    ///
+    /// **`properties.name` is deliberately NOT consulted.** The file's location
+    /// is structure; `properties.name` is content, and letting content decide
+    /// structure produced a split-brain: this installer used to place
+    /// `roles/author/.node.yaml` (with `properties.name: "Author"`) at
+    /// `/roles/Author`, while the CLI live-sync mapper
+    /// (`packages/raisindb-cli/src/sync/mapping.ts`) and the translation
+    /// lookup ([`super::translation::derive_node_name_from_base_path`]) both
+    /// derive it from the directory and target `/roles/author`. One source file
+    /// became two nodes, and for a node type with a `unique: true` property
+    /// (e.g. `raisin:Role.role_id`) the second write failed the unique check and
+    /// took the whole install batch down with it.
+    ///
+    /// If you are tempted to re-add `properties.name` here, note that three
+    /// other places already derive the same answer from the path alone; a
+    /// fourth opinion is what caused the bug.
     pub fn derive_name(&self, file_path: &str) -> String {
-        // 1. Check explicit name field
+        // 1. Explicit name field wins - the author said so directly.
         if let Some(name) = &self.name {
             return name.clone();
         }
 
-        // 2. Check properties.name
-        if let Some(props) = &self.properties {
-            if let Some(PropertyValue::String(name)) = props.get("name") {
-                return name.clone();
-            }
-        }
+        // 2/3. Otherwise the filesystem location is authoritative.
+        Self::name_from_path(file_path)
+    }
 
-        // 3. Derive from file path
+    /// The node name implied by a content file's location alone.
+    ///
+    /// `.../roles/author/.node.yaml` → `author`; `.../roles/editor.yaml` →
+    /// `editor`. This is the same rule
+    /// [`super::translation::derive_node_name_from_base_path`] applies.
+    pub(super) fn name_from_path(file_path: &str) -> String {
         let path = std::path::Path::new(file_path);
         let filename = path.file_stem().unwrap_or_default().to_string_lossy();
 
         if filename == "node" || filename == ".node" {
-            // For node.yaml or .node.yaml, use parent folder name
+            // For node.yaml or .node.yaml, use the parent folder name
             if let Some(parent) = path.parent() {
                 if let Some(folder_name) = parent.file_name() {
                     return folder_name.to_string_lossy().to_string();
@@ -101,8 +126,132 @@ impl ContentNodeDef {
             }
         }
 
-        // 4. Use filename without extension
         filename.to_string()
+    }
+
+    /// The name this definition would have produced under the pre-fix rule,
+    /// when that differs from the name now derived from the path.
+    ///
+    /// Used by the installer to adopt a node an earlier install placed at the
+    /// legacy path instead of creating a duplicate beside it. Returns `None`
+    /// when an explicit `name:` was given (that always won, so nothing moved),
+    /// when there is no `properties.name`, or when the two agree.
+    pub(super) fn legacy_property_name(&self, file_path: &str) -> Option<String> {
+        if self.name.is_some() {
+            return None;
+        }
+
+        let legacy = match self.properties.as_ref()?.get("name")? {
+            PropertyValue::String(name) => name.clone(),
+            _ => return None,
+        };
+
+        if legacy == Self::name_from_path(file_path) {
+            return None;
+        }
+
+        Some(legacy)
+    }
+}
+
+#[cfg(test)]
+mod derive_name_tests {
+    use super::*;
+
+    fn def(name: Option<&str>, prop_name: Option<&str>) -> ContentNodeDef {
+        ContentNodeDef {
+            id: None,
+            node_type: "raisin:Role".to_string(),
+            name: name.map(|s| s.to_string()),
+            parent: None,
+            archetype: None,
+            properties: prop_name.map(|n| {
+                let mut m = HashMap::new();
+                m.insert("name".to_string(), PropertyValue::String(n.to_string()));
+                m
+            }),
+        }
+    }
+
+    #[test]
+    fn folder_name_wins_over_property_name() {
+        // The regression this fix exists for: a role's display name must not
+        // relocate the node. `raisin-auth` ships exactly this shape.
+        let d = def(None, Some("Author"));
+        assert_eq!(
+            d.derive_name("content/_raisin__access_control/roles/author/.node.yaml"),
+            "author"
+        );
+    }
+
+    #[test]
+    fn file_stem_wins_over_property_name() {
+        let d = def(None, Some("Content Editor"));
+        assert_eq!(
+            d.derive_name("content/_raisin__access_control/roles/editor.yaml"),
+            "editor"
+        );
+    }
+
+    #[test]
+    fn explicit_name_field_still_wins() {
+        let d = def(Some("explicit"), Some("Author"));
+        assert_eq!(
+            d.derive_name("content/ws/roles/author/.node.yaml"),
+            "explicit"
+        );
+    }
+
+    #[test]
+    fn undotted_node_yaml_also_uses_folder() {
+        let d = def(None, None);
+        assert_eq!(d.derive_name("content/ws/roles/viewer/node.yaml"), "viewer");
+    }
+
+    #[test]
+    fn agrees_with_translation_lookup() {
+        // These two must not drift: a translation overlay finds its base node
+        // by path alone, so a name derived any other way is unreachable.
+        for p in [
+            "content/ws/roles/author/.node.yaml",
+            "content/ws/roles/editor.yaml",
+            "content/ws/about.yaml",
+        ] {
+            assert_eq!(
+                def(None, Some("Display Name")).derive_name(p),
+                super::super::translation::derive_node_name_from_base_path(p),
+                "derive_name and derive_node_name_from_base_path disagree for {p}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_property_name_reports_the_moved_node() {
+        let d = def(None, Some("Author"));
+        assert_eq!(
+            d.legacy_property_name("content/ws/roles/author/.node.yaml"),
+            Some("Author".to_string())
+        );
+    }
+
+    #[test]
+    fn legacy_property_name_is_none_when_nothing_moved() {
+        // No properties.name at all
+        assert_eq!(
+            def(None, None).legacy_property_name("content/ws/roles/author/.node.yaml"),
+            None
+        );
+        // properties.name already equals the path-derived name
+        assert_eq!(
+            def(None, Some("author")).legacy_property_name("content/ws/roles/author/.node.yaml"),
+            None
+        );
+        // explicit name: always won, so the node never sat elsewhere
+        assert_eq!(
+            def(Some("author"), Some("Author"))
+                .legacy_property_name("content/ws/roles/author/.node.yaml"),
+            None
+        );
     }
 }
 
@@ -167,6 +316,16 @@ pub(super) enum ContentEntry {
         workspace: String,
         yaml_path: String,
         node: Box<Node>,
+        /// Path this node occupied under the pre-fix naming rule, when that
+        /// differs from `node.path`.
+        ///
+        /// Before `derive_name` was made path-authoritative, `properties.name`
+        /// decided the node's location, so `roles/author/.node.yaml` with
+        /// `properties.name: "Author"` installed to `/roles/Author`. Installing
+        /// the same package again would now create a *second* node at
+        /// `/roles/author` beside the first. The installer probes this path and
+        /// adopts the node it finds instead. `None` when nothing moved.
+        legacy_path: Option<String>,
     },
     /// A binary file to be stored as raisin:Asset
     BinaryFile {

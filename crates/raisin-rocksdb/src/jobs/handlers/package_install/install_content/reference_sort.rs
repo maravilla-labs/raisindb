@@ -284,6 +284,7 @@ mod tests {
         ContentEntry::NodeDef {
             workspace: workspace.to_string(),
             yaml_path: String::new(),
+            legacy_path: None,
             node: Box::new(Node {
                 id: nanoid::nanoid!(),
                 node_type: "test:Node".to_string(),
@@ -335,6 +336,7 @@ mod tests {
         ContentEntry::NodeDef {
             workspace: workspace.to_string(),
             yaml_path: String::new(),
+            legacy_path: None,
             node: Box::new(Node {
                 id: nanoid::nanoid!(),
                 node_type: "studio:Page".to_string(),
@@ -484,6 +486,7 @@ mod tests {
             ContentEntry::NodeDef {
                 workspace: "ws".to_string(),
                 yaml_path: String::new(),
+                legacy_path: None,
                 node: Box::new(Node {
                     id: nanoid::nanoid!(),
                     node_type: "test:Node".to_string(),

@@ -18,6 +18,7 @@
 use raisin_error::{Error, Result};
 use raisin_models::nodes::properties::value::PropertyValue;
 use raisin_models::nodes::Node;
+use raisin_packages::namespace_encoding::decode_namespace;
 use raisin_storage::jobs::JobId;
 use raisin_storage::transactional::TransactionalStorage;
 use raisin_storage::Storage;
@@ -86,16 +87,12 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             }
 
             // Decode namespace encoding: _raisin__access_control → raisin:access_control
-            let raw_ws = path_parts[1];
-            let workspace = if raw_ws.starts_with('_') && !raw_ws.starts_with("__") {
-                if let Some(pos) = raw_ws[1..].find("__") {
-                    format!("{}:{}", &raw_ws[1..pos + 1], &raw_ws[pos + 3..])
-                } else {
-                    raw_ws.to_string()
-                }
-            } else {
-                raw_ws.to_string()
-            };
+            //
+            // Call the shared helper rather than re-deriving it. This was an
+            // inline copy, and the dry-run simulator had no copy at all — so
+            // preview and install disagreed about which workspace a file
+            // belonged to, which is exactly how this drifts.
+            let workspace = decode_namespace(path_parts[1]);
             let filename = path_parts.last().unwrap_or(&"").to_string();
 
             // Build parent path (everything between workspace and filename)
@@ -110,9 +107,29 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             file.read_to_end(&mut content_bytes)
                 .map_err(|e| Error::storage(format!("Failed to read file {}: {}", name, e)))?;
 
-            if filename.ends_with(".yaml") {
+            // `.node.yml` is accepted alongside `.node.yaml` so the CLI sync
+            // mapper and this collector agree on what a folder definition is;
+            // it was previously skipped here as a hidden file while `raisindb
+            // sync` happily pushed it.
+            //
+            // Deliberately NOT extended to a bare `{name}.yml`. A `.yml` data
+            // file belongs in a package as a `raisin:Asset` — that is how
+            // assets get in at all — so it falls through to the binary branch,
+            // as it always has. The CLI was narrowed to match.
+            let is_folder_def_yml = filename == ".node.yml" || filename == "node.yml";
+
+            if filename.ends_with(".yaml") || is_folder_def_yml {
+                // Classification keys on the `.yaml` suffix
+                // (`parse_translation_locale`, `parse_asset_metadata_filename`),
+                // so normalise the spelling for those checks only. Path
+                // derivation still sees the real filename and handles both.
+                let classify = match filename.strip_suffix(".yml") {
+                    Some(stem) => format!("{stem}.yaml"),
+                    None => filename.clone(),
+                };
+
                 // Check if this is a translation file (.node.{locale}.yaml or {name}.{locale}.yaml)
-                if let Some(locale) = parse_translation_locale(&filename) {
+                if let Some(locale) = parse_translation_locale(&classify) {
                     let content = String::from_utf8(content_bytes)
                         .map_err(|_| Error::Validation(format!("Invalid UTF-8 in {}", name)))?;
                     let json_value: serde_json::Value =
@@ -141,7 +158,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                             );
                         }
                     }
-                } else if let Some(target_filename) = parse_asset_metadata_filename(&filename) {
+                } else if let Some(target_filename) = parse_asset_metadata_filename(&classify) {
                     // Check if this is asset metadata (.node.{filename}.yaml)
                     // This is metadata for an associated file
                     let metadata: AssetFileDef =
@@ -219,6 +236,24 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             let derived_name = content_def.derive_name(&yaml_path);
             let derived_path = derive_content_path(&yaml_path, &derived_name);
 
+            // Where an earlier install would have put this node, back when
+            // `properties.name` outranked the file's location. Probed (not
+            // written) by the installer so a re-install adopts that node
+            // rather than creating a twin beside it.
+            let legacy_path = content_def
+                .legacy_property_name(&yaml_path)
+                .map(|legacy_name| derive_content_path(&yaml_path, &legacy_name));
+
+            if let Some(legacy) = &legacy_path {
+                tracing::debug!(
+                    job_id = %job_id,
+                    file = %yaml_path,
+                    node_path = %derived_path,
+                    legacy_path = %legacy,
+                    "Content node moved: pre-fix installs placed it at the legacy path"
+                );
+            }
+
             tracing::debug!(
                 job_id = %job_id,
                 file = %yaml_path,
@@ -258,6 +293,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                 workspace,
                 yaml_path,
                 node: Box::new(node),
+                legacy_path,
             });
         }
 

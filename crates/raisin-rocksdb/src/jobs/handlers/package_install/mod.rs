@@ -48,6 +48,8 @@ mod install_content;
 mod install_schema;
 mod manifest;
 mod nested;
+#[cfg(test)]
+mod role_install_tests;
 pub(in crate::jobs::handlers) mod translation;
 mod types;
 
