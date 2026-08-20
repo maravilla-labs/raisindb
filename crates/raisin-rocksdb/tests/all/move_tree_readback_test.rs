@@ -172,6 +172,99 @@ async fn a_moved_node_resolves_at_its_new_path_within_the_same_transaction() {
     assert!(tx_read(&storage, "/old").await.is_none());
 }
 
+/// Moving a node ONTO a path another node already holds must be refused.
+///
+/// PATH_INDEX stores one mapping per (path, revision) with the id in the VALUE,
+/// so the move's `put` silently replaced the occupant's mapping and stranded it:
+/// blob and every other index entry still live, reachable by a table scan and by
+/// nothing else. Nothing errored.
+///
+/// It compounds, which is why it is worth a hard failure rather than a warning:
+/// once a path no longer resolves, `get_node_by_path` reports "nothing here", and
+/// the next caller that upserts there takes the CREATE branch and adds a
+/// duplicate — drifting the index further. The package installer does exactly
+/// this on every install, adopting a node from the legacy `properties.name` path
+/// by moving it onto the path-derived one.
+#[tokio::test]
+async fn moving_onto_an_occupied_path_is_refused() {
+    let (storage, _dir) = setup().await;
+
+    // Two independent nodes, /a and /b.
+    let (a_id, b_id) = {
+        let tx = storage.begin_context().await.unwrap();
+        tx.set_tenant_repo(TENANT, REPO).unwrap();
+        tx.set_branch(BRANCH).unwrap();
+        tx.set_actor("test").unwrap();
+        tx.set_message("seed").unwrap();
+        tx.set_auth_context(AuthContext::system()).unwrap();
+        let a = node("/a");
+        let b = node("/b");
+        let (a_id, b_id) = (a.id.clone(), b.id.clone());
+        tx.upsert_deep_node(WS, &a, "raisin:Folder").await.unwrap();
+        tx.upsert_deep_node(WS, &b, "raisin:Folder").await.unwrap();
+        tx.commit().await.unwrap();
+        (a_id, b_id)
+    };
+
+    let tx = storage.begin_context().await.unwrap();
+    tx.set_tenant_repo(TENANT, REPO).unwrap();
+    tx.set_branch(BRANCH).unwrap();
+    tx.set_actor("test").unwrap();
+    tx.set_message("move onto occupied").unwrap();
+    tx.set_auth_context(AuthContext::system()).unwrap();
+
+    let err = tx
+        .move_node_tree(WS, &a_id, "/b")
+        .await
+        .expect_err("moving /a onto /b must be refused");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("already occupies"),
+        "the error must name the collision, got: {msg}"
+    );
+
+    drop(tx);
+
+    // Neither node was harmed, and /b still belongs to its original owner.
+    let at_a = tx_read(&storage, "/a").await.expect("/a must survive");
+    let at_b = tx_read(&storage, "/b").await.expect("/b must survive");
+    assert_eq!(at_a.id, a_id);
+    assert_eq!(at_b.id, b_id, "the occupant must keep its path");
+}
+
+/// A no-op move of a node onto its OWN path is not a collision.
+#[tokio::test]
+async fn moving_a_node_onto_its_own_path_is_allowed() {
+    let (storage, _dir) = setup().await;
+
+    let id = {
+        let tx = storage.begin_context().await.unwrap();
+        tx.set_tenant_repo(TENANT, REPO).unwrap();
+        tx.set_branch(BRANCH).unwrap();
+        tx.set_actor("test").unwrap();
+        tx.set_message("seed").unwrap();
+        tx.set_auth_context(AuthContext::system()).unwrap();
+        let n = node("/same");
+        let id = n.id.clone();
+        tx.upsert_deep_node(WS, &n, "raisin:Folder").await.unwrap();
+        tx.commit().await.unwrap();
+        id
+    };
+
+    let tx = storage.begin_context().await.unwrap();
+    tx.set_tenant_repo(TENANT, REPO).unwrap();
+    tx.set_branch(BRANCH).unwrap();
+    tx.set_actor("test").unwrap();
+    tx.set_message("self move").unwrap();
+    tx.set_auth_context(AuthContext::system()).unwrap();
+    tx.move_node_tree(WS, &id, "/same")
+        .await
+        .expect("a node may be moved onto its own path");
+    tx.commit().await.unwrap();
+
+    assert_eq!(tx_read(&storage, "/same").await.map(|n| n.id), Some(id));
+}
+
 async fn tx_read(storage: &Arc<RocksDBStorage>, path: &str) -> Option<Node> {
     use raisin_storage::{scope::StorageScope, NodeRepository};
     storage

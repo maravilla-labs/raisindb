@@ -95,6 +95,34 @@ pub async fn move_node_tree(
             .id
     };
 
+    // A DIFFERENT node already at the destination is a CONFLICT, not a move.
+    //
+    // Nothing below checks this. The batch tombstones the old PATH_INDEX key and
+    // writes `new_path -> node.id`, and PATH_INDEX holds exactly one mapping per
+    // (path, revision) with the id in the VALUE — so moving onto an occupied path
+    // silently overwrites the occupant's mapping and strands it: blob and every
+    // other index entry still live, reachable by a table scan and by nothing else.
+    // (The `get_order_label_for_child` probe further down looks like this check
+    // and is not: it asks whether THIS node already has a slot under the new
+    // parent.)
+    //
+    // That matters most where moves are automatic. The package installer adopts a
+    // node found at the legacy `properties.name` path by moving it onto the
+    // path-derived one, so a tenant holding nodes at BOTH paths silently loses one
+    // — and once a path is unresolvable, `get_node_by_path` reports "nothing here"
+    // and the next install CREATES a duplicate, which drifts the index further.
+    // Measured on a live tenant: one package's content reached four copies.
+    //
+    // Refuse instead. A caller that means "replace" can delete first and say so.
+    if let Some(occupant) = super::read::get_node_by_path(tx, workspace, new_path).await? {
+        if occupant.id != source_node.id {
+            return Err(raisin_error::Error::Conflict(format!(
+                "Cannot move '{}' to '{}': node '{}' already occupies that path",
+                old_root_path, new_path, occupant.id
+            )));
+        }
+    }
+
     // Get old parent info BEFORE locking batch (to avoid holding non-Send lock across await)
     let old_parent_id = if let Some(source_parent_path) = source_node
         .path
