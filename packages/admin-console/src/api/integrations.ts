@@ -217,6 +217,12 @@ export interface Integration {
   /** Names only of the connector-level secrets that are stored. */
   config_secret_fields?: string[]
   /**
+   * Mount presets authored on the connector template and carried into each
+   * instance by `createIntegrationFromTemplate` (it spreads `_raw`). Read-only
+   * in the console; see `planBundle` for how one becomes N mounts.
+   */
+  mount_bundles?: MountBundle[]
+  /**
    * The node's full property bag exactly as read from the server.
    *
    * `PUT /api/repository/...` **replaces** the whole property map
@@ -265,8 +271,12 @@ export interface SyncConfig {
    * mailbox; `calendar` syncs events; `files` syncs a drive (OneDrive or a
    * SharePoint document library — see `drive_scope`). Ignored by other
    * connectors.
+   *
+   * Other connectors use the same key for their own vocabulary (Stripe:
+   * `products`, `checkout_sessions`, …), so the type is open; the ms-graph
+   * values are the ones the editor offers a picker for.
    */
-  resource?: 'mail' | 'calendar' | 'files'
+  resource?: 'mail' | 'calendar' | 'files' | (string & {})
   /**
    * ms-graph connector, mail only: sync the FULL message body onto the node
    * (`body_html` / `body_text`). Off by default — bodies multiply the delta
@@ -700,6 +710,92 @@ export interface MountState {
   push_deliveries_rejected?: number
 }
 
+/**
+ * One mount inside a bundle: everything a `raisin:VirtualMount` needs except
+ * the parts the operator chooses at instantiation (connector, connection,
+ * workspace, branch, root). `sync_config` / `write_config` are copied onto the
+ * mount verbatim — this is the adapter author's knowledge (mapper path,
+ * resource, write mode, command node types) expressed once, as data.
+ */
+export interface MountBundleEntry {
+  /** Mount name suffix; the mount is named `<connector>-<key>`. */
+  key: string
+  title: string
+  /** Appended to the chosen root: `mount_path = <root>/<subpath>`. */
+  subpath: string
+  /** Pre-selected in the picker. */
+  default?: boolean
+  /** Free text shown as a hint, e.g. which application depends on this mount. */
+  required_by?: string[]
+  /** Node types the mount materialises — checked against the workspace gate. */
+  node_types?: string[]
+  remote_root?: string
+  mapping_function?: string
+  resolver_function?: string
+  sync_config?: SyncConfig
+  write_config?: WriteConfig
+}
+
+/** A connector-authored preset of mounts. Schema: `raisin:Integration.mount_bundles`. */
+export interface MountBundle {
+  id: string
+  title: string
+  description?: string
+  default_workspace?: string
+  default_root?: string
+  mounts: MountBundleEntry[]
+}
+
+export interface BundlePlanInput {
+  integration: Integration
+  bundle: MountBundle
+  /** Which entries to create, by `key`. */
+  keys: string[]
+  account_ref?: string
+  target_workspace: string
+  target_branch?: string
+  /** Root folder every entry's `subpath` hangs under, e.g. `/stripe`. */
+  root: string
+}
+
+/** `/a//b/` → `/a/b`; `''` → `/`. Same normalisation the mount editor applies. */
+export function normalizeMountPath(p: string): string {
+  const cleaned = '/' + (p || '').split('/').filter(Boolean).join('/')
+  return cleaned
+}
+
+/**
+ * Turn a bundle plus the operator's choices into the mounts to create.
+ *
+ * Pure, and deliberately so: it is the whole of the bundle semantics, kept out
+ * of the dialog so a server-side "instantiate bundle" endpoint could adopt it
+ * unchanged. Nothing here talks to the network.
+ */
+export function planBundle(input: BundlePlanInput): VirtualMount[] {
+  const { integration, bundle } = input
+  const root = normalizeMountPath(input.root)
+  const wanted = new Set(input.keys)
+  return bundle.mounts
+    .filter((e) => wanted.has(e.key))
+    .map((e) => ({
+      name: `${integration.name}-${e.key}`,
+      title: `${integration.title} · ${e.title}`,
+      integration_ref: integration.path || `${INTEGRATIONS_ROOT}/${integration.name}`,
+      ...(input.account_ref ? { account_ref: input.account_ref } : {}),
+      target_workspace: input.target_workspace,
+      target_branch: input.target_branch || 'main',
+      mount_path: normalizeMountPath(`${root}/${e.subpath}`),
+      ...(e.remote_root ? { remote_root: e.remote_root } : {}),
+      ...(e.mapping_function ? { mapping_function: e.mapping_function } : {}),
+      ...(e.resolver_function ? { resolver_function: e.resolver_function } : {}),
+      // Copies, not references: the dialog may be reopened against the same
+      // template object, and a mount edit must never reach back into it.
+      sync_config: { ...(e.sync_config || {}) },
+      write_config: { ...(e.write_config || {}) },
+      enabled: true,
+    }))
+}
+
 export interface VirtualMount {
   id?: string
   path?: string
@@ -774,6 +870,7 @@ function nodeToIntegration(node: Node): Integration {
     oauth_config_type: (p.oauth_config_type as string) || undefined,
     config: (p.config as Record<string, unknown>) || undefined,
     config_secret_fields: (p.config_secret_fields as string[]) || [],
+    mount_bundles: Array.isArray(p.mount_bundles) ? (p.mount_bundles as MountBundle[]) : undefined,
     _raw: p,
   }
 }

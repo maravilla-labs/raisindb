@@ -2,12 +2,13 @@
 
 import { useEffect, useState, useCallback } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { HardDrive, Plus, RefreshCw, AlertTriangle, Activity, Webhook, X, Wand2, ChevronRight } from 'lucide-react'
+import { HardDrive, Plus, RefreshCw, AlertTriangle, Activity, Webhook, X, Wand2, ChevronRight, Layers } from 'lucide-react'
 import GlassCard from '../components/GlassCard'
 import ConfirmDialog from '../components/ConfirmDialog'
 import { ItemTable, type TableColumn } from '../components/ItemTable'
 import { useToast, ToastContainer } from '../components/Toast'
 import MountEditor from '../components/integrations/MountEditor'
+import AddMountBundleDialog, { bundlesFor } from '../components/integrations/AddMountBundleDialog'
 import TestConnectionPanel from '../components/integrations/TestConnectionPanel'
 import { integrationsApi, type VirtualMount, type Integration } from '../api/integrations'
 import { workspacesApi } from '../api/workspaces'
@@ -30,6 +31,8 @@ export default function Mounts() {
   const { repo } = useParams<{ repo: string }>()
   const [mounts, setMounts] = useState<VirtualMount[]>([])
   const [integrations, setIntegrations] = useState<Integration[]>([])
+  const [templates, setTemplates] = useState<Integration[]>([])
+  const [showBundle, setShowBundle] = useState(false)
   const [workspaces, setWorkspaces] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
   const [editing, setEditing] = useState<VirtualMount | undefined>(undefined)
@@ -64,10 +67,13 @@ export default function Mounts() {
     // empty — indistinguishable from "no mounts configured", with only a
     // transient toast to say otherwise. A mount you cannot see is a mount you
     // cannot sync, disable or delete.
-    const [msR, intsR, wsR] = await Promise.allSettled([
+    const [msR, intsR, wsR, tplR] = await Promise.allSettled([
       integrationsApi.listMounts(repo),
       integrationsApi.listIntegrations(repo),
       workspacesApi.list(repo),
+      // Templates only feed the bundle dialog's fallback; a failure here is
+      // silent because nothing else on the page depends on them.
+      integrationsApi.listConnectorTemplates(repo),
     ])
 
     if (msR.status === 'fulfilled') {
@@ -79,6 +85,7 @@ export default function Mounts() {
     }
     if (intsR.status === 'fulfilled') setIntegrations(intsR.value)
     if (wsR.status === 'fulfilled') setWorkspaces(wsR.value.map((w) => w.name))
+    if (tplR.status === 'fulfilled') setTemplates(tplR.value)
 
     // Degraded, not fatal: say so, but keep the mounts on screen.
     if (msR.status === 'fulfilled' && (intsR.status === 'rejected' || wsR.status === 'rejected')) {
@@ -366,15 +373,28 @@ export default function Mounts() {
           <h1 className="text-4xl font-bold text-white mb-2">Mounts</h1>
           <p className="text-zinc-400">Mount external subtrees into workspace paths</p>
         </div>
-        <button
-          onClick={() => {
-            setEditing(undefined)
-            setShowEditor(true)
-          }}
-          className="flex items-center gap-2 px-4 py-2 bg-primary-500 hover:bg-primary-600 text-white rounded-lg transition-colors"
-        >
-          <Plus className="w-5 h-5" /> New Mount
-        </button>
+        <div className="flex items-center gap-2">
+          {/* Only when some connector actually ships one: a button that opens an
+              empty picker is a question with no answer. */}
+          {integrations.some((i) => bundlesFor(i, templates).length > 0) && (
+            <button
+              onClick={() => setShowBundle(true)}
+              className="flex items-center gap-2 px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 text-white rounded-lg transition-colors"
+              title="Create a connector's preset of mounts in one go"
+            >
+              <Layers className="w-5 h-5" /> Add bundle
+            </button>
+          )}
+          <button
+            onClick={() => {
+              setEditing(undefined)
+              setShowEditor(true)
+            }}
+            className="flex items-center gap-2 px-4 py-2 bg-primary-500 hover:bg-primary-600 text-white rounded-lg transition-colors"
+          >
+            <Plus className="w-5 h-5" /> New Mount
+          </button>
+        </div>
       </div>
 
       {/* First load only. Once the table exists it stays on screen through
@@ -445,6 +465,20 @@ export default function Mounts() {
             onDelete={(m) => setDeleteTarget(m)}
           />
         </GlassCard>
+      )}
+
+      {showBundle && repo && (
+        <AddMountBundleDialog
+          repo={repo}
+          integrations={integrations}
+          templates={templates}
+          existingMounts={mounts}
+          workspaces={workspaces}
+          onClose={() => setShowBundle(false)}
+          onCreated={() => void load(true)}
+          onError={showError}
+          onSuccess={showSuccess}
+        />
       )}
 
       {showEditor && repo && (

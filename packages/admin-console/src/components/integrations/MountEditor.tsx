@@ -57,6 +57,9 @@ const DEFAULT_MAPPERS: Record<string, string | Record<string, string>> = {
   'google-calendar': '/mappers/google-calendar-default',
   imap: '/mappers/imap-default',
   gmail: '/mappers/imap-default',
+  // Every Stripe resource goes through one mapper; `sync_config.resource`
+  // picks the shape. Blank here yields shapeless nodes, same as the others.
+  stripe: '/mappers/stripe-default',
 }
 
 /** Every shipped mapper path, for the free-text field's autocomplete. */

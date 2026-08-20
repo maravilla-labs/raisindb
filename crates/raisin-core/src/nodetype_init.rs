@@ -429,7 +429,7 @@ mod tests {
         // raisin:Integration is strict, so each property below must be declared or a
         // connector using it is rejected on write — and adding one is a schema change
         // that must bump the version, or existing repos never resync.
-        assert_eq!(integration.version, Some(3));
+        assert_eq!(integration.version, Some(4));
         for prop in [
             "config_type",
             "connection_config_type",
@@ -437,6 +437,8 @@ mod tests {
             "config",
             "config_secrets_encrypted",
             "config_secret_fields",
+            // v4: connector-authored mount presets, read by the admin console only.
+            "mount_bundles",
         ] {
             assert!(
                 integration

@@ -102,6 +102,16 @@ an integration/account to a target workspace subtree.
 | `state` | Object | Engine-managed: `{ last_sync_token, last_sync_at, last_error, consecutive_failures, status, last_fencing_token }`. Do not hand-edit. |
 | `enabled` | Boolean | Default `true` (indexed). |
 
+**Mount bundles.** A connector whose resources need different write modes
+(an outbox beside a read-only ledger beside a two-way catalogue) needs one mount
+per resource, and each is a dozen adapter-specific values. The connector
+template can carry that set as `raisin:Integration.mount_bundles`; the admin
+console's *Add bundle* (Mounts page) asks for connection, workspace and root
+folder, checks the workspace's `allowed_node_types` against what the bundle
+materialises, and creates ordinary `raisin:VirtualMount` nodes from it
+(`planBundle` in `packages/admin-console/src/api/integrations.ts`). Nothing
+server-side reads the property. The Stripe package is the reference example.
+
 `sync_config.mode` is `poll` | `webhook` | `hybrid`. `webhook` mounts are skipped
 by the periodic driver (they are driven by inbound webhooks instead). Ephemeral
 mounts (`ephemeral: true` + `ttl_seconds`) auto-delete stale nodes each sync — the

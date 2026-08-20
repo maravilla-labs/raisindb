@@ -1,7 +1,7 @@
 name: raisin:Integration
 description: Tenant/repo-level configuration for an external system integration
 icon: plug
-version: 3
+version: 4
 strict: true
 indexable: true
 index_types: [Property]
@@ -188,6 +188,44 @@ properties:
     required: false
     title: Documentation URL
     description: Link to the provider's own setup documentation
+
+  - name: mount_bundles
+    type: Array
+    required: false
+    title: Mount Bundles
+    description: |
+      Presets of VIRTUAL MOUNTS this connector knows it is normally used with,
+      authored on the connector TEMPLATE and carried into every instance.
+
+      A connector whose resources need different write modes (an outbox of
+      commands beside a read-only ledger beside a two-way catalogue) cannot be
+      served by one mount, because a mount carries exactly one `write_config`.
+      The operator then has to hand-build N mounts from values only the adapter
+      author knows: the mapper path, `sync_config.resource`, which mode, which
+      `command_node_types`. A bundle is that knowledge as data, so the console
+      can ask for the three things that are genuinely the operator's to choose
+      — connection, target workspace, root folder — and mint the rest.
+
+      Nothing on the server reads this. It is instantiated client-side into
+      ordinary `raisin:VirtualMount` nodes; once created they owe the bundle
+      nothing and are edited like any other mount.
+
+        [{
+          id, title, description?,
+          default_workspace?,           # suggestion; the operator confirms
+          default_root?,                # suggested mount_path prefix, e.g. /stripe
+          mounts: [{
+            key,                        # mount name suffix: <connector>-<key>
+            title,
+            subpath,                    # mount_path = <root>/<subpath>
+            default?,                   # pre-selected in the picker
+            required_by?: [ ... ],      # free text, e.g. which app needs it
+            node_types?: [ ... ],       # what materialises; checked against the
+                                        #   target workspace's allowed_node_types
+            mapping_function?, resolver_function?, remote_root?,
+            sync_config?, write_config? # copied verbatim onto the mount
+          }]
+        }]
 
   - name: enabled
     type: Boolean
