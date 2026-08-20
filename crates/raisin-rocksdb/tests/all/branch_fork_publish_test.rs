@@ -1490,7 +1490,11 @@ async fn cross_branch_copy_replaces_a_different_id_at_the_same_path() -> Result<
         )
         .await?;
 
-    let first_root_id = nodes.get_by_path(publish(), "/page", None).await?.unwrap().id;
+    let first_root_id = nodes
+        .get_by_path(publish(), "/page", None)
+        .await?
+        .unwrap()
+        .id;
     let first_child_id = nodes
         .get_by_path(publish(), "/page/a", None)
         .await?
@@ -1513,7 +1517,11 @@ async fn cross_branch_copy_replaces_a_different_id_at_the_same_path() -> Result<
         .create(main(), make_node("/page/a", "raisin:Page"), no_validation())
         .await?;
     let second_root_id = nodes.get_by_path(main(), "/page", None).await?.unwrap().id;
-    let second_child_id = nodes.get_by_path(main(), "/page/a", None).await?.unwrap().id;
+    let second_child_id = nodes
+        .get_by_path(main(), "/page/a", None)
+        .await?
+        .unwrap()
+        .id;
     assert_ne!(
         first_root_id, second_root_id,
         "the re-created node must carry a new id, or this test proves nothing"
@@ -1557,5 +1565,100 @@ async fn cross_branch_copy_replaces_a_different_id_at_the_same_path() -> Result<
     );
     assert_eq!(children[0].id, second_child_id);
 
+    Ok(())
+}
+
+/// Does a cross-branch promotion carry the node's OUTGOING RELATIONS, and
+/// does re-promoting after an edge was removed on main remove it on the target?
+///
+/// Studio's publish pipeline replays edges by hand (`replay-relations`) on the
+/// assumption that a node-by-node copy does not carry them. This pins down
+/// what the primitive actually does so that assumption can be retired or kept
+/// on evidence.
+#[tokio::test]
+async fn cross_branch_copy_carries_relations_and_their_removal() -> Result<()> {
+    use raisin_models::nodes::RelationRef;
+    use raisin_storage::RelationRepository;
+
+    let t = TestStorage::new().await?;
+    let storage = &t.storage;
+    let nodes = storage.nodes();
+    let main = || StorageScope::new(TENANT, REPO, "main", WORKSPACE);
+    let publish = || StorageScope::new(TENANT, REPO, "publish", WORKSPACE);
+
+    let (a, b, c) = (
+        make_node("/a", "raisin:Page"),
+        make_node("/b", "raisin:Page"),
+        make_node("/c", "raisin:Page"),
+    );
+    for n in [&a, &b, &c] {
+        nodes.create(main(), n.clone(), no_validation()).await?;
+    }
+    let rel = |target: &Node, ty: &str| RelationRef {
+        target: target.id.clone(),
+        workspace: WORKSPACE.to_string(),
+        target_node_type: "raisin:Page".to_string(),
+        relation_type: ty.to_string(),
+        weight: None,
+    };
+    storage
+        .relations()
+        .add_relation(main(), &a.id, "raisin:Page", rel(&b, "links_to"))
+        .await?;
+    storage
+        .relations()
+        .add_relation(main(), &a.id, "raisin:Page", rel(&c, "links_to"))
+        .await?;
+    create_empty_branch(storage, "publish").await?;
+
+    let roots = ["/a".to_string(), "/b".to_string(), "/c".to_string()];
+    raisin_storage::NodeRepository::copy_nodes_across_branches(
+        nodes, TENANT, REPO, "main", "publish", WORKSPACE, &roots, false, false, None, None,
+    )
+    .await?;
+
+    let mut live: Vec<String> = storage
+        .relations()
+        .get_outgoing_relations(publish(), &a.id, None)
+        .await?
+        .into_iter()
+        .map(|r| r.target)
+        .collect();
+    live.sort();
+    let mut want = vec![b.id.clone(), c.id.clone()];
+    want.sort();
+    assert_eq!(live, want, "promotion must carry a's outgoing edges");
+
+    // Remove a->c on main, re-promote a, expect the edge gone on publish.
+    storage
+        .relations()
+        .remove_relation(main(), &a.id, WORKSPACE, &c.id, Some("links_to"))
+        .await?;
+    raisin_storage::NodeRepository::copy_nodes_across_branches(
+        nodes,
+        TENANT,
+        REPO,
+        "main",
+        "publish",
+        WORKSPACE,
+        &["/a".to_string()],
+        false,
+        false,
+        None,
+        None,
+    )
+    .await?;
+    let live: Vec<String> = storage
+        .relations()
+        .get_outgoing_relations(publish(), &a.id, None)
+        .await?
+        .into_iter()
+        .map(|r| r.target)
+        .collect();
+    assert_eq!(
+        live,
+        vec![b.id.clone()],
+        "re-promotion must drop the edge removed on main"
+    );
     Ok(())
 }

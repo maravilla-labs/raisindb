@@ -19,6 +19,7 @@ mod capture;
 mod collect;
 mod helpers;
 mod prune;
+mod relations;
 mod roots;
 mod secrets;
 mod stage;
@@ -47,6 +48,8 @@ struct CopyScope<'a> {
     target_branch: &'a str,
     workspace: &'a str,
     revision: &'a HLC,
+    /// Upper bound for reads of the SOURCE branch: the pin, else its head.
+    source_max_revision: &'a HLC,
     now: chrono::DateTime<chrono::Utc>,
     meta_actor: &'a str,
     meta_message: &'a str,
@@ -63,6 +66,8 @@ struct CopyAccumulators {
     max_label_per_parent: HashMap<String, String>,
     /// Secret versions copied into the target branch, for replication capture.
     secrets: Vec<crate::secret_store::StoredSecret>,
+    /// Edge deltas the promotion produced on the target, for replication.
+    relation_ops: Vec<raisin_replication::OpType>,
 }
 
 /// One source node staged for copying, with its resolved parent ids.
@@ -154,6 +159,21 @@ impl NodeRepositoryImpl {
             )
         };
 
+        // Edges are read from the source at the same bound as the nodes were:
+        // the pin when there is one, otherwise the source head.
+        let source_head = self
+            .branch_repo
+            .get_branch(tenant_id, repo_id, source_branch)
+            .await?
+            .map(|b| b.head)
+            .ok_or_else(|| {
+                raisin_error::Error::NotFound(format!(
+                    "Source branch '{}' not found",
+                    source_branch
+                ))
+            })?;
+        let source_max_revision = source_revision.copied().unwrap_or(source_head);
+
         let scope = CopyScope {
             tenant_id,
             repo_id,
@@ -161,6 +181,7 @@ impl NodeRepositoryImpl {
             target_branch,
             workspace,
             revision: &revision,
+            source_max_revision: &source_max_revision,
             now,
             meta_actor: &meta_actor,
             meta_message: &meta_message,
@@ -172,6 +193,7 @@ impl NodeRepositoryImpl {
             nodes_for_replication,
             max_label_per_parent,
             secrets: Vec::new(),
+            relation_ops: Vec::new(),
         };
         for entry in &entries {
             self.stage_cross_branch_entry(&mut batch, entry, &scope, &mut acc)
@@ -183,6 +205,7 @@ impl NodeRepositoryImpl {
             nodes_for_replication,
             max_label_per_parent,
             secrets,
+            relation_ops,
         } = acc;
 
         let copied = entries.len();
@@ -295,6 +318,24 @@ impl NodeRepositoryImpl {
             &deleted_ids,
         )
         .await;
+
+        // Edge deltas AFTER the node snapshots, same lane: a peer applies the
+        // AddRelation once both endpoints' snapshots have landed.
+        for op_type in relation_ops {
+            let _ = self
+                .operation_capture
+                .capture_operation_with_revision(
+                    tenant_id.to_string(),
+                    repo_id.to_string(),
+                    target_branch.to_string(),
+                    op_type,
+                    meta_actor.clone(),
+                    None,
+                    meta_is_system,
+                    Some(revision),
+                )
+                .await;
+        }
 
         // Always store revision metadata — this is what makes the promotion
         // visible to branch diffs and change tracking.

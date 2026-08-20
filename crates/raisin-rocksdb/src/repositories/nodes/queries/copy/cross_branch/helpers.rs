@@ -69,12 +69,8 @@ impl NodeRepositoryImpl {
         // single source of truth used by the repository, cascade and
         // transaction delete paths, and it covers NODE_PATH / COMPOUND_INDEX /
         // SPATIAL_INDEX, which the copy path's own prune helper still misses.
-        let ctx = crate::tombstones::TombstoneContext::new(
-            tenant_id,
-            repo_id,
-            target_branch,
-            workspace,
-        );
+        let ctx =
+            crate::tombstones::TombstoneContext::new(tenant_id, repo_id, target_branch, workspace);
         let cfs = crate::tombstones::TombstoneColumnFamilies::from_db(&self.db)?;
         crate::tombstones::add_node_tombstones(batch, &self.db, &ctx, &cfs, occupant, revision)?;
 

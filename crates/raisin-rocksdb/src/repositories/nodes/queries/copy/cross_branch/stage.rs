@@ -213,6 +213,10 @@ impl NodeRepositoryImpl {
             &mut acc.change_infos,
         )?;
 
+        // Carry the node's outgoing edges — branch-scoped, in their own
+        // keyspace, and therefore NOT part of the node write above.
+        self.copy_relations_to_batch(batch, &node.id, scope, &mut acc.relation_ops)?;
+
         // Track the max label per parent for the last-child metadata cache.
         let slot = acc
             .max_label_per_parent
