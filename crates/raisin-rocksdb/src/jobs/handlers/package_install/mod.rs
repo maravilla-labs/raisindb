@@ -43,6 +43,8 @@
 
 mod content_types;
 mod dry_run;
+#[cfg(test)]
+mod folder_dup_tests;
 mod handler;
 mod install_content;
 mod install_schema;

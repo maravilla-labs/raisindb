@@ -472,6 +472,18 @@ impl JobType {
             JobType::SpatialIndexBuild { .. } => 600,
             JobType::Backup => 600,
             JobType::Restore => 600,
+            // A package install is one job that writes hundreds of content
+            // nodes plus their binaries in 100-node batches, and it neither
+            // checkpoints nor resumes: a timed-out attempt is RESTARTED from
+            // the top. Under the catch-all 300s the studio package (433
+            // content nodes, 177 binaries) timed out on a slow box, and the
+            // retry then ran CONCURRENTLY with the still-live first attempt
+            // (the abort does not land inside a batch), so every create the
+            // first attempt still held a path reservation for was rejected
+            // with "being created by a concurrent operation". Path
+            // reservations kept that from minting duplicates, but it cost two
+            // extra full passes and a failed-looking job. Give it room.
+            JobType::PackageInstall { .. } => 1800,
             // Default for everything else
             _ => 300,
         }
