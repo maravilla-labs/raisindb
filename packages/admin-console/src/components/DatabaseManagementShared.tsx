@@ -707,11 +707,14 @@ export default function DatabaseManagementShared({
         branch !== 'main' ? branch : undefined
       )
 
-      if (response.success && response.data) {
-        setReindexJobId(response.data.job_id)
+      // /api/admin/management/database/* job starters return a bare
+      // { job_id, message } (same as relationsVerify/relationsRepair), not
+      // the { success, data } envelope.
+      if (response.job_id) {
+        setReindexJobId(response.job_id)
         showSuccess('Reindex started')
       } else {
-        throw new Error(response.error || 'Failed to start reindex')
+        throw new Error('Failed to start reindex')
       }
     } catch (error: any) {
       showErrorMsg(error.message || 'Failed to start reindex')

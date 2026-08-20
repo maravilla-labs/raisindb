@@ -359,7 +359,7 @@ export const managementApi = {
     indexTypes: string[],
     branch?: string
   ) =>
-    api.post<ApiResponse<{ job_id: string; message: string }>>(
+    api.post<{ job_id: string; message: string }>(
       `/api/admin/management/database/${tenant}/${repo}/reindex/start${branch ? `?branch=${branch}` : ''}`,
       {
         workspace,
