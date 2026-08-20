@@ -62,6 +62,7 @@ pub use callbacks::{
     NodeUpdateCallback,
     NodeUpdatePropertyCallback,
     PdfProcessFromStorageCallback,
+    PlatformHookCallback,
     PluginCallContext,
     PluginCallback,
     RaisinFunctionApiCallbacks,

@@ -285,6 +285,17 @@ pub trait FunctionApi: Send + Sync {
         ))
     }
 
+    /// Fire an operator-configured platform hook (`[platform.hooks.<name>]`).
+    ///
+    /// Returns `{ ok, status, body }`.
+    async fn platform_hook(&self, name: &str, payload: Value) -> Result<Value> {
+        let _ = payload;
+        Err(raisin_error::Error::Validation(format!(
+            "Platform hooks are not available in this runtime (hook: {})",
+            name
+        )))
+    }
+
     /// Cancel a pending scheduled invocation by job id or external key.
     ///
     /// Returns `{ job_id, status: "cancelled" }`.

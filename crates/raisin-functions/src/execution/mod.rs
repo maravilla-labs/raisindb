@@ -75,6 +75,7 @@ mod tool_change_sink;
 mod types;
 
 // Re-export public API
+pub use callbacks::platform::{configure_platform_hooks, PlatformHook};
 pub use provider::ExecutionProvider;
 pub use remote_tool::configure_mcp_client;
 pub use types::shared_http_client;

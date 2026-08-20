@@ -25,6 +25,7 @@ pub mod locks;
 pub mod nodes;
 pub mod notify;
 pub mod pdf;
+pub mod platform;
 pub mod resources;
 pub mod scheduler;
 pub mod secrets;
@@ -49,6 +50,7 @@ pub fn build_registry() -> BindingsRegistry {
     methods.extend(flows::methods());
     methods.extend(branches::methods());
     methods.extend(scheduler::methods());
+    methods.extend(platform::methods());
     methods.extend(notify::methods());
     methods.extend(locks::methods());
     methods.extend(integrations::methods());

@@ -1813,6 +1813,7 @@ async fn test_raisin_api_surface_snapshot() {
                 flows: names(raisin.flows),
                 branches: names(raisin.branches),
                 scheduler: names(raisin.scheduler),
+                platform: names(raisin.platform),
                 tasks: names(raisin.tasks),
                 crypto: names(raisin.crypto),
                 locks: names(raisin.locks),
@@ -1878,6 +1879,7 @@ async fn test_raisin_api_surface_snapshot() {
             "nodes",
             "notify",
             "pdf",
+            "platform",
             "scheduler",
             "secrets",
             "sql",
@@ -1919,6 +1921,7 @@ async fn test_raisin_api_surface_snapshot() {
     expect("flows", vec!["run"]);
     expect("branches", vec!["compare", "copyNodes", "diff"]);
     expect("scheduler", vec!["cancel", "get", "list", "schedule"]);
+    expect("platform", vec!["hook"]);
     expect("tasks", vec!["complete", "create"]);
     expect("crypto", vec!["uuid", "verifyJwt"]);
     expect("locks", vec!["acquire", "release", "renew"]);

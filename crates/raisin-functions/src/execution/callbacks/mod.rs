@@ -25,6 +25,7 @@ pub mod http;
 pub mod integrations;
 pub mod locks;
 pub mod nodes;
+pub mod platform;
 pub mod query_context;
 pub mod resources;
 pub mod scheduler;
@@ -204,6 +205,12 @@ where
         )),
         branch_copy_nodes: Some(branches::create_branch_copy_nodes(
             deps.storage.clone(),
+            tenant_id.clone(),
+            repo_id.clone(),
+        )),
+
+        // Operator-configured platform hooks (raisin.platform.hook).
+        platform_hook: Some(platform::create_platform_hook(
             tenant_id.clone(),
             repo_id.clone(),
         )),

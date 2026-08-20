@@ -621,6 +621,18 @@ globalThis.raisin = {
             return r;
         }
     },
+    platform: {
+        // Fire an OPERATOR-configured platform hook by name with a JSON
+        // payload (tenant_id / repo_id are stamped in server-side). Returns
+        // { ok, status, body }. Throws when the hook is not configured.
+        hook: (name, payload) => {
+            const r = __call('platform_hook', [name, payload || {}]);
+            if (r && r.error) {
+                throw new Error(r.message || r.error);
+            }
+            return r;
+        }
+    },
     tasks: {
         // A failed create does NOT throw — the { error } object is returned.
         create: (request) => {

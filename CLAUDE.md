@@ -589,6 +589,35 @@ Invariants to preserve:
 - **`tools/call` is never auto-retried.** MCP has no idempotency key; a retry
   can charge a card twice. Only session recovery replays, once.
 
+## Functions never reach loopback — platform hooks do
+
+`raisin.http.fetch` refuses loopback, private and link-local addresses for
+EVERY function (`raisin-functions/.../callbacks/http.rs`, an `EgressPolicy`
+check before the request and inside DNS resolution). Do not add an allowlist
+there: it would open the address for every tenant's content code, not just
+ours. When a function must reach a platform service on such an address
+(Flightdeck's "install the new Studio package", for one), the operator names
+the endpoint in the server config and the function calls it BY NAME:
+
+```toml
+[platform.hooks.studio_update]
+url = "http://127.0.0.1:8080/internal/studio/update"
+token_env = "STUDIO_INTERNAL_TOKEN"
+token_header = "x-studio-internal-token"
+```
+
+```js
+const r = await raisin.platform.hook('studio_update', {}); // { ok, status, body }
+```
+
+The runtime stamps `tenant_id` / `repo_id` into the payload (a function cannot
+fire a hook for another tenant), the token never passes through tenant data,
+and the call goes through the shared client, not the guarded one. Same pattern
+as the media/screenshot plugin bindings — trusted server code on a known
+address. Implementation: `execution/callbacks/platform.rs`; config plumbing
+`raisin-server/src/config.rs` (`PlatformConfig`) → `startup/cli.rs` →
+`main.rs` (`configure_platform_hooks`).
+
 ## Job dedup is per-PROCESS, not per-cluster
 
 `JobRegistry`'s dedup map is an in-memory `HashMap` with no storage behind it

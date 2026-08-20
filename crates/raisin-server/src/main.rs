@@ -1165,6 +1165,28 @@ async fn main() {
     // a connection is saved.
     raisin_functions::configure_mcp_client(server_config.mcp_client.clone());
 
+    // Operator-named platform hooks for `raisin.platform.hook`. Same
+    // process-global shape as the MCP client settings, for the same reason.
+    raisin_functions::configure_platform_hooks(
+        server_config
+            .platform
+            .hooks
+            .iter()
+            .map(|(name, h)| {
+                (
+                    name.clone(),
+                    raisin_functions::PlatformHook {
+                        url: h.url.clone(),
+                        token: h.token.clone(),
+                        token_env: h.token_env.clone(),
+                        token_header: h.token_header.clone(),
+                        timeout_ms: h.timeout_ms,
+                    },
+                )
+            })
+            .collect(),
+    );
+
     // Hold notification streams open to remote MCP servers that announce tool
     // changes, so a tool added upstream appears in seconds rather than at the
     // next refresh interval.

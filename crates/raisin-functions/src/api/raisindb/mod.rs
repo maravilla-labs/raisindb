@@ -36,6 +36,7 @@ mod integrations;
 mod locks;
 mod network_policy;
 mod nodes;
+mod platform;
 mod resources;
 mod scheduler;
 mod secrets;
@@ -388,6 +389,10 @@ impl FunctionApi for RaisinFunctionApi {
 
     async fn scheduler_schedule(&self, request: Value) -> Result<Value> {
         self.impl_scheduler_schedule(request).await
+    }
+
+    async fn platform_hook(&self, name: &str, payload: Value) -> Result<Value> {
+        self.impl_platform_hook(name, payload).await
     }
 
     async fn scheduler_cancel(&self, job_id_or_key: &str) -> Result<Value> {

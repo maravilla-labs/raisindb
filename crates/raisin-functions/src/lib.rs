@@ -68,7 +68,9 @@ pub use api::{
     SqlExecuteCallback,
     SqlQueryCallback,
 };
-pub use execution::{configure_mcp_client, shared_http_client};
+pub use execution::{
+    configure_mcp_client, configure_platform_hooks, shared_http_client, PlatformHook,
+};
 pub use executor::{ExecutionHandle, FunctionExecutor};
 pub use loader::FunctionLoader;
 pub use plugin::{register_function_plugin, FunctionBindingPlugin};

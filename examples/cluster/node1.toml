@@ -67,3 +67,16 @@ allow_private_addresses = false
 max_response_bytes = 8388608
 # Per-request timeout; a connection may lower it via refresh_policy.call_timeout_ms.
 default_timeout_ms = 30000
+
+# Operator-named platform hooks, reachable from functions as
+# `raisin.platform.hook("<name>", payload)`. The function names the hook; the
+# URL and token live only here, and the runtime stamps tenant_id / repo_id into
+# the payload. This is the supported way for content code to reach a platform
+# service on a loopback or private address -- `raisin.http.fetch` refuses those
+# and must keep refusing them.
+#
+# [platform.hooks.studio_update]
+# url = "http://127.0.0.1:8080/internal/studio/update"
+# token_env = "STUDIO_INTERNAL_TOKEN"
+# token_header = "x-studio-internal-token"
+# timeout_ms = 120000

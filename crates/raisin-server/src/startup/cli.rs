@@ -114,6 +114,8 @@ pub struct MergedConfig {
     pub storage: config::StorageConfig,
     /// Secret handling (auto-vaulting on/off)
     pub secrets: config::SecretsConfig,
+    /// Operator-named platform hooks for `raisin.platform.hook`
+    pub platform: config::PlatformConfig,
 }
 
 impl ServerConfig {
@@ -272,6 +274,13 @@ impl ServerConfig {
             .map(|c| c.secrets.clone())
             .unwrap_or_default();
 
+        // Platform hooks from TOML only (no CLI override: a URL+token pair
+        // does not belong on a command line).
+        let platform = toml_config
+            .as_ref()
+            .map(|c| c.platform.clone())
+            .unwrap_or_default();
+
         // Trigger circuit breaker config from TOML (no CLI override for now)
         let trigger_safety = toml_config
             .as_ref()
@@ -310,6 +319,7 @@ impl ServerConfig {
             system_definitions,
             mcp_client,
             secrets,
+            platform,
             trigger_safety,
             max_active_jobs_per_tenant,
             storage,

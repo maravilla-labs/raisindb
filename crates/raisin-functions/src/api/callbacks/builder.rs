@@ -60,6 +60,7 @@ pub struct RaisinFunctionApiCallbacks {
     pub scheduler_cancel: Option<SchedulerCancelCallback>,
     pub scheduler_list: Option<SchedulerListCallback>,
     pub scheduler_get: Option<SchedulerGetCallback>,
+    pub platform_hook: Option<PlatformHookCallback>,
     // Transaction callbacks
     pub tx_begin: Option<TxBeginCallback>,
     pub tx_commit: Option<TxCommitCallback>,
@@ -288,6 +289,11 @@ impl RaisinFunctionApiCallbacks {
 
     pub fn with_scheduler_list(mut self, callback: SchedulerListCallback) -> Self {
         self.scheduler_list = Some(callback);
+        self
+    }
+
+    pub fn with_platform_hook(mut self, callback: PlatformHookCallback) -> Self {
+        self.platform_hook = Some(callback);
         self
     }
 

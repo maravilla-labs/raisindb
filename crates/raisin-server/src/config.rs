@@ -166,6 +166,47 @@ pub struct ServerConfigFile {
     /// which is the only supported steady state.
     #[serde(default)]
     pub secrets: SecretsConfig,
+    /// Operator-configured platform hooks (TOML `[platform.hooks.<name>]`),
+    /// reachable from functions as `raisin.platform.hook(name, payload)`.
+    /// Absent means no hooks: the binding refuses every name.
+    #[serde(default)]
+    pub platform: PlatformConfig,
+}
+
+/// `[platform]` section: named endpoints a function may fire by name.
+///
+/// This is how content code reaches platform services on loopback / private
+/// addresses WITHOUT `raisin.http.fetch` ever being allowed there: the operator
+/// names the URL and token here, the function only names the hook, and the
+/// runtime stamps the tenant id into the payload.
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+pub struct PlatformConfig {
+    #[serde(default)]
+    pub hooks: std::collections::HashMap<String, PlatformHookConfig>,
+}
+
+/// One `[platform.hooks.<name>]` entry. Mirrors `raisin_functions::PlatformHook`
+/// field for field; defined here because that crate is feature-gated while
+/// this config type is always compiled.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct PlatformHookConfig {
+    pub url: String,
+    #[serde(default)]
+    pub token: Option<String>,
+    #[serde(default)]
+    pub token_env: Option<String>,
+    #[serde(default = "default_platform_token_header")]
+    pub token_header: String,
+    #[serde(default = "default_platform_hook_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+fn default_platform_token_header() -> String {
+    "x-internal-token".to_string()
+}
+
+fn default_platform_hook_timeout_ms() -> u64 {
+    120_000
 }
 
 /// Secret handling (TOML `[secrets]` section).
@@ -418,6 +459,20 @@ mod tests {
         assert!(!config.mcp_client.allow_private_addresses);
         assert_eq!(config.mcp_client.max_response_bytes, 8_388_608);
         assert_eq!(config.mcp_client.default_timeout_ms, 30_000);
+    }
+
+    /// A hook section parses with its defaults, and an absent one is empty.
+    #[test]
+    fn platform_hooks_parse() {
+        let config: ServerConfigFile = toml::from_str(
+            "[platform.hooks.studio_update]\nurl = \"http://127.0.0.1:8080/internal/studio/update\"\ntoken_env = \"STUDIO_INTERNAL_TOKEN\"\ntoken_header = \"x-studio-internal-token\"\n",
+        )
+        .expect("hook section must parse");
+        let hook = &config.platform.hooks["studio_update"];
+        assert_eq!(hook.token_header, "x-studio-internal-token");
+        assert_eq!(hook.timeout_ms, 120_000);
+        let none: ServerConfigFile = toml::from_str("[server]\nport = 8080\n").unwrap();
+        assert!(none.platform.hooks.is_empty());
     }
 
     /// An absent [mcp_client] section must not enable private egress.

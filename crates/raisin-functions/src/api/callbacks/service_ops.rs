@@ -434,6 +434,25 @@ pub type SchedulerGetCallback = Arc<
         + Sync,
 >;
 
+// ========== Platform Hook Callbacks ==========
+
+/// Callback for `raisin.platform.hook(name, payload?)`.
+///
+/// Fires an OPERATOR-configured endpoint (`[platform.hooks.<name>]` in the
+/// server config) with a JSON payload; the tenant and repo ids are stamped in
+/// by the runtime. This is how a function reaches platform services on
+/// addresses `raisin.http.fetch` must keep refusing.
+///
+/// Returns `{ "ok": bool, "status": u16, "body": <json|string> }`.
+pub type PlatformHookCallback = Arc<
+    dyn Fn(
+            String, // hook name
+            Value,  // payload
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send>>
+        + Send
+        + Sync,
+>;
+
 // ========== Integration / Mount Operation Callbacks ==========
 
 /// Callback for `raisin.integrations.sync_now(mountId, mode?)`.
