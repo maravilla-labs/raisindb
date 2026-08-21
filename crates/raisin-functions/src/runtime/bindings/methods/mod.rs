@@ -405,10 +405,13 @@ mod tests {
             method_count
         );
 
-        // Upper bound check (shouldn't have too many extra methods)
+        // Upper bound check (shouldn't have too many extra methods).
+        // This is a duplicate-registration tripwire, not a budget: raise it
+        // deliberately when the surface genuinely grows. It was already blown
+        // (101 > 100) before the crypto signing bindings were added.
         assert!(
-            method_count <= 100,
-            "Expected at most 100 methods, got {}. Did you accidentally duplicate some bindings?",
+            method_count <= 130,
+            "Expected at most 130 methods, got {}. Did you accidentally duplicate some bindings?",
             method_count
         );
 

@@ -89,6 +89,38 @@ impl RaisinFunctionApi {
         Ok(crypto::verify_with_jwks(token, &jwks, &parsed))
     }
 
+    /// `n` CSPRNG bytes as base64. Pure; no policy gate applies because no
+    /// resource outside the process is touched.
+    pub(crate) async fn impl_crypto_random_bytes(&self, n: u32) -> Result<String> {
+        crypto::random_bytes(n)
+    }
+
+    /// Lowercase hex digest (`sha256` by default, `sha512` on request).
+    pub(crate) async fn impl_crypto_hash(&self, input: &str, alg: Option<&str>) -> Result<String> {
+        crypto::hash_hex(input, alg)
+    }
+
+    /// Generate an ES256 (P-256) keypair as `{ alg, publicJwk, privateJwk }`.
+    /// The private JWK is returned to the caller and is never logged here.
+    pub(crate) async fn impl_crypto_generate_key_pair(&self, alg: Option<&str>) -> Result<Value> {
+        crypto::generate_key_pair(alg)
+    }
+
+    /// Sign `claims` into a compact JWS with an EC private JWK. Neither the key
+    /// nor the resulting token appears in any tracing field.
+    pub(crate) async fn impl_crypto_sign_jwt(
+        &self,
+        claims: Value,
+        private_jwk: Value,
+        opts: Value,
+    ) -> Result<String> {
+        crypto::sign_jwt(
+            &claims,
+            &private_jwk,
+            &crypto::SignJwtOptions::from_value(&opts)?,
+        )
+    }
+
     /// Fetch the JWKS document, serving a cached copy while it is fresh.
     async fn fetch_jwks(&self, url: &str) -> Result<Value> {
         if let Some(cached) = cache_get(url) {

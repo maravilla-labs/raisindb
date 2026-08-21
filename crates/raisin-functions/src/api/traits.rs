@@ -719,4 +719,41 @@ pub trait FunctionApi: Send + Sync {
     /// This is a general primitive (any connector may use it to authenticate a
     /// signed push/webhook); it is not provider-specific.
     async fn crypto_verify_jwt(&self, token: &str, opts: Value) -> Result<Value>;
+
+    /// `n` cryptographically secure random bytes, base64-encoded (1..=64).
+    ///
+    /// The runtime has no other CSPRNG: `crypto_uuid` is the only other source
+    /// of entropy, and QuickJS's `Math.random` is not cryptographically strong.
+    /// Anything unguessable — a ticket short code, a nonce, a one-time token —
+    /// must come from here. Errors when `n` is outside the range.
+    async fn crypto_random_bytes(&self, n: u32) -> Result<String>;
+
+    /// Lowercase hex digest of `input`. `alg` is `"sha256"` (default) or
+    /// `"sha512"`; anything else is an error rather than a silent fallback.
+    ///
+    /// Hex and lowercase because the peers that check these digests — webhook
+    /// receivers comparing a signature header, content addresses — read hex,
+    /// and a case mismatch fails verification silently.
+    async fn crypto_hash(&self, input: &str, alg: Option<&str>) -> Result<String>;
+
+    /// Generate a signing keypair; `alg` defaults to `"ES256"` (ECDSA P-256).
+    ///
+    /// Returns `{ alg, publicJwk, privateJwk }`. The private JWK is returned to
+    /// the caller and never logged — where it is stored is the caller's
+    /// decision. Publish only `publicJwk` (as a JWKS) to verifiers.
+    async fn crypto_generate_key_pair(&self, alg: Option<&str>) -> Result<Value>;
+
+    /// Sign `claims` into a compact JWS with an EC private JWK.
+    ///
+    /// `opts` is `{ alg?, kid?, expiresInSec? }`. The signature is JOSE `r||s`
+    /// (64 raw bytes, base64url, unpadded) — the form `crypto_verify_jwt` and
+    /// every other JOSE verifier accept, NOT ASN.1/DER. An explicit
+    /// `expiresInSec` overrides any `exp` already in `claims`. A malformed key
+    /// is a hard error whose message never names the offending component.
+    async fn crypto_sign_jwt(
+        &self,
+        claims: Value,
+        private_jwk: Value,
+        opts: Value,
+    ) -> Result<String>;
 }

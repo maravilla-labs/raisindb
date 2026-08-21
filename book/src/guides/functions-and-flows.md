@@ -319,11 +319,46 @@ raisin.date.diffDays(ts1, ts2)       // Difference in days
 
 #### Crypto Utilities -- `raisin.crypto.*`
 
+Every binding is async -- `await` it. There is no `md5`, no `sha1`, and no
+`randomUUID`; the surface is exactly these six methods.
+
 ```javascript
-const hash = raisin.crypto.md5(data);     // MD5 hex hash
-const hash = raisin.crypto.sha256(data);  // SHA-256 hex hash
-const id = raisin.crypto.uuid();          // Random UUID v4
+const id    = await raisin.crypto.uuid();              // Random UUID v4
+const bytes = await raisin.crypto.randomBytes(16);     // base64, n in 1..=64, CSPRNG
+const hex    = await raisin.crypto.hash(data);          // SHA-256 hex (default)
+const hex512 = await raisin.crypto.hash(data, "sha512");// SHA-512 hex
+
+// ES256 (ECDSA P-256) signing keypair
+const { alg, publicJwk, privateJwk } = await raisin.crypto.generateKeyPair();
+
+// Mint a token. The signature is JOSE r||s (64 raw bytes), base64url,
+// unpadded -- not the ASN.1/DER form, so any JOSE verifier accepts it.
+const token = await raisin.crypto.signJwt(
+  { sub: "ticket:42", iss: "https://tickets.example.com" },
+  privateJwk,
+  { expiresInSec: 3600 }   // stamps `exp`, overriding any `exp` in the claims
+);
+
+// Verify against a published JWKS. Never throws on a bad token:
+// an invalid token is `{ valid: false, error }`.
+const { valid, claims } = await raisin.crypto.verifyJwt(token, {
+  jwks_url: "https://tickets.example.com/.well-known/jwks.json",
+  issuer: "https://tickets.example.com",
+});
 ```
+
+`hash` accepts `"sha256"` (default) and `"sha512"` only. `generateKeyPair` and
+`signJwt` support `ES256` only. `signJwt` always adds `iat` if the claims do not
+carry one, and copies the private JWK's `kid` into the header unless
+`opts.kid` overrides it.
+
+The `jwks_url` host must be allowed by the function's `network_policy`; a denial
+is a hard error, not a `{ valid: false }`. `uuid`, `randomBytes`, `hash`,
+`generateKeyPair` and `signJwt` are pure and offline -- no policy gate applies.
+
+Store a `privateJwk` in the secret store, never in a node property or a log
+line, and read it back with `raisin.secrets.get()` under the function's
+`secret_policy`.
 
 #### Timer APIs (Global)
 

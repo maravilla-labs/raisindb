@@ -319,8 +319,15 @@ const rows = Array.isArray(result) ? result : (result?.rows || []);
 | `raisin.date.now()` | Current ISO-8601 timestamp |
 | `raisin.date.parse(str)` / `format(ts)` | Parse / format dates |
 | `raisin.date.timestamp()` | Unix timestamp (seconds) |
-| `raisin.crypto.hash(data)` | Hash a string |
-| `raisin.crypto.randomUUID()` | Generate UUID v4 |
+| `raisin.crypto.uuid()` | Generate UUID v4 (there is no `randomUUID`) |
+| `raisin.crypto.randomBytes(n)` | `n` CSPRNG bytes as base64; `n` in `1..=64` |
+| `raisin.crypto.hash(input, alg?)` | Lowercase hex digest; `alg` = `"sha256"` (default) or `"sha512"`. No MD5/SHA-1 |
+| `raisin.crypto.generateKeyPair(alg?)` | `{ alg, publicJwk, privateJwk }`; `alg` = `"ES256"` (P-256) only |
+| `raisin.crypto.signJwt(claims, privateJwk, opts?)` | Compact JWS. `opts = { alg?, kid?, expiresInSec? }`. Signature is JOSE `r\|\|s`, base64url, unpadded |
+| `raisin.crypto.verifyJwt(token, opts)` | `opts = { jwks_url, issuer?, audience?, algorithms? }` -> `{ valid, claims?, error? }`; `jwks_url` must pass `network_policy` |
+
+All crypto bindings are async -- `await` them. Keep a `privateJwk` in the secret
+store (`raisin.secrets.get`), never in a node property or a log line.
 
 ### Logging
 

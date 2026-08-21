@@ -22,6 +22,11 @@
 //! already-fetched JWKS value and never touches the network. Tokens and claims
 //! are never logged.
 
+mod primitives;
+pub use primitives::{
+    generate_key_pair, hash_hex, random_bytes, random_bytes_check_len, sign_jwt, SignJwtOptions,
+};
+
 use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde_json::{json, Value};

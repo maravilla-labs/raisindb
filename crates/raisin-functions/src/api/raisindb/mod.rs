@@ -751,6 +751,27 @@ impl FunctionApi for RaisinFunctionApi {
         self.impl_crypto_verify_jwt(token, opts).await
     }
 
+    async fn crypto_random_bytes(&self, n: u32) -> Result<String> {
+        self.impl_crypto_random_bytes(n).await
+    }
+
+    async fn crypto_hash(&self, input: &str, alg: Option<&str>) -> Result<String> {
+        self.impl_crypto_hash(input, alg).await
+    }
+
+    async fn crypto_generate_key_pair(&self, alg: Option<&str>) -> Result<Value> {
+        self.impl_crypto_generate_key_pair(alg).await
+    }
+
+    async fn crypto_sign_jwt(
+        &self,
+        claims: Value,
+        private_jwk: Value,
+        opts: Value,
+    ) -> Result<String> {
+        self.impl_crypto_sign_jwt(claims, private_jwk, opts).await
+    }
+
     // ========== Admin SQL (continued) ==========
 
     async fn admin_sql_execute(&self, sql: &str, params: Vec<Value>) -> Result<i64> {

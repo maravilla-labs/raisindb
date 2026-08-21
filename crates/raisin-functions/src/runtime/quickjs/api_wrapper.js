@@ -676,7 +676,24 @@ globalThis.raisin = {
             const r = __call('crypto_verify_jwt', [token, opts === undefined ? null : opts]);
             if (r && r.error && r.valid === undefined) throw new Error(r.message || r.error);
             return r;
-        }
+        },
+        // randomBytes(n) -> base64 string of n CSPRNG bytes (n: 1..=64).
+        // The ONLY cryptographically strong entropy in the runtime besides
+        // uuid() — Math.random() is not a CSPRNG. Out-of-range n throws.
+        randomBytes: (n) => __call('crypto_random_bytes', [n]),
+        // hash(input, alg?) -> lowercase hex digest; alg "sha256" (default)
+        // or "sha512". An unsupported alg throws rather than falling back.
+        hash: (input, alg) => __call('crypto_hash', [input, alg === undefined ? null : alg]),
+        // generateKeyPair(alg?) -> { alg, publicJwk, privateJwk }; alg defaults
+        // to "ES256" (ECDSA P-256). Publish publicJwk in a JWKS; keep
+        // privateJwk secret — never log it or write it to a public node.
+        generateKeyPair: (alg) => __call('crypto_generate_key_pair', [alg === undefined ? null : alg]),
+        // signJwt(claims, privateJwk, opts?) -> compact JWS string.
+        // opts: { alg?: "ES256", kid?, expiresInSec? }. The signature is JOSE
+        // r||s base64url, so verifyJwt (and any JOSE verifier) accepts it.
+        // expiresInSec overrides any exp already present in claims.
+        signJwt: (claims, privateJwk, opts) =>
+            __call('crypto_sign_jwt', [claims, privateJwk, opts === undefined ? null : opts])
     },
     // Atomic lease-locks (mutual exclusion with fencing tokens).
     // Requires the [locks] subsystem to be enabled in server config, else throws.

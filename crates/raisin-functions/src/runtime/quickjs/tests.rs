@@ -1466,6 +1466,77 @@ async fn test_crypto_verify_jwt_roundtrip() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_crypto_sign_and_key_bindings_roundtrip_in_js() {
+    let runtime = QuickJsRuntime::new();
+
+    // The full JS path for the four new crypto bindings. The mock delegates
+    // these to the REAL `runtime::crypto` primitives (they are pure and
+    // offline), so this asserts the actual contract, not a stub: a 64-byte
+    // JOSE r||s signature, unpadded base64url, and a known-answer digest.
+    let code = r#"
+        function handler(input) {
+            var kp = raisin.crypto.generateKeyPair();
+            var token = raisin.crypto.signJwt(
+                { sub: "ticket-1" },
+                kp.privateJwk,
+                { expiresInSec: 600 }
+            );
+            var parts = token.split(".");
+            return {
+                alg: kp.alg,
+                hasPrivateD: typeof kp.privateJwk.d === "string",
+                publicHasNoD: kp.publicJwk.d === undefined,
+                parts: parts.length,
+                unpadded: token.indexOf("=") === -1,
+                headerAlg: JSON.parse(atob(parts[0].replace(/-/g, "+").replace(/_/g, "/"))).alg,
+                sha256abc: raisin.crypto.hash("abc"),
+                rand16: raisin.crypto.randomBytes(16),
+                randStable: raisin.crypto.randomBytes(16) === raisin.crypto.randomBytes(16)
+            };
+        }
+    "#;
+
+    let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+        .with_input(serde_json::json!({}));
+    let metadata = FunctionMetadata::javascript("test_crypto_sign_jwt");
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+
+    let result = runtime
+        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .await
+        .unwrap();
+
+    assert!(result.success, "function errored: {:?}", result.error);
+    let output = result.output.unwrap();
+    assert_eq!(output["alg"], "ES256");
+    assert_eq!(output["hasPrivateD"], true);
+    assert_eq!(output["publicHasNoD"], true);
+    assert_eq!(output["parts"], 3);
+    assert_eq!(output["unpadded"], true);
+    assert_eq!(output["headerAlg"], "ES256");
+    assert_eq!(
+        output["sha256abc"],
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    // randomBytes is the ONE binding the mock stubs (a fixed 'A' pattern), so
+    // here we can only assert the length contract; that the real generator
+    // produces distinct draws is asserted natively in `runtime::crypto`.
+    assert_eq!(
+        output["randStable"], true,
+        "mock randomBytes is deterministic"
+    );
+    // base64URL of 16 bytes is 22 chars — unpadded, and with no `+` or `/`.
+    // The output goes into URLs, QR payloads and JWS segments, so a `=` here
+    // would have to be escaped by every caller.
+    let rand16 = output["rand16"].as_str().unwrap();
+    assert_eq!(rand16.len(), 22);
+    assert!(
+        !rand16.contains('=') && !rand16.contains('+') && !rand16.contains('/'),
+        "randomBytes must be base64url-unpadded, got {rand16}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_raisin_branches_bindings_registered() {
     let runtime = QuickJsRuntime::new();
 
@@ -1923,7 +1994,17 @@ async fn test_raisin_api_surface_snapshot() {
     expect("scheduler", vec!["cancel", "get", "list", "schedule"]);
     expect("platform", vec!["hook"]);
     expect("tasks", vec!["complete", "create"]);
-    expect("crypto", vec!["uuid", "verifyJwt"]);
+    expect(
+        "crypto",
+        vec![
+            "generateKeyPair",
+            "hash",
+            "randomBytes",
+            "signJwt",
+            "uuid",
+            "verifyJwt",
+        ],
+    );
     expect("locks", vec!["acquire", "release", "renew"]);
     expect("inventory", vec!["claim", "release"]);
     expect("integrations", vec!["syncNow", "sync_now"]);

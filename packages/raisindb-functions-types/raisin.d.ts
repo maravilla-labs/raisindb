@@ -286,6 +286,20 @@ declare namespace raisin {
   namespace crypto {
     function uuid(): Promise<string>;
     function verifyJwt(token: string, opts?: any | null): Promise<any>;
+    /** n cryptographically secure random bytes, base64-encoded. n: 1..=64. */
+    function randomBytes(n: number): Promise<string>;
+    /** Lowercase hex digest. alg: "sha256" (default) | "sha512". */
+    function hash(input: string, alg?: string | null): Promise<string>;
+    /** Generate a signing keypair; alg defaults to "ES256" (ECDSA P-256). */
+    function generateKeyPair(
+      alg?: string | null
+    ): Promise<{ alg: string; publicJwk: any; privateJwk: any }>;
+    /** Sign claims into a compact JWS. Signature is JOSE r||s base64url. */
+    function signJwt(
+      claims: any,
+      privateJwk: any,
+      opts?: { alg?: string; kid?: string; expiresInSec?: number } | null
+    ): Promise<string>;
   }
 
   namespace date {

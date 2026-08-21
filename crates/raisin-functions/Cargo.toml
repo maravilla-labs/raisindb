@@ -77,6 +77,13 @@ tokio-rustls = "0.26"
 # same 9.3 line the rest of the workspace already uses.
 jsonwebtoken = "9.3"
 
+# CSPRNG, SHA-2 digests and ECDSA P-256 for the raisin.crypto.* signing
+# primitives (randomBytes / hash / generateKeyPair / signJwt). Already in the
+# lockfile via raisin-crypto and jsonwebtoken, so this adds no new tree; it is
+# named directly because ECDSA_P256_SHA256_FIXED_SIGNING is what emits the JOSE
+# r||s signature JWS requires, and raisin-crypto does not re-export ring.
+ring = "0.17"
+
 # Dynamic loading of C-ABI function-binding plugins (see `plugin_loader`).
 libloading = "0.8"
 webpki-roots = "1.0"

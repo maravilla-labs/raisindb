@@ -880,6 +880,47 @@ impl FunctionApi for MockFunctionApi {
         // JWKS or network. Real verification lives in `runtime::crypto`.
         Ok(serde_json::json!({ "valid": true, "claims": {} }))
     }
+
+    async fn crypto_random_bytes(&self, n: u32) -> Result<String> {
+        // Deterministic and obviously fake: a repeating 'A' pattern can never
+        // be mistaken for entropy if it escapes into a fixture or a snapshot.
+        // Only the LENGTH contract is honoured (base64url of `n` bytes).
+        //
+        // THE BOUND IS ENFORCED HERE TOO. `ArgParser::u32` casts with `as u32`,
+        // so `randomBytes(-1)` reaches this method as 4294967295 — and a mock
+        // that trusts `n` allocates 4 GiB before anything can object. The real
+        // implementation rejects it; a mock that does not is a way to fell the
+        // test harness with a plausible-looking call.
+        use base64::Engine as _;
+        crate::runtime::crypto::random_bytes_check_len(n)?;
+        Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(vec![0x41u8; n as usize]))
+    }
+
+    async fn crypto_hash(&self, input: &str, alg: Option<&str>) -> Result<String> {
+        // The real digest, not a stub: tests that assert a known-answer digest
+        // are the whole point of the binding, and a fake here would hide a
+        // wiring bug behind a passing test.
+        crate::runtime::crypto::hash_hex(input, alg)
+    }
+
+    async fn crypto_generate_key_pair(&self, alg: Option<&str>) -> Result<Value> {
+        // Real keygen: it is pure, offline and fast, and a fixed fake keypair
+        // in a mock is exactly the kind of thing that ends up in production.
+        crate::runtime::crypto::generate_key_pair(alg)
+    }
+
+    async fn crypto_sign_jwt(
+        &self,
+        claims: Value,
+        private_jwk: Value,
+        opts: Value,
+    ) -> Result<String> {
+        crate::runtime::crypto::sign_jwt(
+            &claims,
+            &private_jwk,
+            &crate::runtime::crypto::SignJwtOptions::from_value(&opts)?,
+        )
+    }
 }
 
 /// Deterministic mock mailbox: `(uid, from, subject)` tuples.
