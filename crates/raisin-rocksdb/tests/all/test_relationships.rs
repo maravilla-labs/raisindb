@@ -2,7 +2,7 @@
 
 use raisin_models::nodes::RelationRef;
 use raisin_rocksdb::RocksDBStorage;
-use raisin_storage::scope::StorageScope;
+use raisin_storage::scope::{BranchScope, StorageScope};
 use raisin_storage::{BranchRepository, RelationRepository, Storage};
 use tempfile::TempDir;
 
@@ -829,4 +829,197 @@ async fn test_branch_and_revision_combined() {
     assert_eq!(feature_current[0].target, "node3");
 
     println!("✅ Test passed: branch_and_revision_combined");
+}
+
+/// Move HEAD forward so the next relation write lands at a NEW revision key
+/// instead of overwriting the previous one. This is what a node write between
+/// RELATE and UNRELATE does in a real server, and it is the condition under
+/// which the global index used to keep returning a removed edge.
+async fn advance_head(storage: &RocksDBStorage, tenant_id: &str, repo_id: &str, branch: &str) {
+    let head = storage
+        .branches()
+        .get_branch(tenant_id, repo_id, branch)
+        .await
+        .unwrap()
+        .unwrap()
+        .head;
+    storage
+        .branches()
+        .update_head(
+            tenant_id,
+            repo_id,
+            branch,
+            raisin_hlc::HLC::new(head.timestamp_ms + 1, 0),
+        )
+        .await
+        .unwrap();
+}
+
+/// RELATE at one HEAD, UNRELATE at a later HEAD, then read the edge back
+/// through every path GRAPH_TABLE and the neighbour scans use. Parameterised
+/// over the target workspace so the same-workspace case stays covered.
+async fn relate_unrelate_across_heads(source_ws: &str, target_ws: &str) {
+    let (storage, tenant_id, repo_id, branch, _) = setup_storage().await;
+
+    let relation = RelationRef::simple(
+        "target".to_string(),
+        target_ws.to_string(),
+        "studio:Event".to_string(),
+        "attends".to_string(),
+    );
+    storage
+        .relations()
+        .add_relation(
+            StorageScope::new(&tenant_id, &repo_id, &branch, source_ws),
+            "source",
+            "raisin:User",
+            relation,
+        )
+        .await
+        .unwrap();
+
+    let global_before = storage
+        .relations()
+        .scan_relations_global(
+            BranchScope::new(&tenant_id, &repo_id, &branch),
+            Some("attends"),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(global_before.len(), 1, "edge visible in global index");
+
+    advance_head(&storage, &tenant_id, &repo_id, &branch).await;
+
+    let removed = storage
+        .relations()
+        .remove_relation(
+            StorageScope::new(&tenant_id, &repo_id, &branch, source_ws),
+            "source",
+            target_ws,
+            "target",
+            Some("attends"),
+        )
+        .await
+        .unwrap();
+    assert!(removed, "remove_relation reports the edge as removed");
+
+    // Outgoing (packed / forward index)
+    let outgoing = storage
+        .relations()
+        .get_outgoing_relations(
+            StorageScope::new(&tenant_id, &repo_id, &branch, source_ws),
+            "source",
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(outgoing.is_empty(), "outgoing still has {:?}", outgoing);
+
+    // Incoming (reverse index, target workspace)
+    let incoming = storage
+        .relations()
+        .get_incoming_relations(
+            StorageScope::new(&tenant_id, &repo_id, &branch, target_ws),
+            "target",
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(incoming.is_empty(), "incoming still has {:?}", incoming);
+
+    // Global index — what GRAPH_TABLE single-hop matching traverses
+    for filter in [Some("attends"), None] {
+        let global = storage
+            .relations()
+            .scan_relations_global(
+                BranchScope::new(&tenant_id, &repo_id, &branch),
+                filter,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            global.is_empty(),
+            "global index (filter {:?}) still has {:?}",
+            filter,
+            global
+                .iter()
+                .map(|(sw, s, tw, t, _)| format!("{sw}:{s} -> {tw}:{t}"))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // Removing again must not rediscover the older, live version.
+    advance_head(&storage, &tenant_id, &repo_id, &branch).await;
+    let removed_again = storage
+        .relations()
+        .remove_relation(
+            StorageScope::new(&tenant_id, &repo_id, &branch, source_ws),
+            "source",
+            target_ws,
+            "target",
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(!removed_again, "a removed edge must not be removable twice");
+}
+
+#[tokio::test]
+async fn test_cross_workspace_unrelate_after_head_advance_hides_edge_everywhere() {
+    relate_unrelate_across_heads("raisin:access_control", "events").await;
+}
+
+#[tokio::test]
+async fn test_same_workspace_unrelate_after_head_advance_hides_edge_everywhere() {
+    relate_unrelate_across_heads("ticketing", "ticketing").await;
+}
+
+#[tokio::test]
+async fn test_packed_unrelate_is_scoped_to_target_workspace() {
+    let (storage, tenant_id, repo_id, branch, _) = setup_storage().await;
+
+    // Same target id in two workspaces; removing one must keep the other.
+    for ws in ["events", "archive"] {
+        storage
+            .relations()
+            .add_relation(
+                StorageScope::new(&tenant_id, &repo_id, &branch, "users"),
+                "source",
+                "raisin:User",
+                RelationRef::simple(
+                    "shared-id".to_string(),
+                    ws.to_string(),
+                    "studio:Event".to_string(),
+                    "attends".to_string(),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+
+    storage
+        .relations()
+        .remove_relation(
+            StorageScope::new(&tenant_id, &repo_id, &branch, "users"),
+            "source",
+            "events",
+            "shared-id",
+            None,
+        )
+        .await
+        .unwrap();
+
+    let outgoing = storage
+        .relations()
+        .get_outgoing_relations(
+            StorageScope::new(&tenant_id, &repo_id, &branch, "users"),
+            "source",
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(outgoing.len(), 1);
+    assert_eq!(outgoing[0].workspace, "archive");
 }

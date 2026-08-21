@@ -83,12 +83,6 @@ pub(super) async fn scan_relations_global(
             continue;
         }
 
-        // Skip tombstones (empty values)
-        if is_tombstone(&value) {
-            stats.skipped_tombstone += 1;
-            continue;
-        }
-
         // Create unique key for this relationship to detect duplicates
         // We only want the newest revision of each relationship
         let rel_key = format!(
@@ -103,6 +97,18 @@ pub(super) async fn scan_relations_global(
         // Skip if we've already seen this relationship (we only want newest revision)
         if seen_relations.contains(&rel_key) {
             stats.skipped_duplicate += 1;
+            continue;
+        }
+
+        // A tombstone is the NEWEST version of this relationship (revisions are
+        // encoded descending, so it is met first). It must claim the rel_key
+        // before being skipped — otherwise the older, live version written at
+        // an earlier HEAD is returned and an UNRELATEd edge keeps showing up in
+        // GRAPH_TABLE. This is exactly what `queries::get_outgoing_relations`
+        // does for the per-workspace index.
+        if is_tombstone(&value) {
+            stats.skipped_tombstone += 1;
+            seen_relations.insert(rel_key);
             continue;
         }
 

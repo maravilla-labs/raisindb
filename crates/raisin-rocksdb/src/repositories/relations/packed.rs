@@ -58,7 +58,9 @@ impl PackedRelationRepository {
         };
 
         if let Some(idx) = new_relations.iter().position(|r| {
-            r.relation_type == compact.relation_type && r.target_id == compact.target_id
+            r.relation_type == compact.relation_type
+                && r.target_id == compact.target_id
+                && r.target_workspace == compact.target_workspace
         }) {
             new_relations[idx] = compact;
         } else {
@@ -93,7 +95,7 @@ impl PackedRelationRepository {
         branch: &str,
         workspace: &str,
         source_node_id: &str,
-        _target_workspace: &str, // Ignored for packed storage (assumes same workspace or stored in target_id)
+        target_workspace: &str,
         target_node_id: &str,
         relation_type: Option<&str>,
     ) -> Result<bool> {
@@ -112,11 +114,13 @@ impl PackedRelationRepository {
         if let Some(mut relations) = prev_relations {
             let initial_len = relations.len();
 
-            // Remove relations matching target_node_id — and, when a type is
-            // given, only that type. A CompactRelation carries its own
+            // Remove relations matching the target (id AND workspace — the same
+            // id can exist in two workspaces) — and, when a type is given, only
+            // that type. A CompactRelation carries its own
             // relation_type, so the pair's other edges are kept.
             relations.retain(|r| {
-                let same_target = r.target_id == target_node_id;
+                let same_target =
+                    r.target_id == target_node_id && r.target_workspace == target_workspace;
                 let same_type = relation_type.is_none_or(|want| want == r.relation_type);
                 !(same_target && same_type)
             });

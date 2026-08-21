@@ -7,6 +7,7 @@ use raisin_error::{Error, Result};
 use raisin_hlc::HLC;
 use raisin_models::nodes::{FullRelation, RelationRef};
 use rocksdb::DB;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::keys::{
@@ -132,6 +133,11 @@ pub(super) async fn remove_relation(
 
     let mut found_any = false;
     let mut relations_to_remove = Vec::new();
+    // (relation_type, target_id) pairs whose newest version has been decided.
+    // Revisions sort descending inside the prefix, so the first key for a
+    // pair is its current state: a tombstone there means the edge is already
+    // gone and its older live versions must not be "removed" again.
+    let mut seen: HashSet<(String, String)> = HashSet::new();
 
     // Scan to find all relations from source to target
     let iter = db.prefix_iterator_cf(cf_relation, &prefix);
@@ -143,7 +149,18 @@ pub(super) async fn remove_relation(
             break;
         }
 
-        // Skip tombstones
+        // Key structure: {tenant}\0{repo}\0{branch}\0{workspace}\0rel\0{source}\0{relation_type}\0{~revision}\0{target}
+        let key_parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
+        if key_parts.len() < 9 {
+            continue;
+        }
+        let found_type = String::from_utf8_lossy(key_parts[6]).to_string();
+        let found_target = String::from_utf8_lossy(key_parts[8]).to_string();
+        if !seen.insert((found_type.clone(), found_target)) {
+            continue;
+        }
+
+        // Newest version is a tombstone: already removed.
         if is_tombstone(&value) {
             continue;
         }
@@ -153,17 +170,12 @@ pub(super) async fn remove_relation(
 
         // Check if this relation points to the target node in the target workspace
         if relation.target == target_node_id && relation.workspace == target_workspace {
-            // Parse key to extract relation_type
-            let key_parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
-            if key_parts.len() >= 7 {
-                let found_type = String::from_utf8_lossy(key_parts[6]).to_string();
-                // A typed removal takes only its own edge.
-                if relation_type.is_some_and(|want| want != found_type) {
-                    continue;
-                }
-                relations_to_remove.push(found_type);
-                found_any = true;
+            // A typed removal takes only its own edge.
+            if relation_type.is_some_and(|want| want != found_type) {
+                continue;
             }
+            relations_to_remove.push(found_type);
+            found_any = true;
         }
     }
 
