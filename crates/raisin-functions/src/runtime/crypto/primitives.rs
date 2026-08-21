@@ -218,10 +218,12 @@ impl SignJwtOptions {
                 });
                 match n {
                     Some(n) if n > 0 => Some(n),
-                    _ => return Err(Error::Validation(format!(
+                    _ => {
+                        return Err(Error::Validation(format!(
                         "[crypto:invalid_options] signJwt: opts.expiresInSec must be a positive \
                              whole number of SECONDS, got {v}"
-                    ))),
+                    )))
+                    }
                 }
             }
         };
