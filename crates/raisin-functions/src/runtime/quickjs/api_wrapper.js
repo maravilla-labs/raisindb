@@ -873,6 +873,41 @@ globalThis.raisin = {
             return r;
         },
     },
+    // Tenant identities (raisin.identities.*) — the auth records a magic link
+    // or password check resolves to, NOT raisin:User nodes.
+    //
+    // Gated by the function's `identity_policy` in its .node.yaml:
+    //
+    //   identity_policy:
+    //     enabled: true
+    //
+    // With no identity_policy every call below throws policy_denied. That
+    // default is deliberate: update() can rename an account and set its
+    // password, which is an account takeover in the wrong hands.
+    //
+    // Both methods THROW on failure. findByEmail returns null only for "no
+    // such account" — a denial is never folded into null.
+    identities: {
+        // findByEmail(email) -> { id, email, email_verified, display_name, has_password } | null
+        // The address is trimmed and lowercased before lookup.
+        findByEmail: (email) => {
+            const r = __call('identities_findByEmail', [email]);
+            if (r && r.error) throw new Error(r.message || r.error);
+            return r === undefined ? null : r;
+        },
+        // update(id, { email?, password?, display_name? }) -> same shape
+        //
+        // A new email is normalised and refused with [identities:email_taken]
+        // when another account holds it; on success the bound raisin:User
+        // node's `email` follows. `password` gives a magic-link-only account
+        // local credentials. `email_verified` is NOT accepted — a rename proves
+        // typing, not possession; only the magic-link verify sets it.
+        update: (id, patch) => {
+            const r = __call('identities_update', [id, patch]);
+            if (r && r.error) throw new Error(r.message || r.error);
+            return r;
+        },
+    },
     // Transactional email (raisin.email.*).
     // The sender identity (from, replyTo) and the provider credential come from
     // the tenant's /config/email node, NOT from the caller — a function chooses

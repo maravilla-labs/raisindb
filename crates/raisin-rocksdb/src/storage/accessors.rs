@@ -236,6 +236,19 @@ impl RocksDBStorage {
         &self.operation_capture
     }
 
+    /// A repository over the tenant auth identities.
+    ///
+    /// Cheap to build (two `Arc` clones), which is why it is a constructor
+    /// rather than a cached handle — and the single place every caller
+    /// (auth handlers, admin, the function runtime) gets one, so the pairing
+    /// of DB and operation capture cannot drift.
+    pub fn identity_repository(&self) -> crate::repositories::IdentityRepository {
+        crate::repositories::IdentityRepository::new(
+            self.db.clone(),
+            self.operation_capture.clone(),
+        )
+    }
+
     /// The secret store, built on first use.
     ///
     /// # Why this can fail, and why that is the point

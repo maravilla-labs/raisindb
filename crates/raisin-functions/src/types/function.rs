@@ -8,7 +8,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use super::{EmailPolicy, NetworkPolicy, ResourceLimits, SecretPolicy, TriggerCondition};
+use super::{
+    EmailPolicy, IdentityPolicy, NetworkPolicy, ResourceLimits, SecretPolicy, TriggerCondition,
+};
 
 /// Supported function runtime languages
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -136,6 +138,13 @@ pub struct FunctionMetadata {
     #[serde(default)]
     pub email_policy: EmailPolicy,
 
+    /// Tenant-identity policy for `raisin.identities.*`.
+    ///
+    /// Absent means **no identity access** — see [`IdentityPolicy`] for why
+    /// the default has to be the denying one.
+    #[serde(default)]
+    pub identity_policy: IdentityPolicy,
+
     /// Inline triggers (events that invoke this function)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub triggers: Vec<TriggerCondition>,
@@ -182,6 +191,7 @@ impl FunctionMetadata {
             network_policy: NetworkPolicy::default(),
             secret_policy: SecretPolicy::default(),
             email_policy: EmailPolicy::default(),
+            identity_policy: IdentityPolicy::default(),
             triggers: Vec::new(),
             input_schema: None,
             output_schema: None,
@@ -266,6 +276,12 @@ impl FunctionMetadata {
     /// Set email policy
     pub fn with_email_policy(mut self, policy: EmailPolicy) -> Self {
         self.email_policy = policy;
+        self
+    }
+
+    /// Set identity policy
+    pub fn with_identity_policy(mut self, policy: IdentityPolicy) -> Self {
+        self.identity_policy = policy;
         self
     }
 

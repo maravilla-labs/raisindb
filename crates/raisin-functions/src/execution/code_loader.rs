@@ -25,7 +25,8 @@ use raisin_models::nodes::Node;
 use raisin_storage::{ListOptions, NodeRepository, Storage, StorageScope};
 
 use crate::types::{
-    EmailPolicy, FunctionLanguage, FunctionMetadata, NetworkPolicy, ResourceLimits, SecretPolicy,
+    EmailPolicy, FunctionLanguage, FunctionMetadata, IdentityPolicy, NetworkPolicy, ResourceLimits,
+    SecretPolicy,
 };
 
 /// Load a function node from the functions workspace by exact path.
@@ -137,6 +138,7 @@ where
     let network_policy = extract_network_policy(func_node);
     let secret_policy = extract_secret_policy(func_node);
     let email_policy = extract_email_policy(func_node);
+    let identity_policy = extract_identity_policy(func_node);
     let resource_limits = extract_resource_limits(func_node);
 
     // Resolve entry file path
@@ -163,6 +165,7 @@ where
     metadata.network_policy = network_policy;
     metadata.secret_policy = secret_policy;
     metadata.email_policy = email_policy;
+    metadata.identity_policy = identity_policy;
     metadata.resource_limits = resource_limits;
 
     Ok((code, metadata))
@@ -291,6 +294,31 @@ pub fn extract_email_policy(node: &Node) -> EmailPolicy {
                  this function CANNOT send email."
             );
             EmailPolicy::default()
+        }
+    }
+}
+
+/// Extract identity_policy from node properties.
+///
+/// Returns the function's `raisin.identities.*` policy. An absent or malformed
+/// block yields the DEFAULT, which denies everything — a function that never
+/// declared `identity_policy` must not be able to rename or re-password a
+/// single account. Malformed is loud for the same reason it is in
+/// [`extract_secret_policy`].
+pub fn extract_identity_policy(node: &Node) -> IdentityPolicy {
+    let Some(raw) = node.properties.get("identity_policy") else {
+        return IdentityPolicy::default();
+    };
+    match serde_json::to_value(raw) {
+        Ok(v) => IdentityPolicy::parse_or_deny(v, &node.path),
+        Err(e) => {
+            tracing::warn!(
+                function_path = %node.path,
+                error = %e,
+                "identity_policy could not be read from the node and was ignored; \
+                 this function has NO identity access."
+            );
+            IdentityPolicy::default()
         }
     }
 }

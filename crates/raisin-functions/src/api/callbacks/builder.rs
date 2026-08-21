@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 
+use super::identity_ops::*;
 use super::lock_ops::*;
 use super::node_ops::*;
 use super::secret_ops::*;
@@ -93,6 +94,9 @@ pub struct RaisinFunctionApiCallbacks {
     pub secret_list: Option<SecretListCallback>,
     pub secret_rotate: Option<SecretRotateCallback>,
     pub secret_delete: Option<SecretDeleteCallback>,
+    // Tenant-identity callbacks
+    pub identity_find_by_email: Option<IdentityFindByEmailCallback>,
+    pub identity_update: Option<IdentityUpdateCallback>,
 }
 
 impl RaisinFunctionApiCallbacks {
@@ -450,6 +454,16 @@ impl RaisinFunctionApiCallbacks {
 
     pub fn with_secret_delete(mut self, callback: SecretDeleteCallback) -> Self {
         self.secret_delete = Some(callback);
+        self
+    }
+
+    pub fn with_identity_find_by_email(mut self, callback: IdentityFindByEmailCallback) -> Self {
+        self.identity_find_by_email = Some(callback);
+        self
+    }
+
+    pub fn with_identity_update(mut self, callback: IdentityUpdateCallback) -> Self {
+        self.identity_update = Some(callback);
         self
     }
 }

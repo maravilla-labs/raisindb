@@ -360,6 +360,42 @@ Store a `privateJwk` in the secret store, never in a node property or a log
 line, and read it back with `raisin.secrets.get()` under the function's
 `secret_policy`.
 
+#### Identity APIs
+
+Look up and update the tenant's auth identities — the records a magic link
+or a password check resolves to, **not** `raisin:User` nodes.
+
+```javascript
+const who = await raisin.identities.findByEmail("Ada@Example.com"); // normalised
+// -> { id, email, email_verified, display_name, has_password } | null
+
+await raisin.identities.update(who.id, {
+  email: "ada@new-example.com",   // refused with [identities:email_taken] if held by another account
+  password: "…",                  // gives a magic-link-only account a password
+  display_name: "Ada",
+});
+```
+
+The binding is **denied by default**. A function opts in from its `.node.yaml`:
+
+```yaml
+identity_policy:
+  enabled: true
+```
+
+Without that block every call rejects with `[identities:policy_denied]`.
+There is no allow-list: an account-management function needs whichever
+identity the request is about, so the grant is all-or-nothing and must be
+typed into the one function that needs it — `update` can rename an account
+and set its password, which is an account takeover in the wrong hands.
+
+What a function can never do is mark an address verified. `email_verified`
+in a patch is refused, and a rename always clears the flag: a rename proves
+the caller could *type* an address, only the magic-link verify step proves
+the holder *possesses* it. When the email changes, the `email` property of
+the bound `raisin:User` node (found by its `user_id`, in
+`raisin:access_control` on `main`) follows; its path does not move.
+
 #### Timer APIs (Global)
 
 ```javascript

@@ -68,6 +68,7 @@ pub(crate) fn build_function_api(
         // None when no master keyring is configured. A present store is not a
         // grant — the function's own SecretPolicy still gates every call.
         secret_store: state.storage.secret_store().ok(),
+        identity_repo: Some(Arc::new(state.storage.identity_repository())),
         schema_stats_cache: state.schema_stats_cache.clone(),
     });
 

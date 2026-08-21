@@ -399,6 +399,10 @@ where
                         .rocksdb_storage
                         .as_ref()
                         .and_then(|s| s.secret_store().ok()),
+                    identity_repo: ws_state
+                        .rocksdb_storage
+                        .as_ref()
+                        .map(|s| Arc::new(s.identity_repository())),
                     schema_stats_cache: ws_state.schema_stats_cache.clone(),
                 });
 
@@ -420,7 +424,8 @@ where
                         callbacks,
                     )
                     .with_secret_policy(loaded.metadata.secret_policy.clone())
-                    .with_email_policy(loaded.metadata.email_policy.clone()),
+                    .with_email_policy(loaded.metadata.email_policy.clone())
+                    .with_identity_policy(loaded.metadata.identity_policy.clone()),
                 );
 
                 // Execute function

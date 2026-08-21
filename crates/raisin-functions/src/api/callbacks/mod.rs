@@ -14,11 +14,13 @@
 //! - [`node_ops`] - Node CRUD operation callbacks
 //! - [`sql_ops`] - SQL query/execute callbacks
 //! - [`secret_ops`] - Secret store callbacks (policy-gated one layer up)
+//! - [`identity_ops`] - Tenant-identity callbacks (policy-gated one layer up)
 //! - [`service_ops`] - HTTP, Event, AI, PDF, Resource, Task, and Function callbacks
 //! - [`transaction_ops`] - Transaction operation callbacks
 //! - [`builder`] - `RaisinFunctionApiCallbacks` builder
 
 mod builder;
+mod identity_ops;
 mod lock_ops;
 mod node_ops;
 mod secret_ops;
@@ -27,6 +29,7 @@ mod sql_ops;
 mod transaction_ops;
 
 pub use builder::RaisinFunctionApiCallbacks;
+pub use identity_ops::*;
 pub use lock_ops::*;
 pub use node_ops::*;
 pub use secret_ops::*;

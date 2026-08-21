@@ -31,6 +31,7 @@ mod email;
 mod events;
 mod functions;
 mod http;
+mod identities;
 mod imap;
 mod integrations;
 mod locks;
@@ -55,7 +56,9 @@ use std::sync::{Arc, Mutex};
 
 use super::callbacks::RaisinFunctionApiCallbacks;
 use super::FunctionApi;
-use crate::types::{EmailPolicy, ExecutionContext, LogEntry, NetworkPolicy, SecretPolicy};
+use crate::types::{
+    EmailPolicy, ExecutionContext, IdentityPolicy, LogEntry, NetworkPolicy, SecretPolicy,
+};
 
 /// Real FunctionApi implementation for RaisinDB
 ///
@@ -80,6 +83,12 @@ pub struct RaisinFunctionApi {
     /// thought about email cannot send any. Opt in with
     /// [`RaisinFunctionApi::with_email_policy`].
     pub(crate) email_policy: EmailPolicy,
+    /// Tenant-identity policy for `raisin.identities.*` access control.
+    ///
+    /// Not a constructor argument for the same reason the others are not:
+    /// [`IdentityPolicy::default`] denies everything. Opt in with
+    /// [`RaisinFunctionApi::with_identity_policy`].
+    pub(crate) identity_policy: IdentityPolicy,
     /// Callbacks for operations
     pub(crate) callbacks: RaisinFunctionApiCallbacks,
     /// Captured logs
@@ -103,6 +112,7 @@ impl RaisinFunctionApi {
             network_policy,
             secret_policy: SecretPolicy::default(),
             email_policy: EmailPolicy::default(),
+            identity_policy: IdentityPolicy::default(),
             callbacks,
             logs: Arc::new(Mutex::new(Vec::new())),
         }
@@ -128,6 +138,17 @@ impl RaisinFunctionApi {
     /// "email never works", with no error until a function tries to send.
     pub fn with_email_policy(mut self, policy: EmailPolicy) -> Self {
         self.email_policy = policy;
+        self
+    }
+
+    /// Grant this API surface the function's declared identity policy.
+    ///
+    /// Without it the API refuses every `raisin.identities.*` call. The same
+    /// caveat as [`with_email_policy`](Self::with_email_policy) applies: every
+    /// site that builds this API from a `FunctionMetadata` must call it, or
+    /// that transport alone silently loses the binding.
+    pub fn with_identity_policy(mut self, policy: IdentityPolicy) -> Self {
+        self.identity_policy = policy;
         self
     }
 
@@ -743,6 +764,16 @@ impl FunctionApi for RaisinFunctionApi {
 
     async fn email_send(&self, message: Value) -> Result<Value> {
         self.impl_email_send(message).await
+    }
+
+    // ========== Identities (tenant auth records) ==========
+
+    async fn identity_find_by_email(&self, email: &str) -> Result<Option<Value>> {
+        self.impl_identity_find_by_email(email).await
+    }
+
+    async fn identity_update(&self, id: &str, patch: Value) -> Result<Value> {
+        self.impl_identity_update(id, patch).await
     }
 
     // ========== Crypto (native primitives) ==========

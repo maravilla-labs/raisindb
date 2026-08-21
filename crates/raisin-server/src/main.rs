@@ -493,6 +493,7 @@ async fn main() {
                 // reports the subsystem as unconfigured rather than failing at
                 // an opaque decrypt.
                 secret_store: storage.secret_store().ok(),
+                identity_repo: Some(Arc::new(storage.identity_repository())),
                 schema_stats_cache: Some(schema_stats_cache.clone()),
             });
 

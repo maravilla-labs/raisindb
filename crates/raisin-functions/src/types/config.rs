@@ -547,6 +547,80 @@ impl EmailPolicy {
     }
 }
 
+/// Tenant-identity policy for functions.
+///
+/// Gates `raisin.identities.*` exactly the way [`EmailPolicy`] gates
+/// `raisin.email.*`: a single `enabled` switch, `#[serde(default)]` so an
+/// omitted `identity_policy` block yields **no access at all**.
+///
+/// # Why deny-by-default matters here
+///
+/// Identities are the tenant's AUTH records — the thing a magic link or a
+/// password check resolves to — and they are not nodes, so row-level security
+/// never sees them. `raisin.identities.update` can rename an account's address
+/// and set its password: a function holding it can take over any account in
+/// the tenant. That must be a capability an author typed into one function's
+/// `.node.yaml`, not an ambient power every function (and every privileged
+/// virtual-node adapter) has.
+///
+/// There is no allow-list because there is no meaningful subset to allow: an
+/// account-management function needs whichever identity the request is about.
+/// What it may NOT do is fixed in code instead — it can never mark an address
+/// verified (see `api/raisindb/identities.rs`).
+///
+/// A function opts in from its `.node.yaml`:
+///
+/// ```yaml
+/// identity_policy:
+///   enabled: true
+/// ```
+///
+/// # `deny_unknown_fields` is deliberate
+///
+/// Same trap as [`SecretPolicy`]: a misspelled key would otherwise parse
+/// silently into `enabled: false` and the eventual denial would report "this
+/// function has no identity_policy" to an author looking straight at one.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityPolicy {
+    /// Whether this function may look up and update tenant identities.
+    ///
+    /// `false` (the default) denies every `raisin.identities.*` call.
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+impl IdentityPolicy {
+    /// A policy that allows nothing. Identical to [`Default`]; named so a call
+    /// site can say what it means.
+    pub fn no_access() -> Self {
+        Self::default()
+    }
+
+    /// A policy that grants `raisin.identities.*`.
+    pub fn allow() -> Self {
+        Self { enabled: true }
+    }
+
+    /// Parse a raw `identity_policy` block, denying (and WARNING) if it will
+    /// not parse — the single parse point for both loaders, as with
+    /// [`EmailPolicy::parse_or_deny`].
+    pub fn parse_or_deny(raw: serde_json::Value, context: &str) -> Self {
+        match serde_json::from_value::<Self>(raw) {
+            Ok(policy) => policy,
+            Err(e) => {
+                tracing::warn!(
+                    function = %context,
+                    error = %e,
+                    "identity_policy could not be parsed and was ignored; this function \
+                     has NO identity access. Expected `enabled: true`."
+                );
+                Self::default()
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -753,5 +827,25 @@ mod tests {
         let policy = EmailPolicy::allow_recipients(vec!["*".to_string()]);
         assert!(policy.is_recipient_allowed("user@example.com"));
         assert!(policy.is_recipient_allowed("user@anything.test"));
+    }
+
+    #[test]
+    fn identity_policy_denies_by_default() {
+        assert!(!IdentityPolicy::default().enabled);
+        let from_empty: IdentityPolicy = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!from_empty.enabled);
+        assert!(IdentityPolicy::allow().enabled);
+    }
+
+    /// A misspelled key must be a parse error, not a silent `enabled: false`.
+    #[test]
+    fn identity_policy_rejects_an_unknown_key() {
+        let err = serde_json::from_value::<IdentityPolicy>(serde_json::json!({
+            "enable": true
+        }))
+        .unwrap_err();
+        assert!(err.to_string().contains("enable"), "{err}");
+        // and parse_or_deny turns that into a denial
+        assert!(!IdentityPolicy::parse_or_deny(serde_json::json!({ "enable": true }), "f").enabled);
     }
 }

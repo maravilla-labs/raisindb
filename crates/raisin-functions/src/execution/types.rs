@@ -100,6 +100,14 @@ where
     /// function's `SecretPolicy`, which denies by default.
     pub secret_store: Option<Arc<raisin_rocksdb::secret_store::SecretStore>>,
 
+    /// Identity repository for `raisin.identities.*` (optional).
+    ///
+    /// `None` on paths without a RocksDB handle, in which case the binding
+    /// reports the subsystem as unavailable. A PRESENT repository is not a
+    /// grant — every call is gated by the function's `IdentityPolicy`, which
+    /// denies by default.
+    pub identity_repo: Option<Arc<raisin_rocksdb::repositories::IdentityRepository>>,
+
     /// Schema statistics cache for SQL planner selectivity estimation.
     ///
     /// Without it, every `raisin.sql.query()` call re-runs two full listings (all

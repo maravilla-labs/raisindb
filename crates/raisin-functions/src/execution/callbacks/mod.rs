@@ -22,6 +22,7 @@ pub mod events;
 pub mod flows;
 pub mod functions;
 pub mod http;
+pub mod identities;
 pub mod integrations;
 pub mod locks;
 pub mod nodes;
@@ -419,6 +420,23 @@ where
                 tenant_id.clone(),
                 repo_id.clone(),
                 branch.clone(),
+                auth_context.clone(),
+            )
+        }),
+
+        // Tenant identities - only on paths that hand over the RocksDB identity
+        // repository. Present is NOT a grant: every call is gated by the
+        // function's own IdentityPolicy, which denies by default.
+        identity_find_by_email: deps
+            .identity_repo
+            .as_ref()
+            .map(|r| identities::create_identity_find_by_email(r.clone(), tenant_id.clone())),
+        identity_update: deps.identity_repo.as_ref().map(|r| {
+            identities::create_identity_update::<S, B>(
+                r.clone(),
+                deps.storage.clone(),
+                tenant_id.clone(),
+                repo_id.clone(),
                 auth_context.clone(),
             )
         }),

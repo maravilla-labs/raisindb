@@ -95,6 +95,20 @@ properties:
       This node type is `strict`, so the property has to be declared here
       before it can be set at all.
 
+  - name: identity_policy
+    type: Object
+    required: false
+    title: Identity Policy
+    description: |
+      Whether this function may look up and update tenant identities through
+      `raisin.identities.*` (find by email, rename, set a password). Structure:
+      { enabled }.
+
+      Deny-by-default: an absent block or `enabled: false` refuses every call.
+      Grant it only to the one function in a package that owns account
+      adoption — renaming an identity re-keys who a person IS. A rename never
+      marks the address verified; only the magic-link verify does.
+
   - name: email_policy
     type: Object
     required: false

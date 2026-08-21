@@ -220,6 +220,7 @@ where
         job_data_store: deps.job_data_store.clone(),
         lock_manager: deps.lock_manager.clone(),
         secret_store: deps.secret_store.clone(),
+        identity_repo: deps.identity_repo.clone(),
         schema_stats_cache: deps.schema_stats_cache.clone(),
     });
 
@@ -299,7 +300,8 @@ where
             api_callbacks,
         )
         .with_secret_policy(metadata.secret_policy.clone())
-        .with_email_policy(metadata.email_policy.clone()),
+        .with_email_policy(metadata.email_policy.clone())
+        .with_identity_policy(metadata.identity_policy.clone()),
     );
 
     // 6. Create loaded function with sibling files for module resolution

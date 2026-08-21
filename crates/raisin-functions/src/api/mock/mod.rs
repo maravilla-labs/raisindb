@@ -860,6 +860,28 @@ impl FunctionApi for MockFunctionApi {
 
     // ========== Email (recorded, never sent) ==========
 
+    // ========== Identities ==========
+    //
+    // NOTE: the mock enforces NO IdentityPolicy. The gate lives in
+    // `RaisinFunctionApi` (api/raisindb/identities.rs) and is tested there.
+
+    async fn identity_find_by_email(&self, _email: &str) -> Result<Option<Value>> {
+        self.check_all_errors()?;
+        Ok(None)
+    }
+
+    async fn identity_update(&self, id: &str, patch: Value) -> Result<Value> {
+        self.check_all_errors()?;
+        // Echo the patch in the public shape; never the password itself.
+        Ok(serde_json::json!({
+            "id": id,
+            "email": patch.get("email").cloned().unwrap_or(Value::Null),
+            "email_verified": false,
+            "display_name": patch.get("display_name").cloned().unwrap_or(Value::Null),
+            "has_password": patch.get("password").is_some(),
+        }))
+    }
+
     async fn email_send(&self, message: Value) -> Result<Value> {
         self.check_all_errors()?;
         let mut sent = self.emails_sent.lock().unwrap();

@@ -702,6 +702,32 @@ pub trait FunctionApi: Send + Sync {
     /// the config references.
     async fn email_send(&self, message: Value) -> Result<Value>;
 
+    // ========== Identities (tenant auth records, not raisin:User nodes) ==========
+
+    /// Look up a tenant identity by email.
+    ///
+    /// The address is normalised (trimmed, lowercased) before the lookup.
+    /// Returns `{ id, email, email_verified, display_name, has_password }` or
+    /// `None`. Gated by the function's
+    /// [`IdentityPolicy`](crate::types::IdentityPolicy), which denies by
+    /// default; a denial is a hard error naming the policy block that grants
+    /// it — never `None`, which would read as "no such account".
+    async fn identity_find_by_email(&self, email: &str) -> Result<Option<Value>>;
+
+    /// Change an identity's `email`, `password` and/or `display_name`.
+    ///
+    /// `patch` is `{ email?, password?, display_name? }`. A new email is
+    /// normalised and, if another identity already holds it, refused with
+    /// `[identities:email_taken]`. A password gives an identity local
+    /// credentials (so an account created by magic link can sign in with a
+    /// password afterwards). `email_verified` is NOT settable: a rename proves
+    /// typing, not possession — only the magic-link verify proves the address.
+    /// When the email changes, the bound `raisin:User` node's `email` property
+    /// follows. Returns the same shape as [`identity_find_by_email`].
+    ///
+    /// [`identity_find_by_email`]: FunctionApi::identity_find_by_email
+    async fn identity_update(&self, id: &str, patch: Value) -> Result<Value>;
+
     // ========== Crypto Operations (native primitives) ==========
 
     /// Verify an RS256/ES256-signed JWT/OIDC token against a JWKS.

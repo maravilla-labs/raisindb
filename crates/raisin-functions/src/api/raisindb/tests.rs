@@ -650,3 +650,248 @@ fn both_paths_agree_on_what_a_single_star_means() {
         api.is_url_allowed("https://api.example.com/users/123"),
     );
 }
+
+// ============================================================================
+// raisin.identities.* — the IdentityPolicy gate and edge normalisation
+// ============================================================================
+//
+// Every test here runs with NO identity callbacks wired. A PermissionDenied
+// therefore proves the policy refused before the seam was reached; a recording
+// callback shows what an ALLOWED call actually hands over.
+
+use crate::api::IdentityPatch;
+use crate::types::IdentityPolicy;
+
+fn api_with_identity_policy(policy: IdentityPolicy) -> RaisinFunctionApi {
+    let ctx = ExecutionContext::new("tenant1", "repo1", "main", "test-user");
+    RaisinFunctionApi::new(
+        ctx,
+        NetworkPolicy::default(),
+        RaisinFunctionApiCallbacks::default(),
+    )
+    .with_identity_policy(policy)
+}
+
+/// Records what reached the callbacks, so a test can assert on the normalised
+/// email and the parsed patch rather than on a return value.
+fn api_with_recording_identity_callbacks() -> (
+    RaisinFunctionApi,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    std::sync::Arc<std::sync::Mutex<Vec<(String, IdentityPatch)>>>,
+) {
+    use std::sync::{Arc, Mutex};
+    let lookups: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let updates: Arc<Mutex<Vec<(String, IdentityPatch)>>> = Arc::new(Mutex::new(Vec::new()));
+    let l = lookups.clone();
+    let u = updates.clone();
+    let callbacks = RaisinFunctionApiCallbacks::default()
+        .with_identity_find_by_email(Arc::new(move |email: String| {
+            l.lock().unwrap().push(email.clone());
+            Box::pin(async move {
+                Ok(if email == "ada@example.com" {
+                    Some(serde_json::json!({ "id": "id-ada", "email": email }))
+                } else {
+                    None
+                })
+            })
+        }))
+        .with_identity_update(Arc::new(move |id: String, patch: IdentityPatch| {
+            u.lock().unwrap().push((id.clone(), patch));
+            Box::pin(async move { Ok(serde_json::json!({ "id": id })) })
+        }));
+    let ctx = ExecutionContext::new("tenant1", "repo1", "main", "test-user");
+    let api = RaisinFunctionApi::new(ctx, NetworkPolicy::default(), callbacks)
+        .with_identity_policy(IdentityPolicy::allow());
+    (api, lookups, updates)
+}
+
+fn assert_identity_policy_denied(err: raisin_error::Error) {
+    assert!(
+        matches!(err, raisin_error::Error::PermissionDenied(_)),
+        "expected PermissionDenied, got: {err}"
+    );
+    let msg = err.to_string();
+    assert!(msg.contains("[identities:policy_denied]"), "{msg}");
+    assert!(
+        msg.contains("identity_policy"),
+        "the denial must name the block that grants it: {msg}"
+    );
+}
+
+/// A function that never declared `identity_policy` can neither look up nor
+/// update — and the lookup denial is an ERROR, never `None`.
+#[tokio::test]
+async fn identities_denied_without_policy() {
+    let api = api_with_identity_policy(IdentityPolicy::default());
+    let err = api
+        .impl_identity_find_by_email("ada@example.com")
+        .await
+        .expect_err("no policy must deny findByEmail");
+    assert_identity_policy_denied(err);
+
+    let err = api
+        .impl_identity_update("id-1", serde_json::json!({ "display_name": "Ada" }))
+        .await
+        .expect_err("no policy must deny update");
+    assert_identity_policy_denied(err);
+}
+
+/// `enabled: false` spelled out is the same as absent.
+#[tokio::test]
+async fn identities_denied_when_explicitly_disabled() {
+    let api = api_with_identity_policy(IdentityPolicy { enabled: false });
+    let err = api
+        .impl_identity_find_by_email("ada@example.com")
+        .await
+        .unwrap_err();
+    assert_identity_policy_denied(err);
+}
+
+/// The gate runs BEFORE the patch is parsed: an invalid patch under a denying
+/// policy is still reported as a denial, so the error names the missing grant
+/// rather than a field the author cannot use anyway.
+#[tokio::test]
+async fn identities_policy_runs_before_patch_validation() {
+    let api = api_with_identity_policy(IdentityPolicy::default());
+    let err = api
+        .impl_identity_update("id-1", serde_json::json!({ "email_verified": true }))
+        .await
+        .unwrap_err();
+    assert_identity_policy_denied(err);
+}
+
+/// Allowed, but no repository on this execution path: a clear error, not a
+/// silent null.
+#[tokio::test]
+async fn identities_allowed_without_callbacks_reports_unavailable() {
+    let api = api_with_identity_policy(IdentityPolicy::allow());
+    let err = api
+        .impl_identity_find_by_email("ada@example.com")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, raisin_error::Error::Validation(_)),
+        "expected Validation, got: {err}"
+    );
+    assert!(err.to_string().contains("not available"), "{err}");
+}
+
+/// The email is trimmed and lowercased at the edge, so the store is only ever
+/// asked for one spelling.
+#[tokio::test]
+async fn identities_find_by_email_normalises_the_address() {
+    let (api, lookups, _) = api_with_recording_identity_callbacks();
+    let found = api
+        .impl_identity_find_by_email("  Ada@Example.COM \n")
+        .await
+        .unwrap();
+    assert_eq!(found.unwrap()["id"], "id-ada");
+    assert_eq!(lookups.lock().unwrap().as_slice(), ["ada@example.com"]);
+
+    let missing = api
+        .impl_identity_find_by_email("nobody@example.com")
+        .await
+        .unwrap();
+    assert!(missing.is_none(), "unknown address is None, not an error");
+}
+
+#[tokio::test]
+async fn identities_find_by_email_rejects_an_empty_address() {
+    let (api, lookups, _) = api_with_recording_identity_callbacks();
+    let err = api.impl_identity_find_by_email("   ").await.unwrap_err();
+    assert!(
+        err.to_string().contains("[identities:invalid_email]"),
+        "{err}"
+    );
+    assert!(
+        lookups.lock().unwrap().is_empty(),
+        "nothing may reach the store"
+    );
+}
+
+#[tokio::test]
+async fn identities_update_normalises_the_patch() {
+    let (api, _, updates) = api_with_recording_identity_callbacks();
+    api.impl_identity_update(
+        " id-1 ",
+        serde_json::json!({
+            "email": " New@Example.COM ",
+            "password": "hunter2-but-longer",
+            "display_name": "  Ada  ",
+        }),
+    )
+    .await
+    .unwrap();
+
+    let recorded = updates.lock().unwrap();
+    let (id, patch) = &recorded[0];
+    assert_eq!(id, "id-1");
+    assert_eq!(patch.email.as_deref(), Some("new@example.com"));
+    assert_eq!(patch.password.as_deref(), Some("hunter2-but-longer"));
+    assert_eq!(patch.display_name.as_deref(), Some("Ada"));
+}
+
+/// `email_verified` is refused — not ignored — so an author learns that the
+/// binding cannot do it instead of believing it silently worked.
+#[tokio::test]
+async fn identities_update_refuses_email_verified() {
+    let (api, _, updates) = api_with_recording_identity_callbacks();
+    let err = api
+        .impl_identity_update(
+            "id-1",
+            serde_json::json!({ "email": "a@example.com", "email_verified": true }),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("[identities:invalid_patch]"),
+        "{err}"
+    );
+    assert!(err.to_string().contains("email_verified"), "{err}");
+    assert!(
+        updates.lock().unwrap().is_empty(),
+        "nothing may reach the store"
+    );
+}
+
+#[tokio::test]
+async fn identities_update_refuses_malformed_patches() {
+    let (api, _, updates) = api_with_recording_identity_callbacks();
+    for bad in [
+        serde_json::json!("not an object"),
+        serde_json::json!({}),
+        serde_json::json!({ "email": "no-at-sign" }),
+        serde_json::json!({ "email": 42 }),
+        serde_json::json!({ "password": "" }),
+        serde_json::json!({ "avatar_url": "https://x" }),
+    ] {
+        let err = api
+            .impl_identity_update("id-1", bad.clone())
+            .await
+            .expect_err(&format!("must refuse {bad}"));
+        assert!(
+            err.to_string().contains("[identities:invalid_patch]"),
+            "{bad}: {err}"
+        );
+    }
+    let err = api
+        .impl_identity_update("", serde_json::json!({ "display_name": "x" }))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("[identities:invalid_id]"), "{err}");
+    assert!(updates.lock().unwrap().is_empty());
+}
+
+/// The patch's Debug output carries a password across the seam, so it must
+/// never render it — a `{:?}` in a log line is the obvious leak.
+#[test]
+fn identity_patch_debug_redacts_the_password() {
+    let patch = IdentityPatch {
+        email: Some("a@example.com".to_string()),
+        password: Some("correct horse battery staple".to_string()),
+        display_name: None,
+    };
+    let rendered = format!("{patch:?}");
+    assert!(!rendered.contains("correct horse"), "{rendered}");
+    assert!(rendered.contains("<redacted>"), "{rendered}");
+}

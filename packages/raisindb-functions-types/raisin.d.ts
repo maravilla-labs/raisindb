@@ -350,6 +350,47 @@ declare namespace raisin {
     function send(message: EmailMessage): Promise<EmailReceipt>;
   }
 
+  /** A tenant auth identity — what a magic link or password check resolves to. */
+  interface Identity {
+    id: string;
+    email: string;
+    /** True only once the magic-link verify step has proven possession. */
+    email_verified: boolean;
+    display_name: string | null;
+    /** Whether the account has local (password) credentials. */
+    has_password: boolean;
+  }
+
+  interface IdentityPatch {
+    /** New address; trimmed and lowercased. Clears `email_verified`. */
+    email?: string;
+    /** New password. Gives a magic-link-only account local credentials. */
+    password?: string;
+    display_name?: string;
+  }
+
+  /**
+   * Tenant identities (the auth records, NOT `raisin:User` nodes).
+   *
+   * Gated by the function's `identity_policy: { enabled: true }` in its
+   * `.node.yaml`; with no block declared every call rejects with
+   * `[identities:policy_denied]`.
+   */
+  namespace identities {
+    /** Look up an identity by (case-insensitive) email. `null` when none. */
+    function findByEmail(email: string): Promise<Identity | null>;
+    /**
+     * Change an identity's email, password and/or display name.
+     *
+     * Rejects with `[identities:email_taken]` when another account already
+     * holds the new address, and with `[identities:invalid_patch]` for any
+     * other key — `email_verified` in particular cannot be set here: a rename
+     * proves typing, not possession. When the email changes, the bound
+     * `raisin:User` node's `email` property follows.
+     */
+    function update(id: string, patch: IdentityPatch): Promise<Identity>;
+  }
+
   namespace events {
     function emit(eventType: string, data: any): Promise<void>;
   }

@@ -19,6 +19,7 @@ pub mod events;
 pub mod flows;
 pub mod functions;
 pub mod http;
+pub mod identities;
 pub mod imap;
 pub mod integrations;
 pub mod locks;
@@ -57,6 +58,7 @@ pub fn build_registry() -> BindingsRegistry {
     methods.extend(imap::methods());
     methods.extend(email::methods());
     methods.extend(secrets::methods());
+    methods.extend(identities::methods());
 
     // Resource operations
     methods.extend(resources::methods());
@@ -353,12 +355,14 @@ mod tests {
             .replace("nodes_", "node_")
             .replace("locks_", "lock_")
             .replace("secrets_", "secret_")
+            .replace("identities_", "identity_")
             .replace("events_", "event_")
             .replace("tasks_", "task_")
             .replace("functions_", "function_")
             .replace("resources_", "resource_")
             // CamelCase to snake_case
             .replace("getById", "get_by_id")
+            .replace("findByEmail", "find_by_email")
             .replace("getChildren", "get_children")
             .replace("updateProperty", "update_property")
             .replace("deleteById", "delete_by_id")

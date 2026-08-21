@@ -392,6 +392,10 @@ mod inner {
                 .rocksdb_storage
                 .as_ref()
                 .and_then(|s| s.secret_store().ok()),
+            identity_repo: state
+                .rocksdb_storage
+                .as_ref()
+                .map(|s| Arc::new(s.identity_repository())),
             schema_stats_cache: state.schema_stats_cache.clone(),
         });
 
@@ -412,7 +416,8 @@ mod inner {
                 callbacks,
             )
             .with_secret_policy(metadata.secret_policy.clone())
-            .with_email_policy(metadata.email_policy.clone()),
+            .with_email_policy(metadata.email_policy.clone())
+            .with_identity_policy(metadata.identity_policy.clone()),
         );
 
         let context = ExecutionContext::new(&tenant_id, &repo, DEFAULT_BRANCH, "system")
