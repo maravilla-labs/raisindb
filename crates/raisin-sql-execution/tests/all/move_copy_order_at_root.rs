@@ -56,7 +56,8 @@ async fn create_test_storage() -> (Arc<raisin_rocksdb::RocksDBStorage>, TempDir)
         .node_types()
         .create(
             raisin_storage::BranchScope::new(TENANT, REPO, BRANCH),
-            serde_json::from_value(serde_json::json!({ "name": "raisin:Folder" })).expect("nodetype"),
+            serde_json::from_value(serde_json::json!({ "name": "raisin:Folder" }))
+                .expect("nodetype"),
             raisin_storage::CommitMetadata {
                 message: "test".to_string(),
                 actor: "test".to_string(),

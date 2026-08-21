@@ -136,7 +136,11 @@ async fn create(storage: &RocksDBStorage, paths: &[&str]) -> Result<()> {
 #[tokio::test]
 async fn move_a_tree_to_the_workspace_root() -> Result<()> {
     let t = TestStorage::new().await?;
-    create(&t.storage, &["/holder", "/holder/movable", "/holder/movable/kid"]).await?;
+    create(
+        &t.storage,
+        &["/holder", "/holder/movable", "/holder/movable/kid"],
+    )
+    .await?;
     let nodes = t.storage.nodes();
 
     let before = nodes
@@ -182,7 +186,10 @@ async fn rename_a_node_that_sits_at_the_workspace_root() -> Result<()> {
     create(&t.storage, &["/Studio", "/Studio/tool"]).await?;
     let nodes = t.storage.nodes();
 
-    let before = nodes.get_by_path(scope(), "/Studio", None).await?.expect("seeded");
+    let before = nodes
+        .get_by_path(scope(), "/Studio", None)
+        .await?
+        .expect("seeded");
 
     nodes.rename_node(scope(), "/Studio", "studio").await?;
 
@@ -212,14 +219,21 @@ async fn rename_a_node_that_sits_at_the_workspace_root() -> Result<()> {
 #[tokio::test]
 async fn copy_a_tree_to_the_workspace_root() -> Result<()> {
     let t = TestStorage::new().await?;
-    create(&t.storage, &["/holder", "/holder/source", "/holder/source/kid"]).await?;
+    create(
+        &t.storage,
+        &["/holder", "/holder/source", "/holder/source/kid"],
+    )
+    .await?;
     let nodes = t.storage.nodes();
 
     let copied = nodes
         .copy_node_tree(scope(), "/holder/source", "/", Some("copied"), None)
         .await?;
 
-    assert_eq!(copied.path, "/copied", "the copy lands at the workspace root");
+    assert_eq!(
+        copied.path, "/copied",
+        "the copy lands at the workspace root"
+    );
     assert!(
         nodes.get_by_path(scope(), "/copied", None).await?.is_some(),
         "a tree copy to the workspace root must land"
