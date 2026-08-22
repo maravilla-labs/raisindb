@@ -402,22 +402,30 @@ export default function EmailSettings() {
         </div>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           <div className="md:col-span-2">
-            <Input value={testTo} onChange={setTestTo} placeholder="you@example.com" />
+            <Field label="Send to" required>
+              <Input value={testTo} onChange={setTestTo} placeholder="you@example.com" />
+              <Hint>
+                Any address you can read — it has nothing to do with your own account, and the
+                recipient needs no user in this repository.
+              </Hint>
+            </Field>
           </div>
-          <select
-            className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white"
-            value={testProvider}
-            onChange={(e) => setTestProvider(e.target.value)}
-          >
-            <option value="" className="bg-slate-800">
-              Default provider
-            </option>
-            {enabledProviders.map((p) => (
-              <option key={p.name} value={p.name} className="bg-slate-800">
-                {p.name}
+          <Field label="Through">
+            <select
+              className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white"
+              value={testProvider}
+              onChange={(e) => setTestProvider(e.target.value)}
+            >
+              <option value="" className="bg-slate-800">
+                Default provider
               </option>
-            ))}
-          </select>
+              {enabledProviders.map((p) => (
+                <option key={p.name} value={p.name} className="bg-slate-800">
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          </Field>
         </div>
         <div className="flex items-center gap-3">
           <button

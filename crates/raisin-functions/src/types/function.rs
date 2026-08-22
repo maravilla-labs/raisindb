@@ -83,6 +83,48 @@ impl std::fmt::Display for ExecutionMode {
     }
 }
 
+impl ExecutionMode {
+    /// Whether a caller may invoke the function synchronously.
+    ///
+    /// The one definition of that question. `invoke_function` used to ask it
+    /// inverted (`mode == Async`), which was the same answer by accident — a
+    /// third variant that could not run inline would have had to be remembered
+    /// in two places.
+    pub fn allows_sync(&self) -> bool {
+        matches!(self, ExecutionMode::Sync | ExecutionMode::Both)
+    }
+}
+
+/// Parse the `execution_mode` property of a `raisin:Function` node.
+///
+/// CASE-INSENSITIVE, and that is the whole point of having it. The property is
+/// hand-written YAML and the shipped nodes spell it both ways — `Async` in most
+/// built-in packages, `"async"` in others — while the parser this replaces
+/// matched lowercase only and fell through to `Async` for everything else.
+///
+/// That fall-through is the dangerous shape: `execution_mode: Sync` parsed as
+/// `Async`, so four built-in functions that declared themselves synchronous
+/// were refused synchronous invocation with "does not support synchronous
+/// execution" — an error that names the function rather than the typo, and sends
+/// the reader looking at the caller. An unknown value must not silently become
+/// the most restrictive mode.
+///
+/// `inline` is accepted as a synonym for `sync`: four `ai-tools` functions use
+/// it, and an agent tool whose result is consumed by the caller is inline by
+/// definition.
+impl std::str::FromStr for ExecutionMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "async" => Ok(Self::Async),
+            "sync" | "inline" => Ok(Self::Sync),
+            "both" => Ok(Self::Both),
+            other => Err(format!("Unknown execution mode: {other}")),
+        }
+    }
+}
+
 /// Function metadata stored in raisin:Function node properties
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionMetadata {
@@ -291,12 +333,9 @@ impl FunctionMetadata {
         self
     }
 
-    /// Check if sync execution is allowed
+    /// Check if sync execution is allowed. Delegates, so there is one answer.
     pub fn allows_sync(&self) -> bool {
-        matches!(
-            self.execution_mode,
-            ExecutionMode::Sync | ExecutionMode::Both
-        )
+        self.execution_mode.allows_sync()
     }
 }
 
@@ -358,6 +397,67 @@ impl LoadedFunction {
             path,
             node_id,
             workspace,
+        }
+    }
+}
+
+#[cfg(test)]
+mod execution_mode_tests {
+    use super::*;
+
+    /// The shipped `.node.yaml` files spell this both ways — `Async` in most
+    /// built-in packages, `"async"` in others — so a case-sensitive parser
+    /// reads half of them wrong.
+    #[test]
+    fn parsing_is_case_insensitive() {
+        for (raw, expected) in [
+            ("async", ExecutionMode::Async),
+            ("Async", ExecutionMode::Async),
+            ("ASYNC", ExecutionMode::Async),
+            ("sync", ExecutionMode::Sync),
+            ("Sync", ExecutionMode::Sync),
+            ("  Sync  ", ExecutionMode::Sync),
+            ("both", ExecutionMode::Both),
+            ("Both", ExecutionMode::Both),
+            // `ai-tools` spells a synchronous tool this way.
+            ("inline", ExecutionMode::Sync),
+            ("Inline", ExecutionMode::Sync),
+        ] {
+            assert_eq!(
+                raw.parse::<ExecutionMode>().expect("parses"),
+                expected,
+                "{raw} should parse as {expected}"
+            );
+        }
+    }
+
+    /// An unknown value is an ERROR, not a silent demotion to the most
+    /// restrictive mode. The caller decides what to do with it (the HTTP layer
+    /// logs and defaults); swallowing it here is how `Sync` became `Async`.
+    #[test]
+    fn an_unknown_value_does_not_silently_become_async() {
+        assert!("whenever".parse::<ExecutionMode>().is_err());
+        assert!("".parse::<ExecutionMode>().is_err());
+    }
+
+    /// The one definition of "may this be invoked synchronously".
+    #[test]
+    fn only_sync_and_both_allow_a_synchronous_invoke() {
+        assert!(ExecutionMode::Sync.allows_sync());
+        assert!(ExecutionMode::Both.allows_sync());
+        assert!(!ExecutionMode::Async.allows_sync());
+    }
+
+    /// Display and FromStr must round-trip, or a value written back by the
+    /// server would not parse on the way in again.
+    #[test]
+    fn display_round_trips_through_from_str() {
+        for mode in [
+            ExecutionMode::Async,
+            ExecutionMode::Sync,
+            ExecutionMode::Both,
+        ] {
+            assert_eq!(mode.to_string().parse::<ExecutionMode>().unwrap(), mode);
         }
     }
 }

@@ -431,14 +431,27 @@ pub(super) fn property_as_json(value: Option<&PropertyValue>) -> Option<serde_js
     value.and_then(|prop| serde_json::to_value(prop).ok())
 }
 
+/// Parse a node's `execution_mode`, defaulting to the safest mode when absent.
+///
+/// Delegates to `ExecutionMode`'s `FromStr` rather than matching here, exactly
+/// as `parse_language` does: this used to match lowercase spellings only and
+/// silently read `execution_mode: Sync` — the spelling most shipped nodes use —
+/// as `Async`, which refused those functions synchronous invocation.
+///
+/// An ABSENT property still defaults to `Async`. An UNPARSEABLE one does too,
+/// but noisily: a value nobody recognises is a typo worth a log line, not a
+/// silent demotion.
 pub(super) fn parse_execution_mode(value: Option<&PropertyValue>) -> ExecutionMode {
-    property_as_string(value)
-        .map(|s| match s.as_str() {
-            "sync" => ExecutionMode::Sync,
-            "both" => ExecutionMode::Both,
-            _ => ExecutionMode::Async,
-        })
-        .unwrap_or(ExecutionMode::Async)
+    let Some(raw) = property_as_string(value) else {
+        return ExecutionMode::Async;
+    };
+    raw.parse().unwrap_or_else(|_| {
+        tracing::warn!(
+            execution_mode = %raw,
+            "unrecognised execution_mode on a raisin:Function node; treating it as async"
+        );
+        ExecutionMode::Async
+    })
 }
 
 pub(super) fn parse_language(value: Option<&PropertyValue>) -> FunctionLanguage {

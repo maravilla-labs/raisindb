@@ -60,10 +60,10 @@ pub async fn invoke_function(
         find_function_node(&state, tenant_id, &repo, &name, auth_context.as_ref()).await?;
 
     let execution_mode = parse_execution_mode(function_node.properties.get("execution_mode"));
-    if req.sync && execution_mode == ExecutionMode::Async {
+    if req.sync && !execution_mode.allows_sync() {
         return Err(ApiError::validation_failed(format!(
-            "Function '{}' does not support synchronous execution",
-            name
+            "Function '{name}' does not support synchronous execution \
+             (its execution_mode is {execution_mode}; set sync or both)"
         )));
     }
     if req.sync && req.wait_for_completion {
