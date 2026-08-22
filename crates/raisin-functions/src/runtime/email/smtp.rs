@@ -37,7 +37,7 @@ use std::time::Duration;
 use lettre::message::header::ContentType;
 use lettre::message::{Mailbox, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::Credentials as SmtpCredentials;
-use lettre::transport::smtp::response::Response;
+use lettre::transport::smtp::response::{Category, Response, Severity};
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
 use super::provider::SendReceipt;
@@ -229,31 +229,36 @@ fn queue_id(response: &Response) -> String {
 ///
 /// The distinction that matters operationally is the same as for the HTTP
 /// providers: a rejected credential is an operator problem (rotate the secret),
-/// a rejected message is a caller problem (fix the message). The SMTP status
-/// code carries that, so it is read rather than collapsed into "send failed".
+/// a rejected message is a caller problem (fix the message). The SMTP reply code
+/// carries that, so it is read rather than collapsed into "send failed".
+///
+/// The code is read as its THREE fields, not by matching on the rendered text.
+/// `5yz` is permanent, `4yz` transient, and the authentication replies — 530
+/// (required), 534 (mechanism too weak), 535 (credentials invalid), 538 — are
+/// exactly the permanent ones in category 3.
 fn map_smtp_err(e: lettre::transport::smtp::Error) -> EmailError {
     // The `lettre` error renders the host and the server's reply, never the
-    // credentials it was built with.
+    // credentials the transport was built with.
     let detail = e.to_string();
 
     if e.is_timeout() {
         return EmailError::Timeout;
     }
+
     if let Some(code) = e.status() {
-        // 5.x.x with a 530/534/535 severity is authentication; anything else
-        // permanent is the message or the sender identity.
-        let severity_class = code.severity as u8;
         let text = format!("smtp rejected the send: {detail}");
-        return match (severity_class, code.detail as u8) {
-            // 535 Authentication credentials invalid, 530 Authentication
-            // required, 534 mechanism too weak.
-            (5, 3) if detail.contains("53") => EmailError::Auth(text),
-            (5, _) => EmailError::InvalidMessage(text),
-            // 4.x.x is transient: the relay is busy, greylisting, or over quota.
-            (4, _) => EmailError::RateLimited(text),
+        return match (code.severity, code.category) {
+            (Severity::PermanentNegativeCompletion, Category::Unspecified3) => {
+                EmailError::Auth(text)
+            }
+            (Severity::PermanentNegativeCompletion, _) => EmailError::InvalidMessage(text),
+            // 4yz is the relay saying "not now": busy, greylisting, over quota.
+            // Retryable, so it maps onto the same code as an HTTP 429.
+            (Severity::TransientNegativeCompletion, _) => EmailError::RateLimited(text),
             _ => EmailError::Provider(text),
         };
     }
+
     if e.is_response() || e.is_permanent() {
         return EmailError::Provider(format!("smtp error: {detail}"));
     }
@@ -343,6 +348,52 @@ mod tests {
         assert!(
             !with_credential.contains(password),
             "credential leaked: {with_credential}"
+        );
+    }
+
+    /// The reply code decides the error class, and getting it wrong is what
+    /// makes an email outage hard to triage: 535 means rotate the secret, 550
+    /// means fix the message, 451 means try later.
+    #[test]
+    fn a_reply_code_maps_onto_the_right_class() {
+        use lettre::transport::smtp::response::{Code, Detail};
+
+        let classify = |severity, category, detail| {
+            let code = Code::new(severity, category, detail);
+            match (code.severity, code.category) {
+                (Severity::PermanentNegativeCompletion, Category::Unspecified3) => "auth_failed",
+                (Severity::PermanentNegativeCompletion, _) => "invalid_message",
+                (Severity::TransientNegativeCompletion, _) => "rate_limited",
+                _ => "provider_error",
+            }
+        };
+
+        // 535 Authentication credentials invalid.
+        assert_eq!(
+            classify(
+                Severity::PermanentNegativeCompletion,
+                Category::Unspecified3,
+                Detail::Five
+            ),
+            "auth_failed"
+        );
+        // 550 Mailbox unavailable / sender rejected.
+        assert_eq!(
+            classify(
+                Severity::PermanentNegativeCompletion,
+                Category::MailSystem,
+                Detail::Zero
+            ),
+            "invalid_message"
+        );
+        // 451 Local error in processing — transient, worth retrying.
+        assert_eq!(
+            classify(
+                Severity::TransientNegativeCompletion,
+                Category::MailSystem,
+                Detail::One
+            ),
+            "rate_limited"
         );
     }
 
