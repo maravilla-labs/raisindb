@@ -10,10 +10,13 @@
 use serde::{Deserialize, Serialize};
 
 use super::provider::{build_client, error_from_response, map_transport_err, SendReceipt};
-use super::{Credential, EmailConfig, EmailError, EmailMessage, EmailProvider, Result};
+use super::{Credential, EmailError, EmailMessage, EmailProvider, EmailSender, Result};
 
-/// Resend's send endpoint.
-const ENDPOINT: &str = "https://api.resend.com/emails";
+/// Resend's API root. A sender may override it (regional endpoint, or a local
+/// stub in tests) through `api_base`.
+const API_BASE: &str = "https://api.resend.com";
+/// Path of the send endpoint, appended to the API base.
+const SEND_PATH: &str = "/emails";
 
 /// Request body. Field names are Resend's wire names; `snake_case` here already
 /// matches, so no rename attribute is needed.
@@ -38,21 +41,22 @@ struct SendResponse {
 
 /// Send `message` through Resend.
 pub(super) async fn send(
-    cfg: &EmailConfig,
+    sender: &EmailSender,
     credential: &Credential,
     message: &EmailMessage,
 ) -> Result<SendReceipt> {
     let body = SendRequest {
-        from: cfg.from_header(),
+        from: sender.from_header(),
         to: &message.to,
         subject: &message.subject,
         text: &message.text,
         html: message.html.as_deref(),
-        reply_to: cfg.reply_to.as_deref(),
+        reply_to: sender.reply_to.as_deref(),
     };
 
+    let endpoint = super::provider::endpoint(sender, API_BASE, SEND_PATH);
     let resp = build_client()?
-        .post(ENDPOINT)
+        .post(&endpoint)
         .bearer_auth(credential.expose())
         .json(&body)
         .send()
@@ -72,6 +76,7 @@ pub(super) async fn send(
     Ok(SendReceipt {
         message_id: parsed.id,
         provider: EmailProvider::Resend,
+        sender: String::new(),
     })
 }
 
@@ -81,23 +86,24 @@ mod tests {
 
     #[test]
     fn request_body_takes_the_sender_from_config_only() {
-        let cfg = EmailConfig {
+        let sender = EmailSender {
+            name: "transactional".to_string(),
             provider: EmailProvider::Resend,
             from_address: "noreply@example.com".to_string(),
             from_name: Some("Example".to_string()),
             reply_to: Some("support@example.com".to_string()),
-            base_url: "https://app.example.com".to_string(),
             credential_ref: "secret://email/api_key".to_string(),
-            enabled: true,
+            api_base: None,
+            smtp: None,
         };
         let msg = EmailMessage::new("user@example.com", "Sign in", "link");
         let body = SendRequest {
-            from: cfg.from_header(),
+            from: sender.from_header(),
             to: &msg.to,
             subject: &msg.subject,
             text: &msg.text,
             html: msg.html.as_deref(),
-            reply_to: cfg.reply_to.as_deref(),
+            reply_to: sender.reply_to.as_deref(),
         };
         let v = serde_json::to_value(&body).expect("serializes");
         assert_eq!(v["from"], "Example <noreply@example.com>");
@@ -105,5 +111,31 @@ mod tests {
         assert_eq!(v["reply_to"], "support@example.com");
         // An absent HTML alternative is omitted, not sent as null.
         assert!(v.get("html").is_none());
+    }
+
+    /// A sender's `api_base` must actually redirect the request — this is what
+    /// a regional endpoint and every stubbed test depend on.
+    #[test]
+    fn api_base_overrides_the_endpoint() {
+        let mut sender = EmailSender {
+            name: "r".to_string(),
+            provider: EmailProvider::Resend,
+            from_address: "noreply@example.com".to_string(),
+            from_name: None,
+            reply_to: None,
+            credential_ref: "secret://email/api_key".to_string(),
+            api_base: None,
+            smtp: None,
+        };
+        assert_eq!(
+            super::super::provider::endpoint(&sender, API_BASE, SEND_PATH),
+            "https://api.resend.com/emails"
+        );
+        // Trailing slash on the override must not double up.
+        sender.api_base = Some("https://stub.test/".to_string());
+        assert_eq!(
+            super::super::provider::endpoint(&sender, API_BASE, SEND_PATH),
+            "https://stub.test/emails"
+        );
     }
 }

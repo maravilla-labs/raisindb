@@ -307,8 +307,9 @@ mod tests {
             "imap_fetch_since",
             "imap_list_mailboxes",
             "imap_fetch_message",
-            // Email operations (1)
+            // Email operations (2)
             "email_send",
+            "email_providers",
             // Crypto operations (1)
             "crypto_verify_jwt",
         ];

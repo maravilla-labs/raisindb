@@ -15,9 +15,9 @@ use std::time::Duration;
 use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 
-use super::{brevo, resend};
+use super::{brevo, resend, smtp};
 use super::{
-    Credential, EmailConfig, EmailError, EmailMessage, Result, CONNECT_TIMEOUT_SECS,
+    Credential, EmailError, EmailMessage, EmailSender, Result, CONNECT_TIMEOUT_SECS,
     SEND_TIMEOUT_SECS,
 };
 
@@ -29,10 +29,10 @@ pub enum EmailProvider {
     Resend,
     /// <https://brevo.com> — `POST /v3/smtp/email`, `api-key` header.
     Brevo,
-    /// Direct SMTP submission. Reserved: the variant exists so the config
-    /// surface is stable, but v1 has no implementation and sending through it
-    /// returns [`EmailError::Unsupported`]. Opening a raw TCP session from the
-    /// function sandbox is a separate security decision.
+    /// Direct SMTP submission — any provider with a relay, or your own mail
+    /// server. The session is opened by this crate, never by the sandbox: a
+    /// function names a provider, and the host, port and password come from
+    /// operator configuration and the secret store.
     Smtp,
 }
 
@@ -46,48 +46,45 @@ impl EmailProvider {
         }
     }
 
-    /// Send one message.
+    /// Send one message through `sender`.
     ///
-    /// `credential` is the secret resolved from `cfg.credential_ref`; it is
+    /// `credential` is the secret resolved from `sender.credential_ref`; it is
     /// borrowed for the duration of the call and immediately wrapped in a
     /// [`Credential`] so no intermediate value can print it.
+    ///
+    /// The provider is taken from the SENDER, not from `self`: resolution
+    /// ([`EmailConfig::resolve`]) has already decided which configured account
+    /// this send belongs to, and re-deciding here would be the second
+    /// implementation this module exists to avoid.
+    ///
+    /// [`EmailConfig::resolve`]: super::EmailConfig::resolve
     pub async fn send(
-        &self,
-        cfg: &EmailConfig,
+        sender: &EmailSender,
         credential: &str,
         message: &EmailMessage,
     ) -> Result<SendReceipt> {
-        if !cfg.enabled {
-            return Err(EmailError::Config(
-                "email is disabled for this tenant".to_string(),
-            ));
-        }
-        if cfg.provider != *self {
-            return Err(EmailError::Config(format!(
-                "config selects provider {} but {} was invoked",
-                cfg.provider.as_str(),
-                self.as_str()
-            )));
-        }
         // Validate before opening a socket: a malformed message must fail as
         // `invalid_message` locally rather than as whatever the provider
         // happens to answer.
         message.validate()?;
         if credential.trim().is_empty() {
             return Err(EmailError::Config(format!(
-                "no credential resolved from {}",
-                cfg.credential_ref
+                "no credential resolved from {} for email provider `{}`",
+                sender.credential_ref, sender.name
             )));
         }
         let credential = Credential::new(credential);
 
-        match self {
-            EmailProvider::Resend => resend::send(cfg, &credential, message).await,
-            EmailProvider::Brevo => brevo::send(cfg, &credential, message).await,
-            EmailProvider::Smtp => Err(EmailError::Unsupported(
-                "smtp sending is not implemented; configure resend or brevo".to_string(),
-            )),
-        }
+        let mut receipt = match sender.provider {
+            EmailProvider::Resend => resend::send(sender, &credential, message).await,
+            EmailProvider::Brevo => brevo::send(sender, &credential, message).await,
+            EmailProvider::Smtp => smtp::send(sender, &credential, message).await,
+        }?;
+        // Stamped here rather than in each provider module: WHICH configured
+        // account sent is this layer's knowledge, and a provider module that
+        // forgot to set it would produce a receipt that silently lied.
+        receipt.sender = sender.name.clone();
+        Ok(receipt)
     }
 }
 
@@ -97,8 +94,30 @@ impl EmailProvider {
 pub struct SendReceipt {
     /// The provider's message identifier.
     pub message_id: String,
-    /// Which provider issued it.
+    /// Which provider API issued it.
     pub provider: EmailProvider,
+    /// The configured sender name it went through — the answer to "which of my
+    /// accounts sent this", which `provider` alone cannot give once a tenant
+    /// has two entries on the same API.
+    #[serde(default)]
+    pub sender: String,
+}
+
+/// The URL an HTTP provider posts to: the sender's `api_base` when it sets
+/// one, the provider's own root otherwise.
+///
+/// Shared rather than repeated per provider so the trailing-slash handling
+/// cannot differ between them — `https://stub.test/` and `https://stub.test`
+/// must produce the same URL, and a doubled slash is a 404 that reads like an
+/// outage.
+pub(super) fn endpoint(sender: &EmailSender, default_base: &str, path: &str) -> String {
+    let base = sender
+        .api_base
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+        .unwrap_or(default_base);
+    format!("{}{}", base.trim_end_matches('/'), path)
 }
 
 /// HTTP client for a provider request. Built per send rather than cached: a
@@ -184,42 +203,38 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn smtp_is_reserved_but_unimplemented() {
-        let cfg = EmailConfig {
-            provider: EmailProvider::Smtp,
+    fn sender(provider: EmailProvider) -> EmailSender {
+        EmailSender {
+            name: "primary".to_string(),
+            provider,
             from_address: "noreply@example.com".to_string(),
             from_name: None,
             reply_to: None,
-            base_url: "https://app.example.com".to_string(),
             credential_ref: "secret://email/api_key".to_string(),
-            enabled: true,
-        };
-        let msg = EmailMessage::new("user@example.com", "Sign in", "link");
-        let err = EmailProvider::Smtp
-            .send(&cfg, "irrelevant", &msg)
-            .await
-            .expect_err("smtp must not send");
-        assert_eq!(err.code(), "unsupported");
+            api_base: None,
+            smtp: None,
+        }
     }
 
     #[tokio::test]
     async fn a_malformed_message_never_reaches_the_network() {
-        let cfg = EmailConfig {
-            provider: EmailProvider::Resend,
-            from_address: "noreply@example.com".to_string(),
-            from_name: None,
-            reply_to: None,
-            base_url: "https://app.example.com".to_string(),
-            credential_ref: "secret://email/api_key".to_string(),
-            enabled: true,
-        };
         let msg = EmailMessage::new("user@example.com", "Sign in\nBcc: x@y.z", "link");
-        let err = EmailProvider::Resend
-            .send(&cfg, "re_key", &msg)
+        let err = EmailProvider::send(&sender(EmailProvider::Resend), "re_key", &msg)
             .await
             .expect_err("header splitting must be refused");
         assert_eq!(err.code(), "invalid_message");
+    }
+
+    /// An empty credential must fail as configuration, before a socket — the
+    /// alternative is an unauthenticated request and a provider 401 that reads
+    /// like a revoked key rather than a missing secret.
+    #[tokio::test]
+    async fn an_unresolved_credential_fails_as_config() {
+        let msg = EmailMessage::new("user@example.com", "Sign in", "link");
+        let err = EmailProvider::send(&sender(EmailProvider::Resend), "   ", &msg)
+            .await
+            .expect_err("an empty credential must not be sent with");
+        assert_eq!(err.code(), "config");
     }
 
     #[test]

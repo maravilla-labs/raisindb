@@ -324,14 +324,49 @@ declare namespace raisin {
     /** Plain-text body. Always required, even alongside `html`. */
     text: string;
     html?: string;
+    /**
+     * Which of the tenant's configured senders to send through, by name (see
+     * {@link email.providers}). Omit it for the tenant's default — which is
+     * what system mail such as the magic link uses.
+     *
+     * An unknown name REJECTS rather than falling back to the default: mail
+     * leaving through the wrong account is worse than mail not leaving.
+     */
+    provider?: string;
   }
 
   /** Proof that the provider accepted a message. Acceptance is not delivery. */
   interface EmailReceipt {
     /** The provider's message id — what a later bounce/webhook correlates to. */
     message_id: string;
-    /** The provider that issued it, e.g. "resend" or "brevo". */
+    /** The provider API that issued it: "resend", "brevo" or "smtp". */
     provider: string;
+    /**
+     * The configured sender it went through. Answers "which of my accounts
+     * sent this", which `provider` alone cannot once a tenant has two entries
+     * on the same API.
+     */
+    sender: string;
+  }
+
+  /** One of the tenant's configured senders, as {@link email.providers} lists it. */
+  interface EmailProviderInfo {
+    /** The name {@link email.send} accepts in `provider`. */
+    name: string;
+    /** The provider API behind it: "resend", "brevo" or "smtp". */
+    provider: string;
+    from_address: string;
+    /** A disabled sender cannot be selected, by name or as the default. */
+    enabled: boolean;
+    /** True for the one system mail goes through. */
+    default: boolean;
+  }
+
+  /** What {@link email.providers} returns. */
+  interface EmailProviders {
+    /** The tenant master switch — off means no sender works, however many exist. */
+    enabled: boolean;
+    providers: EmailProviderInfo[];
   }
 
   namespace email {
@@ -348,6 +383,17 @@ declare namespace raisin {
      * config references, or when the provider refuses the message.
      */
     function send(message: EmailMessage): Promise<EmailReceipt>;
+
+    /**
+     * List the tenant's configured senders, so a function can discover the
+     * names `send` accepts rather than hardcoding one it cannot verify.
+     *
+     * Carries no credential and no `credential_ref`: a function that may send
+     * does not thereby get to enumerate the secret store. Gated on the same
+     * `email_policy` as {@link send} — a function that may not send has no use
+     * for the names.
+     */
+    function providers(): Promise<EmailProviders>;
   }
 
   /** A tenant auth identity — what a magic link or password check resolves to. */

@@ -885,13 +885,35 @@ impl FunctionApi for MockFunctionApi {
     async fn email_send(&self, message: Value) -> Result<Value> {
         self.check_all_errors()?;
         let mut sent = self.emails_sent.lock().unwrap();
+        let named = message
+            .get("provider")
+            .and_then(Value::as_str)
+            .unwrap_or("default")
+            .to_string();
         sent.push(message);
         // Sequence-numbered so a test asserting on the second send does not
         // depend on the first, and obviously fake so a mock id can never be
         // mistaken for a provider one.
+        // `named` is captured above, before the message is recorded: a test can
+        // then assert that a function routed a send to the account it meant to.
         Ok(serde_json::json!({
             "message_id": format!("mock-email-{}", sent.len()),
             "provider": "resend",
+            "sender": named,
+        }))
+    }
+
+    async fn email_providers(&self) -> Result<Value> {
+        self.check_all_errors()?;
+        Ok(serde_json::json!({
+            "enabled": true,
+            "providers": [{
+                "name": "default",
+                "provider": "resend",
+                "from_address": "noreply@example.test",
+                "enabled": true,
+                "default": true,
+            }],
         }))
     }
 

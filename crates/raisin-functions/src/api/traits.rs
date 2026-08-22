@@ -689,18 +689,35 @@ pub trait FunctionApi: Send + Sync {
 
     /// Send one transactional email through the tenant's configured provider.
     ///
-    /// `message` is `{ to, subject, text, html? }` (`to` is one address or an
-    /// array of them). The SENDER is not part of it: `from`, `reply_to` and the
-    /// provider credential come from the tenant's `raisin:EmailConfig` node at
-    /// `/config/email` in `raisin:system`, so a function cannot send as an
-    /// address the tenant has not verified.
+    /// `message` is `{ to, subject, text, html?, provider? }` (`to` is one
+    /// address or an array of them). The SENDER is not part of it: `from`,
+    /// `reply_to` and the provider credential come from the tenant's
+    /// `raisin:EmailConfig` node at `/config/email` in `raisin:system`, so a
+    /// function cannot send as an address the tenant has not verified.
     ///
-    /// Returns the provider's receipt `{ message_id, provider }` — the provider
+    /// `provider` names one of the tenant's configured senders (see
+    /// [`email_providers`]); omitting it uses the tenant's default, which is
+    /// what system mail such as the magic link does. An unknown name is an
+    /// error, never a fall-back to the default — a typo must not silently move
+    /// mail onto another account.
+    ///
+    /// Returns the receipt `{ message_id, provider, sender }` — the provider
     /// ACCEPTED the message; delivery is a later, separate event. Sending is
     /// refused (before any socket is opened) when email is not configured, not
     /// enabled, or the function's `secret_policy` does not grant the credential
     /// the config references.
+    ///
+    /// [`email_providers`]: Self::email_providers
     async fn email_send(&self, message: Value) -> Result<Value>;
+
+    /// List the tenant's configured email senders.
+    ///
+    /// Returns `{ enabled, providers: [{ name, provider, from_address,
+    /// enabled, default }] }` so a function can discover what it may name
+    /// instead of hardcoding a string it cannot verify. Deliberately carries no
+    /// credential and no `credential_ref`: a function that may send does not
+    /// thereby get to enumerate the secret store.
+    async fn email_providers(&self) -> Result<Value>;
 
     // ========== Identities (tenant auth records, not raisin:User nodes) ==========
 

@@ -766,6 +766,10 @@ impl FunctionApi for RaisinFunctionApi {
         self.impl_email_send(message).await
     }
 
+    async fn email_providers(&self) -> Result<Value> {
+        self.impl_email_providers().await
+    }
+
     // ========== Identities (tenant auth records) ==========
 
     async fn identity_find_by_email(&self, email: &str) -> Result<Option<Value>> {

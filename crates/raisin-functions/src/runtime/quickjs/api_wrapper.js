@@ -913,7 +913,8 @@ globalThis.raisin = {
     // the tenant's /config/email node, NOT from the caller — a function chooses
     // who receives a message, never who it appears to be from.
     email: {
-        // send({ to, subject, text, html? }) -> { message_id, provider }
+        // send({ to, subject, text, html?, provider? })
+        //   -> { message_id, provider, sender }
         // `to` is one address or an array of them. The receipt means the
         // provider ACCEPTED the message; delivery is a later, separate event.
         // Gated by the function's `email_policy` in its .node.yaml:
@@ -927,8 +928,24 @@ globalThis.raisin = {
         // send. Throws for that, when email is not configured/enabled for the
         // tenant, when the function's secret_policy does not grant the
         // configured credential, or when the provider rejects the send.
+        //
+        // `provider` names one of the tenant's configured senders. Omit it and
+        // the tenant's default is used — which is what system mail (the magic
+        // link above all) does. An unknown name THROWS rather than falling back
+        // to the default: mail leaving through the wrong account is worse than
+        // mail not leaving.
         send: (message) => {
             const r = __call('email_send', [message]);
+            if (r && r.error) throw new Error(r.message || r.error);
+            return r;
+        },
+        // providers() -> { enabled, providers: [{ name, provider,
+        //                  from_address, enabled, default }] }
+        // What this tenant has configured, so a function can discover the names
+        // `send` accepts instead of hardcoding one. Carries no credential and
+        // no credential_ref, and needs the same `email_policy` as send().
+        providers: () => {
+            const r = __call('email_providers', []);
             if (r && r.error) throw new Error(r.message || r.error);
             return r;
         },

@@ -2011,9 +2011,10 @@ async fn test_raisin_api_surface_snapshot() {
     expect("inventory", vec!["claim", "release"]);
     expect("integrations", vec!["syncNow", "sync_now"]);
     expect("imap", vec!["fetchMessage", "fetchSince", "listMailboxes"]);
-    // Only `send`: the sender identity lives in /config/email, so there is
+    // `send` and `providers`. A caller may choose WHICH configured sender to
+    // use, but not who it is: the identity lives in /config/email, so there is
     // deliberately no per-call "from" surface to widen this to.
-    expect("email", vec!["send"]);
+    expect("email", vec!["providers", "send"]);
     expect("identities", vec!["findByEmail", "update"]);
     expect(
         "pdf",

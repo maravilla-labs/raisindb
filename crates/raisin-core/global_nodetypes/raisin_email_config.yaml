@@ -19,62 +19,48 @@ properties:
     type: Boolean
     required: false
     title: Enabled
-    description: Whether outbound email is enabled for this tenant
+    description: >
+      Master switch for the whole tenant. Off means no configured provider
+      sends, however many there are.
     # Deny by default. A tenant that has never been configured must not be
     # able to send, and must not fall back to some other tenant's sender.
     default: false
 
-  - name: provider
-    type: String
+  - name: providers
+    type: Array
     required: false
-    title: Provider
-    description: Transactional email provider to send through
-    # v1 ships HTTP providers only - the sandbox has no raw TCP, so SMTP is
-    # deliberately absent, and adding `smtp` here is the whole schema change
-    # that direction needs. Note that `enum` is declarative, exactly as in the
-    # sibling nodetypes: PropertyValueSchema does not carry it, so it documents
-    # the accepted values for authors and tooling - the sending path still has
-    # to reject an unknown provider itself.
-    enum: [resend, brevo]
-    default: resend
-
-  - name: from_address
-    type: String
-    required: false
-    title: From Address
-    description: Envelope/header sender address (must be verified with the provider)
-
-  - name: from_name
-    type: String
-    required: false
-    title: From Name
-    description: Display name shown alongside the sender address
-
-  - name: reply_to
-    type: String
-    required: false
-    title: Reply-To
-    description: Address replies are directed to, if different from the sender
-
-  - name: api_base
-    type: String
-    required: false
-    title: API Base URL
+    title: Providers
     description: >
-      Override for the provider's API base URL. Left unset the provider's
-      documented default is used; set it to point at a regional endpoint or,
-      in tests, at a local stub.
+      The configured senders. Each entry is complete on its own:
 
-  - name: credential_ref
+        name           unique slug a function names, e.g. "transactional"
+        provider       resend | brevo | smtp
+        from_address   sender address, verified with THAT entry's account
+        from_name      optional display name
+        reply_to       optional Reply-To
+        credential_ref secret:// reference to this entry's API key or SMTP
+                       password - NEVER the key itself
+        api_base       optional provider API base override (HTTP providers)
+        smtp           { host, port, username, security } when provider=smtp;
+                       security is starttls | tls | none, port defaults to 587
+        enabled        per-entry switch, default true
+        default        marks the entry system mail goes through
+
+      Empty means this tenant cannot send. There is deliberately no implicit
+      sender and no platform fallback account: mail either goes out as somebody
+      this tenant configured, or it does not go out.
+    default: []
+
+  - name: default_provider
     type: String
     required: false
-    title: Credential Reference
+    title: Default Provider
     description: >
-      Reference to the provider API key in the secret store, e.g.
-      "secret://email/api_key". The key itself is NEVER stored on this node -
-      config nodes are versioned, auditable and readable by anyone with read
-      access to /config, and a secret would leak through every one of those.
-    default: "secret://email/api_key"
+      Name of the entry in `providers` that system mail - magic-link sign-in
+      above all - goes through, and the one a function gets when it names none.
+      Redundant with a single configured provider, or with one carrying
+      `default: true`; when both are present this wins, so moving the default
+      is a one-field edit rather than two that can disagree.
 
   - name: base_url
     type: String

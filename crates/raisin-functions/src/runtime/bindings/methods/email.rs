@@ -12,7 +12,9 @@
 //! Only the message is an argument: the sender identity and the provider
 //! credential come from the tenant's `/config/email` node, and the send is
 //! authorized against that config and the function's secret policy before any
-//! socket is opened (see `api/raisindb/email.rs`).
+//! socket is opened (see `api/raisindb/email.rs`). The message MAY name which
+//! of the tenant's configured senders to use; `providers()` is how a function
+//! discovers the names.
 
 use crate::api::FunctionApi;
 use crate::runtime::bindings::registry::{
@@ -41,6 +43,23 @@ pub fn methods() -> Vec<ApiMethodDescriptor> {
                     let mut parser = ArgParser::new(&args);
                     let message = parser.json()?;
                     let result = api.email_send(message).await?;
+                    Ok(InvokeResult::Json(result))
+                })
+            },
+        },
+        // email.providers()
+        ApiMethodDescriptor {
+            internal_name: "email_providers",
+            js_name: "providers",
+            py_name: "providers",
+            category: "email",
+            args: vec![],
+            return_type: ReturnType::Json,
+            invoker: |api: Arc<dyn FunctionApi>,
+                      _args: Vec<Value>|
+             -> BoxFuture<'static, Result<InvokeResult>> {
+                Box::pin(async move {
+                    let result = api.email_providers().await?;
                     Ok(InvokeResult::Json(result))
                 })
             },

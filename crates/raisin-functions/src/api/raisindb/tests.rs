@@ -584,6 +584,51 @@ async fn email_send_denied_when_any_recipient_is_disallowed() {
     );
 }
 
+/// Naming a provider does not skip the policy. The recipient check runs before
+/// the config is read, so a function without a policy cannot even learn whether
+/// the provider it named exists.
+#[tokio::test]
+async fn naming_a_provider_does_not_bypass_the_recipient_policy() {
+    let api = api_with_email_policy(EmailPolicy::allow_recipients(vec![
+        "example.com".to_string()
+    ]));
+    let mut message = message_to(&["nope@elsewhere.test"]);
+    message["provider"] = serde_json::json!("marketing");
+
+    let err = api
+        .impl_email_send(message)
+        .await
+        .expect_err("a forbidden recipient must be refused whatever the provider");
+    assert!(matches!(err, raisin_error::Error::PermissionDenied(_)));
+    assert!(err.to_string().contains("email:policy_denied"));
+}
+
+/// Listing providers is gated on the same policy as sending: a function that
+/// may not send has no use for the names, and should not learn them.
+#[tokio::test]
+async fn listing_providers_needs_the_email_policy() {
+    let denied = api_with_email_policy(EmailPolicy::default())
+        .impl_email_providers()
+        .await
+        .expect_err("no policy, no listing");
+    assert!(matches!(denied, raisin_error::Error::PermissionDenied(_)));
+    assert!(denied.to_string().contains("email:policy_denied"));
+
+    // And with a policy it gets past the gate, failing at the config lookup
+    // instead — without this the assertion above would also pass if listing
+    // were denied unconditionally.
+    let allowed = api_with_email_policy(EmailPolicy::allow_recipients(vec![
+        "example.com".to_string()
+    ]))
+    .impl_email_providers()
+    .await
+    .expect_err("there is no /config/email node in this test");
+    assert!(
+        !matches!(allowed, raisin_error::Error::PermissionDenied(_)),
+        "a granted function must not be refused by the policy: {allowed}"
+    );
+}
+
 /// The complement: an ALLOWED recipient gets past the policy and fails at the
 /// next gate instead. Without this the tests above would also pass if the gate
 /// denied everything unconditionally.

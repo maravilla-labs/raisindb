@@ -6,15 +6,24 @@
 //! Brevo provider: `POST https://api.brevo.com/v3/smtp/email` with an `api-key`
 //! header (Brevo does not use bearer auth).
 //!
+//! This is Brevo's REST transactional API — the `smtp` in the path is Brevo's
+//! naming, not a protocol. It needs a **v3 API key** from Settings → API keys.
+//! An **SMTP key** (Settings → SMTP & API → SMTP) is a different credential for
+//! Brevo's relay and returns 401 here; that mix-up is the single most common
+//! reason a correct-looking Brevo config never delivers. To use an SMTP key,
+//! configure a provider with `smtp` instead.
+//!
 //! <https://developers.brevo.com/reference/sendtransacemail>
 
 use serde::{Deserialize, Serialize};
 
 use super::provider::{build_client, error_from_response, map_transport_err, SendReceipt};
-use super::{Credential, EmailConfig, EmailError, EmailMessage, EmailProvider, Result};
+use super::{Credential, EmailError, EmailMessage, EmailProvider, EmailSender, Result};
 
-/// Brevo's transactional send endpoint.
-const ENDPOINT: &str = "https://api.brevo.com/v3/smtp/email";
+/// Brevo's API root. Overridable per sender through `api_base`.
+const API_BASE: &str = "https://api.brevo.com";
+/// Path of the transactional send endpoint, appended to the API base.
+const SEND_PATH: &str = "/v3/smtp/email";
 /// Header Brevo authenticates with. Not `Authorization`.
 const API_KEY_HEADER: &str = "api-key";
 
@@ -61,14 +70,14 @@ struct SendResponse {
 
 /// Send `message` through Brevo.
 pub(super) async fn send(
-    cfg: &EmailConfig,
+    from: &EmailSender,
     credential: &Credential,
     message: &EmailMessage,
 ) -> Result<SendReceipt> {
     let body = SendRequest {
         sender: Address {
-            email: &cfg.from_address,
-            name: cfg.from_name.as_deref(),
+            email: &from.from_address,
+            name: from.from_name.as_deref(),
         },
         to: message
             .to
@@ -81,14 +90,15 @@ pub(super) async fn send(
             .html
             .clone()
             .unwrap_or_else(|| html_from_text(&message.text)),
-        reply_to: cfg
+        reply_to: from
             .reply_to
             .as_deref()
             .map(|email| Address { email, name: None }),
     };
 
+    let endpoint = super::provider::endpoint(from, API_BASE, SEND_PATH);
     let resp = build_client()?
-        .post(ENDPOINT)
+        .post(&endpoint)
         .header(API_KEY_HEADER, credential.expose())
         .header(reqwest::header::ACCEPT, "application/json")
         .json(&body)
@@ -114,6 +124,7 @@ pub(super) async fn send(
     Ok(SendReceipt {
         message_id,
         provider: EmailProvider::Brevo,
+        sender: String::new(),
     })
 }
 
@@ -137,14 +148,15 @@ mod tests {
 
     #[test]
     fn request_body_uses_brevos_camel_case_shape() {
-        let cfg = EmailConfig {
+        let cfg = EmailSender {
+            name: "brevo".to_string(),
             provider: EmailProvider::Brevo,
             from_address: "noreply@example.com".to_string(),
             from_name: Some("Example".to_string()),
             reply_to: None,
-            base_url: "https://app.example.com".to_string(),
             credential_ref: "secret://email/api_key".to_string(),
-            enabled: true,
+            api_base: None,
+            smtp: None,
         };
         let msg = EmailMessage::new("user@example.com", "Sign in", "link").with_html("<b>l</b>");
         let body = SendRequest {

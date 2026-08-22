@@ -87,6 +87,11 @@ ring = "0.17"
 # Dynamic loading of C-ABI function-binding plugins (see `plugin_loader`).
 libloading = "0.8"
 webpki-roots = "1.0"
+# SMTP submission for the `smtp` email provider. rustls only — no OpenSSL /
+# native-tls in the build, matching the IMAP client. `builder` is what composes
+# the RFC 5322 message (MIME, encoding, Message-ID); hand-rolling that is how
+# header-injection bugs get written.
+lettre = { version = "0.11.23", default-features = false, features = ["tokio1", "tokio1-rustls-tls", "builder", "smtp-transport", "hostname", "ring"] }
 
 [dev-dependencies]
 # Test-only: generate an ephemeral RSA keypair + JWK at runtime so no private
