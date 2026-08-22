@@ -180,6 +180,39 @@ impl<'de> Visitor<'de> for StorageTimestampVisitor {
             return Err(de::Error::custom("expected single-element tuple"));
         }
 
+        // A ONE-ELEMENT INTEGER SEQUENCE IS ALSO JUST AN ARRAY, and telling the
+        // two apart is not optional: `days_of_week: [3]` (Wednesday) was read as
+        // three NANOSECONDS after the epoch and stored as
+        // "1970-01-01T00:00:00.000000003+00:00", silently destroying every
+        // single-day weekly schedule. `[1,3,5]` survived, `[3]` did not.
+        //
+        // WHY NOT `is_human_readable()`, which is how `Serialize` above picks
+        // its format: `PropertyValue` is `#[serde(untagged)]`, and serde buffers
+        // an untagged value into `Content` before trying the variants. Its
+        // `ContentDeserializer` does not forward the flag — it reports
+        // human-readable ALWAYS, MessagePack included. Branching on it here
+        // would make every STORED timestamp fail this variant and fall through
+        // to `Vector`, turning dates into `[1.7e18]` across the whole store.
+        //
+        // So the discriminator has to be the value itself, and the two
+        // populations are nowhere near each other: a real timestamp is ~1.7e18
+        // nanoseconds (2020s dates), while the integers that appear in short
+        // arrays — weekday indices, day-of-month, ids, counts — are many orders
+        // of magnitude smaller. A tenth of a picosecond-scale floor separates
+        // them with room to spare in both directions.
+        //
+        // The residual, stated rather than hidden: a Date written within ~16
+        // minutes of the epoch now reads back as an array, and a one-element
+        // array holding an integer above the floor still reads as a Date. Both
+        // are far outside what this system stores; the alternative was
+        // corrupting every schedule that names a single day.
+        const PLAUSIBLE_TIMESTAMP_NANOS: i64 = 1_000_000_000_000; // epoch + ~16.7 min
+        if nanos.abs() < PLAUSIBLE_TIMESTAMP_NANOS {
+            return Err(de::Error::custom(
+                "single-element integer sequence is an array, not a timestamp",
+            ));
+        }
+
         StorageTimestamp::from_nanos(nanos)
             .ok_or_else(|| de::Error::custom("Invalid nanosecond timestamp"))
     }
@@ -221,6 +254,40 @@ mod tests {
 
         let expected = Utc.with_ymd_and_hms(2024, 11, 28, 16, 30, 45).unwrap();
         assert_eq!(ts.into_inner(), expected);
+    }
+
+    #[test]
+    fn a_single_element_integer_array_is_not_a_timestamp() {
+        // THE REGRESSION THIS GUARDS. `days_of_week: [3]` (Wednesday) round-tripped
+        // through an untagged PropertyValue as three NANOSECONDS after the epoch —
+        // "1970-01-01T00:00:00.000000003+00:00" — and every weekly schedule that
+        // named exactly ONE day lost its day. `[1,3,5]` survived, because the
+        // second element made this visitor error out; `[3]` threaded the needle.
+        for json in ["[3]", "[0]", "[1]", "[6]", "[31]", "[1234567890]"] {
+            let result: Result<StorageTimestamp, _> = serde_json::from_str(json);
+            assert!(
+                result.is_err(),
+                "{json} is an array of small integers, not a timestamp"
+            );
+        }
+    }
+
+    #[test]
+    fn a_real_nanosecond_timestamp_still_deserializes_from_a_tuple() {
+        // The other direction, and the reason the guard is a magnitude test
+        // rather than "sequences are never timestamps": MessagePack stores every
+        // Date as exactly this shape, so rejecting it wholesale would turn the
+        // entire store's dates into arrays.
+        let ts = StorageTimestamp::now();
+        let bytes = rmp_serde::to_vec_named(&ts).expect("serialize");
+        let back: StorageTimestamp = rmp_serde::from_slice(&bytes).expect("round trip");
+        assert_eq!(back.timestamp_nanos(), ts.timestamp_nanos());
+
+        // …and a date before the epoch, which is negative and large.
+        let old = StorageTimestamp::from_nanos(-2_000_000_000_000_000_000).expect("pre-epoch");
+        let bytes = rmp_serde::to_vec_named(&old).expect("serialize");
+        let back: StorageTimestamp = rmp_serde::from_slice(&bytes).expect("round trip");
+        assert_eq!(back.timestamp_nanos(), old.timestamp_nanos());
     }
 
     #[test]

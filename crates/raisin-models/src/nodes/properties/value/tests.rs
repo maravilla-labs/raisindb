@@ -468,6 +468,40 @@ fn z_range_spans_a_mixed_dimension_geometry_and_is_none_when_flat() {
 }
 
 #[test]
+fn a_single_integer_array_survives_the_untagged_property_value_inference() {
+    // MEASURED IN PRODUCTION, 22 Aug 2026: an agenda slot's `days_of_week: [3]`
+    // came back as "1970-01-01T00:00:00.000000003+00:00". `Date` sits above
+    // `Array` in the untagged ladder and StorageTimestamp accepted any
+    // one-element integer sequence — because that is exactly how MessagePack
+    // encodes a timestamp — so a weekday index was read as three nanoseconds.
+    // Every weekly schedule naming exactly ONE day silently lost it.
+    let value: PropertyValue = serde_json::from_str("[3]").expect("parse");
+    assert!(
+        !matches!(value, PropertyValue::Date(_)),
+        "a one-element integer array must not infer as a Date, got {value:?}"
+    );
+
+    // Nested in an Object, which is how it actually reached us.
+    let nested: PropertyValue = serde_json::from_str(r#"{"days_of_week": [3]}"#).expect("parse");
+    let PropertyValue::Object(map) = &nested else {
+        panic!("expected an object, got {nested:?}");
+    };
+    assert!(
+        !matches!(map.get("days_of_week"), Some(PropertyValue::Date(_))),
+        "nested one-element integer array must not infer as a Date, got {:?}",
+        map.get("days_of_week")
+    );
+
+    // The multi-element case never broke; it is here so the pair is visible.
+    let multi: PropertyValue = serde_json::from_str("[1,3,5]").expect("parse");
+    assert!(!matches!(multi, PropertyValue::Date(_)));
+
+    // And a real RFC3339 string must still infer as a Date.
+    let date: PropertyValue = serde_json::from_str(r#""2026-09-01T18:00:00Z""#).expect("parse");
+    assert!(matches!(date, PropertyValue::Date(_)), "got {date:?}");
+}
+
+#[test]
 fn a_third_ordinate_survives_the_untagged_property_value_inference() {
     // The risk: an extra ordinate or member makes serde fall through to
     // `Object`, which is never spatially indexed and reports no error.
