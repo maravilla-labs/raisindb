@@ -1,0 +1,61 @@
+node_type: raisin:Function
+properties:
+  title: Send Test Email
+  description: >
+    Sends one test message through a configured email provider, so an operator
+    can prove a provider actually delivers before a user ever waits on a
+    sign-in link.
+
+    It exists because every other signal is indirect: the console can see that
+    the config node is complete and that the referenced secret EXISTS, but
+    nothing reads a secret's value back, so the first proof that a key is the
+    right key has always been a real send. This is that send, on demand.
+
+    Deliberately the ordinary path - it calls raisin.email.send like any other
+    function, so a green result proves the whole chain (config, provider
+    selection, secret, provider account, sending domain) and not a shortcut
+    around it.
+  language: JavaScript
+  entry_file: index.js:sendTestEmail
+  execution_mode: Sync
+  enabled: true
+  resource_limits:
+    # An SMTP handshake plus submission can outlast an HTTP round trip.
+    timeout_ms: 45000
+    max_memory_bytes: 33554432
+  # A test goes to whatever address the operator typed, which is by definition
+  # not a domain the tenant owns.
+  email_policy:
+    enabled: true
+    allowed_recipients:
+      - "*"
+  # The provider credentials referenced by /config/email. Scoped to the email
+  # namespace so this function can never reach another subsystem's secrets.
+  secret_policy:
+    enabled: true
+    allowed_names:
+      - "email/*"
+  input_schema:
+    type: object
+    required:
+      - to
+    properties:
+      to:
+        type: string
+        description: Address to send the test message to
+      provider:
+        type: string
+        description: >
+          Name of the configured provider to test. Omit it to test the tenant's
+          DEFAULT sender - the one magic-link sign-in uses.
+  output_schema:
+    type: object
+    properties:
+      sent:
+        type: boolean
+      message_id:
+        type: string
+      provider:
+        type: string
+      sender:
+        type: string

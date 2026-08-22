@@ -1,16 +1,32 @@
 node_type: raisin:Function
 properties:
-  title: Send Email Notification (Placeholder)
+  title: Send Email Notification
   description: >
-    Placeholder function for sending email notifications.
-    Currently logs the email details. Replace with actual email service integration.
+    Sends stewardship emails - ward invitations, stewardship requests - through
+    the tenant's outbound email configuration. Names no provider, so the
+    tenant's DEFAULT sender is used.
   language: Starlark
   entry_file: index.py:send_email_notification
   execution_mode: Async
   enabled: true
   resource_limits:
-    timeout_ms: 10000
+    # A provider round trip, not a log line: the HTTP providers are given 30s
+    # and an SMTP handshake can take longer than the old 10s allowed.
+    timeout_ms: 30000
     max_memory_bytes: 16777216
+  # Sending is deny-by-default per function. A stewardship invitation goes to
+  # whatever address the inviter typed, and the tenant does not own those
+  # domains - narrow this to your own on a closed-audience deployment.
+  email_policy:
+    enabled: true
+    allowed_recipients:
+      - "*"
+  # The provider credential referenced by /config/email, scoped to the email
+  # namespace.
+  secret_policy:
+    enabled: true
+    allowed_names:
+      - "email/*"
   input_schema:
     type: object
     required:
@@ -35,6 +51,11 @@ properties:
       template_data:
         type: object
         description: Data to pass to template
+      provider:
+        type: string
+        description: >
+          Optional name of a configured email provider. Omit it to use the
+          tenant's default sender.
   output_schema:
     type: object
     properties:
@@ -46,4 +67,10 @@ properties:
         description: Reason if not sent
       message_id:
         type: string
-        description: Email service message ID if sent
+        description: The provider's message id - acceptance, not delivery
+      provider:
+        type: string
+        description: The provider API that accepted it
+      sender:
+        type: string
+        description: Which configured sender it went through

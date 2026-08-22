@@ -2,8 +2,9 @@ node_type: raisin:Function
 properties:
   title: Send Email Notification
   description: >
-    Sends email notifications to users.
-    This function is called by other handlers to send email alerts.
+    Sends email notifications to users through the tenant's outbound email
+    configuration. Names no provider, so the tenant's DEFAULT sender is used -
+    the same account magic-link sign-in goes through.
   language: Starlark
   entry_file: index.py:send_email_notification
   execution_mode: Async
@@ -11,32 +12,66 @@ properties:
   resource_limits:
     timeout_ms: 30000
     max_memory_bytes: 16777216
+  # Sending is deny-by-default per function. "*" is the honest setting for a
+  # notification handler: it delivers to whatever address a user registered,
+  # and the tenant does not own those domains. Narrow it to your own domains on
+  # a deployment where only staff are notified.
+  email_policy:
+    enabled: true
+    allowed_recipients:
+      - "*"
+  # The provider credential referenced by /config/email. Scoped to the email
+  # namespace so a change here can never reach another subsystem's secrets.
+  secret_policy:
+    enabled: true
+    allowed_names:
+      - "email/*"
   input_schema:
     type: object
     required:
-      - recipient_email
       - subject
-      - body
     properties:
-      recipient_email:
+      to_email:
         type: string
         description: The recipient's email address
+      recipient_email:
+        type: string
+        description: Alias for to_email, accepted for older callers
+      email:
+        type: string
+        description: Alias for to_email, accepted for older callers
       subject:
         type: string
         description: The email subject
       body:
         type: string
-        description: The email body content
+        description: Plain-text body
+      html_body:
+        type: string
+        description: Optional HTML alternative, sent alongside the text body
+      provider:
+        type: string
+        description: >
+          Optional name of a configured email provider. Omit it to use the
+          tenant's default sender.
       template:
         type: string
         description: Optional email template name
   output_schema:
     type: object
     properties:
+      sent:
+        type: boolean
       success:
         type: boolean
       message_id:
         type: string
-        description: The sent email message ID
+        description: The provider's message id - acceptance, not delivery
+      provider:
+        type: string
+        description: The provider API that accepted it
+      sender:
+        type: string
+        description: Which configured sender it went through
       error:
         type: string
