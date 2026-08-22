@@ -52,7 +52,9 @@ mod tests_ms_graph_outbox;
 
 use async_trait::async_trait;
 use raisin_error::{Error, Result};
-use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, Function, Module, Promise, Value};
+use rquickjs::{
+    AsyncContext, AsyncRuntime, CatchResultExt, Ctx, Function, Module, Object, Promise, Value,
+};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -355,6 +357,37 @@ impl FunctionRuntime for QuickJsRuntime {
                     }
                 } else {
                     // Script mode: evaluate as classic script (existing behavior)
+                    //
+                    // A CommonJS shim goes in FIRST. A script has no `module`,
+                    // so the spelling every Node-shaped example ends with —
+                    // `module.exports = { handler }` — threw a ReferenceError
+                    // during eval, before the handler was ever called. The
+                    // function looked ordinary (its handler declared at top
+                    // level, found in globals) and the error named the last
+                    // line rather than the missing feature, so it read as a
+                    // typo. Three built-in functions shipped that way,
+                    // `send-magic-link` among them, which meant passwordless
+                    // sign-in could not send whatever the email config said.
+                    //
+                    // Re-created on EVERY execution, never once at setup: the
+                    // runtime is pooled, and a `module.exports` left behind by
+                    // the previous tenant's function would otherwise still be
+                    // there to satisfy the entrypoint lookup below — serving
+                    // somebody else's handler.
+                    if let Err(e) = ctx
+                        .eval::<(), _>(
+                            "globalThis.module = { exports: {} }; \
+                             globalThis.exports = globalThis.module.exports;",
+                        )
+                        .catch(&ctx)
+                    {
+                        let error_msg = format_js_error(&ctx, e);
+                        tracing::error!(error = %error_msg, "failed to install the CommonJS shim");
+                        return Err(Error::Internal(format!(
+                            "failed to install the CommonJS shim: {error_msg}"
+                        )));
+                    }
+
                     let code_bytes: Vec<u8> = code.into_bytes();
                     let eval_result: std::result::Result<(), rquickjs::CaughtError> =
                         ctx.eval(code_bytes).catch(&ctx);
@@ -373,17 +406,26 @@ impl FunctionRuntime for QuickJsRuntime {
                         )));
                     }
 
-                    // Get the entrypoint function from globals
+                    // Get the entrypoint function: a top-level declaration
+                    // first, then `module.exports`.
+                    //
+                    // Globals WIN, so nothing that worked before changes
+                    // meaning — the two can only disagree in a script that
+                    // exports something other than what it declared, and the
+                    // global is what the old lookup found.
                     let globals = ctx.globals();
-                    let handler: std::result::Result<Function, _> = globals.get(&*entrypoint);
-                    match handler {
+                    match globals.get::<_, Function>(&*entrypoint) {
                         Ok(f) => f,
-                        Err(_) => {
-                            return Err(Error::Validation(format!(
-                                "Entrypoint function '{}' not found",
-                                entrypoint
-                            )));
-                        }
+                        Err(_) => match commonjs_export(&ctx, &entrypoint) {
+                            Some(f) => f,
+                            None => {
+                                return Err(Error::Validation(format!(
+                                    "Entrypoint function '{entrypoint}' not found. Declare it at \
+                                     the top level, or export it as \
+                                     module.exports.{entrypoint}."
+                                )));
+                            }
+                        },
                     }
                 };
 
@@ -597,4 +639,20 @@ impl FunctionRuntime for QuickJsRuntime {
     fn name(&self) -> &'static str {
         "QuickJS"
     }
+}
+
+/// Look up `entrypoint` on the CommonJS `module.exports` object.
+///
+/// Every step is fallible and every failure means the same thing — the script
+/// did not export a callable under that name — so they collapse to `None`
+/// rather than to distinct errors nobody can act on differently. The caller
+/// reports the miss once, naming both places it looked.
+///
+/// `module` is re-created before each eval, so a value found here belongs to
+/// the script just evaluated and cannot be a leftover from a pooled runtime's
+/// previous tenant.
+fn commonjs_export<'js>(ctx: &Ctx<'js>, entrypoint: &str) -> Option<Function<'js>> {
+    let module: Object<'js> = ctx.globals().get("module").ok()?;
+    let exports: Object<'js> = module.get("exports").ok()?;
+    exports.get::<_, Function<'js>>(entrypoint).ok()
 }

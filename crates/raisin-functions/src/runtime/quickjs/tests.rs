@@ -2762,3 +2762,159 @@ async fn test_uncoded_error_message_is_unchanged() {
         err.message
     );
 }
+
+// ============================================================================
+// CommonJS in script mode
+// ============================================================================
+//
+// A function with no `import` / `export` runs as a plain SCRIPT, not an ES6
+// module. `module` is not a thing in a script, so the CommonJS spelling every
+// Node-shaped example ends with — `module.exports = { handler }` — threw a
+// ReferenceError DURING EVAL, before the handler was ever called.
+//
+// The failure was invisible in the worst way: the function declared its handler
+// at top level and looked perfectly ordinary, and the error named the last line
+// rather than the missing feature. Three built-in functions shipped like this,
+// `send-magic-link` among them — which is to say passwordless sign-in could not
+// send at all, whatever the email configuration said.
+
+/// The exact shape that was broken: a top-level handler plus a trailing
+/// `module.exports`.
+#[tokio::test]
+async fn a_script_may_end_with_module_exports() {
+    let runtime = QuickJsRuntime::new();
+
+    let code = r#"
+        function handler(input) {
+            return { ok: true, got: input.value };
+        }
+
+        module.exports = { handler };
+    "#;
+
+    let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+        .with_input(serde_json::json!({"value": 42}));
+    let metadata = FunctionMetadata::javascript("commonjs_tail");
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+
+    let result = runtime
+        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .await
+        .expect("module.exports must not be a syntax error in script mode");
+
+    assert!(result.success, "error: {:?}", result.error);
+    assert_eq!(result.output.unwrap()["got"], 42);
+}
+
+/// And the handler may exist ONLY on `module.exports`, which is how a function
+/// written as a Node module looks when nothing is declared at top level.
+#[tokio::test]
+async fn a_handler_reachable_only_through_module_exports_is_found() {
+    let runtime = QuickJsRuntime::new();
+
+    let code = r#"
+        module.exports.handler = function (input) {
+            return { ok: true, got: input.value };
+        };
+    "#;
+
+    let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+        .with_input(serde_json::json!({"value": 7}));
+    let metadata = FunctionMetadata::javascript("commonjs_only");
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+
+    let result = runtime
+        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .await
+        .expect("an export-only handler must be found");
+
+    assert!(result.success, "error: {:?}", result.error);
+    assert_eq!(result.output.unwrap()["got"], 7);
+}
+
+/// The bare `exports` alias works too — `exports.handler = …` is the other half
+/// of the CommonJS idiom, and it must reference the SAME object as
+/// `module.exports` or one of the two spellings silently exports nothing.
+#[tokio::test]
+async fn the_bare_exports_alias_is_the_same_object() {
+    let runtime = QuickJsRuntime::new();
+
+    let code = r#"
+        exports.handler = function (input) {
+            return { same: module.exports.handler === exports.handler, got: input.value };
+        };
+    "#;
+
+    let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+        .with_input(serde_json::json!({"value": 1}));
+    let metadata = FunctionMetadata::javascript("commonjs_alias");
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+
+    let result = runtime
+        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .await
+        .expect("the exports alias must work");
+
+    assert!(result.success, "error: {:?}", result.error);
+    let output = result.output.unwrap();
+    assert_eq!(output["same"], true);
+    assert_eq!(output["got"], 1);
+}
+
+/// A top-level declaration still WINS over `module.exports`, so nothing that
+/// worked before changes meaning. The two disagree only in code that exports
+/// something other than what it declared, and the global is what the old
+/// lookup found.
+#[tokio::test]
+async fn a_top_level_declaration_still_wins() {
+    let runtime = QuickJsRuntime::new();
+
+    let code = r#"
+        function handler(input) { return { from: "global" }; }
+        module.exports = { handler: function (input) { return { from: "exports" }; } };
+    "#;
+
+    let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+        .with_input(serde_json::json!({}));
+    let metadata = FunctionMetadata::javascript("commonjs_precedence");
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+
+    let result = runtime
+        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .await
+        .expect("executes");
+
+    assert_eq!(result.output.unwrap()["from"], "global");
+}
+
+/// A genuinely missing entrypoint must still be an error, and must still say
+/// so — the fallback must not turn "not found" into a confusing type error.
+#[tokio::test]
+async fn a_missing_entrypoint_is_still_reported() {
+    let runtime = QuickJsRuntime::new();
+
+    let code = r#"
+        module.exports = { somethingElse: function () { return 1; } };
+    "#;
+
+    let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+        .with_input(serde_json::json!({}));
+    let metadata = FunctionMetadata::javascript("commonjs_missing");
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+
+    let err = runtime
+        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .await;
+
+    let reported = match err {
+        Err(e) => e.to_string(),
+        Ok(r) => r
+            .error
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "no error reported".to_string()),
+    };
+    assert!(
+        reported.contains("handler"),
+        "the error must name the entrypoint it looked for: {reported}"
+    );
+}
