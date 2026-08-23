@@ -112,6 +112,9 @@ mod tests {
         // The weak slot survives until the next sweep, which reaps it.
         invalidate_all_permission_caches();
         let after = caches().lock().map(|g| g.len()).unwrap_or(0);
-        assert!(after <= before, "a dropped cache must not linger in the registry");
+        assert!(
+            after <= before,
+            "a dropped cache must not linger in the registry"
+        );
     }
 }

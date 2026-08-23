@@ -3,6 +3,48 @@
 use super::*;
 
 impl VirtualMountSyncHandler {
+    /// How long a payload-carrying run waits for the mount lease before giving up
+    /// and letting the job system redeliver it.
+    ///
+    /// Sized against what it actually waits for: the run in front is normally a
+    /// sub-second delta, and a burst of provider events arrives inside a few
+    /// hundred milliseconds. Long enough to absorb that, short enough that a
+    /// genuinely stuck lease (TTL is ten minutes) does not pin a worker.
+    const PUSH_LEASE_WAIT: Duration = Duration::from_secs(8);
+    /// Gap between attempts. Fine-grained because the point is to apply the event
+    /// the instant the mount frees up, not merely eventually.
+    const PUSH_LEASE_POLL: Duration = Duration::from_millis(150);
+
+    /// Wait for the per-mount lease, for a run that must not lose its payload.
+    ///
+    /// `Ok(None)` means the wait expired and the caller should arrange a retry —
+    /// it must NOT be read as "nothing to do".
+    async fn await_mount_lease(
+        lm: &std::sync::Arc<dyn raisin_locks::LockManager>,
+        lock_key: &str,
+        owner: &str,
+        mount_id: &str,
+    ) -> Result<Option<u64>> {
+        let deadline = std::time::Instant::now() + Self::PUSH_LEASE_WAIT;
+        loop {
+            tokio::time::sleep(Self::PUSH_LEASE_POLL).await;
+            if let Some(g) = lm.try_acquire(lock_key, owner, SYNC_LEASE_TTL).await? {
+                tracing::debug!(
+                    mount_id = %mount_id,
+                    "acquired the mount lease after waiting; applying the pushed payload"
+                );
+                return Ok(Some(g.token));
+            }
+            if std::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    mount_id = %mount_id,
+                    "mount stayed locked while a pushed payload waited; deferring to a retry"
+                );
+                return Ok(None);
+            }
+        }
+    }
+
     /// Sync a single mount. Returns the run summary as the job result.
     pub(super) async fn run_sync(
         &self,
@@ -45,6 +87,19 @@ impl VirtualMountSyncHandler {
             .build_ctx_parts(&svc, &tenant, &repo, &config_branch, &mount)
             .await?;
 
+        // Forwarded by the control plane when the webhook that woke this run carried the
+        // resource itself. An empty list is treated as absent, so a delivery carrying
+        // nothing this mount cares about still gets a normal re-read rather than a run
+        // that asks the adapter to apply zero events and calls it done.
+        //
+        // READ BEFORE THE LEASE, deliberately: whether this run carries a payload decides
+        // what to do when the mount is already busy. See the contention arm below.
+        let pushed_events = context
+            .metadata
+            .get("pushed_events")
+            .filter(|v| v.as_array().is_some_and(|a| !a.is_empty()))
+            .cloned();
+
         // Acquire the per-mount lease (cluster safety). Keyed on the config
         // branch — that is the identity the periodic scan enqueues against.
         let lock_key = ctx::mount_lease_key(&tenant, &repo, &config_branch, &mount_id);
@@ -52,9 +107,47 @@ impl VirtualMountSyncHandler {
         let lease_token = match &self.lock_manager {
             Some(lm) => match lm.try_acquire(&lock_key, &owner, SYNC_LEASE_TTL).await? {
                 Some(g) => Some(g.token),
-                None => {
+                None if pushed_events.is_none() => {
+                    // No payload: another run is already re-reading this mount from the
+                    // provider, and it will see whatever this one would have. Skipping is
+                    // correct and is what keeps a burst of periodic kicks cheap.
                     tracing::warn!(mount_id = %mount_id, "mount is being synced elsewhere; no-op");
                     return Ok(Some(skip_result("locked_elsewhere")));
+                }
+                None => {
+                    // A PAYLOAD MUST NEVER BE DROPPED HERE.
+                    //
+                    // This run carries the changed resource itself, delivered under a
+                    // verified webhook signature. The run holding the lease carries a
+                    // DIFFERENT event and will not apply ours, so skipping loses it
+                    // outright — the change then waits for the next scheduled poll.
+                    //
+                    // That is not hypothetical. One Stripe payment emits three events
+                    // within ~150ms (`payment_intent.created`, `payment_intent.succeeded`,
+                    // `checkout.session.completed`), the control plane fans each to this
+                    // mount, and they race. The one that wins applies its own event; the
+                    // `checkout.session.completed` that actually settles the order lost
+                    // the race and was discarded, so a paid order sat `pending` until a
+                    // poll caught up minutes later. Single-event resources never bursted,
+                    // which is why only payments looked broken.
+                    //
+                    // Waiting briefly is the right answer rather than failing: the run in
+                    // front is normally a sub-second delta, so the events end up applied
+                    // in sequence and the node write — and the live subscription that
+                    // updates somebody's order page — still happens in real time.
+                    match Self::await_mount_lease(lm, &lock_key, &owner, &mount_id).await? {
+                        Some(token) => Some(token),
+                        None => {
+                            // Still held after the wait. Return an error rather than a
+                            // skip so the job system redelivers this run WITH its payload;
+                            // reporting success here would drop the event silently, which
+                            // is the whole failure being fixed.
+                            return Err(Error::Backend(format!(
+                                "mount {mount_id} stayed locked while holding a pushed \
+                                 payload; retrying so the event is not lost"
+                            )));
+                        }
+                    }
                 }
             },
             None => {
@@ -72,15 +165,6 @@ impl VirtualMountSyncHandler {
         // `scope` (built by `build_ctx_parts`) targets `mount.target_branch` for
         // materialization; mount/integration config and mount state stay on the
         // config branch (`ctx.config_branch`).
-        // Forwarded by the control plane when the webhook that woke this run carried the
-        // resource itself. An empty list is treated as absent, so a delivery carrying
-        // nothing this mount cares about still gets a normal re-read rather than a run
-        // that asks the adapter to apply zero events and calls it done.
-        let pushed_events = context
-            .metadata
-            .get("pushed_events")
-            .filter(|v| v.as_array().is_some_and(|a| !a.is_empty()))
-            .cloned();
 
         let mut ctx = SyncCtx {
             public_origin,
@@ -349,4 +433,106 @@ pub(super) fn close_interrupted_run(state: &mut MountState, now: i64) -> Option<
     state.recent_runs.insert(0, closed);
     state.recent_runs.truncate(config::MAX_RUN_HISTORY);
     Some(ran_for)
+}
+
+#[cfg(test)]
+mod push_contention_tests {
+    use super::*;
+    use raisin_locks::{InProcessLockManager, LockManager};
+
+    /// The decision this file makes on lease contention, isolated from timing.
+    ///
+    /// Reproduces the shape that lost a payment: a mount is already leased, and a
+    /// second run arrives carrying a webhook payload. Before the fix both cases
+    /// took the same branch and answered `locked_elsewhere`, discarding the
+    /// event.
+    fn manager() -> std::sync::Arc<dyn LockManager> {
+        std::sync::Arc::new(InProcessLockManager::new())
+    }
+
+    /// No payload: skipping is correct and must stay cheap. The run in front is
+    /// re-reading from the provider and will see whatever this one would have.
+    #[tokio::test]
+    async fn a_kick_with_no_payload_still_skips_when_the_mount_is_busy() {
+        let lm = manager();
+        let key = "tenant\0repo\0main\0mount-a";
+        let held = lm
+            .try_acquire(key, "holder", SYNC_LEASE_TTL)
+            .await
+            .expect("lock call")
+            .expect("first acquire wins");
+        assert!(held.token > 0);
+
+        // A second acquire is refused — the condition the skip branch keys on.
+        let second = lm
+            .try_acquire(key, "other", SYNC_LEASE_TTL)
+            .await
+            .expect("lock call");
+        assert!(second.is_none(), "a held lease must refuse a second owner");
+    }
+
+    /// With a payload the run must WAIT rather than skip, and must pick the lease
+    /// up as soon as the holder releases — that is what keeps the node write, and
+    /// the live subscription behind it, real time.
+    #[tokio::test]
+    async fn a_pushed_payload_waits_for_the_lease_and_then_applies() {
+        let lm = manager();
+        let key = "tenant\0repo\0main\0mount-b";
+        let held = lm
+            .try_acquire(key, "holder", SYNC_LEASE_TTL)
+            .await
+            .expect("lock call")
+            .expect("first acquire wins");
+
+        // Release shortly, as a sub-second delta run would.
+        let releaser = {
+            let lm = lm.clone();
+            let key = key.to_string();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                let _ = lm.release(&key, held.token).await;
+            })
+        };
+
+        let got = VirtualMountSyncHandler::await_mount_lease(&lm, key, "pushed", "mount-b")
+            .await
+            .expect("wait must not error");
+        assert!(
+            got.is_some(),
+            "a payload-carrying run must acquire the lease once the holder releases, \
+             not drop its event"
+        );
+        releaser.await.expect("releaser");
+    }
+
+    /// A lease that never frees must NOT be reported as success. Returning
+    /// `Ok(None)` is what tells the caller to fail the run so the job system
+    /// redelivers it with its payload intact.
+    #[tokio::test]
+    async fn a_lease_that_never_frees_defers_rather_than_dropping() {
+        let lm = manager();
+        let key = "tenant\0repo\0main\0mount-c";
+        let _held = lm
+            .try_acquire(key, "holder", SYNC_LEASE_TTL)
+            .await
+            .expect("lock call")
+            .expect("first acquire wins");
+
+        tokio::time::pause();
+        let wait = tokio::spawn({
+            let lm = lm.clone();
+            let key = key.to_string();
+            async move {
+                VirtualMountSyncHandler::await_mount_lease(&lm, &key, "pushed", "mount-c").await
+            }
+        });
+        tokio::time::advance(VirtualMountSyncHandler::PUSH_LEASE_WAIT + Duration::from_secs(1))
+            .await;
+        let got = wait.await.expect("join").expect("wait must not error");
+        assert!(
+            got.is_none(),
+            "an expired wait must report None so the caller retries; reporting success \
+             would silently drop the event"
+        );
+    }
 }
