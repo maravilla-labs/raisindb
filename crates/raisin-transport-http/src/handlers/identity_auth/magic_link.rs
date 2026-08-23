@@ -552,7 +552,10 @@ async fn request_magic_link_core(
             req.email.clone(),
             token_id.clone(),
             token,
-            link_config.base_url.clone(),
+            // THIS SERVER's origin, not the tenant's front end. `link_config`
+            // still supplies `base_url` for the post-verify redirect above; the
+            // verify endpoint itself lives here.
+            raisin_auth::jobs::VerifyOrigin(verify_origin),
             EXPIRES_IN_MINUTES,
         )
         .with_verify_path(format!("/auth/{repo}/magic-link/verify"));

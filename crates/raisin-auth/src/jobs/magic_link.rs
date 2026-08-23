@@ -56,6 +56,21 @@ pub struct MagicLinkJobData {
     pub verify_path: Option<String>,
 }
 
+/// The origin the verify link is built on — THIS server, never the tenant's app.
+///
+/// A newtype around a `String` for one reason: the two origins in play here are
+/// both plain strings, so the compiler could not tell them apart, and passing the
+/// wrong one produced a link that 404s on the customer's own site. That is not
+/// hypothetical — it shipped: the call site kept handing over the tenant's
+/// `base_url` after this field was introduced, and it compiled silently because
+/// `String` fits `String`. The only symptom was an "unused variable" warning
+/// nobody read.
+///
+/// Wrapping it means the mistake is now a type error at the call site instead of
+/// a broken email a user discovers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifyOrigin(pub String);
+
 impl MagicLinkJobData {
     /// Create new magic link job data
     pub fn new(
@@ -63,7 +78,7 @@ impl MagicLinkJobData {
         email: impl Into<String>,
         token_id: impl Into<String>,
         token: impl Into<String>,
-        verify_origin: impl Into<String>,
+        verify_origin: VerifyOrigin,
         expires_in_minutes: u32,
     ) -> Self {
         Self {
@@ -71,7 +86,7 @@ impl MagicLinkJobData {
             email: email.into(),
             token_id: token_id.into(),
             token: token.into(),
-            verify_origin: verify_origin.into(),
+            verify_origin: verify_origin.0,
             expires_in_minutes,
             template: None,
             verify_path: None,
@@ -211,7 +226,7 @@ mod tests {
             "user@example.com",
             "token-id-456",
             "abc123def456",
-            "https://app.example.com",
+            VerifyOrigin("https://rdb.example.com".to_string()),
             15,
         );
 
@@ -220,7 +235,7 @@ mod tests {
         assert_eq!(data.expires_in_minutes, 15);
         assert_eq!(
             data.build_link(),
-            "https://app.example.com/auth/magic-link/verify?token=abc123def456"
+            "https://rdb.example.com/auth/magic-link/verify?token=abc123def456"
         );
     }
 
@@ -231,7 +246,7 @@ mod tests {
             "user@example.com",
             "token-id-456",
             "abc123def456",
-            "https://app.example.com",
+            VerifyOrigin("https://rdb.example.com".to_string()),
             15,
         )
         .with_template("custom_template");
@@ -255,14 +270,14 @@ mod tests {
             "user@example.com",
             "token-id-456",
             "abc123",
-            "https://app.example.com",
+            VerifyOrigin("https://rdb.example.com".to_string()),
             15,
         )
         .with_verify_path("/auth/docs/magic-link/verify");
 
         assert_eq!(
             data.build_link(),
-            "https://app.example.com/auth/docs/magic-link/verify?token=abc123"
+            "https://rdb.example.com/auth/docs/magic-link/verify?token=abc123"
         );
     }
 }

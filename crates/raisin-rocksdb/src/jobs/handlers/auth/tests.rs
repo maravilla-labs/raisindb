@@ -173,7 +173,7 @@ async fn test_magic_link_handler() {
         "user@example.com",
         "token-id-456",
         "abc123def456",
-        "https://app.example.com",
+        raisin_auth::jobs::VerifyOrigin("https://app.example.com".to_string()),
         15,
     );
 
