@@ -245,9 +245,16 @@ pub(crate) fn auth_routes(state: &AppState) -> Router<AppState> {
         // ----------------------------------------------------------------
         // Tenant authentication configuration
         // ----------------------------------------------------------------
+        // Admin-only, and authenticated at the ROUTE as well as in the handler.
+        //
+        // These two carried no auth layer at all while every neighbour above
+        // does, and the handlers took no AuthContext either, so the belt and
+        // the braces were both missing on the endpoint that sets default_roles,
+        // anonymous_enabled and the CORS origins for a whole tenant.
         .route(
             "/api/tenants/{tenant_id}/auth/config",
             get(crate::handlers::identity_auth::get_auth_config)
-                .put(crate::handlers::identity_auth::update_auth_config),
+                .put(crate::handlers::identity_auth::update_auth_config)
+                .layer(from_fn_with_state(state.clone(), require_auth_middleware)),
         )
 }
