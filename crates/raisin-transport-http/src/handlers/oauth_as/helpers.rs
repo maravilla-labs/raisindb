@@ -56,6 +56,11 @@ pub fn issuer_from_request(
         OriginError::NotConfigured => {
             AuthServerError::InvalidRequest(OriginError::NotConfigured.to_string())
         }
+        // Unreachable under `WarnOnce`, which allows a loopback issuer rather
+        // than refusing one. Spelled out rather than caught by a wildcard so
+        // that adding a refusal to `self_origin` breaks the build here instead
+        // of silently reclassifying it as a bad request.
+        e @ OriginError::LoopbackNotPublic(_) => AuthServerError::InvalidRequest(e.to_string()),
     })
 }
 

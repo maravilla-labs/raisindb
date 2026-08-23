@@ -61,6 +61,9 @@ pub enum OriginError {
     UntrustedHost(String),
     /// Nothing is configured and the caller demanded certainty.
     NotConfigured,
+    /// The request arrived on loopback, and the result would be shown to
+    /// somebody who is not on this machine.
+    LoopbackNotPublic(String),
 }
 
 impl std::fmt::Display for OriginError {
@@ -76,6 +79,15 @@ impl std::fmt::Display for OriginError {
                 "this deployment has no trusted origin configured; set RAISINDB_BASE_URL \
                  for a single fixed origin, or RAISINDB_TRUSTED_HOST_SUFFIXES for a \
                  multi-tenant one"
+            ),
+            OriginError::LoopbackNotPublic(host) => write!(
+                f,
+                "the request arrived on `{host}`, which nobody outside this machine can \
+                 reach, and this deployment has a public identity configured; a link built \
+                 on it would be dead on arrival. Give the tenant a trusted host so the \
+                 public origin can be resolved, or have the caller forward the public host \
+                 (X-Forwarded-Host) — a forwarded host is still checked against the \
+                 allowlist"
             ),
         }
     }
@@ -127,11 +139,75 @@ pub fn self_origin(
         };
     }
 
+    // LOOPBACK IS NOT A PUBLIC IDENTITY.
+    //
+    // A magic link built on `https://127.0.0.1:8088/...` is dead the moment it
+    // leaves the machine, and that is exactly what shipped: the tenant's app
+    // runs beside RaisinDB and reaches it on the loopback address the platform
+    // injects, so `Host` was `127.0.0.1:8088` and the allowlist waved it
+    // through — loopback was unconditionally trusted. The recipient got a link
+    // to their own computer.
+    //
+    // Trusting loopback is right on a developer's machine, where nothing else
+    // is configured; that case returned above. Once a deployment has declared a
+    // public identity, a loopback request is a local caller, not the public
+    // origin, and the two answers must not be the same value.
+    if is_loopback(host) {
+        // The tenant named exactly one host, so there is nothing to guess.
+        // Preferring it keeps a co-located app working with no header and no
+        // code — the configuration lives in the tenant record, where the
+        // question "what is this org's host" already belongs.
+        if let [only] = tenant_hosts {
+            return Ok(canonical_origin(&format!("https://{only}")));
+        }
+        return match trust {
+            // An OAuth issuer served over loopback is a local development
+            // client talking to a local server — the URL is used in that same
+            // process, not emailed to anyone. Tightening it here would break
+            // those on upgrade, which is the same reason WarnOnce exists.
+            OriginTrust::WarnOnce => Ok(origin),
+            OriginTrust::Required => Err(OriginError::LoopbackNotPublic(host.to_string())),
+        };
+    }
+
     if host_is_trusted(host, &suffixes, tenant_hosts) {
         Ok(origin)
     } else {
         Err(OriginError::UntrustedHost(host.to_string()))
     }
+}
+
+/// Whether a host (with or without a port) addresses this machine.
+///
+/// The port split is not a plain `split(':')`: a bare IPv6 literal is all
+/// colons, so splitting on the first one turns `::1` into the empty string and
+/// splitting on the last turns it into `::`. Neither matches, and loopback
+/// silently stops being recognised — which here would mean an emailed link
+/// built on it. A trailing `:digits` is a port only when the host is bracketed
+/// or has no other colon.
+pub(crate) fn is_loopback(host: &str) -> bool {
+    matches!(
+        hostname_of(host).as_str(),
+        "localhost" | "127.0.0.1" | "::1"
+    )
+}
+
+/// The host part of an authority, with any port and IPv6 brackets removed.
+pub(crate) fn hostname_of(authority: &str) -> String {
+    let authority = authority.trim();
+    let bare = match authority.rsplit_once(':') {
+        Some((head, tail))
+            if !tail.is_empty()
+                && tail.bytes().all(|b| b.is_ascii_digit())
+                && (head.ends_with(']') || !head.contains(':')) =>
+        {
+            head
+        }
+        _ => authority,
+    };
+    bare.trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase()
 }
 
 /// The configured canonical base URL, if `RAISINDB_BASE_URL` is set non-empty.
@@ -159,18 +235,20 @@ pub(crate) fn trusted_host_suffixes() -> Vec<String> {
 /// Whether the derived host is on the allowlist (loopback, a per-tenant exact
 /// host, or a trusted suffix). A port is ignored for the comparison.
 pub(crate) fn host_is_trusted(host: &str, suffixes: &[String], tenant_hosts: &[String]) -> bool {
-    let hostname = host.split(':').next().unwrap_or(host);
+    // One hostname parser, shared with `is_loopback`. The old local
+    // `split(':').next()` disagreed with it on every IPv6 literal.
+    let hostname = hostname_of(host);
 
-    if matches!(hostname, "localhost" | "127.0.0.1" | "::1") {
+    if is_loopback(host) {
         return true;
     }
     if tenant_hosts
         .iter()
-        .any(|h| h.eq_ignore_ascii_case(host) || h.eq_ignore_ascii_case(hostname))
+        .any(|h| h.eq_ignore_ascii_case(host) || h.eq_ignore_ascii_case(&hostname))
     {
         return true;
     }
-    suffixes.iter().any(|s| matches_host_suffix(hostname, s))
+    suffixes.iter().any(|s| matches_host_suffix(&hostname, s))
 }
 
 /// A suffix matches its apex and any subdomain: `example.com` matches
@@ -312,6 +390,82 @@ mod tests {
         let origin = self_origin(&h, &["acme.example.com".into()], OriginTrust::Required)
             .expect("the real Host is used");
         assert_eq!(origin, "https://acme.example.com");
+    }
+
+    /// The bug: a co-located app reaches RaisinDB on the loopback address the
+    /// platform injects, so `Host` is `127.0.0.1:8088`. Loopback was
+    /// unconditionally trusted, so the magic link was built on it and the
+    /// recipient was emailed a link to their own computer.
+    #[test]
+    fn a_loopback_host_cannot_produce_an_emailed_link_on_a_configured_deployment() {
+        let h = headers(&[("host", "127.0.0.1:8088")]);
+        let err = self_origin(
+            &h,
+            &["acme.example.com".into(), "www.acme.test".into()],
+            OriginTrust::Required,
+        )
+        .expect_err("loopback must not become the public origin");
+        match err {
+            OriginError::LoopbackNotPublic(ref host) => assert_eq!(host, "127.0.0.1:8088"),
+            other => panic!("expected LoopbackNotPublic, got {other:?}"),
+        }
+        // The message has to name the fix, or the 503 is a dead end.
+        assert!(err.to_string().contains("X-Forwarded-Host"));
+    }
+
+    /// One declared tenant host is not a guess. Preferring it is what keeps a
+    /// co-located app working with no header and no code change.
+    #[test]
+    fn a_single_tenant_host_answers_for_a_loopback_caller() {
+        let h = headers(&[("host", "127.0.0.1:8088")]);
+        let origin = self_origin(&h, &["acme.example.com".into()], OriginTrust::Required)
+            .expect("one declared host is unambiguous");
+        assert_eq!(origin, "https://acme.example.com");
+    }
+
+    /// A developer machine configures nothing, and must keep working. That case
+    /// returns before the loopback check.
+    #[test]
+    fn loopback_still_works_when_nothing_is_configured() {
+        let h = headers(&[("host", "localhost:8080")]);
+        let origin = self_origin(&h, &[], OriginTrust::WarnOnce).expect("dev must keep working");
+        assert_eq!(origin, "https://localhost:8080");
+    }
+
+    /// An OAuth issuer over loopback is a local client talking to a local
+    /// server — the URL is used in that process, not emailed. Tightening it
+    /// would break those deployments on upgrade.
+    #[test]
+    fn warn_once_still_allows_loopback_when_configured() {
+        let h = headers(&[("host", "127.0.0.1:8088")]);
+        let origin = self_origin(
+            &h,
+            &["acme.example.com".into(), "b.acme.test".into()],
+            OriginTrust::WarnOnce,
+        )
+        .expect("WarnOnce keeps its long-standing behaviour");
+        assert_eq!(origin, "https://127.0.0.1:8088");
+    }
+
+    #[test]
+    fn loopback_is_recognised_with_and_without_a_port() {
+        for host in [
+            "localhost",
+            "localhost:8080",
+            "127.0.0.1",
+            "127.0.0.1:8088",
+            "::1",
+            "[::1]:8080",
+        ] {
+            assert!(is_loopback(host), "{host} should be loopback");
+        }
+        for host in [
+            "acme.example.com",
+            "127.0.0.1.evil.test",
+            "localhost.evil.test",
+        ] {
+            assert!(!is_loopback(host), "{host} should NOT be loopback");
+        }
     }
 
     #[test]
