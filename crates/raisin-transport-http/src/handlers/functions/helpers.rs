@@ -10,9 +10,11 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use raisin_binary::BinaryStorage;
+use raisin_functions::execution::code_loader::{
+    extract_email_policy, extract_identity_policy, extract_network_policy, extract_secret_policy,
+};
 use raisin_functions::{
-    ExecutionMode, FunctionLanguage, FunctionMetadata, LoadedFunction, NetworkPolicy,
-    ResourceLimits,
+    ExecutionMode, FunctionLanguage, FunctionMetadata, LoadedFunction, ResourceLimits,
 };
 use raisin_models::auth::AuthContext;
 use raisin_models::nodes::properties::{value::Resource, PropertyValue};
@@ -368,10 +370,26 @@ pub(super) fn build_metadata(node: &Node) -> Result<FunctionMetadata, ApiError> 
             serde_json::from_value(json).unwrap_or_else(|_| ResourceLimits::default());
     }
 
-    if let Some(json) = property_as_json(node.properties.get("network_policy")) {
-        metadata.network_policy =
-            serde_json::from_value(json).unwrap_or_else(|_| NetworkPolicy::default());
-    }
+    // The four POLICIES go through `code_loader`'s extractors, never through a
+    // local parse.
+    //
+    // This function used to read `network_policy` here and nothing else, so
+    // every HTTP-served execution — sync invoke, run-file, webhooks, MCP tool
+    // calls, adapter invokes, functions embedded in SQL — ran with
+    // `SecretPolicy::default()`, `EmailPolicy::default()` and
+    // `IdentityPolicy::default()`. All three deny by default, so a function
+    // declaring any of them was refused over HTTP while the SAME function
+    // worked from a trigger, a flow or a job, which load through
+    // `code_loader`. "Works from a trigger, denied from the console" is
+    // almost impossible to attribute from the outside.
+    //
+    // Delegating is the point: a policy added to `FunctionMetadata` later must
+    // not need remembering in a second place, which is exactly how these three
+    // went missing.
+    metadata.network_policy = extract_network_policy(node);
+    metadata.secret_policy = extract_secret_policy(node);
+    metadata.email_policy = extract_email_policy(node);
+    metadata.identity_policy = extract_identity_policy(node);
 
     if let Some(json) = property_as_json(node.properties.get("triggers")) {
         metadata.triggers = serde_json::from_value(json).unwrap_or_default();
@@ -624,5 +642,115 @@ mod module_loading_invariant {
              in the function they run will fail to resolve:\n  {}",
             offenders.join("\n  ")
         );
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+    use raisin_models::nodes::properties::PropertyValue;
+
+    /// A node property carrying a JSON object, the way the package installer
+    /// writes a policy block.
+    fn prop(json: serde_json::Value) -> PropertyValue {
+        serde_json::from_value(json).expect("a policy block is a valid PropertyValue")
+    }
+
+    /// A `raisin:Function` node declaring all four policies, as the shipped
+    /// `.node.yaml` files do.
+    fn node_with_policies() -> Node {
+        let mut node = Node {
+            id: "fn1".to_string(),
+            node_type: "raisin:Function".to_string(),
+            name: "send-test-email".to_string(),
+            path: "/lib/raisin/auth/send-test-email".to_string(),
+            ..Default::default()
+        };
+        node.properties.insert(
+            "entry_file".to_string(),
+            PropertyValue::String("index.js:sendTestEmail".to_string()),
+        );
+        node.properties.insert(
+            "email_policy".to_string(),
+            prop(serde_json::json!({
+                "enabled": true,
+                "allowed_recipients": ["*"],
+            })),
+        );
+        node.properties.insert(
+            "secret_policy".to_string(),
+            prop(serde_json::json!({
+                "enabled": true,
+                "allowed_names": ["email/*"],
+            })),
+        );
+        node.properties.insert(
+            "identity_policy".to_string(),
+            prop(serde_json::json!({ "enabled": true })),
+        );
+        node.properties.insert(
+            "network_policy".to_string(),
+            prop(serde_json::json!({
+                "http_enabled": true,
+                "allowed_urls": ["https://api.example.com/*"],
+            })),
+        );
+        node
+    }
+
+    /// The regression this exists for: `build_metadata` read `network_policy`
+    /// and nothing else, so every HTTP-served execution ran with the DENYING
+    /// defaults for secrets, email and identities — while the same function
+    /// worked from a trigger or a flow, which load through `code_loader`.
+    ///
+    /// The symptom was "this function has no email_policy" on a function whose
+    /// node plainly declares one.
+    #[test]
+    fn every_declared_policy_reaches_the_metadata() {
+        let metadata = build_metadata(&node_with_policies()).expect("builds");
+
+        assert!(
+            metadata.email_policy.enabled,
+            "email_policy was declared on the node and must reach the metadata"
+        );
+        assert_eq!(metadata.email_policy.allowed_recipients, vec!["*"]);
+
+        assert!(
+            metadata.secret_policy.enabled,
+            "secret_policy must reach it"
+        );
+        assert_eq!(metadata.secret_policy.allowed_names, vec!["email/*"]);
+
+        assert!(
+            metadata.identity_policy.enabled,
+            "identity_policy must reach it"
+        );
+
+        assert!(metadata.network_policy.http_enabled);
+        assert_eq!(
+            metadata.network_policy.allowed_urls,
+            vec!["https://api.example.com/*".to_string()],
+            "the one policy that always worked must keep working"
+        );
+    }
+
+    /// A node declaring nothing still denies everything. The fix must widen
+    /// what is READ, never what is granted.
+    #[test]
+    fn a_node_declaring_no_policies_still_denies() {
+        let mut bare = node_with_policies();
+        for key in [
+            "email_policy",
+            "secret_policy",
+            "identity_policy",
+            "network_policy",
+        ] {
+            bare.properties.remove(key);
+        }
+
+        let metadata = build_metadata(&bare).expect("builds");
+        assert!(!metadata.email_policy.enabled);
+        assert!(!metadata.secret_policy.enabled);
+        assert!(!metadata.identity_policy.enabled);
     }
 }

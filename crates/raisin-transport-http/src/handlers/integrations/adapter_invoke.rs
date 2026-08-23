@@ -92,14 +92,7 @@ pub(super) async fn invoke_adapter(
         .with_input(input)
         .with_admin_escalation(true);
 
-    let api = build_function_api(
-        state,
-        tenant_id,
-        repo,
-        loaded.metadata.network_policy.clone(),
-        loaded.metadata.secret_policy.clone(),
-        None,
-    );
+    let api = build_function_api(state, tenant_id, repo, &loaded.metadata, None);
     let result = FunctionExecutor::new()
         .execute(&loaded, context, api)
         .await

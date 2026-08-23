@@ -259,8 +259,7 @@ pub async fn run_file(
             &state_clone,
             &tenant_clone,
             &repo_clone,
-            loaded.metadata.network_policy.clone(),
-            loaded.metadata.secret_policy.clone(),
+            &loaded.metadata,
             None,
         );
         let executor = FunctionExecutor::new();

@@ -238,14 +238,7 @@ async fn execute_sync(
         loaded.metadata.network_policy.http_enabled,
         loaded.metadata.network_policy.allowed_urls
     );
-    let api = build_function_api(
-        state,
-        tenant_id,
-        repo,
-        loaded.metadata.network_policy.clone(),
-        loaded.metadata.secret_policy.clone(),
-        None,
-    );
+    let api = build_function_api(state, tenant_id, repo, &loaded.metadata, None);
     let executor = FunctionExecutor::new();
 
     match executor

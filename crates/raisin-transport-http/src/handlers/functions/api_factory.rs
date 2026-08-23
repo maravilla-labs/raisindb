@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use raisin_functions::{
     execution::callbacks::create_production_callbacks, execution::ExecutionDependencies,
-    ExecutionContext, NetworkPolicy, RaisinFunctionApi, SecretPolicy,
+    ExecutionContext, FunctionMetadata, RaisinFunctionApi,
 };
 use raisin_models::auth::AuthContext;
 
@@ -35,11 +35,19 @@ pub(crate) fn build_function_api(
     state: &AppState,
     tenant_id: &str,
     repo: &str,
-    network_policy: NetworkPolicy,
-    // The function's declared secret policy. `SecretPolicy::default()` denies
-    // every `raisin.secrets.*` call, which is the right value for any caller
-    // that is not executing a specific function node.
-    secret_policy: SecretPolicy,
+    // The function's declared policies, ALL of them, taken as one value.
+    //
+    // This took `network_policy` and `secret_policy` as separate arguments and
+    // silently dropped `email_policy` and `identity_policy`, so an
+    // HTTP-invoked function could not send mail or touch identities however it
+    // was declared. Passing the metadata means the next policy added to
+    // `FunctionMetadata` reaches every caller without a signature change and
+    // without six call sites remembering it — the failure mode here was
+    // precisely that remembering.
+    //
+    // A caller that is NOT executing a specific function node should pass
+    // `&FunctionMetadata::default()`, whose policies all deny.
+    metadata: &FunctionMetadata,
     auth_context: Option<AuthContext>,
 ) -> Arc<RaisinFunctionApi> {
     let repo_id = repo.to_string();
@@ -79,9 +87,11 @@ pub(crate) fn build_function_api(
         RaisinFunctionApi::new(
             ExecutionContext::new(tenant_id, repo, DEFAULT_BRANCH, "system")
                 .with_workspace(FUNCTIONS_WORKSPACE),
-            network_policy,
+            metadata.network_policy.clone(),
             callbacks,
         )
-        .with_secret_policy(secret_policy),
+        .with_secret_policy(metadata.secret_policy.clone())
+        .with_email_policy(metadata.email_policy.clone())
+        .with_identity_policy(metadata.identity_policy.clone()),
     )
 }
