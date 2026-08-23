@@ -29,13 +29,24 @@ pub struct MagicLinkJobData {
     pub token_id: String,
     /// The actual magic link token (stored temporarily for email template)
     pub token: String,
-    /// Base URL for the magic link (e.g., "https://app.example.com")
-    pub base_url: String,
+    /// Origin of the RAISINDB SERVER the verify link points at
+    /// (e.g. `https://acme.rdb.example.cloud`).
+    ///
+    /// NOT the tenant's front end. This used to be `base_url`, taken from the
+    /// tenant's `/config/email` node — which is documented, and labelled in the
+    /// console, as the tenant's FRONT END. Appending `/auth/{repo}/magic-link/
+    /// verify` (a RaisinDB route) to the customer's own site produced a link
+    /// that 404ed on their app, and every magic link ever sent was that link.
+    ///
+    /// Renamed rather than repurposed so the two can never be confused again:
+    /// the app origin still exists, still comes from `base_url`, and is still
+    /// what the verify handler redirects to afterwards — it is just not this.
+    pub verify_origin: String,
     /// Expiration time in minutes (for display in email)
     pub expires_in_minutes: u32,
     /// Optional custom email template name
     pub template: Option<String>,
-    /// Path the link points at, relative to `base_url`.
+    /// Path the link points at, relative to `verify_origin`.
     ///
     /// `None` means the tenant-wide `/auth/magic-link/verify`. It is set to the
     /// repo-scoped `/auth/{repo}/magic-link/verify` whenever the request was,
@@ -52,7 +63,7 @@ impl MagicLinkJobData {
         email: impl Into<String>,
         token_id: impl Into<String>,
         token: impl Into<String>,
-        base_url: impl Into<String>,
+        verify_origin: impl Into<String>,
         expires_in_minutes: u32,
     ) -> Self {
         Self {
@@ -60,7 +71,7 @@ impl MagicLinkJobData {
             email: email.into(),
             token_id: token_id.into(),
             token: token.into(),
-            base_url: base_url.into(),
+            verify_origin: verify_origin.into(),
             expires_in_minutes,
             template: None,
             verify_path: None,
@@ -85,7 +96,7 @@ impl MagicLinkJobData {
             .verify_path
             .as_deref()
             .unwrap_or("/auth/magic-link/verify");
-        format!("{}{}?token={}", self.base_url, path, self.token)
+        format!("{}{}?token={}", self.verify_origin, path, self.token)
     }
 
     /// Convert to metadata HashMap for JobContext
@@ -98,7 +109,10 @@ impl MagicLinkJobData {
         map.insert("email".to_string(), serde_json::json!(self.email));
         map.insert("token_id".to_string(), serde_json::json!(self.token_id));
         map.insert("token".to_string(), serde_json::json!(self.token));
-        map.insert("base_url".to_string(), serde_json::json!(self.base_url));
+        map.insert(
+            "verify_origin".to_string(),
+            serde_json::json!(self.verify_origin),
+        );
         map.insert(
             "expires_in_minutes".to_string(),
             serde_json::json!(self.expires_in_minutes),
@@ -123,7 +137,7 @@ impl MagicLinkJobData {
             email: metadata.get("email")?.as_str()?.to_string(),
             token_id: metadata.get("token_id")?.as_str()?.to_string(),
             token: metadata.get("token")?.as_str()?.to_string(),
-            base_url: metadata.get("base_url")?.as_str()?.to_string(),
+            verify_origin: metadata.get("verify_origin")?.as_str()?.to_string(),
             expires_in_minutes: metadata.get("expires_in_minutes")?.as_u64()? as u32,
             template: metadata
                 .get("template")

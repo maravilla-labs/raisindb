@@ -12,6 +12,8 @@ pub mod error;
 mod errors;
 mod extractors;
 pub mod middleware;
+/// One answer to "what is my own public origin?" — see the module docs.
+pub mod origin;
 mod routes;
 #[cfg(feature = "storage-rocksdb")]
 pub use routes::operator_package_routes;

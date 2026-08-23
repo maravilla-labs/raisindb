@@ -7,13 +7,12 @@
 //! deriving the public issuer, rendering RFC-compliant error responses, and
 //! mapping authorization-server errors onto HTTP status codes.
 
-use std::sync::Once;
-
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use raisin_auth::authserver::AuthServerError;
 
+use crate::origin::{canonical_origin, self_origin, OriginError, OriginTrust};
 use crate::state::AppState;
 
 /// Derive and validate the externally-visible issuer (base URL) for discovery
@@ -45,68 +44,19 @@ pub fn issuer_from_request(
     headers: &HeaderMap,
     tenant_hosts: &[String],
 ) -> Result<String, AuthServerError> {
-    if let Some(base) = configured_base_url() {
-        return Ok(base);
-    }
-
-    let trust_forwarded = forwarded_headers_trusted();
-    let proto = trust_forwarded
-        .then(|| header_str(headers, "x-forwarded-proto"))
-        .flatten()
-        .unwrap_or("https");
-    let host = trust_forwarded
-        .then(|| header_str(headers, "x-forwarded-host"))
-        .flatten()
-        .or_else(|| header_str(headers, "host"))
-        .unwrap_or("localhost");
-
-    let issuer = format!("{proto}://{host}")
-        .trim_end_matches('/')
-        .to_string();
-
-    let suffixes = trusted_host_suffixes();
-    if suffixes.is_empty() && tenant_hosts.is_empty() {
-        warn_unconfigured_issuer_once();
-        return Ok(issuer);
-    }
-
-    if host_is_trusted(host, &suffixes, tenant_hosts) {
-        Ok(issuer)
-    } else {
-        Err(AuthServerError::InvalidRequest(format!(
+    // Delegates: `self_origin` IS this logic, lifted out so the magic-link
+    // email, the MCP resource id and this issuer cannot drift into three
+    // different answers to one question. `WarnOnce` preserves the behaviour
+    // this endpoint has always had for a deployment that configures nothing —
+    // tightening it would break those on upgrade and is a separate decision.
+    self_origin(headers, tenant_hosts, OriginTrust::WarnOnce).map_err(|e| match e {
+        OriginError::UntrustedHost(host) => AuthServerError::InvalidRequest(format!(
             "request host `{host}` is not an allowed OAuth issuer host"
-        )))
-    }
-}
-
-/// Canonicalize an origin (`scheme://host[:port]`) so two spellings of the same
-/// origin compare equal.
-///
-/// The scheme and host are lowercased, a default port is dropped (`:443` on
-/// `https`, `:80` on `http`), and any trailing slash is removed. This exists
-/// because the token audience is *minted* from one derivation of the origin and
-/// *verified* against another; without canonicalization a trailing slash, an
-/// explicit `:443`, or an uppercase host silently breaks every MCP request with
-/// an audience mismatch that looks, from the outside, like a permissions bug.
-pub(crate) fn canonical_origin(origin: &str) -> String {
-    let origin = origin.trim().trim_end_matches('/');
-    let (scheme, rest) = match origin.split_once("://") {
-        Some((scheme, rest)) => (scheme.to_ascii_lowercase(), rest),
-        // No scheme to normalize; fall back to the input lowercased as a host.
-        None => return origin.to_ascii_lowercase(),
-    };
-
-    let authority = rest.to_ascii_lowercase();
-    let authority = match (scheme.as_str(), authority.rsplit_once(':')) {
-        // Only strip a *default* port, and only when what follows the colon is
-        // actually a port (an IPv6 literal ends in `]`).
-        ("https", Some((host, "443"))) | ("http", Some((host, "80"))) if !host.is_empty() => {
-            host.to_string()
+        )),
+        OriginError::NotConfigured => {
+            AuthServerError::InvalidRequest(OriginError::NotConfigured.to_string())
         }
-        _ => authority,
-    };
-
-    format!("{scheme}://{authority}")
+    })
 }
 
 /// The canonical origin of an absolute URL (`None` if it does not parse or has
@@ -155,94 +105,6 @@ pub(crate) async fn load_tenant_trusted_hosts(state: &AppState, tenant_id: &str)
         .unwrap_or_default()
 }
 
-/// The configured canonical base URL, if `RAISINDB_BASE_URL` is set non-empty.
-fn configured_base_url() -> Option<String> {
-    std::env::var("RAISINDB_BASE_URL")
-        .ok()
-        .map(|b| b.trim_end_matches('/').to_string())
-        .filter(|b| !b.is_empty())
-}
-
-/// Host suffixes trusted as OAuth issuer hosts for every tenant
-/// (`RAISINDB_TRUSTED_HOST_SUFFIXES`, comma-separated).
-fn trusted_host_suffixes() -> Vec<String> {
-    std::env::var("RAISINDB_TRUSTED_HOST_SUFFIXES")
-        .ok()
-        .map(|v| {
-            v.split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Whether the derived host is on the allowlist (loopback, a per-tenant exact
-/// host, or a trusted suffix). A port is ignored for the comparison.
-fn host_is_trusted(host: &str, suffixes: &[String], tenant_hosts: &[String]) -> bool {
-    let hostname = host.split(':').next().unwrap_or(host);
-
-    if matches!(hostname, "localhost" | "127.0.0.1" | "::1") {
-        return true;
-    }
-    if tenant_hosts
-        .iter()
-        .any(|h| h.eq_ignore_ascii_case(host) || h.eq_ignore_ascii_case(hostname))
-    {
-        return true;
-    }
-    suffixes.iter().any(|s| matches_host_suffix(hostname, s))
-}
-
-/// A suffix matches its apex and any subdomain: `example.com` matches
-/// `example.com` and `a.example.com`, but not `evilexample.com`.
-fn matches_host_suffix(hostname: &str, suffix: &str) -> bool {
-    let suffix = suffix.trim().trim_start_matches('.').to_ascii_lowercase();
-    if suffix.is_empty() {
-        return false;
-    }
-    let host = hostname.to_ascii_lowercase();
-    host == suffix || host.ends_with(&format!(".{suffix}"))
-}
-
-/// Whether `X-Forwarded-*` headers may be trusted (a trusted proxy sets them).
-///
-/// Off unless `RAISINDB_TRUST_FORWARDED_HEADERS` is `1`/`true`/`yes`/`on`.
-fn forwarded_headers_trusted() -> bool {
-    std::env::var("RAISINDB_TRUST_FORWARDED_HEADERS")
-        .map(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
-}
-
-/// Warn once that the issuer is being derived without an allowlist.
-fn warn_unconfigured_issuer_once() {
-    static WARNED: Once = Once::new();
-    WARNED.call_once(|| {
-        tracing::warn!(
-            "No OAuth issuer allowlist configured (RAISINDB_TRUSTED_HOST_SUFFIXES \
-             unset and no per-tenant trusted hosts); the issuer and token \
-             audiences are derived from the request host without validation. Set \
-             RAISINDB_TRUSTED_HOST_SUFFIXES (or RAISINDB_BASE_URL for a single \
-             fixed origin) in any proxied or multi-origin deployment."
-        );
-    });
-}
-
-/// Read a header value as a borrowed `str`, taking the first comma-separated
-/// token (proxy headers may carry a list).
-fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    headers
-        .get(name)
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.split(',').next().unwrap_or(v).trim())
-        .filter(|v| !v.is_empty())
-}
-
 /// Map an [`AuthServerError`] onto the HTTP status the OAuth specs prescribe.
 pub fn status_for(err: &AuthServerError) -> StatusCode {
     match err {
@@ -264,6 +126,10 @@ pub fn oauth_error_response(err: &AuthServerError) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The host-matching primitives moved to `crate::origin` so the issuer, the
+    // MCP resource id and the magic-link email share one implementation. Their
+    // tests stayed here rather than being duplicated there.
+    use crate::origin::{host_is_trusted, matches_host_suffix};
 
     fn headers_with_host(host: &str) -> HeaderMap {
         let mut h = HeaderMap::new();

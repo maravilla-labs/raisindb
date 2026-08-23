@@ -444,6 +444,7 @@ async fn request_magic_link_core(
     tenant_id: &str,
     repo: &str,
     client_ip: Option<&str>,
+    headers: &HeaderMap,
     req: &MagicLinkRequest,
 ) -> Result<Json<MagicLinkSentResponse>, ApiError> {
     use super::helpers::extract_repos;
@@ -465,6 +466,37 @@ async fn request_magic_link_core(
     // of early returns.
     let link_config = load_link_config(state, tenant_id, repo).await?;
     let redirect_url = resolve_redirect(&link_config, req.redirect_url.as_deref())?;
+
+    // WHERE THE EMAILED LINK POINTS — this server, not the tenant's app.
+    //
+    // Two different origins are in play and they were previously the same
+    // value: `link_config.base_url` is the tenant's FRONT END (it is the
+    // redirect target above, and the root the redirect allowlist is measured
+    // against), while the verify endpoint is a RaisinDB route on THIS server.
+    // Building the link from base_url produced
+    // `https://{their app}/auth/{repo}/magic-link/verify`, which 404s — and did,
+    // for every magic link ever sent.
+    //
+    // Resolved HERE, at request time, because the send runs in a background job
+    // with no request to derive a host from. `Required` refuses rather than
+    // guessing: this link carries a one-time sign-in token, so a spoofed Host
+    // would mean emailing a victim a working credential pointed at the
+    // attacker's server. Not sending is the better failure.
+    let tenant_hosts =
+        crate::handlers::oauth_as::helpers::load_tenant_trusted_hosts(state, tenant_id).await;
+    let verify_origin = crate::origin::self_origin(
+        headers,
+        &tenant_hosts,
+        crate::origin::OriginTrust::Required,
+    )
+    .map_err(|e| {
+        tracing::error!(error = %e, "refusing to send a magic link: cannot establish this server's own origin");
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "ORIGIN_NOT_CONFIGURED",
+            format!("Magic link sign-in is unavailable: {e}"),
+        )
+    })?;
 
     let identity = repos
         .identity
@@ -789,6 +821,7 @@ pub async fn request_magic_link(
         &tenant_info.tenant_id,
         &repo,
         client_ip(&headers).as_deref(),
+        &headers,
         &req,
     )
     .await
@@ -811,6 +844,7 @@ pub async fn request_magic_link_for_repo(
         &tenant_info.tenant_id,
         &repo,
         client_ip(&headers).as_deref(),
+        &headers,
         &req,
     )
     .await

@@ -40,8 +40,23 @@ pub struct AccessNotificationJobData {
     pub roles: Vec<String>,
     /// Optional message from the actor
     pub message: Option<String>,
-    /// Base URL for links in the notification
-    pub base_url: String,
+    /// Origin of the TENANT'S FRONT END, e.g. `https://app.example.com`.
+    ///
+    /// An app origin, NOT this server's — `build_workspace_url` appends
+    /// `/workspaces/{repo}`, which is a page in the tenant's own console, so
+    /// the right source is the `base_url` on their `/config/email` node.
+    ///
+    /// Spelled out because the sibling job got it wrong in the other direction:
+    /// `MagicLinkJobData` used this same "base_url" name for what had to be
+    /// RAISINDB's origin (its path is a RaisinDB route), took the app's origin
+    /// instead, and emailed a link that 404ed on the customer's own site. The
+    /// field there is now `verify_origin`. Two jobs, two different origins, and
+    /// the only defence against mixing them again is that each says which it
+    /// wants.
+    ///
+    /// NOTE: nothing enqueues this job today — it is constructed only in tests
+    /// — so this is a contract for the first real caller, not a live bug.
+    pub app_base_url: String,
     /// Optional custom email template name
     pub template: Option<String>,
 }
@@ -54,7 +69,7 @@ impl AccessNotificationJobData {
         repo_id: impl Into<String>,
         workspace_name: impl Into<String>,
         notification_type: AccessNotificationType,
-        base_url: impl Into<String>,
+        app_base_url: impl Into<String>,
     ) -> Self {
         Self {
             identity_id: identity_id.into(),
@@ -66,7 +81,7 @@ impl AccessNotificationJobData {
             actor_name: None,
             roles: Vec::new(),
             message: None,
-            base_url: base_url.into(),
+            app_base_url: app_base_url.into(),
             template: None,
         }
     }
@@ -107,7 +122,7 @@ impl AccessNotificationJobData {
 
     /// Build the workspace URL
     pub fn build_workspace_url(&self) -> String {
-        format!("{}/workspaces/{}", self.base_url, self.repo_id)
+        format!("{}/workspaces/{}", self.app_base_url, self.repo_id)
     }
 
     /// Convert to metadata HashMap for JobContext
@@ -139,7 +154,10 @@ impl AccessNotificationJobData {
         if let Some(message) = &self.message {
             map.insert("message".to_string(), serde_json::json!(message));
         }
-        map.insert("base_url".to_string(), serde_json::json!(self.base_url));
+        map.insert(
+            "app_base_url".to_string(),
+            serde_json::json!(self.app_base_url),
+        );
         map.insert(
             "workspace_url".to_string(),
             serde_json::json!(self.build_workspace_url()),
@@ -180,7 +198,7 @@ impl AccessNotificationJobData {
                 .get("message")
                 .and_then(|v| v.as_str())
                 .map(String::from),
-            base_url: metadata.get("base_url")?.as_str()?.to_string(),
+            app_base_url: metadata.get("app_base_url")?.as_str()?.to_string(),
             template: metadata
                 .get("template")
                 .and_then(|v| v.as_str())
