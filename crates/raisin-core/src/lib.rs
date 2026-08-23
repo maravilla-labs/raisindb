@@ -54,6 +54,7 @@ pub mod services {
     pub mod node_type_resolver;
     pub mod node_validation;
     pub mod permission_cache;
+    pub mod permission_cache_registry;
     pub mod permission_service;
     pub mod reference_resolver;
     pub mod rls_filter;
@@ -89,6 +90,9 @@ pub use services::block_translation_service::{
     BlockTranslationUpdate, BlockTranslationUpdateResult,
 };
 pub use services::derived_cache_registry::{invalidate_all_derived_caches, register_invalidator};
+pub use services::permission_cache_registry::{
+    invalidate_all_permission_caches, register_permission_cache,
+};
 pub use services::element_type_resolver::{ElementTypeResolver, ResolvedElementType};
 pub use services::indexing_policy::IndexingPolicy;
 pub use services::node_service::NodeService;

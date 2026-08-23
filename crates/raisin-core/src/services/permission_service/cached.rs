@@ -49,9 +49,15 @@ pub struct CachedPermissionService<S: Storage> {
 impl<S: Storage> CachedPermissionService<S> {
     /// Create a new cached permission service with specified TTL.
     pub fn new(storage: Arc<S>, ttl: Duration) -> Self {
+        let cache = Arc::new(PermissionCache::new(ttl));
+        // Register so a write to the access-control workspace can drop this
+        // cache. Without it the flattened permission set survives until the TTL
+        // expires, and an admin's role edit silently does nothing for minutes —
+        // see services::permission_cache_registry.
+        crate::services::permission_cache_registry::register_permission_cache(&cache);
         Self {
             inner: PermissionService::new(storage),
-            cache: Arc::new(PermissionCache::new(ttl)),
+            cache,
         }
     }
 

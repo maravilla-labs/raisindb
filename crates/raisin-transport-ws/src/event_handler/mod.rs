@@ -111,6 +111,15 @@ impl<S: Storage> WsEventHandler<S> {
                 .map(|t| ROLE_BEARING_NODE_TYPES.contains(&t))
                 .unwrap_or(false);
             if node_event.workspace_id == ACCESS_CONTROL_WORKSPACE && is_role_bearing {
+                // Drop the SERVER's flattened permission sets before telling
+                // clients to re-resolve. The push below refreshes a client's
+                // ROLE LIST, but what gates a query is the flattened set cached
+                // by CachedPermissionService for five minutes — so notifying
+                // without invalidating meant an admin's role edit appeared to do
+                // nothing until the TTL expired, including for the admin who
+                // made it. Order matters: invalidate first, so a client that
+                // reacts immediately re-resolves against fresh permissions.
+                raisin_core::invalidate_all_permission_caches();
                 self.broadcast_permissions_changed(node_event);
             }
         }
