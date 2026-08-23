@@ -31,6 +31,7 @@ import { UploadManager } from './upload/uploader';
 import { HttpNodeTypes, HttpArchetypes, HttpElementTypes } from './http-schema';
 import { McpClient, type McpTransport, type McpFrameStream, type McpJsonRpcFrame } from './mcp';
 import { SSEClient } from './streaming/sse-client';
+import { IdentityAuthApi, type IdentityAuthResult } from './identity-auth';
 
 /**
  * Current user info
@@ -660,6 +661,72 @@ export class RaisinHttpClient extends EventEmitter {
    */
   getAuthManager(): AuthManager {
     return this.authManager;
+  }
+
+  // ============================================================================
+  // Identity Authentication
+  // ============================================================================
+
+  /**
+   * Identity authentication (magic link, password, providers) for one
+   * repository.
+   *
+   * Identities are per repository — their home nodes and roles live there — so
+   * the repository is required rather than inferred from client state, which
+   * would silently sign somebody into whichever one happened to be current.
+   *
+   * ```ts
+   * const auth = client.auth('studio');
+   * await auth.sendMagicLink('a@example.com', {
+   *   redirectUrl: 'https://app.example.com/account/callback',
+   * });
+   * // …on the callback route:
+   * const tokens = readTokensFromFragment(window.location.hash);
+   * if (tokens) client.setIdentityTokens(tokens.accessToken, tokens.refreshToken);
+   * ```
+   */
+  auth(repository: string): IdentityAuthApi {
+    return new IdentityAuthApi(repository, async (options) => {
+      const response = await this.request({
+        method: options.method,
+        path: options.path,
+        body: options.body,
+        skipAuth: options.skipAuth,
+      });
+      return response.data as never;
+    });
+  }
+
+  /**
+   * Adopt an identity's tokens for every subsequent call on this client.
+   *
+   * Takes the loose form so it serves both callers: the whole result of a
+   * sign-in, and the pair recovered from a redirect fragment (which carries no
+   * identity object and may carry no refresh token).
+   */
+  setIdentityTokens(
+    accessTokenOrResult: string | IdentityAuthResult,
+    refreshToken?: string | null,
+  ): void {
+    if (typeof accessTokenOrResult === 'string') {
+      this.authManager.storage.setAccessToken(accessTokenOrResult);
+      if (refreshToken) this.authManager.storage.setRefreshToken(refreshToken);
+      return;
+    }
+    const result = accessTokenOrResult;
+    this.authManager.setTokens({
+      access_token: result.access_token,
+      refresh_token: result.refresh_token,
+      // The server reports an absolute expiry; AuthManager schedules from a
+      // duration. Deriving it here keeps the refresh timer honest instead of
+      // leaving it unset, which reads as "never expires".
+      expires_in: Math.max(0, result.expires_at - Math.floor(Date.now() / 1000)),
+    } as AuthenticateResponse);
+  }
+
+  /** Forget the current identity's tokens. */
+  clearIdentityTokens(): void {
+    this.authManager.clear();
   }
 
   // ============================================================================

@@ -280,6 +280,16 @@ export type { FlowClientOptions, FlowRunResult, FlowCollectResult } from './flow
 
 // Function invocation
 export { FunctionsApi, HttpFunctionsApi } from './functions-api';
+export { IdentityAuthApi, readTokensFromFragment } from './identity-auth';
+export type {
+  IdentityAuthResult,
+  IdentityAuthTransport,
+  IdentityInfo,
+  IdentityMe,
+  MagicLinkSent,
+  MagicLinkOptions,
+  AuthProviders,
+} from './identity-auth';
 export type {
   FunctionInvokeOptions,
   FunctionInvokeResponse,
