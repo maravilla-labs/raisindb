@@ -959,8 +959,18 @@ export class RaisinHttpClient extends EventEmitter {
       ...options.headers,
     };
 
-    // Add authentication header if available
-    if (!options.skipAuth && this.authManager.isAuthenticated()) {
+    // Send the token whenever we hold one.
+    //
+    // Deliberately NOT gated on `isAuthenticated()`. That asks whether the
+    // token is known to be unexpired, and an expiry we never learned reads as
+    // expired — so a client given a bare token (`authenticate({type:'jwt'})`,
+    // `setIdentityTokens(token)`) sent no Authorization header at all and every
+    // call ran anonymously. It failed silently, because an anonymous read
+    // returns an empty result rather than a 401.
+    //
+    // The server is the authority on whether a token is still good. Withholding
+    // it locally turns a 401 the caller could act on into a wrong answer.
+    if (!options.skipAuth) {
       const token = this.authManager.getAccessToken();
       if (token) {
         headers['Authorization'] = `Bearer ${token}`;
@@ -1144,11 +1154,12 @@ export class RaisinHttpClient extends EventEmitter {
     params: unknown,
   ): McpFrameStream {
     const headers: Record<string, string> = {};
-    if (this.authManager.isAuthenticated()) {
-      const token = this.authManager.getAccessToken();
-      if (token) {
-        headers['Authorization'] = `Bearer ${token}`;
-      }
+    // Same rule as `request()`: hold a token, send it. Gating on
+    // `isAuthenticated()` dropped it whenever the expiry was unknown, which
+    // opened the stream anonymously.
+    const token = this.authManager.getAccessToken();
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
     }
     const sse = new SSEClient<McpJsonRpcFrame>(
       `${this.baseUrl}/mcp/${repository}/${branch}/${slug}`,
