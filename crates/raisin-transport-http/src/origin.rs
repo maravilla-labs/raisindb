@@ -33,9 +33,98 @@
 //! attacker's server. So a derived host is validated, and
 //! [`OriginTrust::Required`] refuses rather than guessing.
 
-use std::sync::Once;
+use std::collections::HashMap;
+use std::sync::{Mutex, Once, OnceLock};
 
 use axum::http::HeaderMap;
+
+/// The last PUBLIC origin each tenant was actually served on.
+///
+/// A tenant's own host is not derivable from anything RaisinDB stores: a
+/// request that bypasses the proxy carries a tenant id, and nothing maps a
+/// tenant id to a host — the handle-to-tenant map lives in the edge, one
+/// direction only. So rather than require every co-located caller to be told
+/// the public origin (which is per-app configuration that a new org silently
+/// misses), the server LEARNS it from the requests that already carry it.
+///
+/// Only an origin that passed the allowlist is ever recorded, so this grants no
+/// trust the request did not already have: it can only remember a host the
+/// deployment was willing to serve for that tenant a moment ago.
+///
+/// Process-local and unpersisted, deliberately. It is a cache, not
+/// configuration — after a restart the first proxied request refills it, and
+/// until then a link that cannot be built is refused rather than guessed.
+fn learned_origins() -> &'static Mutex<HashMap<String, String>> {
+    static LEARNED: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    LEARNED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Remember the origin this tenant was served on, for a later request that
+/// arrives without one.
+fn remember_origin(tenant_id: &str, origin: &str) {
+    if let Ok(mut map) = learned_origins().lock() {
+        match map.get(tenant_id) {
+            Some(existing) if existing == origin => {}
+            _ => {
+                map.insert(tenant_id.to_string(), origin.to_string());
+            }
+        }
+    }
+}
+
+/// Record the public origin a request was served on for this tenant, if the
+/// request actually carries one.
+///
+/// Called from the tenant middleware, so EVERY proxied request teaches it —
+/// not just the handful of endpoints that build a self-referential URL. Those
+/// are rare (an OAuth issuer, an MCP resource id, a magic link), and learning
+/// only from them would leave the map empty on exactly the deployment that
+/// needs it: one whose app talks to RaisinDB over loopback and whose visitors
+/// only ever hit ordinary data routes.
+///
+/// A loopback host teaches nothing — it is the case being solved, not evidence
+/// of anything. Neither does an unvalidated one: the host must pass the same
+/// allowlist a link would be checked against, or a spoofed `Host` on any
+/// request could poison the origin a later magic link is built on.
+pub fn note_request_origin(headers: &HeaderMap, tenant_id: &str) {
+    // An absolute override makes learning pointless: it wins everywhere.
+    if configured_base_url().is_some() {
+        return;
+    }
+    let trust_forwarded = forwarded_headers_trusted();
+    let proto = trust_forwarded
+        .then(|| header_str(headers, "x-forwarded-proto"))
+        .flatten()
+        .unwrap_or("https");
+    let Some(host) = trust_forwarded
+        .then(|| header_str(headers, "x-forwarded-host"))
+        .flatten()
+        .or_else(|| header_str(headers, "host"))
+    else {
+        return;
+    };
+    if is_loopback(host) {
+        return;
+    }
+    let suffixes = trusted_host_suffixes();
+    if suffixes.is_empty() {
+        // Nothing to validate against. Recording here would let any `Host`
+        // become this tenant's origin.
+        return;
+    }
+    if !host_is_trusted(host, &suffixes, &[]) {
+        return;
+    }
+    remember_origin(tenant_id, &canonical_origin(&format!("{proto}://{host}")));
+}
+
+/// The origin this tenant was last served on, if one has been seen.
+fn recall_origin(tenant_id: &str) -> Option<String> {
+    learned_origins()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(tenant_id).cloned())
+}
 
 /// How hard to insist on an allowlist when the origin is derived from a header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +197,7 @@ impl std::fmt::Display for OriginError {
 /// of one origin compare equal.
 pub fn self_origin(
     headers: &HeaderMap,
+    tenant_id: Option<&str>,
     tenant_hosts: &[String],
     trust: OriginTrust,
 ) -> Result<String, OriginError> {
@@ -154,11 +244,22 @@ pub fn self_origin(
     // origin, and the two answers must not be the same value.
     if is_loopback(host) {
         // The tenant named exactly one host, so there is nothing to guess.
-        // Preferring it keeps a co-located app working with no header and no
-        // code — the configuration lives in the tenant record, where the
-        // question "what is this org's host" already belongs.
+        // Configuration wins over anything learned: it is what an operator
+        // asserted, and it survives a restart.
         if let [only] = tenant_hosts {
             return Ok(canonical_origin(&format!("https://{only}")));
+        }
+        // Otherwise use the origin this tenant was last actually served on.
+        // This is what lets a co-located app — one reaching RaisinDB on the
+        // loopback address its platform injects — send a magic link without
+        // being told the public host. Anyone browsing the site refills it.
+        if let Some(learned) = tenant_id.and_then(recall_origin) {
+            tracing::debug!(
+                tenant_id = tenant_id.unwrap_or_default(),
+                origin = %learned,
+                "loopback request: using the origin this tenant was last served on"
+            );
+            return Ok(learned);
         }
         return match trust {
             // An OAuth issuer served over loopback is a local development
@@ -171,6 +272,11 @@ pub fn self_origin(
     }
 
     if host_is_trusted(host, &suffixes, tenant_hosts) {
+        // Validated and public: remember it, so a later loopback request for
+        // this tenant has a real answer instead of a refusal.
+        if let Some(tenant_id) = tenant_id {
+            remember_origin(tenant_id, &origin);
+        }
         Ok(origin)
     } else {
         Err(OriginError::UntrustedHost(host.to_string()))
@@ -333,6 +439,31 @@ pub(crate) fn canonical_origin(origin: &str) -> String {
 mod tests {
     use super::*;
 
+    /// `RAISINDB_TRUSTED_HOST_SUFFIXES` is process-wide, so a test that sets it
+    /// races every other test that reads it. Anything touching it takes this.
+    static ENV_GUARD: Mutex<()> = Mutex::new(());
+
+    /// Sets the suffix allowlist for the duration of `f`, then restores it.
+    /// Restores on unwind too — a panicking assertion must not leave the
+    /// variable set for whatever runs next.
+    fn with_suffixes<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var("RAISINDB_TRUSTED_HOST_SUFFIXES").ok();
+        match value {
+            Some(v) => std::env::set_var("RAISINDB_TRUSTED_HOST_SUFFIXES", v),
+            None => std::env::remove_var("RAISINDB_TRUSTED_HOST_SUFFIXES"),
+        }
+        let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        match previous {
+            Some(v) => std::env::set_var("RAISINDB_TRUSTED_HOST_SUFFIXES", v),
+            None => std::env::remove_var("RAISINDB_TRUSTED_HOST_SUFFIXES"),
+        }
+        match out {
+            Ok(v) => v,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
         let mut h = HeaderMap::new();
         for (k, v) in pairs {
@@ -350,7 +481,7 @@ mod tests {
     #[test]
     fn required_refuses_when_nothing_is_configured() {
         let h = headers(&[("host", "evil.test")]);
-        let err = self_origin(&h, &[], OriginTrust::Required)
+        let err = self_origin(&h, None, &[], OriginTrust::Required)
             .expect_err("no allowlist must refuse under Required");
         assert!(matches!(err, OriginError::NotConfigured));
         // And the message tells the operator what to set.
@@ -362,8 +493,13 @@ mod tests {
     #[test]
     fn an_unlisted_host_is_refused_by_name() {
         let h = headers(&[("host", "evil.test")]);
-        let err = self_origin(&h, &["acme.example.com".into()], OriginTrust::Required)
-            .expect_err("an unlisted host must be refused");
+        let err = self_origin(
+            &h,
+            None,
+            &["acme.example.com".into()],
+            OriginTrust::Required,
+        )
+        .expect_err("an unlisted host must be refused");
         match err {
             OriginError::UntrustedHost(host) => assert_eq!(host, "evil.test"),
             other => panic!("expected UntrustedHost, got {other:?}"),
@@ -373,8 +509,13 @@ mod tests {
     #[test]
     fn a_tenant_host_is_accepted() {
         let h = headers(&[("host", "acme.example.com")]);
-        let origin = self_origin(&h, &["acme.example.com".into()], OriginTrust::Required)
-            .expect("a listed tenant host is allowed");
+        let origin = self_origin(
+            &h,
+            None,
+            &["acme.example.com".into()],
+            OriginTrust::Required,
+        )
+        .expect("a listed tenant host is allowed");
         assert_eq!(origin, "https://acme.example.com");
     }
 
@@ -387,8 +528,13 @@ mod tests {
             ("x-forwarded-host", "evil.test"),
         ]);
         // RAISINDB_TRUST_FORWARDED_HEADERS is unset in the test environment.
-        let origin = self_origin(&h, &["acme.example.com".into()], OriginTrust::Required)
-            .expect("the real Host is used");
+        let origin = self_origin(
+            &h,
+            None,
+            &["acme.example.com".into()],
+            OriginTrust::Required,
+        )
+        .expect("the real Host is used");
         assert_eq!(origin, "https://acme.example.com");
     }
 
@@ -401,6 +547,7 @@ mod tests {
         let h = headers(&[("host", "127.0.0.1:8088")]);
         let err = self_origin(
             &h,
+            None,
             &["acme.example.com".into(), "www.acme.test".into()],
             OriginTrust::Required,
         )
@@ -418,8 +565,13 @@ mod tests {
     #[test]
     fn a_single_tenant_host_answers_for_a_loopback_caller() {
         let h = headers(&[("host", "127.0.0.1:8088")]);
-        let origin = self_origin(&h, &["acme.example.com".into()], OriginTrust::Required)
-            .expect("one declared host is unambiguous");
+        let origin = self_origin(
+            &h,
+            None,
+            &["acme.example.com".into()],
+            OriginTrust::Required,
+        )
+        .expect("one declared host is unambiguous");
         assert_eq!(origin, "https://acme.example.com");
     }
 
@@ -428,7 +580,8 @@ mod tests {
     #[test]
     fn loopback_still_works_when_nothing_is_configured() {
         let h = headers(&[("host", "localhost:8080")]);
-        let origin = self_origin(&h, &[], OriginTrust::WarnOnce).expect("dev must keep working");
+        let origin =
+            self_origin(&h, None, &[], OriginTrust::WarnOnce).expect("dev must keep working");
         assert_eq!(origin, "https://localhost:8080");
     }
 
@@ -440,6 +593,7 @@ mod tests {
         let h = headers(&[("host", "127.0.0.1:8088")]);
         let origin = self_origin(
             &h,
+            None,
             &["acme.example.com".into(), "b.acme.test".into()],
             OriginTrust::WarnOnce,
         )
@@ -466,6 +620,113 @@ mod tests {
         ] {
             assert!(!is_loopback(host), "{host} should NOT be loopback");
         }
+    }
+
+    /// The whole point of learning: a co-located app reaches RaisinDB over
+    /// loopback and cannot say which org it is, but somebody's browser already
+    /// told us a moment ago.
+    ///
+    /// Serial with the tests below — the learned map is process-wide, so these
+    /// use distinct tenant ids rather than a lock.
+    #[test]
+    fn a_loopback_request_uses_the_origin_the_tenant_was_last_served_on() {
+        let tenant = "tenant-learn-basic";
+        with_suffixes(Some(".rdb.example.com"), || {
+            // A real visitor arrives through the edge.
+            let served = self_origin(
+                &headers(&[("host", "acme.rdb.example.com")]),
+                Some(tenant),
+                &[],
+                OriginTrust::Required,
+            )
+            .expect("a suffix-matching host is allowed");
+            assert_eq!(served, "https://acme.rdb.example.com");
+
+            // Now the app asks for a magic link over loopback.
+            let origin = self_origin(
+                &headers(&[("host", "127.0.0.1:8088")]),
+                Some(tenant),
+                &[],
+                OriginTrust::Required,
+            )
+            .expect("the learned origin answers for a loopback caller");
+            assert_eq!(origin, "https://acme.rdb.example.com");
+        });
+    }
+
+    /// Configuration outranks anything learned: an operator asserted it, and it
+    /// survives a restart.
+    #[test]
+    fn a_declared_tenant_host_wins_over_a_learned_one() {
+        let tenant = "tenant-learn-precedence";
+        with_suffixes(Some(".rdb.example.com"), || {
+            remember_origin(tenant, "https://learned.rdb.example.com");
+
+            let origin = self_origin(
+                &headers(&[("host", "127.0.0.1:8088")]),
+                Some(tenant),
+                &["declared.example.com".into()],
+                OriginTrust::Required,
+            )
+            .expect("a declared host resolves");
+            assert_eq!(origin, "https://declared.example.com");
+        });
+    }
+
+    /// A tenant we have never served publicly still refuses, rather than
+    /// borrowing another tenant's origin or guessing.
+    #[test]
+    fn an_unseen_tenant_still_refuses() {
+        with_suffixes(Some(".rdb.example.com"), || {
+            let err = self_origin(
+                &headers(&[("host", "127.0.0.1:8088")]),
+                Some("tenant-never-seen"),
+                &[],
+                OriginTrust::Required,
+            )
+            .expect_err("nothing learned, nothing declared");
+            assert!(matches!(err, OriginError::LoopbackNotPublic(_)));
+        });
+    }
+
+    /// `note_request_origin` is the teaching path, and it must be as fussy as
+    /// the link-building path: a spoofed Host on ANY request would otherwise
+    /// poison the origin a later magic link is built on.
+    #[test]
+    fn only_a_validated_public_host_is_ever_learned() {
+        with_suffixes(Some(".rdb.example.com"), || {
+            note_request_origin(&headers(&[("host", "evil.test")]), "tenant-teach-evil");
+            assert_eq!(recall_origin("tenant-teach-evil"), None, "unlisted host");
+
+            note_request_origin(&headers(&[("host", "127.0.0.1:8088")]), "tenant-teach-lb");
+            assert_eq!(
+                recall_origin("tenant-teach-lb"),
+                None,
+                "loopback teaches nothing"
+            );
+
+            note_request_origin(
+                &headers(&[("host", "ok.rdb.example.com")]),
+                "tenant-teach-ok",
+            );
+            assert_eq!(
+                recall_origin("tenant-teach-ok").as_deref(),
+                Some("https://ok.rdb.example.com")
+            );
+        });
+    }
+
+    /// With no allowlist there is nothing to validate against, so recording
+    /// would let any Host become the tenant's origin.
+    #[test]
+    fn nothing_is_learned_when_no_allowlist_is_configured() {
+        with_suffixes(None, || {
+            note_request_origin(
+                &headers(&[("host", "anything.example")]),
+                "tenant-teach-none",
+            );
+            assert_eq!(recall_origin("tenant-teach-none"), None);
+        });
     }
 
     #[test]

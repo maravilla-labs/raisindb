@@ -486,6 +486,7 @@ async fn request_magic_link_core(
         crate::handlers::oauth_as::helpers::load_tenant_trusted_hosts(state, tenant_id).await;
     let verify_origin = crate::origin::self_origin(
         headers,
+        Some(tenant_id),
         &tenant_hosts,
         crate::origin::OriginTrust::Required,
     )

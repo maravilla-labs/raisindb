@@ -49,7 +49,7 @@ pub fn issuer_from_request(
     // different answers to one question. `WarnOnce` preserves the behaviour
     // this endpoint has always had for a deployment that configures nothing —
     // tightening it would break those on upgrade and is a separate decision.
-    self_origin(headers, tenant_hosts, OriginTrust::WarnOnce).map_err(|e| match e {
+    self_origin(headers, None, tenant_hosts, OriginTrust::WarnOnce).map_err(|e| match e {
         OriginError::UntrustedHost(host) => AuthServerError::InvalidRequest(format!(
             "request host `{host}` is not an allowed OAuth issuer host"
         )),

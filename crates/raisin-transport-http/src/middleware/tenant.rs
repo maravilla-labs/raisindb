@@ -91,6 +91,12 @@ pub async fn ensure_tenant_middleware(
         );
     }
 
+    // Learn this tenant's public origin while we have a request that carries
+    // one. A co-located app reaches RaisinDB over loopback and cannot supply
+    // it, so without this the only way to build that tenant's magic-link URL
+    // is per-app configuration that a new org silently misses.
+    crate::origin::note_request_origin(req.headers(), &tenant_id);
+
     req.extensions_mut().insert(TenantInfo {
         tenant_id,
         deployment_key,
