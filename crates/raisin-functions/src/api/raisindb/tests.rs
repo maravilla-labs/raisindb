@@ -655,6 +655,35 @@ async fn an_allowed_recipient_reaches_the_config_gate() {
     );
 }
 
+/// THE BYPASS TEST. `cc` and `bcc` are recipients, so the policy has to walk
+/// them. If it only checked `to`, a caller could address a permitted `to` and
+/// blind-copy anywhere on earth — the allowlist would still read as enforced
+/// while doing nothing at all.
+#[tokio::test]
+async fn a_blind_copy_cannot_escape_the_recipient_allowlist() {
+    for field in ["cc", "bcc"] {
+        let api = api_with_email_policy(EmailPolicy::allow_recipients(vec![
+            "example.com".to_string()
+        ]));
+        let mut msg = message_to(&["user@example.com"]);
+        msg[field] = serde_json::json!(["attacker@evil.test"]);
+
+        let err = api
+            .impl_email_send(msg)
+            .await
+            .expect_err("a forbidden {field} recipient must be refused");
+
+        assert!(
+            matches!(err, raisin_error::Error::PermissionDenied(_)),
+            "`{field}` must be checked by the email policy, not waved through: {err}"
+        );
+        assert!(
+            err.to_string().contains("attacker@evil.test"),
+            "the refusal should name the denied `{field}` address: {err}"
+        );
+    }
+}
+
 // ========== is_url_allowed divergence (issue #13) ==========
 
 /// The PERMISSIVE half of the divergence, pinned deliberately: on this path

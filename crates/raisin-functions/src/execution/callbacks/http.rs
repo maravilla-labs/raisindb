@@ -185,8 +185,22 @@ pub fn create_http_request(_http_client: reqwest::Client) -> HttpRequestCallback
                 }
             }
 
-            // Add body
-            if let Some(body_val) = body {
+            // Add body.
+            //
+            // `bodyBase64` carries real bytes. Without it an ArrayBuffer body
+            // was base64-encoded on the way in and then sent AS THAT TEXT, so
+            // uploading a file transmitted its base64 rather than its content.
+            if let Some(encoded) = options.get("bodyBase64").and_then(|v| v.as_str()) {
+                use base64::Engine as _;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(encoded.as_bytes())
+                    .map_err(|e| {
+                        raisin_error::Error::Validation(format!(
+                            "request bodyBase64 is not valid base64: {e}"
+                        ))
+                    })?;
+                request = request.body(bytes);
+            } else if let Some(body_val) = body {
                 if let Some(body_str) = body_val.as_str() {
                     request = request.body(body_str.to_string());
                 } else {
@@ -214,19 +228,56 @@ pub fn create_http_request(_http_client: reqwest::Client) -> HttpRequestCallback
                 })
                 .collect();
 
-            let body_text = response.text().await.map_err(|e| {
+            // Read BYTES, not text. `Response::text()` decodes lossily, so
+            // every byte that is not valid UTF-8 became U+FFFD — which made
+            // fetching a PDF, an image or any other binary silently return
+            // corrupted data, with `arrayBuffer()` re-encoding the damage.
+            let body_bytes = response.bytes().await.map_err(|e| {
                 raisin_error::Error::Backend(format!("Failed to read response body: {}", e))
             })?;
 
-            // Try to parse body as JSON, fall back to string
-            let body_value =
-                serde_json::from_str::<Value>(&body_text).unwrap_or(Value::String(body_text));
+            // The shape is decided by the bytes themselves rather than by a
+            // caller flag: valid UTF-8 keeps the existing string/JSON body
+            // (so nothing about the common path changes, and `arrayBuffer()`
+            // can round-trip it exactly through TextEncoder), and anything
+            // else is handed over as base64. A caller may force base64 with
+            // `responseType: "base64"` when it wants the exact bytes of
+            // something that merely happens to be valid UTF-8.
+            let force_base64 = options
+                .get("responseType")
+                .and_then(|v| v.as_str())
+                .is_some_and(|t| t.eq_ignore_ascii_case("base64"));
 
-            Ok(serde_json::json!({
-                "status": status,
-                "headers": headers,
-                "body": body_value
-            }))
+            let as_text = if force_base64 {
+                None
+            } else {
+                std::str::from_utf8(&body_bytes).ok()
+            };
+
+            match as_text {
+                Some(text) => {
+                    let body_value = serde_json::from_str::<Value>(text)
+                        .unwrap_or_else(|_| Value::String(text.to_string()));
+                    Ok(serde_json::json!({
+                        "status": status,
+                        "headers": headers,
+                        "body": body_value
+                    }))
+                }
+                None => {
+                    use base64::Engine as _;
+                    let encoded =
+                        base64::engine::general_purpose::STANDARD.encode(body_bytes.as_ref());
+                    Ok(serde_json::json!({
+                        "status": status,
+                        "headers": headers,
+                        // Empty rather than absent: existing callers that read
+                        // `.body` unconditionally get a string, not undefined.
+                        "body": "",
+                        "body_base64": encoded
+                    }))
+                }
+            }
         })
     })
 }

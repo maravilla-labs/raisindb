@@ -28,6 +28,7 @@ mod branches;
 mod context;
 mod crypto;
 mod email;
+mod email_attachments;
 mod events;
 mod functions;
 mod http;

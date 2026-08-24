@@ -320,10 +320,27 @@ declare namespace raisin {
   interface EmailMessage {
     /** One recipient address, or several. */
     to: string | string[];
+    /** Carbon copy. Visible to every recipient. */
+    cc?: string | string[];
+    /**
+     * Blind carbon copy. Each address is invisible to every other recipient.
+     *
+     * Counted against the same 20-recipient cap as `to` and `cc`, and checked
+     * against the function's `email_policy` exactly like them — a blind copy
+     * is not a way around the allowlist.
+     */
+    bcc?: string | string[];
     subject: string;
     /** Plain-text body. Always required, even alongside `html`. */
     text: string;
     html?: string;
+    /**
+     * Files to attach. Each entry names exactly one source.
+     *
+     * Defaults: at most 20 attachments, 10 MiB each and 10 MiB in total once
+     * decoded. An operator can raise them per sender in `/config/email`.
+     */
+    attachments?: EmailAttachment[];
     /**
      * Which of the tenant's configured senders to send through, by name (see
      * {@link email.providers}). Omit it for the tenant's default — which is
@@ -334,6 +351,66 @@ declare namespace raisin {
      */
     provider?: string;
   }
+
+  /** Fields every attachment shares, whatever its source. */
+  interface EmailAttachmentBase {
+    /**
+     * Name the recipient sees. Required for `content`; for a node reference
+     * the stored file name is used when omitted.
+     *
+     * Rejected rather than cleaned up if it carries a path separator or a
+     * control character.
+     */
+    filename?: string;
+    /**
+     * MIME type. Derived from the filename (or the stored resource) when
+     * omitted. `multipart/*` and `message/*` are refused — neither can be a
+     * single attachment.
+     */
+    contentType?: string;
+    /**
+     * Set this to EMBED the file in the HTML body instead of listing it as a
+     * download: reference it as `<img src="cid:the-value">`.
+     *
+     * Requires an `html` body. Works over `smtp` and `resend`; `brevo` has no
+     * Content-ID and REJECTS an inline attachment rather than sending one that
+     * would arrive broken.
+     */
+    contentId?: string;
+  }
+
+  /** Bytes the function already holds. */
+  interface EmailAttachmentContent extends EmailAttachmentBase {
+    /** Standard base64, or a `data:<type>;base64,...` URL. */
+    content: string;
+    filename: string;
+    node?: never;
+  }
+
+  /**
+   * A file stored on a node, fetched by the server.
+   *
+   * Read with the FUNCTION's authority, not the caller's — a function running
+   * from a trigger or a schedule reads as system. Treat it exactly as you
+   * treat {@link nodes.get}.
+   */
+  interface EmailAttachmentNode extends EmailAttachmentBase {
+    /** Path of the node holding the file. */
+    node: string;
+    /** Workspace the node lives in. Required. */
+    workspace: string;
+    /** Property holding the file. Defaults to `"file"`. */
+    property?: string;
+    content?: never;
+  }
+
+  /**
+   * One attachment: inline bytes, or a node reference.
+   *
+   * In JavaScript a `Resource` (from `node.getResource('file')`) may be passed
+   * directly and is converted to a node reference for you.
+   */
+  type EmailAttachment = EmailAttachmentContent | EmailAttachmentNode;
 
   /** Proof that the provider accepted a message. Acceptance is not delivery. */
   interface EmailReceipt {
@@ -376,7 +453,8 @@ declare namespace raisin {
      * Every recipient must be allowed by the function's `email_policy`
      * (`{ enabled, allowed_recipients }` in its `.node.yaml`, matched against
      * the recipient DOMAIN); with no block declared the function cannot send,
-     * and one disallowed recipient rejects the whole message.
+     * and one disallowed recipient rejects the whole message. "Every
+     * recipient" includes `cc` and `bcc`.
      *
      * Also rejects when email is not configured or not enabled for the tenant,
      * when the function's `secret_policy` does not grant the credential the

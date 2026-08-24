@@ -52,6 +52,20 @@ export interface SmtpSettings {
   security: SmtpSecurity
 }
 
+/**
+ * Per-sender attachment bounds. Every field is optional and an absent one
+ * keeps the server default (20 attachments, 10 MiB each, 10 MiB total).
+ *
+ * The console does not expose these yet, but it MUST round-trip them: a save
+ * rebuilds each provider entry field by field, so anything not mirrored here
+ * is destroyed the first time an operator touches the Email page.
+ */
+export interface AttachmentLimits {
+  max_count?: number
+  max_bytes_each?: number
+  max_total_bytes?: number
+}
+
 /** One configured sender. */
 export interface EmailProviderConfig {
   /** Unique slug a function names. Not the provider API. */
@@ -69,6 +83,11 @@ export interface EmailProviderConfig {
   smtp?: SmtpSettings
   /** A disabled entry cannot be selected, by name or as the default. */
   enabled: boolean
+  /**
+   * Attachment bounds for this sender. Preserved verbatim; see
+   * {@link AttachmentLimits}.
+   */
+  attachments?: AttachmentLimits
 }
 
 export interface EmailConfig {
@@ -132,6 +151,22 @@ function str(source: Record<string, unknown>, key: string, fallback = ''): strin
   return typeof value === 'string' ? value : fallback
 }
 
+/**
+ * Read back the attachment bounds, keeping only the numbers actually present.
+ *
+ * Returns undefined when the entry sets none, so a config that never used them
+ * does not grow an empty object on every save.
+ */
+function attachmentLimitsFrom(raw: unknown): AttachmentLimits | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const a = raw as Record<string, unknown>
+  const out: AttachmentLimits = {}
+  for (const key of ['max_count', 'max_bytes_each', 'max_total_bytes'] as const) {
+    if (typeof a[key] === 'number') out[key] = a[key] as number
+  }
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
 function providerFrom(raw: unknown): EmailProviderConfig | null {
   if (!raw || typeof raw !== 'object') return null
   const p = raw as Record<string, unknown>
@@ -151,6 +186,7 @@ function providerFrom(raw: unknown): EmailProviderConfig | null {
     // live unless it says otherwise. This mirrors the server's serde default,
     // which is the opposite of the config-level switch and deliberately so.
     enabled: p.enabled !== false,
+    attachments: attachmentLimitsFrom(p.attachments),
     smtp:
       kind === 'smtp' || smtpRaw
         ? {
@@ -212,6 +248,11 @@ function toProperties(config: EmailConfig): Record<string, unknown> {
     for (const key of ['from_name', 'reply_to', 'api_base'] as const) {
       const value = (p[key] ?? '').trim()
       if (value) entry[key] = value
+    }
+    // Written back untouched. The console has no UI for these, so dropping
+    // them here would quietly reset an operator's limits on the next save.
+    if (p.attachments && Object.keys(p.attachments).length > 0) {
+      entry.attachments = { ...p.attachments }
     }
     if (p.provider === 'smtp' && p.smtp) {
       const smtp: Record<string, unknown> = {

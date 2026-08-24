@@ -46,6 +46,21 @@ impl EmailProvider {
         }
     }
 
+    /// Whether this provider can carry an inline part addressable as
+    /// `cid:{content_id}` from the HTML body.
+    ///
+    /// Brevo's `POST /v3/smtp/email` attachment objects are `{ name, content }`
+    /// with no Content-ID field, so an inline part sent through it arrives as
+    /// an ordinary attachment while the `cid:` reference in the body resolves
+    /// to nothing. That is refused rather than degraded — a broken image in
+    /// the recipient's inbox is invisible to every test we could write.
+    pub fn supports_inline(&self) -> bool {
+        match self {
+            EmailProvider::Resend | EmailProvider::Smtp => true,
+            EmailProvider::Brevo => false,
+        }
+    }
+
     /// Send one message through `sender`.
     ///
     /// `credential` is the secret resolved from `sender.credential_ref`; it is
@@ -67,6 +82,9 @@ impl EmailProvider {
         // `invalid_message` locally rather than as whatever the provider
         // happens to answer.
         message.validate()?;
+        // Bounds and provider capabilities. Separate from `validate` only
+        // because they need the resolved sender; both run before a socket.
+        message.validate_attachments(sender.provider, &sender.attachment_limits)?;
         if credential.trim().is_empty() {
             return Err(EmailError::Config(format!(
                 "no credential resolved from {} for email provider `{}`",
@@ -205,14 +223,8 @@ mod tests {
 
     fn sender(provider: EmailProvider) -> EmailSender {
         EmailSender {
-            name: "primary".to_string(),
             provider,
-            from_address: "noreply@example.com".to_string(),
-            from_name: None,
-            reply_to: None,
-            credential_ref: "secret://email/api_key".to_string(),
-            api_base: None,
-            smtp: None,
+            ..Default::default()
         }
     }
 

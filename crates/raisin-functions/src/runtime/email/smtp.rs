@@ -35,15 +35,15 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use lettre::message::header::ContentType;
-use lettre::message::{Mailbox, MultiPart, SinglePart};
+use lettre::message::{Attachment, Mailbox, MultiPart, MultiPartBuilder, SinglePart};
 use lettre::transport::smtp::authentication::Credentials as SmtpCredentials;
 use lettre::transport::smtp::response::{Category, Response, Severity};
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
 use super::provider::SendReceipt;
 use super::{
-    Credential, EmailError, EmailMessage, EmailProvider, EmailSender, Result, SmtpSecurity,
-    SmtpSettings, CONNECT_TIMEOUT_SECS, SEND_TIMEOUT_SECS,
+    Credential, EmailError, EmailMessage, EmailProvider, EmailSender, ResolvedAttachment, Result,
+    SmtpSecurity, SmtpSettings, CONNECT_TIMEOUT_SECS, SEND_TIMEOUT_SECS,
 };
 
 /// Send `message` over SMTP.
@@ -144,20 +144,131 @@ fn build_message(sender: &EmailSender, message: &EmailMessage) -> Result<Message
         builder = builder.reply_to(mailbox);
     }
 
-    let body = match message.html.as_deref() {
-        Some(html) if !html.is_empty() => {
-            MultiPart::alternative_plain_html(message.text.clone(), html.to_string())
-        }
-        _ => MultiPart::mixed().singlepart(
+    for cc in &message.cc {
+        let mailbox: Mailbox = cc
+            .parse()
+            .map_err(|e| EmailError::InvalidMessage(format!("invalid cc recipient `{cc}`: {e}")))?;
+        builder = builder.cc(mailbox);
+    }
+
+    // `.bcc()` sets a `Bcc` header, and lettre REMOVES that header while
+    // computing the envelope in `build()` — the address still receives the
+    // message, but no recipient can see it. `keep_bcc()` opts out of that
+    // removal and would expose every blind recipient to every other one.
+    // Never call it.
+    for bcc in &message.bcc {
+        let mailbox: Mailbox = bcc.parse().map_err(|e| {
+            EmailError::InvalidMessage(format!("invalid bcc recipient `{bcc}`: {e}"))
+        })?;
+        builder = builder.bcc(mailbox);
+    }
+
+    match build_body(message)? {
+        Body::Multi(part) => builder.multipart(part),
+        Body::Single(part) => builder.singlepart(part),
+    }
+    .map_err(|e| EmailError::InvalidMessage(format!("could not compose message: {e}")))
+}
+
+/// A MIME body that is either one leaf or a subtree.
+///
+/// lettre's builders expose `singlepart` and `multipart` as distinct methods
+/// with no shared `Part` type, so the two cannot be handed around uniformly
+/// without this. The alternative — wrapping every body in a one-child
+/// `multipart/alternative` so the type is always `MultiPart` — puts a
+/// pointless container on every plain-text send.
+enum Body {
+    Single(SinglePart),
+    Multi(MultiPart),
+}
+
+/// Append `body` to `builder`, whichever shape it has.
+fn push(builder: MultiPartBuilder, body: Body) -> MultiPart {
+    match body {
+        Body::Single(p) => builder.singlepart(p),
+        Body::Multi(p) => builder.multipart(p),
+    }
+}
+
+/// Compose the MIME tree.
+///
+/// ```text
+/// multipart/mixed                     (only when there are attachments)
+/// └── multipart/related               (only when there are inline parts)
+///     └── multipart/alternative       (only when there is an html body)
+///         ├── text/plain
+///         └── text/html
+/// ```
+///
+/// Every layer collapses when it has nothing to hold, so a plain-text message
+/// is a bare `text/plain` and not a one-child container. This matters beyond
+/// tidiness: many clients render a paperclip for anything `multipart/mixed`,
+/// so the previous unconditional `mixed` wrapper made every magic-link mail
+/// look like it carried an attachment.
+///
+/// The nesting order is not a preference. Inline parts must sit INSIDE the
+/// `related` subtree next to the body that references them, and attachments
+/// must sit OUTSIDE it; getting that backwards makes Outlook show an embedded
+/// image twice — once inline and once as a stray attachment.
+fn build_body(message: &EmailMessage) -> Result<Body> {
+    let content = match message.html.as_deref() {
+        Some(html) if !html.is_empty() => Body::Multi(MultiPart::alternative_plain_html(
+            message.text.clone(),
+            html.to_string(),
+        )),
+        _ => Body::Single(
             SinglePart::builder()
                 .header(ContentType::TEXT_PLAIN)
                 .body(message.text.clone()),
         ),
     };
 
-    builder
-        .multipart(body)
-        .map_err(|e| EmailError::InvalidMessage(format!("could not compose message: {e}")))
+    let (inline, attached): (Vec<_>, Vec<_>) =
+        message.attachments.iter().partition(|a| a.is_inline());
+
+    let related = if inline.is_empty() {
+        content
+    } else {
+        let mut mp = push(MultiPart::related(), content);
+        for a in inline {
+            mp = mp.singlepart(single_part(a)?);
+        }
+        Body::Multi(mp)
+    };
+
+    let root = if attached.is_empty() {
+        related
+    } else {
+        let mut mp = push(MultiPart::mixed(), related);
+        for a in attached {
+            mp = mp.singlepart(single_part(a)?);
+        }
+        Body::Multi(mp)
+    };
+
+    Ok(root)
+}
+
+/// One attachment as a MIME leaf.
+///
+/// `content_id` is passed WITHOUT angle brackets: lettre wraps it itself, and
+/// a pre-bracketed value yields `Content-ID: <<logo>>`, which no client
+/// matches against `src="cid:logo"`.
+fn single_part(a: &ResolvedAttachment) -> Result<SinglePart> {
+    let ct = ContentType::parse(&a.content_type).map_err(|e| {
+        EmailError::InvalidMessage(format!(
+            "attachment `{}` has an invalid content_type `{}`: {e}",
+            a.filename, a.content_type
+        ))
+    })?;
+    Ok(match &a.content_id {
+        Some(cid) if a.filename.trim().is_empty() => {
+            Attachment::new_inline(cid.clone()).body(a.bytes.clone(), ct)
+        }
+        Some(cid) => Attachment::new_inline_with_name(cid.clone(), a.filename.clone())
+            .body(a.bytes.clone(), ct),
+        None => Attachment::new(a.filename.clone()).body(a.bytes.clone(), ct),
+    })
 }
 
 /// Build the transport for one send.
@@ -277,13 +388,13 @@ mod tests {
             from_name: Some("Example".to_string()),
             reply_to: Some("support@example.com".to_string()),
             credential_ref: "secret://email/smtp_password".to_string(),
-            api_base: None,
             smtp: Some(SmtpSettings {
                 host: "smtp.example.com".to_string(),
                 port: 587,
                 username: Some("apikey".to_string()),
                 security,
             }),
+            ..Default::default()
         }
     }
 
@@ -297,6 +408,158 @@ mod tests {
         assert!(raw.contains("Reply-To: support@example.com"));
         assert!(raw.contains("Subject: Sign in"));
         assert!(raw.contains("click here"));
+        // No container at all with nothing to contain. The previous
+        // implementation wrapped this in a one-child `multipart/mixed`, which
+        // makes many clients draw a paperclip on every magic-link mail.
+        assert!(
+            !raw.contains("multipart"),
+            "a plain message must not be multipart:\n{raw}"
+        );
+    }
+
+    /// The collapse matrix: each layer appears only when it holds something.
+    #[test]
+    fn the_mime_tree_collapses_to_what_the_message_actually_has() {
+        let base = || EmailMessage::new("user@example.com", "Subject", "plain body");
+        let file = |cid: Option<&str>| ResolvedAttachment {
+            filename: "ticket.pdf".to_string(),
+            content_type: "application/pdf".to_string(),
+            bytes: b"%PDF-1.4".to_vec(),
+            content_id: cid.map(str::to_string),
+        };
+        let compose = |msg: EmailMessage| {
+            String::from_utf8(
+                build_message(&sender(SmtpSecurity::Starttls), &msg)
+                    .expect("composes")
+                    .formatted(),
+            )
+            .expect("utf8")
+        };
+
+        // text + attachment -> mixed, no alternative
+        let raw = compose(base().with_attachments(vec![file(None)]));
+        assert!(raw.contains("multipart/mixed"), "{raw}");
+        assert!(!raw.contains("multipart/alternative"), "{raw}");
+        assert!(!raw.contains("multipart/related"), "{raw}");
+
+        // html + attachment -> mixed wrapping alternative
+        let raw = compose(
+            base()
+                .with_html("<b>rich</b>")
+                .with_attachments(vec![file(None)]),
+        );
+        assert!(raw.contains("multipart/mixed"), "{raw}");
+        assert!(raw.contains("multipart/alternative"), "{raw}");
+        assert!(!raw.contains("multipart/related"), "{raw}");
+
+        // html + inline -> related, no mixed (nothing is attached)
+        let raw = compose(
+            base()
+                .with_html("<img src=\"cid:logo\">")
+                .with_attachments(vec![file(Some("logo"))]),
+        );
+        assert!(raw.contains("multipart/related"), "{raw}");
+        assert!(raw.contains("multipart/alternative"), "{raw}");
+        assert!(!raw.contains("multipart/mixed"), "{raw}");
+
+        // html + inline + attachment -> all three, mixed outermost
+        let raw = compose(
+            base()
+                .with_html("<img src=\"cid:logo\">")
+                .with_attachments(vec![file(Some("logo")), file(None)]),
+        );
+        let mixed = raw.find("multipart/mixed").expect("mixed");
+        let related = raw.find("multipart/related").expect("related");
+        let alternative = raw.find("multipart/alternative").expect("alternative");
+        // Outer containers are declared before inner ones. Getting this
+        // backwards is what makes Outlook show an inline image twice.
+        assert!(mixed < related, "mixed must enclose related:\n{raw}");
+        assert!(
+            related < alternative,
+            "related must enclose alternative:\n{raw}"
+        );
+    }
+
+    /// lettre brackets the Content-ID itself. A pre-bracketed value yields
+    /// `<<logo>>`, which no client matches against `src="cid:logo"` — an
+    /// inline image that is broken only in the inbox.
+    #[test]
+    fn an_inline_part_carries_a_singly_bracketed_content_id() {
+        let msg = EmailMessage::new("user@example.com", "Subject", "plain")
+            .with_html("<img src=\"cid:logo\">")
+            .with_attachments(vec![ResolvedAttachment {
+                filename: "logo.png".to_string(),
+                content_type: "image/png".to_string(),
+                bytes: vec![0x89, 0x50, 0x4e, 0x47],
+                content_id: Some("logo".to_string()),
+            }]);
+        let raw = String::from_utf8(
+            build_message(&sender(SmtpSecurity::Starttls), &msg)
+                .expect("composes")
+                .formatted(),
+        )
+        .expect("utf8");
+        assert!(raw.contains("Content-ID: <logo>"), "{raw}");
+        assert!(
+            !raw.contains("<<"),
+            "content id was double-bracketed:\n{raw}"
+        );
+        assert!(raw.contains("Content-Disposition: inline"), "{raw}");
+    }
+
+    /// cc is visible to everyone; bcc must be visible to no one. lettre drops
+    /// the `Bcc` header while computing the envelope — unless `keep_bcc()` is
+    /// called, which is why this asserts on the formatted bytes rather than
+    /// trusting the call site.
+    #[test]
+    fn bcc_reaches_the_envelope_but_never_the_message() {
+        let mut msg = EmailMessage::new("user@example.com", "Subject", "plain");
+        msg.cc = vec!["visible@example.com".to_string()];
+        msg.bcc = vec!["hidden@example.com".to_string()];
+
+        let email = build_message(&sender(SmtpSecurity::Starttls), &msg).expect("composes");
+        let envelope_has_hidden = email
+            .envelope()
+            .to()
+            .iter()
+            .any(|a| a.to_string().contains("hidden@example.com"));
+        let raw = String::from_utf8(email.formatted()).expect("utf8");
+
+        assert!(
+            envelope_has_hidden,
+            "the bcc recipient must still be delivered to"
+        );
+        assert!(raw.contains("Cc: visible@example.com"), "{raw}");
+        assert!(
+            !raw.contains("hidden@example.com"),
+            "BCC ADDRESS LEAKED INTO THE MESSAGE:\n{raw}"
+        );
+        assert!(!raw.contains("Bcc:"), "Bcc header leaked:\n{raw}");
+    }
+
+    /// Belt and braces over lettre's RFC 2231 encoding: a filename carrying a
+    /// CRLF must not become a header, whatever the encoder does with it.
+    #[test]
+    fn a_filename_cannot_inject_a_header() {
+        let msg = EmailMessage::new("user@example.com", "Subject", "plain").with_attachments(vec![
+            ResolvedAttachment {
+                filename: "a\r\nBcc: attacker@evil.test".to_string(),
+                content_type: "text/plain".to_string(),
+                bytes: b"x".to_vec(),
+                content_id: None,
+            },
+        ]);
+        let raw = String::from_utf8(
+            build_message(&sender(SmtpSecurity::Starttls), &msg)
+                .expect("composes")
+                .formatted(),
+        )
+        .expect("utf8");
+        assert!(
+            !raw.contains("\r\nBcc:"),
+            "filename injected a header:\n{raw}"
+        );
+        assert!(!raw.contains("attacker@evil.test\r\n"), "{raw}");
     }
 
     #[test]
@@ -318,7 +581,7 @@ mod tests {
             to: vec!["a@example.com".to_string(), "b@example.com".to_string()],
             subject: "Notice".to_string(),
             text: "body".to_string(),
-            html: None,
+            ..Default::default()
         };
         let email = build_message(&sender(SmtpSecurity::Starttls), &msg).expect("composes");
         let raw = String::from_utf8(email.formatted()).expect("utf8");

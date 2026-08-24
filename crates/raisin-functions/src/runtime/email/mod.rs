@@ -35,11 +35,16 @@
 //!
 //! [`send`]: EmailProvider::send
 
+mod attachment;
 mod brevo;
 mod provider;
 mod resend;
 mod smtp;
 
+pub use attachment::{
+    AttachmentLimits, PartialAttachmentLimits, ResolvedAttachment, MAX_ATTACHMENTS,
+    MAX_ATTACHMENTS_TOTAL_BYTES, MAX_ATTACHMENT_BYTES,
+};
 pub use provider::{EmailProvider, SendReceipt};
 
 use serde::{Deserialize, Serialize};
@@ -128,6 +133,12 @@ pub struct EmailProviderConfig {
     /// hence the field name; the wire name stays `default`.
     #[serde(default, rename = "default")]
     pub is_default: bool,
+    /// Per-entry attachment bounds. Absent fields keep the defaults.
+    ///
+    /// Raising `max_total_bytes` here without also raising
+    /// [`SEND_TIMEOUT_SECS`] trades a rejected message for a timed-out one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<PartialAttachmentLimits>,
 }
 
 /// How an SMTP session is secured.
@@ -204,6 +215,34 @@ pub struct EmailSender {
     pub api_base: Option<String>,
     /// SMTP connection settings, present only for [`EmailProvider::Smtp`].
     pub smtp: Option<SmtpSettings>,
+    /// Attachment bounds for this sender: the defaults, with this entry's
+    /// overrides applied. Resolved here so a provider module can never see an
+    /// unresolved limit.
+    pub attachment_limits: AttachmentLimits,
+}
+
+/// A minimal sender for tests.
+///
+/// Exists so that adding a field to [`EmailSender`] does not break every test
+/// literal in this module — the previous round of that is why this is here.
+/// Test-only on purpose: in production a sender is built by
+/// [`EmailConfig::senders`], and a default-constructible one would make it
+/// possible to send from a half-configured value.
+#[cfg(test)]
+impl Default for EmailSender {
+    fn default() -> Self {
+        Self {
+            name: "primary".to_string(),
+            provider: EmailProvider::Resend,
+            from_address: "noreply@example.com".to_string(),
+            from_name: None,
+            reply_to: None,
+            credential_ref: "secret://email/api_key".to_string(),
+            api_base: None,
+            smtp: None,
+            attachment_limits: AttachmentLimits::default(),
+        }
+    }
 }
 
 impl EmailSender {
@@ -298,6 +337,8 @@ impl EmailConfig {
                         credential_ref: p.credential_ref.trim().to_string(),
                         api_base: p.api_base.clone(),
                         smtp: p.smtp.clone(),
+                        attachment_limits: AttachmentLimits::default()
+                            .merged_with(p.attachments.as_ref()),
                     },
                     p.enabled,
                     is_default,
@@ -439,9 +480,17 @@ impl From<&str> for Credential {
 /// sender the tenant has not verified.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct EmailMessage {
-    /// One or more recipient addresses. At least one, at most
-    /// [`MAX_RECIPIENTS`].
+    /// One or more primary recipient addresses. At least one; `to`, `cc` and
+    /// `bcc` together are capped at [`MAX_RECIPIENTS`].
     pub to: Vec<String>,
+    /// Carbon-copy recipients, visible to everyone who receives the message.
+    #[serde(default)]
+    pub cc: Vec<String>,
+    /// Blind-carbon-copy recipients. Each is invisible to every other
+    /// recipient — see [`EmailMessage::bcc`]'s handling in the SMTP module,
+    /// where the header must be dropped before the message goes on the wire.
+    #[serde(default)]
+    pub bcc: Vec<String>,
     /// Subject line.
     pub subject: String,
     /// Plain-text body. Always required — an HTML-only message is a spam signal
@@ -450,6 +499,18 @@ pub struct EmailMessage {
     /// Optional HTML body.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub html: Option<String>,
+    /// Attachments, already resolved to bytes.
+    ///
+    /// `skip` is not tidiness, it is the enforcement point. This struct is
+    /// built with `serde_json::from_value` on a caller-supplied object, so a
+    /// deserializable field here would let a function post raw bytes and an
+    /// arbitrary content type straight into a message — bypassing every
+    /// sanitiser, every size cap and the entire source model. Attachments may
+    /// only arrive through the resolution layer, which is what
+    /// `skip_deserializing` guarantees. `skip_serializing` keeps a 10 MiB
+    /// payload out of anything that logs the message.
+    #[serde(skip)]
+    pub attachments: Vec<ResolvedAttachment>,
 }
 
 impl EmailMessage {
@@ -457,9 +518,12 @@ impl EmailMessage {
     pub fn new(to: impl Into<String>, subject: impl Into<String>, text: impl Into<String>) -> Self {
         Self {
             to: vec![to.into()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
             subject: subject.into(),
             text: text.into(),
             html: None,
+            attachments: Vec::new(),
         }
     }
 
@@ -467,6 +531,27 @@ impl EmailMessage {
     pub fn with_html(mut self, html: impl Into<String>) -> Self {
         self.html = Some(html.into());
         self
+    }
+
+    /// Attach already-resolved attachments.
+    pub fn with_attachments(mut self, attachments: Vec<ResolvedAttachment>) -> Self {
+        self.attachments = attachments;
+        self
+    }
+
+    /// Every recipient this message will be delivered to, across all three
+    /// fields.
+    ///
+    /// One definition, because both the cap and the `email_policy` check must
+    /// see the same set: a policy that walked only `to` would make `bcc` a
+    /// one-line bypass of the entire allowlist.
+    pub fn all_recipients(&self) -> impl Iterator<Item = &String> {
+        self.to.iter().chain(&self.cc).chain(&self.bcc)
+    }
+
+    /// Total recipients across `to`, `cc` and `bcc`.
+    pub fn recipient_count(&self) -> usize {
+        self.to.len() + self.cc.len() + self.bcc.len()
     }
 
     /// Reject a message the provider would either bounce or, worse, accept with
@@ -477,16 +562,22 @@ impl EmailMessage {
     /// is for any future SMTP provider, and a header-splitting attempt is never
     /// legitimate traffic. Rejecting here keeps the check in one place.
     pub(crate) fn validate(&self) -> Result<()> {
+        // `to` specifically, not the union: a message addressed only via bcc
+        // is accepted by some providers and rejected by others, and "no
+        // visible recipient" is not a shape worth supporting differently per
+        // provider.
         if self.to.is_empty() {
             return Err(EmailError::InvalidMessage("no recipients".to_string()));
         }
-        if self.to.len() > MAX_RECIPIENTS {
+        // The cap is on the union. Per-field caps would silently make the real
+        // ceiling three times what the constant says.
+        if self.recipient_count() > MAX_RECIPIENTS {
             return Err(EmailError::InvalidMessage(format!(
-                "too many recipients: {} (max {MAX_RECIPIENTS})",
-                self.to.len()
+                "too many recipients: {} across to/cc/bcc (max {MAX_RECIPIENTS})",
+                self.recipient_count()
             )));
         }
-        for addr in &self.to {
+        for addr in self.all_recipients() {
             if addr.trim().is_empty() || !addr.contains('@') {
                 return Err(EmailError::InvalidMessage(
                     "recipient is not an email address".to_string(),
@@ -498,6 +589,7 @@ impl EmailMessage {
                 ));
             }
         }
+        self.validate_attachment_shape()?;
         if self.subject.is_empty() {
             return Err(EmailError::InvalidMessage("empty subject".to_string()));
         }
@@ -508,6 +600,99 @@ impl EmailMessage {
         }
         if self.text.is_empty() {
             return Err(EmailError::InvalidMessage("empty text body".to_string()));
+        }
+        Ok(())
+    }
+
+    /// Attachment checks that need nothing but the message itself.
+    ///
+    /// Size and count live in [`validate_attachments`] instead, because those
+    /// depend on the resolved sender's limits.
+    ///
+    /// [`validate_attachments`]: Self::validate_attachments
+    fn validate_attachment_shape(&self) -> Result<()> {
+        let mut seen_ids: Vec<&str> = Vec::new();
+        for a in &self.attachments {
+            if a.filename.trim().is_empty() && !a.is_inline() {
+                return Err(EmailError::InvalidMessage(
+                    "attachment has an empty filename".to_string(),
+                ));
+            }
+            let Some(cid) = a.content_id.as_deref() else {
+                continue;
+            };
+            // An inline part is referenced from the HTML body. With no HTML
+            // body there is nothing that could reference it, and the recipient
+            // gets a mail whose image is simply missing.
+            if self.html.as_deref().unwrap_or("").is_empty() {
+                return Err(EmailError::InvalidMessage(format!(
+                    "attachment `{}` is inline (content_id `{cid}`) but the message has no html body to reference it from",
+                    a.filename
+                )));
+            }
+            if seen_ids.contains(&cid) {
+                return Err(EmailError::InvalidMessage(format!(
+                    "duplicate attachment content_id `{cid}`: a cid: reference would be ambiguous"
+                )));
+            }
+            seen_ids.push(cid);
+        }
+        Ok(())
+    }
+
+    /// Enforce the resolved sender's attachment bounds and the provider's
+    /// capabilities.
+    ///
+    /// Separate from [`validate`] only because it needs the sender. Both run
+    /// before a socket is opened.
+    ///
+    /// [`validate`]: Self::validate
+    pub(crate) fn validate_attachments(
+        &self,
+        provider: EmailProvider,
+        limits: &AttachmentLimits,
+    ) -> Result<()> {
+        if self.attachments.is_empty() {
+            return Ok(());
+        }
+        if self.attachments.len() > limits.max_count {
+            return Err(EmailError::InvalidMessage(format!(
+                "too many attachments: {} (max {})",
+                self.attachments.len(),
+                limits.max_count
+            )));
+        }
+        let mut total = 0usize;
+        for a in &self.attachments {
+            if a.bytes.len() > limits.max_bytes_each {
+                return Err(EmailError::InvalidMessage(format!(
+                    "attachment `{}` is {} bytes (max {} each)",
+                    a.filename,
+                    a.bytes.len(),
+                    limits.max_bytes_each
+                )));
+            }
+            total = total.saturating_add(a.bytes.len());
+        }
+        if total > limits.max_total_bytes {
+            return Err(EmailError::InvalidMessage(format!(
+                "attachments total {total} bytes (max {})",
+                limits.max_total_bytes
+            )));
+        }
+        // Refuse rather than degrade. Sending an inline part through a
+        // provider that cannot carry a Content-ID produces a mail whose image
+        // is a stray attachment and whose `cid:` reference resolves to
+        // nothing — broken in the inbox, silent everywhere else.
+        if !provider.supports_inline() {
+            if let Some(a) = self.attachments.iter().find(|a| a.is_inline()) {
+                return Err(EmailError::InvalidMessage(format!(
+                    "provider `{}` does not support inline attachments (attachment `{}` sets content_id); \
+                     send it as a normal attachment, or use an smtp or resend sender",
+                    provider.as_str(),
+                    a.filename
+                )));
+            }
         }
         Ok(())
     }
@@ -607,6 +792,7 @@ mod tests {
             smtp: None,
             enabled: true,
             is_default: false,
+            attachments: None,
         }
     }
 
@@ -696,7 +882,7 @@ mod tests {
             to: vec![],
             subject: "Sign in".to_string(),
             text: "link".to_string(),
-            html: None,
+            ..Default::default()
         };
         assert!(matches!(m.validate(), Err(EmailError::InvalidMessage(_))));
 
@@ -704,9 +890,148 @@ mod tests {
             to: vec!["user@example.com".to_string(); MAX_RECIPIENTS + 1],
             subject: "Sign in".to_string(),
             text: "link".to_string(),
-            html: None,
+            ..Default::default()
         };
         assert!(matches!(m.validate(), Err(EmailError::InvalidMessage(_))));
+    }
+
+    // ---- Recipients and attachments --------------------------------------
+
+    fn att(bytes: usize, cid: Option<&str>) -> ResolvedAttachment {
+        ResolvedAttachment {
+            filename: "ticket.pdf".to_string(),
+            content_type: "application/pdf".to_string(),
+            bytes: vec![0u8; bytes],
+            content_id: cid.map(str::to_string),
+        }
+    }
+
+    /// The cap is on the union. Per-field caps would make the real ceiling
+    /// three times what the constant advertises.
+    #[test]
+    fn the_recipient_cap_counts_to_cc_and_bcc_together() {
+        let mut m = EmailMessage::new("user@example.com", "Subject", "body");
+        m.cc = vec!["c@example.com".to_string(); 10];
+        m.bcc = vec!["b@example.com".to_string(); 10];
+        assert_eq!(m.recipient_count(), 21);
+        let err = m.validate().expect_err("21 recipients must be refused");
+        assert!(err.to_string().contains("across to/cc/bcc"), "{err}");
+
+        m.bcc.pop();
+        assert!(m.validate().is_ok(), "20 recipients is the cap, not 19");
+    }
+
+    /// Header splitting is refused wherever the address sits, not only in
+    /// `to` — a `bcc` is just as much a header.
+    #[test]
+    fn a_hostile_address_is_refused_in_every_recipient_field() {
+        for field in ["cc", "bcc"] {
+            let mut m = EmailMessage::new("user@example.com", "Subject", "body");
+            let bad = "x@example.com\r\nBcc: attacker@evil.test".to_string();
+            match field {
+                "cc" => m.cc = vec![bad],
+                _ => m.bcc = vec![bad],
+            }
+            let err = m.validate().expect_err("{field} must be validated");
+            assert!(err.to_string().contains("control characters"), "{err}");
+        }
+    }
+
+    #[test]
+    fn an_inline_attachment_needs_an_html_body_to_reference_it() {
+        let m = EmailMessage::new("user@example.com", "Subject", "body")
+            .with_attachments(vec![att(4, Some("logo"))]);
+        let err = m.validate().expect_err("cid with no html must be refused");
+        assert!(err.to_string().contains("no html body"), "{err}");
+    }
+
+    #[test]
+    fn duplicate_content_ids_are_refused() {
+        let m = EmailMessage::new("user@example.com", "Subject", "body")
+            .with_html("<img src=\"cid:logo\">")
+            .with_attachments(vec![att(4, Some("logo")), att(4, Some("logo"))]);
+        let err = m.validate().expect_err("duplicate cid must be refused");
+        assert!(err.to_string().contains("duplicate"), "{err}");
+    }
+
+    #[test]
+    fn attachment_bounds_are_enforced_against_the_senders_limits() {
+        let limits = AttachmentLimits {
+            max_count: 2,
+            max_bytes_each: 100,
+            max_total_bytes: 150,
+        };
+        let msg = |n: usize, each: usize| {
+            EmailMessage::new("user@example.com", "Subject", "body").with_attachments(vec![
+                att(
+                    each, None
+                );
+                n
+            ])
+        };
+
+        let err = msg(3, 10)
+            .validate_attachments(EmailProvider::Resend, &limits)
+            .expect_err("count");
+        assert!(err.to_string().contains("too many attachments"), "{err}");
+
+        let err = msg(1, 200)
+            .validate_attachments(EmailProvider::Resend, &limits)
+            .expect_err("per item");
+        assert!(err.to_string().contains("max 100 each"), "{err}");
+
+        let err = msg(2, 90)
+            .validate_attachments(EmailProvider::Resend, &limits)
+            .expect_err("total");
+        assert!(err.to_string().contains("total 180 bytes"), "{err}");
+
+        assert!(msg(2, 50)
+            .validate_attachments(EmailProvider::Resend, &limits)
+            .is_ok());
+    }
+
+    /// Refused, never degraded: Brevo would accept the send and the recipient
+    /// would get a mail with a broken image and a dangling `cid:` reference.
+    #[test]
+    fn brevo_refuses_an_inline_attachment_and_says_what_to_use_instead() {
+        let m = EmailMessage::new("user@example.com", "Subject", "body")
+            .with_html("<img src=\"cid:logo\">")
+            .with_attachments(vec![att(4, Some("logo"))]);
+
+        let err = m
+            .validate_attachments(EmailProvider::Brevo, &AttachmentLimits::default())
+            .expect_err("brevo cannot carry a content_id");
+        let msg = err.to_string();
+        assert!(msg.contains("brevo"), "{msg}");
+        assert!(msg.contains("smtp") && msg.contains("resend"), "{msg}");
+
+        // The very same message is fine on the providers that can carry it.
+        for p in [EmailProvider::Smtp, EmailProvider::Resend] {
+            assert!(m
+                .validate_attachments(p, &AttachmentLimits::default())
+                .is_ok());
+        }
+    }
+
+    /// A caller must not be able to post resolved bytes straight into the
+    /// message: that would skip every sanitiser and every size bound.
+    #[test]
+    fn attachments_cannot_be_deserialized_onto_the_message() {
+        let m: EmailMessage = serde_json::from_value(serde_json::json!({
+            "to": ["user@example.com"],
+            "subject": "Subject",
+            "text": "body",
+            "attachments": [{
+                "filename": "evil.sh",
+                "content_type": "text/x-shellscript",
+                "bytes": [1, 2, 3],
+            }],
+        }))
+        .expect("the unknown key is ignored, not an error");
+        assert!(
+            m.attachments.is_empty(),
+            "attachments must only arrive through resolution"
+        );
     }
 
     // ---- Config parsing --------------------------------------------------

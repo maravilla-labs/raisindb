@@ -6536,6 +6536,7 @@ dependencies = [
  "lettre",
  "libloading",
  "mail-parser",
+ "mime_guess",
  "nanoid",
  "num_cpus",
  "pdf_oxide",

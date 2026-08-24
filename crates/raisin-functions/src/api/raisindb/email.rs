@@ -29,6 +29,7 @@
 use raisin_error::Result;
 use serde_json::Value;
 
+use super::email_attachments::{take_attachment_specs, AttachmentSpec};
 use super::RaisinFunctionApi;
 use crate::runtime::email::{EmailConfig, EmailError, EmailMessage, EmailProvider, EmailSender};
 
@@ -49,13 +50,18 @@ impl RaisinFunctionApi {
     /// addressed to one permitted and one forbidden domain is refused whole,
     /// because silently dropping a recipient would let a caller believe a
     /// message went somewhere it did not.
-    fn authorize_recipients(&self, to: &[String]) -> Result<()> {
+    ///
+    /// "Every recipient" means `to`, `cc` AND `bcc`. Checking only `to` would
+    /// make `bcc` a one-line bypass of the entire allowlist — the policy would
+    /// still read as enforced while mail went anywhere the caller liked.
+    fn authorize_recipients(&self, message: &EmailMessage) -> Result<()> {
         // Deliberately no subject or body in any of these messages — only the
         // recipient, which the caller already supplied.
-        let denied: Vec<&String> = to
-            .iter()
+        let denied: Vec<&String> = message
+            .all_recipients()
             .filter(|addr| !self.email_policy.is_recipient_allowed(addr))
             .collect();
+        let total = message.recipient_count();
 
         if denied.is_empty() {
             return Ok(());
@@ -74,7 +80,7 @@ impl RaisinFunctionApi {
 
         tracing::warn!(
             denied_recipients = denied.len(),
-            total_recipients = to.len(),
+            total_recipients = total,
             policy_enabled = self.email_policy.enabled,
             "raisin.email.send denied by email policy"
         );
@@ -139,9 +145,37 @@ impl RaisinFunctionApi {
     /// `{ message_id, provider, sender }` — proof of acceptance, not of
     /// delivery.
     pub(crate) async fn impl_email_send(&self, message: Value) -> Result<Value> {
-        let (message, requested_provider) = parse_message(message)?;
-        self.authorize_recipients(&message.to)?;
+        // Ordering is load-bearing: everything that can refuse the send runs
+        // before anything expensive. In particular attachment RESOLUTION —
+        // node reads and blob fetches — happens last, so a function that may
+        // not send never causes megabytes to be read on its way to being
+        // denied.
+        let (mut message, requested_provider, specs) = parse_message(message)?;
+        self.authorize_recipients(&message)?;
         let (sender, credential) = self.authorize_email(requested_provider.as_deref()).await?;
+
+        // Refuse an impossible combination before fetching bytes for it. The
+        // same check runs again inside `EmailProvider::send`, which is the
+        // structural gate no caller can bypass; this one exists only to fail
+        // earlier and cheaper.
+        if !sender.provider.supports_inline() {
+            if let Some(spec) = specs.iter().find(|s| s.content_id.is_some()) {
+                return Err(raisin_error::Error::from(EmailError::InvalidMessage(
+                    format!(
+                        "provider `{}` does not support inline attachments (attachment `{}` sets content_id); \
+                         send it as a normal attachment, or use an smtp or resend sender",
+                        sender.provider.as_str(),
+                        spec.filename.as_deref().unwrap_or("<unnamed>")
+                    ),
+                )));
+            }
+        }
+
+        let attachment_count = specs.len();
+        message.attachments = self
+            .resolve_attachments(specs, &sender.attachment_limits)
+            .await?;
+        let attachment_bytes: usize = message.attachments.iter().map(|a| a.bytes.len()).sum();
 
         let receipt = EmailProvider::send(&sender, &credential, &message)
             .await
@@ -151,7 +185,12 @@ impl RaisinFunctionApi {
             provider = sender.provider.as_str(),
             sender = %sender.name,
             message_id = %receipt.message_id,
+            // Counts only. A bcc list in a log line defeats the point of bcc.
             recipients = message.to.len(),
+            cc = message.cc.len(),
+            bcc = message.bcc.len(),
+            attachments = attachment_count,
+            attachment_bytes,
             "email sent"
         );
 
@@ -218,7 +257,9 @@ impl RaisinFunctionApi {
 /// serde to ignore. An unknown-field error is not available here (the message
 /// type is deliberately permissive), so leaving it in would mean a misspelled
 /// key silently became part of nothing.
-fn parse_message(mut message: Value) -> Result<(EmailMessage, Option<String>)> {
+fn parse_message(
+    mut message: Value,
+) -> Result<(EmailMessage, Option<String>, Vec<AttachmentSpec>)> {
     let requested_provider = message
         .as_object_mut()
         .and_then(|obj| obj.remove("provider"))
@@ -232,17 +273,27 @@ fn parse_message(mut message: Value) -> Result<(EmailMessage, Option<String>)> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
-    if let Some(to) = message.get_mut("to") {
-        if let Some(single) = to.as_str() {
-            *to = Value::Array(vec![Value::String(single.to_string())]);
+    // Lifted out for the same reason as `provider`, and for one more: the
+    // resolved `attachments` field on `EmailMessage` is deliberately not
+    // deserializable, so a caller-supplied array left in place would be
+    // dropped without a word.
+    let specs = take_attachment_specs(&mut message)?;
+
+    // All three recipient fields accept the single-address spelling that both
+    // runtimes' authors reach for first.
+    for field in ["to", "cc", "bcc"] {
+        if let Some(v) = message.get_mut(field) {
+            if let Some(single) = v.as_str() {
+                *v = Value::Array(vec![Value::String(single.to_string())]);
+            }
         }
     }
     let parsed: EmailMessage = serde_json::from_value(message).map_err(|e| {
         raisin_error::Error::from(EmailError::InvalidMessage(format!(
-            "message must be {{ to, subject, text, html?, provider? }}: {e}"
+            "message must be {{ to, cc?, bcc?, subject, text, html?, attachments?, provider? }}: {e}"
         )))
     })?;
-    Ok((parsed, requested_provider))
+    Ok((parsed, requested_provider, specs))
 }
 
 #[cfg(test)]
@@ -251,7 +302,7 @@ mod tests {
 
     #[test]
     fn a_single_recipient_string_is_accepted() {
-        let (parsed, provider) = parse_message(serde_json::json!({
+        let (parsed, provider, _) = parse_message(serde_json::json!({
             "to": "user@example.com",
             "subject": "Sign in",
             "text": "link",
@@ -264,7 +315,7 @@ mod tests {
 
     #[test]
     fn a_named_provider_is_lifted_out_of_the_message() {
-        let (parsed, provider) = parse_message(serde_json::json!({
+        let (parsed, provider, _) = parse_message(serde_json::json!({
             "to": "user@example.com",
             "subject": "Sign in",
             "text": "link",
@@ -282,7 +333,7 @@ mod tests {
     #[test]
     fn an_absent_provider_value_means_the_default() {
         for value in [serde_json::Value::Null, serde_json::json!("   ")] {
-            let (_, provider) = parse_message(serde_json::json!({
+            let (_, provider, _) = parse_message(serde_json::json!({
                 "to": "user@example.com",
                 "subject": "Sign in",
                 "text": "link",

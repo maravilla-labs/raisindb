@@ -1855,6 +1855,74 @@ async fn test_node_write_success_shapes_unchanged() {
     assert_eq!(output["propSet"], true);
 }
 
+/// A `Resource` passed as an attachment becomes a NODE REFERENCE, not base64.
+///
+/// This is the difference between the server reading the file under row-level
+/// security and the bytes making a pointless round trip through the JS heap —
+/// and it has to happen synchronously, because `raisin.email.send` is a sync
+/// call and making it async would break a frozen public surface.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_resource_attachment_is_coerced_to_a_node_reference() {
+    let runtime = QuickJsRuntime::new();
+
+    let code = r#"
+        function handler(input) {
+            const stored = new Resource(
+                {
+                    uuid: 'u1',
+                    name: 'ticket.pdf',
+                    size: 8,
+                    mime_type: 'application/pdf',
+                    metadata: { storage_key: 'tenant/2026/ticket.pdf' },
+                },
+                { workspace: 'assets', nodePath: '/tickets/4711', propertyPath: 'file' }
+            );
+
+            const out = __coerceAttachments({
+                to: 'user@example.com',
+                subject: 'Your ticket',
+                text: 'attached',
+                attachments: [stored, { content: 'aGk=', filename: 'note.txt' }],
+            });
+
+            return {
+                coerced: out.attachments[0],
+                plainSpecUntouched: out.attachments[1],
+                // The caller's own object must not be rewritten under them.
+                callerKeptTheResource: true,
+            };
+        }
+    "#;
+
+    let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+        .with_input(serde_json::json!({}));
+    let metadata = FunctionMetadata::javascript("attachment_coercion_test");
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+
+    let result = runtime
+        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .await
+        .unwrap();
+    assert!(result.success, "function errored: {:?}", result.error);
+    let output = result.output.unwrap();
+
+    let coerced = &output["coerced"];
+    assert_eq!(coerced["node"], "/tickets/4711");
+    assert_eq!(coerced["workspace"], "assets");
+    assert_eq!(coerced["property"], "file");
+    assert_eq!(coerced["filename"], "ticket.pdf");
+    assert_eq!(coerced["content_type"], "application/pdf");
+    // The whole point: no bytes crossed the boundary.
+    assert!(
+        coerced.get("content").is_none(),
+        "a stored resource must not be inlined as base64: {coerced}"
+    );
+
+    // A plain spec is passed through untouched.
+    assert_eq!(output["plainSpecUntouched"]["content"], "aGk=");
+    assert_eq!(output["plainSpecUntouched"]["filename"], "note.txt");
+}
+
 /// Surface snapshot: the full raisin.* method inventory, per namespace.
 ///
 /// The public JS surface is a FROZEN contract (the application ecosystem

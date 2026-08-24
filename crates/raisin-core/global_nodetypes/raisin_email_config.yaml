@@ -45,6 +45,14 @@ properties:
                        security is starttls | tls | none, port defaults to 587
         enabled        per-entry switch, default true
         default        marks the entry system mail goes through
+        attachments    optional bounds for this sender:
+                       { max_count, max_bytes_each, max_total_bytes }.
+                       Absent fields keep the defaults (20 attachments,
+                       10 MiB each, 10 MiB total, decoded). Raising
+                       max_total_bytes should come with a longer send
+                       timeout - the 30s per-send budget covers the upload
+                       too, so too high a cap turns a clean rejection into
+                       a timeout part-way through sending.
 
       Empty means this tenant cannot send. There is deliberately no implicit
       sender and no platform fallback account: mail either goes out as somebody

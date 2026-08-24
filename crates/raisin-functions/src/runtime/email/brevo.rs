@@ -17,8 +17,13 @@
 
 use serde::{Deserialize, Serialize};
 
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
+
 use super::provider::{build_client, error_from_response, map_transport_err, SendReceipt};
-use super::{Credential, EmailError, EmailMessage, EmailProvider, EmailSender, Result};
+use super::{
+    Credential, EmailError, EmailMessage, EmailProvider, EmailSender, ResolvedAttachment, Result,
+};
 
 /// Brevo's API root. Overridable per sender through `api_base`.
 const API_BASE: &str = "https://api.brevo.com";
@@ -42,6 +47,10 @@ struct SendRequest<'a> {
     /// From config, never from the caller.
     sender: Address<'a>,
     to: Vec<Address<'a>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    cc: Vec<Address<'a>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    bcc: Vec<Address<'a>>,
     subject: &'a str,
     text_content: &'a str,
     /// NOT optional, unlike every other provider's HTML field.
@@ -54,6 +63,28 @@ struct SendRequest<'a> {
     html_content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     reply_to: Option<Address<'a>>,
+    /// SINGULAR — Brevo's key really is `attachment` for an array of them.
+    /// `rename_all = "camelCase"` leaves a single-word field alone, so this
+    /// needs no rename, which is exactly why it looks like a typo. Pinned by
+    /// a test.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    attachment: Vec<Attachment<'a>>,
+}
+
+/// One attachment in Brevo's `attachment` array.
+///
+/// The filename field is `name`, not `filename` — Brevo differs from Resend
+/// on both the array key and the field. There is no Content-ID: inline parts
+/// are refused before reaching here, in
+/// [`EmailMessage::validate_attachments`](super::EmailMessage::validate_attachments).
+///
+/// Brevo also accepts `url` in place of `content`; not exposed, for the same
+/// reason as Resend's `path`.
+#[derive(Serialize)]
+struct Attachment<'a> {
+    name: &'a str,
+    /// Base64.
+    content: String,
 }
 
 /// Success body. Brevo answers `{"messageId": "<...>"}` for a single recipient
@@ -84,6 +115,16 @@ pub(super) async fn send(
             .iter()
             .map(|email| Address { email, name: None })
             .collect(),
+        cc: message
+            .cc
+            .iter()
+            .map(|email| Address { email, name: None })
+            .collect(),
+        bcc: message
+            .bcc
+            .iter()
+            .map(|email| Address { email, name: None })
+            .collect(),
         subject: &message.subject,
         text_content: &message.text,
         html_content: message
@@ -94,6 +135,14 @@ pub(super) async fn send(
             .reply_to
             .as_deref()
             .map(|email| Address { email, name: None }),
+        attachment: message
+            .attachments
+            .iter()
+            .map(|a| Attachment {
+                name: &a.filename,
+                content: BASE64.encode(&a.bytes),
+            })
+            .collect(),
     };
 
     let endpoint = super::provider::endpoint(from, API_BASE, SEND_PATH);
@@ -151,12 +200,8 @@ mod tests {
         let cfg = EmailSender {
             name: "brevo".to_string(),
             provider: EmailProvider::Brevo,
-            from_address: "noreply@example.com".to_string(),
             from_name: Some("Example".to_string()),
-            reply_to: None,
-            credential_ref: "secret://email/api_key".to_string(),
-            api_base: None,
-            smtp: None,
+            ..Default::default()
         };
         let msg = EmailMessage::new("user@example.com", "Sign in", "link").with_html("<b>l</b>");
         let body = SendRequest {
@@ -168,6 +213,8 @@ mod tests {
                 email: &msg.to[0],
                 name: None,
             }],
+            cc: Vec::new(),
+            bcc: Vec::new(),
             subject: &msg.subject,
             text_content: &msg.text,
             html_content: msg
@@ -175,6 +222,7 @@ mod tests {
                 .clone()
                 .unwrap_or_else(|| html_from_text(&msg.text)),
             reply_to: None,
+            attachment: Vec::new(),
         };
         let v = serde_json::to_value(&body).expect("serializes");
         assert_eq!(v["sender"]["email"], "noreply@example.com");
@@ -183,6 +231,102 @@ mod tests {
         assert_eq!(v["textContent"], "link");
         assert_eq!(v["htmlContent"], "<b>l</b>");
         assert!(v.get("replyTo").is_none());
+    }
+
+    /// Brevo differs from Resend on BOTH names: the array key is singular
+    /// `attachment`, and the filename field is `name`, not `filename`. Both
+    /// look like typos, which is exactly why they are pinned.
+    #[test]
+    fn attachments_use_brevos_singular_key_and_name_field() {
+        let cfg = EmailSender {
+            provider: EmailProvider::Brevo,
+            ..Default::default()
+        };
+        let mut msg =
+            EmailMessage::new("user@example.com", "Subject", "body").with_attachments(vec![
+                ResolvedAttachment {
+                    filename: "ticket.pdf".to_string(),
+                    content_type: "application/pdf".to_string(),
+                    bytes: b"hello".to_vec(),
+                    content_id: None,
+                },
+            ]);
+        msg.cc = vec!["cc@example.com".to_string()];
+        msg.bcc = vec!["bcc@example.com".to_string()];
+
+        let body = SendRequest {
+            sender: Address {
+                email: &cfg.from_address,
+                name: None,
+            },
+            to: vec![Address {
+                email: &msg.to[0],
+                name: None,
+            }],
+            cc: msg
+                .cc
+                .iter()
+                .map(|email| Address { email, name: None })
+                .collect(),
+            bcc: msg
+                .bcc
+                .iter()
+                .map(|email| Address { email, name: None })
+                .collect(),
+            subject: &msg.subject,
+            text_content: &msg.text,
+            html_content: html_from_text(&msg.text),
+            reply_to: None,
+            attachment: msg
+                .attachments
+                .iter()
+                .map(|a| Attachment {
+                    name: &a.filename,
+                    content: BASE64.encode(&a.bytes),
+                })
+                .collect(),
+        };
+        let v = serde_json::to_value(&body).expect("serializes");
+
+        assert!(
+            v.get("attachments").is_none(),
+            "brevo's key is singular `attachment`"
+        );
+        assert_eq!(v["attachment"][0]["name"], "ticket.pdf");
+        assert!(
+            v["attachment"][0].get("filename").is_none(),
+            "brevo names it `name`, not `filename`"
+        );
+        assert_eq!(v["attachment"][0]["content"], "aGVsbG8=");
+        assert_eq!(v["cc"][0]["email"], "cc@example.com");
+        assert_eq!(v["bcc"][0]["email"], "bcc@example.com");
+    }
+
+    #[test]
+    fn empty_copies_and_attachments_are_omitted() {
+        let cfg = EmailSender::default();
+        let msg = EmailMessage::new("user@example.com", "Subject", "body");
+        let body = SendRequest {
+            sender: Address {
+                email: &cfg.from_address,
+                name: None,
+            },
+            to: vec![Address {
+                email: &msg.to[0],
+                name: None,
+            }],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: &msg.subject,
+            text_content: &msg.text,
+            html_content: html_from_text(&msg.text),
+            reply_to: None,
+            attachment: Vec::new(),
+        };
+        let v = serde_json::to_value(&body).expect("serializes");
+        assert!(v.get("cc").is_none());
+        assert!(v.get("bcc").is_none());
+        assert!(v.get("attachment").is_none());
     }
 
     #[test]

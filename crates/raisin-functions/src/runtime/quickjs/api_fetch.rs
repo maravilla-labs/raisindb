@@ -95,7 +95,11 @@ fn register_fetch_request<'js>(
                     opts["body"] = serde_json::Value::String(s.clone());
                 }
                 crate::runtime::fetch::FetchBody::ArrayBuffer(s) => {
-                    opts["body"] = serde_json::Value::String(s.clone());
+                    // Already base64 (see `fetch_fn.rs`). It must travel under
+                    // its own key so the HTTP layer decodes it back to bytes —
+                    // as `body` it was sent as the base64 TEXT, which silently
+                    // corrupted every binary upload.
+                    opts["bodyBase64"] = serde_json::Value::String(s.clone());
                 }
             }
         }
@@ -158,10 +162,27 @@ fn register_fetch_request<'js>(
                     len_if_string = body.as_str().map(|s| s.len()).unwrap_or(0),
                     "fetch_request - extracted body"
                 );
-                let body_bytes = match body {
-                    serde_json::Value::String(s) => bytes::Bytes::from(s),
-                    serde_json::Value::Null => bytes::Bytes::new(),
-                    other => bytes::Bytes::from(serde_json::to_string(&other).unwrap_or_default()),
+                // A binary response arrives as base64 under its own key,
+                // because it could not survive a JSON string. Decoding it here
+                // means the stream the polyfill reads carries the REAL bytes,
+                // so `arrayBuffer()`, `blob()` and `bytes()` are exact rather
+                // than a re-encoding of lossily-decoded text.
+                let body_bytes = match response.get("body_base64").and_then(|v| v.as_str()) {
+                    Some(encoded) => {
+                        use base64::Engine as _;
+                        bytes::Bytes::from(
+                            base64::engine::general_purpose::STANDARD
+                                .decode(encoded.as_bytes())
+                                .unwrap_or_default(),
+                        )
+                    }
+                    None => match body {
+                        serde_json::Value::String(s) => bytes::Bytes::from(s),
+                        serde_json::Value::Null => bytes::Bytes::new(),
+                        other => {
+                            bytes::Bytes::from(serde_json::to_string(&other).unwrap_or_default())
+                        }
+                    },
                 };
 
                 tracing::trace!(body_bytes_len = body_bytes.len(), "fetch_request - body_bytes");

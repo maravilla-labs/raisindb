@@ -198,6 +198,53 @@ class Resource {
 // Make Resource globally available
 globalThis.Resource = Resource;
 
+// Turn any `Resource` in an email's `attachments` into a plain spec.
+//
+// Deliberately SYNCHRONOUS. `raisin.email.send` is a sync call, and making it
+// async to `await resource.getBinary()` would change a frozen public surface.
+// It does not need to: the primitives underneath `getBinary()` are themselves
+// sync (`__call` and `__raisin_internal.temp_getBinary`), so they are used
+// directly here.
+//
+// A stored resource becomes a NODE REFERENCE rather than base64: the server
+// then reads it through the ordinary node API, so row-level security applies
+// and the bytes never make the round trip through the JS heap. Only a temp
+// resource — one produced by resize() or toImage(), which has no node and no
+// storage key — falls back to inline base64.
+function __coerceAttachments(message) {
+    if (!message || !Array.isArray(message.attachments)) return message;
+    const out = message.attachments.map((a, i) => {
+        if (!(a instanceof Resource)) return a;
+        const ctx = a._context || {};
+        if (ctx.nodePath) {
+            return {
+                node: ctx.nodePath,
+                workspace: ctx.workspace,
+                property: ctx.propertyPath,
+                filename: a.name,
+                content_type: a.mimeType,
+            };
+        }
+        if (a._tempHandle) {
+            const bytes = __raisin_internal.temp_getBinary(a._tempHandle);
+            if (typeof bytes === 'string' && bytes.startsWith('error:')) {
+                throw new Error(bytes.substring(6));
+            }
+            return {
+                content: bytes,
+                filename: a.name || `attachment-${i + 1}`,
+                content_type: a.mimeType,
+            };
+        }
+        throw new Error(
+            `attachments[${i}] is a Resource with neither a node nor a temp handle; ` +
+            'pass { content, filename } instead'
+        );
+    });
+    // Copy rather than mutate: the caller's object is theirs.
+    return Object.assign({}, message, { attachments: out });
+}
+
 // Wrap node with resource helper methods
 function wrapNode(nodeData, workspace) {
     if (!nodeData) return null;
@@ -483,6 +530,15 @@ globalThis.raisin = {
     http: {
         // fetch(url, { method, headers, body, ... }). A failed request does
         // NOT throw — it resolves to { error, status: 0, ok: false }.
+        //
+        // A response whose bytes are not valid UTF-8 (a PDF, an image) comes
+        // back with `body: ''` and `body_base64: '<base64>'`, because those
+        // bytes cannot survive a JSON string. Pass
+        // `{ responseType: 'base64' }` to get base64 even for text. To SEND
+        // bytes, pass `{ bodyBase64: '<base64>' }` rather than putting base64
+        // in `body`, which would transmit the base64 itself.
+        // The W3C `fetch()` polyfill handles all of this for you: prefer it
+        // and read `await res.arrayBuffer()`.
         fetch: (url, options) => {
             const opts = options || {};
             const method = typeof opts.method === 'string' ? opts.method : 'GET';
@@ -913,10 +969,24 @@ globalThis.raisin = {
     // the tenant's /config/email node, NOT from the caller — a function chooses
     // who receives a message, never who it appears to be from.
     email: {
-        // send({ to, subject, text, html?, provider? })
+        // send({ to, cc?, bcc?, subject, text, html?, attachments?, provider? })
         //   -> { message_id, provider, sender }
-        // `to` is one address or an array of them. The receipt means the
-        // provider ACCEPTED the message; delivery is a later, separate event.
+        // `to`, `cc` and `bcc` each take one address or an array. The receipt
+        // means the provider ACCEPTED the message; delivery is a later,
+        // separate event.
+        //
+        // ATTACHMENTS. Each entry has exactly one source:
+        //
+        //   { content: '<base64>' | '<data: URL>', filename, contentType? }
+        //   { node: '/tickets/4711', workspace: 'assets', property: 'file' }
+        //   aResource                      // from node.getResource('file')
+        //
+        // Set `contentId` to embed one in the HTML body as
+        // `<img src="cid:that-id">`. Inline works over smtp and resend; brevo
+        // has no Content-ID and REFUSES rather than sending a broken image.
+        //
+        // A `node` attachment is read with the FUNCTION's authority, not the
+        // caller's — treat it exactly as you treat raisin.nodes.get.
         // Gated by the function's `email_policy` in its .node.yaml:
         //
         //   email_policy:
@@ -935,7 +1005,7 @@ globalThis.raisin = {
         // to the default: mail leaving through the wrong account is worse than
         // mail not leaving.
         send: (message) => {
-            const r = __call('email_send', [message]);
+            const r = __call('email_send', [__coerceAttachments(message)]);
             if (r && r.error) throw new Error(r.message || r.error);
             return r;
         },

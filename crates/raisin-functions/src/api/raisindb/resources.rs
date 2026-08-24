@@ -21,6 +21,27 @@ impl RaisinFunctionApi {
         callback(storage_key.to_string()).await
     }
 
+    /// Fetch a stored blob as raw bytes.
+    ///
+    /// Goes through the base64 callback and decodes, rather than adding a
+    /// second byte-returning callback beside it. That costs one extra copy of
+    /// the blob, which is bounded by the attachment limits — and it buys the
+    /// thing that matters more: there is still exactly ONE storage-read
+    /// callback to wire up. A parallel callback would be `None` in any
+    /// construction path that forgot it, and the symptom would be attachments
+    /// working over one transport and silently failing over another.
+    pub(crate) async fn impl_resource_get_bytes(&self, storage_key: &str) -> Result<Vec<u8>> {
+        use base64::Engine as _;
+        let encoded = self.impl_resource_get_binary(storage_key).await?;
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded.as_bytes())
+            .map_err(|e| {
+                raisin_error::Error::Backend(format!(
+                    "stored object '{storage_key}' did not decode as base64: {e}"
+                ))
+            })
+    }
+
     pub(crate) async fn impl_node_add_resource(
         &self,
         workspace: &str,
