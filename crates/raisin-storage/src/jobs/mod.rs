@@ -30,7 +30,7 @@ pub use conversation_events::{
     ConversationEventSubscription,
 };
 pub use flow_events::{
-    global_flow_broadcaster, FlowEvent, FlowEventBroadcaster, FlowEventSubscription,
+    global_flow_broadcaster, FlowEvent, FlowEventBroadcaster, FlowEventSubscription, StepUsage,
 };
 pub use monitor::{
     JobEvent, JobLogEntry, JobMonitor, JobMonitorGuard, JobMonitorHub, LogEmitter, LoggingMonitor,

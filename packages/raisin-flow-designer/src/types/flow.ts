@@ -385,21 +385,42 @@ export interface ContainerRefereeConfig {
  * (default `item`), referenced in templates as `{{ item }}` / `${item}`.
  */
 export interface LoopConfig {
-  /** Collection expression to iterate, e.g. "${steps.pick.candidates}" (must resolve to an array) */
-  over: string;
+  /**
+   * for_each: collection expression, e.g. "${steps.pick.candidates}".
+   *
+   * Optional, not required. EXACTLY ONE of `over`, `while` or `times` decides
+   * the loop's shape — `over` was mandatory while the engine hardcoded
+   * `for_each` and its while/times arms were unreachable from this format.
+   */
+  over?: string;
+  /** while: a REL condition re-tested BEFORE each iteration. */
+  while?: string;
+  /** times: a fixed repeat count. */
+  times?: number;
   /** Variable name for the current item (default "item"; snake_case REL identifier) */
   item?: string;
   /** Optional variable name for the current 0-based index */
   index?: string;
   /** Safety cap: iterate at most this many items */
   max_iterations?: number;
+  /**
+   * `while` only: drop the iteration ceiling and run purely on the condition.
+   * The executor bounds a runaway itself, so this costs a failed flow rather
+   * than a wedged worker.
+   */
+  unbounded?: boolean;
   /** Early-exit REL condition evaluated after each completed iteration, e.g. "steps.ask.response == 'accept'" */
   until?: string;
 }
 
-/** Default loop configuration */
+/**
+ * Default loop configuration.
+ *
+ * Seeds `item` only. It used to seed `over: ''`, which pinned every new loop to
+ * for_each before the author had chosen a shape — and an empty string reads as
+ * "a collection you forgot to fill in" rather than "not chosen yet".
+ */
 export const DEFAULT_LOOP_CONFIG: LoopConfig = {
-  over: '',
   item: 'item',
 };
 
@@ -516,7 +537,7 @@ export const CONTAINER_TYPE_DESCRIPTIONS: Record<ContainerType, string> = {
   parallel: 'Execute children concurrently',
   ai_sequence: 'AI-orchestrated execution',
   competition: 'Competing agents judged by a referee',
-  loop: 'Run children once per item of a collection',
+  loop: 'Repeat children: per item, while a condition holds, or a fixed number of times',
 };
 
 // ============================================================================
@@ -608,11 +629,25 @@ export interface StepStartedEvent extends BaseEvent {
 }
 
 /** Step completed event */
+/** Model usage attributable to one step. */
+export interface StepUsage {
+  input_tokens: number;
+  output_tokens: number;
+}
+
 export interface StepCompletedEvent extends BaseEvent {
   type: 'step_completed';
   node_id: string;
   output: unknown;
   duration_ms: number;
+  /**
+   * Model usage for THIS step, when it made a model call.
+   *
+   * Absent means no call was made (a function step, a decision) — distinct from
+   * a call that reported nothing, which arrives as zeros. This is what lets the
+   * canvas show cost per node rather than only per run.
+   */
+  usage?: StepUsage;
 }
 
 /** Step failed event */

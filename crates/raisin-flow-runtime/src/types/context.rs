@@ -240,6 +240,10 @@ impl FlowContext {
     /// - `input` - the triggering node data
     /// - `steps.{step_id}` - output from a specific step
     /// - `trigger` - info about what triggered the flow
+    /// - `visits.{step_id}` - how many times that node has been entered (1 on
+    ///   the first visit); the primitive that bounds a cyclic graph
+    /// - `history.{step_id}` - that node's output per visit, oldest first
+    ///   (most recent `MAX_HISTORY_PER_STEP` retained)
     /// - `{variable_name}` - flow variables
     ///
     /// This is the single source of truth for the expression evaluation
@@ -272,6 +276,25 @@ impl FlowContext {
         // Add variables directly (for backward compatibility with raisin-rel evaluation)
         for (key, value) in &self.variables {
             obj.insert(key.clone(), value.clone());
+        }
+
+        // Republish per-node visit counts as the `visits` namespace, so a
+        // condition can read `visits.draft_email` rather than the internal
+        // `__visits.draft_email`. This is what bounds a CYCLE: the engine
+        // follows a backward edge indefinitely, and an author writes
+        // `steps.critic.passed == false and visits.draft_email < 3` to stop it.
+        // Kept as a projection of the variable bag rather than its own context
+        // field so it persists, resumes and syncs with everything else.
+        if let Some(visits) = self.variables.get(crate::runtime::executor::VISITS_KEY) {
+            obj.insert("visits".to_string(), visits.clone());
+        }
+
+        // Republish per-visit output history as the `history` namespace.
+        // `steps.<id>` is a single slot holding the LATEST output; this is what
+        // lets a critic compare `history.draft[0]` against `history.draft[2]`
+        // rather than only ever seeing the most recent attempt.
+        if let Some(history) = self.variables.get(crate::runtime::executor::HISTORY_KEY) {
+            obj.insert("history".to_string(), history.clone());
         }
 
         if let Some(output) = &self.current_output {

@@ -23,6 +23,7 @@ import type {
   RetryStrategy,
   ChatStepConfig,
 } from './flow';
+import { DEFAULT_LOOP_CONFIG } from './flow';
 import type { InsertPosition } from './dnd';
 
 /** Context provided to commands for state access */
@@ -159,6 +160,8 @@ export interface StepTemplate {
     retry_strategy?: RetryStrategy;
   };
   children?: FlowNode[];
+  /** Seed config for a loop container, so a dropped loop is editable at once. */
+  loop?: LoopConfig;
 }
 
 /** Map of step types to their templates */
@@ -227,5 +230,11 @@ export const STEP_TEMPLATES: Record<StepType, StepTemplate> = {
     node_type: 'raisin:FlowContainer',
     container_type: 'loop',
     children: [],
+    // Seed the config so a newly dropped loop lands in a shape the editor can
+    // show and the validator can talk about. Without it the container arrived
+    // with no `loop` at all, which reads as "not configured" everywhere — and
+    // `DEFAULT_LOOP_CONFIG` deliberately does NOT name a shape, so the author
+    // still chooses between for-each / while / times.
+    loop: { ...DEFAULT_LOOP_CONFIG },
   },
 };

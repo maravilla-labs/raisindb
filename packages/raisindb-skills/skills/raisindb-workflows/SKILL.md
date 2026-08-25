@@ -104,9 +104,32 @@ properties:
 | `and` | Children run as a sequence |
 | `or` | REL `rules` evaluated in order; first match routes to its child; no match → container skipped. Add a `router: {agent_ref...}` and an AI agent picks the branch when no rule matched |
 | `parallel` | Children as parallel branch flows; add `fan_out` for one branch PER COLLECTION ITEM (below) |
-| `loop` | Iterate a collection (below) |
+| `loop` | Repeat children: per collection item, `while` a condition holds, or a fixed number of `times` (below) |
 | `ai_sequence` | Agentic tool loop (agent + tools until done) |
 | `competition` | Several agents answer; a referee judges/refines |
+
+### Loop — three shapes, pick exactly one
+
+`over` (a collection), `while` (a REL condition re-tested BEFORE each
+iteration), or `times` (a fixed count). Naming none or more than one is refused
+rather than resolved by precedence, because guessing which you meant is how a
+loop silently runs the wrong number of times.
+
+```yaml
+loop:
+  while: 'steps.critic.passed == false'   # re-tested each iteration
+  max_iterations: 5                       # safety ceiling
+```
+
+`unbounded: true` (with `while` only) drops the ceiling and runs purely on the
+condition. Use it deliberately: it is safe because the executor bounds a runaway
+itself, so a condition that never goes false costs a failed flow rather than a
+wedged worker — but nothing else will stop the loop. It cannot be combined with
+`max_iterations`.
+
+For "repeat until the critic passes", prefer a back edge guarded by
+`visits.<step_id>` over a `while` loop — the cycle is the shape the engine
+executes natively.
 
 ### Loop (ask-one-by-one, batch processing)
 
@@ -115,7 +138,7 @@ properties:
   node_type: raisin:FlowContainer
   container_type: loop
   loop:
-    over: "${steps.pick_candidates.candidates}"   # required, collection expr
+    over: "${steps.pick_candidates.candidates}"   # collection expr — ONE of over/while/times
     item: candidate                               # exposed as a flow variable
     index: candidate_index                        # optional
     max_iterations: 10                            # optional cap
@@ -140,7 +163,7 @@ ONE branch subgraph run per item, and the container joins every run:
   node_type: raisin:FlowContainer
   container_type: parallel
   fan_out:
-    over: "${steps.pick_candidates.candidates}"   # required, collection expr
+    over: "${steps.pick_candidates.candidates}"   # collection expr — ONE of over/while/times
     max_branches: 100                             # optional cap (default 500)
   merge_strategy: all_success                     # or merge_all | first_success
   children: [ ...branch steps reference ${item.*} and ${index}... ]
@@ -163,7 +186,16 @@ until someone accepts). **fan-out** = concurrent, always waits for all
   the native JSON type (numbers, arrays, objects):
   `quantity: "${input.quantity}"` stays a number.
 - Namespaces: `input.*` (flow input), `steps.<id>.*` (step outputs),
-  `trigger.*`, loop item vars.
+  `trigger.*`, loop item vars, plus:
+  - `visits.<step_id>` — how many times that node has been ENTERED (1 on the
+    first). This is what bounds a CYCLE: the engine follows a backward edge
+    indefinitely, so you write the limit yourself, e.g.
+    `steps.critic.passed == false and visits.draft < 3` on the edge back to
+    `draft`. `steps.<id>` is a single slot holding the LATEST output, so it
+    cannot tell you which attempt you are on.
+  - `history.<step_id>` — that node's output PER VISIT, oldest first (most
+    recent 20 retained), so a critic can compare `history.draft[0]` against
+    `history.draft[2]` instead of only ever seeing the newest.
 
 ### REL pitfalls (these WILL bite you)
 

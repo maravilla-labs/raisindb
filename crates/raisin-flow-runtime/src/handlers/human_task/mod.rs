@@ -37,7 +37,7 @@ mod step_handler_impl;
 #[cfg(test)]
 mod tests;
 
-pub use handler::HumanTaskHandler;
+pub use handler::{instance_slug, HumanTaskHandler};
 
 /// Workspace where inbox task nodes live. User homes (`raisin:User` nodes
 /// with their `inbox` children) are created in `raisin:access_control`, so

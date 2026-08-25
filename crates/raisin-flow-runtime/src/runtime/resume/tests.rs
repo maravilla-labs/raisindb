@@ -109,6 +109,7 @@ fn waiting_instance(node_id: &str, wait_info: Option<WaitInfo>) -> FlowInstance 
         compensation_stack: Vec::new(),
         error: None,
         retry_count: 0,
+        checkpoints: Vec::new(),
         started_at: Utc::now(),
         completed_at: None,
         parent_instance_ref: None,

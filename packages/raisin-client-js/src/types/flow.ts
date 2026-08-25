@@ -43,6 +43,26 @@ export interface FlowInstanceStatusResponse {
   started_at: string;
   /** Error message (if status is failed) */
   error?: string;
+  /** Execution metrics, when the server includes them. */
+  metrics?: FlowMetrics;
+}
+
+/** Execution metrics for a flow run. */
+export interface FlowMetrics {
+  total_duration_ms: number;
+  step_count: number;
+  retry_count: number;
+  compensation_count: number;
+  ai_iteration_count: number;
+  /**
+   * Model calls whose usage was reported.
+   *
+   * Counted separately from the token totals: a call that reported no usage is
+   * a different fact from no call at all.
+   */
+  ai_call_count: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
 }
 
 // ============================================================================
@@ -62,12 +82,34 @@ export interface StepStartedEvent extends BaseFlowEvent {
   step_type: string;
 }
 
+/**
+ * Model usage attributable to ONE step.
+ *
+ * Mirrors the engine's `StepUsage`. Providers disagree on the wire spelling
+ * (`input_tokens`/`output_tokens` vs OpenAI's `prompt_tokens`/
+ * `completion_tokens`); the server normalises them, so these two names are what
+ * ever reaches a client.
+ */
+export interface StepUsage {
+  input_tokens: number;
+  output_tokens: number;
+}
+
 /** A step has completed successfully */
 export interface StepCompletedEvent extends BaseFlowEvent {
   type: 'step_completed';
   node_id: string;
   output: unknown;
   duration_ms: number;
+  /**
+   * Model usage for THIS step, when it made a model call.
+   *
+   * Absent means no call was made (a function step, a decision) — as distinct
+   * from a call that reported nothing, which arrives as zeros. Flow-level totals
+   * live on the instance's metrics; this is what attributes cost to a node,
+   * which is the question anyone tuning an agent graph has.
+   */
+  usage?: StepUsage;
 }
 
 /** A step has failed */

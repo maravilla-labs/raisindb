@@ -23,13 +23,15 @@ pub use compensation::{CompensationEntry, CompensationStatus};
 pub use context::{
     ContextFrame, FlowContext, FlowContextError, FrameType, TriggerEventType, TriggerInfo,
 };
-pub use events::FlowExecutionEvent;
+pub use events::{FlowExecutionEvent, StepUsage};
 pub use flow_definition::{
     is_valid_task_type_slug, AIContainerConfig, AiExecutionConfig, DecisionConfig, FlowDefinition,
     FlowEdge, FlowMetadata, FlowNode, FunctionStepConfig, HumanTaskConfig, StepType, TaskOption,
     TaskType, ToolMode,
 };
-pub use flow_instance::{FlowInstance, FlowMetrics, FlowStatus, WaitInfo, WaitType};
+pub use flow_instance::{
+    FlowCheckpoint, FlowInstance, FlowMetrics, FlowStatus, WaitInfo, WaitType,
+};
 pub use parallel::{ChildFlowStatus, CreateChildFlowRequest};
 pub use result::{FlowError, FlowResult, StepResult};
 pub use step_execution::{FlowStepExecution, StepStatus};

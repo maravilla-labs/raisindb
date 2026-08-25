@@ -56,6 +56,20 @@ pub struct AiContainerState {
     /// Epoch millis when execution started (for total timeout enforcement)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at_ms: Option<u64>,
+
+    /// Prompt tokens across every turn of THIS container.
+    ///
+    /// Accumulated in the state rather than reported per turn because a
+    /// container re-enters itself (`StepResult::SameStep`) for each tool round,
+    /// and the executor only sees an output when the container finally
+    /// continues. Without a running total every turn but the last would go
+    /// uncounted — which for a tool loop is most of the cost.
+    #[serde(default)]
+    pub input_tokens: u64,
+
+    /// Completion tokens across every turn of this container.
+    #[serde(default)]
+    pub output_tokens: u64,
 }
 
 /// Helper functions for AI container state management

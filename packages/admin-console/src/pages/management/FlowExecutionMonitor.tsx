@@ -60,7 +60,26 @@ export interface FlowInstance {
     step_count: number
     retry_count: number
     compensation_count: number
+    ai_iteration_count?: number
+    /** Model calls whose usage was reported — a call that reported nothing is
+     *  still a call, and is a different fact from no call at all. */
+    ai_call_count?: number
+    total_input_tokens?: number
+    total_output_tokens?: number
   }
+  /** Recorded positions, when the flow opted into checkpointing. */
+  checkpoints?: FlowCheckpoint[]
+}
+
+/** One recorded position in a flow's history: where it was, and what it knew. */
+export interface FlowCheckpoint {
+  seq: number
+  node_id: string
+  variables: unknown
+  /** Which visit of `node_id` this was (1 on the first). */
+  visit?: number
+  wait_info?: unknown
+  recorded_at: string
 }
 
 export interface CompensationEntry {

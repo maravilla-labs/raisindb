@@ -34,12 +34,20 @@ export interface StepStartedEvent extends FlowEventBase {
   step_type: string
 }
 
+/** Model usage attributable to one step. */
+export interface StepUsage {
+  input_tokens: number
+  output_tokens: number
+}
+
 /** Step completed event */
 export interface StepCompletedEvent extends FlowEventBase {
   type: 'step_completed'
   node_id: string
   output: unknown
   duration_ms: number
+  /** Present only when this step made a model call. */
+  usage?: StepUsage
 }
 
 /** Step failed event */

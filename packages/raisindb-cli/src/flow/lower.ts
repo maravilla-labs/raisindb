@@ -227,10 +227,20 @@ function lowerContainer(node: DesignerNode, successor: string, out: Map<string, 
       // advances the iteration and exits to the successor when done.
       const entry = lowerNodes(children, id, out);
       const cfg = node.loop ?? {};
-      const detail = [
-        `over: ${typeof cfg.over === 'string' ? cfg.over : '(missing)'}`,
-        `item: ${typeof cfg.item === 'string' && cfg.item !== '' ? cfg.item : 'item'}`,
-      ];
+      // Branch on the SHAPE. This used to print `over: (missing)` for anything
+      // without a collection, which is now how a legitimate `while` or `times`
+      // loop renders — an explain that calls a valid flow broken is worse than
+      // no explain.
+      const detail: string[] = [];
+      if (typeof cfg.while === 'string' && cfg.while !== '') {
+        detail.push(`while: ${cfg.while}`);
+        if (cfg.unbounded === true) detail.push('unbounded (no iteration ceiling)');
+      } else if (typeof cfg.times === 'number') {
+        detail.push(`times: ${cfg.times}`);
+      } else {
+        detail.push(`over: ${typeof cfg.over === 'string' ? cfg.over : '(missing)'}`);
+      }
+      detail.push(`item: ${typeof cfg.item === 'string' && cfg.item !== '' ? cfg.item : 'item'}`);
       if (cfg.max_iterations != null) detail.push(`max_iterations: ${cfg.max_iterations}`);
       if (typeof cfg.until === 'string' && cfg.until !== '') detail.push(`until: ${cfg.until}`);
       out.set(id, {
@@ -280,8 +290,16 @@ function lowerNodes(nodes: DesignerNode[], successor: string, out: Map<string, P
 export function lowerFlow(def: DesignerFlowDefinition): LoweredFlow {
   const nodes = new Map<string, PlanNode>();
   const entry = lowerNodes(def.nodes ?? [], 'end', nodes);
-  nodes.set('start', { id: 'start', kind: 'start', detail: [], next: entry });
-  nodes.set('end', { id: 'end', kind: 'end', detail: [] });
+  // Inject the implicit caps ONLY where the author has not claimed those ids —
+  // mirroring the engine's lowering. Setting them unconditionally OVERWROTE an
+  // author-declared `start`/`end` in the plan map, so `flow explain` rendered
+  // the wrong graph for exactly the flows the engine now supports.
+  if (!nodes.has('start')) {
+    nodes.set('start', { id: 'start', kind: 'start', detail: [], next: entry });
+  }
+  if (!nodes.has('end')) {
+    nodes.set('end', { id: 'end', kind: 'end', detail: [] });
+  }
   return { entry, nodes };
 }
 

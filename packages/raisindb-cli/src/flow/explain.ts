@@ -16,7 +16,7 @@ const KIND_LABELS: Record<string, string> = {
   decision: 'decision',
   sequence: 'sequence',
   parallel: 'parallel',
-  loop: 'loop (per item)',
+  loop: 'loop',
 };
 
 /**

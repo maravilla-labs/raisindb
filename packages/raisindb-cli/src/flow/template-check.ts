@@ -151,10 +151,14 @@ export function checkTemplates(def: DesignerFlowDefinition, findings: Finding[])
     // bare flow variables in the body — treat them as known roots.
     const loopRoots = loopVariableNames(ancestors);
 
+    // Every templated field a loop carries, not just `over`. `while` and `until`
+    // are REL expressions over the same context and were never scanned — `while`
+    // because it was unreachable until the engine's designer format gained it,
+    // `until` because the shape only ever looked at one field.
     const fields = isLoopContainer
-      ? typeof node.loop?.over === 'string'
-        ? [{ field: 'loop.over', text: node.loop.over }]
-        : []
+      ? (['over', 'while', 'until'] as const)
+          .map((field) => ({ field: `loop.${field}`, text: node.loop?.[field] }))
+          .filter((f): f is { field: string; text: string } => typeof f.text === 'string')
       : templatedFields(node);
 
     for (const { field, text } of fields) {

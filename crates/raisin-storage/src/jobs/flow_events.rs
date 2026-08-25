@@ -51,6 +51,18 @@ const CHANNEL_CAPACITY: usize = 100;
 
 /// Flow execution event for broadcasting
 /// This is a simplified version of FlowExecutionEvent for serialization over SSE
+/// Model usage attributable to one step.
+///
+/// A deliberate MIRROR of the flow runtime's `StepUsage`, not a re-export: this
+/// crate does not depend on the runtime (the dependency runs the other way), and
+/// the whole `FlowEvent` enum is already a wire-shaped mirror of
+/// `FlowExecutionEvent` for the same reason.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StepUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FlowEvent {
@@ -66,6 +78,15 @@ pub enum FlowEvent {
         node_id: String,
         output: serde_json::Value,
         duration_ms: u64,
+        /// Model usage for THIS step, when it made a model call.
+        ///
+        /// `None` means no call was made (a function step, a decision), as
+        /// distinct from a call that reported nothing — which arrives as zeros.
+        /// This is the SSE stream a UI reads, so per-step cost has to travel on
+        /// it; otherwise attributing spend to a node means re-parsing the raw
+        /// step output on the client.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<StepUsage>,
         timestamp: String,
     },
     /// A step has failed

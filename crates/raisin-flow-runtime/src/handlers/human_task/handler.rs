@@ -278,16 +278,24 @@ impl HumanTaskHandler {
         step_id: &str,
         context: &FlowContext,
     ) -> String {
-        // Short path-safe slug of the instance id (UUIDs: first 8 hex chars)
-        let mut instance_slug: String = context
-            .instance_id
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric())
-            .take(8)
-            .collect();
-        if instance_slug.is_empty() {
-            instance_slug = chrono::Utc::now().timestamp_millis().to_string();
-        }
+        // A SHORT HASH OF THE WHOLE INSTANCE ID, not its first eight characters.
+        //
+        // The slug used to be `chars().filter(alphanumeric).take(8)`, which is a
+        // prefix, and a prefix is not an identity. For UUIDs the collision odds
+        // are negligible, but ids are not always UUIDs: a fork named
+        // `<original>-fork`, or any pair like `order-approval-1` and
+        // `order-approval-2`, produce the SAME task path. The `same_instance`
+        // guard on the create path catches it and falls back to
+        // `{path}-{timestamp_millis}` — which is not deterministic, so a job
+        // REDELIVERY generates yet another path and creates a duplicate task.
+        // The deterministic path is what makes that create idempotent, so
+        // collisions do not merely mis-name a node, they cost the idempotency.
+        //
+        // SHA-256 truncated to 12 hex chars: stable across processes and
+        // releases (unlike `DefaultHasher`, whose output Rust may change), which
+        // it must be because these paths are persisted and regenerated on every
+        // redelivery.
+        let instance_slug = instance_slug(&context.instance_id);
 
         // Loop iteration (set by the loop handler); 0 outside loops
         let iteration = context
@@ -301,10 +309,115 @@ impl HumanTaskHandler {
             assignee, step_id, instance_slug, iteration
         )
     }
+
+    /// The path this task WOULD have had under the pre-hash slug scheme.
+    /// See `legacy_instance_slug`; transitional, deletable once drained.
+    pub(super) fn legacy_task_path(
+        &self,
+        assignee: &str,
+        step_id: &str,
+        context: &FlowContext,
+    ) -> Option<String> {
+        let slug = legacy_instance_slug(&context.instance_id)?;
+        let iteration = context
+            .variables
+            .get("__loop_index")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        Some(format!(
+            "{}/inbox/task-{}-{}-it{}",
+            assignee, step_id, slug, iteration
+        ))
+    }
 }
 
 impl Default for HumanTaskHandler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// A short, stable, path-safe slug for a flow instance id.
+///
+/// SHA-256 truncated to 12 hex characters — a hash of the WHOLE id, never a
+/// prefix of it. `chars().take(8)` was the previous scheme, and a prefix is not
+/// an identity: `order-approval-1` and `order-approval-2` collapse to the same
+/// slug, as does any fork named after its original. The create path detects the
+/// collision and falls back to `{path}-{timestamp_millis}`, which is not
+/// deterministic — so a job redelivery generates a different path again and
+/// creates a duplicate task. The deterministic path is precisely what makes that
+/// create idempotent.
+///
+/// Stability matters more than speed here: these paths are persisted and
+/// regenerated on every redelivery, so this must not use `DefaultHasher`, whose
+/// output Rust is free to change between releases.
+pub fn instance_slug(instance_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(&Sha256::digest(instance_id.as_bytes())[..6])
+}
+
+/// The slug scheme this replaced: the first eight alphanumeric characters.
+///
+/// TRANSITIONAL. An instance that created its task under the old scheme and is
+/// redelivered after the upgrade would otherwise regenerate a different path,
+/// find nothing there, and open a SECOND task — leaving the first pending in
+/// someone's inbox forever, with the flow parked on the new one. The create path
+/// checks here too and adopts a task that is genuinely this instance's, so an
+/// in-flight approval survives the deploy.
+///
+/// Returns `None` where the old scheme was itself non-deterministic: it fell
+/// back to a timestamp when the id had no alphanumerics, and a path built from
+/// "whatever the clock said" cannot be recomputed, so there is nothing to look
+/// for.
+///
+/// Safe to delete once no instance predating the change can still be running.
+pub(super) fn legacy_instance_slug(instance_id: &str) -> Option<String> {
+    let slug: String = instance_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(8)
+        .collect();
+    (!slug.is_empty()).then_some(slug)
+}
+
+#[cfg(test)]
+mod slug_tests {
+    use super::instance_slug;
+
+    /// THE BUG THIS REPLACES: the slug was the first eight alphanumeric
+    /// characters of the instance id, and a prefix is not an identity. Ids that
+    /// share one — a fork named after its original, or a pair like
+    /// `order-approval-1` / `order-approval-2` — produced the SAME task path,
+    /// and the collision fallback appends a timestamp, which is not
+    /// deterministic and so creates a duplicate task on every redelivery.
+    #[test]
+    fn test_ids_sharing_a_prefix_do_not_collide() {
+        let a = instance_slug("order-approval-1");
+        let b = instance_slug("order-approval-2");
+        assert_ne!(
+            a, b,
+            "ids differing only past the 8th character must differ"
+        );
+
+        // The case that motivated it: forking an instance.
+        let original = instance_slug("2f8a1c04-9e3d-4b77-a1e2-000000000001");
+        let fork = instance_slug("2f8a1c04-9e3d-4b77-a1e2-000000000001-fork");
+        assert_ne!(
+            original, fork,
+            "a fork must not share its parent's task path"
+        );
+    }
+
+    /// Deterministic across calls — the create path regenerates it on every
+    /// redelivery, and that is what makes the create idempotent.
+    #[test]
+    fn test_slug_is_stable_and_path_safe() {
+        let id = "instance/with:awkward chars";
+        assert_eq!(instance_slug(id), instance_slug(id));
+        assert_eq!(instance_slug(id).len(), 12);
+        assert!(
+            instance_slug(id).chars().all(|c| c.is_ascii_hexdigit()),
+            "a slug goes into a node path; it must carry nothing that needs escaping"
+        );
     }
 }

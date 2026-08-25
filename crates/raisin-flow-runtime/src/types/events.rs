@@ -14,6 +14,20 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Model usage attributable to ONE step.
+///
+/// Carried on `StepCompleted` so a caller can attribute cost to the node that
+/// incurred it. `FlowMetrics` totals are flow-scoped and answer "what did this
+/// run cost"; they cannot answer "which step is expensive", which is the
+/// question anyone tuning an agent graph actually has — and the per-step numbers
+/// existed all along, buried in each agent step's output for a consumer to dig
+/// out and re-parse.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StepUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
 /// Events emitted during flow execution for real-time tracking
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -38,6 +52,13 @@ pub enum FlowExecutionEvent {
         output: Value,
         /// Execution duration in milliseconds
         duration_ms: u64,
+        /// Model usage for THIS step, when it made a model call.
+        ///
+        /// `None` means no call was made (a function step, a decision) — as
+        /// distinct from a call that reported nothing, which arrives as
+        /// `Some(0, 0)`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<StepUsage>,
         /// When the step completed
         timestamp: DateTime<Utc>,
     },
@@ -190,12 +211,22 @@ impl FlowExecutionEvent {
         }
     }
 
-    /// Create a StepCompleted event
+    /// Create a StepCompleted event.
+    ///
+    /// Usage is derived from the output rather than passed in: the output is
+    /// already here, every producer of this event already has it, and deriving
+    /// means no call site can forget to attribute a model call it made.
     pub fn step_completed(node_id: impl Into<String>, output: Value, duration_ms: u64) -> Self {
+        let usage =
+            crate::runtime::executor::extract_token_usage(&output).map(|(i, o)| StepUsage {
+                input_tokens: i,
+                output_tokens: o,
+            });
         Self::StepCompleted {
             node_id: node_id.into(),
             output,
             duration_ms,
+            usage,
             timestamp: Utc::now(),
         }
     }
@@ -344,5 +375,64 @@ impl FlowExecutionEvent {
             node_id,
             timestamp: Utc::now(),
         }
+    }
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+
+    /// A step that made a model call attributes its own cost, so a caller can
+    /// ask "which node is expensive" — a question the flow-scoped `FlowMetrics`
+    /// totals cannot answer.
+    #[test]
+    fn test_step_completed_attributes_model_usage() {
+        let event = FlowExecutionEvent::step_completed(
+            "draft",
+            serde_json::json!({
+                "content": "hello",
+                "usage": { "input_tokens": 1204, "output_tokens": 380 }
+            }),
+            3400,
+        );
+        match event {
+            FlowExecutionEvent::StepCompleted { usage, .. } => assert_eq!(
+                usage,
+                Some(StepUsage {
+                    input_tokens: 1204,
+                    output_tokens: 380
+                })
+            ),
+            other => panic!("expected StepCompleted, got {other:?}"),
+        }
+    }
+
+    /// "No model call" is `None`, distinct from a call that reported nothing —
+    /// a function step must not read as a zero-cost model call.
+    #[test]
+    fn test_step_without_a_model_call_has_no_usage() {
+        let event = FlowExecutionEvent::step_completed(
+            "charge",
+            serde_json::json!({ "success": true }),
+            12,
+        );
+        match event {
+            FlowExecutionEvent::StepCompleted { usage, .. } => assert!(usage.is_none()),
+            other => panic!("expected StepCompleted, got {other:?}"),
+        }
+    }
+
+    /// Absent usage is omitted from the wire form rather than serialised as
+    /// null, so a consumer reading the stream sees the field only where it means
+    /// something.
+    #[test]
+    fn test_absent_usage_is_omitted_from_the_wire_form() {
+        let json = serde_json::to_value(FlowExecutionEvent::step_completed(
+            "charge",
+            serde_json::json!({ "success": true }),
+            12,
+        ))
+        .unwrap();
+        assert!(json.get("usage").is_none(), "got {json}");
     }
 }

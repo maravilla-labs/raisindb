@@ -11,6 +11,7 @@ import { useFlowDesignerContext } from '../context/FlowDesignerContext';
 import { useThemeClasses } from '../context';
 import { isFlowStep, isFlowContainer } from '../utils';
 import { StepPropertiesEditor } from './properties/StepPropertiesEditor';
+import { LoopConfigEditor } from './properties/LoopConfigEditor';
 import { ErrorHandlingEditor } from './properties/ErrorHandlingEditor';
 import { MERGE_STRATEGY_DESCRIPTIONS } from '../types';
 import type { FlowStep, FlowContainer } from '../types';
@@ -206,20 +207,12 @@ function ContainerPropertiesContent({ container }: { container: FlowContainer })
         </div>
       )}
 
-      {/* Loop Config */}
-      {container.container_type === 'loop' && container.loop && (
-        <div>
-          <label className={clsx('block text-xs font-medium mb-1', themeClasses.stepTextMuted)}>
-            Loop Configuration
-          </label>
-          <pre className={clsx(
-            'text-xs p-2 rounded bg-gray-100 dark:bg-gray-800 overflow-x-auto',
-            themeClasses.stepText
-          )}>
-            {JSON.stringify(container.loop, null, 2)}
-          </pre>
-        </div>
-      )}
+      {/* Loop config — an editor, not a JSON dump.
+          Rendered whenever the container IS a loop, not only when it already
+          has a `loop` object: a loop with no config is exactly the one that
+          most needs the form, and the old `&& container.loop` guard meant a
+          freshly-added loop showed nothing at all. */}
+      {container.container_type === 'loop' && <LoopConfigEditor container={container} />}
 
       {/* Parallel: fan-out + join. Without a fan_out the children ARE the
           branches; with one they are a single branch run per collection item. */}

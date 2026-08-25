@@ -287,6 +287,14 @@ impl StepHandler for AiContainerHandler {
             ai_response.get("finish_reason")
         );
 
+        // Accumulate this turn's usage onto the container's running total, so a
+        // tool loop's cost survives the SameStep re-entries and reaches the
+        // flow's metrics in the final output.
+        if let Some((input, output)) = crate::runtime::executor::extract_token_usage(&ai_response) {
+            state.input_tokens = state.input_tokens.saturating_add(input);
+            state.output_tokens = state.output_tokens.saturating_add(output);
+        }
+
         // Process AI response — text/thought chunks were already emitted during streaming
         let content = ai_response
             .get("content")
@@ -353,6 +361,10 @@ impl StepHandler for AiContainerHandler {
                     "response": state.final_response,
                     "iterations": state.iteration,
                     "message_count": messages.len(),
+                    "usage": {
+                        "input_tokens": state.input_tokens,
+                        "output_tokens": state.output_tokens,
+                    },
                 });
 
                 let _ = callbacks

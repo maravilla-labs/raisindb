@@ -26,11 +26,18 @@ pub(super) fn convert_flow_event(
             node_id,
             output,
             duration_ms,
+            usage,
             timestamp,
         } => FlowEvent::StepCompleted {
             node_id,
             output,
             duration_ms,
+            // Mirrored across the crate boundary rather than re-exported:
+            // raisin-storage does not depend on the flow runtime.
+            usage: usage.map(|u| raisin_storage::jobs::StepUsage {
+                input_tokens: u.input_tokens,
+                output_tokens: u.output_tokens,
+            }),
             timestamp: timestamp.to_rfc3339(),
         },
         FlowExecutionEvent::StepFailed {

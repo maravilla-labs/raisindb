@@ -21,6 +21,17 @@ use crate::types::flow_definition::{
     StepType, ToolMode,
 };
 
+/// Is `id` used by any node in this tree, at any depth?
+///
+/// Ids share ONE namespace across nesting levels — `find_node` falls through to
+/// children — so a child called `start` collides with the injected Start node
+/// just as a top-level one does.
+fn contains_id(nodes: &[FlowNode], id: &str) -> bool {
+    nodes
+        .iter()
+        .any(|n| n.id == id || contains_id(&n.children, id))
+}
+
 impl DesignerFlowDefinition {
     /// Convert designer format to runtime format.
     ///
@@ -39,34 +50,49 @@ impl DesignerFlowDefinition {
         // - AI Sequence -> AIContainer step (children kept as tool steps)
         let entry = self.lower_nodes(&self.nodes, "end", &mut runtime_nodes, &mut edges);
 
-        // Inject implicit Start node (designer UI shows these visually but
+        // Inject implicit Start/End nodes (the designer shows these visually but
         // doesn't save them). The canonical ids "start"/"end" match the
         // fallbacks used throughout the runtime handlers.
-        let start_node = FlowNode {
+        //
+        // ONLY IF THE AUTHOR HAS NOT USED THOSE IDS. A flow whose own first step
+        // is called `start` used to get a second node with the same id, whose
+        // `next_node` pointed at `start` — i.e. at itself, since that is what
+        // `entry` resolved to. It survived only because `build_index` is
+        // last-wins, so the lookup happened to land on the author's node and the
+        // injected one was shadowed into harmlessness. On the linear fallback
+        // path `find_node` returns the FIRST match instead — the injected Start —
+        // and the flow spins on itself forever. Behaviour that depends on
+        // whether an index was built is not behaviour; when the author has
+        // already named a node `start`, that node IS the entry.
+        let start_exists = contains_id(&runtime_nodes, "start");
+        let end_exists = contains_id(&runtime_nodes, "end");
+
+        let start_node = (!start_exists).then(|| FlowNode {
             id: "start".to_string(),
             step_type: StepType::Start,
             properties: HashMap::new(),
             children: Vec::new(),
             next_node: Some(entry.clone()),
-        };
-        edges.insert(
-            0,
-            FlowEdge {
-                from: "start".to_string(),
-                to: entry,
-                label: None,
-                condition: None,
-            },
-        );
+        });
+        if !start_exists {
+            edges.insert(
+                0,
+                FlowEdge {
+                    from: "start".to_string(),
+                    to: entry,
+                    label: None,
+                    condition: None,
+                },
+            );
+        }
 
-        // Inject implicit End node
-        let end_node = FlowNode {
+        let end_node = (!end_exists).then(|| FlowNode {
             id: "end".to_string(),
             step_type: StepType::End,
             properties: HashMap::new(),
             children: Vec::new(),
             next_node: None,
-        };
+        });
 
         // Flow-level error_strategy "continue" lowers to continue_on_fail on
         // work steps that don't declare their own error handling.
@@ -85,10 +111,11 @@ impl DesignerFlowDefinition {
             }
         }
 
-        // Build final node list: Start + lowered nodes + End
-        let mut all_nodes = vec![start_node];
+        // Build final node list: Start + lowered nodes + End (each cap present
+        // only when the author did not already claim its id).
+        let mut all_nodes: Vec<FlowNode> = start_node.into_iter().collect();
         all_nodes.append(&mut runtime_nodes);
-        all_nodes.push(end_node);
+        all_nodes.extend(end_node);
 
         // Preserve flow-level settings in metadata
         let mut metadata = FlowMetadata::default();
@@ -591,12 +618,37 @@ impl DesignerFlowDefinition {
                     let body_entry = self.lower_nodes(children, id, output, edges);
 
                     let mut props = HashMap::new();
+                    // The SHAPE comes from the config, not a hardcoded default.
+                    // `for_each` used to be written in unconditionally, which is
+                    // what made the runtime's `while` and `times` arms
+                    // unreachable from the designer format.
                     props.insert(
                         "loop_type".to_string(),
-                        Value::String("for_each".to_string()),
+                        Value::String(
+                            loop_config
+                                .as_ref()
+                                .map(|c| c.loop_type())
+                                .unwrap_or("for_each")
+                                .to_string(),
+                        ),
                     );
                     if let Some(cfg) = loop_config {
-                        props.insert("collection".to_string(), Value::String(cfg.over.clone()));
+                        if let Some(over) = &cfg.over {
+                            props.insert("collection".to_string(), Value::String(over.clone()));
+                        }
+                        if let Some(cond) = &cfg.while_condition {
+                            props.insert("condition".to_string(), Value::String(cond.clone()));
+                        }
+                        // Lowered whenever it is set, NOT only for a `while`.
+                        // Dropping it on a for_each here would mean the author
+                        // wrote a word that did nothing and never heard about
+                        // it; carrying it through is what lets `validate` say so.
+                        if cfg.unbounded {
+                            props.insert("unbounded".to_string(), Value::Bool(true));
+                        }
+                        if let Some(times) = cfg.times {
+                            props.insert("times".to_string(), Value::Number(times.into()));
+                        }
                         props.insert("item_var".to_string(), Value::String(cfg.item.clone()));
                         if let Some(index) = &cfg.index {
                             props.insert("index_var".to_string(), Value::String(index.clone()));

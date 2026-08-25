@@ -52,7 +52,7 @@ properties:
 
 // Two doctor ERRORS: hyphenated step id used with dot access in a template
 // (TEMPLATE_HYPHENATED_STEP_PATH) and a loop container without loop.over
-// (LOOP_MISSING_OVER).
+// (LOOP_MISSING_SHAPE).
 const BROKEN_FLOW_YAML = `node_type: raisin:Flow
 properties:
   name: broken-flow
@@ -126,7 +126,7 @@ describe('doctorWorkflowData (pure shared entry point)', () => {
       ],
     });
     const codes = result.findings.map((f) => f.code);
-    expect(codes).toContain('LOOP_MISSING_OVER');
+    expect(codes).toContain('LOOP_MISSING_SHAPE');
     expect(codes).toContain('TEMPLATE_HYPHENATED_STEP_PATH');
   });
 
@@ -180,10 +180,10 @@ describe('validatePackageFlows', () => {
     expect(results[key].file_type).toBe('content');
 
     const errorCodes = results[key].errors.map((e) => e.error_code);
-    expect(errorCodes).toContain('LOOP_MISSING_OVER');
+    expect(errorCodes).toContain('LOOP_MISSING_SHAPE');
     expect(errorCodes).toContain('TEMPLATE_HYPHENATED_STEP_PATH');
     // node id is part of the message for debuggability
-    const loopError = results[key].errors.find((e) => e.error_code === 'LOOP_MISSING_OVER');
+    const loopError = results[key].errors.find((e) => e.error_code === 'LOOP_MISSING_SHAPE');
     expect(loopError?.message).toContain('loop_items');
   });
 
@@ -244,7 +244,7 @@ describe('mergeFlowResults', () => {
           {
             file_path: 'content/a/.node.yaml',
             field_path: 'workflow_data',
-            error_code: 'LOOP_MISSING_OVER',
+            error_code: 'LOOP_MISSING_SHAPE',
             message: 'missing over',
             severity: 'error',
             fix_type: 'manual',
@@ -302,7 +302,7 @@ describe('validatePackageDirectory (WASM schema + flow doctor, full gate)', () =
     const allErrorCodes = Object.values(results).flatMap((r) =>
       r.errors.map((e) => e.error_code)
     );
-    expect(allErrorCodes).toContain('LOOP_MISSING_OVER');
+    expect(allErrorCodes).toContain('LOOP_MISSING_SHAPE');
     expect(allErrorCodes).toContain('TEMPLATE_HYPHENATED_STEP_PATH');
   });
 });

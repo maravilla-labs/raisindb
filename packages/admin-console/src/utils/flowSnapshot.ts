@@ -176,6 +176,28 @@ function runtimeNodeToStep(node: RuntimeFlowNode): FlowStep {
       if (agentRef) stepProps.agent_ref = toReference(agentRef, agentWorkspace)
       break
 
+    // An agent picking the branch, and competing agents judged by a referee.
+    // These fell through to the generic label below, which is a shame precisely
+    // because they are the interesting nodes in an agent graph — a run showed
+    // "agent_decision: route" instead of naming the agent doing the routing.
+    case 'agent_decision':
+    case 'ai_decision':
+    case 'agent_router':
+      stepProps.step_type = 'ai_agent'
+      stepProps.action = action || (agentRef ? `route via ${lastSegment(agentRef)}` : `route: ${node.id}`)
+      if (agentRef) stepProps.agent_ref = toReference(agentRef, agentWorkspace)
+      break
+
+    case 'competition':
+    case 'ai_competition':
+      stepProps.step_type = 'ai_agent'
+      stepProps.action = action || `best of: ${node.id}`
+      break
+
+    case 'join':
+      stepProps.action = action || `join: ${node.id}`
+      break
+
     default:
       stepProps.action = action || `${node.step_type}: ${node.id}`
       break

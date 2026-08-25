@@ -483,6 +483,7 @@ fn make_instance(workflow_data: Value, input: Value) -> FlowInstance {
         compensation_stack: Vec::new(),
         error: None,
         retry_count: 0,
+        checkpoints: Vec::new(),
         started_at: chrono::Utc::now(),
         completed_at: None,
         parent_instance_ref: None,
@@ -1181,7 +1182,8 @@ async fn second_run_creates_fresh_task_and_ignores_previous_runs_completed_task(
 
     // Instance-scoped path: contains the instance slug and iteration marker
     assert!(
-        task_path1.contains("flow1") && task_path1.ends_with("-it0"),
+        task_path1.contains(&raisin_flow_runtime::instance_slug("flow-1"))
+            && task_path1.ends_with("-it0"),
         "task path must be instance + iteration scoped, got: {}",
         task_path1
     );
@@ -1263,7 +1265,13 @@ async fn stale_completed_task_at_path_never_satisfies_new_wait() {
 
     // The deterministic path the step would use for instance "flow-1",
     // step "approve", iteration 0
-    let base_path = "/users/manager/inbox/task-approve-flow1-it0";
+    // Derived, not hardcoded: the slug is a hash of the whole instance id, so
+    // the expectation follows the implementation instead of restating it.
+    let base_path = format!(
+        "/users/manager/inbox/task-approve-{}-it0",
+        raisin_flow_runtime::instance_slug("flow-1")
+    );
+    let base_path = base_path.as_str();
 
     // Seed a stale COMPLETED task at that path (e.g. left over from an
     // earlier visit of the same step)
@@ -1317,13 +1325,73 @@ async fn stale_completed_task_at_path_never_satisfies_new_wait() {
     assert_eq!(stale["properties"]["status"], json!("completed"));
 }
 
+/// UPGRADE PATH: a task this instance created under the PREVIOUS (prefix-based)
+/// slug scheme is adopted, not duplicated.
+///
+/// Without this, an instance that parked before the upgrade and is redelivered
+/// after it regenerates a different path, finds nothing there, and opens a
+/// SECOND task — leaving the first pending in someone's inbox forever while the
+/// flow waits on the other. This is the deploy-window case, and it is the only
+/// reason the old scheme is still computed at all.
+#[tokio::test]
+async fn pending_task_from_the_previous_path_scheme_is_adopted() {
+    let harness = Harness::new();
+
+    // What the old scheme (first 8 alphanumerics of "flow-1") would have built.
+    let legacy_path = "/users/manager/inbox/task-approve-flow1-it0";
+    let current_path = format!(
+        "/users/manager/inbox/task-approve-{}-it0",
+        raisin_flow_runtime::instance_slug("flow-1")
+    );
+    assert_ne!(
+        legacy_path, current_path,
+        "the schemes must actually differ"
+    );
+
+    harness.seed_node(
+        "raisin:access_control",
+        legacy_path,
+        json!({
+            "node_type": "raisin:InboxTask",
+            "properties": {
+                "flow_instance_id": "flow-1",
+                "step_id": "approve",
+                "status": "pending",
+                "title": "Approve order"
+            }
+        }),
+    );
+
+    let id = run_to_quiescence(&harness, approval_flow(), json!({"order_id": "ORD-9"})).await;
+    let instance = harness.instance(&id);
+
+    assert_eq!(instance.status, FlowStatus::Waiting);
+    assert_eq!(
+        instance.wait_info.as_ref().unwrap().target_path.as_deref(),
+        Some(legacy_path),
+        "the flow must wait on the task the human can already see"
+    );
+    assert!(
+        harness
+            .get_stored_node("raisin:access_control", &current_path)
+            .is_none(),
+        "adopting means NOT opening a second task at the new path"
+    );
+}
+
 /// A still-PENDING task for the same instance/step at the deterministic
 /// path is reused (idempotent re-delivery) instead of duplicated.
 #[tokio::test]
 async fn pending_task_for_same_wait_is_reused_not_duplicated() {
     let harness = Harness::new();
 
-    let base_path = "/users/manager/inbox/task-approve-flow1-it0";
+    // Derived, not hardcoded: the slug is a hash of the whole instance id, so
+    // the expectation follows the implementation instead of restating it.
+    let base_path = format!(
+        "/users/manager/inbox/task-approve-{}-it0",
+        raisin_flow_runtime::instance_slug("flow-1")
+    );
+    let base_path = base_path.as_str();
     harness.seed_node(
         "raisin:access_control",
         base_path,

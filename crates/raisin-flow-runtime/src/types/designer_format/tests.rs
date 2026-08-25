@@ -389,9 +389,11 @@ fn test_loop_config_defaults_item_var() {
 }
 
 #[test]
-fn test_loop_config_missing_over_is_a_conversion_error() {
-    // `over` is required: a loop block without it must fail to parse, so
-    // from_workflow_data surfaces an InvalidDefinition error.
+fn test_loop_without_a_shape_is_rejected_by_validation() {
+    // `over` is no longer required at PARSE time — a loop may instead be a
+    // `while` or a `times` — so the "you must say which kind of loop this is"
+    // check moved to validation, where it also covers hand-authored runtime
+    // format rather than only the designer lowering.
     let json = r#"{
         "version": 1,
         "nodes": [
@@ -401,18 +403,79 @@ fn test_loop_config_missing_over_is_a_conversion_error() {
         ]
     }"#;
 
-    let parsed: Result<DesignerFlowDefinition, _> = serde_json::from_str(json);
-    assert!(parsed.is_err(), "loop config without 'over' must not parse");
-
-    let err = crate::types::FlowDefinition::from_workflow_data(
+    let def = crate::types::FlowDefinition::from_workflow_data(
         serde_json::from_str::<serde_json::Value>(json).unwrap(),
     )
-    .unwrap_err();
+    .expect("a shapeless loop still parses; validation is what refuses it");
+
+    let err = def.validate().unwrap_err().to_string();
     assert!(
-        err.to_string().contains("over"),
-        "error should mention the missing 'over' field: {}",
-        err
+        err.contains("'over'") && err.contains("'while'") && err.contains("'times'"),
+        "the error must say what the author may choose from: {err}"
     );
+}
+
+/// All three loop shapes reach the runtime. `while` and `times` were previously
+/// unreachable from the designer format, because `over` was mandatory and
+/// `loop_type` was hardcoded to `for_each`.
+#[test]
+fn test_loop_shapes_lower_to_their_runtime_types() {
+    let lower = |cfg: &str| {
+        let json = format!(
+            r#"{{ "version": 1, "nodes": [
+                {{ "id": "each", "node_type": "raisin:FlowContainer", "container_type": "loop",
+                   "loop": {cfg},
+                   "children": [ {{ "id": "body", "node_type": "raisin:FlowStep",
+                                    "properties": {{ "function_ref": "/lib/x" }} }} ] }}
+            ] }}"#
+        );
+        let def = crate::types::FlowDefinition::from_workflow_data(
+            serde_json::from_str::<serde_json::Value>(&json).unwrap(),
+        )
+        .unwrap();
+        let node = def.find_node("each").expect("loop node").clone();
+        (
+            node.properties
+                .get("loop_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            node,
+        )
+    };
+
+    let (kind, n) = lower(r#"{ "over": "${input.items}" }"#);
+    assert_eq!(kind, "for_each");
+    assert!(n.properties.contains_key("collection"));
+
+    let (kind, n) = lower(r#"{ "while": "steps.critic.passed == false" }"#);
+    assert_eq!(kind, "while", "a `while` loop must lower as one");
+    assert_eq!(
+        n.properties.get("condition").and_then(|v| v.as_str()),
+        Some("steps.critic.passed == false")
+    );
+
+    let (kind, n) = lower(r#"{ "times": 3 }"#);
+    assert_eq!(kind, "times");
+    assert_eq!(n.properties.get("times").and_then(|v| v.as_u64()), Some(3));
+}
+
+/// Naming two shapes is refused rather than resolved by precedence.
+#[test]
+fn test_loop_with_two_shapes_is_rejected() {
+    let json = r#"{
+        "version": 1,
+        "nodes": [
+            { "id": "each", "node_type": "raisin:FlowContainer", "container_type": "loop",
+              "loop": { "over": "${input.items}", "times": 3 },
+              "children": [] }
+        ]
+    }"#;
+    let def = crate::types::FlowDefinition::from_workflow_data(
+        serde_json::from_str::<serde_json::Value>(json).unwrap(),
+    )
+    .unwrap();
+    assert!(def.validate().unwrap_err().to_string().contains("at once"));
 }
 
 #[test]
@@ -749,4 +812,81 @@ fn test_designer_human_task_literal_deadline_stays_numeric() {
     let step = runtime.nodes.iter().find(|n| n.id == "approve").unwrap();
     assert_eq!(step.get_i64_property("due_in_seconds"), Some(86400));
     assert_eq!(step.get_u32_property("priority"), Some(4));
+}
+
+/// An unbounded `while` reaches the runtime, and the bounded default is
+/// preserved when the flag is absent.
+#[test]
+fn test_unbounded_while_lowers_and_defaults_to_bounded() {
+    let lower = |cfg: &str| {
+        let json = format!(
+            r#"{{ "version": 1, "nodes": [
+                {{ "id": "spin", "node_type": "raisin:FlowContainer", "container_type": "loop",
+                   "loop": {cfg},
+                   "children": [ {{ "id": "body", "node_type": "raisin:FlowStep",
+                                    "properties": {{ "function_ref": "/lib/x" }} }} ] }}
+            ] }}"#
+        );
+        crate::types::FlowDefinition::from_workflow_data(
+            serde_json::from_str::<serde_json::Value>(&json).unwrap(),
+        )
+        .unwrap()
+    };
+
+    let def = lower(r#"{ "while": "steps.critic.passed == false", "unbounded": true }"#);
+    let node = def.find_node("spin").unwrap();
+    assert_eq!(
+        node.properties.get("unbounded").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    assert!(def.validate().is_ok(), "{:?}", def.validate());
+
+    // Absent, the safety ceiling stays: silently dropping a limit is not
+    // something an author should get by omission.
+    let def = lower(r#"{ "while": "steps.critic.passed == false" }"#);
+    assert!(def
+        .find_node("spin")
+        .unwrap()
+        .properties
+        .get("unbounded")
+        .is_none());
+}
+
+/// `unbounded` is meaningless on a for_each or a times loop, so it is refused
+/// rather than accepted as a word that does nothing.
+#[test]
+fn test_unbounded_is_rejected_on_bounded_loop_shapes() {
+    let json = r#"{
+        "version": 1,
+        "nodes": [
+            { "id": "each", "node_type": "raisin:FlowContainer", "container_type": "loop",
+              "loop": { "over": "${input.items}", "unbounded": true },
+              "children": [] }
+        ]
+    }"#;
+    let def = crate::types::FlowDefinition::from_workflow_data(
+        serde_json::from_str::<serde_json::Value>(json).unwrap(),
+    )
+    .unwrap();
+    let err = def.validate().unwrap_err().to_string();
+    assert!(err.contains("unbounded"), "{err}");
+}
+
+/// Naming both a ceiling and no ceiling is a contradiction, not a precedence
+/// puzzle.
+#[test]
+fn test_unbounded_with_max_iterations_is_rejected() {
+    let json = r#"{
+        "version": 1,
+        "nodes": [
+            { "id": "spin", "node_type": "raisin:FlowContainer", "container_type": "loop",
+              "loop": { "while": "true", "unbounded": true, "max_iterations": 10 },
+              "children": [] }
+        ]
+    }"#;
+    let def = crate::types::FlowDefinition::from_workflow_data(
+        serde_json::from_str::<serde_json::Value>(json).unwrap(),
+    )
+    .unwrap();
+    assert!(def.validate().unwrap_err().to_string().contains("pick one"));
 }

@@ -45,14 +45,50 @@ pub(crate) fn calculate_timeout(metadata: &Value) -> Option<chrono::DateTime<Utc
         .map(|ms| Utc::now() + chrono::Duration::milliseconds(ms as i64))
 }
 
+/// Resolve a step's named `retry_strategy` preset, if it names a known one.
+///
+/// The designer schema has advertised `retry_strategy`
+/// (`none|quick|standard|aggressive|llm`) all along, and `runtime::retry`
+/// implements every preset — but nothing ever read the property here, so
+/// setting it was a SILENT NO-OP: an author asking for `aggressive` got the
+/// type default of 3, and an `llm` step that should back off for ten seconds
+/// retried on the legacy 10/30/60s ladder. A schema that advertises a knob the
+/// engine ignores is worse than not having the knob.
+///
+/// An unrecognised name resolves to `None` (falling back to the defaults)
+/// rather than to `none()`, so a typo does not silently disable retries.
+pub(crate) fn retry_strategy_config(step: &FlowNode) -> Option<crate::runtime::retry::RetryConfig> {
+    use crate::runtime::retry::strategies;
+    let name = step
+        .properties
+        .get("retry_strategy")
+        .and_then(|v| v.as_str())?;
+    match name {
+        "none" => Some(strategies::none()),
+        "quick" => Some(strategies::quick()),
+        "standard" => Some(strategies::standard()),
+        "aggressive" => Some(strategies::aggressive()),
+        "llm" => Some(strategies::llm()),
+        other => {
+            tracing::warn!(
+                step_id = %step.id,
+                retry_strategy = %other,
+                "Unknown retry_strategy, falling back to the step-type default"
+            );
+            None
+        }
+    }
+}
+
 /// Get max retries for a step.
 ///
-/// The default comes from the step TYPE (see
-/// `StepType::default_max_retries`): steps whose re-entry duplicates work —
-/// `parallel`, `sub_flow`, `loop` — default to no retries, and must opt in
-/// explicitly. An explicit `max_retries` always wins.
+/// Precedence: an explicit `max_retries` wins, then a named `retry_strategy`
+/// preset, then the step TYPE default (see `StepType::default_max_retries`) —
+/// where steps whose re-entry duplicates work (`parallel`, `sub_flow`, `loop`)
+/// default to no retries and must opt in explicitly.
 pub(crate) fn get_max_retries(step: &FlowNode) -> u32 {
     step.get_u32_property("max_retries")
+        .or_else(|| retry_strategy_config(step).map(|c| c.max_retries))
         .unwrap_or_else(|| step.step_type.default_max_retries())
 }
 
@@ -62,10 +98,17 @@ pub(crate) fn get_max_retries(step: &FlowNode) -> u32 {
 /// attempt, capped at `retry_max_delay_ms`); without a configured base
 /// delay, falls back to the legacy 10/30/60/120s ladder.
 pub(crate) fn calculate_backoff(retry_count: u32, step: Option<&FlowNode>) -> chrono::Duration {
-    let base_delay_ms = step.and_then(|s| s.get_u64_property("retry_base_delay_ms"));
+    // A named preset supplies the base/max delay when the step did not set them
+    // explicitly, so `retry_strategy: llm` actually waits like an LLM call
+    // instead of falling through to the legacy 10/30/60s ladder.
+    let strategy = step.and_then(retry_strategy_config);
+    let base_delay_ms = step
+        .and_then(|s| s.get_u64_property("retry_base_delay_ms"))
+        .or_else(|| strategy.as_ref().map(|c| c.base_delay_ms));
     if let Some(base_ms) = base_delay_ms.filter(|ms| *ms > 0) {
         let max_ms = step
             .and_then(|s| s.get_u64_property("retry_max_delay_ms"))
+            .or_else(|| strategy.as_ref().map(|c| c.max_delay_ms))
             .filter(|ms| *ms > 0)
             .unwrap_or(u64::MAX);
         let factor = 2u64.saturating_pow(retry_count.saturating_sub(1).min(32));
@@ -79,6 +122,157 @@ pub(crate) fn calculate_backoff(retry_count: u32, step: Option<&FlowNode>) -> ch
         _ => 120,
     };
     chrono::Duration::seconds(seconds)
+}
+
+/// Pull `(input_tokens, output_tokens)` out of whatever shape a provider used.
+///
+/// There is no single spelling: the platform's own AI layer writes
+/// `usage.input_tokens` / `usage.output_tokens`, OpenAI-compatible providers
+/// write `usage.prompt_tokens` / `usage.completion_tokens`, and some responses
+/// hoist the counts to the top level. Accepting only one of those is how a
+/// token counter reads zero against a live provider and looks broken.
+///
+/// Returns `None` when the value carries no usage at all, so a caller can tell
+/// "no model call here" from "a call that reported nothing".
+pub(crate) fn extract_token_usage(value: &Value) -> Option<(u64, u64)> {
+    let scope = value.get("usage").unwrap_or(value);
+    let pick = |names: &[&str]| -> Option<u64> {
+        names
+            .iter()
+            .find_map(|n| scope.get(*n).and_then(|v| v.as_u64()))
+            .or_else(|| {
+                names
+                    .iter()
+                    .find_map(|n| value.get(*n).and_then(|v| v.as_u64()))
+            })
+    };
+    let input = pick(&["input_tokens", "prompt_tokens"]);
+    let output = pick(&["output_tokens", "completion_tokens"]);
+    match (input, output) {
+        (None, None) => None,
+        (i, o) => Some((i.unwrap_or(0), o.unwrap_or(0))),
+    }
+}
+
+/// The variable-bag key holding per-node visit counts.
+///
+/// Internal bookkeeping, hence the `__` prefix: the execution loop already
+/// refuses to let a step output overwrite a `__*` key, so a step cannot forge
+/// its own visit count.
+pub(crate) const VISITS_KEY: &str = "__visits";
+
+/// Record that `step_id` is being entered, and return which visit this is
+/// (1 on the first).
+///
+/// Counted on ENTRY rather than on completion so a step can read its own
+/// attempt number, and so a step that fails still burns an attempt — otherwise
+/// a cycle guarded by `visits.x < 3` would never terminate on the failure path,
+/// which is the one that actually loops.
+pub(crate) fn bump_visit_count(instance: &mut FlowInstance, step_id: &str) -> u64 {
+    let Some(vars) = instance.variables.as_object_mut() else {
+        return 1;
+    };
+    let visits = vars
+        .entry(VISITS_KEY.to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    let Some(map) = visits.as_object_mut() else {
+        return 1;
+    };
+    let next = map.get(step_id).and_then(|v| v.as_u64()).unwrap_or(0) + 1;
+    map.insert(step_id.to_string(), Value::from(next));
+    next
+}
+
+/// The variable-bag key holding each node's per-visit output history.
+pub(crate) const HISTORY_KEY: &str = "__history";
+
+/// How many visits of a single node keep their output.
+///
+/// Bounded because the instance is one persisted node: an unbounded history
+/// over a 5000-item `for_each` would grow the row without limit. Twenty is far
+/// more than a review cycle needs (three or four revisions) and far less than a
+/// long iteration produces, so in practice the case that wants history keeps
+/// all of it and the case that would explode keeps a tail.
+pub(crate) const MAX_HISTORY_PER_STEP: usize = 20;
+
+/// Retract the flat variables this step contributed LAST time, then record the
+/// new output: `step_outputs.<id>` (latest), `__history.<id>` (per visit), and
+/// the flat merge.
+///
+/// **The retraction is what makes a re-visited node honest.** A step's object
+/// output is merged key-by-key into the shared variable bag, so before this a
+/// second visit that produced a smaller object left the first visit's extra keys
+/// standing, and a visit that produced nothing left ALL of them — indefinitely,
+/// under names that read like current data.
+///
+/// It retracts a key only when the value is still exactly what this step wrote.
+/// That is the whole subtlety: blindly removing the keys would delete a value
+/// another step legitimately overwrote in between, turning a stale-read bug into
+/// a lost-write bug. Unchanged means unclaimed; changed means someone else owns
+/// it now and it is not ours to remove.
+pub(crate) fn record_step_output(
+    vars: &mut serde_json::Map<String, Value>,
+    step_id: &str,
+    output: &Value,
+) {
+    // What this step contributed on its previous visit (its whole previous
+    // output — the flat keys it merged ARE that object's keys, so no separate
+    // provenance table is needed).
+    let previous = vars
+        .get("step_outputs")
+        .and_then(|o| o.get(step_id))
+        .cloned()
+        .unwrap_or(Value::Null);
+
+    if let Value::Object(prev_map) = &previous {
+        for (key, prev_value) in prev_map {
+            if key.starts_with("__") || key == "step_outputs" {
+                continue;
+            }
+            if vars.get(key) == Some(prev_value) {
+                vars.remove(key);
+            }
+        }
+    }
+
+    // Latest output, unconditional (see the null-output note in the executor).
+    vars.entry("step_outputs".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()))
+        .as_object_mut()
+        .map(|outputs| outputs.insert(step_id.to_string(), output.clone()));
+
+    // Per-visit history, so a critic CAN compare revision 1 against revision 3.
+    // `steps.<id>` is one slot and always the latest; without this an author
+    // asking "is this better than the last attempt" has nothing to read.
+    if let Some(history) = vars
+        .entry(HISTORY_KEY.to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()))
+        .as_object_mut()
+    {
+        let entries = history
+            .entry(step_id.to_string())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if let Some(list) = entries.as_array_mut() {
+            list.push(output.clone());
+            // Drop from the FRONT so the newest is always last; a reader after
+            // the cap wants the recent attempts, not the first ones.
+            while list.len() > MAX_HISTORY_PER_STEP {
+                list.remove(0);
+            }
+        }
+    }
+
+    vars.insert("__last_output".to_string(), output.clone());
+
+    if let Value::Object(map) = output {
+        for (key, value) in map {
+            // Never let a step output clobber internal bookkeeping.
+            if key.starts_with("__") || key == "step_outputs" {
+                continue;
+            }
+            vars.insert(key.clone(), value.clone());
+        }
+    }
 }
 
 /// Build a FlowContext from a FlowInstance
@@ -266,5 +460,243 @@ mod tests {
         assert_eq!(parse_wait_type("human_task"), WaitType::HumanTask);
         assert_eq!(parse_wait_type("retry"), WaitType::Retry);
         assert_eq!(parse_wait_type("unknown"), WaitType::Event);
+    }
+
+    // -----------------------------------------------------------------------
+    // record_step_output: provenance retraction + per-visit history
+    // -----------------------------------------------------------------------
+
+    fn vars_of(v: Value) -> serde_json::Map<String, Value> {
+        v.as_object().cloned().unwrap()
+    }
+
+    /// A second visit that produces LESS must not leave the first visit's extra
+    /// keys standing in the shared bag.
+    #[test]
+    fn test_revisit_retracts_its_own_stale_flat_keys() {
+        let mut vars = vars_of(serde_json::json!({}));
+
+        record_step_output(
+            &mut vars,
+            "draft",
+            &serde_json::json!({
+                "text": "v1", "tone": "formal"
+            }),
+        );
+        assert_eq!(vars.get("tone").and_then(|v| v.as_str()), Some("formal"));
+
+        // Second visit drops `tone` entirely.
+        record_step_output(&mut vars, "draft", &serde_json::json!({ "text": "v2" }));
+
+        assert_eq!(vars.get("text").and_then(|v| v.as_str()), Some("v2"));
+        assert!(
+            vars.get("tone").is_none(),
+            "the first visit's key must not survive a visit that did not produce it"
+        );
+    }
+
+    /// A visit that produces NOTHING retracts everything it contributed.
+    #[test]
+    fn test_null_revisit_retracts_everything_it_contributed() {
+        let mut vars = vars_of(serde_json::json!({}));
+        record_step_output(
+            &mut vars,
+            "translate",
+            &serde_json::json!({
+                "locale": "de", "translations": ["guten tag"]
+            }),
+        );
+
+        record_step_output(&mut vars, "translate", &Value::Null);
+
+        assert!(
+            vars.get("locale").is_none(),
+            "stale locale must not survive"
+        );
+        assert!(
+            vars.get("translations").is_none(),
+            "stale payload must not survive"
+        );
+        assert!(
+            vars["step_outputs"]["translate"].is_null(),
+            "and the latest output must read as nothing"
+        );
+    }
+
+    /// THE SUBTLETY: retraction is conservative. A key another step overwrote in
+    /// the meantime belongs to that step now, and must survive — blindly
+    /// removing this step's old keys would turn a stale-read bug into a
+    /// lost-write bug.
+    #[test]
+    fn test_retraction_leaves_a_key_another_step_overwrote() {
+        let mut vars = vars_of(serde_json::json!({}));
+        record_step_output(&mut vars, "a", &serde_json::json!({ "shared": "from-a" }));
+        record_step_output(&mut vars, "b", &serde_json::json!({ "shared": "from-b" }));
+
+        // `a` runs again and produces nothing. `shared` is now B's value.
+        record_step_output(&mut vars, "a", &Value::Null);
+
+        assert_eq!(
+            vars.get("shared").and_then(|v| v.as_str()),
+            Some("from-b"),
+            "a value another step owns must not be retracted by this one"
+        );
+    }
+
+    /// Every visit is kept, oldest first, so a critic can compare revisions.
+    #[test]
+    fn test_history_records_each_visit_in_order() {
+        let mut vars = vars_of(serde_json::json!({}));
+        for n in 1..=3 {
+            record_step_output(&mut vars, "draft", &serde_json::json!({ "rev": n }));
+        }
+
+        let history = vars[HISTORY_KEY]["draft"].as_array().unwrap();
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[0]["rev"], 1, "oldest first");
+        assert_eq!(history[2]["rev"], 3);
+        // `steps.<id>` stays the latest.
+        assert_eq!(vars["step_outputs"]["draft"]["rev"], 3);
+    }
+
+    /// History is bounded: the instance is one persisted node, and a long
+    /// `for_each` would otherwise grow it without limit. The TAIL is what is
+    /// kept, because a reader past the cap wants the recent attempts.
+    #[test]
+    fn test_history_is_bounded_and_keeps_the_most_recent() {
+        let mut vars = vars_of(serde_json::json!({}));
+        let total = MAX_HISTORY_PER_STEP + 5;
+        for n in 1..=total {
+            record_step_output(&mut vars, "loop_body", &serde_json::json!({ "i": n }));
+        }
+
+        let history = vars[HISTORY_KEY]["loop_body"].as_array().unwrap();
+        assert_eq!(history.len(), MAX_HISTORY_PER_STEP);
+        assert_eq!(history[history.len() - 1]["i"], total, "newest retained");
+        assert_eq!(
+            history[0]["i"],
+            total - MAX_HISTORY_PER_STEP + 1,
+            "oldest retained"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // retry_strategy presets (previously a silent no-op)
+    // -----------------------------------------------------------------------
+
+    fn step_with(props: &[(&str, Value)]) -> FlowNode {
+        FlowNode {
+            id: "s".to_string(),
+            step_type: crate::types::StepType::FunctionStep,
+            properties: props
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+            children: Vec::new(),
+            next_node: None,
+        }
+    }
+
+    /// A named preset now decides the retry budget. Before this it was read by
+    /// nothing: `aggressive` silently got the step-type default of 3.
+    #[test]
+    fn test_retry_strategy_preset_sets_max_retries() {
+        assert_eq!(
+            get_max_retries(&step_with(&[("retry_strategy", Value::from("aggressive"))])),
+            10
+        );
+        assert_eq!(
+            get_max_retries(&step_with(&[("retry_strategy", Value::from("llm"))])),
+            5
+        );
+        assert_eq!(
+            get_max_retries(&step_with(&[("retry_strategy", Value::from("none"))])),
+            0
+        );
+    }
+
+    /// An explicit `max_retries` still wins over the preset.
+    #[test]
+    fn test_explicit_max_retries_beats_the_preset() {
+        let step = step_with(&[
+            ("retry_strategy", Value::from("aggressive")),
+            ("max_retries", Value::from(1)),
+        ]);
+        assert_eq!(get_max_retries(&step), 1);
+    }
+
+    /// A typo must NOT silently disable retries - it falls back to the default.
+    #[test]
+    fn test_unknown_retry_strategy_falls_back_not_to_zero() {
+        let step = step_with(&[("retry_strategy", Value::from("agressive"))]);
+        assert_eq!(
+            get_max_retries(&step),
+            crate::types::StepType::FunctionStep.default_max_retries(),
+            "a misspelled strategy must not read as 'no retries'"
+        );
+    }
+
+    /// The preset also supplies the backoff, so `llm` waits like an LLM call
+    /// instead of falling through to the legacy 10/30/60s ladder.
+    #[test]
+    fn test_retry_strategy_preset_drives_backoff() {
+        let step = step_with(&[("retry_strategy", Value::from("llm"))]);
+        // llm: base 10_000ms, doubling per attempt, capped at 120_000ms.
+        assert_eq!(calculate_backoff(1, Some(&step)).num_milliseconds(), 10_000);
+        assert_eq!(calculate_backoff(2, Some(&step)).num_milliseconds(), 20_000);
+        assert_eq!(
+            calculate_backoff(6, Some(&step)).num_milliseconds(),
+            120_000
+        );
+
+        // Without a strategy the legacy ladder still applies.
+        let plain = step_with(&[]);
+        assert_eq!(calculate_backoff(1, Some(&plain)).num_seconds(), 10);
+    }
+
+    // -----------------------------------------------------------------------
+    // Token usage extraction
+    // -----------------------------------------------------------------------
+
+    /// Providers do not agree on a spelling. Accepting only one is how a token
+    /// counter reads zero against a live provider and looks broken.
+    #[test]
+    fn test_extract_token_usage_accepts_every_provider_shape() {
+        // Platform shape
+        assert_eq!(
+            extract_token_usage(&serde_json::json!({
+                "usage": { "input_tokens": 120, "output_tokens": 30 }
+            })),
+            Some((120, 30))
+        );
+        // OpenAI-compatible
+        assert_eq!(
+            extract_token_usage(&serde_json::json!({
+                "usage": { "prompt_tokens": 8, "completion_tokens": 4 }
+            })),
+            Some((8, 4))
+        );
+        // Hoisted to the top level
+        assert_eq!(
+            extract_token_usage(&serde_json::json!({
+                "input_tokens": 5, "output_tokens": 6
+            })),
+            Some((5, 6))
+        );
+    }
+
+    /// "No model call" and "a call that reported nothing" are different facts.
+    #[test]
+    fn test_extract_token_usage_distinguishes_absent_from_zero() {
+        assert_eq!(
+            extract_token_usage(&serde_json::json!({ "status": "ok" })),
+            None,
+            "a plain function output is not a model call"
+        );
+        assert_eq!(
+            extract_token_usage(&serde_json::json!({ "usage": { "input_tokens": 0 } })),
+            Some((0, 0)),
+            "a reported zero is still a call"
+        );
     }
 }

@@ -162,14 +162,23 @@ describe('flow doctor: schema/shape checks', () => {
         fnStep('dup'),
         fnStep('dup'),
         { node_type: 'raisin:FlowStep', properties: { action: 'x', function_ref: '/lib/x' } },
-        fnStep('start'),
         fnStep('__internal'),
       ],
     };
     const found = codes(check(def));
     expect(found).toContain('DUPLICATE_NODE_ID');
     expect(found).toContain('EMPTY_NODE_ID');
-    expect(found.filter((c) => c === 'RESERVED_NODE_ID')).toHaveLength(2);
+    // Only the `__` prefix is reserved now.
+    expect(found.filter((c) => c === 'RESERVED_NODE_ID')).toHaveLength(1);
+  });
+
+  it('allows a step the author named "start"', () => {
+    // The engine injects its implicit start/end caps ONLY when the author has
+    // not already claimed those ids, so a flow whose own first step is called
+    // `start` is legal and IS the entry. Rejecting it here would refuse a flow
+    // the platform runs.
+    const found = codes(check({ nodes: [fnStep('start'), fnStep('end')] }));
+    expect(found).not.toContain('RESERVED_NODE_ID');
   });
 
   it('flags an empty flow', () => {
@@ -836,7 +845,7 @@ describe('flow doctor: AI router and competition containers', () => {
       ],
     };
     const found = codes(check(def));
-    expect(found).toContain('LOOP_MISSING_OVER');
+    expect(found).toContain('LOOP_MISSING_SHAPE');
     expect(found).toContain('LOOP_INVALID_VARIABLE');
     expect(found).toContain('LOOP_INVALID_MAX_ITERATIONS');
   });
@@ -852,7 +861,55 @@ describe('flow doctor: AI router and competition containers', () => {
         },
       ],
     };
-    expect(codes(check(def))).toContain('LOOP_MISSING_OVER');
+    expect(codes(check(def))).toContain('LOOP_MISSING_SHAPE');
+  });
+
+  const loopWith = (loop: Record<string, unknown>): DesignerFlowDefinition => ({
+    nodes: [
+      {
+        id: 'spin',
+        node_type: 'raisin:FlowContainer',
+        container_type: 'loop',
+        loop,
+        children: [fnStep('body')],
+      },
+    ],
+  });
+
+  it('accepts a while loop and a times loop, not only for_each', () => {
+    // `over` used to be mandatory here — correct while the engine hardcoded
+    // for_each and its while/times arms were unreachable from the designer
+    // format. They are reachable now, so demanding `over` rejected flows the
+    // engine runs happily.
+    expect(codes(check(loopWith({ while: 'steps.critic.passed == false' })))).not.toContain(
+      'LOOP_MISSING_SHAPE'
+    );
+    expect(codes(check(loopWith({ times: 3 })))).not.toContain('LOOP_MISSING_SHAPE');
+    expect(codes(check(loopWith({ over: '${input.items}' })))).not.toContain('LOOP_MISSING_SHAPE');
+  });
+
+  it('flags a loop that names more than one shape', () => {
+    expect(codes(check(loopWith({ over: '${input.items}', times: 3 })))).toContain(
+      'LOOP_AMBIGUOUS_SHAPE'
+    );
+  });
+
+  it('flags unbounded outside a while loop, and unbounded with a ceiling', () => {
+    expect(codes(check(loopWith({ over: '${input.items}', unbounded: true })))).toContain(
+      'LOOP_UNBOUNDED_WITHOUT_WHILE'
+    );
+    expect(
+      codes(check(loopWith({ while: 'true', unbounded: true, max_iterations: 10 })))
+    ).toContain('LOOP_UNBOUNDED_WITH_MAX');
+    expect(codes(check(loopWith({ while: 'true', unbounded: true })))).not.toContain(
+      'LOOP_UNBOUNDED_WITHOUT_WHILE'
+    );
+  });
+
+  it('validates step references inside a while condition, not just until', () => {
+    expect(codes(check(loopWith({ while: 'steps.ghost.done == false' })))).toContain(
+      'LOOP_CONDITION_UNKNOWN_STEP'
+    );
   });
 
   it('flags until conditions referencing unknown steps and loop config on non-loop containers', () => {
@@ -878,7 +935,7 @@ describe('flow doctor: AI router and competition containers', () => {
       ],
     };
     const found = codes(check(def));
-    expect(found).toContain('LOOP_UNTIL_UNKNOWN_STEP');
+    expect(found).toContain('LOOP_CONDITION_UNKNOWN_STEP');
     expect(found).toContain('LOOP_ON_NON_LOOP');
   });
 

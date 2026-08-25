@@ -406,6 +406,41 @@ pub(super) async fn handle_error_result(
         instance_id, instance.retry_count
     );
 
+    // Always `Err`, so the `true` is never observed; it is the safe reading if
+    // that ever changes, because `false` would send the executor back around the
+    // loop on a flow it has just marked failed.
+    fail_flow_terminally(
+        instance_id,
+        instance,
+        &current_step.id,
+        error,
+        flow_start,
+        callbacks,
+    )
+    .await
+    .map(|()| true)
+}
+
+/// Fail the flow NOW: no retry, no error edge, no continue-on-fail.
+///
+/// This is the tail of `handle_error_result` — reached once the recovery
+/// options are exhausted — extracted so a RUNAWAY GUARD can jump straight to
+/// it. For a guard, every recovery option is actively wrong: retrying re-enters
+/// the same non-terminating cycle, and an error edge lets the flow carry on
+/// from a state the engine has already declared it cannot reason about. The
+/// order of what follows is load-bearing: mark failed, compensate, emit, save,
+/// then tell a waiting parent — a parent parked on a join is released only by
+/// that last call, and skipping it strands the whole tree.
+///
+/// Always returns `Err(error)`, after the instance has been persisted.
+pub(super) async fn fail_flow_terminally(
+    instance_id: &str,
+    instance: &mut crate::types::FlowInstance,
+    failed_step_id: &str,
+    error: FlowError,
+    flow_start: &Instant,
+    callbacks: &dyn FlowCallbacks,
+) -> FlowResult<()> {
     instance.status = FlowStatus::Failed;
     instance.error = Some(error.to_string());
     instance.completed_at = Some(Utc::now());
@@ -421,7 +456,7 @@ pub(super) async fn handle_error_result(
             instance_id,
             FlowExecutionEvent::flow_failed(
                 error.to_string(),
-                Some(current_step.id.clone()),
+                Some(failed_step_id.to_string()),
                 total_duration_ms,
             ),
         )

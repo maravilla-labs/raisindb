@@ -90,6 +90,7 @@ async fn seed_waiting_instance(storage: &InMemoryStorage, instance_id: &str, ste
         compensation_stack: Vec::new(),
         error: None,
         retry_count: 0,
+        checkpoints: Vec::new(),
         started_at: chrono::Utc::now(),
         completed_at: None,
         parent_instance_ref: None,

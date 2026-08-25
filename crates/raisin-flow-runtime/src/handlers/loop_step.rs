@@ -52,6 +52,12 @@ struct LoopState {
     item_var: String,
     /// Variable name for index (optional)
     index_var: Option<String>,
+    /// No iteration ceiling: run while the condition holds.
+    ///
+    /// `#[serde(default)]` so loop state persisted before this field existed
+    /// still deserialises, as bounded — the safe reading.
+    #[serde(default)]
+    unbounded: bool,
 }
 
 #[async_trait]
@@ -141,6 +147,8 @@ fn start_for_each_loop(
         results: Vec::new(),
         item_var: item_var.clone(),
         index_var: index_var.clone(),
+        // A for_each is bounded by its collection by definition.
+        unbounded: false,
     };
 
     // Store loop state
@@ -190,8 +198,22 @@ fn start_while_loop(
         FlowError::MissingProperty("condition required for while loop".to_string())
     })?;
 
-    // Get max iterations (safety limit)
-    let max_iterations = step.get_u32_property("max_iterations").unwrap_or(1000) as usize;
+    // A `while` loop terminates on its CONDITION; a count is a safety net, not
+    // semantics. `unbounded: true` removes the net deliberately — which is only
+    // reasonable because the executor bounds a runaway itself
+    // (`MAX_STEPS_PER_EXECUTION`), so a mis-written condition costs a failed flow
+    // rather than a wedged worker. Absent, the ceiling stays at 1000: silently
+    // dropping a safety limit is not something an author should get by omission.
+    let unbounded = step
+        .properties
+        .get("unbounded")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let max_iterations = if unbounded {
+        usize::MAX
+    } else {
+        step.get_u32_property("max_iterations").unwrap_or(1000) as usize
+    };
 
     // Initialize loop state
     let state = LoopState {
@@ -201,12 +223,17 @@ fn start_while_loop(
         results: Vec::new(),
         item_var: "iteration".to_string(),
         index_var: Some("index".to_string()),
+        unbounded,
     };
 
-    // Evaluate initial condition
-    // For now, we use a simple truthy check
-    // Full implementation would use REL evaluator
-    let should_continue = evaluate_simple_condition(&condition, context);
+    // REL, the same evaluator decision steps and the `until` clause use.
+    //
+    // This used to call a placeholder truthy check that looked up the condition
+    // string as a VARIABLE NAME and, failing that, returned `true` for any
+    // non-empty string. So every real expression — `steps.critic.passed == false`,
+    // anything with an operator in it — evaluated to `true` unconditionally, and
+    // a `while` loop silently became "run max_iterations times".
+    let should_continue = evaluate_rel_condition(&condition, context)?;
 
     if !should_continue {
         // Condition false from start - skip loop
@@ -268,6 +295,7 @@ fn start_times_loop(
         results: Vec::new(),
         item_var: "iteration".to_string(),
         index_var: Some("index".to_string()),
+        unbounded: false,
     };
 
     // Store state
@@ -317,11 +345,26 @@ fn continue_loop(
         None => false,
     };
 
+    // A `while` loop re-tests its CONDITION after every iteration — that is what
+    // makes it a while loop. It was previously evaluated once, at loop start, and
+    // never again: `continue_loop` only ever looked at `until` and the index, so
+    // the loop ran `max_iterations` times regardless of the condition going
+    // false. `state.total` is still the safety ceiling.
+    let is_while = step.get_string_property("loop_type").as_deref() == Some("while");
+    let while_exhausted = match (is_while, step.get_string_property("condition")) {
+        (true, Some(condition)) => !evaluate_rel_condition(&condition, context)?,
+        _ => false,
+    };
+
     // Move to next iteration
     state.index += 1;
 
-    // Check if loop is complete
-    if until_satisfied || state.index >= state.total {
+    // Check if loop is complete. An unbounded `while` has no index ceiling —
+    // its condition (re-tested above) and `until` are the only ways out, with the
+    // executor's own step budget as the backstop against a condition that never
+    // goes false.
+    let ceiling_reached = !state.unbounded && state.index >= state.total;
+    if until_satisfied || while_exhausted || ceiling_reached {
         // Loop complete - clean up and continue
         context.variables.remove(loop_state_key);
         context.variables.remove(&state.item_var);
@@ -419,24 +462,6 @@ fn evaluate_rel_condition(condition: &str, context: &FlowContext) -> FlowResult<
     })
 }
 
-/// Simple condition evaluator (placeholder for REL integration)
-fn evaluate_simple_condition(condition: &str, context: &FlowContext) -> bool {
-    // Very simple truthy check - full implementation would use REL
-    if let Some(value) = context.variables.get(condition.trim_start_matches('$')) {
-        match value {
-            Value::Bool(b) => *b,
-            Value::Null => false,
-            Value::Number(n) => n.as_f64().map(|f| f != 0.0).unwrap_or(false),
-            Value::String(s) => !s.is_empty(),
-            Value::Array(a) => !a.is_empty(),
-            Value::Object(o) => !o.is_empty(),
-        }
-    } else {
-        // Default to true for non-empty conditions
-        !condition.trim().is_empty()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,9 +492,76 @@ mod tests {
         assert_eq!(result.len(), 5);
     }
 
+    /// An unbounded `while` has no index ceiling: `state.total` is not what ends
+    /// it. Before this, `max_iterations` (default 1000) was always the real
+    /// terminator, so "run while the condition holds" could not be expressed.
     #[test]
-    fn test_evaluate_simple_condition() {
+    fn test_unbounded_while_state_has_no_ceiling() {
+        let step = FlowNode {
+            id: "spin".to_string(),
+            step_type: crate::types::StepType::Loop,
+            properties: [
+                ("loop_type".to_string(), json!("while")),
+                ("condition".to_string(), json!("true")),
+                ("unbounded".to_string(), json!(true)),
+            ]
+            .into_iter()
+            .collect(),
+            children: Vec::new(),
+            next_node: Some("end".to_string()),
+        };
+        let mut context = create_test_context();
+        let result = start_while_loop(&step, &mut context, "__loop_spin").unwrap();
+        assert!(matches!(result, StepResult::Continue { .. }));
+
+        let state: LoopState =
+            serde_json::from_value(context.variables.get("__loop_spin").unwrap().clone()).unwrap();
+        assert!(state.unbounded, "the flag must survive into the loop state");
+        assert_eq!(state.total, usize::MAX, "no ceiling");
+
+        // And the bounded default is unchanged when the flag is absent.
+        let mut bounded_step = step.clone();
+        bounded_step.properties.remove("unbounded");
+        let mut context = create_test_context();
+        start_while_loop(&bounded_step, &mut context, "__loop_spin").unwrap();
+        let state: LoopState =
+            serde_json::from_value(context.variables.get("__loop_spin").unwrap().clone()).unwrap();
+        assert!(!state.unbounded);
+        assert_eq!(state.total, 1000, "the safety ceiling stays by default");
+    }
+
+    /// Loop state persisted before `unbounded` existed must deserialise as
+    /// BOUNDED - the safe reading.
+    #[test]
+    fn test_legacy_loop_state_reads_as_bounded() {
+        let legacy = json!({
+            "index": 2, "total": 10, "items": [], "results": [],
+            "item_var": "iteration", "index_var": "index"
+        });
+        let state: LoopState = serde_json::from_value(legacy).unwrap();
+        assert!(!state.unbounded);
+    }
+
+    /// The `while` condition is REL, not a variable-name truthy check.
+    ///
+    /// The placeholder this replaces looked the condition string up as a
+    /// VARIABLE and, failing that, returned `true` for any non-empty string —
+    /// so every real expression evaluated to `true` and a `while` loop silently
+    /// meant "run max_iterations times". These are the exact shapes that used to
+    /// be indistinguishable.
+    #[test]
+    fn test_while_condition_is_evaluated_as_rel() {
         let context = create_test_context();
-        assert!(evaluate_simple_condition("$continue_flag", &context));
+
+        // A real expression that is FALSE must evaluate false, not "non-empty
+        // string, therefore true".
+        assert!(
+            !evaluate_rel_condition("1 == 2", &context).unwrap(),
+            "a false expression must not read as true"
+        );
+        assert!(evaluate_rel_condition("1 == 1", &context).unwrap());
+
+        // A variable still works, now through the expression language.
+        assert!(evaluate_rel_condition("continue_flag", &context).unwrap());
     }
 }

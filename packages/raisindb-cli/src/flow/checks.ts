@@ -92,13 +92,17 @@ function checkIds(def: DesignerFlowDefinition, findings: Finding[]): void {
       return;
     }
     seen.set(id, (seen.get(id) ?? 0) + 1);
-    if (id === 'start' || id === 'end' || id.startsWith('__')) {
+    // `__` stays reserved — those are the engine's internal bookkeeping keys.
+    // `start` / `end` no longer are: the lowering injects its implicit caps ONLY
+    // when the author has not already claimed those ids, so a flow whose own
+    // first step is called `start` is legal and IS the entry.
+    if (id.startsWith('__')) {
       findings.push({
         code: 'RESERVED_NODE_ID',
         severity: 'error',
         nodeId: id,
         field: 'id',
-        message: `Node id "${id}" is reserved ("start"/"end" are injected by the engine; "__" prefixes are internal).`,
+        message: `Node id "${id}" is reserved — the "__" prefix is engine-internal bookkeeping.`,
       });
     }
   });
@@ -279,17 +283,61 @@ function checkLoop(node: DesignerNode, allIds: Set<string>, findings: Finding[])
   const nodeId = node.id ?? '<missing-id>';
   const loop = node.loop;
 
-  if (loop == null || typeof loop.over !== 'string' || loop.over.trim() === '') {
+  // A loop names EXACTLY ONE shape. `over` was mandatory here, which was right
+  // when the engine hardcoded `loop_type: for_each` and its `while`/`times` arms
+  // were unreachable from the designer format. They are reachable now, so
+  // demanding `over` rejects flows the engine runs happily.
+  const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
+  const named = [
+    str(loop?.over) !== '' ? 'over' : null,
+    str(loop?.while) !== '' ? 'while' : null,
+    typeof loop?.times === 'number' ? 'times' : null,
+  ].filter((x): x is string => x != null);
+
+  if (named.length === 0) {
     findings.push({
-      code: 'LOOP_MISSING_OVER',
+      code: 'LOOP_MISSING_SHAPE',
       severity: 'error',
       nodeId,
-      field: 'loop.over',
+      field: 'loop',
       message:
-        'Loop container requires loop.over — the collection expression to iterate (e.g. ${steps.pick.items}). The engine refuses a loop block without it.',
+        'Loop container needs exactly one of loop.over (a collection expression, e.g. ${steps.pick.items}), loop.while (a REL condition re-tested each iteration), or loop.times (a fixed count).',
+    });
+  } else if (named.length > 1) {
+    findings.push({
+      code: 'LOOP_AMBIGUOUS_SHAPE',
+      severity: 'error',
+      nodeId,
+      field: 'loop',
+      message: `Loop container names ${named.length} shapes at once (${named.join(', ')}); exactly one decides how it iterates. The engine refuses this rather than picking by precedence.`,
     });
   }
+
   if (loop == null) return;
+
+  // `unbounded` drops the iteration ceiling, which only means anything for a
+  // `while`: a for_each is bounded by its collection and a times by its count.
+  if (loop.unbounded === true) {
+    if (str(loop.while) === '') {
+      findings.push({
+        code: 'LOOP_UNBOUNDED_WITHOUT_WHILE',
+        severity: 'error',
+        nodeId,
+        field: 'loop.unbounded',
+        message:
+          'loop.unbounded applies only to a while loop — a for_each is bounded by its collection and a times by its count.',
+      });
+    }
+    if (loop.max_iterations != null) {
+      findings.push({
+        code: 'LOOP_UNBOUNDED_WITH_MAX',
+        severity: 'error',
+        nodeId,
+        field: 'loop.unbounded',
+        message: 'Loop is both unbounded and capped by max_iterations; pick one.',
+      });
+    }
+  }
 
   // item/index become flow variables referenced as REL identifiers —
   // anything outside [A-Za-z0-9_] silently breaks template resolution.
@@ -318,25 +366,33 @@ function checkLoop(node: DesignerNode, allIds: Set<string>, findings: Finding[])
     });
   }
 
-  if (typeof loop.until === 'string' && loop.until.trim() !== '') {
-    if (!balancedCondition(loop.until)) {
+  // BOTH conditions, not just `until`. They are the same kind of thing — a REL
+  // expression over the flow context — and `while` was previously unreachable,
+  // so it had never been checked. An unbalanced quote or a reference to a step
+  // that does not exist fails at RUN time, mid-flow, which is the expensive
+  // place to find out.
+  for (const field of ['until', 'while'] as const) {
+    const condition = loop[field];
+    if (typeof condition !== 'string' || condition.trim() === '') continue;
+
+    if (!balancedCondition(condition)) {
       findings.push({
         code: 'INVALID_CONDITION',
         severity: 'error',
         nodeId,
-        field: 'loop.until',
-        message: `loop.until condition has unbalanced parentheses or quotes: ${loop.until}`,
+        field: `loop.${field}`,
+        message: `loop.${field} condition has unbalanced parentheses or quotes: ${condition}`,
       });
     }
-    const { stepRefs } = expressionRoots(loop.until);
+    const { stepRefs } = expressionRoots(condition);
     for (const stepId of stepRefs) {
       if (!allIds.has(stepId)) {
         findings.push({
-          code: 'LOOP_UNTIL_UNKNOWN_STEP',
+          code: 'LOOP_CONDITION_UNKNOWN_STEP',
           severity: 'error',
           nodeId,
-          field: 'loop.until',
-          message: `loop.until references steps.${stepId} but no step with id "${stepId}" exists.`,
+          field: `loop.${field}`,
+          message: `loop.${field} references steps.${stepId} but no step with id "${stepId}" exists.`,
         });
       }
     }

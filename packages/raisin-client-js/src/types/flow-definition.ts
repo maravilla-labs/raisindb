@@ -50,7 +50,7 @@ export function getRefPath(ref: RaisinReference): string {
 // ============================================================================
 
 /** Container types */
-export type ContainerType = 'and' | 'or' | 'parallel' | 'ai_sequence';
+export type ContainerType = 'and' | 'or' | 'parallel' | 'loop' | 'ai_sequence' | 'competition';
 
 /** Step error behavior */
 export type StepErrorBehavior = 'stop' | 'skip' | 'continue';
@@ -223,7 +223,9 @@ export interface FlowStepProperties {
   /** Lua script for evaluation */
   lua_script?: string;
   /** Condition expression (REL) - same namespaces as templates:
-   * `input.*`, `steps.<id>.*`, `trigger.*`, flow variables */
+   * `input.*`, `steps.<id>.*`, `trigger.*`, `visits.<step_id>` (how many times a
+ * node has been entered — what bounds a cyclic graph), `history.<step_id>`
+ * (that node's output per visit, oldest first), flow variables */
   condition?: string;
   /** Key for payload data */
   payload_key?: string;
@@ -359,12 +361,48 @@ export interface FanOutConfig {
 /** How a parallel container joins its branches */
 export type MergeStrategy = 'merge_all' | 'first_success' | 'all_success';
 
-/** Container node with children (AND/OR/Parallel/AI) */
+/**
+ * How a loop container iterates.
+ *
+ * EXACTLY ONE of `over`, `while` or `times` decides the shape. `over` was once
+ * required — correct while the engine hardcoded `for_each` and its while/times
+ * arms were unreachable from the designer format — so it is optional here, and
+ * naming none or several is refused by the engine rather than resolved by
+ * precedence.
+ */
+export interface LoopConfig {
+  /** for_each: expression resolving to the collection to iterate. */
+  over?: string;
+  /** while: a REL condition re-tested BEFORE each iteration. */
+  while?: string;
+  /** times: a fixed repeat count. */
+  times?: number;
+  /** Variable name for the current item (default `item`). */
+  item?: string;
+  /** Variable name for the current 0-based index. */
+  index?: string;
+  /** Safety cap on iterations. */
+  max_iterations?: number;
+  /**
+   * `while` only: drop the iteration ceiling and run purely on the condition.
+   *
+   * Opt-in rather than the meaning of an absent `max_iterations`. Safe because
+   * the executor bounds a runaway itself, so a condition that never goes false
+   * costs a failed flow rather than a wedged worker.
+   */
+  unbounded?: boolean;
+  /** Early-exit REL condition, evaluated after each completed iteration. */
+  until?: string;
+}
+
+/** Container node with children (AND/OR/Parallel/Loop/AI/Competition) */
 export interface FlowDefinitionContainer extends FlowDefinitionNodeBase {
   node_type: 'raisin:FlowContainer';
   container_type: ContainerType;
   rules?: ContainerRule[];
   children: FlowDefinitionNode[];
+  /** Iteration configuration (only for loop type) */
+  loop?: LoopConfig;
   /** AI container configuration (only for ai_sequence type) */
   ai_config?: AiContainerConfig;
   /** Fan-out configuration (only for parallel type): one branch per collection item */

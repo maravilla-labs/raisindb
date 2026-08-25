@@ -196,6 +196,10 @@ export class AddStepCommand extends AbstractCommand {
       node_type: 'raisin:FlowContainer',
       container_type: template.container_type!,
       children: [],
+      // Carry the template's seed config through. Dropping it here is why a
+      // freshly-added loop arrived with no `loop` object at all, however the
+      // template was written.
+      ...(template.loop ? { loop: { ...template.loop } } : {}),
     } as FlowContainer;
   }
 }

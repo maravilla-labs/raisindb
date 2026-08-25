@@ -68,6 +68,13 @@ pub struct FlowInstance {
     #[serde(default)]
     pub retry_count: u32,
 
+    /// Recorded positions, oldest first, when checkpointing is enabled.
+    ///
+    /// Bounded by the flow's own `checkpoints` setting; the oldest is dropped
+    /// once the cap is reached, because a debugger wants the recent past.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checkpoints: Vec<FlowCheckpoint>,
+
     /// When the flow execution started
     pub started_at: DateTime<Utc>,
 
@@ -92,6 +99,93 @@ pub struct FlowInstance {
 }
 
 impl FlowInstance {
+    /// The flow's checkpoint budget, from `metadata.custom.checkpoints`.
+    ///
+    /// `0` (the default, and anything unparseable) means checkpointing is off.
+    /// Opt-in rather than always-on: a snapshot copies the whole variable bag,
+    /// and a flow moving large payloads would pay that on every step.
+    pub fn checkpoint_limit(definition: &Value) -> usize {
+        definition
+            .get("metadata")
+            .and_then(|m| m.get("custom"))
+            .and_then(|c| c.get("checkpoints"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize
+    }
+
+    /// Record the current position, dropping the oldest beyond `limit`.
+    pub fn record_checkpoint(&mut self, limit: usize, visit: u64) {
+        if limit == 0 {
+            return;
+        }
+        let seq = self.checkpoints.last().map(|c| c.seq + 1).unwrap_or(0);
+        self.checkpoints.push(FlowCheckpoint {
+            seq,
+            node_id: self.current_node_id.clone(),
+            variables: self.variables.clone(),
+            visit,
+            wait_info: self.wait_info.clone(),
+            recorded_at: Utc::now(),
+        });
+        while self.checkpoints.len() > limit {
+            self.checkpoints.remove(0);
+        }
+    }
+
+    /// Build a NEW instance positioned at one of this instance's checkpoints.
+    ///
+    /// **A fork, never a rewind.** The original is left exactly as it is,
+    /// because its side effects already happened: an order was charged, mail
+    /// went out, inbox tasks exist. Moving a live instance backwards would make
+    /// the record disagree with the world and re-run every one of those on the
+    /// way forward. Forking says the honest thing instead — here is a second
+    /// run that begins from what the first knew at that moment — and leaves
+    /// whether the side effects are safe to repeat as the caller's judgement,
+    /// which is the only place that judgement can live.
+    ///
+    /// The fork carries the same definition snapshot, so it is the same flow;
+    /// it starts `Pending` with a fresh version, no wait, no error and an empty
+    /// compensation stack, since it has undone nothing and has nothing parked.
+    ///
+    /// **It does not inherit a parked inbox task, and must not.** A task is
+    /// completed once, so two instances sharing one would race to consume a
+    /// single human decision. Forking from a checkpoint that was waiting on a
+    /// human therefore RE-ASKS: the fork re-executes that step and opens its own
+    /// task, at its own path — which is safe because the path is derived from
+    /// the whole instance id (see `generate_task_path`). Forking from a
+    /// checkpoint taken AFTER the human answered inherits the answer instead,
+    /// with no new task, because the response lives in the variable bag the
+    /// checkpoint copied.
+    pub fn fork_from_checkpoint(
+        &self,
+        seq: u32,
+        new_id: impl Into<String>,
+    ) -> Option<FlowInstance> {
+        let checkpoint = self.checkpoints.iter().find(|c| c.seq == seq)?;
+        Some(FlowInstance {
+            id: new_id.into(),
+            version: 1,
+            flow_ref: self.flow_ref.clone(),
+            flow_version: self.flow_version,
+            flow_definition_snapshot: self.flow_definition_snapshot.clone(),
+            status: FlowStatus::Pending,
+            current_node_id: checkpoint.node_id.clone(),
+            wait_info: None,
+            variables: checkpoint.variables.clone(),
+            input: self.input.clone(),
+            output: None,
+            compensation_stack: Vec::new(),
+            error: None,
+            retry_count: 0,
+            checkpoints: Vec::new(),
+            started_at: Utc::now(),
+            completed_at: None,
+            parent_instance_ref: None,
+            metrics: Default::default(),
+            test_config: self.test_config.clone(),
+        })
+    }
+
     /// Create a new flow instance
     pub fn new(
         flow_ref: String,
@@ -115,6 +209,7 @@ impl FlowInstance {
             compensation_stack: Vec::new(),
             error: None,
             retry_count: 0,
+            checkpoints: Vec::new(),
             started_at: Utc::now(),
             completed_at: None,
             parent_instance_ref: None,
@@ -282,6 +377,50 @@ pub enum WaitType {
     ChatSession,
 }
 
+/// One recorded position in a flow's history: where it was, and what it knew.
+///
+/// This is the replay primitive. Before it, `current_node_id` plus a mutable
+/// variable bag WAS the entire persisted position — there was no record of any
+/// earlier state, so "what did the critic see on attempt 2" and "run this again
+/// from before the bad decision" had no answer. Compensation is LIFO undo, which
+/// unwinds side effects; it cannot put you back at a moment.
+///
+/// OFF BY DEFAULT, and opt-in per flow (`metadata.custom.checkpoints`). A
+/// snapshot copies the whole variable bag, so a flow carrying large payloads
+/// pays real bytes per step in a single persisted node. An agent graph being
+/// debugged wants this; a publish flow moving 150 nodes does not.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlowCheckpoint {
+    /// Monotonic sequence number within this instance, starting at 0.
+    pub seq: u32,
+
+    /// The node that was about to execute.
+    pub node_id: String,
+
+    /// The variable bag as it stood, including `step_outputs` and the `__*`
+    /// bookkeeping, so a fork resumes with exactly what the original knew.
+    pub variables: Value,
+
+    /// Which visit of `node_id` this was (1 on the first) - the same counter
+    /// `visits.<id>` exposes, denormalised so a checkpoint list reads as a
+    /// history without resolving the bag.
+    #[serde(default)]
+    pub visit: u64,
+
+    /// What the flow was waiting for at this point, if anything.
+    ///
+    /// Recorded so the history says WHY a position sat where it did — parked on
+    /// whose inbox task, waiting for which event. Without it a checkpoint at a
+    /// human task is indistinguishable from one at a function call, and the
+    /// first question anyone asks of a stuck flow is what it was waiting on.
+    ///
+    /// A fork does NOT inherit it: see `fork_from_checkpoint`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_info: Option<WaitInfo>,
+
+    pub recorded_at: DateTime<Utc>,
+}
+
 /// Execution metrics for monitoring and observability
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FlowMetrics {
@@ -304,6 +443,23 @@ pub struct FlowMetrics {
     /// Number of AI iterations (for AI containers)
     #[serde(default)]
     pub ai_iteration_count: u32,
+
+    /// Number of model calls whose usage was reported.
+    ///
+    /// Counted separately from the token totals because a provider that returns
+    /// no `usage` block still costs a call: `ai_call_count > 0` with zero tokens
+    /// means "the model ran and did not tell us", which is a different fact from
+    /// "the model never ran" and the two used to be indistinguishable.
+    #[serde(default)]
+    pub ai_call_count: u32,
+
+    /// Prompt tokens across every model call in this flow.
+    #[serde(default)]
+    pub total_input_tokens: u64,
+
+    /// Completion tokens across every model call in this flow.
+    #[serde(default)]
+    pub total_output_tokens: u64,
 
     /// Custom metrics
     #[serde(default, skip_serializing_if = "Value::is_null")]

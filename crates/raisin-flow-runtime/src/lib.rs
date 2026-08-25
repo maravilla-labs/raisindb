@@ -53,7 +53,20 @@
 #![allow(ambiguous_glob_reexports)]
 #![warn(clippy::all)]
 
-pub mod compiler;
+// NOTE: there is deliberately no `compiler` module.
+//
+// A `FlowCompiler` used to live here, producing a `CompiledFlow` with a
+// precomputed topological `execution_order`. Nothing ever called it — the only
+// reference in the workspace was this crate's own re-export — and its central
+// output contradicts how flows actually run: the executor follows `next_node`
+// at runtime with no visited set, so a branch is chosen by a condition and a
+// backward edge is a legitimate loop. A precomputed linear order cannot express
+// either, and its Kahn sort resolved a cycle by appending the remaining nodes in
+// ARBITRARY order. Dead code is tolerable; a public API that hands a caller a
+// confidently wrong execution order is not.
+//
+// Flow parsing lives in `FlowDefinition::from_workflow_data` (both formats) and
+// structural checking in `FlowDefinition::validate`.
 pub mod handlers;
 pub mod integration;
 pub mod runtime;
@@ -61,7 +74,7 @@ pub mod service;
 pub mod types;
 
 // Re-export all types and runtime functions at the crate root for convenience
-pub use compiler::{CompiledFlow, CompiledMetadata, FlowCompiler};
+pub use handlers::human_task::instance_slug;
 pub use handlers::{
     AgentStepHandler, AiContainerHandler, ChatStepHandler, DecisionHandler, ErrorClass,
     FunctionStepHandler, HumanTaskHandler, OnErrorBehavior, ParallelHandler, StepError,

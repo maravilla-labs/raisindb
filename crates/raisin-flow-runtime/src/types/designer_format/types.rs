@@ -464,12 +464,31 @@ pub enum DesignerContainerType {
 /// variable (default `item`), referenced in templates as `{{ item }}` /
 /// `${item}` and in REL conditions as a bare identifier.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// EXACTLY ONE of `over`, `while`, or `times` decides the loop's shape.
+///
+/// `over` was required, which made the runtime's `while` and `times` arms
+/// unreachable from the format anyone actually authors — so "repeat until the
+/// critic passes" could only be expressed by handing the loop an array of N
+/// placeholder items and exiting early with `until`. All three are now
+/// first-class; `validate` below refuses a config that names none or several,
+/// because guessing which one an author meant is how a loop silently runs the
+/// wrong number of times.
 pub struct DesignerLoopConfig {
     /// Collection expression to iterate, e.g.
     /// `${steps.pick_candidates.candidates}` or `{{ input.items }}`.
     /// Must resolve to an array (objects iterate as
     /// `{key, value}` pairs).
-    pub over: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub over: Option<String>,
+
+    /// REL condition re-tested BEFORE each iteration; the loop runs while it
+    /// holds, bounded by `max_iterations`.
+    #[serde(rename = "while", default, skip_serializing_if = "Option::is_none")]
+    pub while_condition: Option<String>,
+
+    /// Fixed repeat count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub times: Option<u32>,
 
     /// Variable name for the current item (default: `item`). Must be a
     /// REL identifier (`[A-Za-z0-9_]`, snake_case).
@@ -484,11 +503,38 @@ pub struct DesignerLoopConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_iterations: Option<u32>,
 
+    /// `while` only: drop the iteration ceiling and run purely on the condition.
+    ///
+    /// Opt-in rather than the default for an absent `max_iterations`, because
+    /// silently removing a safety limit is not something an author should get by
+    /// omission. It is safe to offer at all only because the executor bounds a
+    /// runaway itself, so a condition that never goes false costs a failed flow
+    /// rather than a wedged worker.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unbounded: bool,
+
     /// Early-exit REL condition, evaluated after each completed
     /// iteration; when true the loop finishes with the results collected
     /// so far (e.g. `steps.ask.response == "accept"`)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub until: Option<String>,
+}
+
+impl DesignerLoopConfig {
+    /// Which runtime `loop_type` this config lowers to.
+    ///
+    /// Whether the config is COHERENT is checked by `FlowDefinition::validate`
+    /// on the lowered shape, not here — one implementation, and it covers
+    /// hand-authored runtime format as well as this one.
+    pub fn loop_type(&self) -> &'static str {
+        if self.while_condition.is_some() {
+            "while"
+        } else if self.times.is_some() {
+            "times"
+        } else {
+            "for_each"
+        }
+    }
 }
 
 fn default_loop_item() -> String {

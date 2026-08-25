@@ -21,8 +21,11 @@ use serde_json::Value;
 use std::time::Instant;
 use tracing::info;
 
+use super::helpers::{bump_visit_count, extract_token_usage, record_step_output};
 use super::isolated_branch::execute_step;
-use super::result_handlers::{handle_complete_result, handle_error_result, handle_wait_result};
+use super::result_handlers::{
+    fail_flow_terminally, handle_complete_result, handle_error_result, handle_wait_result,
+};
 
 /// Main flow execution function with hybrid batching.
 ///
@@ -83,12 +86,58 @@ pub(super) async fn execute_flow_with_retry(
     // Supports both runtime format (step_type) and designer format (node_type)
     let flow_def = FlowDefinition::from_workflow_data(instance.flow_definition_snapshot.clone())?;
 
+    // VALIDATE BEFORE THE FIRST STEP, not on the way into a broken edge.
+    //
+    // Only on a fresh run: a resumed instance is already mid-flight and has
+    // side effects behind it, so refusing it here would strand work that a
+    // human task was about to release. A definition is immutable per run
+    // (`flow_definition_snapshot`), so if it was valid at the start it is valid
+    // now.
+    if instance.metrics.step_count == 0 {
+        if let Err(e) = flow_def.validate() {
+            tracing::error!(instance_id, error = %e, "Flow definition is invalid, refusing to start");
+            instance.status = FlowStatus::Failed;
+            instance.error = Some(e.to_string());
+            instance.completed_at = Some(Utc::now());
+            callbacks.save_instance(&instance).await?;
+            return Err(e);
+        }
+    }
+
     // Track flow start time for duration calculation
     let flow_start = Instant::now();
+
+    // Opt-in per flow; 0 (the default) means no history is kept.
+    let checkpoint_limit =
+        crate::types::FlowInstance::checkpoint_limit(&instance.flow_definition_snapshot);
 
     // Guard against unbounded SameStep re-execution
     let mut same_step_count: u32 = 0;
     const MAX_SAME_STEP_ITERATIONS: u32 = 100;
+
+    // Guard against an unbounded CYCLE.
+    //
+    // The cursor below is assigned whatever `next_node_id` a handler returns,
+    // with no visited set — which is deliberate, and is what lets a graph loop
+    // back (`decision.no_branch` → an earlier node) the way a draft/critique/
+    // revise cycle needs to. `same_step_count` does NOT cover it: that only
+    // catches a handler re-entering ITSELF, and it resets on every transition,
+    // so `A → B → A` slips past it forever.
+    //
+    // Unbounded matters more here than it looks. Persistence happens only at
+    // async boundaries, so a cycle of purely synchronous steps never commits:
+    // it is a hot loop inside one job execution, burning a worker with no
+    // durable state and nothing to observe. This bounds the number of
+    // TRANSITIONS in a single execution batch, which is exactly the quantity
+    // that is unbounded — it is not a limit on how long a flow may live, since
+    // any step that waits resets the batch.
+    //
+    // Generous on purpose: a legitimate fan-out or a long for_each does many
+    // transitions, and this is a backstop against a mis-authored graph, not a
+    // budget an author should ever feel. A bounded cycle is expressed by the
+    // author with `visits.<step_id>` (below), not by this number.
+    let mut steps_this_execution: u32 = 0;
+    const MAX_STEPS_PER_EXECUTION: u32 = 10_000;
 
     // 3. Main execution loop - continue until async boundary or completion
     loop {
@@ -102,6 +151,60 @@ pub(super) async fn execute_flow_with_retry(
             "Executing step {} of type {:?}",
             current_step.id, current_step.step_type
         );
+
+        steps_this_execution += 1;
+        if steps_this_execution > MAX_STEPS_PER_EXECUTION {
+            tracing::error!(
+                step_id = %current_step.id,
+                transitions = steps_this_execution,
+                "Step budget exceeded in one execution - probable unbounded cycle"
+            );
+            // TERMINAL, deliberately skipping retry / error_edge /
+            // continue_on_fail. Every one of those is wrong for a runaway: a
+            // retry re-enters the same non-terminating cycle (three more times,
+            // by default), and an error edge lets the flow continue from a state
+            // the engine has just said it cannot bound. It still fails the flow
+            // PROPERLY — error recorded, compensation run, parent released —
+            // rather than returning a raw Err that would strand the instance in
+            // `Running`.
+            let step_id = current_step.id.clone();
+            fail_flow_terminally(
+                instance_id,
+                &mut instance,
+                &step_id,
+                crate::types::FlowError::MaxIterationsExceeded {
+                    limit: MAX_STEPS_PER_EXECUTION,
+                },
+                &flow_start,
+                callbacks,
+            )
+            .await?;
+            return Ok(());
+        }
+
+        // COUNT THE VISIT, before the step runs, so a step can read its own
+        // attempt number as `visits.<its own id>` (1 on the first pass).
+        //
+        // This is the primitive a bounded cycle is built from. The engine will
+        // happily run `critic --fail--> draft` forever; what stops it is the
+        // AUTHOR writing `visits.draft < 3` on that edge, and until now there
+        // was nothing to write. `retry_count` is not it — that is flow-scoped,
+        // resets on any successful transition, and is never exposed to
+        // expressions at all.
+        //
+        // Lives under `__visits` in the variable bag so it persists and resumes
+        // with everything else; `__`-prefixed keys are already protected from
+        // being clobbered by a step output. `FlowContext::to_json` republishes
+        // it as the `visits` namespace.
+        let visit_count = bump_visit_count(&mut instance, &current_step.id);
+        tracing::debug!(step_id = %current_step.id, visit = visit_count, "Step visit");
+
+        // Record where we are, if this flow asked for a replayable history.
+        // Taken BEFORE the step runs, so a checkpoint is a position you can
+        // start from rather than one you have already moved past — the useful
+        // question is "run it again from here", and answering it needs the state
+        // the step saw, not the state it left.
+        instance.record_checkpoint(checkpoint_limit, visit_count);
 
         // Emit StepStarted event
         let step_start = Instant::now();
@@ -206,29 +309,40 @@ pub(super) async fn execute_flow_with_retry(
                     )
                     .await;
 
-                // Record the raw output under step_outputs so later steps can
-                // reference it via `steps.<step_id>.*` expressions, then merge
-                // object outputs into the flat variables (legacy behavior).
-                // __last_output feeds context.current_output on the next step
-                // (used by loops to collect per-iteration results).
+                // Record the output: latest under `steps.<id>`, one entry per
+                // visit under `history.<id>`, and the legacy flat merge into the
+                // shared variable bag — with THIS STEP'S PREVIOUS flat keys
+                // retracted first, so a re-visited node cannot leave stale values
+                // standing under names that read like current data.
+                //
+                // The `steps.<id>` write is UNCONDITIONAL, including a null
+                // output. It used to be guarded by `if !output.is_null()`, which
+                // meant a step that produced nothing left its PREVIOUS
+                // execution's value in place — so the next reader got stale data
+                // with no way to tell. In a loop that is a silent wrong-data bug,
+                // not a missing-data one: a translation flow whose per-locale
+                // agent call came back empty re-read the previous locale's output
+                // and wrote GERMAN text into the French and Italian overlays,
+                // reporting success for both.
                 if let Value::Object(ref mut vars) = instance.variables {
-                    if !output.is_null() {
-                        vars.entry("step_outputs".to_string())
-                            .or_insert_with(|| Value::Object(serde_json::Map::new()))
-                            .as_object_mut()
-                            .map(|outputs| outputs.insert(current_step.id.clone(), output.clone()));
-                    }
-                    vars.insert("__last_output".to_string(), output.clone());
-                    if let Value::Object(map) = output {
-                        for (key, value) in map {
-                            // Never let a step output clobber internal
-                            // bookkeeping (step_outputs, __* keys)
-                            if key.starts_with("__") || key == "step_outputs" {
-                                continue;
-                            }
-                            vars.insert(key, value);
-                        }
-                    }
+                    record_step_output(vars, &current_step.id, &output);
+                }
+
+                // Roll model usage up onto the flow. `FlowMetrics` tracked
+                // duration, steps, retries and AI iterations but not TOKENS —
+                // the one number anyone asks about an agent workflow — and usage
+                // was left as an opaque blob inside an agent step's output for a
+                // caller to dig out. An AI container reports its own cumulative
+                // total once, at the end, so a container's many turns are counted
+                // exactly once here rather than per re-entry.
+                if let Some((input, output_tokens)) = extract_token_usage(&output) {
+                    instance.metrics.ai_call_count += 1;
+                    instance.metrics.total_input_tokens =
+                        instance.metrics.total_input_tokens.saturating_add(input);
+                    instance.metrics.total_output_tokens = instance
+                        .metrics
+                        .total_output_tokens
+                        .saturating_add(output_tokens);
                 }
 
                 instance.current_node_id = next_node_id;
@@ -299,9 +413,35 @@ pub(super) async fn execute_flow_with_retry(
                         iterations = same_step_count,
                         "SameStep loop guard exceeded, failing step"
                     );
-                    return Err(crate::types::FlowError::MaxIterationsExceeded {
-                        limit: MAX_SAME_STEP_ITERATIONS,
-                    });
+                    // Through the normal error path. This used to `return Err`
+                    // raw, which is the exact shape the error arm above was
+                    // fixed for: MaxIterationsExceeded is not infrastructural,
+                    // so nothing downstream turned it into a flow failure — the
+                    // instance stayed `Running` forever with no error recorded,
+                    // no compensation, and any parent parked on a join never
+                    // released. An AI container hitting its iteration ceiling is
+                    // a STEP failure, and the flow's own error handling
+                    // (retry / error_edge / continue_on_fail) should get to
+                    // decide what that means.
+                    let should_return = handle_error_result(
+                        instance_id,
+                        &mut instance,
+                        current_step,
+                        &flow_def,
+                        crate::types::FlowError::MaxIterationsExceeded {
+                            limit: MAX_SAME_STEP_ITERATIONS,
+                        },
+                        expected_version,
+                        step_duration_ms,
+                        &flow_start,
+                        callbacks,
+                    )
+                    .await?;
+                    if should_return {
+                        return Ok(());
+                    }
+                    same_step_count = 0; // error edge / continue-on-fail moved us on
+                    continue;
                 }
                 tracing::debug!(
                     step_id = %current_step.id,
@@ -484,6 +624,7 @@ mod tests {
             compensation_stack: Vec::new(),
             error: None,
             retry_count: 0,
+            checkpoints: Vec::new(),
             started_at: chrono::Utc::now(),
             completed_at: None,
             parent_instance_ref: None,
@@ -495,6 +636,62 @@ mod tests {
     // -----------------------------------------------------------------------
     // Tests
     // -----------------------------------------------------------------------
+
+    /// A TWO-NODE CYCLE, bounded by the author with `visits`.
+    ///
+    /// `spin` loops back through `hop` until it has been entered `limit` times.
+    /// Deliberately two nodes rather than a self-loop: the pre-existing
+    /// `same_step_count` guard only catches a handler re-entering ITSELF and
+    /// resets on every transition, so a two-node cycle is precisely the shape it
+    /// cannot see.
+    fn bounded_cycle_flow(limit: u32) -> Value {
+        json!({
+            "nodes": [
+                { "id": "start", "step_type": "start", "next_node": "spin" },
+                {
+                    "id": "spin",
+                    "step_type": "decision",
+                    "properties": {
+                        "condition": format!("visits.spin < {}", limit),
+                        "yes_branch": "hop",
+                        "no_branch": "end",
+                        "max_retries": 0
+                    }
+                },
+                {
+                    "id": "hop",
+                    "step_type": "decision",
+                    "properties": {
+                        "condition": "true",
+                        "yes_branch": "spin",
+                        "no_branch": "end",
+                        "max_retries": 0
+                    }
+                },
+                { "id": "end", "step_type": "end" }
+            ]
+        })
+    }
+
+    /// The same cycle with NO guard - it never terminates on its own.
+    fn unbounded_cycle_flow() -> Value {
+        json!({
+            "nodes": [
+                { "id": "start", "step_type": "start", "next_node": "spin" },
+                {
+                    "id": "spin",
+                    "step_type": "decision",
+                    "properties": { "condition": "true", "yes_branch": "hop", "no_branch": "end" }
+                },
+                {
+                    "id": "hop",
+                    "step_type": "decision",
+                    "properties": { "condition": "true", "yes_branch": "spin", "no_branch": "end" }
+                },
+                { "id": "end", "step_type": "end" }
+            ]
+        })
+    }
 
     /// Start -> End completes immediately with no async boundaries.
     #[tokio::test]
@@ -612,5 +809,275 @@ mod tests {
         // but it went through Running first
         let saved = callbacks.saved_instance();
         assert_eq!(saved.status, FlowStatus::Waiting);
+    }
+
+    // -----------------------------------------------------------------------
+    // Cyclic graphs: visit counting, and the runaway backstop
+    // -----------------------------------------------------------------------
+
+    /// A backward edge runs, and `visits.<step_id>` is what lets the AUTHOR
+    /// stop it. This is the draft/critique/revise shape the graph editor needs.
+    #[tokio::test]
+    async fn test_bounded_cycle_terminates_on_visit_count() {
+        let instance = make_instance(bounded_cycle_flow(3));
+        let callbacks = MockLoopCallbacks::new(instance);
+
+        let result = super::execute_flow("test-instance-1", &callbacks).await;
+        assert!(result.is_ok(), "bounded cycle should complete: {result:?}");
+
+        let saved = callbacks.saved_instance();
+        assert_eq!(
+            saved.status,
+            FlowStatus::Completed,
+            "cycle should exit through the guard, not run away"
+        );
+
+        // `spin` is entered 3 times: visits 1 and 2 loop, visit 3 fails
+        // `visits.spin < 3` and falls through to end.
+        let visits = saved
+            .variables
+            .get("__visits")
+            .expect("visit counts should be recorded");
+        assert_eq!(visits.get("spin").and_then(|v| v.as_u64()), Some(3));
+        assert_eq!(visits.get("hop").and_then(|v| v.as_u64()), Some(2));
+    }
+
+    /// The counter is readable by the step being counted, from its first visit.
+    /// Without this an author cannot write "attempt 2 of 3" at all.
+    #[tokio::test]
+    async fn test_visit_count_is_one_on_first_entry() {
+        // `visits.spin < 1` is false on the very first entry, so the flow must
+        // take the NO branch immediately - proving the count is 1, not 0.
+        let instance = make_instance(bounded_cycle_flow(1));
+        let callbacks = MockLoopCallbacks::new(instance);
+
+        let result = super::execute_flow("test-instance-1", &callbacks).await;
+        assert!(result.is_ok(), "flow should complete: {result:?}");
+
+        let saved = callbacks.saved_instance();
+        assert_eq!(saved.status, FlowStatus::Completed);
+        let visits = saved.variables.get("__visits").expect("visit counts");
+        assert_eq!(visits.get("spin").and_then(|v| v.as_u64()), Some(1));
+        assert!(
+            visits.get("hop").is_none(),
+            "the loop body must never run when the guard is false on entry"
+        );
+    }
+
+    /// An UNGUARDED cycle must terminate as a failed flow rather than spinning
+    /// forever. Persistence only happens at async boundaries, so before this
+    /// backstop existed a synchronous cycle was an unbounded hot loop inside one
+    /// job execution - no durable state, nothing to observe, a burned worker.
+    #[tokio::test]
+    async fn test_unbounded_cycle_fails_instead_of_hanging() {
+        let instance = make_instance(unbounded_cycle_flow());
+        let callbacks = MockLoopCallbacks::new(instance);
+
+        let result = super::execute_flow("test-instance-1", &callbacks).await;
+        assert!(
+            matches!(
+                result,
+                Err(crate::types::FlowError::MaxIterationsExceeded { .. })
+            ),
+            "runaway cycle should surface as MaxIterationsExceeded, got {result:?}"
+        );
+
+        // Failed PROPERLY: an earlier version of this guard returned a raw Err,
+        // which left the instance in `Running` forever with no error recorded
+        // and any parent parked on a join never released.
+        let saved = callbacks.saved_instance();
+        assert_eq!(saved.status, FlowStatus::Failed);
+        assert!(saved.error.is_some(), "the failure must be recorded");
+        assert!(saved.completed_at.is_some());
+    }
+
+    /// Visit counts must survive an async boundary, or a cycle that parks on a
+    /// human task resets its own guard on every resume and never terminates -
+    /// which is exactly the shape of a review/revise loop.
+    #[tokio::test]
+    async fn test_visit_counts_persist_across_a_wait() {
+        let instance = make_instance(function_step_flow("/lib/test/fn"));
+        let callbacks = MockLoopCallbacks::new(instance);
+
+        let result = super::execute_flow("test-instance-1", &callbacks).await;
+        assert!(result.is_ok(), "flow should pause cleanly: {result:?}");
+
+        let saved = callbacks.saved_instance();
+        assert_eq!(saved.status, FlowStatus::Waiting, "should be parked");
+
+        let visits = saved
+            .variables
+            .get("__visits")
+            .expect("visit counts must be persisted with the instance, not held in memory");
+        assert_eq!(visits.get("start").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(visits.get("step1").and_then(|v| v.as_u64()), Some(1));
+    }
+
+    // -----------------------------------------------------------------------
+    // Checkpoints: a replayable history, opt-in
+    // -----------------------------------------------------------------------
+
+    fn checkpointing_flow(limit: u32) -> Value {
+        json!({
+            "metadata": { "custom": { "checkpoints": limit } },
+            "nodes": [
+                { "id": "start", "step_type": "start", "next_node": "a" },
+                { "id": "a", "step_type": "decision",
+                  "properties": { "condition": "true", "yes_branch": "end", "no_branch": "end" } },
+                { "id": "end", "step_type": "end" }
+            ]
+        })
+    }
+
+    /// OFF unless the flow asks. A snapshot copies the whole variable bag, and a
+    /// flow moving large payloads should not pay that on every step just to
+    /// exist.
+    #[tokio::test]
+    async fn test_checkpoints_are_off_by_default() {
+        let instance = make_instance(bounded_cycle_flow(3));
+        let callbacks = MockLoopCallbacks::new(instance);
+
+        super::execute_flow("test-instance-1", &callbacks)
+            .await
+            .unwrap();
+
+        assert!(
+            callbacks.saved_instance().checkpoints.is_empty(),
+            "a flow that did not ask for checkpoints must not accumulate them"
+        );
+    }
+
+    /// Each step records where it was ABOUT to run, so a checkpoint is a
+    /// position you can start from rather than one already moved past.
+    #[tokio::test]
+    async fn test_checkpoints_record_each_position() {
+        let instance = make_instance(checkpointing_flow(10));
+        let callbacks = MockLoopCallbacks::new(instance);
+
+        super::execute_flow("test-instance-1", &callbacks)
+            .await
+            .unwrap();
+
+        let saved = callbacks.saved_instance();
+        let ids: Vec<&str> = saved
+            .checkpoints
+            .iter()
+            .map(|c| c.node_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["start", "a", "end"]);
+        assert_eq!(saved.checkpoints[0].seq, 0);
+        assert_eq!(saved.checkpoints[0].visit, 1, "first visit of `start`");
+    }
+
+    /// Bounded, dropping the OLDEST - a debugger wants the recent past, and an
+    /// unbounded history over a long loop would grow one persisted node forever.
+    #[tokio::test]
+    async fn test_checkpoints_are_bounded_keeping_the_recent_past() {
+        let instance = make_instance(checkpointing_flow(2));
+        let callbacks = MockLoopCallbacks::new(instance);
+
+        super::execute_flow("test-instance-1", &callbacks)
+            .await
+            .unwrap();
+
+        let saved = callbacks.saved_instance();
+        assert_eq!(saved.checkpoints.len(), 2);
+        let ids: Vec<&str> = saved
+            .checkpoints
+            .iter()
+            .map(|c| c.node_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["a", "end"],
+            "the earliest is dropped, not the latest"
+        );
+    }
+
+    /// Replay is a FORK, never a rewind: the original keeps its history and its
+    /// terminal state, because its side effects already happened.
+    #[tokio::test]
+    async fn test_fork_from_checkpoint_leaves_the_original_alone() {
+        let instance = make_instance(checkpointing_flow(10));
+        let callbacks = MockLoopCallbacks::new(instance);
+        super::execute_flow("test-instance-1", &callbacks)
+            .await
+            .unwrap();
+
+        let original = callbacks.saved_instance();
+        assert_eq!(original.status, FlowStatus::Completed);
+
+        let fork = original
+            .fork_from_checkpoint(1, "forked-instance")
+            .expect("checkpoint 1 exists");
+
+        assert_eq!(fork.id, "forked-instance");
+        assert_eq!(fork.current_node_id, "a", "positioned at the checkpoint");
+        assert_eq!(fork.status, FlowStatus::Pending, "a fork has not run yet");
+        assert!(
+            fork.checkpoints.is_empty(),
+            "the fork starts its own history"
+        );
+        assert!(fork.completed_at.is_none());
+        assert_eq!(
+            fork.flow_definition_snapshot, original.flow_definition_snapshot,
+            "a fork is the same flow"
+        );
+
+        // The original is untouched.
+        assert_eq!(original.status, FlowStatus::Completed);
+        assert_eq!(original.checkpoints.len(), 3);
+    }
+
+    /// An unknown sequence number is `None`, not a silently mispositioned fork.
+    #[tokio::test]
+    async fn test_fork_from_unknown_checkpoint_is_none() {
+        let instance = make_instance(checkpointing_flow(10));
+        let callbacks = MockLoopCallbacks::new(instance);
+        super::execute_flow("test-instance-1", &callbacks)
+            .await
+            .unwrap();
+
+        assert!(callbacks
+            .saved_instance()
+            .fork_from_checkpoint(99, "nope")
+            .is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // step_outputs staleness
+    // -----------------------------------------------------------------------
+
+    /// A step that produces NOTHING must overwrite its previous output, not
+    /// leave it standing.
+    ///
+    /// This is the bug that shipped: a per-locale translation loop whose agent
+    /// call came back empty re-read the PREVIOUS locale's `steps.<id>` and wrote
+    /// German text into the French and Italian overlays, reporting success for
+    /// both. The write used to be guarded by `if !output.is_null()`, which made
+    /// "produced nothing" indistinguishable from "produced what it did last
+    /// time". `start` is the convenient probe here because it returns
+    /// `Value::Null`.
+    #[tokio::test]
+    async fn test_null_output_overwrites_stale_step_output() {
+        let mut instance = make_instance(start_end_flow());
+        instance.variables = json!({
+            "step_outputs": { "start": { "locale": "de", "translations": ["stale"] } }
+        });
+        let callbacks = MockLoopCallbacks::new(instance);
+
+        let result = super::execute_flow("test-instance-1", &callbacks).await;
+        assert!(result.is_ok(), "flow should complete: {result:?}");
+
+        let saved = callbacks.saved_instance();
+        let recorded = saved
+            .variables
+            .get("step_outputs")
+            .and_then(|o| o.get("start"))
+            .expect("the step must record an entry even when it produced nothing");
+        assert!(
+            recorded.is_null(),
+            "a step that produced nothing must read as nothing, not as its previous run; got {recorded:?}"
+        );
     }
 }

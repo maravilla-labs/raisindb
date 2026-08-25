@@ -112,10 +112,18 @@ export interface DesignerNode {
   prompt?: string;
   /** Loop configuration for loop containers */
   loop?: {
+    /** for_each: the collection to iterate. */
     over?: string;
+    /** while: a REL condition re-tested BEFORE each iteration. */
+    while?: string;
+    /** times: a fixed repeat count. */
+    times?: number;
+    /** Exactly one of over / while / times decides the loop's shape. */
     item?: string;
     index?: string;
     max_iterations?: number;
+    /** `while` only: drop the iteration ceiling and run purely on the condition. */
+    unbounded?: boolean;
     until?: string;
     [key: string]: unknown;
   };
@@ -216,6 +224,14 @@ export const KNOWN_TEMPLATE_ROOTS = [
   'error',
   // Well-known flow variable set by human task completion (section 6.2)
   '__human_response',
+  // How many times a node has been ENTERED (1 on the first). This is what
+  // bounds a cyclic graph: the engine will follow a backward edge indefinitely,
+  // and an author writes `visits.draft < 3` on that edge to stop it.
+  'visits',
+  // A node's output PER VISIT, oldest first — `steps.<id>` is a single slot
+  // holding only the latest, so this is what lets a critic compare revision 1
+  // against revision 3.
+  'history',
 ];
 
 export function isStep(node: DesignerNode): boolean {

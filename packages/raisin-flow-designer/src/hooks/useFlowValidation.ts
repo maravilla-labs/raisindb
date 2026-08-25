@@ -327,14 +327,54 @@ function validateStepProperties(nodes: FlowNode[], _parentId?: string): Validati
 
       // Loop container checks (mirrors the CLI doctor)
       if (container.container_type === 'loop') {
-        if (!container.loop || !container.loop.over?.trim()) {
+        // EXACTLY ONE shape. Demanding `over` rejected while/times loops the
+        // engine runs happily, once its designer format gained them.
+        const loop = container.loop;
+        const named = [
+          loop?.over?.trim() ? 'over' : null,
+          loop?.while?.trim() ? 'while' : null,
+          typeof loop?.times === 'number' ? 'times' : null,
+        ].filter((x): x is string => x != null);
+
+        if (named.length === 0) {
           issues.push({
             nodeId: container.id,
-            field: 'loop.over',
-            code: 'LOOP_MISSING_OVER',
-            message: "Loop container requires loop.over - the collection expression to iterate (e.g. ${steps.pick.items}).",
+            field: 'loop',
+            code: 'LOOP_MISSING_SHAPE',
+            message:
+              'Loop container needs exactly one of loop.over (a collection to iterate), loop.while (a condition re-tested each iteration), or loop.times (a fixed count).',
             severity: 'error',
           });
+        } else if (named.length > 1) {
+          issues.push({
+            nodeId: container.id,
+            field: 'loop',
+            code: 'LOOP_AMBIGUOUS_SHAPE',
+            message: `Loop container names ${named.length} shapes at once (${named.join(', ')}); exactly one decides how it iterates.`,
+            severity: 'error',
+          });
+        }
+
+        if (loop?.unbounded === true) {
+          if (!loop.while?.trim()) {
+            issues.push({
+              nodeId: container.id,
+              field: 'loop.unbounded',
+              code: 'LOOP_UNBOUNDED_WITHOUT_WHILE',
+              message:
+                'loop.unbounded applies only to a while loop - a for_each is bounded by its collection and a times by its count.',
+              severity: 'error',
+            });
+          }
+          if (loop.max_iterations != null) {
+            issues.push({
+              nodeId: container.id,
+              field: 'loop.unbounded',
+              code: 'LOOP_UNBOUNDED_WITH_MAX',
+              message: 'Loop is both unbounded and capped by max_iterations; pick one.',
+              severity: 'error',
+            });
+          }
         }
         if (container.loop?.item != null && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(container.loop.item)) {
           issues.push({

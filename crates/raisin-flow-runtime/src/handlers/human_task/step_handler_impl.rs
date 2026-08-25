@@ -95,35 +95,73 @@ impl StepHandler for HumanTaskHandler {
         // COMPLETED (or expired/cancelled/foreign-instance) task must never
         // satisfy a new wait - the new task is created at a fresh unique
         // path instead.
-        let mut existing_task: Option<serde_json::Value> = None;
-        if let Ok(Some(existing)) = callbacks
-            .get_node_in_workspace(super::INBOX_WORKSPACE, &task_path)
-            .await
-        {
-            let props = existing.get("properties").cloned().unwrap_or_default();
-            let same_instance = props.get("flow_instance_id").and_then(|v| v.as_str())
-                == Some(context.instance_id.as_str());
-            let same_step = props.get("step_id").and_then(|v| v.as_str()) == Some(step.id.as_str());
-            let pending = props.get("status").and_then(|v| v.as_str()) == Some("pending");
+        // May a node sitting at a task path stand in for THIS wait? Only when it
+        // is this instance's still-pending task for this step. Factored out
+        // because the same question is asked of two paths below, and two copies
+        // of "is this task reusable" is how they drift.
+        let reusable = |node: &serde_json::Value| -> bool {
+            let props = node.get("properties").cloned().unwrap_or_default();
+            props.get("flow_instance_id").and_then(|v| v.as_str())
+                == Some(context.instance_id.as_str())
+                && props.get("step_id").and_then(|v| v.as_str()) == Some(step.id.as_str())
+                && props.get("status").and_then(|v| v.as_str()) == Some("pending")
+        };
 
-            if same_instance && same_step && pending {
-                debug!(
-                    task_path = %task_path,
-                    "Pending task for this wait already exists - reusing (idempotent re-execution)"
-                );
-                existing_task = Some(existing);
-            } else {
-                let unique_path =
-                    format!("{}-{}", task_path, chrono::Utc::now().timestamp_millis());
-                debug!(
-                    occupied_path = %task_path,
-                    unique_path = %unique_path,
-                    same_instance,
-                    same_step,
-                    pending,
-                    "Task path occupied by a non-reusable task node - using a fresh unique path"
-                );
-                task_path = unique_path;
+        let mut existing_task: Option<serde_json::Value> = None;
+
+        // TRANSITIONAL: adopt a task this instance created under the previous
+        // (prefix-based) path scheme. Without this, an instance that parked
+        // before the upgrade and is redelivered after it regenerates a different
+        // path, finds nothing, and opens a SECOND task — the first left pending
+        // in someone's inbox forever while the flow waits on the other. Deletable
+        // once no instance predating the change can still be running.
+        if let Some(legacy_path) = self.legacy_task_path(&assignee, &step.id, context) {
+            if legacy_path != task_path {
+                if let Ok(Some(legacy)) = callbacks
+                    .get_node_in_workspace(super::INBOX_WORKSPACE, &legacy_path)
+                    .await
+                {
+                    if reusable(&legacy) {
+                        debug!(
+                            legacy_path = %legacy_path,
+                            "Adopting this instance's pending task from the previous path scheme"
+                        );
+                        task_path = legacy_path;
+                        existing_task = Some(legacy);
+                    }
+                }
+            }
+        }
+
+        if existing_task.is_none() {
+            if let Ok(Some(existing)) = callbacks
+                .get_node_in_workspace(super::INBOX_WORKSPACE, &task_path)
+                .await
+            {
+                if reusable(&existing) {
+                    debug!(
+                        task_path = %task_path,
+                        "Pending task for this wait already exists - reusing (idempotent re-execution)"
+                    );
+                    existing_task = Some(existing);
+                } else {
+                    // An existing COMPLETED (or expired / cancelled /
+                    // foreign-instance) task must never satisfy a new wait, so
+                    // the new one goes to a fresh path. The timestamp makes this
+                    // non-deterministic, which is why a path COLLISION is worse
+                    // than a mis-named node: it lands here, and a redelivery
+                    // then picks a different suffix and creates a duplicate.
+                    // `instance_slug` hashing the whole id is what keeps genuine
+                    // collisions out of this branch.
+                    let unique_path =
+                        format!("{}-{}", task_path, chrono::Utc::now().timestamp_millis());
+                    debug!(
+                        occupied_path = %task_path,
+                        unique_path = %unique_path,
+                        "Task path occupied by a non-reusable task node - using a fresh unique path"
+                    );
+                    task_path = unique_path;
+                }
             }
         }
         let reused_pending_task = existing_task.is_some();
