@@ -190,12 +190,19 @@ until someone accepts). **fan-out** = concurrent, always waits for all
   - `visits.<step_id>` — how many times that node has been ENTERED (1 on the
     first). This is what bounds a CYCLE: the engine follows a backward edge
     indefinitely, so you write the limit yourself, e.g.
-    `steps.critic.passed == false and visits.draft < 3` on the edge back to
+    `steps.critic.passed == false && visits.draft < 3` on the edge back to
     `draft`. `steps.<id>` is a single slot holding the LATEST output, so it
     cannot tell you which attempt you are on.
   - `history.<step_id>` — that node's output PER VISIT, oldest first (most
     recent 20 retained), so a critic can compare `history.draft[0]` against
     `history.draft[2]` instead of only ever seeing the newest.
+
+  REL joins clauses with `&&` and `||`, **not** `and` / `or`, and has no
+  `x in [a, b]` — both are parse errors, and a condition that fails to parse
+  fails the step at RUN time. Note this is a DIFFERENT language from the
+  `meta.control: rule` builder in Studio's editor (rule-language-v1), which
+  does use `and` / `or` and `in [...]`; an expression built there is not
+  automatically valid here.
 
 ### REL pitfalls (these WILL bite you)
 

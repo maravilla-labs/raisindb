@@ -282,7 +282,9 @@ impl FlowContext {
         // condition can read `visits.draft_email` rather than the internal
         // `__visits.draft_email`. This is what bounds a CYCLE: the engine
         // follows a backward edge indefinitely, and an author writes
-        // `steps.critic.passed == false and visits.draft_email < 3` to stop it.
+        // `steps.critic.passed == false && visits.draft_email < 3` to stop it.
+        // REL joins with `&&` / `||`, NOT `and` / `or` — the word form is a parse
+        // error, so an example written that way is an example nobody can run.
         // Kept as a projection of the variable bag rather than its own context
         // field so it persists, resumes and syncs with everything else.
         if let Some(visits) = self.variables.get(crate::runtime::executor::VISITS_KEY) {
