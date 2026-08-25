@@ -38,16 +38,56 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         // predicate.
         let index_catalog: Arc<dyn IndexCatalog> = Arc::new(
             crate::physical_plan::catalog::RocksDBIndexCatalog::new()
-                .with_optional_spatial_state(self.storage.spatial_state()),
+                .with_optional_spatial_state(self.storage.spatial_state())
+                // Compound build state. Without it every compound index
+                // reads as `NotBuilt` and the planner declines it — correct,
+                // never fast. With it, a declared-but-unbuilt index is
+                // distinguishable from a usable one.
+                .with_optional_compound_state(self.storage.compound_state()),
         );
 
-        let physical_planner = PhysicalPlanner::with_catalog(
+        let mut physical_planner = PhysicalPlanner::with_catalog(
             self.tenant_id.clone(),
             self.repo_id.clone(),
             branch.clone(),
             workspace.clone(),
             index_catalog,
         );
+
+        // Give UPDATE/DELETE the same index selection a SELECT with the same WHERE
+        // clause would get. Without this the non-bulk DML path could never choose a
+        // compound index — `set_compound_indexes` was simply never called, so
+        // `try_compound_index_scan` returned early on an empty list every time.
+        //
+        // Note `branch`, not `self.branch`: DML may carry a branch override, and
+        // loading declarations from the wrong branch is how an index that exists
+        // reads as absent.
+        if let Some(filter) = helpers::statement_filter(analyzed) {
+            let compound = match helpers::extract_node_type_from_expr(filter) {
+                Some(node_type_name) => {
+                    helpers::load_compound_indexes(
+                        &*self.storage,
+                        &self.tenant_id,
+                        &self.repo_id,
+                        &branch,
+                        &node_type_name,
+                    )
+                    .await
+                }
+                None => {
+                    helpers::load_all_compound_indexes(
+                        &*self.storage,
+                        &self.tenant_id,
+                        &self.repo_id,
+                        &branch,
+                    )
+                    .await
+                }
+            };
+            if let Some(indexes) = compound {
+                physical_planner.set_compound_indexes(indexes);
+            }
+        }
 
         let physical_plan = physical_planner.plan(&logical_plan)?;
 

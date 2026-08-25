@@ -2,7 +2,9 @@
 
 use raisin_error::{Error, Result};
 use raisin_hlc::HLC;
-use raisin_models::nodes::properties::schema::{IndexType, PropertyValueSchema};
+use raisin_models::nodes::properties::schema::{
+    CompoundIndexDefinition, IndexType, PropertyValueSchema,
+};
 use raisin_storage::{scope::BranchScope, NodeTypeRepository, Storage};
 use std::collections::{HashMap, HashSet};
 
@@ -76,6 +78,21 @@ impl<S: Storage> NodeTypeResolver<S> {
                 }
             }
 
+            // Most-derived wins, so a later `push_compound` for the same name
+            // REPLACES an earlier one: parent first, then mixins, then own.
+            let mut resolved_compound_indexes: Vec<CompoundIndexDefinition> = Vec::new();
+
+            fn push_compound(
+                list: &mut Vec<CompoundIndexDefinition>,
+                incoming: &CompoundIndexDefinition,
+            ) {
+                if let Some(existing) = list.iter_mut().find(|i| i.name == incoming.name) {
+                    *existing = incoming.clone();
+                } else {
+                    list.push(incoming.clone());
+                }
+            }
+
             let mut resolved_indexable = true;
             let mut resolved_index_types: Vec<IndexType> =
                 vec![IndexType::Fulltext, IndexType::Vector, IndexType::Property];
@@ -94,6 +111,9 @@ impl<S: Storage> NodeTypeResolver<S> {
                 resolved_allowed_children.extend(parent_resolved.resolved_allowed_children);
                 for mixin in parent_resolved.resolved_mixins {
                     push_mixin(&mut resolved_mixins, &mixin);
+                }
+                for index in &parent_resolved.resolved_compound_indexes {
+                    push_compound(&mut resolved_compound_indexes, index);
                 }
                 resolved_indexable = parent_resolved.resolved_indexable;
                 resolved_index_types = parent_resolved.resolved_index_types;
@@ -130,6 +150,10 @@ impl<S: Storage> NodeTypeResolver<S> {
                     push_mixin(&mut resolved_mixins, mixin_name);
                     for inner in mixin_resolved.resolved_mixins {
                         push_mixin(&mut resolved_mixins, &inner);
+                    }
+
+                    for index in &mixin_resolved.resolved_compound_indexes {
+                        push_compound(&mut resolved_compound_indexes, index);
                     }
 
                     if !mixin_resolved.resolved_indexable {
@@ -174,6 +198,11 @@ impl<S: Storage> NodeTypeResolver<S> {
             if let Some(ref index_types) = node_type.index_types {
                 resolved_index_types = index_types.clone();
             }
+            if let Some(ref own) = node_type.compound_indexes {
+                for index in own {
+                    push_compound(&mut resolved_compound_indexes, index);
+                }
+            }
 
             let mut resolved_properties: Vec<PropertyValueSchema> =
                 property_map.into_values().collect();
@@ -186,6 +215,7 @@ impl<S: Storage> NodeTypeResolver<S> {
                 resolved_mixins,
                 resolved_indexable,
                 resolved_index_types,
+                resolved_compound_indexes,
                 inheritance_chain: chain.clone(),
             })
         })

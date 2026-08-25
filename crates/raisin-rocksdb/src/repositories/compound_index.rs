@@ -181,27 +181,59 @@ impl CompoundIndexRepository for CompoundIndexRepositoryImpl {
         } = scope;
         let cf = cf_handle(&self.db, cf::COMPOUND_INDEX)?;
 
-        let prefix = keys::compound_index_prefix(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            index_name,
-            equality_values,
-            published_only,
-        );
+        // A node is indexed under EXACTLY ONE tag — `cidx_pub` when
+        // `published_at` is set, `cidx` otherwise (see
+        // `crud/indexing/compound_indexes.rs`, and the `tag_changed` tombstone
+        // dance the property index does for the same reason). So "every node
+        // matching this prefix" is the UNION of both tags, not either one.
+        // Reading only `cidx` silently dropped every published row, and because
+        // the planner strips the matched equality predicates from the residual
+        // filter there was no filter left to catch the loss — wrong results, not
+        // a slow path. `remove_all_compound_indexes_for_node` already iterates
+        // `[false, true]` for exactly this reason.
+        let tags: &[bool] = if published_only {
+            &[true]
+        } else {
+            &[false, true]
+        };
 
         tracing::debug!(
-            "CompoundIndex: Scanning index '{}' with {} equality columns, ascending={}, limit={:?}",
+            "CompoundIndex: Scanning index '{}' with {} equality columns, ascending={}, limit={:?}, tags={:?}",
             index_name,
             equality_values.len(),
             ascending,
-            limit
+            limit,
+            tags
         );
 
-        // Use prefix_iterator for forward scanning
-        let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        // Collect from each tag, keyed by the suffix AFTER the tag-bearing
+        // prefix. The prefixes differ only in that tag, so the suffix is the
+        // index-order key: `…{column values}\0{~revision}\0{node_id}`. Sorting
+        // the union by it reproduces the single-keyspace ordering the dedup and
+        // tombstone-shadowing logic below depends on — newest revision of each
+        // node first.
+        let mut merged: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = Vec::new();
+        for &published in tags {
+            let prefix = keys::compound_index_prefix(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                index_name,
+                equality_values,
+                published,
+            );
+            let prefix_clone = prefix.clone();
+            for item in self.db.prefix_iterator_cf(cf, prefix) {
+                let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+                if !key.starts_with(&prefix_clone) {
+                    break;
+                }
+                let suffix = key[prefix_clone.len()..].to_vec();
+                merged.push((suffix, key.to_vec(), value.to_vec()));
+            }
+        }
+        merged.sort_by(|a, b| a.0.cmp(&b.0));
 
         let mut results = Vec::new();
         let mut seen_nodes = std::collections::HashSet::new();
@@ -209,18 +241,11 @@ impl CompoundIndexRepository for CompoundIndexRepositoryImpl {
         // prevent older entries from resurrecting deleted nodes
         let mut tombstoned_nodes = std::collections::HashSet::new();
 
-        for item in iter {
-            let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
-
-            // Verify key actually starts with our prefix
-            if !key.starts_with(&prefix_clone) {
-                break;
-            }
-
+        for (_suffix, key, value) in &merged {
             // Parse node_id from key
-            if let Some(node_id) = Self::parse_node_id_from_key(&key) {
+            if let Some(node_id) = Self::parse_node_id_from_key(key) {
                 // Skip tombstones and track them for MVCC
-                if is_tombstone(&value) {
+                if is_tombstone(value) {
                     tombstoned_nodes.insert(node_id);
                     continue;
                 }
@@ -234,7 +259,7 @@ impl CompoundIndexRepository for CompoundIndexRepositoryImpl {
                 if !seen_nodes.contains(&node_id) {
                     seen_nodes.insert(node_id.clone());
 
-                    let timestamp = Self::parse_timestamp_from_key(&key);
+                    let timestamp = Self::parse_timestamp_from_key(key);
 
                     results.push(CompoundIndexScanEntry { node_id, timestamp });
 
@@ -397,6 +422,147 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].node_id, node_id);
+    }
+
+    /// A PUBLISHED node must come back from an ordinary (non-published-only)
+    /// scan.
+    ///
+    /// The writer picks the keyspace EXCLUSIVELY from `published_at`: a
+    /// published node goes to `cidx_pub` and is absent from `cidx`. Every SQL
+    /// scan asks for `published_only: false`, so when that meant "read `cidx`"
+    /// each published row silently vanished — and because the planner strips the
+    /// matched equality predicates from the residual filter, nothing downstream
+    /// could notice. Regression guard: `false` means BOTH keyspaces.
+    #[tokio::test]
+    async fn scan_returns_published_and_draft_nodes_together() {
+        let (db, _temp_dir) = create_test_db();
+        let repo = CompoundIndexRepositoryImpl::new(db);
+
+        let scope = test_scope();
+        let index_name = "by_type_category";
+
+        let columns = |ts: i64| {
+            vec![
+                CompoundColumnValue::String("news:Article".to_string()),
+                CompoundColumnValue::String("business".to_string()),
+                CompoundColumnValue::TimestampDesc(ts),
+            ]
+        };
+
+        repo.index_compound(
+            scope,
+            index_name,
+            &columns(1700000000000000),
+            &HLC::new(1700000000000000, 0),
+            "draft_node",
+            false, // draft -> cidx
+        )
+        .await
+        .unwrap();
+
+        repo.index_compound(
+            scope,
+            index_name,
+            &columns(1700000000000001),
+            &HLC::new(1700000000000001, 0),
+            "published_node",
+            true, // published -> cidx_pub
+        )
+        .await
+        .unwrap();
+
+        let equality_values = vec![
+            CompoundColumnValue::String("news:Article".to_string()),
+            CompoundColumnValue::String("business".to_string()),
+        ];
+
+        let all = repo
+            .scan_compound_index(scope, index_name, &equality_values, false, true, None)
+            .await
+            .unwrap();
+        let ids: Vec<&str> = all.iter().map(|e| e.node_id.as_str()).collect();
+        assert!(
+            ids.contains(&"published_node"),
+            "a published node must be visible to a normal scan; got {ids:?}"
+        );
+        assert!(
+            ids.contains(&"draft_node"),
+            "a draft node must still be visible; got {ids:?}"
+        );
+        assert_eq!(all.len(), 2, "expected exactly the two indexed nodes");
+
+        // `true` still means published-only.
+        let published = repo
+            .scan_compound_index(scope, index_name, &equality_values, true, true, None)
+            .await
+            .unwrap();
+        let published_ids: Vec<&str> = published.iter().map(|e| e.node_id.as_str()).collect();
+        assert_eq!(published_ids, vec!["published_node"]);
+    }
+
+    /// A non-String leading column must round-trip.
+    ///
+    /// `build_compound_key` encodes `Integer` as big-endian bytes, so a reader
+    /// that rebuilt the prefix as the ASCII text `"42"` addressed different
+    /// bytes and matched nothing. This pins the writer's encoding as the
+    /// contract the executor has to reproduce.
+    #[tokio::test]
+    async fn scan_matches_a_non_string_leading_column() {
+        let (db, _temp_dir) = create_test_db();
+        let repo = CompoundIndexRepositoryImpl::new(db);
+
+        let scope = test_scope();
+        let index_name = "by_priority";
+
+        repo.index_compound(
+            scope,
+            index_name,
+            &vec![
+                CompoundColumnValue::Integer(42),
+                CompoundColumnValue::TimestampDesc(1700000000000000),
+            ],
+            &HLC::new(1700000000000000, 0),
+            "int_node",
+            false,
+        )
+        .await
+        .unwrap();
+
+        let typed = repo
+            .scan_compound_index(
+                scope,
+                index_name,
+                &[CompoundColumnValue::Integer(42)],
+                false,
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            typed.len(),
+            1,
+            "an Integer prefix must match what was written"
+        );
+        assert_eq!(typed[0].node_id, "int_node");
+
+        // The old executor behaviour: same value, stringified. Must NOT match —
+        // this is the shape of the bug, kept explicit so a regression is loud.
+        let stringified = repo
+            .scan_compound_index(
+                scope,
+                index_name,
+                &[CompoundColumnValue::String("42".to_string())],
+                false,
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            stringified.is_empty(),
+            "a String-encoded prefix addresses different bytes than an Integer column"
+        );
     }
 
     #[tokio::test]

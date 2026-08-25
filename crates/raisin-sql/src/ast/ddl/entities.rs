@@ -137,6 +137,15 @@ pub enum NodeTypeAlteration {
     SetIndexable(bool),
     /// Set strict flag
     SetStrict(bool),
+    /// Add a compound index.
+    ///
+    /// Adding one does NOT make it usable on its own: the entries have to be
+    /// built before the planner will choose it. The executor marks the new
+    /// index unbuilt so the fail-closed availability gate declines it until a
+    /// build lands, rather than planning against an empty keyspace.
+    AddCompoundIndex(CompoundIndexDef),
+    /// Drop a compound index by name.
+    DropCompoundIndex(String),
 }
 
 /// DROP NODETYPE statement

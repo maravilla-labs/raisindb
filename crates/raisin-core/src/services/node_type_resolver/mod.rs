@@ -17,7 +17,9 @@ mod resolution;
 
 use raisin_error::{Error, Result};
 use raisin_hlc::HLC;
-use raisin_models::nodes::properties::schema::{IndexType, PropertyValueSchema};
+use raisin_models::nodes::properties::schema::{
+    CompoundIndexDefinition, IndexType, PropertyValueSchema,
+};
 use raisin_models::nodes::types::NodeType;
 use raisin_storage::{
     scope::{BranchScope, RepoScope},
@@ -42,6 +44,13 @@ pub struct ResolvedNodeType {
     pub resolved_indexable: bool,
     /// Which index types are enabled (merged from inheritance)
     pub resolved_index_types: Vec<IndexType>,
+    /// Compound indexes including those declared by a parent type or a mixin.
+    ///
+    /// Deduped by NAME, not by full equality: an index name addresses one
+    /// workspace-global keyspace, so two declarations sharing a name are the
+    /// same index however their columns differ — and the most-derived
+    /// declaration is the one that wins, matching how properties resolve.
+    pub resolved_compound_indexes: Vec<CompoundIndexDefinition>,
     /// Inheritance chain (for debugging)
     pub inheritance_chain: Vec<String>,
 }

@@ -297,6 +297,36 @@ impl PhysicalPlanner {
         )
     }
 
+    /// Build state for one declared compound index, by name.
+    ///
+    /// Looks the declaration back up out of `self.compound_indexes` because
+    /// availability is judged against the CURRENT declaration — the state
+    /// record stores the fingerprint it was built from, and a mismatch is
+    /// exactly the "stale keyspace" case this exists to catch. An index name
+    /// with no matching declaration cannot have been matched in the first
+    /// place, so that path answers `NotBuilt` rather than inventing a default.
+    pub(super) fn compound_availability(
+        &self,
+        workspace: &str,
+        branch: &str,
+        index_name: &str,
+    ) -> raisin_storage::compound::CompoundAvailability {
+        let Some(definition) = self
+            .compound_indexes
+            .iter()
+            .find(|index| index.name == index_name)
+        else {
+            return raisin_storage::compound::CompoundAvailability::NotBuilt;
+        };
+        self.index_catalog.compound_index_availability(
+            &self.default_tenant_id,
+            &self.default_repo_id,
+            branch,
+            workspace,
+            definition,
+        )
+    }
+
     /// Convert a logical plan to a physical plan (public entry point)
     pub fn plan(&self, logical: &LogicalPlan) -> Result<PhysicalPlan, Error> {
         // Start with empty context - no parent operators

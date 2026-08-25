@@ -16,6 +16,7 @@ pub mod join;
 pub mod relational;
 pub mod scan;
 
+use raisin_models::nodes::properties::schema::CompoundColumnType;
 use raisin_sql::analyzer::TypedExpr;
 use raisin_sql::logical_plan::{ProjectionExpr, SortExpr, TableSchema, WindowExpr};
 use std::sync::Arc;
@@ -192,7 +193,10 @@ define_physical_plan! {
             table: String,
             alias: Option<String>,
             index_name: String,
-            equality_columns: Vec<(String, String)>,
+            /// Matched equality columns as (property, value, declared type).
+            /// The type is carried so the executor encodes the scan prefix the
+            /// same way the index writer encoded the key.
+            equality_columns: Vec<(String, String, CompoundColumnType)>,
             pre_sorted: bool,
             ascending: bool,
             projection: Option<Vec<String>>,

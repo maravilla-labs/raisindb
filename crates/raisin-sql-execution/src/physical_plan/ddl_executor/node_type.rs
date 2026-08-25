@@ -203,6 +203,29 @@ fn apply_nodetype_alteration(
         NodeTypeAlteration::DropMixin(mixin) => {
             node_type.mixins.retain(|m| m != mixin);
         }
+        NodeTypeAlteration::AddCompoundIndex(def) => {
+            let converted = convert_compound_indexes(std::slice::from_ref(def));
+            let Some(incoming) = converted.into_iter().next() else {
+                return Ok(());
+            };
+            let indexes = node_type.compound_indexes.get_or_insert_with(Vec::new);
+            // Replace by NAME rather than appending: the name IS the keyspace,
+            // so two entries sharing it are one index declared twice, and the
+            // planner's first-wins dedup would pick between them arbitrarily.
+            if let Some(existing) = indexes.iter_mut().find(|i| i.name == incoming.name) {
+                *existing = incoming;
+            } else {
+                indexes.push(incoming);
+            }
+        }
+        NodeTypeAlteration::DropCompoundIndex(name) => {
+            if let Some(indexes) = node_type.compound_indexes.as_mut() {
+                indexes.retain(|i| &i.name != name);
+                if indexes.is_empty() {
+                    node_type.compound_indexes = None;
+                }
+            }
+        }
         NodeTypeAlteration::SetVersionable(v) => {
             node_type.versionable = Some(*v);
         }

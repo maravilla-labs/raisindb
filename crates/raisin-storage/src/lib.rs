@@ -30,6 +30,7 @@
 //! - [`WorkspaceRepository`] - CRUD operations for workspaces
 //! - [`RegistryRepository`] - Multi-tenant deployment and tenant registration
 
+pub mod compound;
 pub mod fulltext;
 pub mod jobs;
 pub mod management;
@@ -85,6 +86,11 @@ pub use jobs::{
 pub use fulltext::{
     FullTextIndexJob, FullTextJobStore, FullTextSearchQuery, FullTextSearchResult, IndexingEngine,
     JobKind,
+};
+
+// Re-export compound index build-state types
+pub use compound::{
+    CompoundAvailability, CompoundBuildPhase, CompoundIndexState, CompoundStateSource,
 };
 
 // Re-export spatial types

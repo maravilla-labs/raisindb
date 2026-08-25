@@ -434,22 +434,22 @@ pub fn sorted_precisions(mut precisions: Vec<usize>) -> Vec<usize> {
 
 /// FNV-1a 64. Small, dependency-free, and — unlike `DefaultHasher` — documented
 /// to produce the same value forever, which a persisted fingerprint requires.
-struct Fnv(u64);
+pub(crate) struct Fnv(u64);
 
 impl Fnv {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Fnv(0xcbf2_9ce4_8422_2325)
     }
-    fn write_bytes(&mut self, bytes: &[u8]) {
+    pub(crate) fn write_bytes(&mut self, bytes: &[u8]) {
         for b in bytes {
             self.0 ^= *b as u64;
             self.0 = self.0.wrapping_mul(0x100_0000_01b3);
         }
     }
-    fn write_u32(&mut self, v: u32) {
+    pub(crate) fn write_u32(&mut self, v: u32) {
         self.write_bytes(&v.to_be_bytes());
     }
-    fn finish(self) -> u64 {
+    pub(crate) fn finish(self) -> u64 {
         self.0
     }
 }

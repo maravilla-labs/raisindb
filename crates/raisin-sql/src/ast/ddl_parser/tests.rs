@@ -1184,3 +1184,67 @@ CREATE NODETYPE 'news:Article' (
         _ => panic!("Expected CreateNodeType"),
     }
 }
+
+#[cfg(test)]
+mod compound_index_alterations {
+    use crate::ast::ddl::NodeTypeAlteration;
+    use crate::ast::ddl_parser::nodetype::alter_nodetype;
+
+    /// `ALTER NODETYPE` could not touch compound indexes at all: the field
+    /// existed only on `CreateNodeType`, so an index could be created but never
+    /// added to, or removed from, an existing type.
+    #[test]
+    fn alter_can_add_a_compound_index() {
+        let sql = "ALTER NODETYPE 'studio:Order' \
+                   ADD COMPOUND_INDEX 'order_buyer_status' ON (buyer_user_id, status)";
+        let (rest, alter) = alter_nodetype(sql).expect("should parse");
+        assert!(rest.trim().is_empty(), "unparsed tail: {rest:?}");
+        assert_eq!(alter.name, "studio:Order");
+        assert_eq!(alter.alterations.len(), 1);
+
+        match &alter.alterations[0] {
+            NodeTypeAlteration::AddCompoundIndex(def) => {
+                assert_eq!(def.name, "order_buyer_status");
+                let props: Vec<&str> = def.columns.iter().map(|c| c.property.as_str()).collect();
+                assert_eq!(props, vec!["buyer_user_id", "status"]);
+            }
+            other => panic!("expected AddCompoundIndex, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn alter_can_drop_a_compound_index() {
+        let sql = "ALTER NODETYPE 'studio:Order' DROP COMPOUND_INDEX 'order_status_created'";
+        let (rest, alter) = alter_nodetype(sql).expect("should parse");
+        assert!(rest.trim().is_empty(), "unparsed tail: {rest:?}");
+        assert_eq!(
+            alter.alterations,
+            vec![NodeTypeAlteration::DropCompoundIndex(
+                "order_status_created".to_string()
+            )]
+        );
+    }
+
+    /// The new arms must not shadow the existing `ADD`/`DROP` alterations —
+    /// `alt` tries in order and they all start with the same keyword.
+    #[test]
+    fn compound_arms_do_not_shadow_mixin_or_property_arms() {
+        let sql = "ALTER NODETYPE 'studio:Order' ADD MIXIN 'raisin:Timestamped'";
+        let (_, alter) = alter_nodetype(sql).expect("should parse");
+        assert_eq!(
+            alter.alterations,
+            vec![NodeTypeAlteration::AddMixin(
+                "raisin:Timestamped".to_string()
+            )]
+        );
+
+        let sql = "ALTER NODETYPE 'studio:Order' DROP MIXIN 'raisin:Timestamped'";
+        let (_, alter) = alter_nodetype(sql).expect("should parse");
+        assert_eq!(
+            alter.alterations,
+            vec![NodeTypeAlteration::DropMixin(
+                "raisin:Timestamped".to_string()
+            )]
+        );
+    }
+}

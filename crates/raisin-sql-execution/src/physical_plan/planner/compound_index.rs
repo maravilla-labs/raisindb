@@ -4,6 +4,17 @@ use super::{
     CanonicalPredicate, CompoundIndexDefinition, Error, Expr, Literal, PhysicalPlanner,
     SchemaStats, TypedExpr,
 };
+use raisin_models::nodes::properties::schema::CompoundColumnType;
+
+/// One matched equality column: (property, value, declared column type).
+///
+/// The TYPE travels with the value because the executor has to rebuild the same
+/// key bytes the writer produced, and it has no access to the index definition.
+/// `build_compound_key` encodes per `column_type` — `Integer`/`Boolean`/
+/// `Timestamp*` as big-endian bytes, only `String` as UTF-8 — so an executor
+/// that assumed `String` built a prefix that could never match a non-String
+/// column. Dropping the type here is what reintroduces that.
+pub type CompoundMatchedColumn = (String, String, CompoundColumnType);
 
 /// Result of a successful compound index match:
 /// (index_name, matched_equality_columns, ascending, claims_order)
@@ -11,7 +22,7 @@ use super::{
 /// `claims_order` is true when ALL equality columns matched and the trailing
 /// order column satisfies the query's ORDER BY — only then may the scan's
 /// iteration order be relied upon (e.g. for LIMIT pushdown under an ORDER BY).
-pub type CompoundIndexMatch = (String, Vec<(String, String)>, bool, bool);
+pub type CompoundIndexMatch = (String, Vec<CompoundMatchedColumn>, bool, bool);
 
 /// Normalise a `CHILD_OF` argument to the exact string the index writer stores
 /// for `__parent_path`.
@@ -160,11 +171,15 @@ impl PhysicalPlanner {
             };
 
             // Match a leading prefix of the equality columns.
-            let mut matched_columns: Vec<(String, String)> = Vec::new();
+            let mut matched_columns: Vec<CompoundMatchedColumn> = Vec::new();
             for i in 0..equality_column_count {
                 let col = &index.columns[i];
                 if let Some(value) = equality_map.get(&col.property) {
-                    matched_columns.push((col.property.clone(), value.clone()));
+                    matched_columns.push((
+                        col.property.clone(),
+                        value.clone(),
+                        col.column_type.clone(),
+                    ));
                 } else {
                     break;
                 }

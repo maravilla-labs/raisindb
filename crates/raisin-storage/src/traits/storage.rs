@@ -106,6 +106,16 @@ pub trait Storage: Send + Sync {
         None
     }
 
+    /// Source of per-(workspace, index) COMPOUND index build state.
+    ///
+    /// `None` means "this backend cannot tell you", which the planner treats as
+    /// [`crate::compound::CompoundAvailability::NotBuilt`] — never as "assume it
+    /// works". Same contract as [`Self::spatial_state`], and for the same
+    /// reason: a declared index is not a built one.
+    fn compound_state(&self) -> Option<Arc<dyn crate::compound::CompoundStateSource>> {
+        None
+    }
+
     /// Operator surface for the spatial index: local state, a physical entry
     /// census, and rebuild scheduling.
     ///

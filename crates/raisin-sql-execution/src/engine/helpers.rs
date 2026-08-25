@@ -33,6 +33,22 @@ pub(super) fn analyzed_selection(analyzed: &AnalyzedStatement) -> Option<&TypedE
     None
 }
 
+/// The WHERE clause of any analyzed statement that HAS one, DML included.
+///
+/// Separate from [`analyzed_selection`] on purpose: that one feeds
+/// `apply_schema_stats`, whose gate is deliberately query-only. This one feeds
+/// index selection, where an `UPDATE … WHERE` deserves the same access path its
+/// equivalent `SELECT … WHERE` would get — which it did not, because the DML
+/// planner never loaded compound indexes at all.
+pub(super) fn statement_filter(analyzed: &AnalyzedStatement) -> Option<&TypedExpr> {
+    match analyzed {
+        AnalyzedStatement::Query(q) => q.selection.as_ref(),
+        AnalyzedStatement::Update(u) => u.filter.as_ref(),
+        AnalyzedStatement::Delete(d) => d.filter.as_ref(),
+        _ => None,
+    }
+}
+
 /// Recursively search a TypedExpr for `node_type = 'value'` pattern
 pub(crate) fn extract_node_type_from_expr(expr: &TypedExpr) -> Option<String> {
     match &expr.expr {
@@ -147,8 +163,24 @@ static COMPOUND_INDEX_CACHE: std::sync::OnceLock<
 
 fn compound_index_cache(
 ) -> &'static raisin_core::TtlCache<std::sync::Arc<Vec<CompoundIndexDefinition>>> {
-    COMPOUND_INDEX_CACHE
-        .get_or_init(|| raisin_core::TtlCache::new(std::time::Duration::from_secs(30)))
+    COMPOUND_INDEX_CACHE.get_or_init(|| {
+        let cache = raisin_core::TtlCache::new(std::time::Duration::from_secs(30));
+        // Replication checkpoint ingest copies whole SSTs in and emits NO
+        // events, so an event-driven hook alone would leave this cache serving
+        // definitions for a schema that has already been replaced. Registering
+        // here — inside the initializer, so registration cannot get out of
+        // order with population — is the registry's documented contract.
+        //
+        // Registered even though the TTL is only 30s: a stale entry here plans
+        // reads against a keyspace nobody is writing any more, and 30s of that
+        // is 30s of silently wrong index selection.
+        raisin_core::register_invalidator(|| {
+            if let Some(c) = COMPOUND_INDEX_CACHE.get() {
+                c.invalidate_all();
+            }
+        });
+        cache
+    })
 }
 
 pub(crate) async fn load_all_compound_indexes<S: Storage>(

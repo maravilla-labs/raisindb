@@ -444,6 +444,35 @@ pub(crate) fn nodetype_alteration(input: &str) -> IResult<&str, NodeTypeAlterati
             ),
             NodeTypeAlteration::SetStrict,
         ),
+        // Compound-index alterations, nested in their own `alt` because nom's
+        // tuple `alt` has an arity ceiling and the outer list is already at it.
+        compound_index_alteration,
+    ))
+    .parse(input)
+}
+
+/// `ADD COMPOUND_INDEX 'name' ON (col, col DESC)` / `DROP COMPOUND_INDEX 'name'`
+///
+/// Reuses the same `compound_index` parser `CREATE NODETYPE` uses, so the two
+/// spellings of a declaration cannot drift.
+fn compound_index_alteration(input: &str) -> IResult<&str, NodeTypeAlteration> {
+    alt((
+        map(
+            preceded((tag_no_case("ADD"), multispace1), compound_index),
+            NodeTypeAlteration::AddCompoundIndex,
+        ),
+        map(
+            preceded(
+                (
+                    tag_no_case("DROP"),
+                    multispace1,
+                    tag_no_case("COMPOUND_INDEX"),
+                    multispace1,
+                ),
+                quoted_string,
+            ),
+            |s| NodeTypeAlteration::DropCompoundIndex(s.to_string()),
+        ),
     ))
     .parse(input)
 }

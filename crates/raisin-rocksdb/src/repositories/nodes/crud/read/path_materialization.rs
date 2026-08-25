@@ -17,7 +17,9 @@ impl NodeRepositoryImpl {
     /// This is used when reading nodes stored as StorageNode (without path).
     /// For backward compatibility, if the node already has a path (old data),
     /// this function is not called.
-    pub(in crate::repositories::nodes) fn materialize_path(
+    /// Visible crate-wide because the INDEX REBUILDS need it too: they iterate
+    /// the node blobs directly, and a blob deliberately carries no `path`.
+    pub(crate) fn materialize_path(
         &self,
         tenant_id: &str,
         repo_id: &str,

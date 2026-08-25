@@ -19,11 +19,77 @@ use crate::physical_plan::operators::PhysicalPlan;
 use async_stream::try_stream;
 use raisin_core::services::rls_filter;
 use raisin_error::Error;
+use raisin_models::nodes::properties::schema::CompoundColumnType;
 use raisin_models::permissions::PermissionScope;
 use raisin_storage::{
     CompoundColumnValue, CompoundIndexRepository, NodeRepository, Storage, StorageScope,
 };
 use std::time::Instant;
+
+/// Encode one matched equality value into the same `CompoundColumnValue` the
+/// index WRITER produced for that column.
+///
+/// The writer resolves a node's value through
+/// `extract_compound_column_value` and encodes per declared `column_type`; the
+/// planner, by contrast, only ever has the value as a string literal from the
+/// WHERE clause. This is the one place those two representations are
+/// reconciled, so it must stay in step with
+/// `raisin-rocksdb/src/keys/index_keys.rs::build_compound_key`.
+///
+/// A value that cannot be parsed as its declared type falls back to `String`.
+/// That yields a prefix which matches nothing, which is the correct outcome —
+/// `WHERE quantity = 'abc'` on an Integer column has no rows — and it is what
+/// the writer does too (a type mismatch there drops the node from the index).
+fn encode_equality_value(
+    prop_name: &str,
+    value: &str,
+    column_type: &CompoundColumnType,
+) -> CompoundColumnValue {
+    match column_type {
+        CompoundColumnType::String => CompoundColumnValue::String(value.to_string()),
+        CompoundColumnType::Integer => match value.parse::<i64>() {
+            Ok(i) => CompoundColumnValue::Integer(i),
+            Err(_) => {
+                tracing::warn!(
+                    "CompoundIndexScan: column '{}' is declared Integer but the predicate value '{}' is not an integer; \
+                     the scan prefix cannot match",
+                    prop_name,
+                    value
+                );
+                CompoundColumnValue::String(value.to_string())
+            }
+        },
+        CompoundColumnType::Boolean => match value.parse::<bool>() {
+            Ok(b) => CompoundColumnValue::Boolean(b),
+            Err(_) => {
+                tracing::warn!(
+                    "CompoundIndexScan: column '{}' is declared Boolean but the predicate value '{}' is not a boolean; \
+                     the scan prefix cannot match",
+                    prop_name,
+                    value
+                );
+                CompoundColumnValue::String(value.to_string())
+            }
+        },
+        // The writer only ever mints a Timestamp column from the engine-owned
+        // `__created_at` / `__updated_at`, and encodes it DESCENDING
+        // (`TimestampDesc`) — see `extract_compound_column_value`. Mirror that
+        // exactly; an equality predicate on a timestamp is unusual but must
+        // still address the bytes that were written.
+        CompoundColumnType::Timestamp => match value.parse::<i64>() {
+            Ok(ts) => CompoundColumnValue::TimestampDesc(ts),
+            Err(_) => {
+                tracing::warn!(
+                    "CompoundIndexScan: column '{}' is declared Timestamp but the predicate value '{}' is not \
+                     microseconds-since-epoch; the scan prefix cannot match",
+                    prop_name,
+                    value
+                );
+                CompoundColumnValue::String(value.to_string())
+            }
+        },
+    }
+}
 
 /// Execute a compound index scan.
 ///
@@ -96,9 +162,18 @@ pub async fn execute_compound_index_scan<S: Storage + 'static>(
         let qualifier = alias.clone().unwrap_or_else(|| table.clone());
         let locales_to_use = get_locales_to_use(&ctx_clone);
 
+        // Encode each equality value the way the WRITER encoded it. The writer
+        // (`keys/index_keys.rs::build_compound_key`) switches on the declared
+        // `column_type`: only `String` goes in as UTF-8, everything else as
+        // big-endian bytes. Encoding everything as `String` here built a prefix
+        // that could never match a non-String column, so the scan returned
+        // nothing while the planner had already dropped the predicate from the
+        // residual filter — silently missing rows, not a slow path.
         let compound_values: Vec<CompoundColumnValue> = equality_columns
             .iter()
-            .map(|(_prop_name, value)| CompoundColumnValue::String(value.clone()))
+            .map(|(prop_name, value, column_type)| {
+                encode_equality_value(prop_name, value, column_type)
+            })
             .collect();
 
         tracing::debug!(
@@ -112,6 +187,11 @@ pub async fn execute_compound_index_scan<S: Storage + 'static>(
             .compound_index()
             .scan_compound_index(
                 StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
+                // `false` = both keyspaces (draft AND published), which is what
+                // a SQL scan wants: a node is indexed under exactly one tag, so
+                // asking for only one silently drops the other half. Passing
+                // `true` would restrict to published-only, which no SQL surface
+                // currently asks for.
                 &index_name, &compound_values, false, ascending, scan_limit,
             )
             .await?;

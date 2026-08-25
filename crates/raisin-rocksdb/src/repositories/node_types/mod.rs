@@ -203,6 +203,186 @@ impl NodeTypeRepositoryImpl {
         parent_head
     }
 
+    /// Warn about compound-index declarations that will never do what the
+    /// author meant.
+    ///
+    /// These are WARNINGS, not errors, on purpose: this runs on the package
+    /// install path, and a hard failure there aborts the whole schema batch and
+    /// takes an unrelated install down with it. The cost of a bad declaration is
+    /// a permanently unused (or permanently empty) index with correct query
+    /// results — bad performance, never wrong rows — so refusing the write is
+    /// the more damaging of the two options.
+    ///
+    /// The trap this exists for: the PLANNER rewrites a query's
+    /// `ORDER BY created_at` to `__created_at`
+    /// (`raisin-sql-execution/.../planner/compound_index.rs`) and then compares
+    /// it against the declared property VERBATIM. Meanwhile the WRITER resolves
+    /// `__created_at` from `node.created_at` but a bare `created_at` from
+    /// `node.properties["created_at"]` — a different value entirely. So a
+    /// declaration spelling the order column `created_at` can never claim the
+    /// ORDER BY it was written for, and silently costs a Sort. Nothing else in
+    /// the system says so.
+    pub(super) fn warn_on_suspect_compound_indexes(node_type: &NodeType) {
+        const ENGINE_OWNED: [&str; 4] = [
+            "__node_type",
+            "__parent_path",
+            "__created_at",
+            "__updated_at",
+        ];
+
+        let Some(indexes) = node_type.compound_indexes.as_ref() else {
+            return;
+        };
+
+        let declared: std::collections::HashSet<&str> = node_type
+            .properties
+            .as_ref()
+            .map(|props| props.iter().filter_map(|p| p.name.as_deref()).collect())
+            .unwrap_or_default();
+
+        for index in indexes {
+            if index.has_order_column {
+                if let Some(order_col) = index.columns.last() {
+                    let bare = order_col.property.as_str();
+                    if bare == "created_at" || bare == "updated_at" {
+                        tracing::warn!(
+                            target: "rocksb::nodetype::compound_index",
+                            "NodeType '{}' compound index '{}' declares its ORDER column as '{}'. \
+                             The planner normalises `ORDER BY {}` to '__{}', so this index can NEVER \
+                             claim that ordering and every query pays a Sort. It also indexes \
+                             properties['{}'] rather than the engine timestamp. Did you mean '__{}'?",
+                            node_type.name, index.name, bare, bare, bare, bare, bare
+                        );
+                    }
+                }
+            }
+
+            for column in &index.columns {
+                let prop = column.property.as_str();
+                if ENGINE_OWNED.contains(&prop) || declared.contains(prop) {
+                    continue;
+                }
+                tracing::warn!(
+                    target: "rocksb::nodetype::compound_index",
+                    "NodeType '{}' compound index '{}' references column '{}', which is neither a \
+                     declared property nor engine-owned. Every node missing that value is dropped \
+                     from the index entirely, so the index may be silently empty.",
+                    node_type.name, index.name, prop
+                );
+            }
+        }
+    }
+
+    /// Drop the build state of any compound index whose declaration changed.
+    ///
+    /// The entries already in the keyspace were written under the OLD columns,
+    /// and an index name addresses one workspace-global keyspace — so after a
+    /// declaration change the stored bytes and the planner's idea of the key
+    /// layout disagree. Marking the state stale makes the planner decline the
+    /// index until a build re-establishes it, instead of reading the old
+    /// entries through the new layout.
+    ///
+    /// Deliberately covers REMOVED declarations too: an index dropped from a
+    /// NodeType stops being maintained immediately, so a state record still
+    /// saying `Ready` would outlive the thing it describes.
+    ///
+    /// Best-effort — a failure here is logged, never fatal. Refusing a schema
+    /// write because a status record could not be updated would take down
+    /// package installs for a bookkeeping problem, and the fail-closed default
+    /// already covers the case where the record is missing entirely.
+    pub(super) fn invalidate_changed_compound_state(
+        db: &Arc<DB>,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        existing: Option<&NodeType>,
+        incoming: &NodeType,
+    ) {
+        use std::collections::HashMap;
+
+        let hashes = |nt: Option<&NodeType>| -> HashMap<String, u64> {
+            nt.and_then(|n| n.compound_indexes.as_ref())
+                .map(|indexes| {
+                    indexes
+                        .iter()
+                        .map(|i| (i.name.clone(), i.definition_hash()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        let before = hashes(existing);
+        let after = hashes(Some(incoming));
+
+        let mut stale: Vec<&String> = Vec::new();
+        for (name, hash) in &after {
+            if before.get(name) != Some(hash) {
+                stale.push(name);
+            }
+        }
+        for name in before.keys() {
+            if !after.contains_key(name) {
+                stale.push(name);
+            }
+        }
+        if stale.is_empty() {
+            return;
+        }
+
+        let store = crate::compound_state::CompoundStateStore::new(db.clone());
+        // A NodeType is branch-scoped but compound state is per WORKSPACE, and
+        // the declaration does not name one. Clearing across every workspace
+        // that has a record is the conservative reading: a spurious extra
+        // rebuild costs time, a missed one costs correctness.
+        let workspaces = match Self::workspaces_with_compound_state(db, tenant_id, repo_id, branch)
+        {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not enumerate compound index state; skipping invalidation");
+                return;
+            }
+        };
+        for workspace in workspaces {
+            for name in &stale {
+                if let Err(e) = store.mark_not_built(tenant_id, repo_id, branch, &workspace, name) {
+                    tracing::warn!(
+                        index = %name,
+                        workspace = %workspace,
+                        error = %e,
+                        "could not invalidate compound index build state"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Workspaces on this branch that carry at least one compound state record.
+    fn workspaces_with_compound_state(
+        db: &Arc<DB>,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+    ) -> Result<Vec<String>> {
+        let cf = cf_handle(db, cf::INDEX_STATUS)?;
+        let prefix = format!("compound_index\0{tenant_id}\0{repo_id}\0{branch}\0").into_bytes();
+        let mut out = std::collections::BTreeSet::new();
+        for item in db.prefix_iterator_cf(cf, &prefix) {
+            let (key, _) = item
+                .map_err(|e| RaisinError::storage(format!("compound state scan failed: {}", e)))?;
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            // Remainder is `{workspace}\0{index_name}`.
+            let rest = &key[prefix.len()..];
+            if let Some(sep) = rest.iter().position(|b| *b == 0) {
+                if let Ok(ws) = std::str::from_utf8(&rest[..sep]) {
+                    out.insert(ws.to_string());
+                }
+            }
+        }
+        Ok(out.into_iter().collect())
+    }
+
     pub(super) fn apply_versioning(node_type: NodeType, existing: Option<&NodeType>) -> NodeType {
         let now = Utc::now();
         let mut enriched = node_type.clone();

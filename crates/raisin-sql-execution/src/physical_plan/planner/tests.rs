@@ -519,11 +519,101 @@ fn test_archetype_equality_uses_property_index_scan() {
 
 // ── Compound-index prefix matching ───────────────────────────────────────
 
+/// A compound state source that reports every index as built.
+///
+/// Needed because the planner now fails CLOSED: a declared index it has no
+/// build state for is declined, so a planner assembled from a bare catalog
+/// plans as if it had no compound indexes at all. These tests are about the
+/// MATCHING logic, so they assert against an index that is genuinely ready.
+/// `compound_index_declined_when_not_built` covers the other half.
+#[derive(Debug)]
+struct AllBuilt;
+
+impl raisin_storage::compound::CompoundStateSource for AllBuilt {
+    fn compound_availability(
+        &self,
+        _tenant_id: &str,
+        _repo_id: &str,
+        _branch: &str,
+        _workspace: &str,
+        definition: &raisin_models::nodes::properties::schema::CompoundIndexDefinition,
+    ) -> raisin_storage::compound::CompoundAvailability {
+        raisin_storage::compound::CompoundAvailability::Ready {
+            built_through: raisin_hlc::HLC::now(),
+            definition_hash: definition.definition_hash(),
+        }
+    }
+}
+
+fn compound_planner(built: bool) -> PhysicalPlanner {
+    let mut catalog = crate::physical_plan::catalog::RocksDBIndexCatalog::new();
+    if built {
+        catalog = catalog.with_optional_compound_state(Some(std::sync::Arc::new(AllBuilt)));
+    }
+    PhysicalPlanner::with_catalog(
+        "default".into(),
+        "default".into(),
+        "main".into(),
+        "default".into(),
+        std::sync::Arc::new(catalog),
+    )
+}
+
+/// The whole point of the availability signal: a DECLARED index with no build
+/// state must not be planned against.
+///
+/// Before this, `has_compound_index()` answered a hardcoded `true` that nothing
+/// read, and a declaration was taken as proof the entries existed. Since the
+/// planner strips the matched equality predicates from the residual filter, an
+/// empty or stale keyspace meant missing rows, not a slow query.
+#[test]
+fn compound_index_declined_when_not_built() {
+    use raisin_models::nodes::properties::schema::{
+        CompoundColumnType, CompoundIndexColumn, CompoundIndexDefinition,
+    };
+
+    // Same declaration as `planner_with_compound_index`, but a catalog with no
+    // compound state source — so availability fails closed to `NotBuilt`.
+    let mut planner = compound_planner(false);
+    planner.set_compound_indexes(vec![CompoundIndexDefinition {
+        name: "grp_status_time".to_string(),
+        columns: vec![
+            CompoundIndexColumn {
+                property: "group".to_string(),
+                column_type: CompoundColumnType::String,
+                ascending: None,
+            },
+            CompoundIndexColumn {
+                property: "status".to_string(),
+                column_type: CompoundColumnType::String,
+                ascending: None,
+            },
+        ],
+        has_order_column: false,
+    }]);
+
+    let filter = LogicalPlan::Filter {
+        input: Box::new(scan_nodes("nodes")),
+        predicate: FilterPredicate::from_expr(and(
+            json_eq("nodes", "group", "/g1"),
+            json_eq("nodes", "status", "open"),
+        )),
+    };
+    let physical = planner.plan(&filter).unwrap();
+    let explain = physical.explain();
+
+    assert!(
+        !explain.contains("CompoundIndexScan"),
+        "an unbuilt compound index must not be planned against; plan:\n{}",
+        explain
+    );
+}
+
 fn planner_with_compound_index() -> PhysicalPlanner {
     use raisin_models::nodes::properties::schema::{
         CompoundColumnType, CompoundIndexColumn, CompoundIndexDefinition,
     };
-    let mut planner = PhysicalPlanner::new();
+    let mut planner = compound_planner(true);
     planner.set_compound_indexes(vec![CompoundIndexDefinition {
         name: "grp_status_time".to_string(),
         columns: vec![
@@ -883,7 +973,7 @@ fn planner_with_parent_path_index() -> PhysicalPlanner {
     use raisin_models::nodes::properties::schema::{
         CompoundColumnType, CompoundIndexColumn, CompoundIndexDefinition,
     };
-    let mut planner = PhysicalPlanner::new();
+    let mut planner = compound_planner(true);
     planner.set_compound_indexes(vec![CompoundIndexDefinition {
         name: "folder_time".to_string(),
         columns: vec![

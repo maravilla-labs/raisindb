@@ -114,6 +114,7 @@ mod tests {
             resolved_mixins: vec![],
             resolved_indexable: indexable,
             resolved_index_types: index_types,
+            resolved_compound_indexes: vec![],
             inheritance_chain: vec!["test:Type".to_string()],
         }
     }

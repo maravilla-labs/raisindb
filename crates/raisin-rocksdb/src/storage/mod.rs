@@ -282,6 +282,14 @@ impl Storage for RocksDBStorage {
         )))
     }
 
+    /// Same per-call construction rationale as `spatial_state`: the store is a
+    /// thin `Arc<DB>` + cache pair, so a hot-loop caller should hold the handle.
+    fn compound_state(&self) -> Option<Arc<dyn raisin_storage::compound::CompoundStateSource>> {
+        Some(Arc::new(crate::compound_state::CompoundStateStore::new(
+            self.db.clone(),
+        )))
+    }
+
     /// The RocksDB backend can administer its spatial index: read the local state
     /// records, census the keys physically present, and queue a local rebuild.
     ///

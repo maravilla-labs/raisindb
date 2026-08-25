@@ -460,7 +460,7 @@ impl PhysicalPlan {
             } => {
                 let cols_str = equality_columns
                     .iter()
-                    .map(|(k, v)| format!("{}={}", k, v))
+                    .map(|(k, v, _ty)| format!("{}={}", k, v))
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!(

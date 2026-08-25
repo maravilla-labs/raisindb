@@ -9,6 +9,8 @@
 
 use crate::{cf, cf_handle, keys, repositories::hash_property_value, RocksDBStorage};
 use raisin_error::{Error, Result};
+use raisin_hlc::HLC;
+use raisin_storage::compound::{CompoundBuildPhase, CompoundIndexState};
 use raisin_storage::{IndexType, RebuildStats};
 use rocksdb::WriteBatch;
 
@@ -515,6 +517,21 @@ async fn rebuild_compound_indexes(
     let nodes = scan_nodes(storage, tenant_id, repo_id, branch, workspace).await?;
 
     // 2. Clear existing compound indexes for this workspace (draft + published)
+    //
+    // Everything declared on this branch is about to be rebuilt, so mark it all
+    // `Building` FIRST. The clear below empties the keyspace, and until the
+    // rebuild finishes there is no complete entry set to serve — unlike spatial,
+    // where `Building` still describes a usable older generation. The planner
+    // treats `Building` as unusable and takes another access path, which is
+    // correct-but-slower rather than fast-but-wrong.
+    let state_store = crate::compound_state::CompoundStateStore::new(storage.db.clone());
+    let declared = declared_compound_indexes(storage, tenant_id, repo_id, branch).await?;
+    for definition in &declared {
+        let mut state = CompoundIndexState::ready(definition, HLC::new(0, 0));
+        state.phase = CompoundBuildPhase::Building;
+        state_store.put(tenant_id, repo_id, branch, workspace, &state)?;
+    }
+
     clear_compound_indexes(storage, tenant_id, repo_id, branch, workspace).await?;
 
     // 3. Rebuild from nodes
@@ -573,7 +590,55 @@ async fn rebuild_compound_indexes(
         })?;
     }
 
+    // Only NOW does the state flip to `Ready`, and only for the declaration each
+    // index was actually just built from. A rebuild that dies partway leaves
+    // `Building` in place — which reads as unusable, not as ready-and-empty.
+    // That asymmetry is the whole point: the failure mode of this record must be
+    // "planner declines a good index", never "planner trusts a bad one".
+    for definition in &declared {
+        let mut state = CompoundIndexState::ready(definition, current_revision);
+        state.nodes_indexed = stats.items_processed as u64;
+        state_store.put(tenant_id, repo_id, branch, workspace, &state)?;
+    }
+
     Ok(())
+}
+
+/// Every compound index declared by ANY NodeType on this branch.
+///
+/// Deliberately branch-wide rather than per-node-type: an index NAME addresses a
+/// workspace-global keyspace, so "is this index built" is a question about the
+/// branch, not about one type. Matches how the planner loads declarations in
+/// `engine/helpers.rs::load_all_compound_indexes`, including its
+/// first-declaration-wins dedup by name.
+async fn declared_compound_indexes(
+    storage: &RocksDBStorage,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+) -> Result<Vec<raisin_models::nodes::properties::schema::CompoundIndexDefinition>> {
+    use raisin_storage::NodeTypeRepository;
+
+    let node_types = storage
+        .node_types
+        .list(
+            raisin_storage::BranchScope::new(tenant_id, repo_id, branch),
+            None,
+        )
+        .await?;
+
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for node_type in node_types {
+        if let Some(indexes) = node_type.compound_indexes {
+            for index in indexes {
+                if seen.insert(index.name.clone()) {
+                    out.push(index);
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Rebuild child order indexes for all nodes in a workspace

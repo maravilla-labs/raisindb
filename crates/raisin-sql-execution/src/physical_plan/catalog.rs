@@ -48,6 +48,8 @@ pub use spatial_availability::{
     GEOHASH_CELL_RADIUS_METERS,
 };
 
+use raisin_models::nodes::properties::schema::CompoundIndexDefinition;
+use raisin_storage::compound::{CompoundAvailability, CompoundStateSource};
 use std::fmt;
 use std::sync::Arc;
 
@@ -111,8 +113,38 @@ pub trait IndexCatalog: Send + Sync {
     /// - `WHERE node_type = 'Article' AND category = 'business' ORDER BY created_at DESC`
     ///
     /// Key format: `{tenant}\0{repo}\0{branch}\0{workspace}\0cidx\0{index_name}\0{col1}\0{col2}\0...\0{~revision}\0{node_id}`
+    /// Whether the backend has a compound-index column family at all.
+    ///
+    /// Cosmetic — `available_indexes()` prints it. This is NOT a planning
+    /// signal and must never become one: the CF existing says nothing about
+    /// whether a particular index holds entries. Use
+    /// [`Self::compound_index_availability`] for that.
     fn has_compound_index(&self) -> bool {
         true // Available by default in RocksDB
+    }
+
+    /// What one compound index can actually answer, for the declaration
+    /// currently in force.
+    ///
+    /// # This method must fail closed
+    ///
+    /// The default returns [`CompoundAvailability::NotBuilt`], for the same
+    /// reason `spatial_index_availability` does. A compound index name
+    /// addresses a workspace-global keyspace with no node type in the key, so a
+    /// changed declaration writes new-layout entries alongside old-layout ones.
+    /// Trusting a declaration means building a scan prefix for a layout the
+    /// stored bytes may not share — and because the planner STRIPS the matched
+    /// equality predicates from the residual filter, the result is missing rows
+    /// rather than a slow query.
+    fn compound_index_availability(
+        &self,
+        _tenant_id: &str,
+        _repo_id: &str,
+        _branch: &str,
+        _workspace: &str,
+        _definition: &CompoundIndexDefinition,
+    ) -> CompoundAvailability {
+        CompoundAvailability::NotBuilt
     }
 
     /// Find a compound index matching the given query pattern
@@ -190,6 +222,8 @@ pub struct RocksDBIndexCatalog {
     /// `None` means "unknown", which resolves to
     /// [`SpatialAvailability::NotBuilt`] — never to "assume it works".
     spatial_state: Option<Arc<dyn SpatialStateSource>>,
+    /// Same contract for compound indexes.
+    compound_state: Option<Arc<dyn CompoundStateSource>>,
 }
 
 impl fmt::Debug for RocksDBIndexCatalog {
@@ -197,6 +231,7 @@ impl fmt::Debug for RocksDBIndexCatalog {
         f.debug_struct("RocksDBIndexCatalog")
             .field("has_fulltext", &self.has_fulltext)
             .field("spatial_state", &self.spatial_state.is_some())
+            .field("compound_state", &self.compound_state.is_some())
             .finish()
     }
 }
@@ -210,6 +245,7 @@ impl RocksDBIndexCatalog {
         Self {
             has_fulltext: true,
             spatial_state: None,
+            compound_state: None,
         }
     }
 
@@ -220,6 +256,7 @@ impl RocksDBIndexCatalog {
         Self {
             has_fulltext: false,
             spatial_state: None,
+            compound_state: None,
         }
     }
 
@@ -228,6 +265,7 @@ impl RocksDBIndexCatalog {
         Self {
             has_fulltext: enabled,
             spatial_state: None,
+            compound_state: None,
         }
     }
 
@@ -250,6 +288,19 @@ impl RocksDBIndexCatalog {
         source: Option<Arc<dyn SpatialStateSource>>,
     ) -> Self {
         self.spatial_state = source;
+        self
+    }
+
+    /// Attach the source of per-(workspace, index) compound build state.
+    ///
+    /// `None` keeps the fail-closed default: every compound index reads as
+    /// `NotBuilt` and the planner declines all of them. That is the correct
+    /// answer for a backend that cannot report build state.
+    pub fn with_optional_compound_state(
+        mut self,
+        source: Option<Arc<dyn CompoundStateSource>>,
+    ) -> Self {
+        self.compound_state = source;
         self
     }
 }
@@ -289,6 +340,23 @@ impl IndexCatalog for RocksDBIndexCatalog {
             }
             // FAIL CLOSED. The CF exists; that is not the question.
             None => SpatialAvailability::NotBuilt,
+        }
+    }
+
+    fn compound_index_availability(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        definition: &CompoundIndexDefinition,
+    ) -> CompoundAvailability {
+        match &self.compound_state {
+            Some(source) => {
+                source.compound_availability(tenant_id, repo_id, branch, workspace, definition)
+            }
+            // FAIL CLOSED. The CF exists; that was never the question.
+            None => CompoundAvailability::NotBuilt,
         }
     }
 }

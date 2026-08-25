@@ -66,7 +66,10 @@ pub fn create_spatial_index_handler(
 }
 
 /// Create the compound index handler
-pub fn create_compound_index_handler(storage: &RocksDBStorage) -> Arc<CompoundIndexJobHandler> {
+pub fn create_compound_index_handler(
+    storage: &RocksDBStorage,
+    lock_manager: Option<raisin_locks::LockManagerHandle>,
+) -> Arc<CompoundIndexJobHandler> {
     let revision_repo = Arc::new(crate::repositories::RevisionRepositoryImpl::new(
         storage.db.clone(),
         storage.config.cluster_node_id.clone().unwrap_or_default(),
@@ -74,9 +77,8 @@ pub fn create_compound_index_handler(storage: &RocksDBStorage) -> Arc<CompoundIn
     let branch_repo = Arc::new(crate::repositories::BranchRepositoryImpl::new(
         storage.db.clone(),
     ));
-    Arc::new(CompoundIndexJobHandler::new(
-        storage.db.clone(),
-        revision_repo,
-        branch_repo,
-    ))
+    Arc::new(
+        CompoundIndexJobHandler::new(storage.db.clone(), revision_repo, branch_repo)
+            .with_lock_manager(lock_manager),
+    )
 }

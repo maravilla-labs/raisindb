@@ -547,7 +547,12 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         // predicate.
         let index_catalog: Arc<dyn IndexCatalog> = Arc::new(
             crate::physical_plan::catalog::RocksDBIndexCatalog::new()
-                .with_optional_spatial_state(self.storage.spatial_state()),
+                .with_optional_spatial_state(self.storage.spatial_state())
+                // Compound build state. Without it every compound index
+                // reads as `NotBuilt` and the planner declines it — correct,
+                // never fast. With it, a declared-but-unbuilt index is
+                // distinguishable from a usable one.
+                .with_optional_compound_state(self.storage.compound_state()),
         );
 
         let mut physical_planner = PhysicalPlanner::with_catalog(

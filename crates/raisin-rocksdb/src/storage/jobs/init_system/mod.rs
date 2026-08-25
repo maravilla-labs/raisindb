@@ -112,7 +112,8 @@ impl RocksDBStorage {
             master_key,
         );
         let property_index_handler = indexing_handlers::create_property_index_handler(&self);
-        let compound_index_handler = indexing_handlers::create_compound_index_handler(&self);
+        let compound_index_handler =
+            indexing_handlers::create_compound_index_handler(&self, lock_manager.clone());
 
         let snapshot_handler = replication_handlers::create_snapshot_handler(&self);
         let replication_gc_handler = replication_handlers::create_replication_gc_handler(&self);

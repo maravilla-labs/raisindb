@@ -138,6 +138,29 @@ async fn setup() -> (
             .expect("create");
     }
 
+    // BUILD THE INDEX, the way production does.
+    //
+    // A declaration is not a built index: the planner consults the persisted
+    // build state and DECLINES anything that is not `Ready`, because a scan over
+    // an empty or stale keyspace yields missing rows with nothing downstream to
+    // catch it. Nothing had built it here — the node type was upserted and the
+    // nodes created, but no job ran — so every query in this file planned as a
+    // PrefixScan and the assertions below could never hold.
+    //
+    // `rebuild_indexes(.., IndexType::Compound)` is the real build path and it
+    // is synchronous, which is what a test needs; `sweep_compound_index_builds`
+    // only QUEUES work, and there is no worker here to pick it up.
+    raisin_rocksdb::management::async_indexing::rebuild_indexes(
+        &storage,
+        TENANT,
+        REPO,
+        BRANCH,
+        WS,
+        raisin_storage::IndexType::Compound,
+    )
+    .await
+    .expect("build the compound index");
+
     let mut catalog = StaticCatalog::default_nodes_schema();
     catalog.register_workspace(WS.to_string());
     let engine = QueryEngine::new(

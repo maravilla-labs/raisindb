@@ -153,6 +153,16 @@ impl NodeTypeRepository for NodeTypeRepositoryImpl {
 
         let existing = self.get(scope, &node_type.name, None).await?;
 
+        Self::warn_on_suspect_compound_indexes(&node_type);
+        Self::invalidate_changed_compound_state(
+            &self.db,
+            tenant_id,
+            repo_id,
+            branch,
+            existing.as_ref(),
+            &node_type,
+        );
+
         let enriched = Self::apply_versioning(node_type, existing.as_ref());
         let serialized = rmp_serde::to_vec_named(&enriched).map_err(|e| {
             RaisinError::storage(format!("Serialization error for NodeType: {}", e))

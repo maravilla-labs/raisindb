@@ -20,6 +20,8 @@ pub(crate) async fn scan_nodes(
     let cf_nodes = cf_handle(storage.db(), cf::NODES)?;
     let prefix = keys::workspace_prefix(tenant_id, repo_id, branch, workspace);
 
+    let current_revision = get_current_revision(storage, tenant_id, repo_id, branch).await?;
+
     let mut nodes = Vec::new();
     let iter = storage.db().prefix_iterator_cf(cf_nodes, &prefix);
 
@@ -50,7 +52,48 @@ pub(crate) async fn scan_nodes(
         }
 
         match rmp_serde::from_slice::<Node>(&value) {
-            Ok(node) => nodes.push(node),
+            Ok(mut node) => {
+                // MATERIALIZE THE PATH. A node blob deliberately carries none —
+                // `StorageNode` omits it so a subtree move is O(1) in blob
+                // writes — and it is looked up from NODE_PATH on the normal read
+                // path. This function reads the blob DIRECTLY, so without this
+                // every node arrives with `path: ""`.
+                //
+                // That is not cosmetic. The compound-index rebuild derives
+                // `__parent_path` from `Node::parent_path()`, which reads the
+                // path; with an empty one it resolves to `None`, the column
+                // cannot be filled, and every node is skipped. The rebuild
+                // CLEARS the keyspace first and marks the index `Ready` at the
+                // end, so the result was an EMPTY index the planner trusts —
+                // silently returning no rows for a folder listing, with the
+                // matched predicates already stripped from the residual filter
+                // so nothing downstream could catch the loss.
+                if node.path.is_empty() {
+                    match storage.nodes.materialize_path(
+                        tenant_id,
+                        repo_id,
+                        branch,
+                        workspace,
+                        &node.id,
+                        &current_revision,
+                    ) {
+                        Ok(path) => node.path = path,
+                        Err(e) => {
+                            // Skip rather than index a node whose place in the
+                            // tree is unknown: a hierarchy column built from a
+                            // guess is worse than one missing an entry, because
+                            // the planner cannot tell the difference.
+                            tracing::warn!(
+                                node_id = %node.id,
+                                error = %e,
+                                "Skipping node during index rebuild: no path in NODE_PATH"
+                            );
+                            continue;
+                        }
+                    }
+                }
+                nodes.push(node)
+            }
             Err(e) => {
                 tracing::warn!("Failed to deserialize node: {}", e);
             }

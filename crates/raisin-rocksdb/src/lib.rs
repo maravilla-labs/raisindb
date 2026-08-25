@@ -44,6 +44,7 @@ mod admin_user_store;
 mod api_key_store;
 mod auth_service;
 pub mod checkpoint;
+pub mod compound_state;
 pub mod config;
 mod constants;
 mod error_ext;

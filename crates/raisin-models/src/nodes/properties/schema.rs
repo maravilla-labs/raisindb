@@ -215,6 +215,60 @@ pub struct CompoundIndexColumn {
     pub column_type: CompoundColumnType,
 }
 
+impl CompoundIndexDefinition {
+    /// Bump when the meaning of a declaration changes such that entries written
+    /// under the old reading are no longer valid, even for an identical
+    /// `columns` list.
+    pub const NORMALIZER_VERSION: u32 = 1;
+
+    /// A stable fingerprint of everything that determines the KEY BYTES this
+    /// index produces.
+    ///
+    /// Persisted alongside the built entries so a changed declaration is
+    /// detectable. It has to be, because an index name addresses a
+    /// workspace-global keyspace: change a column and the new entries land in
+    /// the SAME keyspace as the old ones, interleaved and mutually
+    /// unintelligible. Comparing this hash is what lets the planner answer
+    /// "stale" instead of quietly reading both.
+    ///
+    /// FNV-1a over a canonical encoding, hand-rolled for the same reason
+    /// `SpatialPolicy::policy_hash` is: `DefaultHasher` is explicitly NOT
+    /// stable across std versions, and this value outlives the process that
+    /// wrote it.
+    ///
+    /// Column ORDER is part of the identity — `(status, created_at)` and
+    /// `(created_at, status)` are different indexes — so the columns are hashed
+    /// in sequence, never as a set.
+    pub fn definition_hash(&self) -> u64 {
+        let mut h = crate::nodes::properties::spatial_policy::Fnv::new();
+        h.write_u32(Self::NORMALIZER_VERSION);
+        h.write_bytes(self.name.as_bytes());
+        h.write_u32(u32::from(self.has_order_column));
+        h.write_u32(self.columns.len() as u32);
+        for column in &self.columns {
+            h.write_bytes(column.property.as_bytes());
+            // Length-prefix-free encodings let `("ab","c")` collide with
+            // `("a","bc")`; the discriminator below plus the per-column type
+            // keeps the stream unambiguous.
+            h.write_u32(column.property.len() as u32);
+            h.write_u32(match column.column_type {
+                CompoundColumnType::String => 0,
+                CompoundColumnType::Integer => 1,
+                CompoundColumnType::Timestamp => 2,
+                CompoundColumnType::Boolean => 3,
+            });
+            // `Option<bool>`: absent and present-false are different
+            // declarations, so they must not hash alike.
+            h.write_u32(match column.ascending {
+                None => 0,
+                Some(false) => 1,
+                Some(true) => 2,
+            });
+        }
+        h.finish()
+    }
+}
+
 /// Type hint for compound index column encoding.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, JsonSchema)]
 pub enum CompoundColumnType {

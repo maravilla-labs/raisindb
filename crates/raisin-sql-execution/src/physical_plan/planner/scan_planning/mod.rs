@@ -442,9 +442,29 @@ impl PhysicalPlanner {
         let (index_name, equality_columns, ascending, claims_order) =
             self.try_match_compound_index(canonical, order_by_ref)?;
 
+        // A declaration is not a built index. Consult the persisted build state
+        // and DECLINE unless it says Ready for this exact declaration.
+        //
+        // This must sit between the match and the plan, never earlier: the match
+        // is what tells us WHICH index we would use, and availability is
+        // per-index. And it must not be skipped for speed — below this point the
+        // matched equality predicates are removed from the residual filter, so a
+        // scan over an empty or stale keyspace yields missing rows with nothing
+        // downstream to catch it.
+        let availability = self.compound_availability(workspace, branch, &index_name);
+        if !availability.is_ready() {
+            tracing::warn!(
+                index = %index_name,
+                workspace = %workspace,
+                detail = %availability.explain_reason(),
+                "compound index matched the query but is not usable; falling back to another access path"
+            );
+            return None;
+        }
+
         let used_props: std::collections::HashSet<String> = equality_columns
             .iter()
-            .map(|(prop, _)| prop.clone())
+            .map(|(prop, _, _)| prop.clone())
             .collect();
 
         // The parent path this scan is pinned to, if `__parent_path` was one of
@@ -453,8 +473,8 @@ impl PhysicalPlanner {
         // must stay a row-level filter.
         let matched_parent_path: Option<&str> = equality_columns
             .iter()
-            .find(|(prop, _)| prop == "__parent_path")
-            .map(|(_, value)| value.as_str());
+            .find(|(prop, _, _)| prop == "__parent_path")
+            .map(|(_, value, _)| value.as_str());
 
         let remaining: Vec<_> = canonical
             .iter()
