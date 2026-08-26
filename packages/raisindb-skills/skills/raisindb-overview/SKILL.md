@@ -190,12 +190,20 @@ Two ways to push a change deliberately:
      the platform-owned paths (functions, config you own) as `replace`.
    - **Override:** installing with an explicit force/overwrite mode always wins
      and ignores this file entirely — the escape hatch for a clean reset.
-   - This file is unrelated to the *other* `.raisin-sync.yaml` the `sync`
-     command reads from your **local checkout** (connection config: server
-     URL, repo, branch — see `raisindb sync --help`); that one is always
-     excluded from what gets pushed. Same filename, different location and
-     purpose — the install-policy one lives at the package root and ships
-     *inside* the `.rap`.
+   - **This file used to share a name with the `sync` command's own config,
+     and that collision was a real bug.** The CLI reads its connection
+     settings (server URL, repo, branch — see `raisindb sync --help`) from
+     your **local checkout**; until CLI 0.1.39 both files were called
+     `.raisin-sync.yaml`, so `sync --push` on a package that shipped an
+     install policy read the policy as connection config and died with
+     `Cannot read properties of undefined (reading 'startsWith')`.
+   - **Since CLI 0.1.39 the connection config is `.raisindb-cli.yaml`.** The
+     old name is still honoured, but only for a file that actually looks like
+     CLI config (it must carry a `server:` key), so an install policy is never
+     mistaken for one again. The install-policy file keeps the name
+     `.raisin-sync.yaml`, lives at the package root beside `manifest.yaml`,
+     and ships *inside* the `.rap`. If you hit that `startsWith` crash, you
+     are on a CLI older than 0.1.39.
 
 ## SDK Connection
 
