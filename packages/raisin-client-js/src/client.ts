@@ -712,6 +712,10 @@ export class RaisinClient extends EventEmitter {
     if (isJwtCredentials(credentials)) {
       // JWT authentication for identity users
       logger.info('[authenticate] Starting JWT authentication...');
+      // Learn this token's expiry. Every bare-token path funnels through here
+      // — session restore included — and without it `expiresAt` stays null,
+      // which `isTokenExpired()` reads as expired. See AuthManager.adoptToken.
+      this.authManager.adoptToken(credentials.token);
       const payload: AuthenticateJwtPayload = { token: credentials.token };
       const response = await this.sendRequestInternal(
         payload,
@@ -1401,7 +1405,22 @@ export class RaisinClient extends EventEmitter {
 
     this._refreshTimer = setTimeout(async () => {
       logger.info('[autoRefresh] Auto-refreshing token...');
-      await this.refreshToken();
+      const user = await this.refreshToken();
+      if (!user) {
+        // The session is over and NOBODY IS LOOKING. This timer is the only
+        // thing that runs when a tab sits idle past its refresh window, and
+        // dropping the failure here meant the app was never told: an
+        // unauthenticated read returns an empty result rather than a 401, so
+        // the UI kept rendering, kept reading, and kept getting nothing —
+        // which looks like the user's content disappeared.
+        //
+        // Same teardown as the reconnect path in autoReauthenticate(), which
+        // was until now the only emitter of SESSION_EXPIRED.
+        logger.error('[autoRefresh] Refresh failed, clearing session');
+        this.authManager.clear();
+        this._currentUser = null;
+        this._emitAuthEvent('SESSION_EXPIRED');
+      }
     }, clamped);
   }
 

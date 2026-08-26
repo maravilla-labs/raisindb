@@ -182,8 +182,10 @@ export class RaisinHttpClient extends EventEmitter {
   async authenticate(credentials: Credentials, repository?: string): Promise<void> {
     if (isJwtCredentials(credentials)) {
       // For HTTP client, JWT auth is typically done via Authorization header
-      // Just store the token for future requests
+      // Just store the token for future requests, and learn its expiry so
+      // `isAuthenticated()` can answer for this client (see adoptToken).
       this.authManager.storage.setAccessToken(credentials.token);
+      this.authManager.adoptToken(credentials.token);
 
       // Fetch user info from /auth/{repo}/me endpoint if repository is provided
       if (repository) {
@@ -710,6 +712,9 @@ export class RaisinHttpClient extends EventEmitter {
   ): void {
     if (typeof accessTokenOrResult === 'string') {
       this.authManager.storage.setAccessToken(accessTokenOrResult);
+      // The loose form carries no `expires_at`, so read it off the token —
+      // otherwise the expiry stays unknown, which reads as expired.
+      this.authManager.adoptToken(accessTokenOrResult);
       if (refreshToken) this.authManager.storage.setRefreshToken(refreshToken);
       return;
     }

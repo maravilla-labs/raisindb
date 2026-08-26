@@ -220,6 +220,34 @@ export class AuthManager {
   }
 
   /**
+   * Learn a bare token's expiry FROM THE TOKEN.
+   *
+   * `setTokens` is the only other writer of `expiresAt`, and it needs a whole
+   * `AuthenticateResponse`. Several paths hold nothing but a JWT string — a
+   * session restored from storage, `authenticate({type:'jwt'})`,
+   * `setIdentityTokens(token)` — and left `expiresAt` null. `isTokenExpired()`
+   * reads null as EXPIRED, so `isAuthenticated()` answered false for the whole
+   * life of every restored session, i.e. every page load after the first.
+   *
+   * It failed silently, and it had already been routed around three times
+   * rather than fixed: both HTTP send paths were made to stop consulting
+   * `isAuthenticated()` (see `request()` and `mcpStream()` in http-client),
+   * and Studio grew its own token parse to tell a 404 apart from a logged-out
+   * read. This is the missing writer those workarounds existed for.
+   *
+   * Same 60s safety margin as `setTokens`, so both writers agree on when a
+   * token stops counting as good.
+   *
+   * @param token - A JWT held in storage or handed to us
+   */
+  adoptToken(token: string): void {
+    const exp = AuthManager.parseToken(token)?.exp;
+    // Unparsable or `exp`-less: leave the expiry unknown rather than invent
+    // one. The server stays the authority on whether the token is good.
+    this.expiresAt = typeof exp === 'number' ? exp * 1000 - 60_000 : null;
+  }
+
+  /**
    * Get current access token
    */
   getAccessToken(): string | null {

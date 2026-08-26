@@ -3,7 +3,7 @@ import { EventEmitter } from 'events';
 import { encode, decode } from '@msgpack/msgpack';
 import { RaisinClient } from './client';
 import { Connection, ConnectionState, type ConnectionOptions } from './connection';
-import { MemoryTokenStorage } from './auth';
+import { AuthManager, MemoryTokenStorage } from './auth';
 import { RaisinAuthError, RaisinTimeoutError } from './errors';
 
 // ---------------------------------------------------------------------------
@@ -524,5 +524,90 @@ describe('RaisinClient URL parsing', () => {
   it('sends the x-tenant-id upgrade header when the URL carries a tenant', () => {
     new UrlCapturingClient('ws://localhost:8081/sys/acme/shiftboard');
     expect(capturedConnection.options?.headers).toMatchObject({ 'x-tenant-id': 'acme' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Session liveness (item 14)
+// ---------------------------------------------------------------------------
+
+describe('AuthManager knows a bare token\'s expiry', () => {
+  const inSeconds = (n: number) => Math.floor(Date.now() / 1000) + n;
+
+  it('counts a restored, unexpired token as authenticated', () => {
+    // The regression: `setTokens` was the ONLY writer of `expiresAt`, so every
+    // path holding a bare JWT — session restore above all — left it null, and
+    // `isTokenExpired()` reads null as expired. `isAuthenticated()` therefore
+    // answered false for the whole life of every restored session.
+    const storage = new MemoryTokenStorage();
+    const token = fakeJwt({ sub: 'u1', exp: inSeconds(3600) });
+    storage.setAccessToken(token);
+
+    const auth = new AuthManager(storage);
+    expect(auth.isAuthenticated()).toBe(false); // nothing learned yet
+
+    auth.adoptToken(token);
+    expect(auth.isAuthenticated()).toBe(true);
+    expect(auth.isTokenExpired()).toBe(false);
+  });
+
+  it('counts a restored, expired token as expired', () => {
+    const storage = new MemoryTokenStorage();
+    const token = fakeJwt({ sub: 'u1', exp: inSeconds(-3600) });
+    storage.setAccessToken(token);
+
+    const auth = new AuthManager(storage);
+    auth.adoptToken(token);
+    expect(auth.isTokenExpired()).toBe(true);
+    expect(auth.isAuthenticated()).toBe(false);
+  });
+
+  it('leaves the expiry UNKNOWN for a token it cannot read', () => {
+    // Refusing to invent an expiry is the point: the server stays the
+    // authority on whether a token is good.
+    const auth = new AuthManager(new MemoryTokenStorage());
+    auth.adoptToken('not-a-jwt');
+    expect(auth.isTokenExpired()).toBe(true);
+    auth.adoptToken(fakeJwt({ sub: 'u1' })); // no `exp` claim
+    expect(auth.isTokenExpired()).toBe(true);
+  });
+
+  it('applies the same 60s margin as setTokens', () => {
+    const auth = new AuthManager(new MemoryTokenStorage());
+    auth.adoptToken(fakeJwt({ exp: inSeconds(30) }));
+    // Inside the margin: not good enough to count on.
+    expect(auth.isTokenExpired()).toBe(true);
+  });
+});
+
+describe('a scheduled refresh that fails announces the expiry', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('emits SESSION_EXPIRED and clears the session', async () => {
+    // The silent case: this timer is the ONLY thing that runs when a tab sits
+    // idle past its refresh window, and it used to discard its own failure.
+    // Nothing told the app, and an unauthenticated read returns an empty
+    // result rather than a 401 — so the UI kept rendering and kept getting
+    // nothing back.
+    vi.useFakeTimers();
+    const storage = new MemoryTokenStorage();
+    storage.setAccessToken(fakeJwt({ sub: 'u1', exp: 1 }));
+    const { client } = makeClient({ tokenStorage: storage });
+
+    const events: string[] = [];
+    client.onAuthStateChange(({ event }) => events.push(event));
+
+    // No refresh token in storage → refreshToken() resolves null, the exact
+    // shape of a refresh the server has revoked.
+    (
+      client as unknown as { scheduleAutoRefresh: (ms: number) => void }
+    ).scheduleAutoRefresh(0); // clamped to the 30s floor
+
+    await vi.advanceTimersByTimeAsync(31_000);
+
+    expect(events).toContain('SESSION_EXPIRED');
+    expect(storage.getAccessToken()).toBeNull();
   });
 });
