@@ -1,5 +1,5 @@
 /**
- * Sync configuration handling for .raisin-sync.yaml
+ * Sync configuration handling for .raisindb-cli.yaml
  */
 
 import fs from 'fs';
@@ -9,7 +9,7 @@ import { hasEnvTokens, substituteEnvTokens } from '../env/substitute.js';
 import { loadEnvContext, EnvLoadOptions } from '../env/load.js';
 
 /**
- * Sync configuration stored in .raisin-sync.yaml
+ * Sync configuration stored in .raisindb-cli.yaml
  */
 export interface SyncConfig {
   version: number;
@@ -26,13 +26,46 @@ export interface SyncConfig {
   };
 }
 
-const SYNC_CONFIG_FILENAME = '.raisin-sync.yaml';
+const SYNC_CONFIG_FILENAME = '.raisindb-cli.yaml';
+
+/**
+ * The name this file used to have — still READ, never written.
+ *
+ * It was renamed because `.raisin-sync.yaml` is ALSO the name of a completely
+ * different file: a PACKAGE's install-reconciliation policy, which ships inside
+ * the .rap beside `manifest.yaml` and tells `raisin:install` which paths it may
+ * overwrite. Same name, unrelated schema. A package that followed the
+ * documented convention could not run `sync --push` at all: the CLI loaded the
+ * install policy as its own config, found no `server`, and threw
+ * `Cannot read properties of undefined (reading 'startsWith')` from
+ * `toHttpUrl` — with `--dry-run` succeeding, because planning never builds a
+ * URL.
+ *
+ * The legacy name is therefore accepted ONLY when the file is shaped like a CLI
+ * config (see `looksLikeCliConfig`). That check is what makes the collision
+ * un-repeatable rather than merely renamed away: an install policy at the old
+ * name is now ignored, and the caller falls through to `~/.raisinrc`.
+ */
+const LEGACY_CONFIG_FILENAME = '.raisin-sync.yaml';
+
+/**
+ * Does this parsed document belong to the CLI, or is it a package's install
+ * policy that happens to share the legacy filename?
+ *
+ * `server` is the discriminator because it is the one field the CLI cannot
+ * work without and the install policy never has — the policy is `defaults` +
+ * `filters`, addressed to the server, which already knows where it is.
+ */
+function looksLikeCliConfig(doc: unknown): boolean {
+  return !!doc && typeof doc === 'object' && typeof (doc as SyncConfig).server === 'string';
+}
 const DEFAULT_CONFIG: Partial<SyncConfig> = {
   version: 1,
   branch: 'main',
   conflict_strategy: 'prompt',
   ignore: [
     '*.local.*',
+    '.raisindb-cli.yaml',
     '.raisin-sync.yaml',
     'node_modules/',
     '.git/',
@@ -42,6 +75,15 @@ const DEFAULT_CONFIG: Partial<SyncConfig> = {
   ],
 };
 
+/** Cheap shape probe for a legacy-named file: parse and look for `server`. */
+function isCliConfigFile(configPath: string): boolean {
+  try {
+    return looksLikeCliConfig(yaml.parse(fs.readFileSync(configPath, 'utf-8')));
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Find sync config file by searching up the directory tree
  */
@@ -50,9 +92,13 @@ export function findSyncConfig(startDir: string): string | null {
   const root = path.parse(currentDir).root;
 
   while (currentDir !== root) {
-    const configPath = path.join(currentDir, SYNC_CONFIG_FILENAME);
-    if (fs.existsSync(configPath)) {
-      return configPath;
+    for (const name of [SYNC_CONFIG_FILENAME, LEGACY_CONFIG_FILENAME]) {
+      const configPath = path.join(currentDir, name);
+      // A legacy-named file is only OURS if it is shaped like a CLI config;
+      // otherwise it is a package install policy and we must not claim it.
+      if (fs.existsSync(configPath) && (name === SYNC_CONFIG_FILENAME || isCliConfigFile(configPath))) {
+        return configPath;
+      }
     }
     currentDir = path.dirname(currentDir);
   }
@@ -64,7 +110,7 @@ export function findSyncConfig(startDir: string): string | null {
  * Load sync config from a directory.
  *
  * `{env:NAME}` tokens are resolved before parsing, so one checked-in
- * .raisin-sync.yaml can target local, staging and prod:
+ * .raisindb-cli.yaml can target local, staging and prod:
  *
  *   server: "{env:RAISIN_SERVER:-http://localhost:8080}"
  *   branch: "{env:RAISIN_BRANCH:-main}"

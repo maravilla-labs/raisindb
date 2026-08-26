@@ -118,6 +118,7 @@ export class SyncWatcher extends EventEmitter {
       ignorePatterns: options.ignorePatterns ?? [
         '**/node_modules/**',
         '**/.git/**',
+        '**/.raisindb-cli.yaml',
         '**/.raisin-sync.yaml',
         '**/dist/**',
         '**/*.log',

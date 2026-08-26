@@ -326,6 +326,16 @@ export async function pushTranslationFile(
  * Convert raisin:// or raisins:// URLs to http:// or https://
  */
 function toHttpUrl(server: string): string {
+  // A missing `server` used to reach here as `undefined` and throw
+  // `Cannot read properties of undefined (reading 'startsWith')` — the symptom
+  // of a package install policy being loaded as a CLI config. `config.ts` now
+  // rejects that file by shape, so this is the second line of defence: a
+  // malformed config should say what is wrong, not fail inside a URL helper.
+  if (typeof server !== 'string' || !server) {
+    throw new Error(
+      'No `server` in the sync config. Add one, or remove the config file to fall back to ~/.raisinrc.'
+    );
+  }
   if (server.startsWith('raisins://')) {
     return server.replace('raisins://', 'https://');
   }

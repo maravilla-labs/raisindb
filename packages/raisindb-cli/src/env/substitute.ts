@@ -8,7 +8,7 @@
  * it when the package is built, validated or pushed.
  *
  * This module is the ONE implementation of the token grammar. Every call site
- * (pack, validate, sync push, .raisin-sync.yaml) goes through it — a second
+ * (pack, validate, sync push, .raisindb-cli.yaml) goes through it — a second
  * copy would drift and leave one surface shipping raw tokens while another
  * ships resolved values.
  *

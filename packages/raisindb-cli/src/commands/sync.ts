@@ -98,14 +98,14 @@ export async function syncPackage(
   if (!config) {
     if (options.repo) {
       // Non-interactive: build an ephemeral config from flags/env. No
-      // .raisin-sync.yaml is written — keeps package dirs clean and works
+      // .raisindb-cli.yaml is written — keeps package dirs clean and works
       // the same in CI: raisindb sync ./package --repo myapp --watch
       config = await promptForSyncConfig(packageDir, options);
     } else {
       console.log('No sync configuration found. Running interactive setup...');
       config = await promptForSyncConfig(packageDir, options);
       saveSyncConfig(packageDir, config);
-      console.log(`Sync configuration saved to ${packageDir}/.raisin-sync.yaml`);
+      console.log(`Sync configuration saved to ${packageDir}/.raisindb-cli.yaml`);
     }
   }
 
@@ -143,7 +143,7 @@ async function initializeSyncConfig(
 ): Promise<void> {
   const config = await promptForSyncConfig(packageDir, options);
   saveSyncConfig(packageDir, config);
-  console.log(`Sync configuration saved to ${packageDir}/.raisin-sync.yaml`);
+  console.log(`Sync configuration saved to ${packageDir}/.raisindb-cli.yaml`);
 }
 
 /**
@@ -399,6 +399,7 @@ async function runWatchMode(
     ignorePatterns: [
       '**/node_modules/**',
       '**/.git/**',
+      '**/.raisindb-cli.yaml',
       '**/.raisin-sync.yaml',
       '**/dist/**',
       '**/*.log',
