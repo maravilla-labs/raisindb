@@ -37,6 +37,56 @@ pub(crate) fn parse_wait_type(s: &str) -> WaitType {
     }
 }
 
+/// Republish a step's primary value under the author's own name, when the step
+/// declares an `output_key`.
+///
+/// Studio's agent and function steps have offered a "Save the answer as" field
+/// since they were written, promising `steps.<id>.<output_key>` — and NOTHING
+/// read it. Not the compiler, not the engine. An author who set it and wrote
+/// the condition the field's own description shows got `null`, silently, with
+/// no error anywhere. (`FunctionStepConfig::output_mapping` is the same story
+/// from the other side: declared, never read.)
+///
+/// The projection ADDS a key rather than replacing the output, so
+/// `steps.<id>.response` keeps working alongside `steps.<id>.<output_key>` and
+/// no existing flow changes shape.
+///
+/// "Primary value" is per-step-type but expressible as one precedence, because
+/// each step type contributes exactly one of these keys: an agent's parsed
+/// structured output, else its text `response`, else a function's `result`,
+/// else the whole output for a step whose shape this does not know.
+pub(crate) fn project_output_key(step: &FlowNode, output: Value) -> Value {
+    let Some(key) = step
+        .get_string("output_key")
+        .filter(|k| !k.trim().is_empty())
+    else {
+        return output;
+    };
+    let key = key.trim().to_string();
+
+    let Value::Object(mut map) = output else {
+        // A scalar or array output has no room for a second key, so the
+        // author's name becomes the whole shape.
+        return serde_json::json!({ key: output });
+    };
+
+    // Never overwrite a key the step itself produced: the step's own meaning
+    // for `response` outranks an author who happened to reuse the word.
+    if map.contains_key(&key) {
+        return Value::Object(map);
+    }
+
+    let primary = map
+        .get("structured_output")
+        .or_else(|| map.get("response"))
+        .or_else(|| map.get("result"))
+        .cloned()
+        .unwrap_or_else(|| Value::Object(map.clone()));
+
+    map.insert(key, primary);
+    Value::Object(map)
+}
+
 /// Calculate timeout from metadata
 pub(crate) fn calculate_timeout(metadata: &Value) -> Option<chrono::DateTime<Utc>> {
     metadata
@@ -698,5 +748,85 @@ mod tests {
             Some((0, 0)),
             "a reported zero is still a call"
         );
+    }
+
+    // -- project_output_key ------------------------------------------------
+    //
+    // The field was authored, documented and dead: Studio's step-agent.yaml
+    // promises `steps.<id>.<output_key>` and nothing read the property.
+
+    /// An agent step declaring (or not declaring) an `output_key`.
+    fn keyed(output_key: Option<&str>) -> FlowNode {
+        match output_key {
+            Some(k) => step_with(&[("output_key", serde_json::json!(k))]),
+            None => step_with(&[]),
+        }
+    }
+
+    #[test]
+    fn no_output_key_leaves_the_output_alone() {
+        let out = serde_json::json!({"response": "hi"});
+        assert_eq!(project_output_key(&keyed(None), out.clone()), out);
+        // An empty string is "not configured", not a key named "".
+        assert_eq!(project_output_key(&keyed(Some("  ")), out.clone()), out);
+    }
+
+    #[test]
+    fn an_agents_text_answer_lands_under_the_authors_name() {
+        let out = project_output_key(
+            &keyed(Some("summary")),
+            serde_json::json!({"response": "the gist", "model": "m"}),
+        );
+        assert_eq!(out["summary"], "the gist");
+        // ...without taking the original shape away.
+        assert_eq!(out["response"], "the gist");
+        assert_eq!(out["model"], "m");
+    }
+
+    #[test]
+    fn structured_output_outranks_the_text_response() {
+        let out = project_output_key(
+            &keyed(Some("verdict")),
+            serde_json::json!({
+                "response": "{\"ok\":true}",
+                "structured_output": {"ok": true},
+            }),
+        );
+        assert_eq!(out["verdict"]["ok"], true);
+    }
+
+    #[test]
+    fn a_functions_result_is_its_primary_value() {
+        let out = project_output_key(
+            &keyed(Some("order")),
+            serde_json::json!({"result": {"id": 7}}),
+        );
+        assert_eq!(out["order"]["id"], 7);
+    }
+
+    #[test]
+    fn a_shape_we_do_not_know_is_republished_whole() {
+        let out = project_output_key(
+            &keyed(Some("data")),
+            serde_json::json!({"rows": [1, 2]}),
+        );
+        assert_eq!(out["data"]["rows"][1], 2);
+    }
+
+    #[test]
+    fn a_scalar_output_becomes_the_key() {
+        let out = project_output_key(&keyed(Some("count")), serde_json::json!(3));
+        assert_eq!(out["count"], 3);
+    }
+
+    #[test]
+    fn the_steps_own_key_is_never_overwritten() {
+        // An author naming their key `response` must not lose the step's
+        // meaning for it.
+        let out = project_output_key(
+            &keyed(Some("response")),
+            serde_json::json!({"response": "mine", "structured_output": {"x": 1}}),
+        );
+        assert_eq!(out["response"], "mine");
     }
 }

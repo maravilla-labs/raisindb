@@ -262,11 +262,30 @@ impl FlowCallbacks for RocksDBFlowCallbacks {
         messages: Vec<Value>,
         response_format: Option<Value>,
     ) -> FlowResult<Value> {
+        self.call_ai_with_tools(
+            agent_workspace,
+            agent_ref,
+            messages,
+            response_format,
+            Vec::new(),
+        )
+        .await
+    }
+
+    async fn call_ai_with_tools(
+        &self,
+        agent_workspace: &str,
+        agent_ref: &str,
+        messages: Vec<Value>,
+        response_format: Option<Value>,
+        extra_tools: Vec<Value>,
+    ) -> FlowResult<Value> {
         tracing::debug!(
             agent_workspace = %agent_workspace,
             agent_ref = %agent_ref,
             message_count = messages.len(),
             has_response_format = response_format.is_some(),
+            extra_tool_count = extra_tools.len(),
             "Calling AI from flow"
         );
 
@@ -280,6 +299,7 @@ impl FlowCallbacks for RocksDBFlowCallbacks {
             branch: self.branch.clone(),
             workspace: agent_workspace.to_string(),
             agent_ref: agent_ref.to_string(),
+            extra_tools,
         };
 
         caller(ctx, messages, response_format)
@@ -294,6 +314,24 @@ impl FlowCallbacks for RocksDBFlowCallbacks {
         messages: Vec<Value>,
         response_format: Option<Value>,
     ) -> FlowResult<tokio::sync::mpsc::Receiver<Value>> {
+        self.call_ai_streaming_with_tools(
+            agent_workspace,
+            agent_ref,
+            messages,
+            response_format,
+            Vec::new(),
+        )
+        .await
+    }
+
+    async fn call_ai_streaming_with_tools(
+        &self,
+        agent_workspace: &str,
+        agent_ref: &str,
+        messages: Vec<Value>,
+        response_format: Option<Value>,
+        extra_tools: Vec<Value>,
+    ) -> FlowResult<tokio::sync::mpsc::Receiver<Value>> {
         if let Some(caller) = &self.ai_streaming_caller {
             let ctx = AiCallContext {
                 tenant_id: self.tenant_id.clone(),
@@ -301,15 +339,24 @@ impl FlowCallbacks for RocksDBFlowCallbacks {
                 branch: self.branch.clone(),
                 workspace: agent_workspace.to_string(),
                 agent_ref: agent_ref.to_string(),
+                extra_tools,
             };
 
             caller(ctx, messages, response_format)
                 .await
                 .map_err(|e| FlowError::AIProvider(format!("Streaming AI call failed: {}", e)))
         } else {
-            // Fall back to default (non-streaming)
+            // Fall back to non-streaming, CARRYING THE CONTROL TOOLS. Dropping
+            // them here would make an agent's ability to end a conversation
+            // depend on whether its provider happens to stream.
             let response = self
-                .call_ai(agent_workspace, agent_ref, messages, response_format)
+                .call_ai_with_tools(
+                    agent_workspace,
+                    agent_ref,
+                    messages,
+                    response_format,
+                    extra_tools,
+                )
                 .await?;
             let (tx, rx) = tokio::sync::mpsc::channel(1);
             let _ = tx.send(response).await;

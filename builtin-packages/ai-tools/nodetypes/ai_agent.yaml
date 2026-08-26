@@ -21,6 +21,32 @@ properties:
       type: Reference
     description: References to raisin:Function nodes that the agent can use
 
+  # The agent's OWN contract, distinct from a step's.
+  #
+  # Neither is enforced at runtime — they are declarative, the way a function's
+  # `input_schema` / `output_schema` are — but neither is decoration either:
+  # `output_schema` is the DEFAULT `response_format` for every call that does
+  # not set one (a step's own `response_format` still wins), and `input_schema`
+  # is what an authoring UI reads to know what this agent expects to be given.
+  - name: input_schema
+    title: Input Schema
+    type: object
+    required: false
+    description: >-
+      JSON Schema for what this agent expects to be given. Advisory: read by
+      authoring tools to validate and build a step's inputs, never enforced at
+      call time.
+
+  - name: output_schema
+    title: Output Schema
+    type: object
+    required: false
+    description: >-
+      JSON Schema for what this agent answers with. Used as the default
+      structured-output format for calls that do not set their own
+      `response_format`, and as the default result shape for a chat step's
+      `end_session` control tool.
+
   - name: rules
     title: Rules
     type: array

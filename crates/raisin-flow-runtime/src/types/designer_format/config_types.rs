@@ -135,6 +135,35 @@ pub struct ChatStepConfig {
     /// Termination conditions for the chat session
     #[serde(default)]
     pub termination: ChatTerminationConfig,
+
+    /// JSON Schema the agent's final result must take when it ends the session
+    /// via the `end_session` control tool. Shapes that tool's `result`
+    /// argument, and the payload lands at `steps.<id>.result`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<serde_json::Value>,
+
+    /// Whether the agent may park the flow on a human decision of its own
+    /// accord (the `request_approval` control tool).
+    #[serde(default)]
+    pub approval: ChatApprovalConfig,
+}
+
+/// Agent-initiated approval settings for a chat step.
+///
+/// Off by default: an agent that can park a flow on a person is a capability
+/// the flow author grants, never one an agent acquires by being an agent.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChatApprovalConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Who an approval goes to when the agent names nobody.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+
+    /// Deadline for the human to answer, in seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub due_in_seconds: Option<i64>,
 }
 
 fn default_max_turns() -> u32 {

@@ -91,14 +91,23 @@ pub(super) fn take_user_message(context: &mut FlowContext) -> Option<String> {
     msg
 }
 
-/// Build a `StepResult::Continue` with session summary output.
+/// Build a `StepResult::Continue` with the session's output.
+///
+/// `result` is the point of the whole step. Without it a chat published only
+/// that it had happened — a turn count and a reason — and the step after it had
+/// nothing to branch on. It is populated when the agent ENDS DELIBERATELY, by
+/// calling the `end_session` control tool with a payload; a session that ran out
+/// of turns or was closed by a user keyword has no result, and `null` is the
+/// honest answer for those rather than an empty object that reads like one.
 pub(super) fn make_continue(step: &FlowNode, session: &ChatSessionState) -> StepResult {
     StepResult::Continue {
         next_node_id: step.next_node.clone().unwrap_or_else(|| "end".to_string()),
         output: serde_json::json!({
+            "result": session.result,
             "session_id": session.session_id,
             "turn_count": session.turn_count,
             "completion_reason": session.completion_reason,
+            "conversation_path": session.conversation_path,
         }),
     }
 }

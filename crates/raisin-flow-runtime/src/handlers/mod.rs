@@ -20,6 +20,7 @@ pub mod ai_tool_loop;
 pub mod chat_step;
 pub(crate) mod collection;
 pub mod context_injection;
+pub mod control_tools;
 pub mod conversation_persistence;
 pub mod decision;
 pub mod error;

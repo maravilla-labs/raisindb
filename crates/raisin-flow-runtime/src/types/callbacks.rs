@@ -15,13 +15,27 @@ use super::{FlowExecutionEvent, FlowInstance, FlowResult};
 /// Groups the five positional `String` parameters (`tenant_id`, `repo_id`,
 /// `branch`, `workspace`, `agent_ref`) into a single typed struct, making
 /// call sites self-documenting.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct AiCallContext {
     pub tenant_id: String,
     pub repo_id: String,
     pub branch: String,
     pub workspace: String,
     pub agent_ref: String,
+
+    /// Extra tool definitions to offer the model for THIS CALL ONLY, appended
+    /// to the tools the agent node declares.
+    ///
+    /// This is how CONTROL TOOLS reach the provider. An agent's own `tools`
+    /// are functions to execute; these are verbs the RUNTIME implements —
+    /// ending a chat with a result, handing off, asking a human — and they
+    /// belong to the step rather than the agent, because the same agent ends
+    /// a triage chat and a drafting chat with different payloads.
+    ///
+    /// Carried on the context rather than as a sixth callback parameter so the
+    /// `AICallerCallback` / `AIStreamingCallerCallback` type aliases (and every
+    /// mock built against them) keep their shape.
+    pub extra_tools: Vec<Value>,
 }
 
 /// Callbacks provided by the transport/storage layer to the flow runtime.
@@ -129,6 +143,44 @@ pub trait FlowCallbacks: Send + Sync {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         let _ = tx.send(response).await;
         Ok(rx)
+    }
+
+    /// Call an AI provider, offering `extra_tools` alongside the agent's own.
+    ///
+    /// `extra_tools` are CONTROL TOOLS — see [`AiCallContext::extra_tools`].
+    /// The default implementation drops them and delegates to [`call_ai`],
+    /// which is correct for a callback with no provider behind it (every mock
+    /// in the test suite): a model that is never offered a control tool simply
+    /// never calls one, and the tool-loop's interception side is unaffected.
+    ///
+    /// [`call_ai`]: FlowCallbacks::call_ai
+    async fn call_ai_with_tools(
+        &self,
+        agent_workspace: &str,
+        agent_ref: &str,
+        messages: Vec<Value>,
+        response_format: Option<Value>,
+        extra_tools: Vec<Value>,
+    ) -> FlowResult<Value> {
+        let _ = extra_tools;
+        self.call_ai(agent_workspace, agent_ref, messages, response_format)
+            .await
+    }
+
+    /// Streaming counterpart of [`call_ai_with_tools`].
+    ///
+    /// [`call_ai_with_tools`]: FlowCallbacks::call_ai_with_tools
+    async fn call_ai_streaming_with_tools(
+        &self,
+        agent_workspace: &str,
+        agent_ref: &str,
+        messages: Vec<Value>,
+        response_format: Option<Value>,
+        extra_tools: Vec<Value>,
+    ) -> FlowResult<tokio::sync::mpsc::Receiver<Value>> {
+        let _ = extra_tools;
+        self.call_ai_streaming(agent_workspace, agent_ref, messages, response_format)
+            .await
     }
 
     /// Execute a function synchronously

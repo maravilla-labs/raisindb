@@ -8,6 +8,7 @@
 
 use super::types::{ChatConfig, ChatSessionState};
 use crate::handlers::ai_tool_loop::{self, ToolLoopConfig, ToolLoopResult};
+use crate::handlers::control_tools::ControlToolConfig;
 use crate::handlers::conversation_persistence::{
     self, AiResponseData, ToolCallData, UsageData, AI_SENDER_ID,
 };
@@ -34,7 +35,7 @@ pub(super) async fn process_ai_turn(
     .await;
 
     let workspace = config.agent_workspace.as_deref().unwrap_or("functions");
-    let tool_config = ToolLoopConfig::new(workspace, agent_path);
+    let tool_config = ToolLoopConfig::new(workspace, agent_path).with_control(control_config(config));
 
     let _ = callbacks
         .emit_event(
@@ -69,6 +70,19 @@ pub(super) async fn process_ai_turn(
             if result.end_session && config.termination.allow_ai_end {
                 session.is_complete = true;
                 session.completion_reason = Some("ai_terminated".to_string());
+                // The RESULT, not just the fact of ending. `end_result` is
+                // `None` when a provider signalled `end_session` natively
+                // without one; `Null` when the agent called the tool and passed
+                // nothing. Both are recorded as they are — collapsing them
+                // would lose the difference between "no payload was possible"
+                // and "the agent had nothing to say".
+                session.result = result.end_result.clone();
+            } else if result.end_session {
+                // The step forbids AI termination. Say so in the log rather
+                // than silently continuing: the agent believes it finished.
+                warn!(
+                    "Agent asked to end the session but `termination.allow_ai_end` is off - continuing"
+                );
             }
 
             let total_tokens = result.total_input_tokens + result.total_output_tokens;
@@ -76,15 +90,42 @@ pub(super) async fn process_ai_turn(
                 session.total_tokens += total_tokens;
             }
 
-            if let Some(ref conv_path) = session.conversation_path {
-                persist_ai_result(
-                    callbacks,
-                    &context.instance_id,
-                    conv_path,
-                    conv_workspace,
-                    &result,
-                )
-                .await;
+            let message_path = match session.conversation_path.clone() {
+                Some(conv_path) => {
+                    persist_ai_result(
+                        callbacks,
+                        &context.instance_id,
+                        &conv_path,
+                        conv_workspace,
+                        &result,
+                    )
+                    .await
+                }
+                None => None,
+            };
+
+            // An approval can only be parked once the assistant message exists:
+            // the pending tool call's result is written UNDER it, and the path
+            // is what the resume needs.
+            if let Some(pending) = &result.pending_approval {
+                match message_path {
+                    Some(ref path) => {
+                        session.pending_approval = super::approval::open(
+                            callbacks,
+                            context,
+                            session,
+                            &config.approval,
+                            step_id,
+                            path,
+                            pending,
+                        )
+                        .await;
+                    }
+                    None => warn!(
+                        "Agent requested approval but the assistant message was not persisted - \
+                         not parking"
+                    ),
+                }
             }
 
             Ok(())
@@ -228,7 +269,8 @@ async fn build_ai_messages(
         messages.push(serde_json::json!({
             "role": "system",
             "content": format!(
-                "You can hand off to specialized agents when appropriate:\n{}",
+                "When another agent is better suited, call the `handoff_to_agent` tool with \
+                 one of these:\n{}",
                 handoff_context
             ),
         }));
@@ -267,13 +309,14 @@ async fn build_ai_messages(
 ///
 /// Uses the unified `raisin:Message` format with tool call children and
 /// cost records, then updates the conversation's `last_message` preview.
+/// Persist an AI tool-loop result and return the assistant message's path.
 async fn persist_ai_result(
     callbacks: &dyn FlowCallbacks,
     instance_id: &str,
     conv_path: &str,
     conv_workspace: &str,
     result: &ai_tool_loop::ToolLoopResult,
-) {
+) -> Option<String> {
     let total_tokens = result.total_input_tokens + result.total_output_tokens;
     let usage = (total_tokens > 0).then(|| UsageData {
         input_tokens: Some(result.total_input_tokens),
@@ -314,11 +357,17 @@ async fn persist_ai_result(
         Ok(path) => path,
         Err(e) => {
             error!("Failed to persist assistant response: {}", e);
-            return;
+            return None;
         }
     };
 
     for tc in &result.tool_calls_executed {
+        // A PENDING call has no result yet — the human has not answered. Writing
+        // one now would tell the next turn's history rebuild the question was
+        // already resolved, and the agent would carry on without the answer.
+        if tc.pending {
+            continue;
+        }
         let tc_path = format!("{}/{}", message_path, tc.id);
         let _ = conversation_persistence::persist_tool_result(
             callbacks,
@@ -340,4 +389,32 @@ async fn persist_ai_result(
         AI_SENDER_ID,
     )
     .await;
+
+    Some(message_path)
+}
+
+/// Which control tools this chat step offers its agent.
+///
+/// Each is gated on the author having asked for it, and `handoff_targets`
+/// doubles as the tool's `enum`, so an agent can only name an agent the step
+/// listed.
+fn control_config(config: &ChatConfig) -> ControlToolConfig {
+    ControlToolConfig {
+        allow_end: config.termination.allow_ai_end,
+        result_schema: config.output_schema.clone(),
+        handoff_targets: config
+            .handoff_targets
+            .iter()
+            .map(|t| {
+                (
+                    t.agent_ref.clone(),
+                    t.description
+                        .clone()
+                        .unwrap_or_else(|| "Available for handoff".to_string()),
+                )
+            })
+            .collect(),
+        allow_approval: config.approval.enabled,
+        approval_assignee: config.approval.assignee.clone(),
+    }
 }

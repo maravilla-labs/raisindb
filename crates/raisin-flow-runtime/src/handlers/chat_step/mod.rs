@@ -17,13 +17,17 @@
 //! - [`ai_turn`]  — AI processing: message building, tool loop, result persistence
 
 mod ai_turn;
+mod approval;
 mod session;
 mod types;
 
 #[cfg(test)]
 mod tests;
 
-use types::{ChatConfig, ConversationType, HandoffTarget, TerminationConfig};
+use types::{
+    ApprovalConfig, ChatConfig, ChatSessionState, ConversationType, HandoffTarget,
+    PendingApprovalState, TerminationConfig,
+};
 
 use super::{StepHandler, StepResult};
 use crate::handlers::conversation_persistence;
@@ -35,6 +39,15 @@ use tracing::{debug, error, info, instrument, warn};
 
 /// Wait reason for chat sessions.
 const WAIT_REASON_CHAT_SESSION: &str = "chat_session";
+
+/// Wait reason for an approval the AGENT asked for mid-turn.
+///
+/// Deliberately `human_task` rather than a reason of its own: that is what
+/// `parse_wait_type` maps to `WaitType::HumanTask`, which is what makes the
+/// human's answer arrive as `__human_response` and what makes an expired
+/// deadline mark the inbox task `expired`. A new wait type would have had to
+/// re-earn both.
+const WAIT_REASON_AGENT_APPROVAL: &str = "human_task";
 
 /// Handler for chat step execution.
 ///
@@ -128,6 +141,25 @@ impl ChatStepHandler {
                 .unwrap_or(false),
         };
 
+        let output_schema = step.properties.get("output_schema").cloned();
+
+        let approval = step
+            .properties
+            .get("approval")
+            .map(|v| ApprovalConfig {
+                enabled: v
+                    .get("enabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                assignee: v
+                    .get("assignee")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(String::from),
+                due_in_seconds: v.get("due_in_seconds").and_then(|v| v.as_i64()),
+            })
+            .unwrap_or_default();
+
         let conversation_type = step
             .get_string("conversation_type")
             .or_else(|| step.get_string("conversation_format"))
@@ -155,6 +187,8 @@ impl ChatStepHandler {
             termination,
             execution,
             conversation_type,
+            output_schema,
+            approval,
         }
     }
 
@@ -168,6 +202,29 @@ impl ChatStepHandler {
             .end_keywords
             .iter()
             .any(|kw| message_lower.contains(&kw.to_lowercase()))
+    }
+}
+
+/// Park the flow on an agent-requested approval.
+///
+/// `target_path` is what `WaitInfo` records and what the timeout path marks
+/// `expired`, so it must be the TASK — not the conversation.
+fn park_on_approval(
+    step_id: &str,
+    session: &ChatSessionState,
+    parked: Option<&PendingApprovalState>,
+) -> StepResult {
+    StepResult::Wait {
+        reason: WAIT_REASON_AGENT_APPROVAL.to_string(),
+        metadata: serde_json::json!({
+            "step_id": step_id,
+            "target_path": parked.map(|p| p.task_path.clone()),
+            "approval_title": parked.map(|p| p.title.clone()),
+            "session_id": session.session_id,
+            "turn_count": session.turn_count,
+            "conversation_path": session.conversation_path,
+            "requested_by_agent": session.current_agent,
+        }),
     }
 }
 
@@ -241,8 +298,32 @@ impl StepHandler for ChatStepHandler {
 
         let is_resumed = session.turn_count > 0;
 
+        // An answered approval outranks everything below. The conversation is
+        // MID-TURN: the agent asked a person something and the flow parked, so
+        // the next move is the agent's, not the user's. Falling through to the
+        // user-message path would consume an unrelated message, count a turn
+        // the user did not take, and leave the agent's own question unanswered.
+        let resuming_approval =
+            approval::answer(callbacks, context, &mut session, &conv_ws).await;
+
+        if resuming_approval {
+            debug!("Resuming chat step '{}' from an answered approval", step.id);
+        }
+
+        // Still parked and no answer arrived — this execution is a redelivery
+        // or a timeout check. Re-park unchanged rather than calling the model
+        // again, which would ask the agent to repeat a question already asked.
+        if !resuming_approval && session.pending_approval.is_some() {
+            let parked = session.pending_approval.clone();
+            context.variables.insert(
+                session_key.clone(),
+                serde_json::to_value(&session).unwrap_or_default(),
+            );
+            return Ok(park_on_approval(&step.id, &session, parked.as_ref()));
+        }
+
         // Handle user message
-        if let Some(message) = session::take_user_message(context) {
+        if let Some(message) = session::take_user_message(context).filter(|_| !resuming_approval) {
             let source = if is_new {
                 "context.input (first turn)"
             } else {
@@ -295,8 +376,10 @@ impl StepHandler for ChatStepHandler {
             debug!("No user message found for step '{}'", step.id);
         }
 
-        // Check turn limit
-        if session.turn_count >= config.max_turns {
+        // Check turn limit. An approval resume is exempt: it is a continuation
+        // of a turn already counted, and refusing it here would abandon the
+        // agent mid-question with the human's answer already given.
+        if !resuming_approval && session.turn_count >= config.max_turns {
             session.is_complete = true;
             session.completion_reason = Some("max_turns_reached".to_string());
             session::update_stats_and_save(callbacks, context, &session_key, &session, &conv_ws)
@@ -337,6 +420,17 @@ impl StepHandler for ChatStepHandler {
                     )
                     .await;
             }
+        }
+
+        // The agent asked for a human decision and the task was filed — park.
+        // `approval::open` returns `None` when it could not file the task, and
+        // the session then simply carries on: a flow parked on a task that does
+        // not exist waits forever.
+        if session.pending_approval.is_some() {
+            let parked = session.pending_approval.clone();
+            session::update_stats_and_save(callbacks, context, &session_key, &session, &conv_ws)
+                .await;
+            return Ok(park_on_approval(&step.id, &session, parked.as_ref()));
         }
 
         // If session is complete, finish the step

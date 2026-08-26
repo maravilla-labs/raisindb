@@ -1054,6 +1054,23 @@ fn convert_step_node(
             termination["inactivity_timeout_ms"] = Value::Number(inactivity.into());
         }
         props.insert("termination".to_string(), termination);
+
+        if let Some(schema) = &chat_cfg.output_schema {
+            props.insert("output_schema".to_string(), schema.clone());
+        }
+        // Only emitted when ENABLED. An `approval: {enabled: false}` bag on
+        // every chat step would read as a configured-and-declined capability
+        // rather than one never asked for.
+        if chat_cfg.approval.enabled {
+            let mut approval = serde_json::json!({ "enabled": true });
+            if let Some(assignee) = &chat_cfg.approval.assignee {
+                approval["assignee"] = Value::String(assignee.clone());
+            }
+            if let Some(secs) = chat_cfg.approval.due_in_seconds {
+                approval["due_in_seconds"] = Value::Number(secs.into());
+            }
+            props.insert("approval".to_string(), approval);
+        }
     }
 
     FlowNode {

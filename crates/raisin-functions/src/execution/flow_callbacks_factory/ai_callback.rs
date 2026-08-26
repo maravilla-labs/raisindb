@@ -13,7 +13,7 @@ use serde::Serialize;
 
 use crate::execution::ai_provider::create_provider_for_model;
 use crate::execution::ExecutionDependencies;
-use raisin_ai::types::{FunctionCall, Message, StreamChunk, ToolCall, Usage};
+use raisin_ai::types::{FunctionCall, Message, StreamChunk, ToolCall, ToolDefinition, Usage};
 use raisin_binary::BinaryStorage;
 use raisin_models::nodes::properties::{Properties, PropertyValue};
 use raisin_storage::{transactional::TransactionalStorage, NodeRepository, Storage, StorageScope};
@@ -393,17 +393,53 @@ where
     let max_tokens = props.get_number("max_tokens").map(|n| n as u32);
 
     let ai_messages = build_ai_messages(system_prompt.as_deref(), messages);
-    let (tools, tool_path_map) =
+    let (mut tools, tool_path_map) =
         load_agent_tools(deps, &props, &ctx.tenant_id, &ctx.repo_id, &ctx.branch).await;
 
-    let response_format = response_format_json.and_then(|rf| {
-        serde_json::from_value::<raisin_ai::types::ResponseFormat>(rf)
-            .map_err(|e| {
-                tracing::warn!("Invalid response_format, ignoring: {}", e);
-                e
+    // CONTROL TOOLS, appended after the agent's own. These have no function
+    // behind them — the flow runtime intercepts the call by name before it
+    // would reach `execute_function` — so they are deliberately absent from
+    // `tool_path_map`: a control tool that acquired a path would be executed as
+    // one, and `end_session` would be invoked as the function `/end_session`.
+    //
+    // They come from the STEP (via `AiCallContext::extra_tools`) rather than
+    // from the agent node, because whether an agent may end a conversation, or
+    // park a flow on a person, is a property of the flow it is running in.
+    for extra in &ctx.extra_tools {
+        match serde_json::from_value::<ToolDefinition>(extra.clone()) {
+            Ok(def) => tools.push(def),
+            Err(e) => tracing::warn!("Ignoring malformed control tool definition: {}", e),
+        }
+    }
+
+    // The STEP's response_format wins; the AGENT's declared `output_schema`
+    // is the default beneath it.
+    //
+    // An agent has no output schema of its own in the engine — structured
+    // output has always been a per-CALL setting — and that layering is right:
+    // the same translator agent returns a different shape in a QA flow than in
+    // a publishing one. But an agent that ALWAYS answers in one shape had no
+    // way to say so, leaving every step to restate it and any step that forgot
+    // to get prose back. Declaring it on the agent makes the common case
+    // declarative without taking the override away.
+    let response_format = response_format_json
+        .or_else(|| {
+            props.get("output_schema").map(|schema| {
+                let schema = serde_json::to_value(schema).unwrap_or_default();
+                serde_json::json!({
+                    "type": "json_schema",
+                    "json_schema": { "name": "agent_output", "schema": schema, "strict": false },
+                })
             })
-            .ok()
-    });
+        })
+        .and_then(|rf| {
+            serde_json::from_value::<raisin_ai::types::ResponseFormat>(rf)
+                .map_err(|e| {
+                    tracing::warn!("Invalid response_format, ignoring: {}", e);
+                    e
+                })
+                .ok()
+        });
 
     // Strip the provider slug (e.g. "marvel:") — it routes the call, the upstream API
     // never sees it. Same tenant-slug test as the qualification above, so a colon that
@@ -535,7 +571,7 @@ where
     S: Storage + TransactionalStorage + 'static,
     B: BinaryStorage + 'static,
 {
-    use raisin_ai::types::{FunctionDefinition, ToolDefinition};
+    use raisin_ai::types::FunctionDefinition;
 
     let mut tools: Vec<ToolDefinition> = Vec::new();
     let mut tool_path_map: HashMap<String, String> = Default::default();

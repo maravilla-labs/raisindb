@@ -21,7 +21,9 @@ use serde_json::Value;
 use std::time::Instant;
 use tracing::info;
 
-use super::helpers::{bump_visit_count, extract_token_usage, record_step_output};
+use super::helpers::{
+    bump_visit_count, extract_token_usage, project_output_key, record_step_output,
+};
 use super::isolated_branch::execute_step;
 use super::result_handlers::{
     fail_flow_terminally, handle_complete_result, handle_error_result, handle_wait_result,
@@ -324,6 +326,11 @@ pub(super) async fn execute_flow_with_retry(
                 // agent call came back empty re-read the previous locale's output
                 // and wrote GERMAN text into the French and Italian overlays,
                 // reporting success for both.
+                // Republish the primary value under the step's own
+                // `output_key`, if the author named one, BEFORE recording — so
+                // `steps.<id>`, `history.<id>` and the flat variable bag all
+                // agree on the shape.
+                let output = project_output_key(current_step, output);
                 if let Value::Object(ref mut vars) = instance.variables {
                     record_step_output(vars, &current_step.id, &output);
                 }
