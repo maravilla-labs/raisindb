@@ -372,6 +372,38 @@ fn test_module_resolver_path_resolution() {
     assert_eq!(resolver.resolve_path("index.js", "./utils"), "utils.js");
 }
 
+/// One shared library importing another — the resolver's half of the contract.
+///
+/// The key `load_external_modules` writes for a nested external is
+/// `<dir>/<path-under-dir>`, and this is the assertion that the resolver
+/// produces exactly that string from the specifier. The two agreed all along;
+/// what failed was DISCOVERY — `collect_external_import_dirs` ignored
+/// `export … from` and never scanned the externals it had loaded, so the file
+/// was simply absent from the map and a correct resolution was rejected as
+/// unresolvable.
+#[test]
+fn a_library_can_resolve_another_library() {
+    use module_loader::FunctionModuleResolver;
+
+    let files = Arc::new(HashMap::from([
+        ("index.js".to_string(), String::new()),
+        ("studio-mcp-shared/refs.js".to_string(), String::new()),
+        // Keyed as load_external_modules keys it: dir_name + path under it.
+        ("refs/ref-shared/refs.js".to_string(), String::new()),
+    ]));
+    let resolver = FunctionModuleResolver::new(files);
+
+    assert_eq!(
+        resolver.resolve_path("studio-mcp-shared/refs.js", "../refs/ref-shared/refs.js"),
+        "refs/ref-shared/refs.js",
+    );
+    // And the direct case a function entry uses, which never broke.
+    assert_eq!(
+        resolver.resolve_path("index.js", "../refs/ref-shared/refs.js"),
+        "refs/ref-shared/refs.js",
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_raisin_ai_api_completion() {
     let runtime = QuickJsRuntime::new();

@@ -515,11 +515,23 @@ where
 ///
 /// Scans import statements for patterns like `from '../dir-name/...'` and returns
 /// the first path component after `../` (the directory name).
+///
+/// **`export … from` counts.** A re-export is an import — it makes the module
+/// a dependency exactly as `import` does — and missing it produced a failure
+/// with no obvious cause: a shared library that re-exported one helper from a
+/// sibling library (`export { refPathOf } from '../refs/ref-shared/refs.js'`)
+/// resolved fine when a FUNCTION imported that path directly, and died with
+/// `Error resolving module '../refs/ref-shared/refs.js' from
+/// 'studio-mcp-shared/refs.js'` when the same line sat one level in. The
+/// resolver and the key format already agreed; only discovery did not.
 fn collect_external_import_dirs(code: &str) -> Vec<String> {
     let mut dirs = Vec::new();
     for line in code.lines() {
         let trimmed = line.trim();
-        if !trimmed.starts_with("import ") {
+        // `export … from '…'` is a dependency too. `export default`/`export
+        // const` never carry a specifier, so the `from ` check below is what
+        // actually discriminates — this only has to let the line through.
+        if !trimmed.starts_with("import ") && !trimmed.starts_with("export ") {
             continue;
         }
         // Extract module specifier from: import ... from 'specifier'
@@ -589,7 +601,29 @@ where
 
     let mut result = HashMap::new();
 
-    for dir_name in &external_dirs {
+    // TRANSITIVE, because a shared library may depend on another one.
+    //
+    // This used to be a single pass over `external_dirs`, which meant only the
+    // dependencies named by the ENTRY (or its own siblings) were ever loaded.
+    // A library that imported a second library resolved for every function
+    // that happened to name that second library itself, and failed for every
+    // function that did not — the same source line working or not depending on
+    // who imported it. `external_dirs` grows as each newly-loaded file is
+    // scanned, and `loaded_dirs` bounds the walk so a dependency cycle between
+    // two libraries terminates instead of scanning forever.
+    let mut loaded_dirs: Vec<String> = Vec::new();
+    let mut cursor = 0;
+
+    while cursor < external_dirs.len() {
+        let dir_name = external_dirs[cursor].clone();
+        cursor += 1;
+
+        if loaded_dirs.contains(&dir_name) {
+            continue;
+        }
+        loaded_dirs.push(dir_name.clone());
+
+        let dir_name = &dir_name;
         let dir_prefix = format!("{}/{}/", parent_path, dir_name);
 
         let descendants = storage
@@ -617,6 +651,13 @@ where
 
             match extract_code_from_asset(child, binary_storage).await {
                 Ok(code) => {
+                    // Whatever THIS module imports is a dependency of the
+                    // function too — queue any directory it names.
+                    for dir in collect_external_import_dirs(&code) {
+                        if !external_dirs.contains(&dir) {
+                            external_dirs.push(dir);
+                        }
+                    }
                     result.insert(key, code);
                 }
                 Err(e) => {
@@ -694,6 +735,47 @@ import { helper } from '../other-lib/helper.js';
 "#;
         let dirs = collect_external_import_dirs(code);
         assert_eq!(dirs, vec!["agent-shared", "other-lib"]);
+    }
+
+    #[test]
+    fn collect_external_import_dirs_sees_a_re_export() {
+        // `export … from` makes the module a dependency exactly as `import`
+        // does. Missing it is what broke the MCP tools: a shared library
+        // re-exporting one helper from a sibling library resolved when a
+        // function named that path itself, and died when the same line sat one
+        // level in.
+        let code = r#"
+export { refPathOf, refWsOf, isResolved } from '../refs/ref-shared/refs.js';
+export * from '../other-lib/all.js';
+"#;
+        let dirs = collect_external_import_dirs(code);
+        assert_eq!(dirs, vec!["refs", "other-lib"]);
+    }
+
+    #[test]
+    fn a_local_export_is_not_a_dependency() {
+        // `export const` / `export function` / `export default` carry no
+        // specifier — letting the line through must not invent a directory.
+        let code = r#"
+export const REF_FIELD_TYPES = new Set(['ReferenceField']);
+export function envelope(path, workspace) { return {}; }
+export default envelope;
+export { envelope };
+export { local } from './sibling.js';
+"#;
+        assert!(
+            collect_external_import_dirs(code).is_empty(),
+            "only ../ specifiers name an external directory"
+        );
+    }
+
+    #[test]
+    fn a_nested_external_keeps_its_first_segment() {
+        // The dir NAME is the first segment; the rest becomes part of the key
+        // (`refs/ref-shared/refs.js`), which is exactly what the resolver
+        // produces for `../refs/ref-shared/refs.js`.
+        let code = "import { x } from '../refs/ref-shared/refs.js';";
+        assert_eq!(collect_external_import_dirs(code), vec!["refs"]);
     }
 
     #[test]
