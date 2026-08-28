@@ -13,7 +13,7 @@ use raisin_models::permissions::{Operation, PermissionScope};
 use raisin_rel::eval::RelationResolver;
 
 use context::{evaluate_rel_condition, evaluate_rel_condition_async};
-use matching::{apply_field_filter, find_matching_permission};
+use matching::{apply_field_filter, matching_permissions};
 
 /// Filter a single node based on RLS rules.
 ///
@@ -50,36 +50,35 @@ pub fn filter_node(node: Node, auth: &AuthContext, scope: &PermissionScope) -> O
         return Some(node);
     }
 
-    let matching_permission =
-        find_matching_permission(&node, &permissions.permissions, scope, Operation::Read);
-
-    match matching_permission {
-        Some(permission) => {
-            tracing::debug!(
-                node_path = %node.path,
-                permission_path = %permission.path,
-                "RLS: Found matching permission, allowing access"
-            );
-
-            if let Some(condition) = &permission.condition {
-                if !evaluate_rel_condition(condition, &node, auth) {
-                    tracing::debug!("REL condition not satisfied for node {}", node.id);
-                    return None;
-                }
+    // EVERY matching grant is a reason to allow, most specific first. The one
+    // that actually grants access is also the one whose field filter applies.
+    let candidates = matching_permissions(&node, &permissions.permissions, scope, Operation::Read);
+    for permission in &candidates {
+        if let Some(condition) = &permission.condition {
+            if !evaluate_rel_condition(condition, &node, auth) {
+                tracing::debug!(
+                    node_path = %node.path,
+                    permission_path = %permission.path,
+                    "RLS: condition not satisfied - trying the next matching permission"
+                );
+                continue;
             }
-
-            let filtered_node = apply_field_filter(node, permission);
-            Some(filtered_node)
         }
-        None => {
-            tracing::info!(
-                node_path = %node.path,
-                node_workspace = ?node.workspace,
-                "RLS: No matching permission found, DENYING access"
-            );
-            None
-        }
+        tracing::debug!(
+            node_path = %node.path,
+            permission_path = %permission.path,
+            "RLS: Found matching permission, allowing access"
+        );
+        return Some(apply_field_filter(node, permission));
     }
+
+    tracing::info!(
+        node_path = %node.path,
+        node_workspace = ?node.workspace,
+        candidates = candidates.len(),
+        "RLS: No matching permission allowed this node, DENYING access"
+    );
+    None
 }
 
 /// Filter multiple nodes based on RLS rules.
@@ -117,21 +116,16 @@ pub async fn filter_node_async(
         return Some(node);
     }
 
-    let matching_permission =
-        find_matching_permission(&node, &permissions.permissions, scope, Operation::Read);
-
-    match matching_permission {
-        Some(permission) => {
-            if let Some(condition) = &permission.condition {
-                if !evaluate_rel_condition_async(condition, &node, auth, resolver).await {
-                    tracing::debug!("REL condition not satisfied for node {}", node.id);
-                    return None;
-                }
+    for permission in matching_permissions(&node, &permissions.permissions, scope, Operation::Read)
+    {
+        if let Some(condition) = &permission.condition {
+            if !evaluate_rel_condition_async(condition, &node, auth, resolver).await {
+                continue;
             }
-            Some(apply_field_filter(node, permission))
         }
-        None => None,
+        return Some(apply_field_filter(node, permission));
     }
+    None
 }
 
 /// Async counterpart to [`filter_nodes`]. Evaluates each node sequentially so a
@@ -175,20 +169,13 @@ pub fn can_perform(
         return true;
     }
 
-    let matching_permission =
-        find_matching_permission(node, &permissions.permissions, scope, operation);
-
-    match matching_permission {
-        Some(permission) => {
-            if let Some(condition) = &permission.condition {
-                if !evaluate_rel_condition(condition, node, auth) {
-                    return false;
-                }
-            }
-            true
+    for permission in matching_permissions(node, &permissions.permissions, scope, operation) {
+        match &permission.condition {
+            Some(condition) if !evaluate_rel_condition(condition, node, auth) => continue,
+            _ => return true,
         }
-        None => false,
     }
+    false
 }
 
 /// Async counterpart to [`can_perform`] that can evaluate `RELATES … VIA`
@@ -216,20 +203,15 @@ pub async fn can_perform_async(
         return true;
     }
 
-    let matching_permission =
-        find_matching_permission(node, &permissions.permissions, scope, operation);
-
-    match matching_permission {
-        Some(permission) => {
-            if let Some(condition) = &permission.condition {
-                if !evaluate_rel_condition_async(condition, node, auth, resolver).await {
-                    return false;
-                }
+    for permission in matching_permissions(node, &permissions.permissions, scope, operation) {
+        if let Some(condition) = &permission.condition {
+            if !evaluate_rel_condition_async(condition, node, auth, resolver).await {
+                continue;
             }
-            true
         }
-        None => false,
+        return true;
     }
+    false
 }
 
 /// Check if user can create a node at a path with a given type.

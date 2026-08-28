@@ -375,3 +375,79 @@ async fn test_async_non_relates_condition_still_works() {
             .is_none()
     );
 }
+
+// ── Grants are ADDITIVE ─────────────────────────────────────────────────────
+//
+// The bug these pin: reads resolved the single most SPECIFIC matching
+// permission and denied when that one's condition failed, while creates
+// already unioned across every match. So a narrow conditional grant HID rows a
+// broad unconditional grant allowed — measured live, an administrator with
+// `/users/** read` saw exactly one user (themselves), because
+// `authenticated_user` grants `raisin:User` with `node.id == auth.local_user_id`
+// and that rule was more specific. Every listing that offers people was empty
+// but one, while a direct read of the same node succeeded.
+
+/// A conditional grant that does NOT match must not veto a broad one that does.
+#[test]
+fn a_failing_condition_does_not_hide_what_another_grant_allows() {
+    let mut narrow = make_permission("/users/**", vec![Operation::Read]);
+    narrow.node_types = Some(vec!["raisin:User".to_string()]);
+    narrow.condition = Some("node.id == 'somebody-else'".to_string());
+    let broad = make_permission("/**", vec![Operation::Read]);
+
+    let auth = make_auth("admin", vec![narrow, broad]);
+    let node = make_node("/users/internal/alice", "raisin:User");
+
+    assert!(
+        filter_node(node, &auth, &make_scope()).is_some(),
+        "the unconditional grant still allows the read"
+    );
+}
+
+/// …and with no other grant, the condition still decides.
+#[test]
+fn a_failing_condition_alone_still_denies() {
+    let mut narrow = make_permission("/users/**", vec![Operation::Read]);
+    narrow.condition = Some("node.id == 'somebody-else'".to_string());
+
+    let auth = make_auth("admin", vec![narrow]);
+    let node = make_node("/users/internal/alice", "raisin:User");
+
+    assert!(filter_node(node, &auth, &make_scope()).is_none());
+}
+
+/// The same union applies to a write check, not only to reads.
+#[test]
+fn can_perform_unions_across_grants_too() {
+    let mut narrow = make_permission("/users/**", vec![Operation::Update]);
+    narrow.condition = Some("node.id == 'somebody-else'".to_string());
+    let broad = make_permission("/**", vec![Operation::Update]);
+
+    let auth = make_auth("admin", vec![narrow, broad]);
+    let node = make_node("/users/internal/alice", "raisin:User");
+
+    assert!(can_perform(&node, Operation::Update, &auth, &make_scope()));
+}
+
+/// A SATISFIED condition on the most specific grant still wins, so field
+/// filtering keeps applying the narrowest rule that actually granted access.
+#[test]
+fn the_most_specific_satisfied_grant_is_the_one_that_applies() {
+    let mut narrow = make_permission("/users/**", vec![Operation::Read]);
+    narrow.condition = Some("node.node_type == 'raisin:User'".to_string());
+    narrow.except_fields = Some(vec!["email".to_string()]);
+    let broad = make_permission("/**", vec![Operation::Read]);
+
+    let auth = make_auth("admin", vec![narrow, broad]);
+    let mut node = make_node("/users/internal/alice", "raisin:User");
+    node.properties.insert(
+        "email".to_string(),
+        raisin_models::nodes::properties::PropertyValue::String("a@b.c".to_string()),
+    );
+
+    let filtered = filter_node(node, &auth, &make_scope()).expect("allowed");
+    assert!(
+        !filtered.properties.contains_key("email"),
+        "the narrow grant's field filter must be the one applied"
+    );
+}

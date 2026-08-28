@@ -3,21 +3,35 @@
 use raisin_models::nodes::Node;
 use raisin_models::permissions::{Operation, Permission, PermissionScope};
 
-/// Find the most specific permission that matches a node's path, type, scope, AND operation.
+/// EVERY permission that matches a node's path, type, scope and operation, most
+/// specific first.
 ///
-/// Checks permissions in order of:
+/// A list, not a winner, and that is the whole point. Grants are ADDITIVE: a
+/// role that may read `/users/**` and a role that may read its own user record
+/// are two reasons to allow, not a contest. Taking only the most specific one
+/// and denying when ITS condition failed turned the union into a lottery —
+/// `authenticated_user` grants `raisin:User` with `node.id == auth.local_user_id`,
+/// so an administrator holding an unconditional `/users/** read` saw exactly
+/// one user: themselves. Every listing that offers people (a task assignee, a
+/// chat participant, the Access app) showed a single candidate, while a direct
+/// read of the same node succeeded — because that path resolved a different
+/// permission. Measured on a local instance, 2026-08-29.
+///
+/// Ordering is by path specificity so a caller that must pick ONE (field
+/// filtering) still gets the most specific rule that actually applied.
+///
+/// Checks, in order:
 /// 1. Scope match (workspace and branch patterns) - fail-fast
 /// 2. Path pattern match
 /// 3. Operation match - permission must include the required operation
 /// 4. Node type filter match
-/// 5. Specificity scoring (most specific wins)
-pub(super) fn find_matching_permission<'a>(
+pub(super) fn matching_permissions<'a>(
     node: &Node,
     permissions: &'a [Permission],
     scope: &PermissionScope,
     operation: Operation,
-) -> Option<&'a Permission> {
-    let mut best_match: Option<(&Permission, usize)> = None;
+) -> Vec<&'a Permission> {
+    let mut matches: Vec<(&Permission, usize)> = Vec::new();
 
     for permission in permissions {
         // Check scope FIRST (fail-fast, O(1))
@@ -42,19 +56,30 @@ pub(super) fn find_matching_permission<'a>(
             }
         }
 
-        // Score by specificity using cached value
-        let specificity = permission.path_specificity();
-
-        match &best_match {
-            None => best_match = Some((permission, specificity)),
-            Some((_, current_score)) if specificity > *current_score => {
-                best_match = Some((permission, specificity));
-            }
-            _ => {}
-        }
+        matches.push((permission, permission.path_specificity()));
     }
 
-    best_match.map(|(p, _)| p)
+    // Most specific first; a stable sort keeps declaration order among equals,
+    // so a role's own ordering stays meaningful.
+    matches.sort_by(|a, b| b.1.cmp(&a.1));
+    matches.into_iter().map(|(p, _)| p).collect()
+}
+
+/// The most specific permission that matches, ignoring conditions.
+///
+/// Kept for callers that only need to know whether a rule EXISTS. Anything
+/// deciding access must use [`matching_permissions`] and try each in turn —
+/// see the note there.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn find_matching_permission<'a>(
+    node: &Node,
+    permissions: &'a [Permission],
+    scope: &PermissionScope,
+    operation: Operation,
+) -> Option<&'a Permission> {
+    matching_permissions(node, permissions, scope, operation)
+        .into_iter()
+        .next()
 }
 
 /// Apply field filtering to a node based on permission rules.
