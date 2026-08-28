@@ -6,10 +6,11 @@
 //! - Any binary operations containing async functions
 
 use crate::physical_plan::executor::Row;
-use raisin_core::services::reference_resolver::ReferenceResolver;
+use raisin_core::services::reference_resolver::{ReferenceResolver, ResolutionLocale};
 use raisin_error::Error;
 use raisin_locks::LockManager;
 use raisin_models::nodes::properties::{extract_references, PropertyValue, RaisinReference};
+use raisin_models::translations::LocaleCode;
 use raisin_sql::analyzer::{BinaryOperator, Expr, Literal, TypedExpr};
 use std::collections::HashMap;
 use std::future::Future;
@@ -346,6 +347,57 @@ async fn eval_function_async<S: raisin_storage::Storage>(
     }
 }
 
+/// The locale RESOLVE() should read referenced nodes in.
+///
+/// The scan executors have already applied the query's locale to the row this
+/// expression is evaluating over (`ctx.locales`, extracted from the
+/// `locale = '<x>'` predicate before it ever reaches the filter). A reference is
+/// part of that same document, so it is read in that same language — otherwise a
+/// translated page inlines untranslated nodes and is silently half translated.
+///
+/// WHICH locale, when the query asked for several: a `locale IN ('ja','de')`
+/// read fans out one ROW PER LOCALE, so the locale is a property of the row and
+/// not of the query. The row carries it as the virtual `locale` column — when
+/// that column is projected we use it, which is exact. When it is not projected
+/// there is nothing on the row to read and we fall back to the first requested
+/// locale, which is exact for the single-locale case that every translated site
+/// actually issues, and is at worst the previous behaviour for one of the rows
+/// of a multi-locale fan-out that did not ask to see its own locale.
+///
+/// `None` — meaning "read the base language", the behaviour before this existed
+/// — whenever the repository has no translation configuration, the requested
+/// locale IS the default language, or the code does not parse.
+fn resolution_locale<S: raisin_storage::Storage>(
+    row: &Row,
+    ctx: &crate::physical_plan::executor::ExecutionContext<S>,
+) -> Option<ResolutionLocale> {
+    let config = ctx.repository_config.as_ref()?;
+
+    // The row's own locale wins over the query's list; see above. Looked up
+    // unqualified because the column is `<qualifier>.locale` and this expression
+    // does not know the qualifier it is being evaluated under.
+    let from_row = match row.get_by_unqualified("locale") {
+        Some(PropertyValue::String(s)) if !s.is_empty() => Some(s.clone()),
+        _ => None,
+    };
+    let wanted = from_row
+        .or_else(|| ctx.locales.first().cloned())
+        .unwrap_or_else(|| ctx.default_language.to_string());
+
+    if wanted == ctx.default_language.as_ref() {
+        return None;
+    }
+
+    Some(ResolutionLocale {
+        locale: LocaleCode::parse(&wanted).ok()?,
+        default_language: ctx.default_language.to_string(),
+        config: config.clone(),
+        // The same revision the scan resolved the row at, so a reference cannot
+        // be read at a different point in time than the document holding it.
+        revision: ctx.max_revision.unwrap_or_else(raisin_hlc::HLC::now),
+    })
+}
+
 /// Evaluate RESOLVE(jsonb[, depth]) - resolve PropertyValue::Reference to full node data
 ///
 /// Two code paths:
@@ -415,6 +467,10 @@ async fn eval_resolve<S: raisin_storage::Storage>(
 
     let workspace = ctx.workspace.as_ref();
 
+    // The language this read is in — see `resolution_locale` for why RESOLVE()
+    // has to know it, and for the one case it cannot answer exactly.
+    let resolution_locale = resolution_locale(row, ctx);
+
     // Path A: Single reference (JSON object with "raisin:ref" key)
     if json_value.get("raisin:ref").is_some() {
         let reference: RaisinReference =
@@ -427,7 +483,8 @@ async fn eval_resolve<S: raisin_storage::Storage>(
             ctx.tenant_id.to_string(),
             ctx.repo_id.to_string(),
             ctx.branch.to_string(),
-        );
+        )
+        .with_locale(resolution_locale.clone());
 
         match resolver
             .resolve_single_reference(workspace, &reference, max_depth)
@@ -463,7 +520,8 @@ async fn eval_resolve<S: raisin_storage::Storage>(
             ctx.tenant_id.to_string(),
             ctx.repo_id.to_string(),
             ctx.branch.to_string(),
-        );
+        )
+        .with_locale(resolution_locale.clone());
 
         let resolved_properties = resolver
             .resolve_properties(workspace, &properties, max_depth)

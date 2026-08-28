@@ -430,3 +430,96 @@ async fn a_regional_locale_wins_over_the_language_it_falls_back_to() {
         "a field only the fallback language translates must still show through"
     );
 }
+
+/// A REFERENCE inlined by `resolve()` must be read in the query's language too.
+///
+/// This is the one the locale plumbing missed for a long time, and it is invisible
+/// from either side on its own: the scan executors translate the row before
+/// projection, so the SELECTED node came back correctly translated, while
+/// `resolve()` fetched every referenced node straight out of storage with no
+/// locale at all. A page read in `de` therefore rendered a German headline over an
+/// untranslated referenced author — half a document, with the translation sitting
+/// in the database the whole time and nothing reporting a problem.
+#[tokio::test]
+async fn resolve_reads_referenced_nodes_in_the_query_locale() {
+    let (storage, _td) = setup().await;
+    let e = engine(&storage, config(&["en", "de"]));
+
+    // An author, and a page that REFERENCES it rather than repeating it.
+    let author = serde_json::json!({ "title": "Markus", "role": "Founder & Director" }).to_string();
+    run(
+        &e,
+        &format!(
+            "INSERT INTO {WS} (id, path, node_type, properties) VALUES \
+             ('author-1','/author','test:Page','{author}'::JSONB)"
+        ),
+    )
+    .await;
+
+    let page = serde_json::json!({
+        "title": "Team",
+        "author": { "raisin:ref": "author-1", "raisin:workspace": WS },
+    })
+    .to_string();
+    run(
+        &e,
+        &format!(
+            "INSERT INTO {WS} (id, path, node_type, properties) VALUES \
+             ('page-2','/team','test:Page','{page}'::JSONB)"
+        ),
+    )
+    .await;
+
+    // Both documents are translated — the page itself, and the node it points at.
+    run(
+        &e,
+        &format!("UPDATE {WS} FOR LOCALE 'de' SET title = 'Das Team' WHERE path = '/team'"),
+    )
+    .await;
+    run(
+        &e,
+        &format!(
+            "UPDATE {WS} FOR LOCALE 'de' SET role = 'Gründer & Direktor' WHERE path = '/author'"
+        ),
+    )
+    .await;
+
+    let sql = format!(
+        "SELECT resolve(properties, 2) AS properties FROM {WS} \
+         WHERE path = '/team' AND locale = 'de' LIMIT 1"
+    );
+    let mut stream = e.execute(&sql).await.expect("resolve select");
+    let row = stream.next().await.expect("a row").expect("row ok");
+    let props: serde_json::Value =
+        serde_json::to_value(row.columns.get("properties").expect("properties")).expect("json");
+
+    assert_eq!(
+        props.get("title").and_then(|v| v.as_str()),
+        Some("Das Team"),
+        "the selected row translates, as it always did"
+    );
+    assert_eq!(
+        props.pointer("/author/role").and_then(|v| v.as_str()),
+        Some("Gründer & Direktor"),
+        "the REFERENCED node must be inlined in the query's locale, not the base language"
+    );
+    assert_eq!(
+        props.pointer("/author/title").and_then(|v| v.as_str()),
+        Some("Markus"),
+        "an untranslated field of a referenced node still falls back to the base language"
+    );
+
+    // And the base language is unaffected: no locale predicate, no translation.
+    let sql_en = format!(
+        "SELECT resolve(properties, 2) AS properties FROM {WS} WHERE path = '/team' LIMIT 1"
+    );
+    let mut stream = e.execute(&sql_en).await.expect("resolve select en");
+    let row = stream.next().await.expect("a row").expect("row ok");
+    let props: serde_json::Value =
+        serde_json::to_value(row.columns.get("properties").expect("properties")).expect("json");
+    assert_eq!(
+        props.pointer("/author/role").and_then(|v| v.as_str()),
+        Some("Founder & Director"),
+        "a read with no locale must still be the base language"
+    );
+}

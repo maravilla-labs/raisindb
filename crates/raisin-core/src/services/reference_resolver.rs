@@ -8,9 +8,12 @@
 //! 2. Fetches the referenced nodes in parallel
 //! 3. Returns a resolved node with references replaced by full node objects
 
+use crate::services::translation_resolver::TranslationResolver;
+use raisin_context::RepositoryConfig;
 use raisin_error::Result;
 use raisin_models::nodes::properties::{extract_references, PropertyValue, RaisinReference};
 use raisin_models::nodes::Node;
+use raisin_models::translations::LocaleCode;
 use raisin_storage::{NodeRepository, Storage, StorageScope};
 use std::collections::HashMap;
 use std::future::Future;
@@ -33,12 +36,42 @@ pub struct ResolvedNode {
     pub resolved_references: HashMap<String, Node>,
 }
 
+/// The language a resolution runs in.
+///
+/// Reference expansion used to be language-blind, which made it impossible to
+/// read a translated document: `SELECT resolve(properties, 2) ... WHERE locale =
+/// 'ja'` returned the SELECTED row translated — the scan executors apply the
+/// overlay before projection — and every node it REFERENCES in the base
+/// language. A page read in Japanese therefore rendered a Japanese headline over
+/// an English job title, with the referenced contact fully translated the whole
+/// time. Nothing errored; the document was simply half translated, which reads
+/// as a translation that never saved.
+///
+/// A reference is part of the document being read, so it is read in the same
+/// language as the document. Absent (`None`) means the base language and the
+/// original behaviour, which is what an untranslated repository and every
+/// non-SQL caller still get.
+#[derive(Clone)]
+pub struct ResolutionLocale {
+    /// The locale to resolve referenced nodes in.
+    pub locale: LocaleCode,
+    /// The repository's default language — the language the base node IS.
+    pub default_language: String,
+    /// Fallback chains, so `fr-CA` can fall back to `fr` and then to the base.
+    pub config: RepositoryConfig,
+    /// The revision the overlay is looked up at, so a reference resolves as of
+    /// the same point in time as the row that carries it.
+    pub revision: raisin_hlc::HLC,
+}
+
 #[derive(Clone)]
 pub struct ReferenceResolver<S: Storage> {
     storage: Arc<S>,
     tenant_id: String,
     repo_id: String,
     branch: String,
+    /// `None` = base language: fetch and inline exactly as stored.
+    locale: Option<ResolutionLocale>,
 }
 
 impl<S: Storage> ReferenceResolver<S> {
@@ -48,7 +81,65 @@ impl<S: Storage> ReferenceResolver<S> {
             tenant_id,
             repo_id,
             branch,
+            locale: None,
         }
+    }
+
+    /// Resolve referenced nodes in a locale.
+    ///
+    /// Pass `None` for the base language. Callers that have no translation
+    /// configuration — and every caller that predates this — get the base
+    /// language by construction rather than by remembering to opt out.
+    pub fn with_locale(mut self, locale: Option<ResolutionLocale>) -> Self {
+        self.locale = locale;
+        self
+    }
+
+    /// Fetch one referenced node, in the resolution's language.
+    ///
+    /// THE ONE PLACE A REFERENCED NODE IS READ. There were four, each with its
+    /// own `repo.get(...)`, which is how the translation layer came to be missed
+    /// by all of them at once; a fifth resolution path added later inherits the
+    /// language for free by calling this.
+    ///
+    /// `Ok(None)` means "do not inline": either the node does not exist, or it is
+    /// HIDDEN in this locale. Hiding is an explicit editorial act — a tombstone
+    /// saying this node is not part of the document in this language — so the
+    /// reference is left unresolved rather than falling back to base-language
+    /// content the author deliberately withheld. An untranslated FIELD still
+    /// falls back to the base text, which is the translation layer's own rule
+    /// and unchanged here.
+    async fn fetch_referenced_node(&self, workspace: &str, id: &str) -> Result<Option<Node>> {
+        let scope = StorageScope::new(&self.tenant_id, &self.repo_id, &self.branch, workspace);
+        let Some(node) = self.storage.nodes().get(scope, id, None).await? else {
+            return Ok(None);
+        };
+
+        let Some(resolution) = &self.locale else {
+            return Ok(Some(node));
+        };
+        // The base node already IS the default language; asking for an overlay
+        // that was never written would cost a lookup to return the same node.
+        if resolution.locale.as_str() == resolution.default_language {
+            return Ok(Some(node));
+        }
+
+        // The referenced node's OWN workspace, not the scan's — a page in
+        // `stories` referencing a contact in `people` has its translations
+        // stored against `people`, and looking them up under the reader's
+        // workspace finds nothing at all.
+        let translations = Arc::new(self.storage.translations().clone());
+        TranslationResolver::new(translations, resolution.config.clone())
+            .resolve_node(
+                &self.tenant_id,
+                &self.repo_id,
+                &self.branch,
+                workspace,
+                node,
+                &resolution.locale,
+                &resolution.revision,
+            )
+            .await
     }
 
     /// Resolve all references in a node
@@ -61,11 +152,9 @@ impl<S: Storage> ReferenceResolver<S> {
 
         // Fetch all referenced nodes
         let mut resolved_references = HashMap::new();
-        let repo = self.storage.nodes();
 
-        let scope = StorageScope::new(&self.tenant_id, &self.repo_id, &self.branch, workspace);
         for ref_id in reference_ids {
-            if let Some(referenced_node) = repo.get(scope, &ref_id, None).await? {
+            if let Some(referenced_node) = self.fetch_referenced_node(workspace, &ref_id).await? {
                 resolved_references.insert(ref_id, referenced_node);
             }
         }
@@ -168,10 +257,10 @@ impl<S: Storage> ReferenceResolver<S> {
         } else {
             &reference.workspace
         };
-        let scope = StorageScope::new(&self.tenant_id, &self.repo_id, &self.branch, ref_workspace);
-        let repo = self.storage.nodes();
-
-        let Some(node) = repo.get(scope, &reference.id, None).await? else {
+        let Some(node) = self
+            .fetch_referenced_node(ref_workspace, &reference.id)
+            .await?
+        else {
             return Ok(None);
         };
 
@@ -209,7 +298,6 @@ impl<S: Storage> ReferenceResolver<S> {
 
             // Fetch references, skipping already-visited IDs (circular reference guard)
             let mut resolved_nodes: HashMap<String, Node> = HashMap::new();
-            let repo = self.storage.nodes();
             for (_, raisin_ref) in &refs {
                 if resolved_nodes.contains_key(&raisin_ref.id) || visited.contains(&raisin_ref.id) {
                     continue;
@@ -221,9 +309,10 @@ impl<S: Storage> ReferenceResolver<S> {
                 } else {
                     &raisin_ref.workspace
                 };
-                let scope =
-                    StorageScope::new(&self.tenant_id, &self.repo_id, &self.branch, ref_workspace);
-                if let Some(node) = repo.get(scope, &raisin_ref.id, None).await? {
+                if let Some(node) = self
+                    .fetch_referenced_node(ref_workspace, &raisin_ref.id)
+                    .await?
+                {
                     resolved_nodes.insert(raisin_ref.id.clone(), node);
                 }
             }
@@ -258,7 +347,6 @@ impl<S: Storage> ReferenceResolver<S> {
 
         // Fetch remaining references
         let mut resolved_nodes: HashMap<String, Node> = HashMap::new();
-        let repo = self.storage.nodes();
         for (_, raisin_ref) in &refs {
             if resolved_nodes.contains_key(&raisin_ref.id) {
                 continue;
@@ -268,9 +356,10 @@ impl<S: Storage> ReferenceResolver<S> {
             } else {
                 &raisin_ref.workspace
             };
-            let scope =
-                StorageScope::new(&self.tenant_id, &self.repo_id, &self.branch, ref_workspace);
-            if let Some(node) = repo.get(scope, &raisin_ref.id, None).await? {
+            if let Some(node) = self
+                .fetch_referenced_node(ref_workspace, &raisin_ref.id)
+                .await?
+            {
                 resolved_nodes.insert(raisin_ref.id.clone(), node);
             }
         }
