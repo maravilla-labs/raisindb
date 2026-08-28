@@ -219,10 +219,16 @@ fn tool(name: &str, description: &str, parameters: Value) -> Value {
 #[derive(Debug, Clone)]
 pub enum ControlAction {
     /// End with this result and optional reason.
-    End { result: Value, reason: Option<String> },
+    End {
+        result: Value,
+        reason: Option<String>,
+    },
 
     /// Continue with a different agent.
-    Handoff { agent: String, reason: Option<String> },
+    Handoff {
+        agent: String,
+        reason: Option<String>,
+    },
 
     /// Park on a human decision.
     Approval(ApprovalRequest),
@@ -334,7 +340,10 @@ mod tests {
             result_schema: Some(schema.clone()),
             ..Default::default()
         };
-        assert_eq!(cfg.definitions()[0]["function"]["parameters"]["properties"]["result"], schema);
+        assert_eq!(
+            cfg.definitions()[0]["function"]["parameters"]["properties"]["result"],
+            schema
+        );
     }
 
     #[test]
@@ -356,7 +365,10 @@ mod tests {
             ..Default::default()
         };
         let defs = cfg.definitions();
-        assert_eq!(defs[0]["function"]["parameters"]["properties"]["agent"]["enum"][0], "/agents/legal");
+        assert_eq!(
+            defs[0]["function"]["parameters"]["properties"]["agent"]["enum"][0],
+            "/agents/legal"
+        );
     }
 
     #[test]

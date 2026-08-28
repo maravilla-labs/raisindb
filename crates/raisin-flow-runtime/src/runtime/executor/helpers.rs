@@ -806,10 +806,7 @@ mod tests {
 
     #[test]
     fn a_shape_we_do_not_know_is_republished_whole() {
-        let out = project_output_key(
-            &keyed(Some("data")),
-            serde_json::json!({"rows": [1, 2]}),
-        );
+        let out = project_output_key(&keyed(Some("data")), serde_json::json!({"rows": [1, 2]}));
         assert_eq!(out["data"]["rows"][1], 2);
     }
 

@@ -661,7 +661,10 @@ async fn group_quorum_resumes_on_the_response_that_reaches_it() {
     )
     .await
     .expect("second acceptance");
-    assert!(second.flow.is_some(), "the second acceptance reaches quorum");
+    assert!(
+        second.flow.is_some(),
+        "the second acceptance reaches quorum"
+    );
     assert_eq!(task_status(&storage, &task_ids[2]).await, "cancelled");
 
     let scheduled = scheduler.scheduled.lock().unwrap();

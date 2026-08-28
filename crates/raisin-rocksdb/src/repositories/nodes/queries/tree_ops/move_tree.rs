@@ -344,8 +344,8 @@ impl NodeRepositoryImpl {
             if *depth != 1 {
                 continue;
             }
-            if let Some(stale_label) =
-                self.get_order_label_for_child(tenant_id, repo_id, branch, workspace, id, orphan_id)?
+            if let Some(stale_label) = self
+                .get_order_label_for_child(tenant_id, repo_id, branch, workspace, id, orphan_id)?
             {
                 let stale_key = keys::ordered_child_key_versioned(
                     tenant_id,

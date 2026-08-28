@@ -35,7 +35,8 @@ pub(super) async fn process_ai_turn(
     .await;
 
     let workspace = config.agent_workspace.as_deref().unwrap_or("functions");
-    let tool_config = ToolLoopConfig::new(workspace, agent_path).with_control(control_config(config));
+    let tool_config =
+        ToolLoopConfig::new(workspace, agent_path).with_control(control_config(config));
 
     let _ = callbacks
         .emit_event(

@@ -148,7 +148,9 @@ impl FlowCallbacks for MockChatCallbacks {
         rf: Option<Value>,
         extra_tools: Vec<Value>,
     ) -> FlowResult<tokio::sync::mpsc::Receiver<Value>> {
-        let response = self.call_ai_with_tools(ws, ref_, msgs, rf, extra_tools).await?;
+        let response = self
+            .call_ai_with_tools(ws, ref_, msgs, rf, extra_tools)
+            .await?;
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         let _ = tx.send(response).await;
         Ok(rx)
@@ -705,8 +707,15 @@ async fn a_redelivery_while_parked_does_not_re_ask() {
     // timeout check). It must re-park, NOT call the model again — which would
     // ask the person a second time and orphan the first task.
     let metadata = expect_wait(handler.execute(&node, &mut context, &callbacks).await);
-    assert_eq!(callbacks.ai_call_count(), 1, "the model must not be re-asked");
-    assert!(metadata["target_path"].is_string(), "still parked on the task");
+    assert_eq!(
+        callbacks.ai_call_count(),
+        1,
+        "the model must not be re-asked"
+    );
+    assert!(
+        metadata["target_path"].is_string(),
+        "still parked on the task"
+    );
 }
 
 #[tokio::test]

@@ -95,9 +95,10 @@ pub(super) async fn resolve_group_assignment(
                 let belongs = property(&child, "groups")
                     .and_then(Value::as_array)
                     .map(|groups| {
-                        groups.iter().filter_map(Value::as_str).any(|value| {
-                            membership_matches(value, &group_path, &group_id)
-                        })
+                        groups
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .any(|value| membership_matches(value, &group_path, &group_id))
                     })
                     .unwrap_or(false);
                 if belongs {

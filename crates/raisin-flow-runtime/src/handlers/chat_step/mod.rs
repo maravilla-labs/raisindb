@@ -147,10 +147,7 @@ impl ChatStepHandler {
             .properties
             .get("approval")
             .map(|v| ApprovalConfig {
-                enabled: v
-                    .get("enabled")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false),
+                enabled: v.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false),
                 assignee: v
                     .get("assignee")
                     .and_then(|v| v.as_str())
@@ -312,8 +309,7 @@ impl StepHandler for ChatStepHandler {
         // the next move is the agent's, not the user's. Falling through to the
         // user-message path would consume an unrelated message, count a turn
         // the user did not take, and leave the agent's own question unanswered.
-        let resuming_approval =
-            approval::answer(callbacks, context, &mut session, &conv_ws).await;
+        let resuming_approval = approval::answer(callbacks, context, &mut session, &conv_ws).await;
 
         if resuming_approval {
             debug!("Resuming chat step '{}' from an answered approval", step.id);

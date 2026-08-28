@@ -618,7 +618,10 @@ fn task_response(node: &raisin_models::nodes::Node) -> Value {
 }
 
 fn task_qualifies(node: &raisin_models::nodes::Node) -> bool {
-    matches!(node.properties.get("qualifies"), Some(PropertyValue::Boolean(true)))
+    matches!(
+        node.properties.get("qualifies"),
+        Some(PropertyValue::Boolean(true))
+    )
 }
 
 fn evaluate_group_response(
@@ -633,12 +636,16 @@ fn evaluate_group_response(
         "response": response,
         "responses": previous,
     }))
-    .map_err(|error| FlowError::InvalidNodeConfiguration(format!(
-        "Invalid human-task response context: {}", error
-    )))?;
+    .map_err(|error| {
+        FlowError::InvalidNodeConfiguration(format!(
+            "Invalid human-task response context: {}",
+            error
+        ))
+    })?;
     let value = raisin_rel::eval(condition, &context).map_err(|error| {
         FlowError::InvalidNodeConfiguration(format!(
-            "Invalid human-task response_condition '{}': {}", condition, error
+            "Invalid human-task response_condition '{}': {}",
+            condition, error
         ))
     })?;
     Ok(match value {
@@ -667,20 +674,28 @@ async fn persist_inbox_task<S: Storage>(
         .update(
             scope,
             task,
-            UpdateNodeOptions { validate_schema: false, ..Default::default() },
+            UpdateNodeOptions {
+                validate_schema: false,
+                ..Default::default()
+            },
         )
         .await
         .map_err(|error| FlowError::Other(format!("Failed to update task node: {}", error)))?;
 
     let revision = {
         use raisin_storage::BranchRepository;
-        match storage.branches().get_branch(tenant_id, repo, DEFAULT_BRANCH).await {
+        match storage
+            .branches()
+            .get_branch(tenant_id, repo, DEFAULT_BRANCH)
+            .await
+        {
             Ok(Some(branch)) => branch.head,
             _ => raisin_hlc::HLC::new(0, 0),
         }
     };
-    storage.event_bus().publish(raisin_storage::Event::Node(
-        raisin_storage::NodeEvent {
+    storage
+        .event_bus()
+        .publish(raisin_storage::Event::Node(raisin_storage::NodeEvent {
             tenant_id: tenant_id.to_string(),
             repository_id: repo.to_string(),
             branch: DEFAULT_BRANCH.to_string(),
@@ -691,8 +706,7 @@ async fn persist_inbox_task<S: Storage>(
             kind: raisin_storage::NodeEventKind::Updated,
             path: Some(task_path),
             metadata: None,
-        },
-    ));
+        }));
     Ok(())
 }
 
@@ -814,8 +828,8 @@ pub async fn complete_task<S: Storage>(
     // ordinary branches rather than one silent dead end.
     let group_summary = if let Some(group_path) = assignment_group.clone() {
         let required = task_prop_usize(&task_node, "assignment_required").unwrap_or(1);
-        let completion = task_prop_str(&task_node, "assignment_completion")
-            .unwrap_or_else(|| "any".to_string());
+        let completion =
+            task_prop_str(&task_node, "assignment_completion").unwrap_or_else(|| "any".to_string());
 
         let mut siblings = Vec::new();
         for path in assignment_paths.iter() {

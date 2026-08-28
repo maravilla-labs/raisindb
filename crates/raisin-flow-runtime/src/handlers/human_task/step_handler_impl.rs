@@ -12,8 +12,8 @@ use crate::types::{
 use async_trait::async_trait;
 use tracing::{debug, error, instrument};
 
-use super::handler::{HumanTaskHandler, WAIT_REASON_HUMAN_TASK};
 use super::group_assignee::GroupAssignment;
+use super::handler::{HumanTaskHandler, WAIT_REASON_HUMAN_TASK};
 
 async fn create_group_tasks(
     handler: &HumanTaskHandler,
@@ -191,7 +191,9 @@ impl StepHandler for HumanTaskHandler {
                 FlowError::InvalidNodeConfiguration(format!(
                     "Human task step '{}' assignee did not resolve to a node path: {}",
                     step.id,
-                    task_properties.get("assignee").unwrap_or(&serde_json::Value::Null)
+                    task_properties
+                        .get("assignee")
+                        .unwrap_or(&serde_json::Value::Null)
                 ))
             })?;
 
@@ -211,12 +213,8 @@ impl StepHandler for HumanTaskHandler {
         // real inbox. The completion API aggregates those task nodes according
         // to any/all/quorum and resumes this same flow only when the authored
         // policy is satisfied (or every member has responded).
-        if let Some(assignment) = super::group_assignee::resolve_group_assignment(
-            callbacks,
-            step,
-            &assignee,
-        )
-        .await?
+        if let Some(assignment) =
+            super::group_assignee::resolve_group_assignment(callbacks, step, &assignee).await?
         {
             return create_group_tasks(
                 self,

@@ -416,8 +416,7 @@ async fn process_tool_calls(
         let (tc_id, func_name, arguments) = describe_tool_call(tc);
 
         if !control_tools::is_control_tool(&func_name) {
-            let executed =
-                execute_tool_call(callbacks, tc, tool_map, instance_id, iteration).await;
+            let executed = execute_tool_call(callbacks, tc, tool_map, instance_id, iteration).await;
             messages.push(serde_json::json!({
                 "role": "tool",
                 "tool_call_id": executed.id,
@@ -444,10 +443,7 @@ async fn process_tool_calls(
                 "content": serde_json::to_string(&result).unwrap_or_default(),
             }));
             all_tool_calls.push(ExecutedToolCall::control(
-                &tc_id,
-                &func_name,
-                arguments,
-                result,
+                &tc_id, &func_name, arguments, result,
             ));
             continue;
         }
@@ -462,10 +458,7 @@ async fn process_tool_calls(
                 "content": serde_json::to_string(&result).unwrap_or_default(),
             }));
             all_tool_calls.push(ExecutedToolCall::control(
-                &tc_id,
-                &func_name,
-                arguments,
-                result,
+                &tc_id, &func_name, arguments, result,
             ));
             continue;
         };
@@ -508,12 +501,7 @@ async fn process_tool_calls(
         let _ = callbacks
             .emit_event(
                 instance_id,
-                FlowExecutionEvent::tool_call_completed(
-                    &tc_id,
-                    result.clone(),
-                    None,
-                    Some(0),
-                ),
+                FlowExecutionEvent::tool_call_completed(&tc_id, result.clone(), None, Some(0)),
             )
             .await;
 
