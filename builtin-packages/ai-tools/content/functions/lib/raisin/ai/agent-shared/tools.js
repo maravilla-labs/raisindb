@@ -38,6 +38,18 @@ function normalizeCompletionResponse(raw) {
   if (typeof response.model !== 'string') {
     response.model = response.model ? String(response.model) : undefined;
   }
+  // The Rust accumulator returns provider-native and model-tagged reasoning
+  // as one string. Agent persistence uses a list because a response may carry
+  // multiple reasoning blocks, so normalize that boundary once here.
+  if (Array.isArray(response.thinking)) {
+    response.thinking = response.thinking
+      .filter((thought) => typeof thought === 'string' && thought.trim())
+      .map((thought) => thought.trim());
+  } else if (typeof response.thinking === 'string' && response.thinking.trim()) {
+    response.thinking = [response.thinking.trim()];
+  } else {
+    response.thinking = [];
+  }
   // Defense-in-depth: strip model control tokens that may leak through
   // (primary stripping happens in the Rust streaming layer)
   response.content = response.content

@@ -26,6 +26,77 @@ pub enum StreamEvent {
     ThoughtChunk(String),
 }
 
+/// Incrementally separates model-emitted `<think>...</think>` blocks from
+/// ordinary assistant text. Some OpenAI-compatible providers (notably models
+/// served by Groq) return reasoning this way instead of using a provider-native
+/// thinking field, and the tags may be split across streaming chunks.
+struct ThinkTagDetector {
+    buffer: String,
+    in_thought: bool,
+}
+
+impl ThinkTagDetector {
+    fn new() -> Self {
+        Self {
+            buffer: String::new(),
+            in_thought: false,
+        }
+    }
+
+    fn feed(&mut self, delta: &str) -> Vec<(bool, String)> {
+        self.buffer.push_str(delta);
+        self.drain(false)
+    }
+
+    fn flush(&mut self) -> Vec<(bool, String)> {
+        self.drain(true)
+    }
+
+    fn drain(&mut self, flush: bool) -> Vec<(bool, String)> {
+        let mut output = Vec::new();
+
+        loop {
+            let tag = if self.in_thought {
+                "</think>"
+            } else {
+                "<think>"
+            };
+            if let Some(index) = self.buffer.find(tag) {
+                if index > 0 {
+                    output.push((self.in_thought, self.buffer[..index].to_string()));
+                }
+                self.buffer.drain(..index + tag.len());
+                self.in_thought = !self.in_thought;
+                continue;
+            }
+
+            let safe_len = if flush {
+                self.buffer.len()
+            } else {
+                safe_tag_emit_len(&self.buffer, tag)
+            };
+            if safe_len > 0 {
+                output.push((self.in_thought, self.buffer[..safe_len].to_string()));
+                self.buffer.drain(..safe_len);
+            }
+            break;
+        }
+
+        output
+    }
+}
+
+/// Hold back a suffix that could become `tag` when the next delta arrives.
+fn safe_tag_emit_len(buffer: &str, tag: &str) -> usize {
+    let max_prefix = buffer.len().min(tag.len().saturating_sub(1));
+    for len in (1..=max_prefix).rev() {
+        if buffer.ends_with(&tag[..len]) {
+            return buffer.len() - len;
+        }
+    }
+    buffer.len()
+}
+
 /// Consume streaming chunks from a channel, accumulate them into a final
 /// OpenAI-compatible response object, and invoke `on_event` for each text or
 /// thought delta.
@@ -54,6 +125,7 @@ where
     let mut end_session = false;
     let mut handoff_to: Option<String> = None;
     let mut detector = tool_call_extraction::StreamingToolCallDetector::new();
+    let mut think_detector = ThinkTagDetector::new();
 
     while let Some(chunk) = rx.recv().await {
         // Extract text: streaming chunks carry `delta`; complete
@@ -78,23 +150,35 @@ where
                     thinking.push_str(delta);
                     on_event(StreamEvent::ThoughtChunk(delta.to_string())).await;
                 } else {
-                    // Feed through the detector to intercept raw function syntax
-                    let output = detector.feed(delta);
-                    if !output.text.is_empty() {
-                        content.push_str(&output.text);
-                        on_event(StreamEvent::TextChunk(output.text)).await;
-                    }
-                    for tc in output.tool_calls {
-                        let idx = tool_calls.len();
-                        tool_calls.push(serde_json::json!({
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments
-                            },
-                            "index": idx
-                        }));
+                    // Some compatible providers put reasoning in literal
+                    // <think> blocks. Separate those before tool-call parsing
+                    // so neither tags nor private reasoning become message text.
+                    for (is_tagged_thought, text) in think_detector.feed(delta) {
+                        if is_tagged_thought {
+                            thinking.push_str(&text);
+                            on_event(StreamEvent::ThoughtChunk(text)).await;
+                            continue;
+                        }
+
+                        // Feed visible text through the detector to intercept
+                        // raw function syntax.
+                        let output = detector.feed(&text);
+                        if !output.text.is_empty() {
+                            content.push_str(&output.text);
+                            on_event(StreamEvent::TextChunk(output.text)).await;
+                        }
+                        for tc in output.tool_calls {
+                            let idx = tool_calls.len();
+                            tool_calls.push(serde_json::json!({
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.function.name,
+                                    "arguments": tc.function.arguments
+                                },
+                                "index": idx
+                            }));
+                        }
                     }
                 }
             }
@@ -148,7 +232,33 @@ where
         }
     }
 
-    // Flush any remaining buffered content from the detector
+    // Flush any remaining tagged reasoning before the tool-call detector.
+    for (is_tagged_thought, text) in think_detector.flush() {
+        if is_tagged_thought {
+            thinking.push_str(&text);
+            on_event(StreamEvent::ThoughtChunk(text)).await;
+        } else {
+            let output = detector.feed(&text);
+            if !output.text.is_empty() {
+                content.push_str(&output.text);
+                on_event(StreamEvent::TextChunk(output.text)).await;
+            }
+            for tc in output.tool_calls {
+                let idx = tool_calls.len();
+                tool_calls.push(serde_json::json!({
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments
+                    },
+                    "index": idx
+                }));
+            }
+        }
+    }
+
+    // Flush any remaining buffered content from the tool-call detector.
     let flush = detector.flush();
     if !flush.text.is_empty() {
         content.push_str(&flush.text);
@@ -418,6 +528,107 @@ mod tests {
         assert_eq!(result["content"], "Hello world");
         assert_eq!(result["stop_reason"], "stop");
         assert_eq!(events.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_accumulate_stream_extracts_think_blocks() {
+        let (tx, mut rx) = mpsc::channel(10);
+
+        tx.send(serde_json::json!({
+            "delta": "<think>I should inspect the current "
+        }))
+        .await
+        .unwrap();
+        tx.send(serde_json::json!({
+            "delta": "configuration.</think>Here is the answer.",
+            "stop_reason": "stop"
+        }))
+        .await
+        .unwrap();
+        drop(tx);
+
+        let mut events = Vec::new();
+        let mut tool_map = HashMap::new();
+        let result = accumulate_stream(
+            &mut rx,
+            |event| {
+                events.push(event);
+                async {}
+            },
+            &mut tool_map,
+        )
+        .await;
+
+        assert_eq!(result["content"], "Here is the answer.");
+        assert_eq!(
+            result["thinking"],
+            "I should inspect the current configuration."
+        );
+
+        let visible: String = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::TextChunk(text) => Some(text.as_str()),
+                StreamEvent::ThoughtChunk(_) => None,
+            })
+            .collect();
+        let thoughts: String = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::ThoughtChunk(text) => Some(text.as_str()),
+                StreamEvent::TextChunk(_) => None,
+            })
+            .collect();
+
+        assert_eq!(visible, "Here is the answer.");
+        assert_eq!(thoughts, "I should inspect the current configuration.");
+    }
+
+    #[tokio::test]
+    async fn test_accumulate_stream_handles_think_tags_split_across_chunks() {
+        let (tx, mut rx) = mpsc::channel(10);
+
+        for delta in ["<thi", "nk>private", " reasoning</thi", "nk>public"] {
+            tx.send(serde_json::json!({ "delta": delta }))
+                .await
+                .unwrap();
+        }
+        drop(tx);
+
+        let mut events = Vec::new();
+        let mut tool_map = HashMap::new();
+        let result = accumulate_stream(
+            &mut rx,
+            |event| {
+                events.push(event);
+                async {}
+            },
+            &mut tool_map,
+        )
+        .await;
+
+        assert_eq!(result["content"], "public");
+        assert_eq!(result["thinking"], "private reasoning");
+        assert!(events.iter().all(|event| match event {
+            StreamEvent::TextChunk(text) | StreamEvent::ThoughtChunk(text) => {
+                !text.contains("<think>") && !text.contains("</think>")
+            }
+        }));
+    }
+
+    #[tokio::test]
+    async fn test_accumulate_stream_treats_unclosed_think_block_as_reasoning() {
+        let (tx, mut rx) = mpsc::channel(10);
+        tx.send(serde_json::json!({ "delta": "<think>still reasoning" }))
+            .await
+            .unwrap();
+        drop(tx);
+
+        let mut tool_map = HashMap::new();
+        let result = accumulate_stream(&mut rx, |_| async {}, &mut tool_map).await;
+
+        assert_eq!(result["content"], "");
+        assert_eq!(result["thinking"], "still reasoning");
     }
 
     #[tokio::test]
