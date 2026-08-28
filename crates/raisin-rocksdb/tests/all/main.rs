@@ -39,6 +39,7 @@ mod integration_tests;
 mod move_copy_to_workspace_root_test;
 mod move_tree_compound_reindex_test;
 mod move_tree_readback_test;
+mod move_tree_stale_child_link_test;
 mod multi_node_crdt_integration;
 mod one_time_token_store_test;
 mod oplog_write_read_test;

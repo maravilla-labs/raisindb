@@ -237,20 +237,36 @@ pub async fn move_node_tree(
 
     // 8. For each node (root + descendants): update paths
     for (node, depth) in &descendants {
-        moved_node_ids.push(node.id.clone());
-
         // Calculate new path for this node
         let node_new_path = if *depth == 0 {
             // Root node gets the new_path exactly
             new_path.to_string()
         } else {
-            // Descendant nodes: replace old root prefix with new root prefix
-            let relative = node
-                .path
-                .strip_prefix(&format!("{}/", old_root_path))
-                .unwrap_or(&node.path);
-            format!("{}/{}", new_path, relative)
+            // Descendant nodes: replace old root prefix with new root prefix.
+            // A node the child-order index claims is here but whose path says
+            // otherwise is LEFT WHERE IT IS — see `moved_descendant_path` for
+            // what the old `unwrap_or(&node.path)` did to it instead.
+            match crate::repositories::nodes::helpers::moved_descendant_path(
+                &node.path,
+                &old_root_path,
+                new_path,
+            ) {
+                Some(path) => path,
+                None => {
+                    tracing::warn!(
+                        node_id = %node.id,
+                        node_path = %node.path,
+                        old_root_path = %old_root_path,
+                        "TXN move_node_tree: node is listed under the moved subtree but its path \
+                         is outside it — leaving it in place"
+                    );
+                    continue;
+                }
+            }
         };
+
+        // Counted as moved only once we know it IS moving.
+        moved_node_ids.push(node.id.clone());
 
         tracing::debug!(
             "TXN move_node_tree: updating node path: {} → {}",

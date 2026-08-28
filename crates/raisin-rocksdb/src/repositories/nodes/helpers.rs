@@ -10,6 +10,41 @@ pub(crate) fn is_tombstone(value: &[u8]) -> bool {
     value == TOMBSTONE
 }
 
+/// Where a node inside a moved subtree lands, or `None` when it is not in that
+/// subtree at all.
+///
+/// # Why this returns an Option
+///
+/// A subtree move rewrites each descendant's path by swapping the root's old
+/// prefix for its new one. That is only meaningful for a node whose path
+/// actually starts with the old prefix, and the walk that produces the
+/// descendant list reads ORDERED_CHILDREN — a DIFFERENT index from the one that
+/// holds the paths. When those two disagree (a child whose ordered-children
+/// entry under its old parent was never tombstoned, e.g. because the parent
+/// lookup that writes that tombstone resolved a path the index had not caught up
+/// with), the walk reports a node that has long since moved elsewhere.
+///
+/// This used to be written as `strip_prefix(..).unwrap_or(&node.path)`, which
+/// turned that disagreement into silent corruption: the node's own ABSOLUTE path
+/// was appended to the new root path, producing addresses like
+///
+/// ```text
+/// /site/moved/page//site/elsewhere/orphan
+/// ```
+///
+/// The node still answered by id, but no parent listed it and no scan found it —
+/// and the next subtree delete above it removed it for good. Returning `None`
+/// lets the caller leave such a node exactly where it is and log the
+/// inconsistency, which is always better than relocating it to nowhere.
+pub(crate) fn moved_descendant_path(
+    node_path: &str,
+    old_root_path: &str,
+    new_root_path: &str,
+) -> Option<String> {
+    let relative = node_path.strip_prefix(&format!("{}/", old_root_path))?;
+    Some(format!("{}/{}", new_root_path, relative))
+}
+
 /// Hash a property value for indexing
 ///
 /// Creates a stable string representation suitable for use in property index keys.

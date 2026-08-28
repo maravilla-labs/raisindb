@@ -4,7 +4,7 @@
 //! updates indexes - NO node blob rewrites needed. This is O(K) where K is
 //! the number of index entries, vs O(N*blob_size) with embedded paths.
 
-use super::super::super::helpers::TOMBSTONE;
+use super::super::super::helpers::{moved_descendant_path, TOMBSTONE};
 use super::super::super::NodeRepositoryImpl;
 use crate::{cf, cf_handle, keys};
 use raisin_error::Result;
@@ -239,20 +239,37 @@ impl NodeRepositoryImpl {
         let mut moved_node_ids = Vec::new();
         // (node_id, old_path) for each moved node, for post-commit move events.
         let mut moved_pairs: Vec<(String, String)> = Vec::new();
-        for (node, depth) in &descendants {
-            moved_node_ids.push(node.id.clone());
-            moved_pairs.push((node.id.clone(), node.path.clone()));
+        // Nodes the child-order index claimed are in this subtree but whose paths
+        // say otherwise. They are LEFT WHERE THEY ARE (see
+        // `moved_descendant_path`) and their stale ordering entries are healed
+        // below, so the inconsistency does not follow the tree around forever.
+        let mut orphaned: Vec<(String, String, usize)> = Vec::new();
 
+        for (node, depth) in &descendants {
             // Calculate new path for this node
             let node_new_path = if *depth == 0 {
                 new_path.to_string()
             } else {
-                let relative = node
-                    .path
-                    .strip_prefix(&format!("{}/", old_root_path))
-                    .unwrap_or(&node.path);
-                format!("{}/{}", new_path, relative)
+                match moved_descendant_path(&node.path, &old_root_path, new_path) {
+                    Some(path) => path,
+                    None => {
+                        tracing::warn!(
+                            node_id = %node.id,
+                            node_path = %node.path,
+                            root_id = %id,
+                            old_root_path = %old_root_path,
+                            "move_node_tree: the child-order index lists this node under the \
+                             moved subtree but its path is outside it — leaving it in place and \
+                             dropping the stale ordering entry"
+                        );
+                        orphaned.push((node.id.clone(), node.path.clone(), *depth));
+                        continue;
+                    }
+                }
             };
+
+            moved_node_ids.push(node.id.clone());
+            moved_pairs.push((node.id.clone(), node.path.clone()));
 
             // Tombstone old PATH_INDEX
             let old_path_key = keys::path_index_key_versioned(
@@ -311,6 +328,45 @@ impl NodeRepositoryImpl {
             .await?;
         }
 
+        // HEAL the inconsistency that produced `orphaned`.
+        //
+        // A node reached at depth 1 got there through THIS root's
+        // ORDERED_CHILDREN, so that entry is the stale one and this is the only
+        // place with enough context to name it. Tombstoning it stops the node
+        // being dragged along by every future move of the root — which is how a
+        // stale link turned into an unreachable node.
+        //
+        // Deeper orphans are left alone: their entry belongs to some intermediate
+        // parent this loop does not identify, and guessing would tombstone a
+        // legitimate one. They are logged, they are not corrupted, and the same
+        // repair happens when their real parent is moved.
+        for (orphan_id, orphan_path, depth) in &orphaned {
+            if *depth != 1 {
+                continue;
+            }
+            if let Some(stale_label) =
+                self.get_order_label_for_child(tenant_id, repo_id, branch, workspace, id, orphan_id)?
+            {
+                let stale_key = keys::ordered_child_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    id,
+                    &stale_label,
+                    &revision,
+                    orphan_id,
+                );
+                batch.put_cf(cf_ordered, stale_key, TOMBSTONE);
+                tracing::warn!(
+                    node_id = %orphan_id,
+                    node_path = %orphan_path,
+                    root_id = %id,
+                    "move_node_tree: dropped a stale child-order entry pointing outside the subtree"
+                );
+            }
+        }
+
         // Most of a move is index-only — a descendant's stored blob stays valid
         // because `Node` holds its parent's NAME, not a path. But two kinds of node
         // do go stale and must be rewritten:
@@ -327,11 +383,12 @@ impl NodeRepositoryImpl {
             let node_new_path = if *depth == 0 {
                 new_path.to_string()
             } else {
-                let relative = node
-                    .path
-                    .strip_prefix(&format!("{}/", old_root_path))
-                    .unwrap_or(&node.path);
-                format!("{}/{}", new_path, relative)
+                // Same guard as the index loop: a node that is not really in this
+                // subtree keeps its blob untouched along with its indexes.
+                match moved_descendant_path(&node.path, &old_root_path, new_path) {
+                    Some(path) => path,
+                    None => continue,
+                }
             };
 
             let updated_name = node_new_path
