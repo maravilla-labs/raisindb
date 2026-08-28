@@ -163,3 +163,48 @@ describe('ConversationManager.sendMessage inactivity timeout', () => {
     expect(seen.map((e) => e.type)).toEqual(['text_chunk', 'done']);
   });
 });
+
+describe('ConversationManager flow-owned conversations', () => {
+  it('resumes the owning flow instead of creating an outbox message', async () => {
+    const sql = vi.fn(async (query: string): Promise<SqlResult> => {
+      if (query.includes('SELECT properties FROM')) {
+        return {
+          columns: ['properties'],
+          rows: [{ properties: { flow_instance_id: 'flow-123' } }],
+          row_count: 1,
+        };
+      }
+      throw new Error(`Unexpected SQL: ${query}`);
+    });
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      instance_id: 'flow-123',
+      job_id: 'job-1',
+      status: 'resumed',
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    const manager = new ConversationManager(
+      'http://localhost:8081',
+      'demo',
+      fakeAuth,
+      { fetch: fetchMock as unknown as typeof fetch },
+      sql,
+    );
+
+    await manager.createUserMessage(
+      '/users/internal/alice/conversations/flow-123-chat-1',
+      'Please use the human route',
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, request] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('http://localhost:8081/api/flows/demo/instances/flow-123/resume');
+    expect(request.method).toBe('POST');
+    expect(request.headers).toMatchObject({
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    });
+    expect(JSON.parse(request.body as string)).toEqual({
+      resume_data: { message: 'Please use the human route' },
+    });
+    expect(sql).toHaveBeenCalledTimes(1);
+  });
+});

@@ -266,11 +266,17 @@ impl StepHandler for ChatStepHandler {
         let session_key = format!("__chat_session_{}", step.id);
         let (is_new, mut session) = session::load_or_init_session(context, &session_key, &config);
 
-        let (conv_ws, conv_prefix) = session::resolve_conversation_location(context);
+        let (conv_ws, conv_prefix) = session::resolve_conversation_location(step, context);
         debug!(
             "ChatStep conversation location: workspace={}, prefix='{}'",
             conv_ws, conv_prefix
         );
+
+        let participants: Vec<&str> = if conv_prefix.starts_with("/users/") {
+            vec![conv_prefix.as_str()]
+        } else {
+            Vec::new()
+        };
 
         // Create conversation node on first execution
         if is_new {
@@ -283,7 +289,10 @@ impl StepHandler for ChatStepHandler {
                 &conv_ws,
                 config.conversation_type,
                 config.agent_ref.as_deref(),
-                &[],
+                // The human side of the conversation is a PARTICIPANT, not just
+                // a path prefix: the chat dock lists a user's conversations, and
+                // one they are not a participant of reads as somebody else's.
+                &participants,
                 None,
             )
             .await

@@ -512,10 +512,28 @@ export class ConversationManager {
   async createUserMessage(conversationPath: string, content: string): Promise<void> {
     logger.debug('[ConversationManager] Creating user message', { path: conversationPath });
     const workspace = 'raisin:access_control';
+    const properties = await this.loadConversationProperties(conversationPath, workspace);
+    const flowInstanceId = typeof properties?.flow_instance_id === 'string'
+      ? properties.flow_instance_id.trim()
+      : '';
+
+    // A flow-owned conversation is not a normal direct-message thread. Its
+    // next user message is the payload that resumes the parked chat step; the
+    // runtime persists that message into the conversation while processing the
+    // same flow instance. Sending it through the messaging outbox would require
+    // a recipient that flow conversations deliberately do not have and would
+    // invoke a standalone agent instead of the workflow agent.
+    if (flowInstanceId) {
+      await this.httpRequest<void>({
+        method: 'POST',
+        path: `/api/flows/${this.repository}/instances/${encodeURIComponent(flowInstanceId)}/resume`,
+        body: { resume_data: { message: content } },
+      });
+      return;
+    }
+
     const { userId, userHome } = await this.ensureCurrentUser();
     const messageId = crypto.randomUUID();
-
-    const properties = await this.loadConversationProperties(conversationPath, workspace);
     const participants = Array.isArray(properties?.participants)
       ? (properties.participants as unknown[])
       : [];

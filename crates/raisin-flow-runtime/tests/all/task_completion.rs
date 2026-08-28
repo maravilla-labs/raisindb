@@ -356,3 +356,322 @@ async fn complete_is_idempotent_after_first_completion() {
         "the rejected re-completion must not queue a second resume"
     );
 }
+
+// --- Group assignment ------------------------------------------------------
+//
+// A human_task addressed to a `raisin:Group` is expanded by the step handler
+// into one correlated task per member, all pointing at the SAME parked flow
+// step. Completion is therefore the only place that can decide whether the
+// authored policy (any / all / quorum, narrowed by an optional REL
+// `response_condition`) is satisfied — and the only place that can take the
+// losing tasks back out of the other members' inboxes when it is.
+//
+// The invariant these tests pin: the flow resumes EXACTLY ONCE per group wait,
+// and it resumes either way — a group where nobody qualified comes back with
+// `group.satisfied == false` so "nobody accepted" is a designable branch rather
+// than a flow parked forever.
+
+/// Seed one group wait: `members.len()` correlated pending tasks.
+async fn seed_group_tasks(
+    storage: &InMemoryStorage,
+    instance_id: &str,
+    step_id: &str,
+    members: &[&str],
+    completion: &str,
+    required: usize,
+    response_condition: Option<&str>,
+) -> Vec<String> {
+    let task_ids: Vec<String> = members
+        .iter()
+        .enumerate()
+        .map(|(index, _)| format!("group-task-{}", index))
+        .collect();
+    let task_paths: Vec<String> = members
+        .iter()
+        .zip(task_ids.iter())
+        .map(|(member, id)| format!("{}/inbox/{}", member, id))
+        .collect();
+
+    for ((member, task_id), task_path) in members.iter().zip(task_ids.iter()).zip(task_paths.iter())
+    {
+        let mut node = Node {
+            id: task_id.clone(),
+            name: task_id.clone(),
+            path: task_path.clone(),
+            node_type: "raisin:InboxTask".to_string(),
+            ..Default::default()
+        };
+        for (key, value) in [
+            ("task_type", "approval"),
+            ("title", "Can anyone take this shift?"),
+            ("status", "pending"),
+            ("assignee", member),
+            ("flow_instance_id", instance_id),
+            ("step_id", step_id),
+            ("assignment_id", "assignment-1"),
+            ("assignment_group", "/groups/dispatchers"),
+            ("assignment_completion", completion),
+        ] {
+            node.properties
+                .insert(key.to_string(), PropertyValue::String(value.to_string()));
+        }
+        if let Some(condition) = response_condition {
+            node.properties.insert(
+                "response_condition".to_string(),
+                PropertyValue::String(condition.to_string()),
+            );
+        }
+        node.properties.insert(
+            "assignment_required".to_string(),
+            PropertyValue::Integer(required as i64),
+        );
+        node.properties.insert(
+            "assignment_total".to_string(),
+            PropertyValue::Integer(members.len() as i64),
+        );
+        node.properties.insert(
+            "assignment_task_paths".to_string(),
+            PropertyValue::Array(
+                task_paths
+                    .iter()
+                    .map(|path| PropertyValue::String(path.clone()))
+                    .collect(),
+            ),
+        );
+        storage
+            .nodes()
+            .create(
+                StorageScope::new(TENANT, REPO, BRANCH, INBOX_WS),
+                node,
+                no_validation(),
+            )
+            .await
+            .expect("seed group task");
+    }
+    task_ids
+}
+
+fn completer_for(member: &str) -> TaskCompleter {
+    TaskCompleter {
+        id: member.rsplit('/').next().unwrap().to_string(),
+        home: Some(member.to_string()),
+        is_admin: false,
+    }
+}
+
+/// First response wins: one member accepting resumes the flow once, cancels the
+/// other members' tasks, and hands the flow both the winning response and the
+/// whole picture under `group`.
+#[tokio::test]
+async fn group_any_resumes_once_and_cancels_the_losers() {
+    let storage = InMemoryStorage::default();
+    let scheduler = CapturingScheduler::default();
+    let members = ["/users/ana", "/users/ben", "/users/cara"];
+
+    seed_waiting_instance(&storage, "flow-dispatch-1", "ask_dispatchers").await;
+    let task_ids = seed_group_tasks(
+        &storage,
+        "flow-dispatch-1",
+        "ask_dispatchers",
+        &members,
+        "any",
+        1,
+        None,
+    )
+    .await;
+
+    let result = complete_task(
+        &storage,
+        &scheduler,
+        TENANT,
+        REPO,
+        &task_ids[1],
+        &completer_for(members[1]),
+        json!({ "action": "accept", "note": "I can cover it" }),
+    )
+    .await
+    .expect("the assignee may complete their own group task");
+
+    assert_eq!(result.status, "completed");
+    assert!(result.flow.is_some(), "the group wait resumes its flow");
+    assert_eq!(task_status(&storage, &task_ids[1]).await, "completed");
+    assert_eq!(
+        task_status(&storage, &task_ids[0]).await,
+        "cancelled",
+        "a superseded group task must leave the other members' inboxes"
+    );
+    assert_eq!(task_status(&storage, &task_ids[2]).await, "cancelled");
+
+    let scheduled = scheduler.scheduled.lock().unwrap();
+    assert_eq!(scheduled.len(), 1, "exactly one resume for the whole group");
+    let resume = &scheduled[0].1["function_result"];
+    assert_eq!(resume["action"], json!("accept"));
+    assert_eq!(resume["group"]["satisfied"], json!(true));
+    assert_eq!(resume["group"]["path"], json!("/groups/dispatchers"));
+    assert_eq!(resume["group"]["total"], json!(3));
+    assert_eq!(resume["group"]["responded"], json!(1));
+    assert_eq!(resume["group"]["qualifying"], json!(1));
+    assert_eq!(
+        resume["group"]["responses"][0]["assignee"],
+        json!("/users/ben"),
+        "the flow can see WHO answered, not just what they said"
+    );
+}
+
+/// A `response_condition` decides which answers COUNT. A decline is a real
+/// completed task, but it does not satisfy the wait — so the flow keeps waiting
+/// and the remaining members keep their tasks.
+#[tokio::test]
+async fn group_non_qualifying_response_does_not_resume_the_flow() {
+    let storage = InMemoryStorage::default();
+    let scheduler = CapturingScheduler::default();
+    let members = ["/users/ana", "/users/ben"];
+
+    seed_waiting_instance(&storage, "flow-dispatch-2", "ask_dispatchers").await;
+    let task_ids = seed_group_tasks(
+        &storage,
+        "flow-dispatch-2",
+        "ask_dispatchers",
+        &members,
+        "any",
+        1,
+        Some("response.action == 'accept'"),
+    )
+    .await;
+
+    let result = complete_task(
+        &storage,
+        &scheduler,
+        TENANT,
+        REPO,
+        &task_ids[0],
+        &completer_for(members[0]),
+        json!({ "action": "decline" }),
+    )
+    .await
+    .expect("declining is a valid completion");
+
+    assert_eq!(result.status, "completed");
+    assert!(
+        result.flow.is_none(),
+        "a non-qualifying response must not resume the flow"
+    );
+    assert_eq!(task_status(&storage, &task_ids[0]).await, "completed");
+    assert_eq!(
+        task_status(&storage, &task_ids[1]).await,
+        "pending",
+        "the other member is still being asked"
+    );
+    assert!(scheduler.scheduled.lock().unwrap().is_empty());
+}
+
+/// Nobody qualified. Once the last member has answered, the flow resumes with
+/// `group.satisfied == false` — the branch an author writes for "we found
+/// nobody" — instead of parking forever.
+#[tokio::test]
+async fn group_resumes_unsatisfied_when_every_member_declined() {
+    let storage = InMemoryStorage::default();
+    let scheduler = CapturingScheduler::default();
+    let members = ["/users/ana", "/users/ben"];
+
+    seed_waiting_instance(&storage, "flow-dispatch-3", "ask_dispatchers").await;
+    let task_ids = seed_group_tasks(
+        &storage,
+        "flow-dispatch-3",
+        "ask_dispatchers",
+        &members,
+        "any",
+        1,
+        Some("response.action == 'accept'"),
+    )
+    .await;
+
+    for (task_id, member) in task_ids.iter().zip(members.iter()) {
+        complete_task(
+            &storage,
+            &scheduler,
+            TENANT,
+            REPO,
+            task_id,
+            &completer_for(member),
+            json!({ "action": "decline" }),
+        )
+        .await
+        .expect("declining is a valid completion");
+    }
+
+    let scheduled = scheduler.scheduled.lock().unwrap();
+    assert_eq!(
+        scheduled.len(),
+        1,
+        "only the last answer resumes, and it resumes once"
+    );
+    let resume = &scheduled[0].1["function_result"];
+    assert_eq!(resume["group"]["satisfied"], json!(false));
+    assert_eq!(resume["group"]["qualifying"], json!(0));
+    assert_eq!(resume["group"]["responded"], json!(2));
+    assert_eq!(
+        resume["action"],
+        json!("decline"),
+        "with nothing qualifying, the last real response still reaches the flow"
+    );
+}
+
+/// `quorum` counts only qualifying responses, and only the response that
+/// REACHES the quorum resumes the flow.
+#[tokio::test]
+async fn group_quorum_resumes_on_the_response_that_reaches_it() {
+    let storage = InMemoryStorage::default();
+    let scheduler = CapturingScheduler::default();
+    let members = ["/users/ana", "/users/ben", "/users/cara"];
+
+    seed_waiting_instance(&storage, "flow-dispatch-4", "ask_dispatchers").await;
+    let task_ids = seed_group_tasks(
+        &storage,
+        "flow-dispatch-4",
+        "ask_dispatchers",
+        &members,
+        "quorum",
+        2,
+        Some("response.action == 'accept'"),
+    )
+    .await;
+
+    let first = complete_task(
+        &storage,
+        &scheduler,
+        TENANT,
+        REPO,
+        &task_ids[0],
+        &completer_for(members[0]),
+        json!({ "action": "accept" }),
+    )
+    .await
+    .expect("first acceptance");
+    assert!(first.flow.is_none(), "one of two is not a quorum");
+
+    let second = complete_task(
+        &storage,
+        &scheduler,
+        TENANT,
+        REPO,
+        &task_ids[1],
+        &completer_for(members[1]),
+        json!({ "action": "accept" }),
+    )
+    .await
+    .expect("second acceptance");
+    assert!(second.flow.is_some(), "the second acceptance reaches quorum");
+    assert_eq!(task_status(&storage, &task_ids[2]).await, "cancelled");
+
+    let scheduled = scheduler.scheduled.lock().unwrap();
+    assert_eq!(scheduled.len(), 1);
+    let resume = &scheduled[0].1["function_result"];
+    assert_eq!(resume["group"]["qualifying"], json!(2));
+    assert_eq!(resume["group"]["satisfied"], json!(true));
+    assert_eq!(
+        resume["group"]["responses"].as_array().unwrap().len(),
+        2,
+        "every counted answer is carried back, not just the last one"
+    );
+}

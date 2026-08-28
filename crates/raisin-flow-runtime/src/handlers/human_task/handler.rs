@@ -90,7 +90,11 @@ impl HumanTaskHandler {
         })
     }
 
-    /// Extract assignee from step properties
+    /// Extract the assignee from step properties.
+    ///
+    /// Returned RAW: the caller resolves the whole property bag through
+    /// `DataMapper` a moment later, so an assignee decided by the run
+    /// (`${steps.lookup_owner.user_home}`) is resolved exactly once, there.
     pub(super) fn get_assignee(&self, step: &FlowNode) -> FlowResult<String> {
         step.get_string("assignee").ok_or_else(|| {
             FlowError::MissingProperty(format!(

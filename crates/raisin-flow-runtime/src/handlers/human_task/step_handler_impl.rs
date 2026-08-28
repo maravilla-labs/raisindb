@@ -13,6 +13,125 @@ use async_trait::async_trait;
 use tracing::{debug, error, instrument};
 
 use super::handler::{HumanTaskHandler, WAIT_REASON_HUMAN_TASK};
+use super::group_assignee::GroupAssignment;
+
+async fn create_group_tasks(
+    handler: &HumanTaskHandler,
+    step: &FlowNode,
+    context: &mut FlowContext,
+    callbacks: &dyn FlowCallbacks,
+    task_type: &TaskType,
+    base_properties: &serde_json::Value,
+    assignment: GroupAssignment,
+) -> FlowResult<StepResult> {
+    let iteration = context
+        .variables
+        .get("__loop_index")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let assignment_id = format!(
+        "group-{}-{}-it{}",
+        step.id,
+        super::instance_slug(&context.instance_id),
+        iteration
+    );
+    let task_paths: Vec<String> = assignment
+        .members
+        .iter()
+        .map(|member| handler.generate_task_path(member, &step.id, context))
+        .collect();
+
+    let mut written: Vec<(String, serde_json::Value)> = Vec::new();
+    for (member, task_path) in assignment.members.iter().zip(task_paths.iter()) {
+        let mut properties = base_properties.clone();
+        properties["assignee"] = serde_json::json!(member);
+        properties["assignment_id"] = serde_json::json!(assignment_id);
+        properties["assignment_group"] = serde_json::json!(assignment.group_path);
+        properties["assignment_completion"] = serde_json::json!(assignment.completion);
+        properties["assignment_required"] = serde_json::json!(assignment.required);
+        properties["assignment_total"] = serde_json::json!(assignment.members.len());
+        properties["assignment_task_paths"] = serde_json::json!(task_paths);
+        if let Some(ref condition) = assignment.response_condition {
+            properties["response_condition"] = serde_json::json!(condition);
+        }
+
+        let existing = callbacks
+            .get_node_in_workspace(super::INBOX_WORKSPACE, task_path)
+            .await?;
+        if let Some(node) = existing {
+            let props = node.get("properties").cloned().unwrap_or_default();
+            let reusable = props.get("flow_instance_id").and_then(|v| v.as_str())
+                == Some(context.instance_id.as_str())
+                && props.get("step_id").and_then(|v| v.as_str()) == Some(step.id.as_str())
+                && props.get("assignment_id").and_then(|v| v.as_str())
+                    == Some(assignment_id.as_str())
+                && props.get("status").and_then(|v| v.as_str()) == Some("pending");
+            if !reusable {
+                return Err(FlowError::InvalidNodeConfiguration(format!(
+                    "Group task path '{}' is occupied by a task that does not belong to this wait",
+                    task_path
+                )));
+            }
+            written.push((task_path.clone(), props));
+            continue;
+        }
+
+        match callbacks
+            .create_node_in_workspace(
+                super::INBOX_WORKSPACE,
+                super::INBOX_TASK_NODE_TYPE,
+                task_path,
+                properties.clone(),
+            )
+            .await
+        {
+            Ok(_) => written.push((task_path.clone(), properties)),
+            Err(cause) => {
+                // A partially delivered group assignment is not allowed to sit
+                // in real inboxes. Reconcile every task created in this attempt.
+                for (path, mut props) in written {
+                    props["status"] = serde_json::json!("cancelled");
+                    props["cancellation_reason"] = serde_json::json!("group_delivery_failed");
+                    let _ = callbacks
+                        .update_node_in_workspace(super::INBOX_WORKSPACE, &path, props)
+                        .await;
+                }
+                return Err(FlowError::FunctionExecution(format!(
+                    "Failed to create group inbox task at '{}': {}",
+                    task_path, cause
+                )));
+            }
+        }
+    }
+
+    context.set_variable(
+        format!("__human_task_paths_{}", step.id),
+        serde_json::json!(task_paths),
+    );
+
+    let timeout_ms = base_properties
+        .get("due_in_seconds")
+        .and_then(|v| v.as_i64())
+        .filter(|secs| *secs > 0)
+        .map(|secs| (secs as u64) * 1000);
+    let mut metadata = serde_json::json!({
+        "task_path": task_paths.first(),
+        "task_paths": task_paths,
+        "target_path": task_paths.first(),
+        "task_type": task_type.as_str(),
+        "step_id": step.id,
+        "assignee": assignment.group_path,
+        "assignment_completion": assignment.completion,
+        "assignment_required": assignment.required,
+    });
+    if let Some(ms) = timeout_ms {
+        metadata["timeout_ms"] = serde_json::json!(ms);
+    }
+    Ok(StepResult::Wait {
+        reason: WAIT_REASON_HUMAN_TASK.to_string(),
+        metadata,
+    })
+}
 
 #[async_trait]
 impl StepHandler for HumanTaskHandler {
@@ -56,16 +175,23 @@ impl StepHandler for HumanTaskHandler {
         // Build task properties (template expressions resolved against context)
         let mut task_properties = self.build_task_properties(step, context, &task_type)?;
 
-        // Use the resolved assignee (may contain templates like
-        // "/users/{{ input.approver }}")
+        // Use the resolved assignee (may have been authored as a template like
+        // "${steps.lookup_owner.user_home}" — "ask whoever owns this node").
+        //
+        // An UNRESOLVED template survives the mapper as its literal text, so
+        // this is also where that is caught: a task addressed to the string
+        // "${steps…}" reaches no inbox, and the flow would park on it forever.
         let assignee = task_properties
             .get("assignee")
             .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && !value.contains("${") && !value.contains("{{"))
             .map(String::from)
             .ok_or_else(|| {
                 FlowError::InvalidNodeConfiguration(format!(
-                    "Human task step '{}' assignee did not resolve to a string",
-                    step.id
+                    "Human task step '{}' assignee did not resolve to a node path: {}",
+                    step.id,
+                    task_properties.get("assignee").unwrap_or(&serde_json::Value::Null)
                 ))
             })?;
 
@@ -80,6 +206,29 @@ impl StepHandler for HumanTaskHandler {
             .to_rfc3339());
         }
         task_properties["created_at"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
+
+        // A group is expanded to correlated tasks in each current member's
+        // real inbox. The completion API aggregates those task nodes according
+        // to any/all/quorum and resumes this same flow only when the authored
+        // policy is satisfied (or every member has responded).
+        if let Some(assignment) = super::group_assignee::resolve_group_assignment(
+            callbacks,
+            step,
+            &assignee,
+        )
+        .await?
+        {
+            return create_group_tasks(
+                self,
+                step,
+                context,
+                callbacks,
+                &task_type,
+                &task_properties,
+                assignment,
+            )
+            .await;
+        }
 
         // Generate the task path - deterministic per (instance, step, loop
         // iteration) so a new flow run / iteration can never alias an

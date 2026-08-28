@@ -17,7 +17,13 @@ icon: inbox
 # may define its own task vocabulary (e.g. a triage or dispatch type) without an
 # engine change; the writers validate the SHAPE of the slug instead of the set.
 # Bump forces resync so existing repositories accept custom types on upgrade.
-version: 5
+# v6: declared the GROUP-ASSIGNMENT slots. A human_task step addressed to a
+# raisin:Group is expanded into one correlated task per member, and the
+# completion API aggregates them (any/all/quorum, narrowed by an optional REL
+# `response_condition`) before resuming the flow once. That correlation lives on
+# the task nodes themselves — undeclared, a strict type drops it silently and
+# every member's answer would resume the flow independently. Bump forces resync.
+version: 6
 strict: true
 indexable: true
 index_types: [Property]
@@ -170,6 +176,68 @@ properties:
     required: false
     title: Created At
     description: When the task was created
+
+  # --- Group assignment (human_task addressed to a raisin:Group) ---------
+  # Written by the human_task step for every member's task, read back by
+  # complete_task to decide whether the authored completion policy is met.
+
+  - name: assignment_id
+    type: String
+    required: false
+    title: Assignment ID
+    description: Correlates the tasks created for one group wait of one flow step
+    index: [Property]
+
+  - name: assignment_group
+    type: String
+    required: false
+    title: Assignment Group
+    description: Path of the raisin:Group this task was expanded from
+    index: [Property]
+
+  - name: assignment_completion
+    type: String
+    required: false
+    title: Assignment Completion
+    description: Completion policy for the group wait (any, all or quorum)
+
+  - name: assignment_required
+    type: Number
+    required: false
+    title: Assignment Required
+    description: Number of QUALIFYING responses that satisfy the group wait
+
+  - name: assignment_total
+    type: Number
+    required: false
+    title: Assignment Total
+    description: Number of members the wait was delivered to
+
+  - name: assignment_task_paths
+    type: Array
+    required: false
+    title: Assignment Task Paths
+    description: Every correlated task path in this group wait, including this one
+
+  - name: response_condition
+    type: String
+    required: false
+    title: Response Condition
+    description: >-
+      Optional REL over `response` and `responses` deciding whether a response
+      COUNTS towards the group policy (e.g. only an accept qualifies).
+
+  - name: qualifies
+    type: Boolean
+    required: false
+    title: Qualifies
+    description: Whether this response counted towards the group completion policy
+
+  - name: cancellation_reason
+    type: String
+    required: false
+    title: Cancellation Reason
+    description: Why a pending task was cancelled (e.g. group_completed)
 
   - name: completed_by
     type: String

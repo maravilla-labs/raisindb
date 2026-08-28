@@ -576,6 +576,126 @@ fn task_prop_str(node: &raisin_models::nodes::Node, key: &str) -> Option<String>
     }
 }
 
+fn task_prop_usize(node: &raisin_models::nodes::Node, key: &str) -> Option<usize> {
+    match node.properties.get(key) {
+        Some(PropertyValue::Integer(value)) if *value >= 0 => Some(*value as usize),
+        _ => None,
+    }
+}
+
+fn task_prop_paths(node: &raisin_models::nodes::Node, key: &str) -> Vec<String> {
+    match node.properties.get(key) {
+        Some(PropertyValue::Array(values)) => values
+            .iter()
+            .filter_map(|value| match value {
+                PropertyValue::String(path) => Some(path.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// A timestamp property, whatever shape it came back in.
+///
+/// The writer sets `responded_at` as a String, but the type declares it a Date,
+/// so a task READ BACK from storage carries `PropertyValue::Date` — and a
+/// String-only reader silently reported `null` for every sibling in a group
+/// summary while the just-written one looked fine.
+fn task_prop_time(node: &raisin_models::nodes::Node, key: &str) -> Option<String> {
+    match node.properties.get(key) {
+        Some(PropertyValue::String(value)) => Some(value.clone()),
+        Some(PropertyValue::Date(value)) => Some(value.to_rfc3339()),
+        _ => None,
+    }
+}
+
+fn task_response(node: &raisin_models::nodes::Node) -> Value {
+    node.properties
+        .get("response")
+        .and_then(|value| serde_json::to_value(value).ok())
+        .unwrap_or(Value::Null)
+}
+
+fn task_qualifies(node: &raisin_models::nodes::Node) -> bool {
+    matches!(node.properties.get("qualifies"), Some(PropertyValue::Boolean(true)))
+}
+
+fn evaluate_group_response(
+    condition: Option<&str>,
+    response: &Value,
+    previous: &[Value],
+) -> Result<bool, FlowError> {
+    let Some(condition) = condition.filter(|value| !value.trim().is_empty()) else {
+        return Ok(true);
+    };
+    let context = raisin_rel::EvalContext::from_json(serde_json::json!({
+        "response": response,
+        "responses": previous,
+    }))
+    .map_err(|error| FlowError::InvalidNodeConfiguration(format!(
+        "Invalid human-task response context: {}", error
+    )))?;
+    let value = raisin_rel::eval(condition, &context).map_err(|error| {
+        FlowError::InvalidNodeConfiguration(format!(
+            "Invalid human-task response_condition '{}': {}", condition, error
+        ))
+    })?;
+    Ok(match value {
+        raisin_rel::Value::Boolean(value) => value,
+        raisin_rel::Value::Null => false,
+        raisin_rel::Value::Integer(value) => value != 0,
+        raisin_rel::Value::Float(value) => value != 0.0,
+        raisin_rel::Value::String(value) => !value.is_empty(),
+        raisin_rel::Value::Array(value) => !value.is_empty(),
+        raisin_rel::Value::Object(value) => !value.is_empty(),
+    })
+}
+
+async fn persist_inbox_task<S: Storage>(
+    storage: &S,
+    tenant_id: &str,
+    repo: &str,
+    task: raisin_models::nodes::Node,
+) -> Result<(), FlowError> {
+    let task_id = task.id.clone();
+    let task_path = task.path.clone();
+    let task_type = task.node_type.clone();
+    let scope = StorageScope::new(tenant_id, repo, DEFAULT_BRANCH, INBOX_WORKSPACE);
+    storage
+        .nodes()
+        .update(
+            scope,
+            task,
+            UpdateNodeOptions { validate_schema: false, ..Default::default() },
+        )
+        .await
+        .map_err(|error| FlowError::Other(format!("Failed to update task node: {}", error)))?;
+
+    let revision = {
+        use raisin_storage::BranchRepository;
+        match storage.branches().get_branch(tenant_id, repo, DEFAULT_BRANCH).await {
+            Ok(Some(branch)) => branch.head,
+            _ => raisin_hlc::HLC::new(0, 0),
+        }
+    };
+    storage.event_bus().publish(raisin_storage::Event::Node(
+        raisin_storage::NodeEvent {
+            tenant_id: tenant_id.to_string(),
+            repository_id: repo.to_string(),
+            branch: DEFAULT_BRANCH.to_string(),
+            workspace_id: INBOX_WORKSPACE.to_string(),
+            node_id: task_id,
+            node_type: Some(task_type),
+            revision,
+            kind: raisin_storage::NodeEventKind::Updated,
+            path: Some(task_path),
+            metadata: None,
+        },
+    ));
+    Ok(())
+}
+
 /// Complete an inbox task: validates the caller is the assignee, marks the
 /// task node completed, and resumes the owning flow (if any).
 ///
@@ -596,7 +716,6 @@ pub async fn complete_task<S: Storage>(
     let mut task_node = load_task_node(storage, tenant_id, repo, task_ref).await?;
     let task_path = task_node.path.clone();
     let task_id = task_node.id.clone();
-    let task_node_type = task_node.node_type.clone();
 
     // 1. Status must be pending
     let status = task_prop_str(&task_node, "status").unwrap_or_else(|| "pending".to_string());
@@ -616,6 +735,8 @@ pub async fn complete_task<S: Storage>(
     // 3. If the task belongs to a flow, validate the flow is waiting on it
     let flow_instance_id = task_prop_str(&task_node, "flow_instance_id");
     let step_id = task_prop_str(&task_node, "step_id");
+    let assignment_group = task_prop_str(&task_node, "assignment_group");
+    let assignment_paths = task_prop_paths(&task_node, "assignment_task_paths");
 
     if let Some(instance_id) = &flow_instance_id {
         let (_node, instance) = load_instance(storage, tenant_id, repo, instance_id).await?;
@@ -634,6 +755,28 @@ pub async fn complete_task<S: Storage>(
                 });
             }
         }
+    }
+
+    // A group response can be counted conditionally (for example only an
+    // `accept` response qualifies). Evaluate before mutating the task so an
+    // invalid authored condition cannot consume a person's response.
+    if assignment_group.is_some() {
+        let mut previous_responses = Vec::new();
+        for path in assignment_paths.iter().filter(|path| *path != &task_path) {
+            if let Ok(sibling) = load_task_node(storage, tenant_id, repo, path).await {
+                if task_prop_str(&sibling, "status").as_deref() == Some("completed") {
+                    previous_responses.push(task_response(&sibling));
+                }
+            }
+        }
+        let qualifies = evaluate_group_response(
+            task_prop_str(&task_node, "response_condition").as_deref(),
+            &response,
+            &previous_responses,
+        )?;
+        task_node
+            .properties
+            .insert("qualifies".to_string(), PropertyValue::Boolean(qualifies));
     }
 
     // 4. Mark the task node completed
@@ -658,55 +801,136 @@ pub async fn complete_task<S: Storage>(
             .insert("response".to_string(), PropertyValue::Object(response_prop));
     }
 
-    let scope = StorageScope::new(tenant_id, repo, DEFAULT_BRANCH, INBOX_WORKSPACE);
-    storage
-        .nodes()
-        .update(
-            scope,
-            task_node,
-            UpdateNodeOptions {
-                validate_schema: false,
-                ..Default::default()
-            },
-        )
-        .await
-        .map_err(|e| FlowError::Other(format!("Failed to update task node: {}", e)))?;
+    persist_inbox_task(storage, tenant_id, repo, task_node.clone()).await?;
 
-    // Publish the node:updated event for the completed task.
+    // 4b. A GROUP assignment resumes its flow ONCE, not once per member.
     //
-    // This update goes through the raw node repository, which does NOT emit
-    // events — only NodeService and the flow node callbacks do. So task
-    // CREATION was observable (node:created) while COMPLETION was silent,
-    // meaning a subscriber could only ever count tasks up, never down, and had
-    // to poll or refetch to notice a completion. Emitting here is what makes
-    // an inbox badge (or any `{home}/inbox/**` subscription) correct without
-    // client-side polling.
-    // Same revision lookup the flow node callbacks perform after a write.
-    let revision = {
-        use raisin_storage::BranchRepository;
-        match storage
-            .branches()
-            .get_branch(tenant_id, repo, DEFAULT_BRANCH)
-            .await
-        {
-            Ok(Some(b)) => b.head,
-            _ => raisin_hlc::HLC::new(0, 0),
+    // Every member holds a real inbox task, so this completion API is the only
+    // place that can tell whether the authored policy (any / all / quorum,
+    // narrowed by `response_condition`) is now satisfied — and the only place
+    // that can take the losing tasks back out of people's inboxes when it is.
+    // Both outcomes are DESIGNABLE: the flow resumes with `group.satisfied`
+    // either way, so "first response wins" and "nobody accepted" are two
+    // ordinary branches rather than one silent dead end.
+    let group_summary = if let Some(group_path) = assignment_group.clone() {
+        let required = task_prop_usize(&task_node, "assignment_required").unwrap_or(1);
+        let completion = task_prop_str(&task_node, "assignment_completion")
+            .unwrap_or_else(|| "any".to_string());
+
+        let mut siblings = Vec::new();
+        for path in assignment_paths.iter() {
+            if path == &task_path {
+                siblings.push(task_node.clone());
+            } else if let Ok(node) = load_task_node(storage, tenant_id, repo, path).await {
+                siblings.push(node);
+            }
         }
+        if siblings.is_empty() {
+            siblings.push(task_node.clone());
+        }
+
+        let total = siblings.len();
+        let mut responses = Vec::new();
+        let mut pending = Vec::new();
+        let mut qualifying = 0usize;
+        let mut responded = 0usize;
+        for node in &siblings {
+            match task_prop_str(node, "status")
+                .unwrap_or_else(|| "pending".to_string())
+                .as_str()
+            {
+                "completed" => {
+                    responded += 1;
+                    let qualifies = task_qualifies(node);
+                    if qualifies {
+                        qualifying += 1;
+                    }
+                    responses.push(serde_json::json!({
+                        "assignee": task_prop_str(node, "assignee"),
+                        "task_path": node.path,
+                        "response": task_response(node),
+                        "qualifies": qualifies,
+                        "completed_by": task_prop_str(node, "completed_by"),
+                        "responded_at": task_prop_time(node, "responded_at"),
+                    }));
+                }
+                "pending" => pending.push(node.clone()),
+                _ => {}
+            }
+        }
+
+        let satisfied = qualifying >= required;
+        if !satisfied && !pending.is_empty() {
+            // Answered, but the policy still needs more qualifying responses.
+            // This person's task is done; the flow keeps waiting on the rest.
+            tracing::info!(
+                task_id = %task_id,
+                group = %group_path,
+                qualifying,
+                required,
+                pending = pending.len(),
+                "Group task completed; waiting for more responses"
+            );
+            return Ok(TaskCompletionResult {
+                task_id,
+                task_path,
+                status: "completed".to_string(),
+                flow: None,
+            });
+        }
+
+        for mut node in pending {
+            node.properties.insert(
+                "status".to_string(),
+                PropertyValue::String("cancelled".to_string()),
+            );
+            node.properties.insert(
+                "cancellation_reason".to_string(),
+                PropertyValue::String("group_completed".to_string()),
+            );
+            let cancelled_path = node.path.clone();
+            if let Err(error) = persist_inbox_task(storage, tenant_id, repo, node).await {
+                // A stale task left pending is confusing but not corrupting:
+                // its flow has already moved on and completing it later finds
+                // the instance no longer waiting on this step.
+                tracing::warn!(
+                    task_path = %cancelled_path,
+                    error = %error,
+                    "Failed to cancel superseded group task"
+                );
+            }
+        }
+
+        Some(serde_json::json!({
+            "path": group_path,
+            "completion": completion,
+            "required": required,
+            "total": total,
+            "responded": responded,
+            "qualifying": qualifying,
+            "satisfied": satisfied,
+            "responses": responses,
+        }))
+    } else {
+        None
     };
-    storage
-        .event_bus()
-        .publish(raisin_storage::Event::Node(raisin_storage::NodeEvent {
-            tenant_id: tenant_id.to_string(),
-            repository_id: repo.to_string(),
-            branch: DEFAULT_BRANCH.to_string(),
-            workspace_id: INBOX_WORKSPACE.to_string(),
-            node_id: task_id.to_string(),
-            node_type: Some(task_node_type.clone()),
-            revision,
-            kind: raisin_storage::NodeEventKind::Updated,
-            path: Some(task_path.clone()),
-            metadata: None,
-        }));
+
+    // The response the flow reads at the top level is the QUALIFYING one, so a
+    // first-response-wins branch reads `${steps.ask.action}` exactly as it does
+    // for a single assignee. The full picture stays under `group`.
+    let response = match &group_summary {
+        Some(summary) => summary
+            .get("responses")
+            .and_then(Value::as_array)
+            .and_then(|list| {
+                list.iter()
+                    .find(|entry| entry.get("qualifies") == Some(&Value::Bool(true)))
+            })
+            .and_then(|entry| entry.get("response").cloned())
+            .filter(|value| !value.is_null())
+            .unwrap_or(response),
+        None => response,
+    };
 
     // 5. Resume the owning flow with the response
     let flow = if let Some(instance_id) = &flow_instance_id {
@@ -722,6 +946,9 @@ pub async fn complete_task<S: Storage>(
                 Value::String(completer.id.clone()),
             );
             map.insert("task_path".to_string(), Value::String(task_path.clone()));
+            if let Some(summary) = group_summary.clone() {
+                map.insert("group".to_string(), summary);
+            }
         }
 
         match resume_flow(

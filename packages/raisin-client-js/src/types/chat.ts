@@ -124,7 +124,7 @@ export interface ChatMessage {
 }
 
 /** Conversation type discriminator */
-export type ConversationType = 'ai_chat' | 'direct_message';
+export type ConversationType = 'ai_chat' | 'direct_message' | 'flow_chat';
 
 /**
  * Chat conversation handle.

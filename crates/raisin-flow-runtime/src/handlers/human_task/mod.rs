@@ -31,6 +31,7 @@
 //! ```
 
 pub mod agent_assignee;
+mod group_assignee;
 pub mod handler;
 mod step_handler_impl;
 

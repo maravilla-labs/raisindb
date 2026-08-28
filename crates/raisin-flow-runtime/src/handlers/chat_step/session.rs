@@ -139,11 +139,25 @@ pub(super) async fn update_stats_and_save(
 
 /// Determine the workspace and path prefix for conversation nodes.
 ///
-/// If the flow was triggered by a real user (identified via `trigger_info`),
-/// the conversation is stored in `raisin:access_control` under the user's
-/// home path. Otherwise it falls back to `raisin:system`.
-pub(super) fn resolve_conversation_location(context: &FlowContext) -> (String, String) {
+/// Precedence, and the first rule is the one that makes a BACKEND-STARTED
+/// conversation reachable at all:
+///
+/// 1. The step's authored `participant` — the person this chat is WITH. A flow
+///    started by a node change has no acting user, so without it the runtime
+///    could only fall back to `raisin:system`: a conversation parked waiting for
+///    a human reply that appears in nobody's chat dock. Templates are resolved,
+///    so "chat with whoever owns this node" is `${steps.lookup_owner.user_home}`.
+/// 2. The real user who started a MANUAL run (`trigger_info`).
+/// 3. `raisin:system` — an agent-to-agent conversation with no human side.
+pub(super) fn resolve_conversation_location(
+    step: &FlowNode,
+    context: &FlowContext,
+) -> (String, String) {
     use conversation_persistence::{SYSTEM_WORKSPACE, USER_WORKSPACE};
+
+    if let Some(home) = resolve_participant_home(step, context) {
+        return (USER_WORKSPACE.to_string(), home);
+    }
 
     if let Some(ref trigger) = context.trigger_info {
         if trigger.event_type == crate::types::TriggerEventType::Manual {
@@ -161,4 +175,34 @@ pub(super) fn resolve_conversation_location(context: &FlowContext) -> (String, S
     }
 
     (SYSTEM_WORKSPACE.to_string(), String::new())
+}
+
+/// Resolve the step's `participant` to a user HOME path, or `None`.
+///
+/// Refuses anything that is not a `/users/…` path: the value becomes a path
+/// PREFIX for the conversation node, so a traversal or a stray workspace path
+/// would write the conversation somewhere nobody is listening.
+fn resolve_participant_home(step: &FlowNode, context: &FlowContext) -> Option<String> {
+    let raw = step.get_string("participant")?;
+    let resolved = if raw.contains("${") {
+        match crate::runtime::DataMapper::map(&serde_json::Value::String(raw.clone()), context) {
+            Ok(serde_json::Value::String(value)) => value,
+            Ok(serde_json::Value::Object(map)) => map
+                .get("raisin:path")
+                .or_else(|| map.get("path"))
+                .and_then(|value| value.as_str())
+                .map(String::from)
+                .unwrap_or_default(),
+            _ => String::new(),
+        }
+    } else {
+        raw
+    };
+
+    let home = resolved.trim().trim_end_matches('/').to_string();
+    if home.starts_with("/users/") && !home.contains("..") && !home.contains("${") {
+        Some(home)
+    } else {
+        None
+    }
 }

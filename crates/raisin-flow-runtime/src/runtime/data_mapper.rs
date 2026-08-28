@@ -230,6 +230,28 @@ mod tests {
         context
     }
 
+    /// A WHOLE NAMESPACE resolves as one value.
+    ///
+    /// This is the linchpin of a parallel fork carrying its parent's context:
+    /// each branch runs as a CHILD FLOW INSTANCE with its own empty
+    /// `step_outputs`, so a condition written before the fork
+    /// (`steps.draft.approved`) resolves to nothing inside a branch unless the
+    /// parent's whole `steps` map is handed down through `input_mapping`.
+    /// If `"${steps}"` ever stopped resolving to the map itself, branch
+    /// conditions would silently read null rather than fail.
+    #[test]
+    fn a_whole_namespace_resolves_as_one_value() {
+        let context = create_test_context();
+        let result = DataMapper::map(&json!("${steps}"), &context).unwrap();
+        assert_eq!(result, json!({"step_1": {"result": 100}}));
+
+        // And nested inside the mapping object a fork would actually emit.
+        let mapping = json!({ "flow_input": "${input}", "__parent_steps": "${steps}" });
+        let mapped = DataMapper::map(&mapping, &context).unwrap();
+        assert_eq!(mapped["__parent_steps"]["step_1"]["result"], 100);
+        assert_eq!(mapped["flow_input"]["user"]["name"], "Alice");
+    }
+
     #[test]
     fn test_map_literal() {
         let context = create_test_context();
