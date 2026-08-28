@@ -49,14 +49,42 @@ where
 
     let tx_lock = ctx.transaction_context.read().await;
     if let Some(txn_ctx) = tx_lock.as_ref() {
-        txn_ctx
-            .get_actor()
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| "system".to_string())
-    } else {
-        "system".to_string()
+        if let Some(actor) = txn_ctx.get_actor().ok().flatten() {
+            return actor;
+        }
     }
+    drop(tx_lock);
+    sql_actor(ctx, "system")
+}
+
+/// WHO a SQL write is attributed to.
+///
+/// Every DML path here used to pass a fixed word — `"sql-update"`,
+/// `"sql-order"`, `"system"` — which then became the node's `updated_by`. That
+/// is the reason a page an automation had just rewritten reported `system`:
+/// not that the engine did not know who was writing, but that this layer never
+/// asked. The execution context has carried the `AuthContext` all along, for
+/// row-level security.
+///
+/// A human first, then the non-human principal in the `agent_identity`
+/// vocabulary (`agent:/agents/x`, `flow:/flows/y`, `trigger:/triggers/z`), and
+/// only then the caller's literal — which stays the answer for a context that
+/// genuinely names nobody, such as a seed or an internal maintenance job.
+pub(super) fn sql_actor<S>(ctx: &ExecutionContext<S>, fallback: &str) -> String
+where
+    S: Storage + raisin_storage::transactional::TransactionalStorage,
+{
+    ctx.auth_context
+        .as_ref()
+        .and_then(|auth| {
+            auth.user_id
+                .clone()
+                .filter(|id| id != "system")
+                .or_else(|| auth.agent.clone())
+        })
+        .map(|actor| actor.trim().to_string())
+        .filter(|actor| !actor.is_empty())
+        .unwrap_or_else(|| fallback.to_string())
 }
 
 /// Execute a bulk UPDATE on all nodes matching a complex filter.

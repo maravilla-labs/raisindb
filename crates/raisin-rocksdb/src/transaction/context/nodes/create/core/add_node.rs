@@ -46,9 +46,13 @@ pub async fn add_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
     // 3b. Stamp authorship for this CREATE. Mirrors put_node so every create
     // path records who made the node. Actor: auth context → raw actor →
     // "anonymous". Don't overwrite an explicitly-supplied created_by.
+    //
+    // `principal_id`, like put_node: a flow, agent or trigger runs under
+    // `AuthContext::system()`, and taking `actor_id()` here would record the
+    // word "system" for every one of them.
     let actor = tx
         .get_auth_context()?
-        .map(|a| a.actor_id())
+        .and_then(|a| a.principal_id())
         .or(tx.get_actor()?)
         .unwrap_or_else(|| "anonymous".to_string());
     normalized_node.updated_by = Some(actor.clone());

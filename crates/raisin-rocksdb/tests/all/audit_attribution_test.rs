@@ -29,8 +29,8 @@ use raisin_rocksdb::{fractional_index, RocksDBAuditRepo, RocksDBConfig, RocksDBS
 use raisin_storage::scope::BranchScope;
 use raisin_storage::transactional::TransactionalStorage;
 use raisin_storage::{
-    BranchRepository, CommitMetadata, NodeTypeRepository, RegistryRepository,
-    RepositoryManagementRepository, Storage,
+    BranchRepository, CommitMetadata, NodeRepository, NodeTypeRepository, RegistryRepository,
+    RepositoryManagementRepository, Storage, StorageScope,
 };
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -636,5 +636,97 @@ async fn a_flow_stamped_node_event_is_audited_with_the_flow_and_trigger() -> Res
         Some("system"),
         "a flow step has no human behind it; `agent` is what names the actor"
     );
+    Ok(())
+}
+
+/// A write with no human behind it records the AGENT on the node itself.
+///
+/// Every flow, agent and trigger executes under `AuthContext::system()`, whose
+/// `actor_id()` is the word "system" — so before this, all of them collapsed
+/// into one anonymous writer on `updated_by`, the one field a UI reads to say
+/// who touched a document, while the audit row beside it recorded exactly which
+/// one. An automation could rewrite a page and leave no trace of itself on it.
+#[tokio::test]
+async fn an_automations_write_names_the_automation_on_the_node() -> Result<()> {
+    let (storage, _audit, _tmp) = setup().await?;
+
+    let marker = "flow:/flows/publish-approval@trigger:/triggers/on-order-created";
+    let auth = AuthContext::system().with_agent(marker);
+    let id = create_as(&storage, "/written-by-a-flow", AUDITED_TYPE, auth).await?;
+
+    let node = storage
+        .nodes()
+        .get(
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
+            &id,
+            None,
+        )
+        .await?
+        .expect("the node exists");
+
+    assert_eq!(
+        node.updated_by.as_deref(),
+        Some(marker),
+        "the flow (and the trigger behind it) must be readable off the node"
+    );
+    assert_eq!(
+        node.created_by.as_deref(),
+        Some(marker),
+        "a node an automation created has no other author"
+    );
+    Ok(())
+}
+
+/// A HUMAN still outranks the marker: a function called on somebody's behalf is
+/// that person's write, however it reached the engine.
+#[tokio::test]
+async fn a_human_behind_an_agent_is_still_the_author() -> Result<()> {
+    let (storage, _audit, _tmp) = setup().await?;
+
+    let auth = user("alice").with_agent("mcp:studio-admin");
+    let id = create_as(&storage, "/written-via-mcp", AUDITED_TYPE, auth).await?;
+
+    let node = storage
+        .nodes()
+        .get(
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
+            &id,
+            None,
+        )
+        .await?
+        .expect("the node exists");
+
+    assert_eq!(
+        node.updated_by.as_deref(),
+        Some("alice"),
+        "the person is the author; the agent marker is how they got here"
+    );
+    Ok(())
+}
+
+/// A plain system write — no agent anywhere — is unchanged.
+#[tokio::test]
+async fn an_unmarked_system_write_still_reads_as_system() -> Result<()> {
+    let (storage, _audit, _tmp) = setup().await?;
+
+    let id = create_as(
+        &storage,
+        "/written-by-system",
+        AUDITED_TYPE,
+        AuthContext::system(),
+    )
+    .await?;
+
+    let node = storage
+        .nodes()
+        .get(
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
+            &id,
+            None,
+        )
+        .await?
+        .expect("the node exists");
+
+    assert_eq!(node.updated_by.as_deref(), Some("system"));
     Ok(())
 }

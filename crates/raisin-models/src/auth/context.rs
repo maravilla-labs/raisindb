@@ -356,6 +356,41 @@ impl AuthContext {
         self.agent.as_deref()
     }
 
+    /// WHO this context is, when it is anybody at all.
+    ///
+    /// A human first, then the non-human principal — an agent, a flow, a
+    /// trigger, in the `auth::agent_identity` vocabulary. `None` when the
+    /// context names neither, which is the only case a caller-supplied literal
+    /// ("sql-update", "system") should still win.
+    ///
+    /// This exists because "who touched this node" had two different answers:
+    /// the audit log and the replicated operation resolved the real principal,
+    /// while the NODE recorded whatever literal the write path happened to pass
+    /// — so an automation's work showed up as `system` on the one field every
+    /// UI reads. Attribution that disagrees with itself is worse than none.
+    pub fn principal_id(&self) -> Option<String> {
+        if self.acting_as_ward.is_some() || self.impersonated_by.is_some() {
+            return Some(self.actor_id());
+        }
+        // A REAL user outranks everything: a function called on behalf of a
+        // person is that person's write.
+        if let Some(user_id) = self.user_id.as_deref().filter(|id| *id != "system") {
+            return Some(user_id.to_string());
+        }
+        // Otherwise the non-human principal, if this context names one. The
+        // literal "system" user that `AuthContext::system()` carries is a
+        // privilege level, not an identity — an agent, flow or trigger marker
+        // says strictly more, and saying "system" instead is what made every
+        // automation's work anonymous on the node it wrote.
+        let agent = self
+            .agent
+            .as_deref()
+            .map(str::trim)
+            .filter(|marker| !marker.is_empty())
+            .map(str::to_string);
+        agent.or_else(|| self.user_id.clone())
+    }
+
     /// Get the user ID for audit logging
     pub fn actor_id(&self) -> String {
         if let Some(ward_id) = &self.acting_as_ward {
@@ -372,6 +407,15 @@ impl AuthContext {
             )
         } else if let Some(user_id) = &self.user_id {
             user_id.clone()
+        } else if let Some(agent) = self
+            .agent
+            .as_deref()
+            .map(str::trim)
+            .filter(|marker| !marker.is_empty())
+        {
+            // No human, but a named non-human principal: an agent, a flow or a
+            // trigger is a better answer than "unknown" for every reader.
+            agent.to_string()
         } else if self.is_anonymous {
             "anonymous".to_string()
         } else {

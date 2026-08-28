@@ -64,12 +64,20 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
     // them uniformly — previously most paths left created_by/updated_by as None.
     //
     // Resolve the acting identity: prefer the full auth context (which yields
-    // impersonation/ward-aware actor ids via actor_id()), fall back to the raw
-    // actor string, and finally to "anonymous" for embedded/unauthenticated
-    // writes so the field is never silently empty.
+    // impersonation/ward-aware actor ids, and the AGENT MARKER for a write with
+    // no human behind it), fall back to the raw actor string, and finally to
+    // "anonymous" for embedded/unauthenticated writes so the field is never
+    // silently empty.
+    //
+    // `principal_id` rather than `actor_id` is the whole difference between
+    // "an automation touched this" and "system touched this": every flow,
+    // agent and trigger runs under `AuthContext::system()`, whose `actor_id()`
+    // is the word "system" — so ALL of them collapsed into one anonymous
+    // writer on the one field every UI reads, while the audit log beside it
+    // recorded exactly which one.
     let actor = tx
         .get_auth_context()?
-        .map(|a| a.actor_id())
+        .and_then(|a| a.principal_id())
         .or(tx.get_actor()?)
         .unwrap_or_else(|| "anonymous".to_string());
 

@@ -405,19 +405,35 @@ where
     )
 }
 
-/// The acting user for a function-initiated write, for commit attribution.
+/// Who to attribute a function-initiated write to.
 ///
-/// Ordering operations record a revision, so they are attributed like any other
-/// write. `None` for an unauthenticated context, which storage renders as
-/// `"system"`.
+/// A HUMAN first: a function called on behalf of a signed-in user is that
+/// user's write, and their id is what every other surface expects.
+///
+/// Failing that, the AGENT MARKER — `agent:/agents/triage-bot`,
+/// `flow:/flows/publish-approval`, `trigger:/triggers/on-order-created` — which
+/// is the namespaced identity of the non-human principal that initiated this
+/// execution (`auth::agent_identity`). Without this the marker reached the
+/// audit log and the replicated operation while the NODE recorded `"system"`,
+/// so a page an automation had just rewritten could not say what had touched
+/// it: every agent, every flow and every trigger in the tenant collapsed into
+/// one anonymous word, and no UI could show the work an agent did.
+///
+/// `None` only for a genuinely unattributed context, which storage still
+/// renders as `"system"`.
 fn function_actor<S, B>(ctx: &QueryContext<S, B>) -> Option<String>
 where
     S: Storage + TransactionalStorage + 'static,
     B: BinaryStorage + 'static,
 {
-    ctx.auth_context
-        .as_ref()
-        .and_then(|auth| auth.user_id.clone())
+    let auth = ctx.auth_context.as_ref()?;
+    auth.user_id.clone().or_else(|| {
+        auth.agent
+            .as_deref()
+            .map(str::trim)
+            .filter(|marker| !marker.is_empty())
+            .map(str::to_string)
+    })
 }
 
 /// Moves a child to a 0-based position among its siblings.

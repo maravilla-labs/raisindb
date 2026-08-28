@@ -180,7 +180,7 @@ pub async fn execute_translate<
             target, props_str, locale
         );
         txn_ctx.set_message(&message)?;
-        txn_ctx.set_actor("sql-translate")?;
+        txn_ctx.set_actor(&super::bulk_operations::sql_actor(ctx, "sql-translate"))?;
 
         let auth = ctx
             .auth_context

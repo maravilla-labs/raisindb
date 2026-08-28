@@ -11,6 +11,13 @@ use std::collections::HashMap;
 
 use super::Transaction;
 
+/// Actors that name a MECHANISM rather than a principal, and may therefore be
+/// replaced by a real one. Everything else — a user id, `virtual-mount-sync`,
+/// any actor a caller chose deliberately — is left exactly as it was passed.
+fn is_placeholder_actor(actor: &str) -> bool {
+    matches!(actor, "system" | "anonymous" | "unknown") || actor.starts_with("sql-")
+}
+
 impl<S: TransactionalStorage> Transaction<S> {
     /// Helper to create initial children from NodeType definition within a transaction
     pub(super) async fn create_initial_structure_children(
@@ -133,7 +140,26 @@ impl<S: TransactionalStorage> Transaction<S> {
         }
 
         let message = message.into();
+        // An AGENT MARKER replaces a PLACEHOLDER actor, and nothing else does.
+        //
+        // Several write paths pass a fixed word rather than a principal — SQL
+        // DML passes "sql-update", a job passes "system" — and stamping that on
+        // `node.updated_by` is what made an automation's work anonymous while
+        // the audit log and the replicated operation knew perfectly well who
+        // did it (`transaction/replication/capture.rs` resolves the same way).
+        //
+        // NARROW ON PURPOSE, because the actor is not only attribution: the
+        // engine-owned property shield below decides what a writer may touch by
+        // COMPARING it (`actor != SYNC_ACTOR`). Letting the auth context win
+        // outright locked the sync engine out of its own bookkeeping — a
+        // permission change dressed up as a display improvement. So this
+        // replaces only the words that name a mechanism, and only when there is
+        // a real non-human principal to name instead.
         let actor = actor.into();
+        let actor = match self.auth_context.as_ref().and_then(|auth| auth.agent_id()) {
+            Some(agent) if is_placeholder_actor(&actor) => agent.to_string(),
+            _ => actor,
+        };
 
         tracing::info!(
             "Committing transaction: {} operations, message: '{}', actor: '{}'",

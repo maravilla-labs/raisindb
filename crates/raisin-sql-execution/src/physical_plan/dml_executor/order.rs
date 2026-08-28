@@ -111,7 +111,7 @@ pub async fn execute_order<
             "ORDER {} {} {}",
             source_path, position_str, target_path
         ))?;
-        txn_ctx.set_actor("sql-order")?;
+        txn_ctx.set_actor(&super::bulk_operations::sql_actor(ctx, "sql-order"))?;
 
         let auth = ctx
             .auth_context

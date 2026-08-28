@@ -184,7 +184,7 @@ pub async fn execute_move<
         txn_ctx.set_tenant_repo(&ctx.tenant_id, &ctx.repo_id)?;
         txn_ctx.set_branch(branch)?;
         txn_ctx.set_message(&format!("MOVE {} TO {}", source_path, target_parent_path))?;
-        txn_ctx.set_actor("sql-move")?;
+        txn_ctx.set_actor(&super::bulk_operations::sql_actor(ctx, "sql-move"))?;
 
         let auth = ctx
             .auth_context

@@ -78,7 +78,7 @@ where
         } else {
             "sql-insert"
         };
-        txn_ctx.set_actor(actor)?;
+        txn_ctx.set_actor(&super::bulk_operations::sql_actor(ctx, actor))?;
 
         let auth = ctx
             .auth_context
@@ -177,7 +177,7 @@ where
         txn_ctx.set_tenant_repo(&ctx.tenant_id, &ctx.repo_id)?;
         txn_ctx.set_branch(&ctx.branch)?;
         txn_ctx.set_message("SQL UPDATE")?;
-        txn_ctx.set_actor("sql-update")?;
+        txn_ctx.set_actor(&super::bulk_operations::sql_actor(ctx, "sql-update"))?;
 
         let auth = ctx
             .auth_context

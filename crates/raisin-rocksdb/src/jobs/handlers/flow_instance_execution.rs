@@ -282,6 +282,23 @@ impl FlowInstanceExecutionHandler {
                     .map(str::to_string);
             }
         }
+        // A flow ALWAYS has an identity, whoever pressed the button.
+        //
+        // Only a trigger-started run arrived with a marker, so a flow started
+        // from the API or by hand wrote as nobody: `updated_by: "system"` on
+        // every node it touched, and no way to tell one automation's work from
+        // another's. The flow's own definition path is the honest answer and
+        // the stable one (`agent_identity` is deliberately built from paths,
+        // not instance ids), and a trigger-composed marker still wins when
+        // there is one, because it says strictly more.
+        if agent_marker.is_none() {
+            if let Ok(instance) = callbacks.load_instance(&instance_path).await {
+                let flow_path = instance.flow_ref.trim();
+                if !flow_path.is_empty() {
+                    agent_marker = Some(raisin_models::auth::agent_identity::flow(flow_path));
+                }
+            }
+        }
         callbacks = callbacks.with_agent(agent_marker);
 
         // Take the instance's execution lock BEFORE ANY WRITE: a flow

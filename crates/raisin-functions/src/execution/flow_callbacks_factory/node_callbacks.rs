@@ -221,6 +221,19 @@ where
                 // Update the node's properties
                 existing.properties = props_map;
                 existing.updated_at = Some(chrono::Utc::now());
+                // WHO wrote it, on the node itself.
+                //
+                // The agent marker already reached the audit log and the
+                // replicated operation, but `updated_by` was left alone — so a
+                // node an automation had just rewritten still read `system`,
+                // and every surface that shows "last touched by" (a browser
+                // column, a card, an avatar) could say nothing about the work
+                // an agent did. The marker is the same namespaced vocabulary
+                // used everywhere else (`agent:/agents/x`, `flow:/flows/y`), so
+                // a reader can tell a person from a machine by its prefix.
+                if let Some(marker) = agent.as_deref().filter(|m| !m.trim().is_empty()) {
+                    existing.updated_by = Some(marker.to_string());
+                }
 
                 // Update the node using the correct API.
                 //
@@ -328,6 +341,19 @@ where
                     workspace: Some(workspace.to_string()),
                     created_at: Some(chrono::Utc::now()),
                     updated_at: Some(chrono::Utc::now()),
+                    // Attribution on the node, not only in the audit log — see
+                    // the note in the saver. A node an automation CREATED is
+                    // the case where this matters most: without it the thing
+                    // has no author at all, in a UI whose whole promise is that
+                    // you can see who did what.
+                    created_by: agent
+                        .as_deref()
+                        .filter(|m| !m.trim().is_empty())
+                        .map(str::to_string),
+                    updated_by: agent
+                        .as_deref()
+                        .filter(|m| !m.trim().is_empty())
+                        .map(str::to_string),
                     relations: vec![],
                     ..Default::default()
                 };
