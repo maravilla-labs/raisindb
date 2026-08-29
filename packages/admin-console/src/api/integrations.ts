@@ -729,11 +729,81 @@ export interface MountBundleEntry {
   required_by?: string[]
   /** Node types the mount materialises — checked against the workspace gate. */
   node_types?: string[]
+  /**
+   * Land THIS entry in a workspace of its own, overriding the operator's
+   * choice for the bundle. A Microsoft 365 bundle mounts mail into `workplace`
+   * and drive files into `assets`, so the files show up as raisin:Assets beside
+   * every other asset rather than in a second, parallel media library.
+   *
+   * Each distinct workspace is gated separately: the dialog checks
+   * `allowed_node_types` and probes the root folder once per workspace, because
+   * one verdict for a bundle spanning two of them would be a verdict about the
+   * wrong one.
+   */
+  target_workspace?: string
+  /**
+   * Hang this entry under a different root than the operator's. Almost always
+   * paired with `target_workspace` — the other workspace has its own idea of
+   * where things live, and `/microsoft-365` is a folder that means nothing in
+   * an asset library.
+   */
+  root_override?: string
   remote_root?: string
   mapping_function?: string
   resolver_function?: string
   sync_config?: SyncConfig
   write_config?: WriteConfig
+}
+
+/**
+ * Where a prompt's answer is written on the planned mount.
+ *
+ * A CLOSED set, not a free path expression. `target` comes from a connector
+ * template, which is package-shipped data — an open dotted path would let a
+ * template write `enabled` or `target_workspace` or `write_config.mode` onto a
+ * mount, i.e. exactly the operator-owned decisions the console exists to ask
+ * about. Three destinations cover every real case: adapter config, the provider
+ * root, and which connected account to use.
+ */
+export type MountBundlePromptTarget =
+  | `sync_config.${string}`
+  | 'remote_root'
+  | 'account_ref'
+
+/**
+ * A question the console asks the OPERATOR once and writes onto every entry
+ * that needs the answer.
+ *
+ * The bundle's other fields are the adapter author's knowledge, which can be
+ * shipped. A mailbox address, a SharePoint site id or a drive id cannot be:
+ * they are facts about the tenant, discovered at instantiation. Before prompts,
+ * a connector needing one could not be expressed as a bundle at all — every
+ * Microsoft mount was hand-built in the mount editor from the ten values only
+ * the adapter author knew, which is the problem bundles were introduced to
+ * remove.
+ */
+export interface MountBundlePrompt {
+  /** Answer key, e.g. `site_id`. Unique within the bundle. */
+  key: string
+  title: string
+  help?: string
+  /**
+   * `remote` renders the RemotePicker against `browse`; `select` renders
+   * `options`; `text` is a plain field. `remote` degrades to a text field on
+   * its own when the adapter reports `supported: false` for the kind.
+   */
+  type: 'remote' | 'select' | 'text'
+  /** For `type: 'remote'`: the adapter's browse kind (mailbox, site, drive, folder…). */
+  browse?: string
+  /** For `type: 'select'`. */
+  options?: string[]
+  /** Entry KEYS this answer is written onto. An entry not listed never sees it. */
+  applies_to: string[]
+  /** Blocks create while unanswered — but only when an `applies_to` entry is selected. */
+  required?: boolean
+  /** Ask only when another prompt's answer matches, e.g. `{ drive_scope: 'site' }`. */
+  required_when?: Record<string, string>
+  target: MountBundlePromptTarget
 }
 
 /** A connector-authored preset of mounts. Schema: `raisin:Integration.mount_bundles`. */
@@ -743,6 +813,7 @@ export interface MountBundle {
   description?: string
   default_workspace?: string
   default_root?: string
+  prompts?: MountBundlePrompt[]
   mounts: MountBundleEntry[]
 }
 
@@ -756,12 +827,93 @@ export interface BundlePlanInput {
   target_branch?: string
   /** Root folder every entry's `subpath` hangs under, e.g. `/stripe`. */
   root: string
+  /** Answers to `bundle.prompts`, by prompt key. Blank answers are ignored. */
+  answers?: Record<string, string>
 }
 
 /** `/a//b/` → `/a/b`; `''` → `/`. Same normalisation the mount editor applies. */
 export function normalizeMountPath(p: string): string {
   const cleaned = '/' + (p || '').split('/').filter(Boolean).join('/')
   return cleaned
+}
+
+/** A blank answer means "unanswered": the console writes `''` for a cleared field. */
+function answered(answers: Record<string, string> | undefined, key: string): string | null {
+  const v = answers?.[key]
+  if (typeof v !== 'string') return null
+  const trimmed = v.trim()
+  return trimmed.length ? trimmed : null
+}
+
+/**
+ * Is this prompt live, given the answers so far?
+ *
+ * `required_when` is what keeps the form honest: a SharePoint site id is
+ * meaningless for a OneDrive mount, and asking for it anyway teaches the
+ * operator that some fields can be ignored — which is how the ones that matter
+ * get ignored too.
+ */
+export function promptIsActive(
+  prompt: MountBundlePrompt,
+  answers: Record<string, string> | undefined
+): boolean {
+  const when = prompt.required_when
+  if (!when) return true
+  return Object.entries(when).every(([k, v]) => answered(answers, k) === v)
+}
+
+/** Prompts the console should render: active, and wanted by at least one selected entry. */
+export function activePrompts(
+  bundle: MountBundle,
+  keys: string[],
+  answers: Record<string, string> | undefined
+): MountBundlePrompt[] {
+  const wanted = new Set(keys)
+  return (bundle.prompts || []).filter(
+    (p) => promptIsActive(p, answers) && p.applies_to.some((k) => wanted.has(k))
+  )
+}
+
+/** Keys of active, required prompts still unanswered. Non-empty blocks create. */
+export function missingPromptKeys(
+  bundle: MountBundle,
+  keys: string[],
+  answers: Record<string, string> | undefined
+): string[] {
+  return activePrompts(bundle, keys, answers)
+    .filter((p) => p.required && !answered(answers, p.key))
+    .map((p) => p.key)
+}
+
+/**
+ * Write one answer onto a planned mount, at the prompt's declared target.
+ *
+ * Throws on a target outside the closed set rather than dropping it. A dropped
+ * answer is the worst outcome available: the mount is created, looks configured,
+ * and reads the wrong mailbox — which is the exact silent-wrong-data failure the
+ * adapter's own `principal()` comment warns about. A throw stops the dialog with
+ * the template's name in the message instead.
+ */
+function applyPromptAnswer(mount: VirtualMount, target: string, value: string): void {
+  if (target === 'remote_root') {
+    mount.remote_root = value
+    return
+  }
+  if (target === 'account_ref') {
+    mount.account_ref = value
+    return
+  }
+  const sync = target.startsWith('sync_config.') ? target.slice('sync_config.'.length) : null
+  if (sync && sync.length && !sync.includes('.')) {
+    const cfg = (mount.sync_config || {}) as Record<string, unknown>
+    cfg[sync] = value
+    mount.sync_config = cfg as SyncConfig
+    return
+  }
+  throw new Error(
+    `mount bundle prompt has an unsupported target '${target}' ` +
+      `(expected sync_config.<key>, remote_root or account_ref)`
+  )
 }
 
 /**
@@ -775,25 +927,40 @@ export function planBundle(input: BundlePlanInput): VirtualMount[] {
   const { integration, bundle } = input
   const root = normalizeMountPath(input.root)
   const wanted = new Set(input.keys)
+  // Only ACTIVE prompts are applied. An answer left behind by a prompt the
+  // operator has since switched away from — a site id typed before going back
+  // to drive_scope: me — must not ride along on the mount.
+  const prompts = (bundle.prompts || []).filter((p) => promptIsActive(p, input.answers))
   return bundle.mounts
     .filter((e) => wanted.has(e.key))
-    .map((e) => ({
-      name: `${integration.name}-${e.key}`,
-      title: `${integration.title} · ${e.title}`,
-      integration_ref: integration.path || `${INTEGRATIONS_ROOT}/${integration.name}`,
-      ...(input.account_ref ? { account_ref: input.account_ref } : {}),
-      target_workspace: input.target_workspace,
-      target_branch: input.target_branch || 'main',
-      mount_path: normalizeMountPath(`${root}/${e.subpath}`),
-      ...(e.remote_root ? { remote_root: e.remote_root } : {}),
-      ...(e.mapping_function ? { mapping_function: e.mapping_function } : {}),
-      ...(e.resolver_function ? { resolver_function: e.resolver_function } : {}),
-      // Copies, not references: the dialog may be reopened against the same
-      // template object, and a mount edit must never reach back into it.
-      sync_config: { ...(e.sync_config || {}) },
-      write_config: { ...(e.write_config || {}) },
-      enabled: true,
-    }))
+    .map((e) => {
+      const mount: VirtualMount = {
+        name: `${integration.name}-${e.key}`,
+        title: `${integration.title} · ${e.title}`,
+        integration_ref: integration.path || `${INTEGRATIONS_ROOT}/${integration.name}`,
+        ...(input.account_ref ? { account_ref: input.account_ref } : {}),
+        target_workspace: e.target_workspace || input.target_workspace,
+        target_branch: input.target_branch || 'main',
+        mount_path: normalizeMountPath(
+          `${e.root_override ? normalizeMountPath(e.root_override) : root}/${e.subpath}`
+        ),
+        ...(e.remote_root ? { remote_root: e.remote_root } : {}),
+        ...(e.mapping_function ? { mapping_function: e.mapping_function } : {}),
+        ...(e.resolver_function ? { resolver_function: e.resolver_function } : {}),
+        // Copies, not references: the dialog may be reopened against the same
+        // template object, and a mount edit must never reach back into it.
+        sync_config: { ...(e.sync_config || {}) },
+        write_config: { ...(e.write_config || {}) },
+        enabled: true,
+      }
+      for (const p of prompts) {
+        if (!p.applies_to.includes(e.key)) continue
+        const value = answered(input.answers, p.key)
+        if (value === null) continue
+        applyPromptAnswer(mount, p.target, value)
+      }
+      return mount
+    })
 }
 
 export interface VirtualMount {

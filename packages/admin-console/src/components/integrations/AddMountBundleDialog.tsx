@@ -18,21 +18,41 @@
  *
  * It creates ordinary `raisin:VirtualMount` nodes. Once created they owe the
  * bundle nothing: edit or delete them like any other mount.
+ *
+ * TWO THINGS A BUNDLE CAN DO THAT ONE FORM CANNOT (schema v5), and both are
+ * about the same connector — Microsoft 365, whose mail is a mailbox and whose
+ * files are assets:
+ *
+ *  - An entry may name its OWN `target_workspace` (and root). So a bundle can
+ *    put mail in `workplace` and drive files in `assets`, where they show up as
+ *    raisin:Assets beside every other asset instead of in a parallel library.
+ *    Every gate below is therefore per DESTINATION, not per dialog: one
+ *    `allowed_node_types` verdict for a bundle spanning two workspaces would be
+ *    a verdict about the wrong one.
+ *  - A bundle may declare PROMPTS: the values only the operator knows (which
+ *    mailbox, which SharePoint site, which drive). Before them, any connector
+ *    needing one could not be a bundle at all.
  */
 
 import { useEffect, useMemo, useState } from 'react'
 import { AlertTriangle, Check, Layers, X } from 'lucide-react'
 import {
+  activePrompts,
   integrationsApi,
+  missingPromptKeys,
   normalizeMountPath,
   planBundle,
   type Integration,
   type MountBundle,
+  type MountBundleEntry,
+  type MountBundlePrompt,
+  type SyncConfig,
   type VirtualMount,
 } from '../../api/integrations'
 import { nodesApi } from '../../api/nodes'
 import { workspacesApi } from '../../api/workspaces'
 import { writeModeLabel } from '../../utils/mountStatus'
+import RemotePicker from './RemotePicker'
 
 interface Props {
   repo: string
@@ -66,6 +86,26 @@ export function bundlesFor(i: Integration, templates: Integration[]): MountBundl
 
 type RowOutcome = { key: string; status: 'created' | 'exists' | 'failed'; message?: string }
 
+/**
+ * One DESTINATION: a workspace plus the root the entries going there hang
+ * under. A v4 bundle has exactly one; a bundle whose entries name their own
+ * `target_workspace` has several, and each is gated separately.
+ */
+interface Destination {
+  workspace: string
+  root: string
+  entries: MountBundleEntry[]
+}
+
+type RootState = 'unknown' | 'exists' | 'missing'
+
+/** Node types a destination materialises, including the folders along its path. */
+function neededTypes(dest: Destination): string[] {
+  const need = new Set<string>(['raisin:Folder'])
+  for (const e of dest.entries) for (const t of e.node_types || []) need.add(t)
+  return [...need]
+}
+
 export default function AddMountBundleDialog({
   repo,
   integrations,
@@ -93,10 +133,14 @@ export default function AddMountBundleDialog({
   const [workspace, setWorkspace] = useState('')
   const [root, setRoot] = useState('')
   const [keys, setKeys] = useState<Set<string>>(new Set())
-  const [allowed, setAllowed] = useState<string[] | null>(null)
-  const [allowedState, setAllowedState] = useState<'idle' | 'loading' | 'ok' | 'unknown'>('idle')
-  const [rootState, setRootState] = useState<'unknown' | 'exists' | 'missing'>('unknown')
-  const [creatingRoot, setCreatingRoot] = useState(false)
+  /** Prompt answers, by prompt key. `''` means unanswered — see `planBundle`. */
+  const [answers, setAnswers] = useState<Record<string, string>>({})
+  const [pickerFor, setPickerFor] = useState<MountBundlePrompt | null>(null)
+  /** `allowed_node_types` per destination workspace; `null` = could not be read. */
+  const [allowedByWs, setAllowedByWs] = useState<Record<string, string[] | null>>({})
+  const [gateLoading, setGateLoading] = useState(false)
+  const [rootStates, setRootStates] = useState<Record<string, RootState>>({})
+  const [creatingRoot, setCreatingRoot] = useState('')
   const [saving, setSaving] = useState(false)
   const [outcomes, setOutcomes] = useState<RowOutcome[] | null>(null)
 
@@ -106,6 +150,7 @@ export default function AddMountBundleDialog({
     setWorkspace((w) => w || bundle.default_workspace || '')
     setRoot((r) => r || bundle.default_root || '')
     setKeys(new Set(bundle.mounts.filter((m) => m.default).map((m) => m.key)))
+    setAnswers({})
     setOutcomes(null)
   }, [bundle?.id])
 
@@ -114,105 +159,186 @@ export default function AddMountBundleDialog({
     if (accounts.length === 1) setAccountRef(accounts[0].id)
   }, [integration?.path])
 
+  const normalizedRoot = normalizeMountPath(root)
+
+  const selectedEntries = bundle ? bundle.mounts.filter((m) => keys.has(m.key)) : []
+
+  // Where the selected entries actually land. An entry may override both the
+  // workspace and the root, so this is a list, and everything downstream —
+  // the type gate, the folder probe, the path shown on each row — is computed
+  // per destination rather than once for the dialog.
+  const destinations = useMemo<Destination[]>(() => {
+    if (!workspace) return []
+    const byKey = new Map<string, Destination>()
+    for (const e of selectedEntries) {
+      const ws = e.target_workspace || workspace
+      const r = normalizeMountPath(e.root_override || normalizedRoot)
+      const k = `${ws}:${r}`
+      const existing = byKey.get(k)
+      if (existing) existing.entries.push(e)
+      else byKey.set(k, { workspace: ws, root: r, entries: [e] })
+    }
+    return [...byKey.values()]
+  }, [selectedEntries, workspace, normalizedRoot])
+
+  const gateWorkspaces = useMemo(
+    () => [...new Set(destinations.map((d) => d.workspace))].sort().join(','),
+    [destinations],
+  )
+
   // The workspace gate. `allowed_node_types` is enforced on every write, and a
   // workspace that rejects every item still finishes `outcome: "ok"` — then
   // flips `backfill_complete`, so the misconfiguration becomes a permanently
   // empty mount. Checking here is the difference between a red line now and a
   // silent failure later.
   useEffect(() => {
-    if (!workspace) {
-      setAllowed(null)
-      setAllowedState('idle')
+    const list = gateWorkspaces ? gateWorkspaces.split(',') : []
+    if (!list.length) {
+      setAllowedByWs({})
+      setGateLoading(false)
       return
     }
     let cancelled = false
-    setAllowedState('loading')
-    workspacesApi
-      .get(repo, workspace)
-      .then((ws) => {
-        if (cancelled) return
-        setAllowed(ws.allowed_node_types || [])
-        setAllowedState('ok')
-      })
-      .catch(() => {
-        if (cancelled) return
-        setAllowed(null)
-        setAllowedState('unknown')
-      })
+    setGateLoading(true)
+    Promise.all(
+      list.map((w) =>
+        workspacesApi
+          .get(repo, w)
+          .then((ws) => [w, ws.allowed_node_types || []] as const)
+          .catch(() => [w, null] as const),
+      ),
+    ).then((pairs) => {
+      if (cancelled) return
+      setAllowedByWs(Object.fromEntries(pairs))
+      setGateLoading(false)
+    })
     return () => {
       cancelled = true
     }
-  }, [repo, workspace])
+  }, [repo, gateWorkspaces])
 
-  const normalizedRoot = normalizeMountPath(root)
+  const destKey = useMemo(
+    () => destinations.map((d) => `${d.workspace}:${d.root}`).sort().join('|'),
+    [destinations],
+  )
 
-  // Does the root folder exist? Same probe as the mount editor: only a 404
-  // proves absence.
+  // Does each destination's root folder exist? Same probe as the mount editor:
+  // only a 404 proves absence.
   useEffect(() => {
-    if (!workspace || normalizedRoot === '/') {
-      setRootState('unknown')
+    const list = destKey ? destKey.split('|') : []
+    const probes = list.filter((k) => !k.endsWith(':/'))
+    if (!probes.length) {
+      setRootStates({})
       return
     }
     let cancelled = false
     const timer = window.setTimeout(() => {
-      nodesApi
-        .getAtHead(repo, 'main', workspace, normalizedRoot)
-        .then(() => !cancelled && setRootState('exists'))
-        .catch((e: any) => !cancelled && setRootState(e?.status === 404 ? 'missing' : 'unknown'))
+      Promise.all(
+        probes.map((k) => {
+          const idx = k.indexOf(':')
+          const ws = k.slice(0, idx)
+          const path = k.slice(idx + 1)
+          return nodesApi
+            .getAtHead(repo, 'main', ws, path)
+            .then(() => [k, 'exists' as RootState] as const)
+            .catch((e: any) => [k, (e?.status === 404 ? 'missing' : 'unknown') as RootState] as const)
+        }),
+      ).then((pairs) => {
+        if (!cancelled) setRootStates(Object.fromEntries(pairs))
+      })
     }, 400)
     return () => {
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [repo, workspace, normalizedRoot])
+  }, [repo, destKey])
 
-  async function createRoot() {
-    if (!workspace || normalizedRoot === '/') return
-    setCreatingRoot(true)
+  async function createRoot(ws: string, path: string) {
+    if (path === '/') return
+    const key = `${ws}:${path}`
+    setCreatingRoot(key)
     try {
-      const segments = normalizedRoot.split('/').filter(Boolean)
+      const segments = path.split('/').filter(Boolean)
       const leaf = segments.pop() as string
       const parent = segments.length ? `/${segments.join('/')}` : '/'
-      await nodesApi.create(repo, 'main', workspace, parent, {
+      await nodesApi.create(repo, 'main', ws, parent, {
         name: leaf,
         node_type: 'raisin:Folder',
         properties: { title: leaf },
       })
-      setRootState('exists')
-      onSuccess('Folder created', normalizedRoot)
+      setRootStates((prev) => ({ ...prev, [key]: 'exists' }))
+      onSuccess('Folder created', `${ws}:${path}`)
     } catch (e: any) {
       onError('Could not create the folder', e?.message)
     } finally {
-      setCreatingRoot(false)
+      setCreatingRoot('')
     }
   }
 
-  const planned = useMemo(
-    () =>
-      integration && bundle && workspace
-        ? planBundle({
-            integration,
-            bundle,
-            keys: [...keys],
-            account_ref: accountRef || undefined,
-            target_workspace: workspace,
-            root: normalizedRoot,
-          })
-        : [],
-    [integration, bundle, keys, accountRef, workspace, normalizedRoot],
+  // ---- prompts ----
+
+  const prompts = useMemo(
+    () => (bundle ? activePrompts(bundle, [...keys], answers) : []),
+    [bundle, keys, answers],
   )
+  const missingAnswers = useMemo(
+    () => (bundle ? missingPromptKeys(bundle, [...keys], answers) : []),
+    [bundle, keys, answers],
+  )
+
+  // What the RemotePicker browses THROUGH. A SharePoint library listing needs
+  // the site the operator just picked, and that answer is not on a mount yet —
+  // so the answers collected so far are projected into a sync_config for it.
+  const promptSyncConfig = useMemo(() => {
+    const cfg: Record<string, unknown> = {}
+    for (const p of prompts) {
+      const v = (answers[p.key] || '').trim()
+      if (!v) continue
+      if (p.target.startsWith('sync_config.')) cfg[p.target.slice('sync_config.'.length)] = v
+    }
+    return cfg as SyncConfig
+  }, [prompts, answers])
+
+  // planBundle THROWS on a bundle whose prompt names a target outside the
+  // closed set. Caught here so a bad template is a red line in the dialog
+  // rather than a blank modal.
+  const plan = useMemo(() => {
+    if (!(integration && bundle && workspace)) {
+      return { mounts: [] as VirtualMount[], error: null as string | null }
+    }
+    try {
+      return {
+        mounts: planBundle({
+          integration,
+          bundle,
+          keys: [...keys],
+          account_ref: accountRef || undefined,
+          target_workspace: workspace,
+          root: normalizedRoot,
+          answers,
+        }),
+        error: null as string | null,
+      }
+    } catch (e: any) {
+      return { mounts: [] as VirtualMount[], error: e?.message || 'this bundle could not be planned' }
+    }
+  }, [integration, bundle, keys, accountRef, workspace, normalizedRoot, answers])
+  const planned = plan.mounts
 
   // ---- pre-flight ----
 
-  const selectedEntries = bundle ? bundle.mounts.filter((m) => keys.has(m.key)) : []
-
-  /** Node types the selected entries materialise that the workspace refuses. */
-  const missingTypes = useMemo(() => {
+  /** Node types a destination materialises that its workspace refuses. */
+  function missingTypesFor(dest: Destination): string[] {
+    const allowed = allowedByWs[dest.workspace]
     if (!allowed) return []
-    const need = new Set<string>(['raisin:Folder'])
-    for (const e of selectedEntries) for (const t of e.node_types || []) need.add(t)
-    return [...need].filter((t) => !allowed.includes(t))
-  }, [allowed, selectedEntries])
+    return neededTypes(dest).filter((t) => !allowed.includes(t))
+  }
+
+  const blockedDestinations = destinations.filter((d) => missingTypesFor(d).length > 0)
+  // Every destination has an answer (a list, or `null` for "could not read").
+  // Without this, the render between choosing entries and the gate resolving
+  // would offer a Create button that has checked nothing.
+  const gateResolved = destinations.every((d) => d.workspace in allowedByWs)
 
   const duplicates = useMemo(() => {
     const taken = new Map(existingMounts.map((m) => [`${m.target_workspace}:${m.mount_path}`, m]))
@@ -221,6 +347,11 @@ export default function AddMountBundleDialog({
   }, [planned, existingMounts])
 
   const account = accounts.find((a) => a.id === accountRef)
+  // The one provider-specific check left, and it stays because a PROMPT cannot
+  // express it: `checkout_success_url` is read off the CONNECTION, which the
+  // dialog can inspect but `planBundle` — pure, and given only the bundle and
+  // the operator's choices — cannot. Everything else Stripe used to need
+  // special-cased here is now data on the bundle.
   const needsReturnUrl =
     selectedEntries.some((e) => e.sync_config?.resource === 'checkout_sessions') &&
     // Per-connection config lives on the account entry (`connection_config_type`
@@ -233,9 +364,12 @@ export default function AddMountBundleDialog({
     !!bundle &&
     !!workspace &&
     planned.length > 0 &&
+    !plan.error &&
     !accountMissing &&
-    missingTypes.length === 0 &&
-    allowedState !== 'loading' &&
+    missingAnswers.length === 0 &&
+    blockedDestinations.length === 0 &&
+    gateResolved &&
+    !gateLoading &&
     !saving
 
   async function create() {
@@ -273,7 +407,9 @@ export default function AddMountBundleDialog({
     }
   }
 
-  const pathFor = (subpath: string) => normalizeMountPath(`${normalizedRoot}/${subpath}`)
+  const rootFor = (e: MountBundleEntry) => normalizeMountPath(e.root_override || normalizedRoot)
+  const pathFor = (e: MountBundleEntry) => normalizeMountPath(`${rootFor(e)}/${e.subpath}`)
+  const wsFor = (e: MountBundleEntry) => e.target_workspace || workspace
 
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4 overscroll-none">
@@ -382,20 +518,72 @@ export default function AddMountBundleDialog({
                     <div>
                       <label className={labelCls}>Root folder *</label>
                       <input className={field} value={root} onChange={(e) => setRoot(e.target.value)} placeholder={bundle.default_root || '/'} />
-                      {rootState === 'missing' && (
-                        <p className="mt-1 text-xs text-amber-400">
-                          <span className="font-mono">{normalizedRoot}</span> does not exist yet.{' '}
-                          <button type="button" onClick={createRoot} disabled={creatingRoot} className="underline hover:text-amber-300 disabled:opacity-50">
-                            {creatingRoot ? 'Creating…' : 'Create it'}
-                          </button>
-                        </p>
-                      )}
-                      {rootState === 'exists' && <p className="mt-1 text-xs text-green-400">This folder exists.</p>}
                       {normalizedRoot === '/' && (
                         <p className="mt-1 text-xs text-amber-400">Give the bundle its own folder rather than the workspace root.</p>
                       )}
+                      {bundle.mounts.some((m) => m.target_workspace) && (
+                        <p className="mt-1 text-xs text-zinc-500">
+                          Some entries in this bundle land elsewhere on purpose — see Destinations.
+                        </p>
+                      )}
                     </div>
                   </div>
+
+                  {prompts.length > 0 && (
+                    <div className="space-y-3">
+                      <label className={labelCls}>Details</label>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        {prompts.map((pr) => {
+                          const value = answers[pr.key] || ''
+                          const blocking = missingAnswers.includes(pr.key)
+                          return (
+                            <div key={pr.key}>
+                              <label className={labelCls}>
+                                {pr.title} {pr.required ? '*' : ''}
+                              </label>
+                              {pr.type === 'select' ? (
+                                <select
+                                  className={field}
+                                  value={value}
+                                  onChange={(ev) => setAnswers({ ...answers, [pr.key]: ev.target.value })}
+                                >
+                                  <option value="">Choose…</option>
+                                  {(pr.options || []).map((o) => (
+                                    <option key={o} value={o}>
+                                      {o}
+                                    </option>
+                                  ))}
+                                </select>
+                              ) : (
+                                <div className="flex gap-2">
+                                  <input
+                                    className={field}
+                                    value={value}
+                                    onChange={(ev) => setAnswers({ ...answers, [pr.key]: ev.target.value })}
+                                  />
+                                  {pr.type === 'remote' && pr.browse && integration.path && (
+                                    <button
+                                      type="button"
+                                      onClick={() => setPickerFor(pr)}
+                                      className="px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-zinc-300 hover:bg-white/10 text-sm whitespace-nowrap"
+                                    >
+                                      Browse…
+                                    </button>
+                                  )}
+                                </div>
+                              )}
+                              {pr.help && <p className="mt-1 text-xs text-zinc-500">{pr.help}</p>}
+                              {blocking && (
+                                <p className="mt-1 text-xs text-amber-400">
+                                  Needed by the mounts you selected.
+                                </p>
+                              )}
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  )}
 
                   <div>
                     <label className={labelCls}>Mounts</label>
@@ -431,7 +619,7 @@ export default function AddMountBundleDialog({
                                 ))}
                               </div>
                               <div className="text-xs text-zinc-500 font-mono mt-0.5">
-                                {workspace || '<workspace>'}:{pathFor(e.subpath)}
+                                {wsFor(e) || '<workspace>'}:{pathFor(e)}
                                 {e.sync_config?.resource ? ` · ${e.sync_config.resource}` : ''}
                               </div>
                               {on && dup && !outcome && (
@@ -457,25 +645,77 @@ export default function AddMountBundleDialog({
                     </ul>
                   </div>
 
-                  {/* Pre-flight. Each of these is a failure that would otherwise
-                      only show up as a mount that looks fine and does nothing. */}
-                  {workspace && allowedState === 'unknown' && (
-                    <p className="text-xs text-amber-400">
-                      Could not read the workspace&rsquo;s allowed node types; the gate check is skipped.
-                    </p>
+                  {/* Pre-flight, per DESTINATION. Each of these is a failure that
+                      would otherwise only show up as a mount that looks fine and
+                      does nothing. */}
+                  {destinations.length > 0 && (
+                    <div>
+                      <label className={labelCls}>Destinations</label>
+                      <ul className="space-y-2">
+                        {destinations.map((d) => {
+                          const key = `${d.workspace}:${d.root}`
+                          const missing = missingTypesFor(d)
+                          const unknownGate = allowedByWs[d.workspace] === null
+                          const rootState = rootStates[key] || 'unknown'
+                          return (
+                            <li key={key} className="border border-white/10 rounded-lg p-3 text-xs">
+                              <div className="font-mono text-zinc-300">
+                                {d.workspace}:{d.root}
+                                <span className="text-zinc-500">
+                                  {' '}
+                                  · {d.entries.length} mount{d.entries.length === 1 ? '' : 's'}
+                                </span>
+                              </div>
+                              {unknownGate && (
+                                <p className="mt-1 text-amber-400">
+                                  Could not read this workspace&rsquo;s allowed node types; the gate check is
+                                  skipped.
+                                </p>
+                              )}
+                              {missing.length > 0 && (
+                                <div className="mt-1 text-red-400 flex items-start gap-2">
+                                  <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+                                  <div>
+                                    <span className="font-mono">{d.workspace}</span> does not allow{' '}
+                                    {missing.map((t) => (
+                                      <span key={t} className="font-mono">
+                                        {t}{' '}
+                                      </span>
+                                    ))}
+                                    — every item would be rejected while the sync reports{' '}
+                                    <span className="font-mono">ok</span>. Install or reinstall the
+                                    connector&rsquo;s package (its workspace patches add these), or pick another
+                                    workspace.
+                                  </div>
+                                </div>
+                              )}
+                              {rootState === 'missing' && (
+                                <p className="mt-1 text-amber-400">
+                                  <span className="font-mono">{d.root}</span> does not exist yet.{' '}
+                                  <button
+                                    type="button"
+                                    onClick={() => createRoot(d.workspace, d.root)}
+                                    disabled={creatingRoot === key}
+                                    className="underline hover:text-amber-300 disabled:opacity-50"
+                                  >
+                                    {creatingRoot === key ? 'Creating…' : 'Create it'}
+                                  </button>
+                                </p>
+                              )}
+                              {rootState === 'exists' && <p className="mt-1 text-green-400">This folder exists.</p>}
+                            </li>
+                          )
+                        })}
+                      </ul>
+                    </div>
                   )}
-                  {missingTypes.length > 0 && (
+                  {plan.error && (
                     <div className="text-xs text-red-400 flex items-start gap-2 bg-red-500/5 border border-red-500/20 rounded-lg p-3">
                       <AlertTriangle className="w-4 h-4 flex-shrink-0" />
                       <div>
-                        <span className="font-mono">{workspace}</span> does not allow{' '}
-                        {missingTypes.map((t) => (
-                          <span key={t} className="font-mono">
-                            {t}{' '}
-                          </span>
-                        ))}
-                        — every item would be rejected while the sync reports <span className="font-mono">ok</span>. Install or
-                        reinstall the connector&rsquo;s package (its workspace patches add these), or pick another workspace.
+                        This bundle is malformed and cannot be instantiated: {plan.error}. It is shipped by the
+                        connector&rsquo;s package, so this is a packaging bug rather than something to work around
+                        here.
                       </div>
                     </div>
                   )}
@@ -492,6 +732,26 @@ export default function AddMountBundleDialog({
             </>
           )}
         </div>
+
+        {/* Browsing is an input affordance only: whatever is picked is written
+            into the answer as an id, and the text field beside it stays usable —
+            a provider may list a container the credential cannot actually read. */}
+        {pickerFor && integration?.path && (
+          <RemotePicker
+            repo={repo}
+            integrationPath={integration.path}
+            accountId={accountRef || undefined}
+            kind={pickerFor.browse as string}
+            syncConfig={promptSyncConfig}
+            searchable={pickerFor.browse === 'mailbox' || pickerFor.browse === 'user' || pickerFor.browse === 'site'}
+            title={pickerFor.title}
+            onSelect={(item) => {
+              setAnswers((prev) => ({ ...prev, [pickerFor.key]: item.id }))
+              setPickerFor(null)
+            }}
+            onClose={() => setPickerFor(null)}
+          />
+        )}
 
         <div className="flex justify-end gap-2 p-6 border-t border-white/10">
           <button onClick={onClose} className="px-4 py-2 text-zinc-300 hover:bg-white/10 rounded-lg transition-colors">

@@ -139,10 +139,14 @@ properties:
     title: Write Configuration
     description: |
       Writeback behaviour: {
-        mode: "off" | "state_only",
+        mode: "off" | "state_only" | "mirror" | "submit",
         mutable_fields: ["unread", ...],
+        command_node_types: ["raisin:OutboundMail", ...],   # mode: submit
+        create_node_types: [...],                           # mode: mirror
         writeback: "off" | "write_through",
-        conflict: "remote_wins" | "local_wins" | "error" | "resolver_function"
+        conflict: "remote_wins" | "local_wins" | "error" | "resolver_function",
+        delete_policy: "detach" | "trash" | "purge",
+        move_policy: "push" | "detach" | "reject"
       }
       conflict decides what a REFUSED push means — the provider saying the
       object changed since this mount read it. "remote_wins" (the default, and
@@ -165,8 +169,14 @@ properties:
       The effective allow-list is the INTERSECTION of mutable_fields and the
       adapter's declared capabilities.mutable_fields, so an adapter that has
       not opted a field in cannot be made to accept it here.
-      writeback: "write_through" asks for a full mirror (create/update/delete),
-      which is not implemented yet and is reported as unsupported.
+      "mirror" is the full two-way surface (create/update/delete) and needs the
+      adapter to declare can_create/can_update/can_delete; "submit" issues
+      COMMANDS instead of mirroring objects — a queued node becomes one provider
+      call — and is what an outbox is. Both are implemented; the mount is
+      refused with a reason when the adapter cannot serve the mode asked for,
+      rather than being demoted to "off".
+      writeback: "write_through" is the legacy spelling of a mirror and is an
+      independent key from mode.
 
   - name: state
     type: Object

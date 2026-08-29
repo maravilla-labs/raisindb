@@ -98,7 +98,7 @@ an integration/account to a target workspace subtree.
 | `adapter_function` | String | Optional override of the integration default. |
 | `mapping_function` | String | Optional custom mapper. |
 | `sync_config` | Object | `{ mode, interval_seconds, include_patterns, exclude_patterns, ephemeral, ttl_seconds, max_items_per_sync }`. |
-| `write_config` | Object | Parsed today: `{ mode, mutable_fields, conflict, writeback }`. `mode` is `off` \| `state_only` — `mirror` and `submit` are designed but refused with a reason, as are `resolver_function` / `delete_policy` / `move_policy` / `collections`, which are **not parsed at all**. A blob that is present but does not parse fails the mount loudly rather than silently disabling writeback. See [The write path](#the-write-path). |
+| `write_config` | Object | `{ mode, mutable_fields, conflict, writeback, command_node_types, create_node_types, delete_policy, move_policy }`. `mode` is `off` \| `state_only` \| `mirror` \| `submit`; a mode the adapter's capabilities cannot serve is refused with a reason rather than demoted. A blob that is present but does not parse fails the mount loudly rather than silently disabling writeback. See [The write path](#the-write-path). |
 | `state` | Object | Engine-managed: `{ last_sync_token, last_sync_at, last_error, consecutive_failures, status, last_fencing_token }`. Do not hand-edit. |
 | `enabled` | Boolean | Default `true` (indexed). |
 
@@ -110,7 +110,17 @@ console's *Add bundle* (Mounts page) asks for connection, workspace and root
 folder, checks the workspace's `allowed_node_types` against what the bundle
 materialises, and creates ordinary `raisin:VirtualMount` nodes from it
 (`planBundle` in `packages/admin-console/src/api/integrations.ts`). Nothing
-server-side reads the property. The Stripe package is the reference example.
+server-side reads the property. Stripe and Microsoft 365 are the two reference
+examples.
+
+Schema v5 added the two things a single-workspace, no-questions preset could not
+express. An entry may name its own `target_workspace` (and `root_override`), so
+the Microsoft 365 bundle puts mail in `workplace` and drive files in `assets`
+beside every other asset; each destination is gated separately. And a bundle may
+declare `prompts` — the values only the operator knows (which mailbox, which
+SharePoint site), asked once and written onto every entry that lists the prompt
+in `applies_to`, at a target from the closed set `sync_config.<key>` /
+`remote_root` / `account_ref`.
 
 `sync_config.mode` is `poll` | `webhook` | `hybrid`. `webhook` mounts are skipped
 by the periodic driver (they are driven by inbound webhooks instead). Ephemeral

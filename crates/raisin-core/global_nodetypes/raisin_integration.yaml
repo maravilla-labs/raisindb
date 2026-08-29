@@ -1,7 +1,7 @@
 name: raisin:Integration
 description: Tenant/repo-level configuration for an external system integration
 icon: plug
-version: 4
+version: 5
 strict: true
 indexable: true
 index_types: [Property]
@@ -214,6 +214,7 @@ properties:
           id, title, description?,
           default_workspace?,           # suggestion; the operator confirms
           default_root?,                # suggested mount_path prefix, e.g. /stripe
+          prompts?: [ ... ],            # see below (v5)
           mounts: [{
             key,                        # mount name suffix: <connector>-<key>
             title,
@@ -222,9 +223,50 @@ properties:
             required_by?: [ ... ],      # free text, e.g. which app needs it
             node_types?: [ ... ],       # what materialises; checked against the
                                         #   target workspace's allowed_node_types
+            target_workspace?,          # v5: overrides the operator's choice for
+                                        #   THIS entry — a Microsoft 365 bundle
+                                        #   puts mail in `workplace` and drive
+                                        #   files in `assets`, as raisin:Assets
+                                        #   beside every other asset
+            root_override?,             # v5: this entry hangs under a different
+                                        #   root than the operator's, which a
+                                        #   `target_workspace` entry usually needs
+                                        #   because the other workspace has its
+                                        #   own idea of where things live
             mapping_function?, resolver_function?, remote_root?,
             sync_config?, write_config? # copied verbatim onto the mount
           }]
+        }]
+
+      PROMPTS (v5) are the values only the OPERATOR knows, as opposed to the
+      values only the adapter author knows. Baking a mailbox id into a template
+      is impossible, so before v5 anything needing one — a shared mailbox, a
+      colleague's OneDrive, a SharePoint library — could not be expressed as a
+      bundle at all and had to be hand-built. A prompt is a question the console
+      asks once and writes onto every entry that needs the answer.
+
+        prompts: [{
+          key,                  # answer key, e.g. site_id
+          title,
+          help?,
+          type,                 # remote | select | text
+          browse?,              # for type `remote`: the adapter's browse kind
+                                #   (folder | calendar | mailbox | user | site |
+                                #    drive | driveItem), fed to the RemotePicker
+          options?: [ ... ],    # for type `select`
+          applies_to: [ ... ],  # entry KEYS this answer is written onto; an
+                                #   entry not listed never sees it
+          required?,            # blocks create while unanswered, but only when
+                                #   an entry in `applies_to` is actually selected
+          required_when?,       # { otherPromptKey: value } — asked only when
+                                #   another answer matches, e.g. site_id only
+                                #   for drive_scope: site
+          target,               # WHERE the answer is written on the planned
+                                #   mount. A CLOSED set: `sync_config.<key>`,
+                                #   `remote_root`, or `account_ref`. Anything
+                                #   else is rejected by planBundle rather than
+                                #   letting a template write an arbitrary
+                                #   property onto a mount node.
         }]
 
   - name: enabled
