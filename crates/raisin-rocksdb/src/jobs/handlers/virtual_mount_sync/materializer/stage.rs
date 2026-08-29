@@ -180,13 +180,55 @@ impl RocksDbMaterializer {
 
         let new_path = join_path(&scope.mount_path, rel_path);
 
+        /// Do the mount's watched fields already hold what the provider just
+        /// reported?
+        ///
+        /// `true` for a mount that watches nothing, which keeps a read-only
+        /// mount's behaviour exactly as it was. Otherwise every watched field
+        /// the incoming item carries must equal the node's current value; a
+        /// field the item does not carry is not evidence of anything and is
+        /// ignored rather than treated as a difference, or an item that simply
+        /// omits a field would rewrite the node on every sync.
+        fn watched_converged(
+            existing: &super::index::VirtualNodeRef,
+            incoming: &serde_json::Map<String, serde_json::Value>,
+            watched_fields: &[String],
+        ) -> bool {
+            if watched_fields.is_empty() {
+                return true;
+            }
+            let Some(view) = existing.write_view.as_ref() else {
+                // No view means the index carried no watched values to compare,
+                // so the etag is all there is. Writing is the safe answer.
+                return false;
+            };
+            watched_fields
+                .iter()
+                .all(|field| match incoming.get(field) {
+                    Some(value) => view.watched.get(field) == Some(value),
+                    None => true,
+                })
+        }
+
         // 1. Match by __external_id within the mount subtree (survives renames).
         let (id, path) = match index.by_external(&virt.external_id) {
             Some(existing) => {
                 // Etag skip-write: unchanged item → no revision churn. Bypassed
                 // by a remap, which exists precisely to re-apply a mapper whose
                 // output changed while the provider's item did not.
-                if !scope.force_rewrite && virt.etag.is_some() && existing.etag == virt.etag {
+                //
+                // And bypassed when the WATCHED FIELDS disagree, whatever the
+                // etag says. Graph can report an isRead flip under the very
+                // etag its own PATCH response returned, so trusting the etag
+                // here dropped real read/unread changes for exactly the
+                // messages the engine had pushed to — see `can_skip_unmapped`,
+                // which no longer takes the earlier shortcut for these mounts
+                // so that this comparison can happen at all.
+                if !scope.force_rewrite
+                    && virt.etag.is_some()
+                    && existing.etag == virt.etag
+                    && watched_converged(existing, &mapped.properties, &scope.watched_fields)
+                {
                     return Ok(Staged::Skipped);
                 }
                 // Update in place, preserving id + current path (avoids dupes on
@@ -208,7 +250,15 @@ impl RocksDbMaterializer {
                         return Ok(Staged::Skipped);
                     }
                     Some(entry) => {
-                        if virt.etag.is_some() && entry.etag == virt.etag {
+                        // A path match carries no watched values to compare
+                        // against (see `PathEntry`), so on a mount that watches
+                        // fields the etag alone cannot justify a skip and the
+                        // write is the safe answer. Read-only mounts are
+                        // unaffected.
+                        if virt.etag.is_some()
+                            && entry.etag == virt.etag
+                            && scope.watched_fields.is_empty()
+                        {
                             return Ok(Staged::Skipped);
                         }
                         // A mount-owned entry without a known id can only come

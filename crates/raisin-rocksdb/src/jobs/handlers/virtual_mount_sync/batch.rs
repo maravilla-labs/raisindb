@@ -122,6 +122,28 @@ impl<'a> SyncBatcher<'a> {
         if self.scope.force_rewrite || item.etag.is_none() {
             return false;
         }
+        // AN ETAG IS NOT PROOF FOR A MOUNT THAT WATCHES FIELDS.
+        //
+        // Verified in production against Microsoft Graph: marking a message
+        // read or unread in Outlook can leave `@odata.etag` exactly as the
+        // engine's own PATCH response reported it. The change then arrives
+        // carrying the stored etag, is dropped here as if it were our own echo,
+        // and the cursor advances past it — so the flag is lost permanently and
+        // no amount of waiting recovers it. Only a force-rewrite did.
+        //
+        // The symptom was cruel: it failed ONLY for messages the engine had
+        // itself pushed to, because those are the ones whose stored etag came
+        // from a PATCH response, so every "it works" test on an untouched
+        // message passed.
+        //
+        // So a mount with watched fields maps the item and lets the
+        // materializer compare the fields themselves (`stage.rs`). That costs
+        // one mapper call per CHANGED item — the delta feed only carries
+        // changed items — and the mapper is a pure projection, so the price is
+        // CPU rather than correctness. Read-only mounts keep the shortcut.
+        if !self.scope.watched_fields.is_empty() {
+            return false;
+        }
         self.index
             .etag_for(&item.external_id)
             .is_some_and(|etag| Some(etag) == item.etag.as_deref())

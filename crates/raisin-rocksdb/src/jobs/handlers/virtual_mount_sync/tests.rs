@@ -3657,6 +3657,54 @@ async fn draining_twice_pushes_once() {
 /// inbound item's etag never matches the stored one, the mapper re-runs, the
 /// node is rewritten, its `unread` flips back to the pre-push value, and the
 /// next drain pushes again — forever, one revision per cycle.
+/// A remote flag change carrying the SAME etag must still land.
+///
+/// The production bug this pins: marking a message read in Outlook left
+/// `@odata.etag` exactly as the engine's own PATCH response had reported it.
+/// The delta delivered the change, the etag matched, and the item was dropped
+/// before the mapper ran — so the flag was lost permanently and the cursor
+/// advanced past it. Only a force-rewrite recovered it, and the failure was
+/// invisible on any message the engine had never pushed to.
+#[tokio::test]
+async fn a_remote_flag_change_under_an_unchanged_etag_is_applied() {
+    let env = setup().await;
+    let mount = state_only_mount();
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let mock = StateOnlyMock::new();
+    // Synced as READ, and the node agrees.
+    let id = sync_in_mail(&mat, false, "v1").await;
+
+    let c = ctx(&env, &mount, &mock, &mat);
+    let mut state = MountState {
+        last_sync_token: Some("t0".to_string()),
+        ..Default::default()
+    };
+
+    // The provider now reports it UNREAD — under the etag already stored.
+    mock.push_changes(json!({ "items": [{
+        "type": "updated",
+        "relative_path": "m1.eml",
+        "item": {
+            "external_id": "M1",
+            "name": "m1",
+            "is_folder": false,
+            "etag": "v1",
+            "metadata": { "unread": true },
+        },
+    }], "next_token": null }));
+
+    super::delta::run(&c, &mut state).await.unwrap();
+
+    let node = node_by_id(&env, &id).await;
+    assert_eq!(
+        node.properties.get("unread"),
+        Some(&raisin_models::nodes::properties::PropertyValue::Boolean(
+            true
+        )),
+        "a remote flag change must land even when the provider reuses the etag"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_delta_echoing_the_pushed_item_writes_nothing() {
     let env = setup().await;
@@ -3699,10 +3747,13 @@ async fn a_delta_echoing_the_pushed_item_writes_nothing() {
         revisions_before,
         "the echoed item must not produce a revision"
     );
-    assert!(
-        !mock.calls.lock().unwrap().contains(&"to_node".to_string()),
-        "the etag skip-write must drop the item BEFORE the mapper runs"
-    );
+    // The mapper DOES run for a mount that watches fields, and that is the
+    // point rather than a regression: Graph can report a read/unread flip
+    // under the etag its own PATCH response returned, so the etag cannot prove
+    // an echo. What must not happen is a WRITE, which the revision count above
+    // asserts. The cheap pre-mapping skip is kept for read-only mounts, where
+    // an etag really is the whole story.
+
     let node = node_by_id(&env, &id).await;
     assert_eq!(
         node.properties.get("unread"),
