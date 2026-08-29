@@ -1,10 +1,11 @@
 name: imap-adapter
-version: 1.2.0
+version: 1.3.0
 title: IMAP Mailbox Adapter
 description: >
   Virtual-node adapter for IMAP mailboxes. Mount an inbox into a workspace path
   and RaisinDB streams new messages in as ephemeral nodes that agents work and
-  that auto-expire. Speaks REAL IMAP (RFC 3501) over TLS via the native
+  that auto-expire. An optional outbox mount SENDS — not over IMAP, which has no
+  submission verb, but through the tenant's configured email provider. Speaks REAL IMAP (RFC 3501) over TLS via the native
   raisin.imap binding — no JMAP proxy required. Ships the adapter function, a
   default message mapper, and a pre-configured (disabled) raisin:Integration
   template you complete with your own mailbox credentials in the admin console.
@@ -38,6 +39,11 @@ provides:
   functions:
     - /functions/adapters/imap
     - /functions/mappers/imap-default
+    # The OUTBOX (write_config.mode: submit) mapper: raisin:OutboundMail -> the
+    # message the adapter's `submit` hands to raisin.email.send. IMAP cannot
+    # send, so the send leaves through the tenant's configured SMTP/relay
+    # provider rather than over the mount's own connection.
+    - /functions/mappers/imap-outbox
   # Pre-configured integration template (disabled until credentials are supplied).
   content:
     - raisin:system/connectors/imap
@@ -58,6 +64,10 @@ sync:
         - "**"
       mode: merge
     - root: /mappers/imap-default
+      include:
+        - "**"
+      mode: merge
+    - root: /mappers/imap-outbox
       include:
         - "**"
       mode: merge

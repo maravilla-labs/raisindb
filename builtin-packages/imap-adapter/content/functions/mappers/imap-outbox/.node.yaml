@@ -1,0 +1,34 @@
+node_type: raisin:Function
+properties:
+  title: IMAP Outbox Mapper
+  description: >
+    Mapping function for an IMAP OUTBOX mount (write_config.mode: submit).
+    Translates a raisin:OutboundMail command node into the message the adapter's
+    `submit` hands to raisin.email.send — the tenant's configured SMTP/relay
+    provider, because IMAP itself cannot send. Write-direction only: `to_node`
+    returns null, because an outbox imports nothing. Only `action: send` is
+    mapped; reply/reply_all/forward are declined, since threading them needs
+    In-Reply-To/References headers the email API does not accept.
+  language: javascript
+  entry_file: index.js:handler
+  execution_mode: Async
+  enabled: true
+  version: 1
+  resource_limits:
+    timeout_ms: 5000
+    max_memory_bytes: 16777216
+  input_schema:
+    type: object
+    properties:
+      operation:
+        type: string
+        description: "to_external | mapper_capabilities | to_node"
+      node:
+        type: object
+        description: The raisin:OutboundMail command node to translate outward
+      mount:
+        type: object
+        description: Read-only mount snapshot { mount_id, mount_path, sync_config }
+  output_schema:
+    type: object
+    description: "{ payload: { action: 'send', body: { to, cc?, bcc?, subject, text, html? } } } or null when not sendable"

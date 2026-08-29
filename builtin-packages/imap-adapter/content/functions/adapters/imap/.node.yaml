@@ -6,8 +6,13 @@ properties:
     raisin.imap binding (real RFC 3501 IMAP over implicit TLS). Translates the
     normalized adapter operations (capabilities, list, get, get_content,
     get_changes) into raisin.imap.{listMailboxes,fetchMessage,fetchSince}
-    calls. Read-only: create/update/delete are unsupported. Invoked directly by
-    the sync engine with a decrypted credential; owns no token-refresh logic.
+    calls. No mirror surface: create/update/delete are unsupported. Invoked
+    directly by the sync engine with a decrypted credential; owns no
+    token-refresh logic.
+    SEND: an outbox mount (write_config.mode: submit) turns one queued
+    raisin:OutboundMail into one raisin.email.send through the tenant's
+    configured SMTP/relay provider — IMAP itself has no submission verb. The
+    adapter declares can_submit only when a provider is actually resolvable.
     EXPERIMENTAL Gmail push: when a mount sets sync_config.pubsub_topic the
     adapter also serves subscribe/renew/unsubscribe via the Gmail users.watch /
     users.stop REST API (Pub/Sub), reusing the XOAUTH2 OAuth token as bearer.
@@ -40,6 +45,36 @@ properties:
       # `**` is required — `*` does not cross `/`. Only reached when a mount sets
       # sync_config.pubsub_topic; plain IMAP mounts never call it.
       - "https://gmail.googleapis.com/**"
+  # THE SEND PATH. `submit` calls raisin.email.send, which is deny-by-default
+  # per function: with no email_policy the adapter cannot send at all, and it
+  # reports can_submit:false with that as the reason rather than resolving as a
+  # writable mount that throws at drain time.
+  #
+  # Shipped OFF, exactly like the allowed_urls list above is shipped with only
+  # the well-known hosts: turning it on is a decision about this tenant's
+  # sending reputation, and an outbox is not usable without an operator who has
+  # made it. To enable an outbox:
+  #
+  #   1. enabled: true
+  #   2. list the recipient DOMAINS this mailbox may write to — globs, e.g.
+  #      "example.com", "*.example.com". `"*"` means any domain and is what a
+  #      general-purpose outbox needs; write it deliberately, it is the whole
+  #      allowlist.
+  #
+  # `enabled: true` with an empty allowed_recipients still denies everything:
+  # "opted in" never silently means "unrestricted".
+  email_policy:
+    enabled: false
+    allowed_recipients: []
+  # Resolving the selected sender's credential_ref runs the SECRET policy too,
+  # so a function may hold email_policy and still be refused the key. `email/*`
+  # covers the conventional refs (secret://email/api_key,
+  # secret://email/smtp_password); narrow it if yours live elsewhere. Inert
+  # while email_policy is off — nothing on the read path touches a secret.
+  secret_policy:
+    enabled: true
+    allowed_names:
+      - "email/*"
   input_schema:
     type: object
     required:
@@ -48,9 +83,10 @@ properties:
       operation:
         type: string
         description: >
-          One of capabilities, list, get, get_content, get_changes, and — for a
-          Gmail mount that configures sync_config.pubsub_topic — subscribe, renew,
-          unsubscribe (Pub/Sub watch lifecycle).
+          One of capabilities, list, get, get_content, get_changes, submit
+          (an outbox mount's send), and — for a Gmail mount that configures
+          sync_config.pubsub_topic — subscribe, renew, unsubscribe (Pub/Sub
+          watch lifecycle).
       params:
         type: object
         description: Operation-specific arguments
@@ -64,7 +100,9 @@ properties:
         type: object
         description: >
           Read-only mount snapshot { mount_id, remote_root, mount_path,
-          sync_config }. sync_config carries host, port, tls, mailbox.
+          sync_config, api_config, config }. The merged config carries host,
+          port, tls, mailbox, and — for an outbox — email_provider, the name of
+          the tenant sender this mount posts through.
   output_schema:
     type: object
     description: Operation-specific result (ExternalItem, page, Capabilities, Change feed, ...)

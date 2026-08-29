@@ -45,16 +45,18 @@ function's `network_policy` (below), which the binding enforces on
 |------|-----------|---------|
 | `/adapters/imap` | `functions` | IMAP adapter function (`handler(input)`). |
 | `/mappers/imap-default` | `functions` | Default per-message mapping function. |
+| `/mappers/imap-outbox` | `functions` | Outbox mapper: `raisin:OutboundMail` → the message `submit` sends. |
 | `/integrations/imap` | `raisin:system` | Pre-configured `raisin:Integration` template, **disabled**. |
 
 ### Capabilities
 
-Read-only. The adapter reports:
+Read, plus an optional **outbox** (`submit`). The adapter reports:
 
 | flag | value |
 |------|-------|
 | `can_read` | `true` |
-| `can_write` | `false` |
+| `can_write` | `true` **iff** an email provider resolves for the mount (see *Sending*), else `false` |
+| `can_submit` | same — declared only when a sender is genuinely resolvable |
 | `can_create_folders` | `false` |
 | `supports_changes` | `true` (UID-based delta via `fetchSince`) |
 | `supports_webhooks` | `true` **iff** the mount sets `sync_config.pubsub_topic`, else `false` |
@@ -62,13 +64,115 @@ Read-only. The adapter reports:
 | `supports_search` | `false` |
 | `default_ttl` | `86400` (the ephemeral default — messages expire after a day) |
 | `max_file_size` | `null` |
+| `supports_idempotency_key` | `false` (SMTP has nowhere to put one) |
 
 `supports_push` is **config-driven, not hard-coded**: it flips to `true` only for
 a Gmail mount that has a `sync_config.pubsub_topic` (see *Gmail push* below). Every
 other IMAP mount reports `supports_push: false`, so the engine keeps polling it —
 the shared adapter never forces Gmail-specific behavior on a non-Gmail server.
 
-`create` / `update` / `delete` throw "not supported" — the mailbox is read-only.
+`create` / `update` / `delete` throw "not supported" — there is no mirror surface,
+so a `mirror` or `state_only` mount is refused, naming the missing flags. The one
+write this connector has is `submit`.
+
+A provider entry with no `from_address` also leaves it `false`: `EmailConfig::resolve`
+ends with a `validate()` that requires one, so such an entry is selectable and then
+refuses the send.
+
+`can_submit` (and the `can_write` the engine demands alongside it) is declared
+**only when `raisin.email.providers()` actually resolves a sender for this mount**
+— not when a provider merely exists. Email switched off for the tenant, the named
+entry disabled, or several enabled entries with no default all leave it `false`,
+with the cause in `submit_unavailable_reason`. A capability declared with nothing
+behind it makes the mount resolve as writable and then throw at drain time, after
+the engine has already claimed the command.
+
+## Sending: the outbox mount
+
+**IMAP cannot send.** RFC 3501 has no submission verb, and `APPEND` files a copy
+without delivering anything. So an outbox mount does not send over the mount's own
+connection: it hands the message to the **tenant's configured email provider**
+(`/config/email`, the console's *Email* page) through `raisin.email.send` — the
+same SMTP/relay path every other server-side function uses.
+
+Two consequences you must not discover from a recipient's inbox:
+
+- **The mail is not sent from the mailbox this mount syncs.** `from`, `from_name`
+  and `reply_to` come from the tenant's provider entry; a function chooses *which*
+  configured sender to post through, never *who* it appears to be from. Configure
+  an entry whose `from_address` is this mailbox and name it on the mount, or replies
+  land somewhere the sender never looks.
+- **No Sent copy is filed.** That would be an IMAP `APPEND`, which the native
+  binding does not have (see *Not yet* below).
+
+### Setting one up
+
+1. **Grant the adapter function email.** Sending is deny-by-default per function.
+   On `/adapters/imap`, set:
+
+   ```yaml
+   email_policy:
+     enabled: true
+     allowed_recipients: ["example.com"]   # globs on the recipient DOMAIN; "*" = anywhere
+   ```
+
+   It ships `enabled: false`: turning it on is a decision about this tenant's
+   sending reputation. `enabled: true` with an empty list still denies everything.
+   `secret_policy` already grants `email/*`, which is what lets the send resolve the
+   provider's credential.
+
+2. **Name the sender on the mount** (optional when the tenant has exactly one
+   enabled provider, or a `default_provider`):
+
+   ```yaml
+   sync_config:
+     email_provider: transactional   # a name from /config/email
+   ```
+
+3. **Create the mount** with the outbox mapper and `submit` mode:
+
+   ```yaml
+   mapping_function: /mappers/imap-outbox
+   write_config:
+     mode: submit
+   ```
+
+   Conventionally `/mail/outbox`, beside the read-only inbox mount.
+
+Then create a `raisin:OutboundMail` node under it. It is born `draft`; moving
+`status` to `queued` is what authorizes the send. The engine claims it durably
+(`queued -> sending`, stamped with an `attempt_id`) before the provider is called,
+so a crash leaves evidence instead of an unbounded question.
+
+### What is mapped, and what is declined
+
+Only `action: send`. `reply` / `reply_all` / `forward` are **declined** (the mapper
+returns `null`, the command settles `failed` with a reason): threading them needs
+`In-Reply-To` / `References` headers on the outgoing message, and `raisin.email.send`
+accepts no headers — a fresh message with a `Re:` subject breaks the recipient's
+thread silently.
+
+A command with no recipient, no subject or no body is declined for the same reason.
+An HTML-only body gets a plain-text alternative generated from it, because the email
+API requires a non-empty `text` and would otherwise refuse every message composed in
+a rich editor. `importance` and attachments are not carried yet.
+
+### How a failed send is treated
+
+| The send failed with | Command lands at | Why |
+|---|---|---|
+| `[email:policy_denied]`, `[email:config]`, `[email:invalid_message]`, `[email:unsupported]`, `[email:auth_failed]` | `failed` | Refused before a socket, or by the provider before it looked at the message. Nothing left; a person edits and requeues. |
+| `[secrets:policy_denied]` (and any other secret-resolution failure) | `failed` | The provider entry's `credential_ref` is outside this function's `secret_policy.allowed_names`. It refuses before the socket, and the capabilities probe cannot pre-empt it — `providers()` deliberately carries no `credential_ref`. |
+| `[email:rate_limited]` | back to `queued` | A 429 is the provider refusing to *look* at the request — the only answer that proves nothing was sent. |
+| `[email:transport]`, `[email:timeout]`, `[email:provider_error]` | `unknown`, never auto-retried | A relay timeout most often means the message *did* arrive and the acknowledgement was lost. Resending delivers a second copy to a real person. Check the provider for the recorded `attempt_id` before requeueing. |
+
+### Not yet (both need Rust, not JS)
+
+- **Filing a Sent copy** needs an IMAP `APPEND` binding; `raisin.imap` today is
+  `fetchSince` / `listMailboxes` / `fetchMessage` only.
+- **Flag writeback** (marking a message read, `UID STORE`) needs the same kind of
+  new binding, which is what a `state_only` mount would require. Until then
+  `unread` is imported and never pushed.
 
 ## Connection: host, port, TLS, mailbox
 
