@@ -1140,3 +1140,42 @@ test('a create at the mount root still uses the remote root', () => {
   })
   assert.match(calls[0].url, /\/items\/ROOT:/, 'falls back to the mount root')
 })
+
+// ---- a deletion carries a name, and a page survives it ---------------------
+//
+// Production: deleting a file in RaisinDB mirrored the delete to OneDrive
+// correctly, then Graph reported that deletion on the delta feed — and the
+// engine answered "bad get_changes response: missing field `name`". One
+// deletion failed the WHOLE page to deserialize, so 36 items were processed and
+// none applied, on every poll.
+
+test('a deleted change carries a name so the page still parses', () => {
+  stubHttp([
+    {
+      body: {
+        value: [
+          { id: 'D1', deleted: { state: 'deleted' } },
+          // Inside the mount root, so it is in scope for this mount.
+          {
+            id: 'K1',
+            name: 'kept.txt',
+            file: {},
+            parentReference: { path: '/drive/root:/root-folder' },
+          },
+        ],
+        '@odata.deltaLink': 'https://graph.microsoft.com/next',
+      },
+    },
+    // The lazy mount-root resolve: `filesMount()` is rooted at a subfolder, so
+    // the adapter asks once per page where that folder sits.
+    { body: { id: 'ROOT', name: 'root-folder', parentReference: { path: '/drive/root:' } } },
+  ])
+  const out = opGetChanges(CREDENTIAL, filesMount(), { since_token: null })
+
+  const removed = out.items.find((c) => c.type === 'deleted')
+  assert.ok(removed, 'the deletion must be reported')
+  assert.equal(removed.item.external_id, 'D1')
+  assert.ok(removed.item.name, 'name is required by the engine item shape')
+  // And the rest of the page still arrives — the point of the fix.
+  assert.ok(out.items.some((c) => c.type === 'updated' && c.item.external_id === 'K1'))
+})

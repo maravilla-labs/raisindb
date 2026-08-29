@@ -300,6 +300,16 @@ async fn stage_change(
     } else {
         change.relative_path.clone()
     };
+    // A nameless UPDATE is a real adapter fault, and it must fail HERE — as one
+    // item, with its id — rather than by refusing to parse the page (which is
+    // what a required `name` did) or by materialising at the mount path itself,
+    // which would put the item on top of the mount's own folder.
+    if rel_path.is_empty() {
+        return Err(AdapterError::Transient(format!(
+            "get_changes returned an item with no name and no relative_path              (external_id {}), so there is nowhere to put it",
+            change.item.external_id
+        )));
+    }
     if !super::passes_filters(&rel_path, include, exclude) {
         return Ok(false);
     }

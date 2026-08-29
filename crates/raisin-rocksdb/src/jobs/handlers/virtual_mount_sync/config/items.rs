@@ -8,6 +8,18 @@ use serde_json::Value;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExternalItem {
     pub external_id: String,
+    /// Defaulted, because a DELETION legitimately has no name: the engine
+    /// matches it by `external_id` and never looks at anything else
+    /// (`delta::apply_change`). Requiring it made one deleted item fail the
+    /// whole `get_changes` PAGE to deserialize — "bad get_changes response:
+    /// missing field `name`" — so a single delete stopped every other change in
+    /// that poll from being applied, and the adapter's only recourse was to
+    /// invent a value.
+    ///
+    /// An UPDATE with no name is still an error, but a locatable one: see the
+    /// guard in `delta::apply_change`, which fails that item alone rather than
+    /// the page.
+    #[serde(default)]
     pub name: String,
     #[serde(default)]
     pub mime_type: Option<String>,

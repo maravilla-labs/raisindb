@@ -321,7 +321,7 @@ function flatChanges(credential, mount, resource, values) {
     // matches on `external_id` and never reads the path, and a deleted item
     // carries no `parentReference` to derive one from anyway.
     if (v["@removed"] || (isFiles && v.deleted)) {
-      out.push({ type: "deleted", item: { external_id: v.id }, relative_path: v.id });
+      out.push({ type: "deleted", item: { external_id: v.id, name: v.id }, relative_path: v.id });
       continue;
     }
 
@@ -416,7 +416,7 @@ export function calendarChanges(credential, mount, values) {
       // A removed OCCURRENCE says nothing about its series: the series is still
       // there, and the next full walk reconciles anything genuinely gone.
       if (v.seriesMasterId) continue;
-      out.push({ type: "deleted", item: { external_id: v.id }, relative_path: v.id });
+      out.push({ type: "deleted", item: { external_id: v.id, name: v.id }, relative_path: v.id });
       continue;
     }
 
