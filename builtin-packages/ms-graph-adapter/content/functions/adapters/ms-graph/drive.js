@@ -92,21 +92,57 @@ function renameIn(payload) {
 // ---- create ---------------------------------------------------------------
 
 // `params` is `{ payload, parent_id, content }`.
+// Is this create a FOLDER rather than a file?
+//
+// The MAPPER's `is_folder` is the authority — it is the authorized translator
+// between node shape and provider shape, and a custom mapper must be able to
+// say so. The absence of bytes is the fallback, and it is only trustworthy
+// because the engine DEFERS a create whose content has not arrived yet (the
+// two-step upload): "no content" here means "this node has none", not "not
+// yet".
+function isFolderCreate(params) {
+  var payload = params.payload || {};
+  if (payload.is_folder === true || payload.folder) return true;
+  return !params.content;
+}
+
+// A folder, created inside its parent: `POST /children` with a folder facet.
+// Not the `:/name:/content` addressing a file create uses — that form has no
+// folder equivalent.
+function createFolder(credential, mount, params, name) {
+  var parent = createParent(params);
+  var container = parent
+    ? driveBase(mount) + "/items/" + enc(parent)
+    : driveContainer(mount);
+  var resp = graphFetch(credential, "POST", GRAPH + container + "/children", {
+    context: "create folder",
+    body: {
+      name: name,
+      folder: {},
+      // `rename`, for the same reason a file create renames: the folder already
+      // at that name may belong to someone else, and taking it over would be a
+      // silent merge of two trees. Graph answers with the real — possibly
+      // renamed — item and the engine adopts THAT id.
+      "@microsoft.graph.conflictBehavior": conflictBehavior(params.payload, "rename"),
+    },
+  });
+  return writeReceipt(resp, null);
+}
+
 export function driveCreate(credential, mount, params) {
   var content = params.content || null;
-  if (!content) {
-    // A create with no bytes is a FOLDER create, and this adapter does not
-    // implement one (`can_create_folders` stays false). Refusing is the honest
-    // answer: POSTing a folder facet here would let a mirror mount push its own
-    // tree at the provider while `capabilities` says it cannot.
-    throw coded(
-      "create: a drive create needs the file's bytes, and none arrived. Creating a " +
-        "FOLDER is not implemented (can_create_folders is false) — create the folder " +
-        "in OneDrive/SharePoint and let the walk import it.",
-      "config_error"
-    );
-  }
   var name = targetName(params);
+
+  if (isFolderCreate(params)) {
+    if (!name) {
+      throw coded(
+        "create: a folder needs a name — neither payload.name nor content.name was set",
+        "config_error"
+      );
+    }
+    return createFolder(credential, mount, params, name);
+  }
+
   if (!name) {
     throw coded(
       "create: no file name — neither the mapper's payload.name nor content.name was " +

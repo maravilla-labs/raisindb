@@ -118,6 +118,12 @@ export function opCapabilities(mount) {
     caps.can_create = true;
     caps.can_update = true;
     caps.can_delete = true;
+    // A locally-created FOLDER becomes a real one at the provider. Declared
+    // only now that `driveCreate` has a folder branch: this flag is what makes
+    // the engine offer raisin:Folder as a creatable type, and offering it with
+    // nothing behind it is how a mount resolves as capable and then throws at
+    // drain time.
+    caps.can_create_folders = true;
     // THE BYTE CHANNEL. Without this the engine sends metadata only, and a
     // "mirrored" file would arrive at OneDrive as a name with no content —
     // which is exactly what this surface did before the write path existed.

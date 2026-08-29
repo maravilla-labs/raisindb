@@ -333,7 +333,7 @@ impl SyncIndex {
     /// answer: without the node, a duplicate `external_id` creates a second node;
     /// without the ancestors, an item resolving exactly onto an auto-created
     /// folder path would treat that path as free.
-    pub(super) fn record_upsert(&mut self, node_ref: VirtualNodeRef) {
+    pub(crate) fn record_upsert(&mut self, node_ref: VirtualNodeRef) {
         for ancestor in ancestor_paths(&node_ref.path) {
             self.by_path.entry(ancestor).or_insert(PathEntry {
                 id: None,

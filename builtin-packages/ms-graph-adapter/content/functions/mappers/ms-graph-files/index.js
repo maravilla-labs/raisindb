@@ -134,13 +134,16 @@ function toExternal(node, mount, fields, intent) {
   var props = node.properties || {};
   var creating = intent === "create";
 
-  // A FOLDER cannot be created through this adapter (`can_create_folders` is
-  // false: a folder POST is a different request and nothing implements it), so
-  // the intent is declined here rather than sent as a file with no bytes. An
-  // existing folder node is still RENAMEABLE — that is an ordinary PATCH.
-  if (node.node_type === "raisin:Folder" && creating) return null;
+  // A FOLDER is creatable now (`driveCreate` has a folder branch and
+  // `can_create_folders` says so), and it is announced EXPLICITLY rather than
+  // inferred from the absence of bytes: the adapter falls back to that
+  // inference, but a mapper that knows the node type should not make the
+  // adapter guess. An existing folder node is still renameable through the
+  // ordinary PATCH below.
+  var isFolder = node.node_type === "raisin:Folder";
 
   var payload = {};
+  if (isFolder && creating) payload.is_folder = true;
 
   // `title` is the node property the engine knows how to gate; `name` is what
   // Graph calls it. The node's own name is the fallback because to_node writes

@@ -65,6 +65,39 @@ impl<'a> SyncBatcher<'a> {
         self.index.virtual_nodes()
     }
 
+    /// Record a node adopted THIS RUN in the in-memory index, immediately.
+    ///
+    /// The staged mutation only reaches the index on flush, and a folder
+    /// created earlier in the same run is exactly what the next file's parent
+    /// lookup needs. Without this, creating a folder and a file inside it in
+    /// one drain files the file at the mount root — the failure the parent
+    /// resolution exists to prevent, reappearing for locally-created folders.
+    ///
+    /// Deliberately minimal: no write view and no pushed state, because the
+    /// staged mutation carries the authoritative entry and overwrites this one
+    /// at flush. What this needs to answer, and all it needs to answer, is
+    /// "what is the provider id at this path".
+    pub fn record_adopted(
+        &mut self,
+        node_id: &str,
+        path: &str,
+        external_id: &str,
+        etag: Option<String>,
+    ) {
+        self.index.record_upsert(
+            crate::jobs::handlers::virtual_mount_sync::materializer::VirtualNodeRef {
+                id: node_id.to_string(),
+                path: path.to_string(),
+                external_id: external_id.to_string(),
+                is_command: false,
+                etag,
+                synced_secs: None,
+                write_view: None,
+                pushed_state: None,
+            },
+        );
+    }
+
     /// The provider id of the mount-owned node at `path` (see
     /// [`SyncIndex::external_id_at`]).
     pub fn external_id_at(&self, path: &str) -> Option<String> {

@@ -685,8 +685,9 @@ test('files declares the mirror set and the byte channel; mail and calendar are 
   assert.equal(files.accepts_content, true)
   assert.equal(files.supports_trash, true)
   assert.equal(files.default_delete_policy, 'trash')
-  // Declared only for what is implemented: no folder create, no command surface.
-  assert.equal(files.can_create_folders, false)
+  // A locally-created folder becomes a real one at the provider (driveCreate's
+  // folder branch). Still no command surface: a drive item is not a command.
+  assert.equal(files.can_create_folders, true)
   assert.equal(files.can_submit, undefined)
 
   // Mail keeps update + submit and nothing else; the drive work must not have
@@ -1178,4 +1179,32 @@ test('a deleted change carries a name so the page still parses', () => {
   assert.ok(removed.item.name, 'name is required by the engine item shape')
   // And the rest of the page still arrives — the point of the fix.
   assert.ok(out.items.some((c) => c.type === 'updated' && c.item.external_id === 'K1'))
+})
+
+// ---- folder creation -------------------------------------------------------
+
+test('a folder create POSTs a folder facet into its parent', () => {
+  const calls = stubHttp([{ body: { id: '01FOLDER', '@odata.etag': '"1"' } }])
+  const out = opCreate(CREDENTIAL, filesMount(), {
+    payload: { name: 'Reports', is_folder: true },
+    parent_id: 'ROOT',
+    parent_external_id: 'FOLDER-PARENT',
+  })
+
+  assert.match(calls[0].url, /\/items\/FOLDER-PARENT\/children$/, 'created inside its parent')
+  assert.equal(calls[0].request.method, 'POST')
+  assert.deepEqual(calls[0].request.body.folder, {})
+  assert.equal(calls[0].request.body.name, 'Reports')
+  // `rename`, not `replace`: the folder already at that name may be someone
+  // else's, and taking it over would silently merge two trees.
+  assert.equal(calls[0].request.body['@microsoft.graph.conflictBehavior'], 'rename')
+  assert.equal(out.external_id, '01FOLDER')
+})
+
+test('a create with no content and no is_folder is still treated as a folder', () => {
+  // The engine defers a create whose bytes have not arrived, so "no content"
+  // here means the node has none — not that they are still coming.
+  const calls = stubHttp([{ body: { id: '01F2' } }])
+  opCreate(CREDENTIAL, filesMount(), { payload: { name: 'Loose' }, parent_id: 'ROOT' })
+  assert.match(calls[0].url, /\/children$/)
 })

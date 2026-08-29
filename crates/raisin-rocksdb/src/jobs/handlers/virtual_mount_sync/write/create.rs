@@ -336,6 +336,13 @@ pub(super) async fn create_one(
         }
     }
 
+    // Visible to the REST OF THIS RUN before the flush, so a file created after
+    // the folder it lives in finds its parent. Creates are processed in path
+    // order, which puts a folder ahead of its contents — that ordering is only
+    // useful if the folder's provider id is readable by the time the contents
+    // are reached.
+    batcher.record_adopted(&node.id, &node.path, external_id, etag.clone());
+
     batcher
         .stage_adopt(&node.id, external_id, etag, Some(pushed), node_bytes)
         .await?;

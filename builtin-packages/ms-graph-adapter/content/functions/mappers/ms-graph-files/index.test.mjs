@@ -142,12 +142,17 @@ test('a content-only push is never dropped', () => {
   assert.ok(out.payload['@microsoft.graph.conflictBehavior'])
 })
 
-test('a folder create is declined; a folder rename is not', () => {
-  // `can_create_folders` is false — a folder POST is a different request and
-  // nothing implements it. Sending one as a file with no bytes is the failure.
+test('a folder create announces itself; a folder rename is an ordinary patch', () => {
+  // The adapter falls back to "no bytes means folder", but the mapper knows the
+  // node type and says so rather than making the adapter infer it.
   const folder = { node_type: 'raisin:Folder', name: 'Reports', properties: { title: 'Reports' } }
-  assert.equal(push(folder, { intent: 'create' }), null)
-  assert.equal(push(folder, { intent: 'update' }).payload.name, 'Reports')
+  const created = push(folder, { intent: 'create' })
+  assert.equal(created.payload.is_folder, true)
+  assert.equal(created.payload.name, 'Reports')
+
+  const renamed = push(folder, { intent: 'update' })
+  assert.equal(renamed.payload.name, 'Reports')
+  assert.equal(renamed.payload.is_folder, undefined, 'a rename is not a create')
 })
 
 test('a create with no name at all is declined rather than guessed', () => {
