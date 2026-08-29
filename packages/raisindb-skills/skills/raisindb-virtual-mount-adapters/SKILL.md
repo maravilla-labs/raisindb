@@ -1,6 +1,6 @@
 ---
 name: raisindb-virtual-mount-adapters
-description: "Build custom connector adapters for RaisinDB virtual mounts: sync external systems (mail, calendars, drives, any API) into nodes and push local edits back. Covers the adapter operation contract (capabilities/list/get_changes/update/submit/subscribe), error taxonomy, cursors and has_more, bidirectional mappers, the receipt-etag and item-build-parity contracts, diverged-fields subsets, conflict policies (RemoteWins/LocalWins), write modes (state_only/mirror/submit), resolvers, echo prevention, and the field-tested traps. Use whenever the user wants a connector, adapter, integration sync, virtual mount, two-way sync with an external service, or mentions raisin:VirtualMount, raisin:Integration, get_changes, or 'sync X into RaisinDB'."
+description: "Build custom connector adapters for RaisinDB virtual mounts: sync external systems (mail, calendars, drives, any API) into nodes and push local edits back. Covers the adapter operation contract (capabilities/list/get_changes/update/submit/subscribe), error taxonomy, cursors and has_more, bidirectional mappers, the receipt-etag and item-build-parity contracts, diverged-fields subsets, conflict policies (RemoteWins/LocalWins), write modes (state_only/mirror/submit), resolvers, echo prevention, the field-tested traps, and SHIPPING A MOUNT BUNDLE — the `mount_bundles` preset on your connector template that lets the admin console mint your connector's whole mount layout in one click, including per-entry target workspaces and the prompts that ask an operator for a mailbox, a site or a drive. Use whenever the user wants a connector, adapter, integration sync, virtual mount, two-way sync with an external service, or mentions raisin:VirtualMount, raisin:Integration, get_changes, or 'sync X into RaisinDB'."
 ---
 
 # RaisinDB Virtual-Mount Adapters
@@ -288,6 +288,105 @@ counted.
   folder and one no-changes delta poll to every adapter test matrix.
 - Live end-to-end: create the integration + mount in the admin console,
   `Sync now`, watch the run history and the delivery panel.
+
+## Ship a mount bundle with your connector
+
+**If your connector needs more than one mount, author a bundle.** This is the
+difference between a connector an operator can install and one they can only
+follow a README about.
+
+A mount carries exactly one `write_config`, one delta cursor and one backfill.
+So a connector whose resources need different write modes — an outbox of
+commands beside a read-only ledger beside a two-way catalogue — is unusable
+with fewer than N mounts, each of which is ten values only YOU know: the mapper
+path, `sync_config.resource`, the mode, the `command_node_types`. Operators
+rebuilt that set by hand, per tenant, from prose, and could not reproduce it.
+
+Put it on the connector template as `raisin:Integration.mount_bundles` and the
+admin console's **Mounts → Add bundle** mints the lot, asking only for what is
+genuinely the operator's: connection, workspace, root folder.
+
+```yaml
+# content/_raisin__system/connectors/<name>/.node.yaml
+properties:
+  mount_bundles:
+    - id: acme-workplace
+      title: Acme
+      default_workspace: workplace     # a suggestion; the operator confirms
+      default_root: /acme
+      prompts:                         # v5 — the operator's half, see below
+        - key: site_id
+          title: Site
+          type: remote                 # remote | select | text
+          browse: site                 # your adapter's `browse` kind
+          required: true
+          required_when: { scope: site }
+          applies_to: [files]          # entry keys this answer is written onto
+          target: sync_config.site_id  # sync_config.<key> | remote_root | account_ref
+      mounts:
+        - key: inbox
+          title: Inbox
+          subpath: mail/inbox
+          default: true                # pre-selected in the picker
+          remote_root: inbox           # bake a well-known id when you have one
+          node_types: [raisin:Mail]    # checked against the workspace gate
+          mapping_function: /mappers/acme-mail
+          sync_config: { resource: mail, mode: hybrid, interval_seconds: 300 }
+          write_config:
+            writeback: 'off'           # QUOTE IT — see below
+            mode: state_only
+            mutable_fields: [unread]
+        - key: files
+          title: Files
+          subpath: drives/acme
+          target_workspace: assets     # v5 — this entry lands elsewhere
+          root_override: /             #      with a root of its own
+          node_types: [raisin:Asset]
+          mapping_function: /mappers/acme-files
+          sync_config: { resource: files, mode: hybrid, interval_seconds: 300 }
+          write_config: { writeback: 'off', mode: 'off' }
+```
+
+Rules worth knowing before you author one:
+
+- **Nothing server-side reads this.** It is instantiated client-side into
+  ordinary `raisin:VirtualMount` nodes by `planBundle`
+  (`packages/admin-console/src/api/integrations.ts`), and once created they owe
+  the bundle nothing — they are edited like any other mount. So a bundle is a
+  starting point, not a binding.
+- **`node_types` is load-bearing.** The console checks it against the target
+  workspace's `allowed_node_types` and refuses to create while a type is
+  missing. Without that check the mount is created, rejects 100% of items,
+  reports `outcome: "ok"`, and flips `backfill_complete` — permanently empty.
+  Ship the matching `workspace_patches` in your manifest, `raisin:Folder`
+  included, at the root level too.
+- **`target_workspace` / `root_override` (v5)** let one bundle span workspaces.
+  Use it when a resource belongs somewhere the rest does not — files as
+  `raisin:Asset` in the asset library, say. Each destination is gated separately.
+- **`prompts` (v5)** are the values only the operator knows, which you cannot
+  bake: a mailbox, a SharePoint site, a drive. `applies_to` names the entries
+  the answer is written onto; `required_when` hides a prompt until another
+  answer matches; `target` is a CLOSED set (`sync_config.<key>`, `remote_root`,
+  `account_ref`) and `planBundle` throws on anything else rather than silently
+  dropping it. `type: remote` renders a picker over your adapter's `browse`
+  operation — which is the reason to implement `browse` at all.
+- **Quote `'off'`.** serde_yaml is YAML 1.1, where a bare `off` is boolean
+  `false`, and `writeback`/`mode` are Strings. This has bitten twice.
+- **Declare the mode your capabilities can actually serve.** A `submit` entry
+  needs `command_node_types` covering its own `node_types` or it drains nothing;
+  a `state_only` entry needs non-empty `mutable_fields`; `mirror` needs
+  `can_create`/`can_update`/`can_delete`. A mode the adapter cannot serve is
+  refused at drain time, after the engine has claimed the work.
+- **Test the preset like code.** The bundle is data that ships to every tenant
+  who clicks the button. Assert that every `resource` is one your adapter
+  accepts, every mapper path exists, every `node_types` entry is in the
+  workspace patch, every prompt `applies_to` names a real entry, and no
+  interval is below your provider's rate-limit floor. `maravilla-connect`'s
+  `tests/package.rs` is a worked example for both its bundles.
+
+Two reference bundles ship today: Stripe (one workspace, seven resources, three
+write modes) and Microsoft 365 (two workspaces, prompts, mail as four mounts
+sharing one root).
 
 ## Ship it
 
