@@ -94,6 +94,35 @@ async fn list_repo_invocations(
     out
 }
 
+/// The PENDING invocation carrying this external key, if there is one.
+///
+/// ── WHY ONLY PENDING ────────────────────────────────────────────────────────
+/// This is what makes `externalKey` a uniqueness constraint rather than a
+/// label, and the honest limit of that constraint is worth stating where it is
+/// enforced: the registry keeps TERMINAL jobs for an hour
+/// (`IN_MEMORY_RETENTION_HOURS`), so a completed invocation is simply gone from
+/// this listing afterwards. A key therefore means "at most one invocation
+/// WAITING TO RUN", never "this key has run at most once, ever" — that second
+/// claim needs a durable record of its own, and a caller who needs it must keep
+/// one (an inventory claim, a marker on the subject) rather than reading a
+/// guarantee here that this cannot make.
+async fn pending_invocation_with_key(
+    registry: &JobRegistry,
+    data_store: &JobDataStore,
+    tenant_id: &str,
+    repo_id: &str,
+    external_key: &str,
+) -> Option<(JobInfo, JobContext)> {
+    list_repo_invocations(registry, data_store, tenant_id, repo_id)
+        .await
+        .into_iter()
+        .find(|(info, ctx)| {
+            matches!(info.status, JobStatus::Scheduled)
+                && ctx.metadata.get(META_EXTERNAL_KEY).and_then(|v| v.as_str())
+                    == Some(external_key)
+        })
+}
+
 /// Resolve an invocation by job id first, falling back to external key.
 async fn resolve_invocation(
     registry: &JobRegistry,
@@ -196,6 +225,47 @@ pub fn create_scheduler_schedule(
                 .and_then(|v| v.as_u64())
                 .map(|v| v as u32)
                 .unwrap_or(0);
+
+            // ── AN EXTERNAL KEY IS A UNIQUENESS CONSTRAINT ──────────────────
+            // It used to be a label: the key went into the job's metadata, and
+            // two schedules with the same key produced TWO jobs that both
+            // fired. Every caller needing "arm this once" therefore had to
+            // list-then-schedule, which is a check-then-write over an
+            // eventually-consistent store — the exact race a scheduler exists
+            // to remove. Enforcing it here is the only place it can be done
+            // once for everyone.
+            //
+            // `replace: true` re-arms deliberately: the pending job is
+            // cancelled and a new one registered, which is what a caller wants
+            // when the moment itself has MOVED (an event rescheduled). Without
+            // it a repeat schedule is a no-op that reports the job already
+            // standing, so a materializer can run every minute and arm once.
+            let replace = request
+                .get("replace")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if let Some(key) = &external_key {
+                if let Some((existing, context)) = pending_invocation_with_key(
+                    &job_registry,
+                    &job_data_store,
+                    &tenant_id,
+                    &repo_id,
+                    key,
+                )
+                .await
+                {
+                    if replace {
+                        job_registry.cancel_job(&existing.id).await?;
+                    } else {
+                        let mut out = invocation_json(&existing, &context);
+                        // The caller asked for a schedule and got the one that
+                        // already stands. Saying so beats reporting a fresh
+                        // registration that did not happen.
+                        out["deduplicated"] = json!(true);
+                        return Ok(out);
+                    }
+                }
+            }
 
             let invocation_id = nanoid::nanoid!();
             let job_type = JobType::ScheduledInvocation {
@@ -447,6 +517,97 @@ mod tests {
         assert_eq!(all["invocations"].as_array().unwrap().len(), 1);
         let filtered = list(json!({"externalKey": "no-such-key"})).await.unwrap();
         assert!(filtered["invocations"].as_array().unwrap().is_empty());
+    }
+
+    // ── WHAT AN EXTERNAL KEY PROMISES ───────────────────────────────────────
+    // These three hold the constraint to exactly what it claims. The middle one
+    // is the reason it exists: without it a materializer that runs every minute
+    // registers a fresh job every minute, and a reminder goes out as many times
+    // as the sweep happened to tick before its moment arrived.
+
+    #[tokio::test]
+    async fn a_repeated_schedule_under_one_key_arms_a_single_job() {
+        let (registry, data_store, _tmp) = test_setup();
+        let (schedule, _cancel, list, _get) = callbacks(&registry, &data_store, "repo-a");
+
+        let first = schedule(schedule_request(Some("invoice-9"))).await.unwrap();
+        assert_eq!(first["status"], "scheduled");
+        assert!(first.get("deduplicated").is_none());
+
+        // The same caller, again — the ordinary case for anything that arms on
+        // a schedule of its own rather than knowing it has already armed.
+        let second = schedule(schedule_request(Some("invoice-9"))).await.unwrap();
+        assert_eq!(
+            second["deduplicated"],
+            json!(true),
+            "a repeat under a live key must report the job that already stands",
+        );
+        assert_eq!(
+            second["job_id"], first["job_id"],
+            "and it must be the SAME job, not a second one wearing the same key",
+        );
+
+        assert_eq!(
+            list(json!({"externalKey": "invoice-9"}))
+                .await
+                .unwrap()["invocations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1,
+            "one key, one pending invocation",
+        );
+    }
+
+    #[tokio::test]
+    async fn replace_rearms_the_key_at_the_new_moment() {
+        let (registry, data_store, _tmp) = test_setup();
+        let (schedule, _cancel, list, _get) = callbacks(&registry, &data_store, "repo-a");
+
+        let first = schedule(schedule_request(Some("show-3"))).await.unwrap();
+
+        // The moment MOVED — the show was rescheduled — so the standing job is
+        // wrong and the caller says so explicitly.
+        let mut moved = schedule_request(Some("show-3"));
+        moved["runAt"] = json!((chrono::Utc::now() + chrono::Duration::hours(9)).to_rfc3339());
+        moved["replace"] = json!(true);
+        let second = schedule(moved).await.unwrap();
+
+        assert_eq!(second["status"], "scheduled");
+        assert_ne!(
+            second["job_id"], first["job_id"],
+            "replace registers a new job rather than editing the old one",
+        );
+        let pending = list(json!({"externalKey": "show-3"})).await.unwrap();
+        let pending = pending["invocations"].as_array().unwrap();
+        // The cancelled original may still be listed as history; exactly one is
+        // still waiting to run, and that is the invariant that matters.
+        assert_eq!(
+            pending
+                .iter()
+                .filter(|i| i["status"] == "scheduled")
+                .count(),
+            1,
+            "replacing must leave one live job, never two",
+        );
+    }
+
+    #[tokio::test]
+    async fn keyless_schedules_stay_independent() {
+        let (registry, data_store, _tmp) = test_setup();
+        let (schedule, _cancel, list, _get) = callbacks(&registry, &data_store, "repo-a");
+
+        schedule(schedule_request(None)).await.unwrap();
+        schedule(schedule_request(None)).await.unwrap();
+
+        assert_eq!(
+            list(json!({})).await.unwrap()["invocations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2,
+            "deduplication is what a KEY buys; without one, two schedules are two jobs",
+        );
     }
 
     #[tokio::test]
