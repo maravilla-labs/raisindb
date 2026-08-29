@@ -277,6 +277,27 @@ jobs:
           # Reinstall to update pnpm lockfile with new versions
           pnpm install --no-frozen-lockfile
 
+      - name: Verify pinned workspace dep versions exist on npm
+        run: |
+          VER="$VERSION"
+          if [[ -z "$VER" ]]; then
+            echo "VERSION not set (auto-bump path); skipping dependency version guard"
+            exit 0
+          fi
+          fail=0
+          for dep in @raisindb/client @raisindb/schema-wasm; do
+            if npm view "$dep@$VER" version >/dev/null 2>&1; then
+              echo "✓ $dep@$VER is published"
+            else
+              echo "✗ $dep@$VER is NOT published on npm"
+              fail=1
+            fi
+          done
+          if [[ "$fail" == "1" ]]; then
+            echo "::error::Refusing to publish @raisindb/cli@$VER — its pinned workspace deps are not resolvable on npm. Publish schema-wasm and client at $VER first (run this workflow with package=all, or publish the missing siblings)."
+            exit 1
+          fi
+
       - name: Publish
         run: pnpm --filter @raisindb/cli publish --access public --no-git-checks
 
