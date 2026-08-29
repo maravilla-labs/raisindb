@@ -230,9 +230,10 @@ mod tests {
             "http_request",
             // Events (1)
             "emit_event",
-            // AI operations (4)
+            // AI operations (5)
             "ai_completion",
             "ai_list_models",
+            "ai_list_providers",
             "ai_get_default_model",
             "ai_embed",
             // Resource operations (2)
@@ -377,6 +378,7 @@ mod tests {
             .replace("addResource", "add_resource")
             .replace("processFromStorage", "process_from_storage")
             .replace("listModels", "list_models")
+            .replace("listProviders", "list_providers")
             .replace("getDefaultModel", "get_default_model")
             .replace("allowsAdminEscalation", "allows_admin_escalation")
             .replace("emitEvent", "emit_event")

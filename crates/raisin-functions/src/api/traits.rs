@@ -204,6 +204,9 @@ pub trait FunctionApi: Send + Sync {
     /// List available AI models
     async fn ai_list_models(&self) -> Result<Vec<Value>>;
 
+    /// List the tenant's configured AI providers (slug, kind, enabled, model count)
+    async fn ai_list_providers(&self) -> Result<Vec<Value>>;
+
     /// Get default model for a use case
     async fn ai_get_default_model(&self, use_case: &str) -> Result<Option<String>>;
 

@@ -337,6 +337,10 @@ impl FunctionApi for RaisinFunctionApi {
         self.impl_ai_list_models().await
     }
 
+    async fn ai_list_providers(&self) -> Result<Vec<Value>> {
+        self.impl_ai_list_providers().await
+    }
+
     async fn ai_get_default_model(&self, use_case: &str) -> Result<Option<String>> {
         self.impl_ai_get_default_model(use_case).await
     }

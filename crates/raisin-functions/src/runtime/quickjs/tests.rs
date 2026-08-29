@@ -2088,7 +2088,13 @@ async fn test_raisin_api_surface_snapshot() {
     expect("events", vec!["emit"]);
     expect(
         "ai",
-        vec!["completion", "embed", "getDefaultModel", "listModels"],
+        vec![
+            "completion",
+            "embed",
+            "getDefaultModel",
+            "listModels",
+            "listProviders",
+        ],
     );
     expect("functions", vec!["call", "execute"]);
     expect("flows", vec!["run"]);

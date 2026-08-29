@@ -118,6 +118,18 @@ pub type AIListModelsCallback = Arc<
         + Sync,
 >;
 
+/// Callback for listing AI PROVIDERS (not their models).
+///
+/// Distinct from [`AIListModelsCallback`] because the two answer different
+/// questions and only this one can answer "is this slug configured". A provider
+/// that accepts arbitrary model ids (Groq, Ollama) may have ZERO registered
+/// models, so it is invisible to a model listing while being perfectly usable.
+pub type AIListProvidersCallback = Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Value>>> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// Callback for getting default AI model
 pub type AIGetDefaultModelCallback = Arc<
     dyn Fn(

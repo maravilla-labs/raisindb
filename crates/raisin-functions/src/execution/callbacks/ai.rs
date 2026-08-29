@@ -28,6 +28,7 @@ use serde_json::Value;
 
 use crate::api::{
     AICompletionCallback, AIEmbedCallback, AIGetDefaultModelCallback, AIListModelsCallback,
+    AIListProvidersCallback,
 };
 use crate::execution::ai_provider::create_provider_for_model;
 
@@ -525,6 +526,61 @@ pub fn create_ai_list_models(
             }
 
             Ok(models)
+        })
+    })
+}
+
+/// Create ai_list_providers callback: `raisin.ai.listProviders()`
+///
+/// The question `listModels()` cannot answer: **which provider SLUGS does this
+/// tenant have?**
+///
+/// A raisin:AIAgent's `provider` is a slug into this configuration — content a
+/// package ships, pointing at state the package cannot create — so "is this
+/// agent runnable here" is a question every agent-guarding function needs to ask
+/// before an `ai_agent` step fails at the call. Listing models is the wrong
+/// instrument for it: Groq and Ollama resolve `<slug>:<anything>`, so a provider
+/// with ZERO registered models is fully usable and completely invisible to a
+/// model listing. That gap is why callers had to treat "no models" as
+/// "unknowable" and stay permissive.
+///
+/// DISABLED PROVIDERS ARE INCLUDED, and carry `enabled: false`. `listModels`
+/// filters them out, which is right for "what can I run" and wrong here: a
+/// caller diagnosing an agent needs to distinguish "that slug does not exist"
+/// from "that slug is switched off", and those want different advice.
+///
+/// No API keys, no endpoints — only what a caller needs to decide reachability
+/// and write a useful message. A function's return value reaches user code.
+pub fn create_ai_list_providers(
+    ai_config_store: Option<Arc<dyn TenantAIConfigStore>>,
+    tenant_id: String,
+) -> AIListProvidersCallback {
+    Arc::new(move || {
+        let store = ai_config_store.clone();
+        let tenant = tenant_id.clone();
+
+        Box::pin(async move {
+            let store = store.ok_or_else(|| {
+                raisin_error::Error::Backend("AI operations not configured".to_string())
+            })?;
+
+            let config = store.get_config(&tenant).await.map_err(|e| {
+                raisin_error::Error::Backend(format!("Failed to get AI config: {}", e))
+            })?;
+
+            Ok(config
+                .providers
+                .iter()
+                .map(|p| {
+                    serde_json::json!({
+                        "slug": p.slug,
+                        "kind": p.kind,
+                        "enabled": p.enabled,
+                        "model_count": p.models.len(),
+                        "has_api_key": p.api_key_encrypted.is_some(),
+                    })
+                })
+                .collect())
         })
     })
 }

@@ -141,6 +141,10 @@ where
             deps.ai_config_store.clone(),
             tenant_id.clone(),
         )),
+        ai_list_providers: Some(ai::create_ai_list_providers(
+            deps.ai_config_store.clone(),
+            tenant_id.clone(),
+        )),
         ai_list_models: Some(ai::create_ai_list_models(
             deps.ai_config_store.clone(),
             tenant_id.clone(),

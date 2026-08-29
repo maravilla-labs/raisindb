@@ -280,6 +280,17 @@ impl FunctionApi for MockFunctionApi {
         Ok(mock_ai_completion(&request))
     }
 
+    async fn ai_list_providers(&self) -> Result<Vec<Value>> {
+        Ok(vec![
+            serde_json::json!({
+                "slug": "openai", "kind": "openai", "enabled": true, "model_count": 1
+            }),
+            serde_json::json!({
+                "slug": "anthropic", "kind": "anthropic", "enabled": true, "model_count": 1
+            }),
+        ])
+    }
+
     async fn ai_list_models(&self) -> Result<Vec<Value>> {
         Ok(vec![
             serde_json::json!({

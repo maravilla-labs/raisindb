@@ -43,6 +43,7 @@ pub struct RaisinFunctionApiCallbacks {
     pub ai_completion: Option<AICompletionCallback>,
     pub ai_embed: Option<AIEmbedCallback>,
     pub ai_list_models: Option<AIListModelsCallback>,
+    pub ai_list_providers: Option<AIListProvidersCallback>,
     pub ai_get_default_model: Option<AIGetDefaultModelCallback>,
     pub resource_get_binary: Option<ResourceGetBinaryCallback>,
     pub pdf_process_from_storage: Option<PdfProcessFromStorageCallback>,
@@ -210,6 +211,11 @@ impl RaisinFunctionApiCallbacks {
 
     pub fn with_ai_embed(mut self, callback: AIEmbedCallback) -> Self {
         self.ai_embed = Some(callback);
+        self
+    }
+
+    pub fn with_ai_list_providers(mut self, callback: AIListProvidersCallback) -> Self {
+        self.ai_list_providers = Some(callback);
         self
     }
 

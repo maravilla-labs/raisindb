@@ -32,6 +32,7 @@ pub use callbacks::{
     AIEmbedCallback,
     AIGetDefaultModelCallback,
     AIListModelsCallback,
+    AIListProvidersCallback,
     BranchCompareCallback,
     BranchCopyNodesCallback,
     BranchDiffCallback,

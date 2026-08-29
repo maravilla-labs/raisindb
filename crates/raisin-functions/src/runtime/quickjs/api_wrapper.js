@@ -573,6 +573,20 @@ globalThis.raisin = {
             const models = __call('ai_listModels', []);
             return __isErr(models) ? [] : models;
         },
+        // The tenant's configured providers: [{ slug, kind, enabled,
+        // model_count, has_api_key }]. Use this, not listModels(), to ask
+        // whether an agent's `provider` slug exists here — a provider that
+        // accepts arbitrary model ids can have zero registered models and still
+        // work, so it is absent from listModels() while being perfectly usable.
+        // DISABLED providers are included with `enabled: false`, so "missing"
+        // and "switched off" stay distinguishable.
+        //
+        // Errors swallowed to [], like listModels — so an empty array still
+        // means "could not tell", never "definitely none".
+        listProviders: () => {
+            const providers = __call('ai_listProviders', []);
+            return __isErr(providers) ? [] : providers;
+        },
         // Returns "" when no default is configured (or on error) — never null.
         getDefaultModel: (useCase) => {
             const r = __call('ai_getDefaultModel', [useCase]);

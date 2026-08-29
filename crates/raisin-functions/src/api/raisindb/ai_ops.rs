@@ -27,6 +27,14 @@ impl RaisinFunctionApi {
         callback().await
     }
 
+    pub(crate) async fn impl_ai_list_providers(&self) -> Result<Vec<Value>> {
+        let callback = self.callbacks.ai_list_providers.as_ref().ok_or_else(|| {
+            raisin_error::Error::Validation("AI list providers callback not configured".to_string())
+        })?;
+
+        callback().await
+    }
+
     pub(crate) async fn impl_ai_get_default_model(&self, use_case: &str) -> Result<Option<String>> {
         let callback = self
             .callbacks

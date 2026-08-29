@@ -53,6 +53,23 @@ pub fn methods() -> Vec<ApiMethodDescriptor> {
                 })
             },
         },
+        // ai.listProviders()
+        ApiMethodDescriptor {
+            internal_name: "ai_listProviders",
+            js_name: "listProviders",
+            py_name: "list_providers",
+            category: "ai",
+            args: vec![],
+            return_type: ReturnType::JsonArray,
+            invoker: |api: Arc<dyn FunctionApi>,
+                      _args: Vec<Value>|
+             -> BoxFuture<'static, Result<InvokeResult>> {
+                Box::pin(async move {
+                    let result = api.ai_list_providers().await?;
+                    Ok(InvokeResult::JsonArray(result))
+                })
+            },
+        },
         // ai.getDefaultModel(useCase)
         ApiMethodDescriptor {
             internal_name: "ai_getDefaultModel",
