@@ -47,6 +47,12 @@ pub struct CreateInvocationRequest {
     /// Workspace the invocation executes against (defaults to "functions")
     #[serde(default)]
     pub workspace: Option<String>,
+    /// Re-arm an `external_key` that already has a pending invocation: the
+    /// standing job is cancelled and a new one registered at the new time.
+    /// Without it, scheduling under a live key is a no-op that reports the job
+    /// already standing.
+    #[serde(default)]
+    pub replace: bool,
     /// Retry attempts if the invocation fails (defaults to 0 — one-shot)
     #[serde(default)]
     pub max_retries: Option<u32>,
@@ -147,6 +153,29 @@ mod inner {
             out.push((job, context));
         }
         out
+    }
+
+    /// The PENDING invocation carrying this external key, if there is one.
+    ///
+    /// Only pending: a terminal job is history, and a key must be reusable once
+    /// its run has happened. Same limit as the functions-side helper — this is
+    /// "at most one waiting to run", never "this key has run at most once,
+    /// ever"; a caller needing that second guarantee must keep a durable record
+    /// of its own.
+    pub(super) async fn pending_invocation_with_key(
+        rocksdb: &Arc<raisin_rocksdb::RocksDBStorage>,
+        tenant_id: &str,
+        repo: &str,
+        external_key: &str,
+    ) -> Option<(JobInfo, JobContext)> {
+        list_repo_invocations(rocksdb, tenant_id, repo)
+            .await
+            .into_iter()
+            .find(|(info, ctx)| {
+                matches!(info.status, JobStatus::Scheduled)
+                    && ctx.metadata.get(META_EXTERNAL_KEY).and_then(|v| v.as_str())
+                        == Some(external_key)
+            })
     }
 
     /// Resolve a scheduled invocation by job id, verifying it belongs to
@@ -345,6 +374,28 @@ pub async fn create_invocation(
         .and_then(|a| a.user_id.clone())
         .unwrap_or_else(|| "http_api".to_string());
 
+    // AN EXTERNAL KEY IS A UNIQUENESS CONSTRAINT, and it has to mean the same
+    // thing through both doors. The functions runtime enforces it in
+    // `raisin.scheduler.schedule`; a caller arriving over HTTP with a key that
+    // already has a job waiting must not get a second one that also fires.
+    if let Some(key) = req.external_key.as_deref() {
+        if let Some((existing, context)) =
+            inner::pending_invocation_with_key(&rocksdb, tenant_id, &repo, key).await
+        {
+            if req.replace {
+                rocksdb
+                    .job_registry()
+                    .cancel_job(&existing.id)
+                    .await
+                    .map_err(|e| ApiError::internal(e.to_string()))?;
+            } else {
+                let mut out = inner::invocation_json(&existing, &context);
+                out["deduplicated"] = serde_json::json!(true);
+                return Ok(Json(out));
+            }
+        }
+    }
+
     let (job_id, invocation_id) =
         inner::register_invocation(&rocksdb, tenant_id, &repo, &req, run_at, &actor).await?;
 
@@ -487,4 +538,133 @@ pub async fn cancel_invocation(
     Err(ApiError::internal(
         "Scheduled invocations require RocksDB backend",
     ))
+}
+
+#[cfg(all(test, feature = "storage-rocksdb"))]
+mod tests {
+    //! WHICH standing job an external key finds — the decision the dedup branch
+    //! is built on.
+    //!
+    //! The branch itself (return the standing job, or cancel it and register a
+    //! new one under `replace`) mirrors the functions-side callback, which has
+    //! its own behavioural tests. What is NOT shared, and so is tested here, is
+    //! this door's own lookup: it reads a MERGED listing of live and persisted
+    //! jobs, so "pending only" has to hold against history that the functions
+    //! side never sees.
+
+    use super::inner::pending_invocation_with_key;
+    use raisin_rocksdb::{JobDataStore, RocksDBStorage, META_EXTERNAL_KEY};
+    use raisin_storage::jobs::{JobContext, JobId, JobStatus, JobType};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    const TENANT: &str = "default";
+    const REPO: &str = "example";
+
+    fn context(external_key: &str) -> JobContext {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            META_EXTERNAL_KEY.to_string(),
+            serde_json::json!(external_key),
+        );
+        JobContext {
+            tenant_id: TENANT.to_string(),
+            repo_id: REPO.to_string(),
+            branch: "main".to_string(),
+            workspace_id: "functions".to_string(),
+            revision: raisin_hlc::HLC::new(0, 0),
+            metadata,
+        }
+    }
+
+    async fn schedule(
+        storage: &Arc<RocksDBStorage>,
+        data_store: &JobDataStore,
+        external_key: &str,
+    ) -> JobId {
+        let job_id = JobId::new();
+        data_store.put(&job_id, &context(external_key)).unwrap();
+        storage
+            .job_registry()
+            .register_job_at_with_id(
+                job_id.clone(),
+                JobType::ScheduledInvocation {
+                    invocation_id: nanoid::nanoid!(),
+                    target_kind: "function".to_string(),
+                },
+                TENANT.to_string(),
+                chrono::Utc::now() + chrono::Duration::hours(1),
+                Some(0),
+            )
+            .await
+            .unwrap();
+        job_id
+    }
+
+    #[tokio::test]
+    async fn a_live_key_finds_the_job_that_already_stands() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(RocksDBStorage::new(temp.path()).unwrap());
+        let data_store = storage.job_data_store();
+
+        let job_id = schedule(&storage, data_store, "invoice-9").await;
+
+        let found = pending_invocation_with_key(&storage, TENANT, REPO, "invoice-9").await;
+        assert_eq!(
+            found.map(|(info, _)| info.id),
+            Some(job_id),
+            "a key with a job waiting must resolve to that job, or the caller registers a second one that also fires",
+        );
+
+        assert!(
+            pending_invocation_with_key(&storage, TENANT, REPO, "no-such-key")
+                .await
+                .is_none(),
+        );
+    }
+
+    #[tokio::test]
+    async fn a_key_whose_run_has_happened_is_free_again() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(RocksDBStorage::new(temp.path()).unwrap());
+        let data_store = storage.job_data_store();
+
+        let job_id = schedule(&storage, data_store, "nightly").await;
+        storage
+            .job_registry()
+            .update_status(&job_id, JobStatus::Completed)
+            .await
+            .unwrap();
+
+        // The job must still BE in the listing — otherwise this asserts nothing
+        // about the status filter, only that the listing forgot the job.
+        let all = super::inner::list_repo_invocations(&storage, TENANT, REPO).await;
+        assert!(
+            all.iter().any(|(info, _)| info.id == job_id),
+            "the completed job should still be listed as history",
+        );
+
+        assert!(
+            pending_invocation_with_key(&storage, TENANT, REPO, "nightly")
+                .await
+                .is_none(),
+            "a terminal job is history; treating it as standing would make a key usable exactly once and then never again",
+        );
+    }
+
+    #[tokio::test]
+    async fn another_repository_s_key_is_not_this_one_s() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(RocksDBStorage::new(temp.path()).unwrap());
+        let data_store = storage.job_data_store();
+
+        schedule(&storage, data_store, "shared-name").await;
+
+        assert!(
+            pending_invocation_with_key(&storage, TENANT, "other-repo", "shared-name")
+                .await
+                .is_none(),
+            "keys are scoped per repository, as every other operation here is",
+        );
+    }
 }
