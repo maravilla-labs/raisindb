@@ -548,9 +548,7 @@ mod tests {
         );
 
         assert_eq!(
-            list(json!({"externalKey": "invoice-9"}))
-                .await
-                .unwrap()["invocations"]
+            list(json!({"externalKey": "invoice-9"})).await.unwrap()["invocations"]
                 .as_array()
                 .unwrap()
                 .len(),
