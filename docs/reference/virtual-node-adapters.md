@@ -199,15 +199,30 @@ engine never calls them.
 | `list` | `{ folder_id?, cursor?, limit? }` | `{ items: ExternalItem[], next_cursor: string \| null }` |
 | `get` | `{ item_id?, path? }` | `ExternalItem \| null` |
 | `get_content` | `{ item_id, parent_item_id?, mime_type? }` | `{ content \| content_base64 \| fetch_url, mime_type }` |
-| `create` _(write)_ | `{ parent_id, name, is_folder, payload?, content?, mime_type? }` | `ExternalItem` |
-| `update` _(write)_ | `{ item_id, payload?, name?, content?, mime_type?, fields?, etag? }` | `ExternalItem` |
-| `delete` _(write)_ | `{ item_id, mode? }` | `{ deleted: true }` |
+| `create` _(write)_ | `{ payload, parent_id }` | `{ external_id, etag? }` |
+| `update` _(write)_ | `{ item_id, payload, fields, etag? }` | `{ etag?, … }` |
+| `delete` _(write)_ | `{ item_id, policy, etag? }` | `{ deleted: true }` |
 | `submit` _(write, optional)_ | `{ payload, external_id?, idempotency_key }` | `{ external_id, etag?, provider_id? }` |
 | `get_changes` | `{ since_token: string \| null, folder_id? }` | `{ items: Change[], next_token: string }` |
 | `subscribe` _(push, optional)_ | `{ notification_url }` | `{ subscription_id, secret?, expires_at?, resource? }` |
 | `renew` _(push, optional)_ | `{ subscription_id, notification_url }` | `{ subscription_id, expires_at? }` |
 | `unsubscribe` _(push, optional)_ | `{ subscription_id }` | `{ ok: true }` |
 | `browse` _(discovery, optional)_ | `{ kind?, parent_id?, query?, cursor?, limit? }` | `{ items: BrowseItem[], next_cursor: string \| null }` |
+
+> **The write ops carry no BYTES, and this table used to imply otherwise.** It
+> listed `name`, `is_folder`, `content` and `mime_type` on `create`/`update`;
+> the engine has never sent any of them. What it sends is exactly the three
+> shapes above — `payload` is the mapper's `to_external` output and nothing
+> else (`write/create.rs:223`, `write/push.rs:191`, `write/deletes.rs:178`).
+>
+> The cost of the older wording is visible in the tree: the Google Drive
+> adapter carries a complete multipart-upload path branching on
+> `params.content` that can never execute, because nothing populates it. If you
+> are writing an adapter for a file-shaped provider, a `mirror` mount today
+> syncs METADATA only. Adding a byte channel is a bounded engine change — the
+> binary read callback already exists and is already in scope at the sync
+> handler's construction site — and is designed in
+> `docs/design/drive-write-path.md`.
 
 `subscribe` / `renew` / `unsubscribe` are the **push lifecycle** (§2.9), called only when the
 adapter advertises `supports_push: true` and the mount runs in `webhook` or `hybrid` mode. All
