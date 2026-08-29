@@ -140,7 +140,16 @@ function toExternal(node, mount, fields, intent) {
   // inference, but a mapper that knows the node type should not make the
   // adapter guess. An existing folder node is still renameable through the
   // ordinary PATCH below.
-  var isFolder = node.node_type === "raisin:Folder";
+  // `raisin:Folder` is the engine's own container type and always counts. A
+  // mount may name ADDITIONAL container types in
+  // `sync_config.folder_node_types` — which is how a product with its own
+  // folder type (a CMS folder, say) mounts a drive without that type's name
+  // living in this mapper, this adapter, or the engine. Same list the engine
+  // reads when it decides whether a node is waiting for bytes, so the two
+  // cannot disagree about what a folder is.
+  var extra = (mount && mount.sync_config && mount.sync_config.folder_node_types) || [];
+  var isFolder =
+    node.node_type === "raisin:Folder" || extra.indexOf(node.node_type) !== -1;
 
   var payload = {};
   if (isFolder && creating) payload.is_folder = true;

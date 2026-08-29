@@ -204,7 +204,11 @@ pub(super) async fn create_one(
     // Bytes not here yet? Wait. See `content::content_pending` — creating now
     // means asking a provider whose create IS the byte transfer to make
     // something out of nothing, and its refusal is terminal for the mount.
-    if super::content::content_pending(node, accepts_content) {
+    if super::content::content_pending(
+        node,
+        accepts_content,
+        &ctx.mount.sync_config.folder_node_types,
+    ) {
         tracing::debug!(
             mount_id = %ctx.scope.mount_id,
             node_id = %node.id,

@@ -17,7 +17,7 @@ properties:
   entry_file: index.js:handler
   execution_mode: Async
   enabled: true
-  version: 3
+  version: 4
   resource_limits:
     timeout_ms: 5000
     max_memory_bytes: 16777216

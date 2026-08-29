@@ -77,6 +77,16 @@ pub struct SyncConfig {
     /// where that must propagate.
     #[serde(default)]
     pub allow_empty_reconcile: bool,
+    /// Node types this mount treats as FOLDERS, beyond the engine's own
+    /// `raisin:Folder`.
+    ///
+    /// A folder has no bytes, so it must never be mistaken for a node whose
+    /// upload has not finished — that mistake defers its create forever and
+    /// misfiles everything inside it. It is a mount setting rather than engine
+    /// knowledge on purpose: a product with its own container type names it
+    /// here, and that type's name never has to appear in this engine.
+    #[serde(default)]
+    pub folder_node_types: Vec<String>,
     /// How many item rejections to tolerate before giving up the run, while
     /// nothing at all has been written.
     ///
@@ -123,6 +133,7 @@ impl Default for SyncConfig {
             batch_size: default_batch_size(),
             batch_max_bytes: default_batch_max_bytes(),
             path_template: String::new(),
+            folder_node_types: Vec::new(),
             allow_empty_reconcile: false,
             max_item_failures: default_max_item_failures(),
         }

@@ -93,8 +93,18 @@ fn file_resource(node: &Node) -> Option<(String, Option<u64>, Option<String>, St
 ///
 /// `is_loaded: false` counts as pending for the same reason: the Resource
 /// exists but its bytes do not.
-pub(crate) fn content_pending(node: &Node, accepts_content: bool) -> bool {
+pub(crate) fn content_pending(node: &Node, accepts_content: bool, folder_types: &[String]) -> bool {
     if !accepts_content {
+        return false;
+    }
+    // A FOLDER has no bytes by definition, so "waiting for its content" is a wait
+    // that never ends. Without this arm every folder candidate returned Skipped
+    // forever, which made folder creation inert AND misfiled the files inside
+    // one: the folder never got an external id, so the file's parent resolution
+    // fell back to the mount root, the next delta reported the file at the root,
+    // and the engine moved the local node to match. Authoring `Reports/q3.pdf`
+    // put the bytes in the wrong place and dragged the node out of its folder.
+    if is_folder_node(node, folder_types) {
         return false;
     }
     match node.properties.get("file") {
@@ -114,6 +124,22 @@ pub(crate) fn content_pending(node: &Node, accepts_content: bool) -> bool {
         // a two-step create, not a node that will never have bytes.
         _ => true,
     }
+}
+
+/// The engine's own container type, which `upsert_deep_node` materialises mount
+/// paths as. Always a folder, on every mount.
+pub(crate) const FOLDER_NODE_TYPE: &str = "raisin:Folder";
+
+/// Is this node a folder?
+///
+/// `raisin:Folder` always is. A mount may name ADDITIONAL types through
+/// `sync_config.folder_node_types` — which is how a product with its own
+/// container type (a CMS folder, say) mounts a drive without that type's name
+/// appearing anywhere in this engine. Deliberately a mount setting rather than
+/// engine knowledge: the engine owns "what is a folder here", the operator owns
+/// "which of my types are folders".
+pub(crate) fn is_folder_node(node: &Node, folder_types: &[String]) -> bool {
+    node.node_type == FOLDER_NODE_TYPE || folder_types.iter().any(|t| t == &node.node_type)
 }
 
 /// Describe (and where possible carry) a node's bytes for a create or update.
@@ -268,6 +294,12 @@ pub(crate) async fn call_with_content(
         json!({
             "status": outcome.status,
             "body": outcome.body,
+            // A JSON body is not the only place a provider puts the result:
+            // S3's PutObject answers with an EMPTY body and the ETag in a
+            // header, so an adapter given status + body alone had nothing to
+            // finalize with. Keys are lowercased by `collect_headers` so the
+            // adapter need not guess the casing.
+            "headers": outcome.headers,
             "intent": operation,
             "item_id": item_id,
         }),
@@ -412,7 +444,7 @@ mod tests {
             unreachable!()
         };
         resource.is_loaded = Some(false);
-        assert!(content_pending(&announced, true));
+        assert!(content_pending(&announced, true, &[]));
 
         // A node with no file property at all is the same case, earlier.
         let bare = Node {
@@ -421,13 +453,46 @@ mod tests {
             name: "later.pdf".into(),
             ..Default::default()
         };
-        assert!(content_pending(&bare, true));
+        assert!(content_pending(&bare, true, &[]));
 
         // Step two: the bytes landed.
-        assert!(!content_pending(&node_with_file(Some(3), "k"), true));
+        assert!(!content_pending(&node_with_file(Some(3), "k"), true, &[]));
 
         // And a mount that does not carry content is never made to wait.
-        assert!(!content_pending(&bare, false));
+        assert!(!content_pending(&bare, false, &[]));
+    }
+
+    /// A folder has no bytes, so it must never be treated as an unfinished
+    /// upload — that deferred its create forever, which in turn misfiled every
+    /// file inside it at the mount root.
+    #[tokio::test]
+    async fn a_folder_never_waits_for_content() {
+        let folder = Node {
+            id: "f1".into(),
+            node_type: "raisin:Folder".into(),
+            name: "Reports".into(),
+            path: "/drives/onedrive/Reports".into(),
+            ..Default::default()
+        };
+        assert!(!content_pending(&folder, true, &[]));
+
+        // A product's own container type is named by the MOUNT, so its name
+        // never reaches this engine.
+        let studio_folder = Node {
+            id: "f2".into(),
+            node_type: "studio:Folder".into(),
+            name: "Reports".into(),
+            ..Default::default()
+        };
+        assert!(
+            content_pending(&studio_folder, true, &[]),
+            "an unknown type is still a node that might be waiting for bytes"
+        );
+        assert!(!content_pending(
+            &studio_folder,
+            true,
+            &["studio:Folder".to_string()]
+        ));
     }
 
     /// Refused rather than degraded: a create from metadata alone would leave

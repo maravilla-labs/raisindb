@@ -169,3 +169,29 @@ test('mapper_capabilities reports the write half, and to_node still works', () =
   assert.equal(handler({ operation: 'to_node', external_item: item(), mount: MOUNT }).node_type,
     'raisin:Asset')
 })
+
+test('a mount may name its own folder types, and the mapper honours them', () => {
+  // The product's container type never appears in the engine or this mapper —
+  // the MOUNT names it, and both sides read the same list.
+  const studioFolder = {
+    node_type: 'studio:Folder',
+    name: 'Reports',
+    properties: { title: 'Reports' },
+  }
+  const withoutConfig = handler({
+    operation: 'to_external',
+    node: studioFolder,
+    mount: MOUNT,
+    intent: 'create',
+  })
+  assert.equal(withoutConfig.payload.is_folder, undefined, 'unconfigured: just a node')
+
+  const configured = handler({
+    operation: 'to_external',
+    node: studioFolder,
+    mount: { ...MOUNT, sync_config: { ...(MOUNT.sync_config || {}), folder_node_types: ['studio:Folder'] } },
+    intent: 'create',
+  })
+  assert.equal(configured.payload.is_folder, true)
+  assert.equal(configured.payload.name, 'Reports')
+})
