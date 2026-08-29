@@ -261,6 +261,7 @@ pub async fn run_ai_with_tools(
             &tool_map,
             instance_id,
             iteration,
+            &config.agent_path,
             &config.control,
             &mut messages,
             &mut all_tool_calls,
@@ -366,6 +367,7 @@ pub async fn run_ai_with_tools_streaming(
             &tool_map,
             instance_id,
             iteration,
+            &config.agent_path,
             &config.control,
             &mut messages,
             &mut all_tool_calls,
@@ -408,6 +410,7 @@ async fn process_tool_calls(
     tool_map: &std::collections::HashMap<String, String>,
     instance_id: &str,
     iteration: u32,
+    agent_path: &str,
     control: &ControlToolConfig,
     messages: &mut Vec<Value>,
     all_tool_calls: &mut Vec<ExecutedToolCall>,
@@ -416,7 +419,9 @@ async fn process_tool_calls(
         let (tc_id, func_name, arguments) = describe_tool_call(tc);
 
         if !control_tools::is_control_tool(&func_name) {
-            let executed = execute_tool_call(callbacks, tc, tool_map, instance_id, iteration).await;
+            let executed =
+                execute_tool_call(callbacks, tc, tool_map, instance_id, iteration, agent_path)
+                    .await;
             messages.push(serde_json::json!({
                 "role": "tool",
                 "tool_call_id": executed.id,
@@ -676,6 +681,7 @@ async fn execute_tool_call(
     tool_map: &std::collections::HashMap<String, String>,
     instance_id: &str,
     iteration: u32,
+    agent_path: &str,
 ) -> ExecutedToolCall {
     let (tc_id, func_name, arguments) = describe_tool_call(tc);
 
@@ -694,8 +700,9 @@ async fn execute_tool_call(
         .unwrap_or_else(|| func_name.clone());
 
     let start = Instant::now();
+    // AS THE AGENT: its own tool call, so its own configured rights.
     let exec_result = callbacks
-        .execute_function(&func_path, arguments.clone())
+        .execute_function_as_agent(&func_path, arguments.clone(), agent_path)
         .await;
     let duration_ms = start.elapsed().as_millis() as u64;
 

@@ -186,6 +186,24 @@ pub trait FlowCallbacks: Send + Sync {
     /// Execute a function synchronously
     async fn execute_function(&self, function_ref: &str, input: Value) -> FlowResult<Value>;
 
+    /// Execute a function AS a named AGENT — an agent's own tool call.
+    ///
+    /// Defaults to [`Self::execute_function`], so an implementation with no
+    /// notion of agent identity is unchanged. The real one composes the agent
+    /// onto the flow's marker and lets the agent's `execution_context` decide
+    /// whose permissions apply: without this, an agent restricted in the UI
+    /// still ran with full system rights the moment it was called from inside a
+    /// flow, which is the opposite of what its configuration says.
+    async fn execute_function_as_agent(
+        &self,
+        function_ref: &str,
+        input: Value,
+        agent_path: &str,
+    ) -> FlowResult<Value> {
+        let _ = agent_path;
+        self.execute_function(function_ref, input).await
+    }
+
     // === Workspace-Aware Node Operations ===
     //
     // These methods allow creating/reading/updating nodes in a specific workspace,

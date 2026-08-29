@@ -38,32 +38,7 @@ fn system_initiated_by(marker: Option<String>) -> Option<AuthContext> {
     })
 }
 
-/// A node property read as a list of ids, tolerating `/roles/x` path forms the
-/// way the user resolver does.
-fn string_array(
-    properties: &std::collections::HashMap<String, PropertyValue>,
-    key: &str,
-) -> Vec<String> {
-    match properties.get(key) {
-        Some(PropertyValue::Array(values)) => values
-            .iter()
-            .filter_map(|value| match value {
-                PropertyValue::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
-                _ => None,
-            })
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
 impl<S: Storage + 'static> AIToolCallExecutionHandler<S> {
-    /// The SAME resolver a signed-in user goes through — group expansion, role
-    /// inheritance, permission set. An agent's rights must never be computed by
-    /// a second implementation.
-    fn permission_service(&self) -> raisin_core::PermissionService<S> {
-        raisin_core::PermissionService::new(self.storage.clone())
-    }
-
     /// Resolve the auth context for a tool call based on the agent's execution_context setting
     ///
     /// This method:
@@ -194,48 +169,25 @@ impl<S: Storage + 'static> AIToolCallExecutionHandler<S> {
         );
 
         match execution_context {
-            // The agent's OWN rights. An agent with roles or groups is a
-            // principal like any other: it executes under exactly what it was
-            // granted, RLS included, so "what may this bot touch" is answered
-            // by the access model rather than by hoping the prompt behaves.
-            //
-            // Opt-in by configuration AND by content: an agent set to `agent`
-            // with nothing granted would be able to do NOTHING, which is a
-            // silent, confusing failure — so an empty grant list falls back to
-            // the previous behaviour and says so in the log.
+            // The agent's OWN rights, resolved by the shared helper the flow
+            // path also uses — an agent must not get different permissions
+            // depending on which direction it reached storage from.
             "agent" => {
-                let roles = string_array(&agent.properties, "roles");
-                let groups = string_array(&agent.properties, "groups");
-                if roles.is_empty() && groups.is_empty() {
-                    tracing::warn!(
-                        agent_path = %agent_path,
-                        "Agent is set to run under its own permissions but has no roles or \
-                         groups; falling back to system context"
-                    );
-                    return system_initiated_by(Some(agent_marker));
-                }
-
-                match self
-                    .permission_service()
-                    .resolve_for_principal_node(tenant_id, repo_id, branch, &agent)
-                    .await
+                match raisin_core::services::agent_auth::resolve_agent_context(
+                    &self.storage,
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    &agent_workspace,
+                    &agent_path,
+                    &agent_marker,
+                )
+                .await
                 {
-                    Ok(resolved) => {
-                        tracing::info!(
-                            agent_path = %agent_path,
-                            roles = ?resolved.effective_roles,
-                            permissions = resolved.permissions.len(),
-                            "Agent executing under its own permissions"
-                        );
-                        // `user_id` is the agent's own marker, so a REL
-                        // condition (`node.created_by == auth.user_id`) and the
-                        // authorship stamp agree on who this is.
-                        Some(
-                            AuthContext::for_user(&agent_marker)
-                                .with_permissions(resolved)
-                                .with_agent(agent_marker.clone()),
-                        )
-                    }
+                    // Not configured for its own rights, or granted nothing:
+                    // the previous behaviour, which the helper logs.
+                    Ok(None) => system_initiated_by(Some(agent_marker)),
+                    Ok(context) => context,
                     Err(error) => {
                         // FAIL CLOSED. An agent whose rights cannot be resolved
                         // must not silently inherit system privileges — that is

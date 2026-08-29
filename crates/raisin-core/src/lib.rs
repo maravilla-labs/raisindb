@@ -44,6 +44,7 @@ pub mod connection;
 pub mod replication;
 pub mod traits;
 pub mod services {
+    pub mod agent_auth;
     pub mod archetype_resolver;
     pub mod block_translation_service;
     pub mod derived_cache_registry;

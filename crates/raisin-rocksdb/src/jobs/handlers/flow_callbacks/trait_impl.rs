@@ -491,6 +491,51 @@ impl FlowCallbacks for RocksDBFlowCallbacks {
         .map_err(|e| FlowError::FunctionExecution(format!("Function execution failed: {}", e)))
     }
 
+    /// A tool call made BY AN AGENT inside a flow.
+    ///
+    /// The marker composes the agent onto whatever set the flow off
+    /// (`agent:/agents/triage-bot@flow:/flows/publish`), so provenance keeps
+    /// both hops — and, because the marker names the agent, the functions layer
+    /// can honour that agent's `execution_context` instead of running every
+    /// in-flow tool call as the whole system.
+    async fn execute_function_as_agent(
+        &self,
+        function_ref: &str,
+        input: Value,
+        agent_path: &str,
+    ) -> FlowResult<Value> {
+        if agent_path.trim().is_empty() {
+            return self.execute_function(function_ref, input).await;
+        }
+
+        tracing::debug!(
+            function_ref = %function_ref,
+            agent_path = %agent_path,
+            "Executing function from flow, as the agent"
+        );
+
+        let executor = self.function_executor.as_ref().ok_or_else(|| {
+            FlowError::FunctionExecution("Function executor callback not configured".to_string())
+        })?;
+
+        let marker = raisin_models::auth::agent_identity::with_origin(
+            raisin_models::auth::agent_identity::agent(agent_path),
+            self.agent.as_deref(),
+        );
+
+        executor(
+            function_ref.to_string(),
+            input,
+            self.tenant_id.clone(),
+            self.repo_id.clone(),
+            self.branch.clone(),
+            "functions".to_string(),
+            Some(marker),
+        )
+        .await
+        .map_err(|e| FlowError::FunctionExecution(format!("Function execution failed: {}", e)))
+    }
+
     async fn emit_event(&self, instance_id: &str, event: FlowExecutionEvent) -> FlowResult<()> {
         // If no event emitter is configured, silently succeed (no-op)
         // This allows the flow to run without SSE streaming configured

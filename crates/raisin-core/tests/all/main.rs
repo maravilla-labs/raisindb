@@ -17,6 +17,7 @@
 // Helpers are shared per-module, so unused ones in a given module are expected.
 #![allow(dead_code)]
 
+mod agent_auth_test;
 mod branch_isolation_tests;
 mod child_listing_keyset_test;
 mod engine_owned_property_shield;
