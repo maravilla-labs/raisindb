@@ -176,7 +176,7 @@ fn test_apply_response_format_text_is_noop() {
 }
 
 #[test]
-fn test_apply_response_format_json_object_is_noop() {
+fn test_apply_response_format_json_object_injects_no_tool() {
     let mut tools = None;
     let mut tool_choice = None;
 
@@ -186,9 +186,48 @@ fn test_apply_response_format_json_object_is_noop() {
         &mut tool_choice,
     );
 
-    // Anthropic doesn't have a native json_object mode
+    // Anthropic has no native json_object mode, so nothing is injected HERE —
+    // the instruction goes on the system prompt instead. That is the half this
+    // provider was missing entirely: the doc comment claimed a system prompt
+    // hint while no hint existed anywhere, making JsonObject a silent no-op.
     assert!(tools.is_none());
     assert!(tool_choice.is_none());
+}
+
+#[test]
+fn test_json_object_reaches_the_model_as_a_system_instruction() {
+    let ask = |system: Option<&str>, format: Option<ResponseFormat>| {
+        let mut request = CompletionRequest::new(
+            "claude-3-5-sonnet".to_string(),
+            vec![Message::user("list three colours")],
+        );
+        request.system = system.map(String::from);
+        request.response_format = format;
+        AnthropicProvider::build_chat_request(&request, false).system
+    };
+
+    let hint = AnthropicProvider::json_object_system_hint();
+
+    // With no system prompt of its own, the hint IS the system prompt.
+    assert_eq!(
+        ask(None, Some(ResponseFormat::JsonObject)).as_deref(),
+        Some(hint)
+    );
+
+    // With one, the hint is appended — the caller's prompt is never replaced.
+    let combined = ask(Some("You are terse."), Some(ResponseFormat::JsonObject)).unwrap();
+    assert!(combined.starts_with("You are terse."), "{combined}");
+    assert!(combined.contains(hint), "{combined}");
+
+    // And it is added ONLY for JsonObject.
+    assert_eq!(
+        ask(Some("You are terse."), None).as_deref(),
+        Some("You are terse.")
+    );
+    assert_eq!(
+        ask(Some("You are terse."), Some(ResponseFormat::Text)).as_deref(),
+        Some("You are terse.")
+    );
 }
 
 #[test]
@@ -563,4 +602,116 @@ fn test_known_models_not_empty() {
     assert!(has_opus);
     assert!(has_sonnet);
     assert!(has_haiku);
+}
+
+// ── the silent structured-output failure ───────────────────────────────────
+//
+// Anthropic forces a synthetic tool for JsonSchema, but unlike Groq its API does
+// NOT reject a model that answers in content anyway. So the prose lands in
+// `message.content`, `extract_structured_output` finds no tool call to move, and
+// the response is indistinguishable from success. The caller's parse then fails
+// far away and blames the prompt.
+//
+// These drive the real `complete()` against a stub speaking Anthropic's wire
+// shape, so they need no API key and run in CI.
+mod prose_instead_of_schema {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    async fn stub(body: String) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let _ = socket.read(&mut buf).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.flush().await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// An Anthropic reply carrying a text block rather than a tool_use block.
+    fn text_reply(text: &str) -> String {
+        format!(
+            r#"{{"id":"msg_1","type":"message","role":"assistant","model":"claude","content":[{{"type":"text","text":{}}}],"stop_reason":"end_turn","usage":{{"input_tokens":1,"output_tokens":2}}}}"#,
+            serde_json::to_string(text).unwrap()
+        )
+    }
+
+    fn schema_request(base: &str) -> (AnthropicProvider, CompletionRequest) {
+        let provider = AnthropicProvider::with_base_url("test-key", base.to_string());
+        let mut request = CompletionRequest::new(
+            "claude-3-5-sonnet".to_string(),
+            vec![Message::user("write three variants")],
+        );
+        request.response_format = Some(ResponseFormat::JsonSchema {
+            schema: JsonSchemaSpec {
+                name: Some("copy_variants".to_string()),
+                schema: serde_json::json!({"type": "object"}),
+                strict: true,
+            },
+        });
+        (provider, request)
+    }
+
+    #[tokio::test]
+    async fn prose_is_reported_here_instead_of_failing_far_away() {
+        let base = stub(text_reply("Sure! Here are three ideas for you.")).await;
+        let (provider, request) = schema_request(&base);
+
+        let err = provider.complete(request).await.unwrap_err();
+        let ProviderError::RequestFailed(msg) = err else {
+            panic!("wrong error variant");
+        };
+        // The message has to name the CAUSE, not just the symptom — the whole
+        // point is that "not JSON" sent people to the prompt.
+        assert!(msg.contains("answered in prose"), "{msg}");
+        assert!(msg.contains("claude-3-5-sonnet"), "{msg}");
+        // …and show enough of the reply to recognise it.
+        assert!(msg.contains("Sure!"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn a_model_that_answers_in_json_without_the_tool_is_accepted() {
+        // Complying in substance is complying. Some models return the object as
+        // text rather than through the forced tool, and that answer is perfectly
+        // usable — refusing it would turn a working call into an error.
+        let base = stub(text_reply(r#"{"variants":[],"notes":"ok"}"#)).await;
+        let (provider, request) = schema_request(&base);
+
+        let r = provider
+            .complete(request)
+            .await
+            .expect("valid JSON must pass");
+        assert_eq!(r.message.content, r#"{"variants":[],"notes":"ok"}"#);
+    }
+
+    #[tokio::test]
+    async fn a_fenced_json_answer_is_accepted_too() {
+        let base = stub(text_reply("```json\n{\"ok\":true}\n```")).await;
+        let (provider, request) = schema_request(&base);
+        assert!(provider.complete(request).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn prose_is_fine_when_no_schema_was_asked_for() {
+        let base = stub(text_reply("Sure! Here are three ideas.")).await;
+        let provider = AnthropicProvider::with_base_url("test-key", base);
+        let request = CompletionRequest::new(
+            "claude-3-5-sonnet".to_string(),
+            vec![Message::user("three ideas")],
+        );
+        let r = provider
+            .complete(request)
+            .await
+            .expect("no schema, no guard");
+        assert!(r.message.content.starts_with("Sure!"));
+    }
 }

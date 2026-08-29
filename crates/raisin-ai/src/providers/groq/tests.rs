@@ -602,3 +602,211 @@ fn test_tool_choice_serialization() {
     assert_eq!(json["type"], "function");
     assert_eq!(json["function"]["name"], "my_tool");
 }
+
+// ── forced-tool structured output: recovery when the model answers in content ──
+//
+// Groq gets JSON-schema output by injecting a synthetic tool and pinning
+// `tool_choice` to it. A model that replies in CONTENT instead makes the API
+// reject the whole request, stranding a perfectly good answer in the error's
+// `failed_generation`. Every `ai_agent` flow step asks for a schema, so this was
+// a hard failure for all of them.
+//
+// These drive the real `complete()` against a stub that speaks the exact bytes
+// Groq returns — no mocking library, and no API key, so they run in CI. What
+// they pin is the behaviour a unit test of the helper cannot: that `complete()`
+// RECOVERS, that the retry is actually sent, and that the retry drops the forced
+// tool rather than repeating the request that just failed.
+mod forced_tool_recovery {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// The 400 Groq returns when the model did not call the pinned tool.
+    fn tool_choice_error(failed_generation: Option<&str>) -> String {
+        let detail = match failed_generation {
+            Some(g) => format!(
+                r#","failed_generation":{}"#,
+                serde_json::to_string(g).unwrap()
+            ),
+            None => String::new(),
+        };
+        format!(
+            r#"{{"error":{{"message":"Tool choice is required, but model did not call a tool","type":"invalid_request_error"{detail}}}}}"#
+        )
+    }
+
+    /// A normal Groq chat completion carrying `content`.
+    fn ok_completion(content: &str) -> String {
+        format!(
+            r#"{{"id":"x","object":"chat.completion","created":0,"model":"stub","choices":[{{"index":0,"message":{{"role":"assistant","content":{}}},"finish_reason":"stop"}}],"usage":{{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}}}"#,
+            serde_json::to_string(content).unwrap()
+        )
+    }
+
+    /// Serve `responses` in order, one per request, recording each request body.
+    /// Returns the base URL and the shared record of what was received.
+    async fn stub(responses: Vec<(u16, String)>) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&seen);
+
+        tokio::spawn(async move {
+            for (status, body) in responses {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                // Read headers, then exactly Content-Length bytes of body. A
+                // short read here would race the assertion on the request body.
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let n = match socket.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => n,
+                    };
+                    buf.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&buf).to_string();
+                    let Some(head_end) = text.find("\r\n\r\n") else {
+                        continue;
+                    };
+                    let len: usize = text[..head_end]
+                        .lines()
+                        .find_map(|l| {
+                            let (k, v) = l.split_once(':')?;
+                            k.eq_ignore_ascii_case("content-length")
+                                .then(|| v.trim().parse().ok())?
+                        })
+                        .unwrap_or(0);
+                    if buf.len() >= head_end + 4 + len {
+                        recorder
+                            .lock()
+                            .unwrap()
+                            .push(text[head_end + 4..].to_string());
+                        break;
+                    }
+                }
+                let reason = if status == 200 { "OK" } else { "Bad Request" };
+                let response = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.flush().await;
+            }
+        });
+
+        (format!("http://{addr}"), seen)
+    }
+
+    fn schema_request(base: &str) -> (GroqProvider, CompletionRequest) {
+        let provider = GroqProvider::with_base_url("test-key", base.to_string());
+        let mut request = CompletionRequest::new(
+            "openai/gpt-oss-20b".to_string(),
+            vec![Message::user("write three variants")],
+        );
+        request.response_format = Some(ResponseFormat::JsonSchema {
+            schema: JsonSchemaSpec {
+                name: Some("copy_variants".to_string()),
+                schema: serde_json::json!({"type":"object"}),
+                strict: true,
+            },
+        });
+        (provider, request)
+    }
+
+    const ANSWER: &str = r#"{"variants":[{"text":"Spring cohort opens","angle":"direct","rationale":"x"}],"notes":""}"#;
+
+    #[tokio::test]
+    async fn salvages_the_answer_stranded_in_failed_generation() {
+        let (base, seen) = stub(vec![(400, tool_choice_error(Some(ANSWER)))]).await;
+        let (provider, request) = schema_request(&base);
+
+        let response = provider.complete(request).await.expect("should recover");
+
+        assert_eq!(response.message.content, ANSWER);
+        assert_eq!(response.stop_reason.as_deref(), Some("stop"));
+        // One request only — a salvageable answer must not cost a second call.
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn retries_in_json_object_mode_when_there_is_nothing_to_salvage() {
+        let (base, seen) = stub(vec![
+            (400, tool_choice_error(None)),
+            (200, ok_completion(ANSWER)),
+        ])
+        .await;
+        let (provider, request) = schema_request(&base);
+
+        let response = provider.complete(request).await.expect("should recover");
+        assert_eq!(response.message.content, ANSWER);
+
+        let sent = seen.lock().unwrap().clone();
+        assert_eq!(sent.len(), 2, "the retry was not sent");
+        let first: serde_json::Value = serde_json::from_str(&sent[0]).unwrap();
+        let second: serde_json::Value = serde_json::from_str(&sent[1]).unwrap();
+        // The first attempt is the forced synthetic tool…
+        assert_eq!(first["tool_choice"]["function"]["name"], "copy_variants");
+        // …and the retry must NOT repeat it, or it fails exactly the same way.
+        assert!(second.get("tool_choice").is_none_or(|v| v.is_null()));
+        assert!(second.get("tools").is_none_or(|v| v.is_null()));
+        assert_eq!(second["response_format"]["type"], "json_object");
+    }
+
+    #[tokio::test]
+    async fn a_fenced_answer_is_still_salvaged() {
+        let fenced = format!("```json\n{ANSWER}\n```");
+        let (base, _) = stub(vec![(400, tool_choice_error(Some(&fenced)))]).await;
+        let (provider, request) = schema_request(&base);
+
+        let response = provider.complete(request).await.expect("should recover");
+        assert_eq!(response.message.content, ANSWER);
+    }
+
+    #[tokio::test]
+    async fn prose_is_not_passed_off_as_an_answer() {
+        // The guarantee that makes salvage safe: a caller cannot distinguish a
+        // recovered response from a normal one, so anything that is not JSON has
+        // to stay an error. Here the retry ALSO fails, so the original error is
+        // what the caller sees.
+        let (base, _) = stub(vec![
+            (
+                400,
+                tool_choice_error(Some("I'm sorry, I can't help with that.")),
+            ),
+            (400, tool_choice_error(None)),
+        ])
+        .await;
+        let (provider, request) = schema_request(&base);
+
+        let err = provider.complete(request).await.unwrap_err();
+        let ProviderError::RequestFailed(msg) = err else {
+            panic!("wrong error variant");
+        };
+        assert!(msg.contains("Tool choice is required"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_failure_is_untouched() {
+        // No schema asked for → no recovery path, no retry, no swallowed error.
+        let (base, seen) = stub(vec![(
+            400,
+            r#"{"error":{"message":"Rate limit reached","type":"rate_limit_error"}}"#.to_string(),
+        )])
+        .await;
+        let provider = GroqProvider::with_base_url("test-key", base);
+        let request = CompletionRequest::new(
+            "llama-3.3-70b-versatile".to_string(),
+            vec![Message::user("hello")],
+        );
+
+        assert!(provider.complete(request).await.is_err());
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            1,
+            "an unrelated error was retried"
+        );
+    }
+}

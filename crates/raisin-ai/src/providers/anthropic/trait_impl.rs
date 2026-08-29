@@ -29,7 +29,25 @@ impl AIProviderTrait for AnthropicProvider {
 
         let mut result = parse_response(anthropic_response);
 
-        Self::extract_structured_output(&mut result, request.response_format.as_ref());
+        let found = Self::extract_structured_output(&mut result, request.response_format.as_ref());
+
+        // A schema was asked for, the forced tool was not called, and what came
+        // back is not JSON either. Anthropic's API does not reject this the way
+        // Groq's does, so without this check the prose is returned as if it were
+        // the structured answer and fails somewhere far away. There is nothing
+        // to salvage — say so here, where the cause is still visible.
+        if crate::providers::structured_output::structured_output_missing(
+            &result,
+            request.response_format.as_ref(),
+            found,
+        ) {
+            let preview: String = result.message.content.chars().take(200).collect();
+            return Err(ProviderError::RequestFailed(format!(
+                "Structured output was requested but the model answered in prose rather than \
+                 calling the schema tool, and the reply is not JSON. Model: {}. Reply began: {}",
+                request.model, preview
+            )));
+        }
 
         Ok(result)
     }

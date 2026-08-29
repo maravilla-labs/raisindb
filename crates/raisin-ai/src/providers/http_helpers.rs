@@ -67,6 +67,17 @@ pub struct OpenAIStyleErrorDetail {
     pub failed_generation: Option<String>,
 }
 
+/// Separator that attaches an OpenAI-style error's `failed_generation` to the
+/// message text of the resulting [`ProviderError`].
+///
+/// `ProviderError` carries no structured payload, so this string IS the channel:
+/// everything after it is the model's own output, which the request rejected but
+/// which is often perfectly usable. Groq's forced-tool structured-output mode is
+/// the case that matters — see
+/// [`crate::providers::structured_output::salvage_failed_generation`], which
+/// reads it back out. Change this and both readers must change with it.
+pub const FAILED_GENERATION_MARKER: &str = "\nFailed generation: ";
+
 /// Generic error wrapper for OpenAI-compatible APIs.
 #[derive(Debug, serde::Deserialize)]
 pub struct OpenAIStyleError {
@@ -131,7 +142,7 @@ pub struct SimpleError {
 pub fn map_openai_style_error(error: OpenAIStyleError) -> ProviderError {
     let mut error_msg = error.error.message.clone();
     if let Some(failed_gen) = &error.error.failed_generation {
-        error_msg.push_str("\nFailed generation: ");
+        error_msg.push_str(FAILED_GENERATION_MARKER);
         error_msg.push_str(failed_gen);
     }
 

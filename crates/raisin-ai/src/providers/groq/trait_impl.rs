@@ -7,10 +7,12 @@ use std::pin::Pin;
 use crate::model_cache::ModelInfo;
 use crate::provider::{AIProviderTrait, ProviderError, Result};
 use crate::types::{
-    CompletionRequest, CompletionResponse, FunctionCall, Message, Role, StreamChunk, ToolCall,
-    Usage,
+    CompletionRequest, CompletionResponse, FunctionCall, Message, ResponseFormat, Role,
+    StreamChunk, ToolCall, Usage,
 };
 use crate::utils::strip_markdown_fences;
+
+use crate::providers::structured_output::{is_schema_request, salvage_failed_generation};
 
 use super::types::*;
 use super::GroqProvider;
@@ -21,6 +23,23 @@ use super::GroqProvider;
 /// `<function=name>{args}</function>` patterns (including hyphenated names).
 fn parse_llama_tool_calls(error_msg: &str) -> Option<Vec<ToolCall>> {
     crate::tool_call_extraction::extract_tool_calls_from_content(error_msg)
+}
+
+/// The same request with the forced-tool structured output swapped for plain
+/// JSON mode.
+///
+/// Groq's `JsonSchema` conversion is a synthetic tool plus a pinned
+/// `tool_choice`, and a model that answers in content rather than calling it
+/// fails the request outright. When the answer cannot be salvaged from the
+/// error, retrying in `json_object` mode is what makes the call SUCCEED rather
+/// than merely fail informatively: every Groq chat model supports JSON mode, and
+/// the schema is already described to the model in the prompt by every caller
+/// that asked for one. Shape is no longer guaranteed by the API on this path —
+/// but an unshaped answer the caller can parse beats no answer at all.
+fn as_json_object_request(request: &CompletionRequest) -> CompletionRequest {
+    let mut fallback = request.clone();
+    fallback.response_format = Some(ResponseFormat::JsonObject);
+    fallback
 }
 
 #[async_trait]
@@ -41,6 +60,41 @@ impl AIProviderTrait for GroqProvider {
                     });
                 }
                 return Err(ProviderError::RequestFailed(msg.clone()));
+            }
+            // Structured output that the model answered in CONTENT. Groq rejects
+            // the request because the pinned `tool_choice` was not honoured, and
+            // returns the model's answer only in `failed_generation`. Recover it
+            // if it is JSON; otherwise ask again in plain JSON mode, which every
+            // Groq chat model supports and no model can fail to "call".
+            Err(ProviderError::RequestFailed(ref msg))
+                if is_schema_request(request.response_format.as_ref()) =>
+            {
+                if let Some(json) = salvage_failed_generation(msg) {
+                    tracing::debug!(
+                        target: "groq",
+                        model = %request.model,
+                        "structured output salvaged from failed_generation"
+                    );
+                    return Ok(CompletionResponse {
+                        message: Message::assistant(json),
+                        model: request.model.clone(),
+                        usage: None,
+                        stop_reason: Some("stop".to_string()),
+                    });
+                }
+                tracing::debug!(
+                    target: "groq",
+                    model = %request.model,
+                    "structured output rejected and unsalvageable; retrying in json_object mode"
+                );
+                let retry = Self::build_chat_request(&as_json_object_request(&request), false);
+                match self.send_api_request(&retry).await {
+                    Ok(resp) => resp,
+                    // Report the ORIGINAL failure. The retry's own error is a
+                    // consequence of this one and naming it would send whoever
+                    // reads the log looking in the wrong place.
+                    Err(_) => return Err(ProviderError::RequestFailed(msg.clone())),
+                }
             }
             Err(e) => return Err(e),
         };
@@ -97,7 +151,25 @@ impl AIProviderTrait for GroqProvider {
             stop_reason,
         };
 
-        Self::extract_structured_output(&mut response, request.response_format.as_ref());
+        let found =
+            Self::extract_structured_output(&mut response, request.response_format.as_ref());
+
+        // The same guard Anthropic needs, as a backstop here. Groq's API rejects
+        // an uncalled forced tool, so this should be unreachable on the primary
+        // path — but the json_object retry above returns through here too, and a
+        // non-JSON answer must not be handed back as if it were structured.
+        if crate::providers::structured_output::structured_output_missing(
+            &response,
+            request.response_format.as_ref(),
+            found,
+        ) {
+            let preview: String = response.message.content.chars().take(200).collect();
+            return Err(ProviderError::RequestFailed(format!(
+                "Structured output was requested but the reply is not JSON. Model: {}. \
+                 Reply began: {}",
+                request.model, preview
+            )));
+        }
 
         Ok(response)
     }
@@ -183,6 +255,37 @@ impl AIProviderTrait for GroqProvider {
                     return Ok(Box::pin(futures::stream::iter(chunks)));
                 }
                 return Err(ProviderError::RequestFailed(msg.clone()));
+            }
+            // Same recovery as `complete`. A salvaged answer arrives as one
+            // delta plus a stop chunk — the request never streamed, so there is
+            // nothing to interleave, and a consumer that concatenates deltas
+            // sees exactly what the non-streaming path returns.
+            Err(ProviderError::RequestFailed(ref msg))
+                if is_schema_request(request.response_format.as_ref()) =>
+            {
+                if let Some(json) = salvage_failed_generation(msg) {
+                    return Ok(Box::pin(futures::stream::iter(vec![
+                        Ok(StreamChunk {
+                            delta: json,
+                            tool_calls: None,
+                            usage: None,
+                            stop_reason: None,
+                            model: Some(request.model.clone()),
+                        }),
+                        Ok(StreamChunk {
+                            delta: String::new(),
+                            tool_calls: None,
+                            usage: None,
+                            stop_reason: Some("stop".to_string()),
+                            model: Some(request.model.clone()),
+                        }),
+                    ])));
+                }
+                let retry = Self::build_chat_request(&as_json_object_request(&request), true);
+                match self.send_api_request(&retry).await {
+                    Ok(resp) => resp,
+                    Err(_) => return Err(ProviderError::RequestFailed(msg.clone())),
+                }
             }
             Err(e) => return Err(e),
         };

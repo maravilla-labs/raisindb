@@ -229,8 +229,8 @@ impl GroqProvider {
     fn extract_structured_output(
         response: &mut CompletionResponse,
         response_format: Option<&ResponseFormat>,
-    ) {
-        super::structured_output::extract_structured_output(response, response_format);
+    ) -> bool {
+        super::structured_output::extract_structured_output(response, response_format)
     }
 
     /// Build a `GroqChatRequest` from a `CompletionRequest`, applying response

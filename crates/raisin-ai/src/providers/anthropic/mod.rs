@@ -163,6 +163,14 @@ impl AnthropicProvider {
     ///
     /// Handles system prompt extraction, message conversion, tool
     /// definitions, response format, and streaming flag.
+    /// The instruction that stands in for a `json_object` mode Anthropic does
+    /// not have. Appended to the system prompt rather than the user message so
+    /// it cannot be mistaken for part of the request being answered.
+    pub(crate) fn json_object_system_hint() -> &'static str {
+        "Respond with a single valid JSON object and nothing else. \
+         No prose before or after it, and no markdown code fences."
+    }
+
     fn build_chat_request(request: &CompletionRequest, stream: bool) -> AnthropicChatRequest {
         let mut system_prompt = request.system.clone();
         let mut anthropic_messages = Vec::new();
@@ -234,6 +242,14 @@ impl AnthropicProvider {
             &mut tool_choice,
         );
 
+        if matches!(request.response_format, Some(ResponseFormat::JsonObject)) {
+            let hint = Self::json_object_system_hint();
+            system_prompt = Some(match system_prompt {
+                Some(s) if !s.trim().is_empty() => format!("{s}\n\n{hint}"),
+                _ => hint.to_string(),
+            });
+        }
+
         // Anthropic requires max_tokens to be specified
         let max_tokens = request.max_tokens.unwrap_or(4096);
 
@@ -285,8 +301,13 @@ impl AnthropicProvider {
 
     /// Applies structured output settings from `ResponseFormat` to the request.
     ///
-    /// - `Text` / `JsonObject`: no-op (Anthropic doesn't have a json_object mode;
-    ///   for `JsonObject` we rely on a system prompt hint).
+    /// - `Text`: no-op.
+    /// - `JsonObject`: Anthropic has no json_object mode, so the request carries
+    ///   the instruction instead — see [`json_object_system_hint`], which
+    ///   `build_chat_request` appends to the system prompt. This comment used to
+    ///   say a hint was relied upon while no hint existed anywhere in the crate,
+    ///   which made `JsonObject` on Anthropic a SILENT no-op: the caller asked
+    ///   for JSON, nothing was sent, and prose came back.
     /// - `JsonSchema`: injects a synthetic tool whose `input_schema` matches
     ///   the requested schema and forces the model to call it via `tool_choice`.
     fn apply_response_format(
@@ -332,7 +353,7 @@ impl AnthropicProvider {
     fn extract_structured_output(
         response: &mut CompletionResponse,
         response_format: Option<&ResponseFormat>,
-    ) {
-        super::structured_output::extract_structured_output(response, response_format);
+    ) -> bool {
+        super::structured_output::extract_structured_output(response, response_format)
     }
 }
