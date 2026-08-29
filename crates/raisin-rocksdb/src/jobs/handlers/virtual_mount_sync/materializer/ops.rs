@@ -263,18 +263,28 @@ pub fn dedup_ops(ops: Vec<BatchOp>, mount_path: &str) -> Vec<BatchOp> {
         disambiguate.extend(owners.iter().copied());
     }
 
-    ops.iter()
+    // The keep decision is frozen into flags so `ops` can be CONSUMED below.
+    // `keep_by_external` borrows each op's external id, and that borrow was the
+    // only reason every survivor — mapped node payload and all — had to be
+    // cloned out, so a flush carrying mail bodies paid a full deep copy of the
+    // batch just so one rare branch could rewrite one path string. One copy per
+    // op becomes none; the disambiguated op is edited in place instead.
+    let mut keep = vec![false; ops.len()];
+    for &i in keep_by_external.values() {
+        keep[i] = true;
+    }
+    drop(keep_by_external);
+
+    ops.into_iter()
         .enumerate()
-        .filter(|(i, op)| keep_by_external.get(op.external_id()) == Some(i))
-        .map(|(i, op)| match op {
-            BatchOp::Upsert { rel_path, .. } if disambiguate.contains(&i) => {
-                let mut cloned = op.clone();
-                if let BatchOp::Upsert { rel_path: p, .. } = &mut cloned {
-                    *p = suffix_path(rel_path, op.external_id());
+        .filter(|(i, _)| keep[*i])
+        .map(|(i, mut op)| {
+            if let BatchOp::Upsert { rel_path, virt, .. } = &mut op {
+                if disambiguate.contains(&i) {
+                    *rel_path = suffix_path(rel_path, &virt.external_id);
                 }
-                cloned
             }
-            _ => op.clone(),
+            op
         })
         .collect()
 }

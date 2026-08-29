@@ -20,15 +20,23 @@ pub async fn cleanup_expired(
     ttl_seconds: u64,
     now_secs: i64,
 ) -> std::result::Result<usize, AdapterError> {
+    // Two passes on purpose. Staging a delete borrows the batcher mutably, so
+    // the expired ids have to be taken before the loop that deletes them — and
+    // reading them through the borrowing iterator, rather than cloning every
+    // virtual node the mount has, is the whole point: on the 50k-node mailbox
+    // this runs on, the expired set is normally a handful.
+    let expired: Vec<String> = batcher
+        .virtual_nodes_iter()
+        .filter(|node| {
+            node.synced_secs
+                .is_some_and(|s| s + ttl_seconds as i64 <= now_secs)
+        })
+        .map(|node| node.external_id.clone())
+        .collect();
     let mut deleted = 0usize;
-    for node in batcher.virtual_nodes() {
-        let Some(synced) = node.synced_secs else {
-            continue;
-        };
-        if synced + ttl_seconds as i64 <= now_secs {
-            batcher.stage_delete(&node.external_id).await?;
-            deleted += 1;
-        }
+    for external_id in expired {
+        batcher.stage_delete(&external_id).await?;
+        deleted += 1;
     }
     batcher.flush().await?;
     if deleted > 0 {

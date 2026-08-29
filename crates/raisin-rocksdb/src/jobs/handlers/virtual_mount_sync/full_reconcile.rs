@@ -101,8 +101,10 @@ pub(super) async fn reconcile_deletes(
     max: u64,
 ) -> std::result::Result<(), AdapterError> {
     // Served from the run's prefetched index, kept current by every flush above —
-    // this used to be another full workspace scan.
-    let existing = batcher.virtual_nodes();
+    // this used to be another full workspace scan. Borrowed rather than cloned:
+    // the guards below need only a count, and the delete branch needs only the
+    // external ids it is actually going to remove, which is normally none.
+    let existing_len = batcher.virtual_nodes_iter().count();
 
     // A stopped walk joins the same guard: it saw only part of the provider, so
     // `seen` cannot distinguish "deleted upstream" from "not reached before the
@@ -115,25 +117,26 @@ pub(super) async fn reconcile_deletes(
             truncated = flags.truncated,
             stopped = flags.stopped,
             max_items_per_sync = max,
-            existing = existing.len(),
+            existing = existing_len,
             "skipping reconcile deletes: this pass did not walk the provider end to end in one \
              run, so 'not seen' does not mean 'deleted upstream'"
         );
-    } else if seen.is_empty()
-        && !existing.is_empty()
-        && !ctx.mount.sync_config.allow_empty_reconcile
-    {
+    } else if seen.is_empty() && existing_len > 0 && !ctx.mount.sync_config.allow_empty_reconcile {
         tracing::error!(
             mount_id = %ctx.mount.mount_id,
-            existing = existing.len(),
+            existing = existing_len,
             "full sync returned NO items while {} mount-owned nodes exist; skipping reconcile \
              deletes rather than emptying the mount. Check the mount's remote root and filters, \
              or set sync_config.allow_empty_reconcile if the source really can be emptied.",
-            existing.len()
+            existing_len
         );
     } else {
-        let mut deleted = 0usize;
-        for node in existing {
+        // The ids are taken in one borrowing pass BEFORE any staging, because
+        // `stage_delete` borrows the batcher mutably — and, like the clone it
+        // replaces, that makes the set a snapshot taken before the first delete
+        // rather than a live view being mutated as we walk it.
+        let stale: Vec<String> = batcher
+            .virtual_nodes_iter()
             // A COMMAND IS NOT A MIRROR. It was authored locally and sent, so
             // "not seen in the provider's listing" is its ordinary condition,
             // not evidence it was deleted upstream. Several providers answer a
@@ -142,13 +145,14 @@ pub(super) async fn reconcile_deletes(
             // listing can ever return. Without this an outbox that also lists
             // would delete every command it had just successfully sent, and the
             // record of the send with it.
-            if node.is_command {
-                continue;
-            }
-            if !seen.contains(&node.external_id) {
-                batcher.stage_delete(&node.external_id).await?;
-                deleted += 1;
-            }
+            .filter(|node| !node.is_command)
+            .filter(|node| !seen.contains(&node.external_id))
+            .map(|node| node.external_id.clone())
+            .collect();
+        let mut deleted = 0usize;
+        for external_id in stale {
+            batcher.stage_delete(&external_id).await?;
+            deleted += 1;
         }
         batcher.flush().await?;
         if deleted > 0 {

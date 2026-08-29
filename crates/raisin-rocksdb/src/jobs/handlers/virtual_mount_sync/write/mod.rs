@@ -73,6 +73,7 @@ mod deletes;
 mod fields;
 mod guard;
 pub(crate) mod pending;
+mod pending_drain;
 mod plan;
 mod policy;
 mod preimage;
@@ -80,6 +81,7 @@ mod push;
 pub(super) mod reconcile;
 mod reconcile_job;
 pub(super) mod relocate;
+mod stats;
 mod submit;
 mod submit_outcome;
 mod submit_record;
@@ -103,120 +105,29 @@ pub(super) use plan::{resolve as resolve_mode, MirrorPlan, SubmitPlan, WriteMode
 /// into a full sync, or — worse, and silently — into a run that postpones every
 /// subsequent poll.
 pub(super) const WRITE_ONLY_MODE: &str = "write";
+pub(super) use pending_drain::drain_pending;
 pub(super) use reconcile_job::run_write_reconcile;
+pub(super) use stats::DrainStats;
 pub(super) use verdict::writeback_verdict;
 
-/// Outcome of one drain, for logging and for the run record.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct DrainStats {
-    pub pushed: usize,
-    pub skipped: usize,
-    pub failed: usize,
-    /// Candidates whose remote object the adapter reported as no longer there.
-    ///
-    /// Counted apart from both `pushed` and `skipped` on purpose. It is not a
-    /// push (nothing reached the provider and nothing was baselined) and it is
-    /// not a converged no-op (the edit is still pending, and always will be for
-    /// this external id). Folding it into either is what let a `null` result be
-    /// reported as a completed push.
-    pub gone: usize,
-    pub first_error: Option<String>,
-    /// The wall-clock budget ran out with candidates still pending.
-    ///
-    /// Recorded rather than inferred: a drain that stops halfway leaves the
-    /// remaining edits pending and looks, from the outside, exactly like a drain
-    /// that had nothing to do. That silence is the same class of invisibility as
-    /// a sync that never renews its lease.
-    pub truncated: bool,
-    /// An operator's Stop landed mid-drain and the rest was abandoned.
-    pub stopped: bool,
-    /// A push failed with a CONFIG error — a missing OAuth scope, a mount
-    /// pointed at something that cannot accept writes.
-    ///
-    /// Terminal for the whole drain, not for the one candidate. The condition is
-    /// a property of the MOUNT, so every remaining push would fail identically,
-    /// and the edits are not bad data: they stay pending and land untouched once
-    /// the configuration is fixed.
-    pub misconfigured: bool,
-    /// Candidates never attempted because the drain ended early.
-    ///
-    /// Only ever non-zero alongside `truncated`, `stopped` or `blocked`. Carried
-    /// out of the drain on [`MountState::last_drain`] because it is the one
-    /// number that separates a mount that is caught up from one that is falling
-    /// behind, and a clean `outcome: ok` says nothing about it.
-    pub pending: usize,
-    /// Deletes actually pushed to the provider.
-    pub deleted: usize,
-    /// Deletes deliberately NOT pushed, under `delete_policy: detach`. Counted
-    /// apart from `deleted` because the remote object is still there — see
-    /// [`deletes`] for why that has to be visible rather than implied.
-    pub detached: usize,
-    /// A blast-radius rail refused this run's deletes and parked every pending
-    /// intent. Nothing was sent and nothing was lost; reads were unaffected.
-    pub blocked: bool,
-    /// Updates withheld whole because `move_policy: reject` and the node's
-    /// location field had changed locally.
-    ///
-    /// Counted apart from `skipped` because a skip is a converged no-op and this
-    /// is an edit the mount is refusing to make. Folding them together would let
-    /// a mount report "nothing to do" while every write it owes is being
-    /// refused — the same silence a `gone` used to have.
-    pub rejected: usize,
-    /// Pushes the provider refused as conflicts and the policy ABANDONED.
-    ///
-    /// Under the default `remote_wins` this is a count of local edits thrown
-    /// away, so it has to be visible: a mount whose users keep losing edits
-    /// otherwise reports the same `outcome: ok` as one that is converged.
-    pub conflicted: usize,
-    /// Conflicts left for a human — the `error` policy, or a resolver that
-    /// parked, threw or answered something unrecognized.
-    pub parked: usize,
-    /// The first park reason, verbatim, for `writeback_last_error`.
-    pub first_park: Option<String>,
-
-    // ---- `submit` only (§5). Deliberately NOT folded into the fields above ----
-    //
-    // A command is not an edit and the two must not share a counter. "Pushed"
-    // means a local value now matches the provider and can be re-derived if it
-    // does not; "submitted" means an email left the building. An operator
-    // reading one number for both has no way to tell a converging mount from one
-    // that has sent thirty messages it was not supposed to.
-    /// Commands the provider accepted. Terminal.
-    pub submitted: usize,
-    /// Commands explicitly refused BEFORE the provider acted (`rate_limited`)
-    /// and returned to `queued`. The only outcome here that is tried again.
-    pub requeued: usize,
-    /// Commands terminally `failed` — definitively not sent.
-    pub abandoned: usize,
-    /// Commands parked at `unknown`: they may or may not have been issued, and
-    /// nothing but a person will ever retry them.
-    ///
-    /// The number that matters most on this path, which is why it is its own.
-    pub unresolved: usize,
-}
-
-impl DrainStats {
-    /// The operator-facing receipt this drain leaves on the mount.
-    fn summary(&self) -> DrainSummary {
-        DrainSummary {
-            pushed: self.pushed as u64,
-            pending: self.pending as u64,
-            gone: self.gone as u64,
-            deleted: self.deleted as u64,
-            detached: self.detached as u64,
-            blocked: self.blocked,
-            failed: self.failed as u64,
-            truncated: self.truncated,
-            stopped: self.stopped,
-            rejected: self.rejected as u64,
-            conflicts: self.conflicted as u64,
-            parked: self.parked as u64,
-            submitted: self.submitted as u64,
-            requeued: self.requeued as u64,
-            abandoned: self.abandoned as u64,
-            unresolved: self.unresolved as u64,
-        }
-    }
+/// Whether this mount is standing off after a configuration failure, and until
+/// when.
+///
+/// One helper because all three drains — the scheduled one, the page-boundary
+/// one and the outbox — must make no provider call at all while the window is
+/// open, and three hand-written copies of the same comparison is how one of
+/// them ends up keeping calling. Each caller keeps its OWN log line and early
+/// return: what "skipped" means differs per drain, and only the caller can say
+/// it.
+///
+/// Deliberately NOT a combined "may this mount write?" predicate. The other
+/// guards around it (`writeback_blocked`, `force_rewrite`, the wall-clock
+/// budget) are asymmetric between these callers on purpose, and folding them
+/// together would silently give one caller a guard the other never wanted.
+pub(super) fn standing_off(state: &MountState, now: i64) -> Option<i64> {
+    state
+        .writeback_retry_after
+        .filter(|retry_after| now < *retry_after)
 }
 
 /// How many candidates the drain pushes between `stop_requested` reads.
@@ -233,140 +144,6 @@ const STOP_CHECK_EVERY: usize = 20;
 /// instead of one per second; short enough that an operator who fixes a scope
 /// sees writeback resume while they are still looking at the screen.
 const MISCONFIGURED_BACKOFF_SECS: i64 = 900;
-
-/// How many pending edits one page boundary pushes; the rest wait for the next
-/// boundary so a burst of edits cannot starve the walk.
-const PENDING_PER_BOUNDARY: usize = 20;
-
-/// Push nodes edited while THIS run has been walking the provider.
-///
-/// The scheduled drain nominates from an index snapshotted at run start, so an
-/// edit landing mid-import is invisible to it until the next run — which a
-/// long backfill can postpone for hours. The capture hook notes such edits in
-/// [`pending`]; this pushes them at a page boundary, where the batcher is
-/// flushed and the lease is held — exactly the invariant the ordinary drain
-/// relies on (an unflushed stamp is never applied after the read's write).
-///
-/// Deliberately only the plain UPDATE arm. Deletes, creates and submit have
-/// their own rails and scans that must not run per page — and a submit retried
-/// from here would be a duplicate send.
-///
-/// Never fails the walk, and never writes mount state: a losing writer would
-/// burn a `state_seq` the walk's own cursor writes depend on.
-pub(super) async fn drain_pending(
-    ctx: &SyncCtx<'_>,
-    state: &MountState,
-    batcher: &mut batch::SyncBatcher<'_>,
-) -> usize {
-    let fields = match ctx.write_mode.get() {
-        Some(WriteMode::StateOnly(fields)) => fields.clone(),
-        Some(WriteMode::Mirror(plan)) => plan.fields.clone(),
-        _ => return 0,
-    };
-    // A push landing mid-remap ping-pongs: the walk re-materializes the field
-    // from the provider's pre-push view while `__pushed_state` records it as
-    // pushed, so it is re-nominated on every page until the walk ends.
-    if ctx.scope.force_rewrite {
-        return 0;
-    }
-    // A BLOCKED mount makes no outbound changes at all — including here.
-    //
-    // A `blocked` verdict from the delete rails parks EVERY pending intent, not
-    // only the deletes, and `drain` honours that by returning before it pushes
-    // anything. This path did not: it is called at every page boundary of the
-    // read phases, which keep running after the drain parks, so a mount an
-    // operator had parked to investigate a suspected mass delete went on
-    // issuing real provider updates for the rest of the run. The console said
-    // "nothing was sent to the provider and nothing was lost" while it was
-    // being sent.
-    //
-    // Checked BEFORE `pending::take`, so the notes survive to be drained once
-    // the block is lifted rather than being consumed and dropped.
-    if state.writeback_blocked.is_some() {
-        return 0;
-    }
-    // Standing off after a config error means NO provider calls.
-    if let Some(retry_after) = state.writeback_retry_after {
-        if Utc::now().timestamp() < retry_after {
-            return 0;
-        }
-    }
-    if ctx.out_of_time(Utc::now().timestamp()) {
-        return 0;
-    }
-    let key = pending::pending_key(
-        &ctx.scope.tenant,
-        &ctx.scope.repo,
-        &ctx.config_branch,
-        &ctx.scope.mount_id,
-    );
-    let ids = pending::take(&key, PENDING_PER_BOUNDARY);
-    if ids.is_empty() {
-        return 0;
-    }
-    let policy = match resolve_conflict_policy(&ctx.mount) {
-        Ok(policy) => policy,
-        Err(_) => {
-            // The run's own full drain already refused and badged the mount;
-            // a page boundary has nothing to add. Hand the notes back.
-            for id in &ids {
-                pending::note(&key, id);
-            }
-            return 0;
-        }
-    };
-
-    let mut pushed = 0usize;
-    let mut iter = ids.into_iter();
-    while let Some(node_id) = iter.next() {
-        if ctx.out_of_time(Utc::now().timestamp()) {
-            pending::note(&key, &node_id);
-            for rest in iter {
-                pending::note(&key, &rest);
-            }
-            break;
-        }
-        // One point read for the external id; `push_one` re-reads and
-        // re-checks divergence itself, so a stale note (already drained,
-        // converged, unmapped) costs this read and nothing else. A note whose
-        // push fails is dropped, not retried: the edit itself is safe — the
-        // node still diverges, so the next run's full drain re-nominates it
-        // from its fresh index. Only the latency shortcut is lost.
-        let node = match ctx.materializer.read_node(&ctx.scope, &node_id).await {
-            Ok(Some(node)) => node,
-            _ => continue,
-        };
-        let Some(external_id) = super::materializer::node_external_id(&node) else {
-            continue;
-        };
-        let candidate = candidates::Candidate {
-            node_id: node_id.clone(),
-            external_id: external_id.to_string(),
-        };
-        if let Ok(push::Pushed::Sent) =
-            push::push_one(ctx, batcher, &candidate, &fields, &policy, false).await
-        {
-            pushed += 1;
-        }
-    }
-    if pushed > 0 {
-        // The pushes staged etag stamp-backs; land them before the walk reads
-        // its next page — the same invariant as the ordinary drain.
-        if let Err(e) = batcher.flush().await {
-            tracing::warn!(
-                mount_id = %ctx.scope.mount_id,
-                error = %e,
-                "mid-run pending drain: flush failed; stamps land with the next page flush"
-            );
-        }
-        tracing::info!(
-            mount_id = %ctx.scope.mount_id,
-            pushed,
-            "pushed pending local edits at a page boundary"
-        );
-    }
-    pushed
-}
 
 /// Push whatever local edits this mount owes the provider.
 ///
@@ -402,17 +179,15 @@ pub(super) async fn drain(
 
     // Standing off after a config error. Checked before ANY provider call and
     // before the delete rails, because the point is to make no calls at all.
-    if let Some(retry_after) = state.writeback_retry_after {
-        let now = Utc::now().timestamp();
-        if now < retry_after {
-            tracing::debug!(
-                mount_id = %ctx.scope.mount_id,
-                retry_in_secs = retry_after - now,
-                "writeback is standing off after a configuration failure; skipping \
-                 this drain. Edits stay pending and go out once the window elapses."
-            );
-            return DrainStats::default();
-        }
+    let now = Utc::now().timestamp();
+    if let Some(retry_after) = standing_off(state, now) {
+        tracing::debug!(
+            mount_id = %ctx.scope.mount_id,
+            retry_in_secs = retry_after - now,
+            "writeback is standing off after a configuration failure; skipping \
+             this drain. Edits stay pending and go out once the window elapses."
+        );
+        return DrainStats::default();
     }
 
     let mut stats = DrainStats::default();
@@ -511,12 +286,66 @@ pub(super) async fn drain(
     // Falling through with an empty candidate list costs one skipped loop.
     let has_candidates = !candidates.is_empty();
 
+    push_candidates(
+        ctx,
+        state,
+        batcher,
+        &candidates,
+        fields,
+        &policy,
+        mirror.is_some_and(|m| m.accepts_content),
+        &mut stats,
+    )
+    .await;
+
+    // Flush before returning: the read phases are about to write `__etag` for
+    // these very items, and an unflushed stamp would be applied AFTER them —
+    // stamping a push's etag over a newer remote one, which is the one way this
+    // design can lose a remote change.
+    if let Err(e) = batcher.flush().await {
+        stats.failed += 1;
+        if stats.first_error.is_none() {
+            stats.first_error = Some(e.to_string());
+        }
+        tracing::warn!(
+            mount_id = %ctx.scope.mount_id,
+            error = %e,
+            "writeback stamp-back flush failed"
+        );
+    }
+
+    record_outcome(&ctx.scope.mount_id, state, &stats, &policy, has_candidates);
+
+    stats
+}
+
+/// The UPDATE phase: push each candidate, counting every outcome into `stats`.
+///
+/// A named function purely so [`drain`]'s body reads as its five ordered phases;
+/// it stays in this file because the ORDER of those phases — deletes, then
+/// creates, then this — is what the comments around the call sites argue for,
+/// and splitting them across files is how a phase gets reordered with only half
+/// the reasoning in view.
+///
+/// Every early exit RETURNS from this phase rather than from the drain, which
+/// is what keeps the flush and the receipt on the path: whatever was staged
+/// before the stop must still land ahead of the read phases.
+async fn push_candidates(
+    ctx: &SyncCtx<'_>,
+    state: &mut MountState,
+    batcher: &mut batch::SyncBatcher<'_>,
+    candidates: &[candidates::Candidate],
+    fields: &FieldPlan,
+    policy: &ConflictPolicy,
+    accepts_content: bool,
+    stats: &mut DrainStats,
+) {
     for (i, candidate) in candidates.iter().enumerate() {
         // Both checks happen BEFORE the push, never after it: they decide
         // whether to START another provider call, and a call already made
-        // cannot be taken back. Breaking (rather than returning) is what keeps
-        // the flush below on the path — whatever was staged so far must still
-        // land ahead of the read phases.
+        // cannot be taken back. Ending this phase (rather than the whole drain)
+        // is what keeps the flush on the path — whatever was staged so far must
+        // still land ahead of the read phases.
         //
         // Everything not reached stays pending exactly as it was: no stamp, no
         // `__pushed_state`, so the next run re-nominates it. The candidate list
@@ -532,7 +361,7 @@ pub(super) async fn drain(
                 "wall-clock budget spent during writeback; ending the drain cleanly. The \
                  remaining edits stay pending and the next run picks them up."
             );
-            break;
+            return;
         }
         if i % STOP_CHECK_EVERY == 0 && super::stop_requested(ctx).await {
             stats.stopped = true;
@@ -543,18 +372,9 @@ pub(super) async fn drain(
                 pending = candidates.len() - i,
                 "stop requested; ending the writeback drain with edits still pending"
             );
-            break;
+            return;
         }
-        match push::push_one(
-            ctx,
-            batcher,
-            candidate,
-            fields,
-            &policy,
-            mirror.is_some_and(|m| m.accepts_content),
-        )
-        .await
-        {
+        match push::push_one(ctx, batcher, candidate, fields, policy, accepts_content).await {
             Ok(push::Pushed::Sent) => stats.pushed += 1,
             Ok(push::Pushed::Skipped) => stats.skipped += 1,
             Ok(push::Pushed::Gone) => stats.gone += 1,
@@ -593,10 +413,10 @@ pub(super) async fn drain(
                     stats.pending += candidates.len().saturating_sub(i + 1);
                     state.writeback_retry_after =
                         Some(Utc::now().timestamp() + MISCONFIGURED_BACKOFF_SECS);
-                    break;
+                    return;
                 }
                 if matches!(e, AdapterError::AuthExpired) {
-                    break;
+                    return;
                 }
             }
         }
@@ -608,23 +428,21 @@ pub(super) async fn drain(
         // same items. It is a no-op when the locks subsystem is disabled.
         ctx.renew_lease().await;
     }
+}
 
-    // Flush before returning: the read phases are about to write `__etag` for
-    // these very items, and an unflushed stamp would be applied AFTER them —
-    // stamping a push's etag over a newer remote one, which is the one way this
-    // design can lose a remote change.
-    if let Err(e) = batcher.flush().await {
-        stats.failed += 1;
-        if stats.first_error.is_none() {
-            stats.first_error = Some(e.to_string());
-        }
-        tracing::warn!(
-            mount_id = %ctx.scope.mount_id,
-            error = %e,
-            "writeback stamp-back flush failed"
-        );
-    }
-
+/// The receipt phase: the outbound health badge, the one reason an operator
+/// gets to read, and the drain summary left on the mount.
+///
+/// Runs on EVERY drain that reached it, clean ones included — that is what
+/// CLEARS a stale badge — so it is deliberately the last thing `drain` does and
+/// deliberately not skipped by any early return above it.
+fn record_outcome(
+    mount_id: &str,
+    state: &mut MountState,
+    stats: &DrainStats,
+    policy: &ConflictPolicy,
+    has_candidates: bool,
+) {
     if stats.pushed > 0
         || stats.failed > 0
         || stats.gone > 0
@@ -634,7 +452,7 @@ pub(super) async fn drain(
         || stats.parked > 0
     {
         tracing::info!(
-            mount_id = %ctx.scope.mount_id,
+            mount_id = %mount_id,
             pushed = stats.pushed,
             skipped = stats.skipped,
             failed = stats.failed,
@@ -735,8 +553,7 @@ pub(super) async fn drain(
     // A drain with no candidates and nothing staged leaves the previous receipt
     // alone: it did not run, and overwriting a real receipt with an empty one
     // would erase what the last drain actually did.
-    if has_candidates || stats != DrainStats::default() {
+    if has_candidates || *stats != DrainStats::default() {
         state.last_drain = Some(stats.summary());
     }
-    stats
 }

@@ -243,6 +243,19 @@ pub struct Capabilities {
     /// at-most-once attempt id is honoured end to end.
     #[serde(default)]
     pub supports_idempotency_key: bool,
+    /// WHY `can_submit` is false, when an adapter can say.
+    ///
+    /// Carried because this struct is the only thing that survives: `resolve.rs`
+    /// caches `serde_json::to_value(capabilities)` from the TYPED value onto the
+    /// integration node, so a key the struct does not name is dropped before any
+    /// consumer — the console included. The IMAP adapter has always answered
+    /// this key (an outbox whose email provider is disabled, ambiguous, or
+    /// denied by policy reports exactly which), and until it was declared here
+    /// that diagnosis reached nobody: the mount showed the engine's generic
+    /// "adapter does not declare can_submit" and the operator had no way to
+    /// learn which of the four causes it was.
+    #[serde(default)]
+    pub submit_unavailable_reason: Option<String>,
 }
 
 impl Capabilities {

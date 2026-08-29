@@ -65,6 +65,13 @@ impl<'a> SyncBatcher<'a> {
         self.index.virtual_nodes()
     }
 
+    /// The same nodes without cloning them (see
+    /// [`SyncIndex::virtual_nodes_iter`]). Callers that also stage deletes must
+    /// collect the ids they want before they touch the batcher again.
+    pub fn virtual_nodes_iter(&self) -> impl Iterator<Item = &VirtualNodeRef> {
+        self.index.virtual_nodes_iter()
+    }
+
     /// Record a node adopted THIS RUN in the in-memory index, immediately.
     ///
     /// The staged mutation only reaches the index on flush, and a folder

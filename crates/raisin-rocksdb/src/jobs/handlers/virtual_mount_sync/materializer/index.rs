@@ -145,6 +145,19 @@ pub struct PathEntry {
     /// user content and must never be clobbered.
     pub mount_owned: bool,
     pub etag: Option<String>,
+    /// The node's `__external_id`, carried here so [`SyncIndex::external_id_at`]
+    /// is a lookup rather than a scan of `by_external`.
+    ///
+    /// Lives INSIDE this entry rather than in a second path→external-id map on
+    /// purpose: a parallel map would be a fourth structure to keep in step
+    /// across `from_nodes`/`adopt`/`record_upsert`/`record_move`/`record_delete`,
+    /// and `record_move`'s path swap — which moves this entry wholesale — is
+    /// exactly where it would rot.
+    ///
+    /// `None` for every node this mount does not own and for the ancestor
+    /// folders recorded with no id, which is what keeps `external_id_at` from
+    /// answering for foreign content.
+    pub external_id: Option<String>,
 }
 
 /// Everything the upsert path needs to locate an item, read ONCE per sync run.
@@ -160,10 +173,17 @@ pub struct PathEntry {
 ///   and the path-fallback etag check both operate on nodes that `by_external`
 ///   deliberately excludes, so filtering this map by `__mount_id` would silently
 ///   drop both protections.
+/// * `children_by_parent` — the same external-id namespace as `by_external`,
+///   pre-split on [`CHILD_ID_SEP`], so [`Self::child_external_ids`] answers
+///   without scanning every key (see that method).
 #[derive(Debug, Clone, Default)]
 pub struct SyncIndex {
     by_external: HashMap<String, VirtualNodeRef>,
     by_path: HashMap<String, PathEntry>,
+    /// Parent external id → the namespaced ids of its subordinate nodes.
+    /// Derived wholly from `by_external`'s keys; maintained in the same four
+    /// places `by_external` is.
+    children_by_parent: HashMap<String, Vec<String>>,
 }
 
 impl SyncIndex {
@@ -182,26 +202,35 @@ impl SyncIndex {
             }
             let mount_owned = node_mount_id(&node) == Some(mount_id);
             let etag = node_str_prop(&node, "__etag");
+            // Only a node this mount owns may answer `external_id_at`; a foreign
+            // node's id is deliberately not recorded here.
+            let external_id = if mount_owned {
+                node_external_id(&node).map(str::to_string)
+            } else {
+                None
+            };
             idx.by_path.insert(
                 node.path.clone(),
                 PathEntry {
                     id: Some(node.id.clone()),
                     mount_owned,
                     etag: etag.clone(),
+                    external_id: external_id.clone(),
                 },
             );
             if !mount_owned {
                 continue;
             }
-            if let Some(ext) = node_external_id(&node) {
+            if let Some(ext) = external_id {
                 let write_view = write_view_of(&node, watched_fields);
                 let is_command = command_node_types.iter().any(|t| t == &node.node_type);
+                idx.index_child(&ext);
                 idx.by_external.insert(
-                    ext.to_string(),
+                    ext.clone(),
                     VirtualNodeRef {
                         id: node.id.clone(),
                         path: node.path.clone(),
-                        external_id: ext.to_string(),
+                        external_id: ext,
                         is_command,
                         etag,
                         synced_secs: node_synced_secs(&node),
@@ -246,8 +275,10 @@ impl SyncIndex {
                 id: Some(node_id.to_string()),
                 mount_owned: true,
                 etag: etag.clone(),
+                external_id: Some(external_id.to_string()),
             },
         );
+        self.index_child(external_id);
         self.by_external.insert(
             external_id.to_string(),
             VirtualNodeRef {
@@ -266,8 +297,27 @@ impl SyncIndex {
     }
 
     /// Every mount-owned virtual node, for reconcile and TTL cleanup.
+    ///
+    /// Clones the whole map; take [`Self::virtual_nodes_iter`] unless the caller
+    /// needs owned values (`write::candidates` consumes them).
     pub fn virtual_nodes(&self) -> Vec<VirtualNodeRef> {
         self.by_external.values().cloned().collect()
+    }
+
+    /// The same nodes, borrowed.
+    ///
+    /// [`Self::virtual_nodes`] deep-clones every entry — five `String`s per
+    /// node, plus a boxed write view holding a `serde_json` map per watched
+    /// field on a writeback mount — and reconcile and the TTL sweep read two
+    /// fields per node and normally delete none of them. Borrowing takes that
+    /// from n clones to the k ids actually acted on.
+    ///
+    /// Both of those callers stage their deletes through the batcher, which
+    /// borrows it mutably, so they must collect the ids they want BEFORE the
+    /// loop that deletes them; the owning version above exists for exactly that
+    /// reason and is still what `write::mod` needs.
+    pub fn virtual_nodes_iter(&self) -> impl Iterator<Item = &VirtualNodeRef> {
+        self.by_external.values()
     }
 
     /// The provider id of the mount-owned node at `path`, if there is one.
@@ -277,11 +327,18 @@ impl SyncIndex {
     /// is right for a calendar (one container) and wrong for a drive, where a
     /// file uploaded into `Gründung` must be created inside that folder rather
     /// than at the top of the library.
+    /// One hash lookup, not a scan. This runs once per create candidate inside
+    /// the drain's provider-call loop, so the old `by_external.values().find()`
+    /// cost the whole node map per candidate: n candidates x m nodes -> m.
     pub fn external_id_at(&self, path: &str) -> Option<&str> {
-        self.by_external
-            .values()
-            .find(|n| n.path == path)
-            .map(|n| n.external_id.as_str())
+        let entry = self.by_path.get(path)?;
+        // A path occupied by user content, or by an ancestor folder this run
+        // auto-created, has no id to give — and answering for one would file a
+        // new remote object inside a stranger's folder.
+        if !entry.mount_owned {
+            return None;
+        }
+        entry.external_id.as_deref()
     }
 
     /// Number of mount-owned virtual nodes.
@@ -308,13 +365,55 @@ impl SyncIndex {
     /// answer: one reports it as seen (suppressing a reconcile delete), the
     /// other deletes it outright. The namespace says "this mount created this
     /// node AS a child of that item", which is the actual question.
+    /// Served from a map keyed by the parent id rather than by scanning every
+    /// key for a prefix: n keys compared per call -> 1 lookup. That matters
+    /// because `item.rs` calls this for EVERY etag-skipped item, i.e. for every
+    /// item of an unchanged re-walk — the path its own comment calls "the
+    /// entire cost of the run" — so the scan made that path quadratic in the
+    /// size of the mount.
+    ///
+    /// The returned order is insertion order rather than the old (arbitrary)
+    /// hash order. Neither caller depends on it: one reports the ids as seen,
+    /// the other deletes each one.
     pub fn child_external_ids(&self, parent_external_id: &str) -> Vec<String> {
-        let prefix = format!("{parent_external_id}{}", super::super::config::CHILD_ID_SEP);
-        self.by_external
-            .keys()
-            .filter(|k| k.starts_with(&prefix))
+        self.children_by_parent
+            .get(parent_external_id)
             .cloned()
-            .collect()
+            .unwrap_or_default()
+    }
+
+    /// Record `external_id` under its parent, if it is a namespaced child id.
+    ///
+    /// Idempotent: `record_upsert` re-inserts ids already in `by_external` on a
+    /// re-sync, and a duplicate here would have the delete loop visit the same
+    /// child twice.
+    fn index_child(&mut self, external_id: &str) {
+        let Some((parent, _)) = external_id.split_once(super::super::config::CHILD_ID_SEP) else {
+            return;
+        };
+        let siblings = self
+            .children_by_parent
+            .entry(parent.to_string())
+            .or_default();
+        if !siblings.iter().any(|c| c == external_id) {
+            siblings.push(external_id.to_string());
+        }
+    }
+
+    /// Drop `external_id` from its parent's child list, and the parent's entry
+    /// with it once empty — an entry that outlived its children would report
+    /// deleted nodes as live.
+    fn unindex_child(&mut self, external_id: &str) {
+        let Some((parent, _)) = external_id.split_once(super::super::config::CHILD_ID_SEP) else {
+            return;
+        };
+        let Some(siblings) = self.children_by_parent.get_mut(parent) else {
+            return;
+        };
+        siblings.retain(|c| c != external_id);
+        if siblings.is_empty() {
+            self.children_by_parent.remove(parent);
+        }
     }
 
     // Visible to the whole sync engine, not just the materializer: the
@@ -339,6 +438,7 @@ impl SyncIndex {
                 id: None,
                 mount_owned: false,
                 etag: None,
+                external_id: None,
             });
         }
         self.by_path.insert(
@@ -347,8 +447,10 @@ impl SyncIndex {
                 id: Some(node_ref.id.clone()),
                 mount_owned: true,
                 etag: node_ref.etag.clone(),
+                external_id: Some(node_ref.external_id.clone()),
             },
         );
+        self.index_child(&node_ref.external_id);
         self.by_external
             .insert(node_ref.external_id.clone(), node_ref);
     }
@@ -364,6 +466,7 @@ impl SyncIndex {
                     id: Some(existing.id.clone()),
                     mount_owned: true,
                     etag: existing.etag.clone(),
+                    external_id: Some(external_id.to_string()),
                 }),
             );
         }
@@ -373,6 +476,7 @@ impl SyncIndex {
     pub(super) fn record_delete(&mut self, external_id: &str) {
         if let Some(existing) = self.by_external.remove(external_id) {
             self.by_path.remove(&existing.path);
+            self.unindex_child(external_id);
         }
     }
 }

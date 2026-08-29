@@ -16,12 +16,50 @@ use super::*;
 use crate::api::MockFunctionApi;
 use serde_json::{json, Value};
 
+fn adapter_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../builtin-packages/google-drive-adapter/content/functions/adapters/google-drive")
+}
+
 fn adapter_source() -> String {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
-        "../../builtin-packages/google-drive-adapter/content/functions/adapters/google-drive/index.js",
-    );
+    let path = adapter_dir().join("index.js");
     std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read adapter at {}: {e}", path.display()))
+}
+
+/// The adapter's sibling MODULES, keyed exactly as the runtime keys them: the
+/// path relative to the function node, which for a flat function directory is
+/// the bare filename.
+///
+/// This mirrors `load_sibling_files`, which lists the function node's children
+/// in storage. Without it the entrypoint's imports would resolve to nothing —
+/// and the resolver REJECTS an unknown specifier rather than returning
+/// undefined, so every test here would fail at load rather than subtly. `.mjs`
+/// is excluded deliberately: `index.test.mjs` is a standalone node test, not a
+/// module this adapter imports.
+fn adapter_files() -> HashMap<String, String> {
+    let dir = adapter_dir();
+    let mut files = HashMap::new();
+    for entry in std::fs::read_dir(&dir).expect("read adapter dir") {
+        let path = entry.expect("dir entry").path();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if name == "index.js" || !name.ends_with(".js") {
+            continue;
+        }
+        files.insert(
+            name.to_string(),
+            std::fs::read_to_string(&path).expect("read adapter module"),
+        );
+    }
+    assert!(
+        !files.is_empty(),
+        "no sibling modules found in {}",
+        dir.display()
+    );
+    files
 }
 
 struct Run {
@@ -42,7 +80,7 @@ async fn call_adapter(input: Value, responses: Vec<Value>) -> Run {
             context,
             &metadata,
             api.clone() as Arc<dyn crate::api::FunctionApi>,
-            HashMap::new(),
+            adapter_files(),
         )
         .await
         .expect("runtime execute");

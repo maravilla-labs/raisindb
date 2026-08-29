@@ -62,15 +62,13 @@ pub(super) async fn drain_submit(
     // gets that wait: without this the throttle above would stop one drain and
     // the next tick would walk straight back into it, which is the loop the
     // stand-off exists to break.
-    if let Some(retry_after) = state.writeback_retry_after {
-        if chrono::Utc::now().timestamp() < retry_after {
-            tracing::debug!(
-                mount_id = %ctx.scope.mount_id,
-                retry_after,
-                "outbox drain skipped: the provider asked us to wait"
-            );
-            return stats;
-        }
+    if let Some(retry_after) = super::standing_off(state, chrono::Utc::now().timestamp()) {
+        tracing::debug!(
+            mount_id = %ctx.scope.mount_id,
+            retry_after,
+            "outbox drain skipped: the provider asked us to wait"
+        );
+        return stats;
     }
 
     // The outbox cannot be read from `SyncIndex`: a command is authored by a
