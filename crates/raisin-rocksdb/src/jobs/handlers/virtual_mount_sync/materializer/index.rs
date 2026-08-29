@@ -270,6 +270,20 @@ impl SyncIndex {
         self.by_external.values().cloned().collect()
     }
 
+    /// The provider id of the mount-owned node at `path`, if there is one.
+    ///
+    /// This is how a locally-created node finds the FOLDER it belongs in. The
+    /// engine otherwise tells an adapter only the mount's own remote root, which
+    /// is right for a calendar (one container) and wrong for a drive, where a
+    /// file uploaded into `Gründung` must be created inside that folder rather
+    /// than at the top of the library.
+    pub fn external_id_at(&self, path: &str) -> Option<&str> {
+        self.by_external
+            .values()
+            .find(|n| n.path == path)
+            .map(|n| n.external_id.as_str())
+    }
+
     /// Number of mount-owned virtual nodes.
     pub fn virtual_len(&self) -> usize {
         self.by_external.len()

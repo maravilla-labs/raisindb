@@ -41,6 +41,21 @@ function itemUrl(mount, id) {
 // `parent_id` absent means the mount root, and `driveContainer` already knows
 // whether that is `/root` or `/items/{remote_root}` — reimplementing the choice
 // here is how the write path and the walk end up rooted at different folders.
+// WHICH container a create files into.
+//
+// `parent_external_id` is the node's OWN parent folder and wins whenever the
+// engine could resolve one: a file uploaded into `Gründung` belongs in that
+// folder, and creating it at the top of the library instead is wrong in a way
+// that looks like success — the walk then re-places the local node at the root
+// to match, so the mistake propagates back and reads as "sync moved my file".
+//
+// `parent_id` (the mount's remote root) is the fallback, and the right answer
+// for a node sitting directly under the mount path or whose parent folder does
+// not exist at the provider yet.
+function createParent(params) {
+  return params.parent_external_id || params.parent_id || null;
+}
+
 function newChildUrl(mount, parentId, name, suffix) {
   var container = parentId
     ? driveBase(mount) + "/items/" + enc(parentId)
@@ -111,13 +126,13 @@ export function driveCreate(credential, mount, params) {
   if (!inlineable(content)) {
     return beginUpload(
       credential, mount,
-      newChildUrl(mount, params.parent_id, name, "/createUploadSession"),
+      newChildUrl(mount, createParent(params), name, "/createUploadSession"),
       name, behavior, null, "create:createUploadSession"
     );
   }
 
   var url =
-    newChildUrl(mount, params.parent_id, name, "/content") +
+    newChildUrl(mount, createParent(params), name, "/content") +
     "?" + CONFLICT_KEY + "=" + enc(behavior);
   var resp = graphFetch(credential, "PUT", url, {
     // The file's OWN media type, not application/json: this request body IS the

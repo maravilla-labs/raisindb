@@ -65,6 +65,12 @@ impl<'a> SyncBatcher<'a> {
         self.index.virtual_nodes()
     }
 
+    /// The provider id of the mount-owned node at `path` (see
+    /// [`SyncIndex::external_id_at`]).
+    pub fn external_id_at(&self, path: &str) -> Option<String> {
+        self.index.external_id_at(path).map(str::to_string)
+    }
+
     /// How many mount-owned nodes this mount currently holds.
     ///
     /// The denominator of the proportional blast-radius rail (`write::guard`),

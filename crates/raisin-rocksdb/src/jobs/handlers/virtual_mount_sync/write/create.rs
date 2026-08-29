@@ -240,6 +240,27 @@ pub(super) async fn create_one(
     // FILE BYTES sends them: metadata alone would create an empty object at the
     // provider that then looks synced forever, because the node and the item
     // agree on everything the engine compares.
+    // WHERE the object belongs at the provider.
+    //
+    // `parent_id` is the mount's own remote root, which is the whole answer for
+    // a single-container mount (a calendar) and only half of it for a drive: a
+    // file created inside `Gründung` must land in THAT folder, not at the top of
+    // the library. So the node's parent folder is resolved to its provider id
+    // and sent alongside — the adapter prefers it when the provider has a
+    // hierarchy, and ignores it when it does not.
+    //
+    // `None` when the parent is the mount root itself, or when the parent folder
+    // has no provider id yet (it was created locally and not yet pushed). The
+    // adapter then falls back to the mount root, which is the old behaviour and
+    // the only safe one: filing into a folder we cannot name is not something to
+    // guess at.
+    let parent_external_id = node
+        .path
+        .rsplit_once('/')
+        .map(|(parent, _)| parent)
+        .filter(|parent| !parent.is_empty() && *parent != ctx.scope.mount_path)
+        .and_then(|parent| batcher.external_id_at(parent));
+
     let result = super::content::call_with_content(
         ctx,
         "create",
@@ -250,6 +271,13 @@ pub(super) async fn create_one(
             // does not have to re-derive it. Absent on a default-container
             // mount, which is not an error.
             "parent_id": ctx.mount.remote_root,
+            "parent_external_id": parent_external_id,
+            // The node's location inside the mount, for an adapter that
+            // addresses by path rather than by container id.
+            "relative_path": node
+                .path
+                .strip_prefix(&format!("{}/", ctx.scope.mount_path))
+                .unwrap_or(&node.name),
         }),
         node,
         accepts_content,

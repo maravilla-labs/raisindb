@@ -1105,3 +1105,38 @@ test('the mail select asks for the flag', () => {
     'without it in $select Graph never returns the flag and every message reads as unflagged',
   )
 })
+
+// ---- a create files into the node's OWN folder -----------------------------
+//
+// Production incident: every uploaded file landed at the top of the SharePoint
+// library whatever folder it was uploaded into, because the engine told the
+// adapter only the mount's remote root. The walk then re-placed the local node
+// at the root to match, so the wrong destination propagated back and read as
+// "the sync moved my file".
+
+test('a create files into the parent folder the engine resolved', () => {
+  const calls = stubHttp([{ body: { id: '01NEW', '@odata.etag': '"1"' } }])
+  opCreate(CREDENTIAL, filesMount(), {
+    payload: { name: 'logo.svg' },
+    parent_id: 'ROOT',
+    parent_external_id: 'FOLDER-GRUENDUNG',
+    content: { name: 'logo.svg', mime_type: 'image/svg+xml', size: 3, inline: true, content_base64: 'AQID' },
+  })
+  assert.match(
+    calls[0].url,
+    /\/items\/FOLDER-GRUENDUNG:/,
+    'the node\'s own folder wins over the mount root',
+  )
+})
+
+test('a create at the mount root still uses the remote root', () => {
+  const calls = stubHttp([{ body: { id: '01NEW', '@odata.etag': '"1"' } }])
+  opCreate(CREDENTIAL, filesMount(), {
+    payload: { name: 'logo.svg' },
+    parent_id: 'ROOT',
+    // No parent_external_id: the node sits directly under the mount path, or
+    // its parent folder does not exist at the provider yet.
+    content: { name: 'logo.svg', mime_type: 'image/svg+xml', size: 3, inline: true, content_base64: 'AQID' },
+  })
+  assert.match(calls[0].url, /\/items\/ROOT:/, 'falls back to the mount root')
+})

@@ -27,7 +27,7 @@ properties:
   # 2: the drive WRITE path (create/update/delete + finalize_upload).
   # 3: drive delta items carry their FOLDER PATH, so a webhook-delivered file
   #    lands where the full walk would have put it instead of at the mount root.
-  version: 4
+  version: 5
   resource_limits:
     timeout_ms: 120000
     max_memory_bytes: 67108864
