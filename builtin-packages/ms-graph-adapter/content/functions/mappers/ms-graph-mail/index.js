@@ -195,7 +195,12 @@ function attachmentChildren(list) {
  * `unread` inverts: Graph's property is `isRead`. `is_read` is its Graph-truth
  * alias (declared in the adapter's capabilities too) and does NOT invert.
  */
-var WRITABLE_FIELDS = ["unread", "is_read"];
+var WRITABLE_FIELDS = ["unread", "is_read", "importance"];
+
+// Graph's own vocabulary for `importance`. Lowercase because that is what the
+// API returns and accepts; the mapper normalises so a node carrying "High"
+// from a UI still pushes.
+var IMPORTANCE = ["low", "normal", "high"];
 
 function toExternal(node, mount, fields) {
   if (!node) return null;
@@ -225,6 +230,19 @@ function toExternal(node, mount, fields) {
   } else if (wanted.indexOf("is_read") !== -1 && typeof props.is_read === "boolean") {
     payload.isRead = props.is_read === true;
     emitted++;
+  }
+
+  // IMPORTANCE. A closed set at Graph, so an unrecognised value is DROPPED
+  // rather than sent: Graph answers a bad one with a 400 that the engine reads
+  // as a config error and stands the mount off, which is a heavy price for one
+  // mistyped word on one message. Dropping it leaves the node diverged and
+  // visibly un-pushed, which is the honest state.
+  if (wanted.indexOf("importance") !== -1 && typeof props.importance === "string") {
+    var importance = props.importance.toLowerCase();
+    if (IMPORTANCE.indexOf(importance) !== -1) {
+      payload.importance = importance;
+      emitted++;
+    }
   }
 
   // Nothing writable in this request: say "not writable" rather than issuing an

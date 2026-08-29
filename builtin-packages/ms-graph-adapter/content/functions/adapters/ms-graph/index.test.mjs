@@ -697,7 +697,10 @@ test('files declares the mirror set and the byte channel; mail and calendar are 
   assert.equal(mail.can_create, undefined)
   assert.equal(mail.can_delete, undefined)
   assert.equal(mail.accepts_content, undefined)
-  assert.deepEqual(mail.mutable_fields, ['unread', 'is_read'])
+  // Two spellings of the read flag, plus importance. The follow-up FLAG is
+  // imported but not writable, so it must NOT appear here — declaring a field
+  // the mapper cannot translate is how a push resolves and then throws.
+  assert.deepEqual(mail.mutable_fields, ['unread', 'is_read', 'importance'])
 
   // Calendar keeps the full mirror set and carries NO byte channel.
   const cal = opCapabilities({ sync_config: { resource: 'calendar' } })
@@ -1064,5 +1067,41 @@ test('a 400 about anything else still fails the mount', () => {
       ),
     /mailbox is unavailable/i,
     'a select fallback must not swallow unrelated 400s',
+  )
+})
+
+// ---- the follow-up flag, and importance -----------------------------------
+
+test('a follow-up flag arrives as the provider-neutral "flagged"', () => {
+  stubHttp([
+    {
+      body: {
+        value: [
+          { id: 'M1', subject: 'flagged one', flag: { flagStatus: 'flagged' } },
+          { id: 'M2', subject: 'finished', flag: { flagStatus: 'complete' } },
+          { id: 'M3', subject: 'plain', flag: { flagStatus: 'notFlagged' } },
+          { id: 'M4', subject: 'no flag key at all' },
+        ],
+      },
+    },
+  ])
+  const out = opList(CREDENTIAL, mailMount(), {})
+  const flags = out.items.map((i) => i.metadata.flags)
+
+  assert.deepEqual(flags[0], ['flagged'])
+  // `complete` is a FINISHED follow-up and `notFlagged` is the absence of one;
+  // both would read as flagged to anyone testing the array for members.
+  assert.equal(flags[1], null)
+  assert.equal(flags[2], null)
+  assert.equal(flags[3], null)
+})
+
+test('the mail select asks for the flag', () => {
+  const calls = stubHttp([{ body: { value: [] } }])
+  opList(CREDENTIAL, mailMount(), {})
+  assert.match(
+    decodeURIComponent(calls[0].url),
+    /\bflag\b/,
+    'without it in $select Graph never returns the flag and every message reads as unflagged',
   )
 })

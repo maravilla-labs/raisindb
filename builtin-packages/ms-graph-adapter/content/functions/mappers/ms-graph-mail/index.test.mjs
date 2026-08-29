@@ -210,3 +210,55 @@ test('to_node emits both spellings of the read flag, mutually inverse', () => {
   assert.equal(fresh.properties.unread, true);
   assert.equal(fresh.properties.is_read, false);
 });
+
+// ---- importance is writable -----------------------------------------------
+
+test('importance pushes as its own PATCH', () => {
+  const out = handler({
+    operation: 'to_external',
+    node: { properties: { importance: 'high', __external_id: 'M1' } },
+    fields: ['importance'],
+  })
+  assert.deepEqual(out.payload, { importance: 'high' })
+  assert.equal(out.external_id, 'M1')
+})
+
+test('a diverged importance alone is a complete request', () => {
+  // `fields` is the DIVERGED subset, so importance must stand on its own —
+  // gating it on the read flag arriving too is how a one-field divergence
+  // becomes a null return and a node re-nominated forever.
+  const out = handler({
+    operation: 'to_external',
+    node: { properties: { unread: true, importance: 'low' } },
+    fields: ['importance'],
+  })
+  assert.deepEqual(out.payload, { importance: 'low' })
+})
+
+test('importance is normalised, and a value Graph does not know is dropped', () => {
+  const cased = handler({
+    operation: 'to_external',
+    node: { properties: { importance: 'High' } },
+    fields: ['importance'],
+  })
+  assert.deepEqual(cased.payload, { importance: 'high' })
+
+  // Dropped rather than sent: Graph answers a bad value with a 400, which the
+  // engine reads as a config error and stands the mount off — too heavy a
+  // price for one mistyped word on one message.
+  const nonsense = handler({
+    operation: 'to_external',
+    node: { properties: { importance: 'urgent!' } },
+    fields: ['importance'],
+  })
+  assert.equal(nonsense, null)
+})
+
+test('the read flag and importance travel together when both diverged', () => {
+  const out = handler({
+    operation: 'to_external',
+    node: { properties: { unread: false, importance: 'normal' } },
+    fields: ['unread', 'importance'],
+  })
+  assert.deepEqual(out.payload, { isRead: true, importance: 'normal' })
+})

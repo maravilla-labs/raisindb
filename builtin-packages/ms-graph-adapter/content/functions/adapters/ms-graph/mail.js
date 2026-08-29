@@ -58,6 +58,18 @@ export function mailMeta(v) {
     unread: v.isRead === false,
     has_attachments: v.hasAttachments === true,
     importance: v.importance || null,
+    // Graph's follow-up flag, expressed in raisin:Mail's PROVIDER-NEUTRAL
+    // vocabulary — the same IMAP-style array the IMAP connector fills, so a
+    // consumer reads one field for "is this flagged" whatever the mailbox is.
+    //
+    // Only the `flagged` status becomes a flag. `complete` is a finished
+    // follow-up and `notFlagged` is the absence of one, and both would read as
+    // "flagged" to anyone filtering the array for members rather than values.
+    // The flag's start/due/completed dates are NOT carried: this array holds
+    // words, and a date that only exists on one provider does not belong in the
+    // field whose whole purpose is that it works across all of them.
+    flags:
+      v.flag && v.flag.flagStatus === "flagged" ? ["flagged"] : null,
     // Outlook categories and Gmail labels are the same concept; the global
     // nodetype carries one `labels` array for both so a consumer never has to
     // branch on provider to read a label.

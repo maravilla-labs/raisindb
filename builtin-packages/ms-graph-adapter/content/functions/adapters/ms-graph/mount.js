@@ -34,7 +34,7 @@ import { initialDeltaUrl } from "./changes.js";
 export var MAIL_SELECT =
   "id,subject,from,toRecipients,ccRecipients,bccRecipients,replyTo," +
   "receivedDateTime,sentDateTime,bodyPreview,isRead,isDraft,hasAttachments," +
-  "importance,categories,conversationId,webLink,internetMessageId," +
+  "importance,flag,categories,conversationId,webLink,internetMessageId," +
   "createdDateTime,lastModifiedDateTime";
 
 // Whether this mount wants attachment METADATA materialized as raisin:Asset

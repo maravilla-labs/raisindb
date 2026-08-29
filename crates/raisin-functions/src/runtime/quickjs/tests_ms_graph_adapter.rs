@@ -149,7 +149,15 @@ async fn capabilities_declare_update_for_mail_and_submit_for_mail_and_calendar()
     // authored in either, and the engine INTERSECTS the two lists — so
     // declaring only one silently drops the other's edits (an empty
     // intersection is refused loudly, a partial one is not).
-    assert_eq!(mail["mutable_fields"], json!(["unread", "is_read"]));
+    // …plus `importance`, which Graph accepts on the same message PATCH from a
+    // closed set it also reports. The follow-up FLAG is imported but absent
+    // here on purpose: writing it means writing a flag OBJECT with a status and
+    // dates, and declaring a field the mapper cannot translate is how a push
+    // resolves as supported and then throws at drain time.
+    assert_eq!(
+        mail["mutable_fields"],
+        json!(["unread", "is_read", "importance"])
+    );
     // NODE property names, never the Graph name: the mount's
     // write_config.mutable_fields is authored in node terms, and the survivors
     // of the intersection are what the mapper receives.

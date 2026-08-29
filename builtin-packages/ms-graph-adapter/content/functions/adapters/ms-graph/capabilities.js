@@ -56,7 +56,12 @@ export function opCapabilities(mount) {
     // attempted, the reason visible only in writeback_last_error. The mail
     // mapper folds both into one `isRead` payload key, so declaring both here
     // never produces two conflicting writes.
-    caps.mutable_fields = ["unread", "is_read"];
+    // `importance` joins the two read-flag spellings: Graph accepts it on the
+    // same message PATCH, from the same closed set it reports. The follow-up
+    // FLAG is deliberately not here — it is imported (see `flags`) but writing
+    // it means writing a flag OBJECT with status and dates, not a value, and a
+    // half-specified flag is worse than none.
+    caps.mutable_fields = ["unread", "is_read", "importance"];
     // The OUTBOX half. `can_submit` is a fact about the adapter, not about the
     // mount: the same declaration serves a `state_only` inbox that never issues
     // a command and a `submit` outbox that does nothing else. The MOUNT's
