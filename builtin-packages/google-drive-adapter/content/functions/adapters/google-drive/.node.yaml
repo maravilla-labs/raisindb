@@ -4,17 +4,39 @@ properties:
   description: >
     Virtual-node adapter for Google Drive (Drive v3). Translates the normalized
     adapter operations (capabilities, list, get, get_content, create, update,
-    delete, get_changes) into Google Drive REST calls. Invoked directly by the
-    sync engine with a decrypted access token; owns no token-refresh logic.
+    delete, get_changes, finalize_upload) into Google Drive REST calls. Invoked
+    directly by the sync engine with a decrypted access token; owns no
+    token-refresh logic.
+    WRITES are the full mirror set plus BYTES: `accepts_content` makes the engine
+    send a node's file, and every content write is answered with a RESUMABLE
+    UPLOAD SESSION that the engine streams to before calling back with
+    `finalize_upload`. A write needs a ReadWrite scope
+    (https://www.googleapis.com/auth/drive, or drive.file for app-created files
+    only) which a read-only connector does not request — add it and re-consent
+    per account, since Google only issues a widened scope on fresh consent.
   language: javascript
   entry_file: index.js:handler
   execution_mode: Async
   enabled: true
-  version: 1
+  # 2: the write path against the parameters the engine actually sends
+  #    (payload / parent_external_id / relative_path / content-as-an-object),
+  #    the resumable upload channel, and delta items that carry their FOLDER
+  #    PATH — a webhook- or poll-delivered file now lands where the full walk
+  #    would have put it instead of flat at the mount root.
+  version: 2
   resource_limits:
     timeout_ms: 120000
     max_memory_bytes: 67108864
   # Outbound access is restricted to Google's Drive/API and OAuth token hosts.
+  # `/upload/drive/v3/...` lives on the same host and is already covered.
+  #
+  # THE UPLOAD PATH ADDS NOTHING HERE, and that is the design rather than an
+  # omission: this adapter only NEGOTIATES the resumable session (an ordinary
+  # JSON call to www.googleapis.com). The session URL it hands back is streamed
+  # by the ENGINE in Rust, under the operator's egress policy, exactly as it
+  # downloads a read's fetch_url. Listing it here would mean the adapter was
+  # pushing megabytes through a QuickJS string, which is what the two-call shape
+  # exists to avoid.
   network_policy:
     http_enabled: true
     request_timeout_ms: 120000
@@ -29,7 +51,10 @@ properties:
     properties:
       operation:
         type: string
-        description: One of capabilities, list, get, get_content, create, update, delete, get_changes
+        description: >
+          One of capabilities, list, get, get_content, create, update, delete,
+          get_changes, finalize_upload (called after the engine streamed a
+          resumable upload session)
       params:
         type: object
         description: Operation-specific arguments

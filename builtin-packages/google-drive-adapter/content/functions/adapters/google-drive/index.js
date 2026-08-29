@@ -13,6 +13,24 @@
  * a current, decrypted token; there is NO refresh_token and no refresh logic
  * here. If a token is rejected, throw `auth_expired` and let the engine handle
  * the reconnect/refresh cycle.
+ *
+ * WRITES are the full mirror set — create, update, delete — plus BYTES. Two
+ * facts about Google shape that half and are worth knowing before reading it:
+ *
+ *   * `raisin.http.fetch` can send raw bytes (`bodyBase64`) but cannot assemble
+ *     a multipart/related body around them, so every content write goes through
+ *     a RESUMABLE UPLOAD SESSION: this adapter negotiates the session (an
+ *     ordinary JSON call) and hands the ENGINE the URL to stream to, and the
+ *     engine calls back with `finalize_upload`. That is also why the multipart
+ *     path that used to live here is gone — it stringified `params.content`,
+ *     which the engine sends as an OBJECT, so it could only ever have uploaded
+ *     the literal text "[object Object]".
+ *   * Drive's changes feed is ACCOUNT-WIDE, not folder-scoped, and Drive is a
+ *     DAG rather than a tree. Both are handled in `changeRelativePath` below.
+ *
+ * SINGLE FILE on purpose: the QuickJS runtime is handed this file alone
+ * (`tests_google_drive_write.rs` loads it with an empty module map), so a
+ * sibling `import` would resolve to nothing at run time.
  */
 
 var DRIVE = "https://www.googleapis.com/drive/v3";
@@ -24,6 +42,25 @@ var FILE_FIELDS =
   "id,name,mimeType,size,parents,createdTime,modifiedTime,version," +
   "md5Checksum,webViewLink,webContentLink,trashed,shared,iconLink";
 
+// Drive requires every chunk of a resumable upload EXCEPT THE LAST to be a
+// multiple of 256 KiB; a non-multiple is rejected mid-transfer, after the bytes
+// have already crossed the wire. 10 MiB is 40 such units.
+//
+// It is sent explicitly even though the engine's current fallback happens to be
+// the same number: the 256 KiB rule is GOOGLE'S, the engine's default is the
+// engine's, and an adapter that leans on someone else's default is one release
+// away from having every non-final chunk rejected. The engine uses this value
+// VERBATIM and rounds nothing, precisely so the provider's rule stays here.
+var UPLOAD_CHUNK_SIZE = 40 * 256 * 1024;
+
+// Drive answers EVERY non-final chunk of a resumable upload with `308 Resume
+// Incomplete`. Declared for the same reason as the chunk size: 308 is a fact
+// about Drive's protocol, and an engine default of `[]` (2xx only) would fail
+// every multi-chunk upload on chunk one. On the FINAL chunk a 308 is still a
+// hard failure — it means Drive does not consider the object written — and that
+// judgement belongs to the engine, which makes it.
+var UPLOAD_CONTINUE_STATUSES = [308];
+
 function coded(message, code) {
   var e = new Error(message);
   e.code = code;
@@ -32,7 +69,7 @@ function coded(message, code) {
 
 // Throw the reserved error codes the engine dispatches on. Never swallow an
 // auth failure into an empty result — that reads as "everything was deleted".
-function raiseForStatus(resp, context) {
+function raiseForStatus(resp, context, isWrite) {
   var status = resp.status;
   if (status >= 200 && status < 300) return;
 
@@ -59,6 +96,22 @@ function raiseForStatus(resp, context) {
       reason === "dailyLimitExceeded")
   ) {
     throw coded("Google Drive usage limit exceeded", "rate_limited");
+  }
+  // A write-scope shortfall, which is the FIRST thing a newly writable mount
+  // hits: the connector asks for a read scope, so every read succeeds and every
+  // write 403s. Left as a plain Error this is transient, i.e. the same doomed
+  // request re-sent on every drain forever, with the operator sent to reconnect
+  // an account whose consent is not the problem. Terminal and named instead.
+  if (status === 403 && isWrite) {
+    throw coded(
+      context + ": Google refused the write (403 " + (reason || "forbidden") +
+        "). This is almost certainly a missing WRITE scope rather than a stale " +
+        "token: add https://www.googleapis.com/auth/drive (or " +
+        "https://www.googleapis.com/auth/drive.file for app-created files only) " +
+        "to the Google connector's OAuth scopes and RECONNECT each account — " +
+        "Google only issues a widened scope on fresh consent.",
+      "config_error"
+    );
   }
   var msg =
     (body && body.error && body.error.message) ||
@@ -87,9 +140,27 @@ function driveFetch(credential, method, url, opts) {
   if (opts.body !== undefined) request.body = opts.body;
   var resp = raisin.http.fetch(url, request);
   if (!opts.rawStatusOk || (resp.status !== 404 && resp.status !== 412)) {
-    raiseForStatus(resp, opts.context || method + " " + url);
+    raiseForStatus(resp, opts.context || method + " " + url, opts.write);
   }
   return resp;
+}
+
+// One response header, whatever the host capitalized it as.
+//
+// The host builds this map from reqwest's own header names, which are
+// lowercased — but the resumable session URL arrives in exactly one header and
+// losing it means the bytes have nowhere to go, so the lookup does not bet on
+// that staying true.
+function headerValue(headers, name) {
+  if (!headers) return null;
+  if (typeof headers[name] === "string") return headers[name];
+  var lower = String(name).toLowerCase();
+  for (var k in headers) {
+    if (String(k).toLowerCase() === lower && typeof headers[k] === "string") {
+      return headers[k];
+    }
+  }
+  return null;
 }
 
 function enc(v) {
@@ -141,13 +212,29 @@ function opCapabilities() {
     // ---- write path ----
     // Declared because they are implemented below and dispatched in `handler`.
     // A capability the engine cannot see is a capability the engine will not
-    // use: `write::plan::resolve` refuses a `mirror` mount whose adapter has
-    // not said all three, so omitting them here is what makes the mount
-    // read-only regardless of what this file can actually do.
+    // use.
+    //
+    // Each is demanded only by the mount that would USE it, not by every mirror
+    // mount — `write/plan.rs::resolve_mirror` asks for `can_create` only when
+    // `write_config.create_node_types` is non-empty and for `can_delete` only
+    // when the resolved delete policy actually pushes (a `detach` mount never
+    // calls `delete`). So omitting one here does not make the whole mount
+    // read-only; it silently removes exactly the operation it names from the
+    // mounts configured to want it, which is the harder failure to see.
     can_create: true,
     can_update: true,
     can_delete: true,
     can_submit: false,
+
+    // THE BYTE CHANNEL. Without it the engine sends metadata only and a
+    // "mirrored" file arrives at Drive as a name with no content — which is
+    // what this adapter did for as long as its upload path read
+    // `params.content` as a string the engine has never sent.
+    //
+    // Declaring it also changes when a create is ATTEMPTED: the engine defers
+    // any create whose node has no bytes yet (`write::content::content_pending`)
+    // rather than minting an empty file the next walk would call synced.
+    accepts_content: true,
 
     // What a local edit may push. Drive files are content plus one writable
     // piece of metadata worth mirroring — the name. The node property is
@@ -156,6 +243,20 @@ function opCapabilities() {
     // provider-computed (size, checksums, links, timestamps) and a PATCH
     // carrying it would be rejected or silently ignored.
     mutable_fields: ["title"],
+
+    // A locally-created FOLDER becomes a real Drive folder (`opCreate`'s folder
+    // branch, and the default mapper's `to_external` emits the folder mime type
+    // on a create so the mapper — not the adapter — stays the authority on what
+    // a node translates to). This flag is what makes the engine offer
+    // raisin:Folder as a creatable type at all.
+    //
+    // KNOWN GAP, stated rather than papered over: the engine's create drain
+    // defers every candidate whose node carries no file bytes while
+    // `accepts_content` is declared, and a folder never carries any — so a
+    // folder create is currently issued only by a mount that does not take
+    // content. Nothing here throws when the engine does ask; the branch is real.
+    // The deferral is `write/content.rs::content_pending`, and it is the same
+    // for the ms-graph adapter.
 
     // `detach` for files (§9.5): a local delete removes the node and leaves the
     // Drive file alone. Deliberately NOT `trash` — a mount is frequently a
@@ -281,27 +382,314 @@ function bodyToString(body) {
   return typeof body === "string" ? body : JSON.stringify(body);
 }
 
-function opCreate(credential, params) {
-  var metadata = { name: params.name, parents: [params.parent_id] };
-  if (params.is_folder) {
+// ---- the write receipt -----------------------------------------------------
+
+/**
+ * The `{ external_id, etag }` the engine stamps back onto the node.
+ *
+ * THE ETAG MUST BE THE ONE THE NEXT WALK COMPUTES for the post-write state. The
+ * read path skips an item only when its etag matches the stored one, so a
+ * receipt carrying anything else makes the run FOLLOWING this push mismatch its
+ * own write, rebuild the node from remote and reseed `__pushed_state` — silently
+ * reverting whatever was edited while the push was in flight. So it is derived
+ * with `toExternalItem`'s formula (`version`, falling back to `modifiedTime`)
+ * and never from a response header, which the walk never sees.
+ *
+ * A null etag is not merely imprecise: the engine falls back to the STALE
+ * pre-write value, which is the same clobber one step later. Callers that can
+ * end up here without one read the file back instead.
+ */
+function writeReceipt(body, fallbackId) {
+  body = body && typeof body === "object" ? body : {};
+  return {
+    external_id: body.id || fallbackId || null,
+    etag: body.version != null ? String(body.version) : body.modifiedTime || null,
+  };
+}
+
+// ---- create ----------------------------------------------------------------
+
+/**
+ * The Drive metadata body for a create or an update.
+ *
+ * The MAPPER's payload is the base — it is the authorized translator between
+ * node shape and provider shape, and a mount pointed at a custom mapper must be
+ * able to decide the remote fields without forking this adapter.
+ *
+ * `is_folder` is stripped because it is the ENGINE's vocabulary, not Drive's:
+ * Google rejects an unknown field in the resource body outright ("Invalid JSON
+ * payload received. Unknown name"), so passing the mapper's own folder flag
+ * through would 400 the very create it was meant to describe.
+ */
+function driveMetadata(payload, name, parent) {
+  var metadata = {};
+  if (payload && typeof payload === "object") {
+    for (var k in payload) {
+      if (k === "is_folder") continue;
+      metadata[k] = payload[k];
+    }
+  }
+  if (name) metadata.name = name;
+  if (parent) metadata.parents = [parent];
+  return metadata;
+}
+
+/**
+ * The name to create under.
+ *
+ * The mapper's `payload.name` wins, `content.name` (the engine's own echo of the
+ * node's file Resource) is the fallback, and the last segment of
+ * `relative_path` is the last resort — that one exists because the engine always
+ * sends a relative_path and a mapper that emits only metadata would otherwise
+ * leave a create with no name at all.
+ */
+function targetName(params) {
+  var payload = params.payload || {};
+  var content = params.content || {};
+  if (typeof payload.name === "string" && payload.name) return payload.name;
+  if (typeof content.name === "string" && content.name) return content.name;
+  if (typeof params.relative_path === "string" && params.relative_path) {
+    var parts = params.relative_path.split("/");
+    var last = parts[parts.length - 1];
+    if (last) return last;
+  }
+  return null;
+}
+
+/**
+ * WHICH folder a create files into.
+ *
+ * `parent_external_id` is the node's OWN parent folder and wins whenever the
+ * engine could resolve one: a file authored under `Gründung/` belongs in that
+ * folder, and creating it at the top of the mount instead is wrong in a way that
+ * looks like success — the next walk then re-places the local node at the root
+ * to match, so the mistake propagates back and reads as "sync moved my file".
+ *
+ * `parent_id` (the mount's own remote root) is the fallback, and the right
+ * answer for a node sitting directly under the mount path or whose parent folder
+ * has no provider id yet. `null` means My Drive's root, which is where Drive
+ * files a create that names no parents.
+ */
+function createParent(mount, params) {
+  if (typeof params.parent_external_id === "string" && params.parent_external_id) {
+    return params.parent_external_id;
+  }
+  if (typeof params.parent_id === "string" && params.parent_id) return params.parent_id;
+  var root = mount && mount.remote_root;
+  return typeof root === "string" && root ? root : null;
+}
+
+/**
+ * Folder, or file?
+ *
+ * The MAPPER is the authority: `mimeType` is Drive's own answer and `is_folder`
+ * the engine's spelling of it, and either settles the question. An explicit
+ * non-folder mime type also settles it the other way, which is what lets a
+ * Google-native document (a Doc, a Sheet) be created — those have no bytes at
+ * all and would otherwise be mistaken for folders by the fallback.
+ *
+ * The fallback — no bytes means a folder — is only trustworthy because this
+ * adapter declares `accepts_content`: the engine then DEFERS a create whose
+ * content has not arrived, so "no content here" means "this node has none",
+ * not "not yet".
+ */
+function createKind(params) {
+  var payload = params.payload || {};
+  if (payload.mimeType === FOLDER_MIME || payload.is_folder === true) return "folder";
+  if (typeof payload.mimeType === "string" && payload.mimeType) return "file";
+  return params.content ? "file" : "folder";
+}
+
+/**
+ * Create one object at the provider.
+ *
+ * `params` is what the write drain actually sends — `{ payload, parent_id,
+ * parent_external_id, relative_path, content }` — and NOT the
+ * `{ name, is_folder, mime_type, content-as-a-string }` this function used to
+ * read. Every one of those keys was absent on every real call, so the name was
+ * `undefined`, the folder branch never ran, and `parents` was built from a
+ * `parent_id` that is only half the answer.
+ *
+ * NOTE ON COLLISIONS: Drive permits two siblings with the same name and has no
+ * `conflictBehavior`, so a create never overwrites a stranger's file the way a
+ * Graph `replace` would. The cost is the opposite failure — a create retried
+ * after a receipt was lost leaves a duplicate — which is why the engine refuses
+ * to adopt a node without an id rather than guessing one.
+ */
+function opCreate(credential, mount, params) {
+  params = params || {};
+  var name = targetName(params);
+  if (!name) {
+    throw coded(
+      "create: no name — the mapper emitted no payload.name, the engine sent no " +
+        "content.name, and relative_path was empty. Drive has no nameless file.",
+      "config_error"
+    );
+  }
+  var metadata = driveMetadata(params.payload, name, createParent(mount, params));
+
+  if (createKind(params) === "folder") {
     metadata.mimeType = FOLDER_MIME;
-    var resp = driveFetch(credential, "POST", DRIVE + "/files?fields=" + enc(FILE_FIELDS), {
-      headers: { "Content-Type": "application/json" },
-      body: metadata,
-      context: "create(folder)",
-    });
-    return toExternalItem(resp.body);
+    var folder = driveFetch(
+      credential,
+      "POST",
+      DRIVE + "/files?fields=" + enc(FILE_FIELDS) + "&supportsAllDrives=true",
+      {
+        headers: { "Content-Type": "application/json" },
+        body: metadata,
+        context: "create(folder)",
+        write: true,
+      }
+    );
+    return requireId(writeReceipt(folder.body, null), "create", folder.status);
   }
-  if (params.mime_type) metadata.mimeType = params.mime_type;
-  if (params.content === undefined || params.content === null) {
-    var r = driveFetch(credential, "POST", DRIVE + "/files?fields=" + enc(FILE_FIELDS), {
-      headers: { "Content-Type": "application/json" },
-      body: metadata,
-      context: "create(file)",
-    });
-    return toExternalItem(r.body);
+
+  // No bytes: a metadata-only create, which is how a Google-native document is
+  // made (its mimeType IS the whole request) and the only shape left for a mount
+  // whose adapter was handed no content.
+  if (!params.content) {
+    var file = driveFetch(
+      credential,
+      "POST",
+      DRIVE + "/files?fields=" + enc(FILE_FIELDS) + "&supportsAllDrives=true",
+      {
+        headers: { "Content-Type": "application/json" },
+        body: metadata,
+        context: "create(file)",
+        write: true,
+      }
+    );
+    return requireId(writeReceipt(file.body, null), "create", file.status);
   }
-  return multipartUpload(credential, "POST", UPLOAD + "/files", metadata, params);
+
+  return beginUpload(
+    credential,
+    "POST",
+    UPLOAD + "/files?uploadType=resumable&fields=" + enc(FILE_FIELDS) +
+      "&supportsAllDrives=true",
+    metadata,
+    "create:resumable"
+  );
+}
+
+// The engine refuses to adopt a node without a real id, and it is right to: a
+// fabricated one makes the node unmatchable and undeletable, and the next
+// reconcile creates a SECOND copy at the provider. So an id-less 2xx is named
+// here rather than passed on as a null.
+function requireId(receipt, context, status) {
+  if (!receipt.external_id) {
+    throw coded(
+      context + ": Google accepted the request (HTTP " + status + ") but returned no " +
+        "file id, so the new file cannot be matched to its node",
+      "transient"
+    );
+  }
+  return receipt;
+}
+
+// ---- the byte channel ------------------------------------------------------
+
+/**
+ * Open a resumable upload session and hand the ENGINE the URL to stream to.
+ *
+ * Why every content write goes this way, small files included: `raisin.http.fetch`
+ * sends raw bytes only as a whole `bodyBase64` body, so a multipart/related
+ * envelope (JSON metadata part + binary part) cannot be assembled here at all —
+ * concatenating base64 fragments is not base64. The alternatives were a
+ * metadata POST followed by a `uploadType=media` PATCH, which leaves an empty
+ * file at the provider and an unadoptable orphan whenever the second call fails,
+ * or this: ONE call that either yields a session or fails having created
+ * nothing.
+ *
+ * `headers` is deliberately ABSENT from the answer. The session URL carries its
+ * own `upload_id` and is pre-authenticated; attaching our bearer token would put
+ * a Google credential on a URL this adapter does not otherwise talk to, for no
+ * benefit.
+ *
+ * The metadata travels IN the initiation body, so a "renamed and re-uploaded"
+ * push is one request and cannot half-apply. The initiation URL's query string
+ * (`fields`) is replayed on the session's final response, which is what makes
+ * `version` — the etag the walk computes — available to `finalize_upload`.
+ */
+function beginUpload(credential, method, url, metadata, context) {
+  var resp = driveFetch(credential, method, url, {
+    headers: { "Content-Type": "application/json; charset=UTF-8" },
+    body: metadata,
+    context: context,
+    write: true,
+  });
+  var session = headerValue(resp.headers, "Location");
+  if (!session) {
+    throw coded(
+      context + ": Google opened no resumable session (HTTP " + resp.status +
+        ", no Location header), so there is nowhere to send the bytes",
+      "transient"
+    );
+  }
+  return {
+    upload: {
+      url: session,
+      method: "PUT",
+      chunk_size: UPLOAD_CHUNK_SIZE,
+      continue_statuses: UPLOAD_CONTINUE_STATUSES,
+    },
+  };
+}
+
+/**
+ * The second half of an engine-streamed upload: `{ status, body, headers,
+ * intent, item_id }`, where `body` is Drive's parsed answer to the LAST chunk.
+ *
+ * This call exists so provider-shaped parsing stays in the adapter — the engine
+ * moved the bytes and must not also learn that a Drive file keeps its id in `id`
+ * and its concurrency token in `version`.
+ *
+ * `headers` is read only as a last resort. Drive answers a completed session
+ * with the file resource as JSON, so unlike S3's `PutObject` there is a body to
+ * read; the header path is here because the engine now supplies it and a bodiless
+ * 200 would otherwise stamp a null etag, which falls back to the STALE pre-write
+ * value and lets the next walk overwrite this upload.
+ */
+function opFinalizeUpload(credential, mount, params) {
+  params = params || {};
+  var status = Number(params.status);
+  var what = params.intent === "update" ? "update" : "create";
+  if (!isFinite(status)) {
+    throw coded(
+      "finalize_upload: no HTTP status for the completed upload (" + what + ")",
+      "config_error"
+    );
+  }
+  // Non-2xx keeps the shared taxonomy, so a 401 at the end of an upload is still
+  // auth_expired and a 429 is still rate_limited. A 308 cannot reach here — the
+  // engine fails a non-2xx FINAL chunk itself — but if it ever did, this is
+  // where it stops, because a 308 means Drive does not consider the file written.
+  if (status < 200 || status >= 300) {
+    raiseForStatus(
+      { status: status, headers: params.headers || {}, body: params.body || {} },
+      "finalize_upload",
+      true
+    );
+  }
+
+  var body = params.body && typeof params.body === "object" ? params.body : {};
+  if (!body.id) {
+    throw coded(
+      "finalize_upload: the upload session reported success (HTTP " + status + ") for " +
+        "this " + what + " but returned no file id, so the file cannot be matched to " +
+        "its node",
+      "transient"
+    );
+  }
+  var receipt = writeReceipt(body, params.item_id || null);
+  if (receipt.etag) return receipt;
+  // A read-back rather than a null etag, for the reason `writeReceipt` states:
+  // the engine would otherwise stamp the pre-write value and the next walk would
+  // clobber the bytes this upload just stored. It goes through `opGet` so the
+  // etag is byte-identical to the one the next walk computes.
+  var item = opGet(credential, mount, { item_id: body.id });
+  if (item) return { external_id: item.external_id, etag: item.etag };
+  return receipt;
 }
 
 /**
@@ -355,68 +743,63 @@ function checkVersion(credential, itemId, etag, context) {
   return "match";
 }
 
-function opUpdate(credential, params) {
+/**
+ * Update one file: metadata, bytes, or both.
+ *
+ * `params` is `{ item_id, payload, fields, etag, content? }`. The payload is the
+ * mount mapper's `to_external` output — already provider-shaped and already
+ * narrowed to the mount's field allow-list — and it is the only source of
+ * metadata: the `params.name` / `params.mime_type` this function used to merge
+ * are not keys the write drain has ever sent, and reading them made the code
+ * look like it supported a shape it never received.
+ */
+function opUpdate(credential, mount, params) {
+  params = params || {};
+  if (!params.item_id) {
+    throw coded("update: params.item_id is required", "config_error");
+  }
   // A vanished file SETTLES the node rather than failing it: the delta feed
   // reports the deletion and the engine removes the node on its own schedule.
   if (checkVersion(credential, params.item_id, params.etag, "update") === "gone") {
     return null;
   }
 
-  // The write drain sends `params.payload` — the mount mapper's `to_external`
-  // output, already provider-shaped and already narrowed to the mount's field
-  // allow-list. `params.name` / `params.mime_type` are the older direct form,
-  // kept because the adapter contract documents them for content sync; the
-  // payload wins where both appear.
-  var metadata = {};
-  if (params.name !== undefined) metadata.name = params.name;
-  if (params.mime_type !== undefined) metadata.mimeType = params.mime_type;
-  if (params.payload && typeof params.payload === "object") {
-    for (var pk in params.payload) metadata[pk] = params.payload[pk];
+  var metadata = driveMetadata(params.payload, null, null);
+
+  if (params.content) {
+    // The metadata rides IN the session initiation body, so a push that both
+    // renames and re-uploads is ONE request and cannot half-apply. An empty
+    // metadata object is fine here — the bytes are the point of the call.
+    return beginUpload(
+      credential,
+      "PATCH",
+      UPLOAD + "/files/" + enc(params.item_id) + "?uploadType=resumable&fields=" +
+        enc(FILE_FIELDS) + "&supportsAllDrives=true",
+      metadata,
+      "update:resumable"
+    );
   }
-  if (isEmptyObject(metadata) && (params.content === undefined || params.content === null)) {
+
+  if (isEmptyObject(metadata)) {
     // An empty PATCH still bumps the file's `version`, which invalidates every
     // stored etag and makes the next delta re-deliver the file for no reason —
     // and on a mirror that is a revision per file per drain, forever.
     throw coded("update: refusing an empty PATCH body", "config_error");
   }
 
-  if (params.content === undefined || params.content === null) {
-    var resp = driveFetch(
-      credential,
-      "PATCH",
-      DRIVE + "/files/" + enc(params.item_id) + "?fields=" + enc(FILE_FIELDS) +
-        "&supportsAllDrives=true",
-      { headers: { "Content-Type": "application/json" }, body: metadata, context: "update" }
-    );
-    return toExternalItem(resp.body);
-  }
-  return multipartUpload(
+  var resp = driveFetch(
     credential,
     "PATCH",
-    UPLOAD + "/files/" + enc(params.item_id),
-    metadata,
-    params
+    DRIVE + "/files/" + enc(params.item_id) + "?fields=" + enc(FILE_FIELDS) +
+      "&supportsAllDrives=true",
+    {
+      headers: { "Content-Type": "application/json" },
+      body: metadata,
+      context: "update",
+      write: true,
+    }
   );
-}
-
-// Multipart/related upload: JSON metadata part + raw content part in one body.
-function multipartUpload(credential, method, base, metadata, params) {
-  var boundary = "raisin-gdrive-" + Date.now();
-  var body =
-    "--" + boundary + "\r\n" +
-    "Content-Type: application/json; charset=UTF-8\r\n\r\n" +
-    JSON.stringify(metadata) + "\r\n" +
-    "--" + boundary + "\r\n" +
-    "Content-Type: " + (params.mime_type || "text/plain") + "\r\n\r\n" +
-    params.content + "\r\n" +
-    "--" + boundary + "--";
-  var url = base + "?uploadType=multipart&fields=" + enc(FILE_FIELDS) + "&supportsAllDrives=true";
-  var resp = driveFetch(credential, method, url, {
-    headers: { "Content-Type": "multipart/related; boundary=" + boundary },
-    body: body,
-    context: "upload",
-  });
-  return toExternalItem(resp.body);
+  return writeReceipt(resp.body, params.item_id);
 }
 
 function isEmptyObject(v) {
@@ -461,10 +844,17 @@ function opDelete(credential, params) {
         body: { trashed: true },
         context: "delete(trash)",
         rawStatusOk: true,
+        // A delete IS a write, and it is the write most likely to be the first
+        // one a newly writable mount issues. Without this flag its 403 misses
+        // the missing-write-scope branch in `raiseForStatus` and comes back a
+        // plain Error, i.e. Transient — the same doomed request re-sent on every
+        // drain forever, against a mount whose operator was never told which
+        // scope is missing. Create and update already say so; delete did not.
+        write: true,
       }
     );
     if (patched.status === 404) return { deleted: true, trashed: true };
-    raiseForStatus(patched, "delete(trash)");
+    raiseForStatus(patched, "delete(trash)", true);
     return { deleted: true, trashed: true };
   }
 
@@ -472,12 +862,142 @@ function opDelete(credential, params) {
     credential,
     "DELETE",
     DRIVE + "/files/" + enc(params.item_id) + "?supportsAllDrives=true",
-    { context: "delete", rawStatusOk: true }
+    // `write: true` for the reason the trash branch states: a 403 here is a
+    // missing write scope, not a transient fault.
+    { context: "delete", rawStatusOk: true, write: true }
   );
   // Already-absent items delete idempotently.
   if (resp.status === 404) return { deleted: true };
-  raiseForStatus(resp, "delete");
+  raiseForStatus(resp, "delete", true);
   return { deleted: true };
+}
+
+// ---- where a delta item lands, relative to the mount root ------------------
+//
+// ONLY the delta feed needs this. The full walk recurses folder by folder and
+// the ENGINE accumulates the prefix as it descends (`full.rs`
+// `resolve_item_path`: `{prefix}/{item.name}`, where the prefix is the parent
+// folder's own resolved path). The changes feed has no recursion, so the path
+// has to be reconstructed — and it has to come out IDENTICAL to the walk's, or
+// the same file sits in one place after a backfill and another after a delta.
+//
+// That is what this replaces: `relative_path: item.name`, flat. A file two
+// folders deep was delivered by the walk at `a/b/report.pdf` and by every delta
+// at `report.pdf`, so the engine's remap MOVED the node on every disagreeing
+// run — out of its folder on a delta, back into it on the next full reconcile,
+// forever. Not cosmetic: a node move rewrites its path and everything that
+// referenced the old one.
+//
+// TWO WAYS DRIVE DIFFERS FROM GRAPH, both handled here:
+//
+//  * The changes feed is ACCOUNT-WIDE. It reports every file the account can
+//    see, not the mount's subtree, so the parent walk is also the SUBTREE
+//    FILTER: an item whose ancestry never reaches the mount root returns null
+//    and is dropped from the page. Nothing else keeps a stranger's file out of
+//    the mount, and the engine joins `relative_path` to `mount_path` verbatim.
+//
+//  * Drive is a DAG, not a tree: a legacy file can have SEVERAL parents. The
+//    rule is the FIRST parent (in Drive's own order) whose chain reaches the
+//    mount root — deterministic, and the cheapest walk. A file with two parents
+//    INSIDE one mount is genuinely ambiguous and the full walk is ambiguous
+//    about it too (it lists the file under both folders and the materializer
+//    keeps whichever it saw last), so no choice here can be "correct"; what
+//    matters is that it is stable between runs. Drive has allowed only one
+//    parent for files created since September 2020, so this is a legacy shape.
+//
+// Costs one `files.get` per ANCESTOR FOLDER not already seen, cached for the
+// whole `get_changes` call — a page of siblings resolves its folder chain once.
+
+var MAX_PARENT_DEPTH = 64;
+
+function newPathCache() {
+  return { meta: {}, rootId: undefined };
+}
+
+// One folder's `{id, name, parents}`, cached. `null` means "gone or not
+// readable", which the caller treats as a chain that cannot be followed rather
+// than as the root.
+function fileMeta(credential, cache, id) {
+  if (Object.prototype.hasOwnProperty.call(cache.meta, id)) return cache.meta[id];
+  var resp = driveFetch(
+    credential,
+    "GET",
+    DRIVE + "/files/" + enc(id) + "?fields=" + enc("id,name,parents") +
+      "&supportsAllDrives=true",
+    { context: "get_changes(parent)", rawStatusOk: true }
+  );
+  var meta = null;
+  if (resp.status !== 404) {
+    raiseForStatus(resp, "get_changes(parent)");
+    meta = resp.body || null;
+  }
+  cache.meta[id] = meta;
+  return meta;
+}
+
+// The folder id every path must terminate at.
+//
+// `remote_root` when the mount names one. Otherwise the mount is the whole of My
+// Drive, and the alias "root" has to be resolved to a real id: `parents` arrays
+// never contain the alias, so leaving it unresolved would make every chain walk
+// past the top and every item look like it lives outside the mount.
+function mountRootId(credential, mount, cache) {
+  if (cache.rootId !== undefined) return cache.rootId;
+  var configured = mount && mount.remote_root;
+  if (typeof configured === "string" && configured && configured !== "root") {
+    cache.rootId = configured;
+    return cache.rootId;
+  }
+  var resp = driveFetch(credential, "GET", DRIVE + "/files/root?fields=id", {
+    context: "get_changes(root)",
+  });
+  cache.rootId = (resp.body && resp.body.id) || null;
+  return cache.rootId;
+}
+
+// The folder names between the mount root and this item, or null when the chain
+// never reaches the root.
+function chainToRoot(credential, cache, rootId, parents, depth) {
+  if (!parents || !parents.length) return null;
+  // A malformed or circular parent graph must not spin: bounded, and answered
+  // with "outside the mount", which drops the item rather than materializing it
+  // somewhere invented.
+  if (depth >= MAX_PARENT_DEPTH) return null;
+  for (var i = 0; i < parents.length; i++) {
+    var pid = parents[i];
+    if (pid === rootId) return [];
+    var meta = fileMeta(credential, cache, pid);
+    if (!meta || !meta.name) continue;
+    var up = chainToRoot(credential, cache, rootId, meta.parents, depth + 1);
+    if (up !== null) return up.concat([meta.name]);
+  }
+  return null;
+}
+
+/**
+ * One changed file's path relative to the mount root, or null to SKIP it.
+ *
+ * Names are used VERBATIM, exactly as the walk uses `item.name`. Drive permits a
+ * "/" inside a file name and neither path survives that intact — but they fail
+ * identically, which is the property that matters: an adapter that sanitized
+ * here and not in `list` would reintroduce the flip-flop this function exists to
+ * remove.
+ */
+function changeRelativePath(credential, mount, cache, file) {
+  var rootId = mountRootId(credential, mount, cache);
+  if (!rootId) {
+    // Refuse the page rather than emit paths we cannot place. A thrown plain
+    // Error is transient: the cursor is not advanced and the changes are
+    // re-delivered next run, whereas returning an empty page would advance the
+    // token past changes nobody ever saw.
+    throw new Error("get_changes: could not resolve the mount root folder id");
+  }
+  // Drive reports the mount's own folder like any other file. Emitting it would
+  // create a folder node standing for the mount, inside itself.
+  if (file.id === rootId) return null;
+  var chain = chainToRoot(credential, cache, rootId, file.parents, 0);
+  if (chain === null) return null;
+  return chain.concat([file.name]).join("/");
 }
 
 function opGetChanges(credential, mount, params) {
@@ -506,17 +1026,25 @@ function opGetChanges(credential, mount, params) {
   var resp = driveFetch(credential, "GET", url, { context: "get_changes" });
   var body = resp.body || {};
   var changes = body.changes || [];
-  var items = changes.map(function (c) {
+  var cache = newPathCache();
+  var items = [];
+  for (var i = 0; i < changes.length; i++) {
+    var c = changes[i];
     if (c.removed || (c.file && c.file.trashed)) {
-      return {
-        type: "deleted",
-        item: { external_id: c.fileId },
-        relative_path: "",
-      };
+      // A deletion carries no path and needs none — the engine stages it by
+      // `external_id` — and a removed file has no metadata left to walk anyway.
+      // Deletions are NOT subtree-filtered for that reason: an id from outside
+      // the mount matches no node and stages nothing.
+      items.push({ type: "deleted", item: { external_id: c.fileId }, relative_path: "" });
+      continue;
     }
-    var item = toExternalItem(c.file);
-    return { type: "updated", item: item, relative_path: item.name };
-  });
+    if (!c.file || !c.file.id) continue;
+    var rel = changeRelativePath(credential, mount, cache, c.file);
+    // Outside the mount. The feed is account-wide, so this is the ordinary case
+    // for most changes, not an error.
+    if (rel === null) continue;
+    items.push({ type: "updated", item: toExternalItem(c.file), relative_path: rel });
+  }
   // Durable, resumable cursor: prefer nextPageToken while paging, else the new start token.
   // `has_more` says explicitly whether to keep paging now (nextPageToken) or
   // stop with a caught-up cursor — token identity is not a reliable signal.
@@ -542,11 +1070,17 @@ function handler(input) {
     case "get_content":
       return opGetContent(credential, params);
     case "create":
-      return opCreate(credential, params);
+      return opCreate(credential, mount, params);
     case "update":
-      return opUpdate(credential, params);
+      return opUpdate(credential, mount, params);
     case "delete":
       return opDelete(credential, params);
+    // The engine streamed the bytes itself and is handing back Drive's answer to
+    // the final chunk. All that is left is reading a file's id and `version` out
+    // of it — provider-shaped parsing, which is why it comes back here rather
+    // than being done in Rust.
+    case "finalize_upload":
+      return opFinalizeUpload(credential, mount, params);
     case "get_changes":
       return opGetChanges(credential, mount, params);
     default:

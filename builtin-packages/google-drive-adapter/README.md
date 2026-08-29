@@ -20,6 +20,27 @@ This package implements the frozen adapter contract in
 `can_read`, `can_write`, `can_create_folders`, and `supports_changes` (real Drive
 changes API) are all `true`. Webhooks, search, and push are not implemented in v1.
 
+### Writes
+
+The full mirror set — `create`, `update`, `delete` — plus bytes. Two things are
+worth knowing before you enable a `mirror` mount:
+
+- **Bytes go through a resumable upload session.** The adapter declares
+  `accepts_content`, so the engine sends the node's file; the adapter answers
+  with `{ upload: { url, chunk_size, continue_statuses } }` and the **engine**
+  streams the bytes, then calls back into `finalize_upload`. Chunks are a
+  multiple of 256 KiB (Drive's rule) and every non-final chunk is answered
+  `308 Resume Incomplete`.
+- **Deletes default to `detach`.** A mount is frequently a read-mostly view of a
+  shared folder, so removing a node removes the node only. `supports_trash` is
+  `true`, so a mount that really should propagate deletes can name `trash`
+  (reversible for 30 days) or `purge` (not) in its `write_config`.
+
+A write needs a write scope. `drive.file` reaches only files this integration
+created; anything else needs `https://www.googleapis.com/auth/drive`. Google
+issues a widened scope only on **fresh consent**, so each connected account has
+to be reconnected after the scope changes — a 403 on a write says so by name.
+
 ### v1 scope — links only
 
 Synced `raisin:Asset` nodes carry `web_url` (Drive `webViewLink`) and

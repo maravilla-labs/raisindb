@@ -2,32 +2,53 @@ node_type: raisin:Function
 properties:
   title: Google Drive Default Mapper
   description: >
-    Default mapping function for Google Drive mounts. Maps folders to
+    Default mapping function for Google Drive mounts. to_node maps folders to
     raisin:Folder and all files (including Google Docs/Sheets/Slides) to
-    raisin:Asset, carrying provider metadata through. Pure and side-effect-free:
-    called once per external item in the sync hot loop; performs no I/O.
+    raisin:Asset, carrying provider metadata through. to_external emits the Drive
+    METADATA for a write — the name, and on a folder CREATE the folder mime type,
+    without which Drive makes a file — and never the bytes, which travel beside
+    the payload as the engine's `content`. Bidirectional dispatch on
+    input.operation; an absent operation means to_node. Pure and
+    side-effect-free: called once per external item in the sync hot loop and once
+    per candidate in the write drain; performs no I/O.
   language: javascript
   entry_file: index.js:handler
   execution_mode: Async
   enabled: true
-  version: 1
+  # 2: to_external learned the folder CREATE payload (mimeType), and reads
+  #    `intent` so a folder UPDATE stays a plain rename.
+  version: 2
   resource_limits:
     timeout_ms: 5000
     max_memory_bytes: 16777216
   input_schema:
     type: object
-    required:
-      - external_item
     properties:
+      operation:
+        type: string
+        description: >
+          to_node (the default when absent), to_external, or
+          mapper_capabilities
       external_item:
         type: object
-        description: The normalized ExternalItem to map
+        description: The normalized ExternalItem to map (to_node)
+      node:
+        type: object
+        description: The node being pushed (to_external)
+      fields:
+        type: array
+        description: Node property names this push may carry (to_external)
+      intent:
+        type: string
+        description: create or update (to_external)
       mount:
         type: object
         description: Read-only mount snapshot { mount_id, mount_path, sync_config }
   output_schema:
     type: object
-    description: "{ node_type, name?, properties } or null to skip the item"
+    description: >
+      to_node: { node_type, name?, properties } or null to skip the item.
+      to_external: { payload, external_id? } or null to decline the push.
     properties:
       node_type:
         type: string

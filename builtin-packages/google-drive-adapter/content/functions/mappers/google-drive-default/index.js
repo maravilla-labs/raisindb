@@ -9,7 +9,7 @@
  *
  *   to_node     input  = { external_item, mount }
  *               return = { node_type, name?, properties } | null
- *   to_external input  = { node, mount, fields? }
+ *   to_external input  = { node, mount, fields?, intent }
  *               return = { payload, external_id? } | null
  *
  * An absent `operation` means `to_node`, so nothing that called this mapper
@@ -30,6 +30,12 @@
  * __synced_at properties on top of whatever is returned, so they are not set here.
  * v1 links only: web_url/download_url are carried through, no content is inlined.
  */
+
+// Drive says "this is a folder" with a mime type and nothing else: there is no
+// folder facet and no boolean. A create whose payload omits it makes a FILE, so
+// this constant is what keeps a locally-authored folder from arriving at Drive
+// as a zero-byte document with a folder's name.
+var FOLDER_MIME = "application/vnd.google-apps.folder";
 
 var GOOGLE_DOC_KINDS = {
   "application/vnd.google-apps.document": "google-doc",
@@ -53,28 +59,44 @@ function handler(input) {
     case "mapper_capabilities":
       return { to_external: true };
     case "to_external":
-      return toExternal(input.node, input.fields);
+      return toExternal(input.node, input.fields, input.intent);
     // `to_node`, and absent — see the header.
   }
   return toNode(input.external_item);
 }
 
 /**
- * One node back into a Drive metadata patch.
+ * One node back into a Drive metadata body.
  *
  * `fields` is the engine's allow-list (the mount's `mutable_fields` narrowed by
  * the adapter's). Emitting only those keys is what keeps a field-scoped update
  * from becoming a whole-object overwrite.
  *
- * Returns null — "not writable" — for a folder, for a node with no writable
- * field in the request, and for anything that resolves to an empty patch. Null
- * parks the intent with a stated reason instead of sending a guess, and an empty
- * PATCH is the one request that costs a revision and achieves nothing.
+ * `intent` is "create" or "update", and it is not inferable: `fields` is empty
+ * for a mirror update as well as for a create. A FOLDER needs it — a create must
+ * carry Drive's folder mime type or the adapter makes a file, while an update of
+ * the same node is an ordinary rename that must NOT carry it (a mimeType on a
+ * PATCH is at best a no-op revision and at worst a rejected request).
+ *
+ * Returns null — "not writable" — for a node with no writable field in the
+ * request and for anything that resolves to an empty body. Null parks the intent
+ * with a stated reason instead of sending a guess, and an empty PATCH is the one
+ * request that costs a revision and achieves nothing.
  */
-function toExternal(node, fields) {
+function toExternal(node, fields, intent) {
   if (!node) return null;
   var props = node.properties || {};
   var allowed = fields && fields.length ? fields : Object.keys(WRITABLE);
+
+  // A folder CREATE is the one payload that is not a subset of WRITABLE: it
+  // carries the mime type that makes Drive create a folder rather than a file.
+  // The name falls back to the node's own, because a Folder node routinely
+  // carries no `title` and a nameless create is refused by the adapter.
+  if (intent === "create" && node.node_type === "raisin:Folder") {
+    var folderName = props.title || node.name;
+    if (!folderName) return null;
+    return { payload: { name: folderName, mimeType: FOLDER_MIME } };
+  }
 
   var payload = {};
   for (var i = 0; i < allowed.length; i++) {
