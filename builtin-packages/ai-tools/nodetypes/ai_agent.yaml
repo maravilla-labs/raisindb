@@ -95,14 +95,39 @@ properties:
     description: |
       Who functions execute as when called by this agent:
       - "user": Functions run with the chatting user's permissions (default, recommended)
+      - "agent": Functions run under THIS AGENT's own roles and groups (below)
       - "system": Functions run with full system privileges (use with caution)
     ui:
       widget: select
       options:
         - label: User Context (Recommended)
           value: user
+        - label: Agent's Own Permissions
+          value: agent
         - label: System Context (Elevated)
           value: system
+
+  # An agent is a PRINCIPAL, not only a prompt.
+  #
+  # Until these existed an agent could run as the chatting user or as the whole
+  # system, and nothing in between — so "let the triage bot read tickets and
+  # write nothing else" had no expression, and every unattended agent ran with
+  # full privileges. Roles and groups are resolved exactly as a user's are
+  # (group expansion, role inheritance, the same permission set), and they take
+  # effect only when `execution_context` is "agent".
+  - name: roles
+    title: Roles
+    type: array
+    items:
+      type: string
+    description: Role ids this agent holds when running under its own permissions.
+
+  - name: groups
+    title: Groups
+    type: array
+    items:
+      type: string
+    description: Group ids this agent belongs to when running under its own permissions.
 
   - name: provider
     title: Provider

@@ -191,6 +191,24 @@ impl<S: Storage> PermissionService<S> {
     }
 
     /// Resolve permissions for a user node.
+    /// Resolve permissions for ANY node that carries `roles` / `groups`.
+    ///
+    /// Public because a principal is not always a person: an AI agent that
+    /// executes under its OWN rights is resolved exactly like a user — same
+    /// group expansion, same role inheritance, same permission set — because
+    /// two resolvers would drift, and the one that drifts is always the one
+    /// deciding what a machine may do unsupervised.
+    pub async fn resolve_for_principal_node(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        node: &Node,
+    ) -> Result<ResolvedPermissions> {
+        self.resolve_for_user_node(tenant_id, repo_id, branch, node)
+            .await
+    }
+
     async fn resolve_for_user_node(
         &self,
         tenant_id: &str,
