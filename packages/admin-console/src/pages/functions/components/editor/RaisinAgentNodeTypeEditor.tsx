@@ -41,7 +41,7 @@ function parseToolPaths(raw: unknown): string[] {
     .filter((t): t is string => !!t)
 }
 
-type ExecutionContext = 'user' | 'system'
+type ExecutionContext = 'user' | 'agent' | 'system'
 type ExecutionMode = 'automatic' | 'approve_then_auto' | 'step_by_step' | 'manual'
 
 interface AgentProperties {
@@ -59,6 +59,9 @@ interface AgentProperties {
   task_creation_enabled: boolean
   execution_mode: ExecutionMode
   execution_context: ExecutionContext
+  /** Only meaningful when execution_context is 'agent' — the agent's OWN rights. */
+  roles: string[]
+  groups: string[]
   tools: string[]
   rules: string[]
   compaction_enabled: boolean
@@ -79,6 +82,21 @@ interface AgentNode {
   updated_at?: string
 }
 
+/** A stored string array, tolerating the shapes older data uses. */
+function stringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+    : []
+}
+
+/** "studio_editor, viewer" → ["studio_editor", "viewer"]. */
+function parseIdList(value: string): string[] {
+  return value
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean)
+}
+
 const DEFAULT_PROPERTIES: AgentProperties = {
   system_prompt: '',
   // Empty rather than 'openai': there is no universal default slug, and the
@@ -91,6 +109,8 @@ const DEFAULT_PROPERTIES: AgentProperties = {
   task_creation_enabled: false,
   execution_mode: 'automatic',
   execution_context: 'user',
+  roles: [],
+  groups: [],
   tools: [],
   rules: [],
   compaction_enabled: true,
@@ -252,6 +272,8 @@ export function RaisinAgentNodeTypeEditor({ tab }: RaisinAgentNodeTypeEditorProp
             task_creation_enabled: (node.properties?.task_creation_enabled as boolean) ?? false,
             execution_mode: (node.properties?.execution_mode as ExecutionMode) || 'automatic',
             execution_context: (node.properties?.execution_context as ExecutionContext) || 'user',
+            roles: stringList(node.properties?.roles),
+            groups: stringList(node.properties?.groups),
             tools: parseToolPaths(node.properties?.tools),
             rules: (node.properties?.rules as string[]) || [],
             compaction_enabled: (node.properties?.compaction_enabled as boolean) ?? true,
@@ -691,6 +713,7 @@ export function RaisinAgentNodeTypeEditor({ tab }: RaisinAgentNodeTypeEditorProp
                 className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-500/20"
               >
                 <option value="user">User Context (Recommended)</option>
+                <option value="agent">Agent's Own Roles</option>
                 <option value="system">System Context (Elevated Privileges)</option>
               </select>
               <p className="text-xs text-zinc-500 mt-1">
@@ -702,6 +725,45 @@ export function RaisinAgentNodeTypeEditor({ tab }: RaisinAgentNodeTypeEditorProp
                 </p>
               )}
             </div>
+
+            {/* The agent as a PRINCIPAL.
+                An unattended agent used to have only two settings — the chatting
+                user, or everything — so "read tickets, write nothing else" could
+                not be expressed. These resolve exactly as a user's roles do
+                (groups expand, roles inherit), and only when the context above
+                is "agent". */}
+            {properties.execution_context === 'agent' && (
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label className="block text-sm font-medium text-zinc-300 mb-2">Roles</label>
+                  <input
+                    type="text"
+                    value={properties.roles.join(', ')}
+                    onChange={(e) => handlePropertiesChange({ roles: parseIdList(e.target.value) })}
+                    placeholder="studio_editor, viewer"
+                    className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-500/20"
+                  />
+                  <p className="text-xs text-zinc-500 mt-1">Comma-separated role ids.</p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-zinc-300 mb-2">Groups</label>
+                  <input
+                    type="text"
+                    value={properties.groups.join(', ')}
+                    onChange={(e) => handlePropertiesChange({ groups: parseIdList(e.target.value) })}
+                    placeholder="studio_editors"
+                    className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-500/20"
+                  />
+                  <p className="text-xs text-zinc-500 mt-1">Comma-separated group ids.</p>
+                </div>
+                {properties.roles.length === 0 && properties.groups.length === 0 && (
+                  <p className="text-xs text-amber-500 sm:col-span-2">
+                    With no roles and no groups this agent could do nothing, so the engine runs it
+                    with system privileges instead. Grant it something.
+                  </p>
+                )}
+              </div>
+            )}
 
             {/* Tools Selection */}
             <div>
