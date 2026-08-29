@@ -15,12 +15,13 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
 
-// Loaded the way the engine loads it: a bare script whose entry point is the
-// global `handler`.
-const src = readFileSync(new URL('./index.js', import.meta.url), 'utf8')
-const handler = new Function(`${src}\nreturn handler;`)()
+// Loaded the way the engine loads it: an ES module whose EXPORTED `handler` is
+// the entry point (`.node.yaml`'s `entry_file: index.js:handler`; the QuickJS
+// runtime reads the entrypoint off the module namespace, so an unexported
+// handler would not be found). The sibling modules it imports — send.js,
+// gmail-push.js — resolve the same way here as in the engine's module loader.
+import { handler } from './index.js'
 
 /** Stub raisin.email; records every send. */
 function stubEmail({ providers, sendResult, sendThrows }) {

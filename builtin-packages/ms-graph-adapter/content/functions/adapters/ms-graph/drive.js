@@ -25,9 +25,8 @@
 import { coded, enc, isEmptyObject } from "./common.js";
 import { GRAPH, graphFetch } from "./http.js";
 import { driveBase, driveContainer } from "./mount.js";
-import { WRITE_STATUSES, diagnoseWrite, ifMatch, writeReceipt } from "./write-common.js";
+import { WRITE_STATUSES, diagnoseWrite, ifMatch, receiptOrReadBack, writeReceipt } from "./write-common.js";
 import { CONFLICT_KEY, beginUpload, inlineBytes, inlineable } from "./drive-upload.js";
-import { opGet } from "./read.js";
 
 // ---- addressing -----------------------------------------------------------
 
@@ -239,7 +238,7 @@ export function driveUpdate(credential, mount, params) {
   // Gone SETTLES the node rather than failing it: the file was deleted at the
   // provider and the next walk prunes the node.
   if (diagnoseWrite(resp, "update:content", "files") === "gone") return null;
-  return receiptFor(credential, mount, resp, params.item_id);
+  return receiptOrReadBack(credential, mount, resp, params.item_id);
 }
 
 function metadataUpdate(credential, mount, params) {
@@ -255,20 +254,7 @@ function metadataUpdate(credential, mount, params) {
     rawStatuses: WRITE_STATUSES,
   });
   if (diagnoseWrite(resp, "update", "files") === "gone") return null;
-  return receiptFor(credential, mount, resp, params.item_id);
-}
-
-// The receipt, with the read-after-write the mail path uses for the same reason:
-// a null etag falls back at the engine to the STALE pre-write value, and the
-// next walk then rebuilds the node from remote — reverting whatever was edited
-// while the run was in flight.
-function receiptFor(credential, mount, resp, itemId) {
-  var receipt = writeReceipt(resp, itemId);
-  if (!receipt.etag) {
-    var item = opGet(credential, mount, { item_id: receipt.external_id || itemId });
-    if (item) return { external_id: item.external_id, etag: item.etag };
-  }
-  return receipt;
+  return receiptOrReadBack(credential, mount, resp, params.item_id);
 }
 
 // ---- delete ---------------------------------------------------------------

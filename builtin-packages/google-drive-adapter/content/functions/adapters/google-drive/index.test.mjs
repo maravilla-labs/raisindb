@@ -1,10 +1,10 @@
 // Run with: node --test .../adapters/google-drive/index.test.mjs
 //
-// index.js is loaded the way the ENGINE loads it — a bare script whose entry
-// point is the global `handler`, with `raisin` injected by the host — so there
-// is nothing to import and the file must stay a single module-free script.
-// (`tests_google_drive_write.rs` hands QuickJS this one file with an empty
-// module map; a sibling `import` would resolve to nothing at run time.)
+// index.js is loaded the way the ENGINE loads it: an ES module whose EXPORTED
+// `handler` is the entry point, importing its siblings the way the engine's
+// module loader resolves them, with `raisin` reached as a HOST GLOBAL rather
+// than as an argument (which is what the QuickJS runtime injects).
+// `tests_google_drive_write.rs` hands QuickJS the same file set.
 //
 // Every case here is a defect this adapter actually shipped:
 //
@@ -24,10 +24,8 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { readFileSync } from 'node:fs'
 
-const src = readFileSync(new URL('./index.js', import.meta.url), 'utf8')
-const load = new Function('raisin', `${src}\nreturn handler;`)
+import { handler } from './index.js'
 
 const CREDENTIAL = { access_token: 'tok' }
 const MOUNT = {
@@ -46,7 +44,7 @@ const MOUNT = {
 function stub(responses) {
   const calls = []
   const queue = [...responses]
-  const handler = load({
+  globalThis.raisin = {
     http: {
       fetch(url, request) {
         calls.push({ url, request })
@@ -55,7 +53,7 @@ function stub(responses) {
         return { status: 200, headers: {}, body: {}, ...next }
       },
     },
-  })
+  }
   return { handler, calls }
 }
 
@@ -616,4 +614,47 @@ test('an already-gone file deletes idempotently under either policy', () => {
     )
     assert.equal(calls.length, 1, 'a 404 from the version probe settles it')
   }
+})
+
+// ---- Retry-After -----------------------------------------------------------
+
+// The engine reads a thrown Error as its message STRING and nothing else, so
+// `retry_after=<n>` in the text is the whole channel: `parse_retry_after`
+// (adapter.rs) scans for it and caps it at an hour. Without it a Drive 429 backs
+// off by guess — and guessing SHORT against Google is what turns throttling into
+// a self-sustaining spiral.
+test('a 429 carries the provider-stated Retry-After into the message', () => {
+  const { handler } = stub([{ status: 429, headers: { 'Retry-After': '30' }, body: {} }])
+  assert.throws(
+    () =>
+      handler({
+        operation: 'list',
+        credential: CREDENTIAL,
+        mount: MOUNT,
+        params: {},
+      }),
+    (e) => e.code === 'rate_limited' && / \(retry_after=30\)$/.test(e.message)
+  )
+})
+
+test('a 403 usage-limit answer carries Retry-After too, and a missing header adds nothing', () => {
+  const limited = stub([
+    {
+      status: 403,
+      headers: { 'retry-after': '12' },
+      body: { error: { errors: [{ reason: 'userRateLimitExceeded' }] } },
+    },
+  ])
+  assert.throws(
+    () =>
+      limited.handler({ operation: 'list', credential: CREDENTIAL, mount: MOUNT, params: {} }),
+    (e) => e.code === 'rate_limited' && / \(retry_after=12\)$/.test(e.message)
+  )
+
+  const silent = stub([{ status: 429, headers: {}, body: {} }])
+  assert.throws(
+    () =>
+      silent.handler({ operation: 'list', credential: CREDENTIAL, mount: MOUNT, params: {} }),
+    (e) => e.code === 'rate_limited' && !/retry_after/.test(e.message)
+  )
 })

@@ -17,20 +17,28 @@
 import { coded, enc, isEmptyObject } from "./common.js";
 import { GRAPH, graphFetch } from "./http.js";
 import { calendarId, outlookHeaders, principal, resourceOf } from "./mount.js";
-import { opGet } from "./read.js";
 import { driveCreate, driveDelete, driveUpdate } from "./drive.js";
 import {
   ETAG_SHAPE,
   WRITE_STATUSES,
   diagnoseWrite,
   ifMatch,
+  receiptOrReadBack,
   writeReceipt,
   writeScopeHint,
 } from "./write-common.js";
 
 // Re-exported so `write.js` stays the one name a caller has to know for "the
 // write path", wherever the implementation actually sits.
-export { ETAG_SHAPE, WRITE_STATUSES, diagnoseWrite, ifMatch, writeReceipt, writeScopeHint };
+export {
+  ETAG_SHAPE,
+  WRITE_STATUSES,
+  diagnoseWrite,
+  ifMatch,
+  receiptOrReadBack,
+  writeReceipt,
+  writeScopeHint,
+};
 
 // ---- update (mail state writeback) ----------------------------------------
 
@@ -85,24 +93,11 @@ export function opUpdate(credential, mount, params) {
   if (diagnoseWrite(resp, "update", resource) === "gone") return null;
 
   // Graph answers a PATCH with 200 and the FULL updated object, so the receipt
-  // can usually be read straight off the response with the walk's own etag
-  // formula — no extra request spent. When the response yields NO etag by that
-  // formula (a bodiless 2xx from a proxy or a future Graph behavior change),
-  // the receipt comes from a read-after-write through `opGet` instead: it
-  // builds the item through the same $select / `toExternalItem` path the walk
-  // uses, so the stamped etag is byte-identical to what the next run computes.
-  // Returning a null etag here would fall back at the engine to the STALE
-  // pre-write etag, and the next walk would clobber the very state this PATCH
-  // just pushed.
-  var receipt = writeReceipt(resp, params.item_id);
-  if (!receipt.etag) {
-    var item = opGet(credential, mount, { item_id: receipt.external_id || params.item_id });
-    // A read-back 404 means the item changed ids between the PATCH and the
-    // read; the delta feed re-imports it under the new id, and the bodiless
-    // receipt is the best remaining answer.
-    if (item) return { external_id: item.external_id, etag: item.etag };
-  }
-  return receipt;
+  // is usually read straight off the response with the walk's own etag formula
+  // and no extra request is spent; `receiptOrReadBack` only re-reads when the
+  // response yields no etag (a bodiless 2xx from a proxy, or a future Graph
+  // behavior change).
+  return receiptOrReadBack(credential, mount, resp, params.item_id);
 }
 
 // ---- create (calendar mirror) ---------------------------------------------

@@ -10,11 +10,14 @@
 //! writes (`write.js`) and the drive writes (`drive.js`) can both use it without
 //! importing each other — a cycle the QuickJS module loader has no reason to
 //! survive. Nothing here knows which surface it is serving; everything that does
-//! stays in the caller.
+//! stays in the caller. It may import `read.js` (for the receipt read-back)
+//! because nothing on the read side imports back: read/changes/mount reach only
+//! common, http, items and mail.
 
 import { coded } from "./common.js";
 import { raiseForStatus } from "./http.js";
 import { outlookHeaders } from "./mount.js";
+import { opGet } from "./read.js";
 
 // An etag TOKEN looks like `W/"CQAAABYAAAA..."` or `"abc"`. A stored `__etag`
 // does NOT always: `toExternalItem` falls back to `lastModifiedDateTime` when
@@ -179,4 +182,24 @@ export function writeReceipt(resp, fallbackId) {
     external_id: body.id || fallbackId || null,
     etag: body["@odata.etag"] || body.eTag || body.lastModifiedDateTime || null,
   };
+}
+
+// The receipt WITH the read-after-write, which is what every caller actually
+// wants: `writeReceipt` alone can answer a null etag, and a null etag falls back
+// at the engine to the STALE pre-write value — the next walk then mismatches its
+// own write, rebuilds the node from remote and reverts whatever was edited while
+// the run was in flight.
+//
+// `opGet` builds the item through the same $select / `toExternalItem` path the
+// walk uses, so the stamped etag is byte-identical to what the next run
+// computes. A read-back that finds nothing means the item changed ids between
+// the write and the read; the delta feed re-imports it under the new id, and the
+// bodiless receipt is the best remaining answer.
+export function receiptOrReadBack(credential, mount, resp, itemId) {
+  var receipt = writeReceipt(resp, itemId);
+  if (!receipt.etag) {
+    var item = opGet(credential, mount, { item_id: receipt.external_id || itemId });
+    if (item) return { external_id: item.external_id, etag: item.etag };
+  }
+  return receipt;
 }
