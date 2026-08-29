@@ -230,6 +230,9 @@ test('a driveItem deletion is a delete, not an update', () => {
         '@odata.deltaLink': 'https://graph/d',
       },
     },
+    // A live drive item makes the page resolve the mount root once, so paths
+    // can be made relative to it.
+    { body: { id: 'ROOT', name: 'Mounted', parentReference: { path: '/drive/root:' } } },
   ])
   const out = opGetChanges(CREDENTIAL, filesMount(), { since_token: token })
   const kinds = out.items.map((c) => c.type)
@@ -725,4 +728,259 @@ test('mail and calendar still refuse what they cannot do', () => {
       }),
     (e) => e.code === 'config_error' && /no permanent delete/.test(e.message)
   )
+})
+
+// ---- drive delta paths ----------------------------------------------------
+//
+// A PRODUCTION INCIDENT. The backfill placed `Sales Deck.docx` inside `General`;
+// two files added later and delivered by webhook landed FLAT at the mount root,
+// alongside a stray `root` folder node. `opGetChanges` was answering
+// `relative_path: external_id` — one segment — for every drive item, and the
+// engine joins that to `mount_path` verbatim.
+//
+// The invariant is not "the delta produces a nice path". It is that the delta
+// and the FULL WALK produce the SAME path for the same item, because the two
+// disagreeing means a file sits in one place after a backfill and another after
+// a webhook, forever — the engine keeps whichever it saw first.
+
+/** A drive mount rooted at the drive root: no remote_root to resolve. */
+function driveRootMount(extra) {
+  return { sync_config: { resource: 'files' }, ...extra }
+}
+
+/**
+ * What the ENGINE's full walk would build for these items.
+ *
+ * Mirrors `full.rs` `resolve_item_path` — `{prefix}/{item.name}`, where the
+ * prefix is the parent folder's own resolved path — and the folder recursion
+ * that feeds it. Written out rather than hand-computed so the equality assertion
+ * below is against the real rule and not against a literal someone typed twice.
+ */
+function walkPaths(mount, tree) {
+  const out = {}
+  const visit = (folderId, prefix) => {
+    const calls = stubHttp([{ body: { value: tree[folderId] || [] } }])
+    void calls
+    for (const item of opList(CREDENTIAL, mount, { folder_id: folderId }).items) {
+      const rel = prefix ? `${prefix}/${item.name}` : item.name
+      out[item.external_id] = rel
+      if (item.is_folder) visit(item.external_id, rel)
+    }
+  }
+  visit(null, '')
+  return out
+}
+
+test('a delta file in a nested folder resolves under that folder, not at the root', () => {
+  const token = mintCursor(driveRootMount())
+  stubHttp([
+    {
+      body: {
+        value: [
+          {
+            id: 'DOC-1',
+            name: 'Sales Deck.docx',
+            file: {},
+            parentReference: { id: 'F-GENERAL', path: '/drive/root:/General' },
+          },
+        ],
+        '@odata.deltaLink': 'https://graph/d',
+      },
+    },
+  ])
+  const out = opGetChanges(CREDENTIAL, driveRootMount(), { since_token: token })
+  assert.equal(out.items[0].relative_path, 'General/Sales Deck.docx')
+})
+
+test('a folder name with a space is DECODED, not materialized as %20', () => {
+  // Graph percent-encodes every path segment. Left encoded, the file lands in a
+  // folder called "Maravilla%20Accelerator" that the walk will never produce.
+  const token = mintCursor(driveRootMount())
+  stubHttp([
+    {
+      body: {
+        value: [
+          {
+            id: 'IMG-1',
+            name: 'maravilla-logo.png',
+            file: {},
+            parentReference: { path: '/drives/b!abc/root:/Maravilla%20Accelerator' },
+          },
+        ],
+        '@odata.deltaLink': 'https://graph/d',
+      },
+    },
+  ])
+  const out = opGetChanges(CREDENTIAL, driveRootMount(), { since_token: token })
+  assert.equal(out.items[0].relative_path, 'Maravilla Accelerator/maravilla-logo.png')
+})
+
+test('the delta and the full walk resolve the SAME item to the SAME path', () => {
+  // THE actual invariant. Asserting two literals would pass happily while both
+  // paths were wrong in the same way; this compares the two code paths.
+  const mount = driveRootMount()
+  const folder = { id: 'F-GENERAL', name: 'General', folder: { childCount: 1 } }
+  const doc = {
+    id: 'DOC-1',
+    name: 'Sales Deck.docx',
+    file: {},
+    parentReference: { id: 'F-GENERAL', path: '/drive/root:/General' },
+  }
+  const nested = {
+    id: 'DOC-2',
+    name: 'Q3.xlsx',
+    file: {},
+    parentReference: { id: 'F-SUB', path: '/drive/root:/General/Sub Folder' },
+  }
+  const sub = { id: 'F-SUB', name: 'Sub Folder', folder: { childCount: 1 } }
+
+  const fromWalk = walkPaths(mount, {
+    null: [folder],
+    'F-GENERAL': [doc, sub],
+    'F-SUB': [nested],
+  })
+
+  const token = mintCursor(mount)
+  stubHttp([
+    { body: { value: [doc, nested], '@odata.deltaLink': 'https://graph/d' } },
+  ])
+  const out = opGetChanges(CREDENTIAL, mount, { since_token: token })
+  const fromDelta = Object.fromEntries(
+    out.items.map((c) => [c.item.external_id, c.relative_path])
+  )
+
+  assert.equal(fromDelta['DOC-1'], fromWalk['DOC-1'])
+  assert.equal(fromDelta['DOC-2'], fromWalk['DOC-2'])
+  // And the layout is the human one, at both ends.
+  assert.equal(fromWalk['DOC-2'], 'General/Sub Folder/Q3.xlsx')
+})
+
+test('a remote_root subfolder is stripped, so paths are relative to the MOUNT', () => {
+  // The walk starts INSIDE remote_root with an empty prefix. Without stripping,
+  // every delta path would carry the mount folder and disagree by a segment.
+  const token = mintCursor(filesMount())
+  stubHttp([
+    {
+      body: {
+        value: [
+          {
+            id: 'DOC-1',
+            name: 'a.txt',
+            file: {},
+            parentReference: { path: '/drive/root:/Team/Mounted/Inner' },
+          },
+          // Outside the mount root entirely: skipped rather than placed, because
+          // the engine joins relative_path to mount_path verbatim.
+          {
+            id: 'DOC-2',
+            name: 'elsewhere.txt',
+            file: {},
+            parentReference: { path: '/drive/root:/Other' },
+          },
+        ],
+        '@odata.deltaLink': 'https://graph/d',
+      },
+    },
+    // The mount root resolution: ROOT is /Team/Mounted.
+    { body: { id: 'ROOT', name: 'Mounted', parentReference: { path: '/drive/root:/Team' } } },
+  ])
+  const out = opGetChanges(CREDENTIAL, filesMount(), { since_token: token })
+  assert.equal(out.items.length, 1, 'the item outside the mount root is skipped')
+  assert.equal(out.items[0].relative_path, 'Inner/a.txt')
+})
+
+test('the mount root container itself is skipped, not materialized as a folder', () => {
+  // The stray `root` node in the incident. Graph reports the container a delta
+  // is scoped to as an item of that delta — a folder standing for the mount,
+  // inside itself.
+  const token = mintCursor(driveRootMount())
+  stubHttp([
+    {
+      body: {
+        value: [
+          { id: 'DRIVE-ROOT', name: 'root', folder: { childCount: 2 }, root: {} },
+          { id: 'DOC-1', name: 'a.txt', file: {}, parentReference: { path: '/drive/root:' } },
+        ],
+        '@odata.deltaLink': 'https://graph/d',
+      },
+    },
+  ])
+  const out = opGetChanges(CREDENTIAL, driveRootMount(), { since_token: token })
+  assert.deepEqual(out.items.map((c) => c.item.external_id), ['DOC-1'])
+  assert.equal(out.items[0].relative_path, 'a.txt')
+
+  // The same, for a mount rooted at a subfolder: that folder arrives as an item
+  // of its own delta and carries no `root` facet.
+  const t2 = mintCursor(filesMount())
+  stubHttp([
+    {
+      body: {
+        value: [{ id: 'ROOT', name: 'Mounted', folder: { childCount: 0 } }],
+        '@odata.deltaLink': 'https://graph/d',
+      },
+    },
+  ])
+  assert.deepEqual(opGetChanges(CREDENTIAL, filesMount(), { since_token: t2 }).items, [])
+})
+
+test('a deletion still carries the id as its path, and costs no root lookup', () => {
+  // The engine's delete arm matches on external_id and never reads the path —
+  // and a deleted entry carries no parentReference to derive one from.
+  const token = mintCursor(filesMount())
+  const calls = stubHttp([
+    {
+      body: {
+        value: [{ id: 'GONE', name: 'old.txt', file: {}, deleted: { state: 'deleted' } }],
+        '@odata.deltaLink': 'https://graph/d',
+      },
+    },
+  ])
+  const out = opGetChanges(CREDENTIAL, filesMount(), { since_token: token })
+  assert.equal(out.items[0].type, 'deleted')
+  assert.equal(out.items[0].relative_path, 'GONE')
+  assert.equal(calls.length, 1, 'a page of nothing but deletions resolves no mount root')
+})
+
+test('an item with no parent path falls back to its name rather than inventing one', () => {
+  const token = mintCursor(driveRootMount())
+  stubHttp([
+    {
+      body: {
+        value: [{ id: 'ODD-1', name: 'loose.txt', file: {} }],
+        '@odata.deltaLink': 'https://graph/d',
+      },
+    },
+  ])
+  const out = opGetChanges(CREDENTIAL, driveRootMount(), { since_token: token })
+  assert.equal(out.items[0].relative_path, 'loose.txt')
+})
+
+test('mail and calendar relative paths are untouched', () => {
+  // A mail mount is ONE folder: the engine builds no prefix for it, the id is
+  // the correct path, and a path_template is how an operator reshapes it.
+  const token = mintCursor(mailMount())
+  stubHttp([
+    {
+      body: {
+        value: [{ id: 'MSG-9', subject: 'x', receivedDateTime: '2026-08-12T10:00:00Z' }],
+        '@odata.deltaLink': 'https://graph/d',
+      },
+    },
+  ])
+  const mail = opGetChanges(CREDENTIAL, mailMount(), { since_token: token })
+  assert.equal(mail.items[0].relative_path, 'MSG-9')
+  assert.equal(mail.items[0].item.name, 'MSG-9', 'and a mail item is still NAMED by its id')
+
+  const calMount = { sync_config: { resource: 'calendar' } }
+  const calToken = mintCursor(calMount)
+  stubHttp([
+    {
+      body: {
+        value: [{ id: 'EV-9', subject: 'Standup', type: 'singleInstance' }],
+        '@odata.deltaLink': 'https://graph/d',
+      },
+    },
+  ])
+  const cal = opGetChanges(CREDENTIAL, calMount, { since_token: calToken })
+  assert.equal(cal.items[0].relative_path, 'EV-9')
 })

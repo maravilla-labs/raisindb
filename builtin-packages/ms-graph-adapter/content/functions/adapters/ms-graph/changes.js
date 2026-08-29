@@ -11,6 +11,7 @@ import { GRAPH, graphFetch, raiseForStatus } from "./http.js";
 import { calendarSupportsDelta, driveContainer, eventSelect, mailFolderId, mailSelect, outlookHeaders, principal, resourceOf, useImmutableIds, windowBounds, windowConfig } from "./mount.js";
 import { enrichAttachments } from "./mail.js";
 import { toExternalItem } from "./items.js";
+import { filesRelativePath, isMountRootContainer, mountRootSegments } from "./paths.js";
 import { seriesExceptions } from "./read.js";
 
 // Build the FIRST delta URL (no since_token yet). Subsequent calls reuse the
@@ -260,20 +261,7 @@ export function opGetChanges(credential, mount, params) {
   var items =
     resource === "calendar"
       ? calendarChanges(credential, mount, values)
-      : values.map(function (v) {
-          // TWO removal vocabularies, not one. Outlook resources mark a
-          // deletion with the `@removed` annotation; a driveItem marks it with a
-          // `deleted` FACET and no annotation at all. Testing only for
-          // `@removed` meant every OneDrive and SharePoint deletion arrived as
-          // an ordinary update, so files deleted at the provider persisted in
-          // the workspace indefinitely — the walk's reconcile being the only
-          // other thing that removes a node.
-          if (v["@removed"] || (resource === "files" && v.deleted)) {
-            return { type: "deleted", item: { external_id: v.id }, relative_path: v.id };
-          }
-          var item = toExternalItem(v, resource, mount);
-          return { type: "updated", item: item, relative_path: item.external_id };
-        });
+      : flatChanges(credential, mount, resource, values);
   if (resource === "mail") {
     enrichAttachments(
       credential,
@@ -301,6 +289,65 @@ export function opGetChanges(credential, mount, params) {
     next_token: wrapCursor(next, identity, mintedMs),
     has_more: Boolean(body["@odata.nextLink"]),
   };
+}
+
+// Mail and drive changes — everything whose delta entries map one-to-one onto
+// items, which is every resource except calendar.
+//
+// The two differ in exactly one place, and it is the path. A MAIL node's
+// relative path is its id and that is correct: the mount is one folder, the
+// engine's full walk never builds a prefix for it, and a `path_template`
+// reshapes it when an operator wants something else. A DRIVE is a tree, and a
+// flat path there is a bug — see `paths.js`.
+function flatChanges(credential, mount, resource, values) {
+  var out = [];
+  var isFiles = resource === "files";
+  // Resolved LAZILY and once: it costs a request, and an idle poll — which is
+  // most polls — has nothing to place.
+  var rootSegments;
+  var rootResolved = false;
+
+  for (var i = 0; i < values.length; i++) {
+    var v = values[i];
+
+    // TWO removal vocabularies, not one. Outlook resources mark a deletion with
+    // the `@removed` annotation; a driveItem marks it with a `deleted` FACET and
+    // no annotation at all. Testing only for `@removed` meant every OneDrive and
+    // SharePoint deletion arrived as an ordinary update, so files deleted at the
+    // provider persisted in the workspace indefinitely — the walk's reconcile
+    // being the only other thing that removes a node.
+    //
+    // A deletion keeps the ID as its path, on purpose: the engine's delete arm
+    // matches on `external_id` and never reads the path, and a deleted item
+    // carries no `parentReference` to derive one from anyway.
+    if (v["@removed"] || (isFiles && v.deleted)) {
+      out.push({ type: "deleted", item: { external_id: v.id }, relative_path: v.id });
+      continue;
+    }
+
+    if (!isFiles) {
+      var mailItem = toExternalItem(v, resource, mount);
+      out.push({ type: "updated", item: mailItem, relative_path: mailItem.external_id });
+      continue;
+    }
+
+    // Graph reports the container the delta is SCOPED TO as an item of that
+    // delta. Emitting it materialized a stray folder node standing for the
+    // mount, at the mount root, inside itself.
+    if (isMountRootContainer(v, mount)) continue;
+
+    if (!rootResolved) {
+      rootSegments = mountRootSegments(credential, mount);
+      rootResolved = true;
+    }
+    var rel = filesRelativePath(v, rootSegments);
+    // Null means the item lives outside the mount root. Skipped rather than
+    // placed: the engine joins `relative_path` to `mount_path` verbatim, so a
+    // chain that does not start inside the root would write outside the mount.
+    if (rel === null) continue;
+    out.push({ type: "updated", item: toExternalItem(v, "files", mount), relative_path: rel });
+  }
+  return out;
 }
 
 // ONE NODE PER SERIES, not one per occurrence.

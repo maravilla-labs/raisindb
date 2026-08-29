@@ -56,9 +56,14 @@ export function filesMeta(v) {
   };
 }
 
-// external_id / name / relative_path are ALWAYS the Graph item id — never the
-// subject/title/filename — so distinct items never collide on a path. All provider
-// fields live in `metadata`, which the engine carries verbatim onto node properties.
+// external_id is ALWAYS the Graph item id, on every resource — it is what keys
+// the node for its whole lifetime. All provider fields live in `metadata`, which
+// the engine carries verbatim onto node properties.
+//
+// `name` is the id too for MAIL and CALENDAR, where it is the path segment an
+// item materializes at and a subject would collide constantly. For FILES it is
+// the FILENAME, and that difference is load-bearing rather than cosmetic — see
+// the files branch below.
 export function toExternalItem(v, resource, mount) {
   var id = v.id;
   var item = {
@@ -77,6 +82,22 @@ export function toExternalItem(v, resource, mount) {
   };
   if (resource === "files") {
     var f = driveFacets(v);
+    // THE PATH LEAF, and the reason a drive mount lays out the way it does.
+    //
+    // The engine builds a full walk's path as `{parent prefix}/{item.name}`
+    // (`full.rs` `resolve_item_path`), and the prefix is each ancestor FOLDER's
+    // path built the same way — so `name` alone decides the layout. With the id
+    // here, a drive materialized as a tree of opaque ids, and worse, the delta
+    // feed could never agree with it: Graph gives a changed item its ancestry
+    // only as `parentReference.path`, which is NAMES. So a webhook-delivered
+    // file had no way to reconstruct the walk's path and landed flat at the
+    // mount root, while the backfill had placed its siblings correctly.
+    //
+    // Two files with the same name in one folder still cannot collide: the
+    // engine disambiguates a repeated path with an external-id suffix
+    // (`materializer/ops.rs` `suffix_path`). Node identity is untouched — that
+    // is `external_id`, which stays the Graph id.
+    item.name = v.name || id;
     item.is_folder = !!f.folder;
     item.mime_type = f.file && f.file.mimeType ? f.file.mimeType : null;
     item.size_bytes = f.size;
