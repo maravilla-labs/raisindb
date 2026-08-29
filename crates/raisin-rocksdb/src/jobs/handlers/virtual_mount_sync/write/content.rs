@@ -79,6 +79,43 @@ fn file_resource(node: &Node) -> Option<(String, Option<u64>, Option<String>, St
     Some((key, size, mime, name))
 }
 
+/// Whether this node's content has not arrived yet.
+///
+/// An asset is routinely created in two steps: the node first, its bytes when
+/// the upload finishes. A create issued in the gap has nothing to send, and a
+/// provider that needs the bytes (Graph's drive create IS the byte transfer)
+/// can only refuse — terminally, because the request can never succeed as
+/// written. That refusal would mark the whole mount misconfigured for what is
+/// actually an ordinary, self-resolving race.
+///
+/// So the create waits instead. It costs one skipped candidate per drain, makes
+/// no provider call, and the node is created as soon as its bytes land.
+///
+/// `is_loaded: false` counts as pending for the same reason: the Resource
+/// exists but its bytes do not.
+pub(crate) fn content_pending(node: &Node, accepts_content: bool) -> bool {
+    if !accepts_content {
+        return false;
+    }
+    match node.properties.get("file") {
+        Some(PropertyValue::Resource(resource)) => {
+            if resource.is_loaded == Some(false) {
+                return true;
+            }
+            // A Resource with no storage key is a placeholder — an upload that
+            // has been announced and not completed.
+            !resource
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("storage_key"))
+                .is_some_and(|v| matches!(v, PropertyValue::String(s) if !s.is_empty()))
+        }
+        // No file property at all: on a content mount this is the first half of
+        // a two-step create, not a node that will never have bytes.
+        _ => true,
+    }
+}
+
 /// Describe (and where possible carry) a node's bytes for a create or update.
 ///
 /// `Ok(None)` means this push has no content dimension at all — the node has no
@@ -363,6 +400,34 @@ mod tests {
             .expect("content");
         assert_eq!(out.descriptor["inline"], false);
         assert!(out.descriptor.get("content_base64").is_none());
+    }
+
+    /// A node whose upload has not finished is not ready to be created.
+    #[tokio::test]
+    async fn a_two_step_upload_defers_its_create_instead_of_failing_the_mount() {
+        // Step one: the node exists, the bytes do not.
+        let mut announced = node_with_file(Some(0), "");
+        let PropertyValue::Resource(resource) = announced.properties.get_mut("file").unwrap()
+        else {
+            unreachable!()
+        };
+        resource.is_loaded = Some(false);
+        assert!(content_pending(&announced, true));
+
+        // A node with no file property at all is the same case, earlier.
+        let bare = Node {
+            id: "n3".into(),
+            node_type: "raisin:Asset".into(),
+            name: "later.pdf".into(),
+            ..Default::default()
+        };
+        assert!(content_pending(&bare, true));
+
+        // Step two: the bytes landed.
+        assert!(!content_pending(&node_with_file(Some(3), "k"), true));
+
+        // And a mount that does not carry content is never made to wait.
+        assert!(!content_pending(&bare, false));
     }
 
     /// Refused rather than degraded: a create from metadata alone would leave
