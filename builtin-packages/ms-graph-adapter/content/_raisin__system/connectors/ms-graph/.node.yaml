@@ -25,6 +25,17 @@ properties:
        *delegated* — the connected account reaches only what it has actually
        been granted in Exchange/SharePoint, so they do not widen access by
        themselves.
+
+       For WRITING — flagging or sending mail, editing calendar events, and
+       uploading or updating drive files — add `Mail.ReadWrite`,
+       `Mail.ReadWrite.Shared`, `Mail.Send`, `Mail.Send.Shared`,
+       `Calendars.ReadWrite`, `Calendars.ReadWrite.Shared`, `Files.ReadWrite`
+       (the signed-in account's OneDrive), `Files.ReadWrite.All` (someone
+       else's) and `Sites.ReadWrite.All` (SharePoint libraries). Still
+       delegated, so still bounded by what the person may do — but nothing else
+       substitutes: with read-only consent every push comes back 403 and the
+       adapter reports a `config_error` naming the missing scope. Omit them and
+       every mount stays usable read-only.
     5. Copy the **Application (client) ID** and the client secret into the fields
        on this page. The secret is encrypted at rest.
     6. **If your app registration is single-tenant** (the default), copy the
@@ -47,9 +58,11 @@ properties:
       Access** to it in Exchange, and the app registration needs the `.Shared`
       scopes from step 4.
     - **Someone else's OneDrive** — set **Mailbox / user** and choose drive
-      location `user` (needs `Files.Read.All`).
+      location `user` (needs `Files.Read.All`, or `Files.ReadWrite.All` to
+      write).
     - **SharePoint document library** — choose drive location `site` and set the
-      **SharePoint site ID** (needs `Sites.Read.All`). Leave the drive ID blank
+      **SharePoint site ID** (needs `Sites.Read.All`, or `Sites.ReadWrite.All`
+      to write). Leave the drive ID blank
       for the site's default library. SharePoint files sync through the same
       `/mappers/ms-graph-files` mapper as OneDrive.
 
@@ -86,7 +99,9 @@ properties:
     # rewrites both for you.
     auth_url: https://login.microsoftonline.com/common/oauth2/v2.0/authorize
     token_url: https://login.microsoftonline.com/common/oauth2/v2.0/token
-    # Least-privilege read scopes; offline_access yields a refresh token so the
+    # Least-privilege delegated scopes for what the adapter actually does —
+    # reads on every surface, writes on mail, calendar and drive. Nothing here
+    # is an application permission. offline_access yields a refresh token so the
     # engine can keep the mount synced without re-consent.
     #
     # openid/email/profile are what make Microsoft return an id_token, from
@@ -113,9 +128,15 @@ properties:
     # `Mail.ReadWrite` covers the state_only path (the read flag, flags, moving
     # a message); `Mail.Send` is separate at Microsoft and is what an outbox
     # needs. `Calendars.ReadWrite` covers a calendar mirror AND an RSVP.
-    # OneDrive stays read-only: a Graph drive write is an upload session rather
-    # than a JSON body, so this adapter does not implement it and asking for
-    # `Files.ReadWrite` would request access it cannot use.
+    #
+    # The DRIVE write scopes are the same three-way split as the read ones, and
+    # each is needed for a different mount: `Files.ReadWrite` for the signed-in
+    # account's own OneDrive (`drive_scope: me`), `Files.ReadWrite.All` for
+    # someone else's (`user`), `Sites.ReadWrite.All` for a SharePoint document
+    # library (`site`). A drive write is an upload session rather than a JSON
+    # body, which is why it took longer to implement than mail and calendar —
+    # not a reason to stay read-only, and the read scopes cannot substitute:
+    # an upload with read-only consent is a 403 before a single byte moves.
     scopes:
       - offline_access
       - openid
@@ -133,7 +154,10 @@ properties:
       - Calendars.ReadWrite.Shared
       - Files.Read
       - Files.Read.All
+      - Files.ReadWrite
+      - Files.ReadWrite.All
       - Sites.Read.All
+      - Sites.ReadWrite.All
     # Filled in by the admin console to match the deployment's callback URL,
     # e.g. https://<host>/api/integrations/<repo>/oauth/callback
     # The <repo> segment is REQUIRED and the path must end in /callback --

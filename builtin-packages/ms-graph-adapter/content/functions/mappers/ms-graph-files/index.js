@@ -3,10 +3,23 @@
  *
  * Called once per external item by the sync engine (adapter contract §6). Pure
  * and fast: it must NOT call raisin.functions.call or perform any I/O — it runs
- * in the sync hot loop. Returning null skips the item.
+ * in the sync hot loop (and, for to_external, inside the write drain under the
+ * mount lease). Returning null skips the item.
  *
- *   input  = { external_item: ExternalItem, mount: { mount_id, mount_path, sync_config } }
- *   return = { node_type, name?, properties } | null
+ * Bidirectional dispatch (adapter contract §6.0), same shape as the calendar
+ * mapper:
+ *
+ *   to_node             { external_item, mount }          -> { node_type, name?, properties } | null
+ *   to_external         { node, mount, fields?, intent? } -> { payload } | null
+ *   mapper_capabilities { mount }                         -> { to_external: true }
+ *
+ * An absent operation means to_node, so the engine's read path is unchanged.
+ *
+ * `to_external` emits the driveItem METADATA only — a name and a conflict
+ * behaviour. The BYTES never pass through here: they travel beside the payload
+ * as the engine's `content` (base64 for a small file, streamed by the engine for
+ * a large one), because a mapper that had to carry megabytes through
+ * JSON.stringify would be neither pure nor affordable.
  *
  * Mapping:
  *   - driveItem folders -> raisin:Folder
@@ -21,6 +34,20 @@
  */
 
 function handler(input) {
+  switch (input && input.operation) {
+    case "to_external":
+      return toExternal(input.node, input.mount, input.fields, input.intent);
+    case "mapper_capabilities":
+      return { to_external: true };
+    case "to_node":
+    default:
+      return toNode(input);
+  }
+}
+
+// ---- to_node --------------------------------------------------------------
+
+function toNode(input) {
   var item = input.external_item;
   if (!item || !item.external_id) return null;
 
@@ -78,4 +105,64 @@ function handler(input) {
       provider_metadata: meta,
     },
   };
+}
+
+// ---- to_external ----------------------------------------------------------
+
+// No list at all means "the whole object" — a create.
+function allowed(fields, name) {
+  if (!fields || !fields.length) return true;
+  return fields.indexOf(name) !== -1;
+}
+
+function str(v) {
+  return typeof v === "string" && v ? v : null;
+}
+
+/**
+ * The driveItem metadata for a create or an update.
+ *
+ * ALWAYS non-null for a file node, and that is deliberate rather than lax. The
+ * engine skips an item whose to_external answers null, so a CONTENT-ONLY push —
+ * new bytes, unchanged name — would be dropped before the adapter ever saw it if
+ * this returned null for an empty payload the way the calendar mapper does. The
+ * conflict behaviour is therefore always emitted, which also means the adapter
+ * never has to guess it.
+ */
+function toExternal(node, mount, fields, intent) {
+  if (!node) return null;
+  var props = node.properties || {};
+  var creating = intent === "create";
+
+  // A FOLDER cannot be created through this adapter (`can_create_folders` is
+  // false: a folder POST is a different request and nothing implements it), so
+  // the intent is declined here rather than sent as a file with no bytes. An
+  // existing folder node is still RENAMEABLE — that is an ordinary PATCH.
+  if (node.node_type === "raisin:Folder" && creating) return null;
+
+  var payload = {};
+
+  // `title` is the node property the engine knows how to gate; `name` is what
+  // Graph calls it. The node's own name is the fallback because to_node writes
+  // the filename there — for a node this mapper imported the two agree, and for
+  // a locally-born one the name is what the author typed.
+  var name = str(props.title) || str(node.name);
+  if (name && allowed(fields, "title")) payload.name = name;
+
+  // WHY `rename` ON CREATE. The file already sitting at that name may not be
+  // ours: a mirror create is a locally-born node landing in a drive full of
+  // documents this mount never imported, and `replace` would destroy a
+  // stranger's file while reporting success. Graph answers with the real,
+  // possibly renamed item and the engine adopts THAT id.
+  //
+  // On update the item is addressed by its own id, so `replace` means "these are
+  // the new bytes for this file", which is what an update is.
+  payload["@microsoft.graph.conflictBehavior"] = creating ? "rename" : "replace";
+
+  // A create with no name at all cannot be issued — Graph has nowhere to put the
+  // file. Null rather than a guess: the engine records the item as failed with a
+  // stated reason, which is something an author can act on.
+  if (creating && !payload.name) return null;
+
+  return { payload: payload };
 }

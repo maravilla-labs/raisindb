@@ -331,6 +331,9 @@ fn ctx<'a>(
         pushed_events: None,
         // Tests never race the wall clock; far-future so the budget never trips.
         deadline: i64::MAX,
+        // Never pushes content: this context exists for the read/probe
+        // paths only.
+        binary_retrieval: None,
         write_mode: std::sync::OnceLock::new(),
         public_origin: None,
         storage: env.storage.clone(),

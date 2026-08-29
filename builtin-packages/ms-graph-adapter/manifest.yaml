@@ -1,5 +1,5 @@
 name: ms-graph-adapter
-version: 1.7.0
+version: 1.8.0
 title: Microsoft 365 Adapter (Preview)
 description: >
   EXPERIMENTAL virtual-node adapter for Microsoft 365 over Microsoft Graph v1.0.
@@ -12,7 +12,11 @@ description: >
   and `drive_scope: site` + a site id to sync a SharePoint library through the
   same files mapper. Set `include_body` on the connection or mount to sync full
   message bodies; it is off by default because bodies multiply delta payload
-  size. Ships
+  size. Drive mounts are now WRITABLE: a file created or edited in RaisinDB is
+  uploaded to OneDrive/SharePoint (inline under 4 MiB, engine-streamed upload
+  session above that), and a delete moves the item to the recycle bin — which
+  needs Files.ReadWrite (or Sites.ReadWrite.All for a library) on the connector
+  plus a reconnect per account. Ships
   the Graph adapter function, a mail mapper and a calendar mapper, and a
   pre-configured (disabled) raisin:Integration template you complete with your
   own Microsoft Entra (Azure AD) OAuth app in the admin console.

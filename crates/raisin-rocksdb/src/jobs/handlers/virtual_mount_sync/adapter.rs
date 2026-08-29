@@ -197,6 +197,17 @@ pub struct Capabilities {
     /// mail, RSVP) rather than mirroring an object.
     #[serde(default)]
     pub can_submit: bool,
+    /// Adapter wants a node's FILE BYTES on `create` / `update`, not just its
+    /// properties.
+    ///
+    /// Off by default, and the default is the safe one: a file-shaped provider
+    /// whose adapter has not opted in mirrors metadata only, which is what
+    /// every adapter did before the content channel existed. Opting in also
+    /// means opting into the second shape — an object over the inline ceiling
+    /// arrives as a descriptor with no bytes, and the adapter must answer with
+    /// an upload URL or fail; see `write::content`.
+    #[serde(default)]
+    pub accepts_content: bool,
     /// The `state_only` allow-list: which node properties this provider accepts
     /// as writes. The engine has no domain knowledge (it does not know a mail
     /// body is immutable while its read flag is not), so this is how a provider

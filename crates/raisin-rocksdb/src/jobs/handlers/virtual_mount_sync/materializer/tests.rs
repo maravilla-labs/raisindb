@@ -375,6 +375,7 @@ fn preserve_pending_edits_keeps_edits_and_their_divergence() {
 
     // Pending `unread` edit (local true, pushed false); `folder` converged.
     let live = WriteView {
+        content: None,
         watched: obj(json!({ "unread": true, "folder": "inbox" })),
         pushed: Some(obj(json!({ "unread": false, "folder": "inbox" }))),
     };
@@ -402,6 +403,7 @@ fn preserve_pending_edits_keeps_edits_and_their_divergence() {
 
     // No local edit at all: same answer, ordinary path.
     let converged = WriteView {
+        content: None,
         watched: obj(json!({ "unread": false, "folder": "inbox" })),
         pushed: Some(obj(json!({ "unread": false, "folder": "inbox" }))),
     };
@@ -426,6 +428,7 @@ fn preserve_pending_edits_treats_absence_as_an_answer() {
 
     // First edit of a never-reported field: local present, baseline lacks it.
     let live = WriteView {
+        content: None,
         watched: obj(json!({ "unread": true })),
         pushed: Some(Map::new()),
     };
@@ -441,6 +444,7 @@ fn preserve_pending_edits_treats_absence_as_an_answer() {
 
     // Unseeded node (no `__pushed_state` at all): same rule.
     let unseeded = WriteView {
+        content: None,
         watched: obj(json!({ "unread": true })),
         pushed: None,
     };
@@ -451,6 +455,7 @@ fn preserve_pending_edits_treats_absence_as_an_answer() {
     // Local DELETE of a watched field the provider still reports: the merge
     // must not resurrect it.
     let deleted = WriteView {
+        content: None,
         watched: Map::new(),
         pushed: Some(obj(json!({ "unread": false }))),
     };

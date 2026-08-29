@@ -64,7 +64,9 @@ pub(crate) use node_paths::{
     ancestor_paths, node_external_id, node_mount_id, node_str_prop, under,
 };
 pub use ops::{dedup_ops, estimate_node_bytes, estimate_op_bytes, BatchOp, BatchStats};
-pub use write_view::{write_view_of, WriteView, PUSHED_STATE_PROP};
+pub use write_view::{
+    content_identity, write_view_of, WriteView, PUSHED_CONTENT_KEY, PUSHED_STATE_PROP,
+};
 
 use async_trait::async_trait;
 use raisin_error::Result;

@@ -199,9 +199,10 @@ engine never calls them.
 | `list` | `{ folder_id?, cursor?, limit? }` | `{ items: ExternalItem[], next_cursor: string \| null }` |
 | `get` | `{ item_id?, path? }` | `ExternalItem \| null` |
 | `get_content` | `{ item_id, parent_item_id?, mime_type? }` | `{ content \| content_base64 \| fetch_url, mime_type }` |
-| `create` _(write)_ | `{ payload, parent_id }` | `{ external_id, etag? }` |
-| `update` _(write)_ | `{ item_id, payload, fields, etag? }` | `{ etag?, … }` |
+| `create` _(write)_ | `{ payload, parent_id, content? }` | `{ external_id, etag? }` or `{ upload }` |
+| `update` _(write)_ | `{ item_id, payload, fields, etag?, content? }` | `{ etag?, … }` or `{ upload }` |
 | `delete` _(write)_ | `{ item_id, policy, etag? }` | `{ deleted: true }` |
+| `finalize_upload` _(write, optional)_ | `{ status, body, intent, item_id? }` | `{ external_id, etag? }` |
 | `submit` _(write, optional)_ | `{ payload, external_id?, idempotency_key }` | `{ external_id, etag?, provider_id? }` |
 | `get_changes` | `{ since_token: string \| null, folder_id? }` | `{ items: Change[], next_token: string }` |
 | `subscribe` _(push, optional)_ | `{ notification_url }` | `{ subscription_id, secret?, expires_at?, resource? }` |
@@ -209,20 +210,75 @@ engine never calls them.
 | `unsubscribe` _(push, optional)_ | `{ subscription_id }` | `{ ok: true }` |
 | `browse` _(discovery, optional)_ | `{ kind?, parent_id?, query?, cursor?, limit? }` | `{ items: BrowseItem[], next_cursor: string \| null }` |
 
-> **The write ops carry no BYTES, and this table used to imply otherwise.** It
-> listed `name`, `is_folder`, `content` and `mime_type` on `create`/`update`;
-> the engine has never sent any of them. What it sends is exactly the three
-> shapes above — `payload` is the mapper's `to_external` output and nothing
-> else (`write/create.rs:223`, `write/push.rs:191`, `write/deletes.rs:178`).
->
-> The cost of the older wording is visible in the tree: the Google Drive
-> adapter carries a complete multipart-upload path branching on
-> `params.content` that can never execute, because nothing populates it. If you
-> are writing an adapter for a file-shaped provider, a `mirror` mount today
-> syncs METADATA only. Adding a byte channel is a bounded engine change — the
-> binary read callback already exists and is already in scope at the sync
-> handler's construction site — and is designed in
-> `docs/design/drive-write-path.md`.
+### Content on the write path
+
+A node's FILE BYTES reach the adapter through `content`, and only when the
+adapter declares `accepts_content` in its capabilities for that mount. Nothing
+else changes: an adapter that does not opt in is offered no `content` key and
+behaves exactly as it did before the channel existed.
+
+```
+content: {
+  name,            // the stored file's name
+  mime_type,
+  size,            // exact byte count
+  content_base64,  // ONLY when `inline` is true
+  inline,          // false => too large to pass inline; answer with an upload
+}
+```
+
+`inline` is the whole of the protocol. Below the engine's ceiling (8 MiB) the
+bytes are in the call and the adapter can PUT them straight to the provider.
+Above it they are not, because the payload crosses the QuickJS boundary as a JS
+string and is copied twice more by `JSON.stringify`/`JSON.parse`, against an
+adapter memory budget typically measured in tens of megabytes.
+
+So a large object is a **two-step write**:
+
+1. the adapter negotiates a transfer — for Microsoft Graph, an ordinary JSON
+   `createUploadSession` — and answers `{ upload: { url, method?, headers?,
+   chunk_size? } }` instead of an `external_id`;
+2. the engine streams the bytes to that URL in Rust, in ranged chunks, through
+   the same operator-owned egress policy that guards `get_content`'s
+   `fetch_url` (and with the same refusal to follow redirects), then calls
+   `finalize_upload` with the provider's final response so the **adapter**
+   parses out the id and etag.
+
+The second call is not ceremony. Parsing that response in the engine would put
+provider-shaped field names in the sync engine, which is the one thing this
+boundary exists to prevent. An upload URL is short-lived and pre-authenticated,
+so mint one per push and never persist it — the same rule `fetch_url` has.
+
+Two refusals worth knowing before you debug one: an adapter handed
+`inline: false` that answers without an `upload` is refused, because it would
+create an empty object at the provider that looks synced forever; and a
+deployment with no binary retrieval wired refuses a content-carrying push
+rather than sending metadata alone.
+
+Content is a **mirror** concern only. `state_only` means "push the named
+properties", and bytes are not a property.
+
+**What makes a content push happen at all.** The drain nominates a node when a
+watched field diverges — and, on a mount whose adapter declared
+`accepts_content`, when its BYTES diverge. That second test is the engine's,
+not the mount's: replacing a document changes no field a `mutable_fields` list
+would sensibly contain (the title is still the title), so a fields-only check
+pushed on rename and on create and never on an edit. Divergence is measured on
+the file resource's storage key, which is minted per stored object, and the
+identity of what was sent is recorded in `__pushed_state` so the same bytes are
+never uploaded twice.
+
+A content-only update therefore reaches the adapter with an EMPTY field list and
+an empty `payload` — the mapper has nothing to translate and correctly says so.
+That is a legitimate update, not a malformed one, and the adapter decides what
+"new bytes, no metadata patch" means for its provider.
+
+> **This table used to promise `name`, `is_folder`, `content` and `mime_type`
+> on `create`/`update` when the engine sent none of them.** The cost is still
+> visible in the tree: the Google Drive adapter carries a complete
+> multipart-upload path branching on `params.content` that could never execute.
+> It can now be finished against the contract above. Design notes and the
+> reasoning behind the ceiling are in `docs/design/drive-write-path.md`.
 
 `subscribe` / `renew` / `unsubscribe` are the **push lifecycle** (§2.9), called only when the
 adapter advertises `supports_push: true` and the mount runs in `webhook` or `hybrid` mode. All

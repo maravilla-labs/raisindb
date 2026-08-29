@@ -29,6 +29,8 @@ function item(extra) {
 }
 
 const call = (external_item) => handler({ external_item, mount: MOUNT })
+const push = (node, extra) =>
+  handler({ operation: 'to_external', node, mount: MOUNT, ...extra })
 
 test('a file becomes a raisin:Asset titled with its real filename', () => {
   const node = call(
@@ -100,4 +102,65 @@ test('provider metadata is passed through verbatim', () => {
   const meta = { filename: 'a.txt', ctag: 'c1', parent_path: '/drive/root:/docs' }
   const node = call(item({ metadata: meta }))
   assert.deepEqual(node.properties.provider_metadata, meta)
+})
+
+// ---- to_external ----------------------------------------------------------
+//
+// The write half. It emits driveItem METADATA only — the bytes travel beside
+// the payload as the engine's `content` — and the one thing it must never do is
+// answer null for a push that has bytes to send.
+
+test('a create names the file and never overwrites a stranger\'s', () => {
+  const out = push(
+    { node_type: 'raisin:Asset', name: 'report.pdf', properties: { title: 'report.pdf' } },
+    { intent: 'create' }
+  )
+  assert.equal(out.payload.name, 'report.pdf')
+  // `rename`, not `replace`: a locally-born node lands in a drive full of
+  // documents this mount never imported, and replace would destroy one and
+  // report success. Graph answers with the real item and the engine adopts it.
+  assert.equal(out.payload['@microsoft.graph.conflictBehavior'], 'rename')
+})
+
+test('an update replaces the item it addresses by id', () => {
+  const out = push(
+    { node_type: 'raisin:Asset', name: 'report.pdf', properties: { title: 'report.pdf' } },
+    { intent: 'update' }
+  )
+  assert.equal(out.payload['@microsoft.graph.conflictBehavior'], 'replace')
+})
+
+test('a content-only push is never dropped', () => {
+  // The engine SKIPS an item whose to_external answers null, so returning null
+  // for an empty payload — the way the calendar mapper does — would silently
+  // drop every push whose only change is the file's bytes.
+  const out = push(
+    { node_type: 'raisin:Asset', name: 'report.pdf', properties: {} },
+    { intent: 'update', fields: ['nothing_writable'] }
+  )
+  assert.notEqual(out, null)
+  assert.ok(out.payload['@microsoft.graph.conflictBehavior'])
+})
+
+test('a folder create is declined; a folder rename is not', () => {
+  // `can_create_folders` is false — a folder POST is a different request and
+  // nothing implements it. Sending one as a file with no bytes is the failure.
+  const folder = { node_type: 'raisin:Folder', name: 'Reports', properties: { title: 'Reports' } }
+  assert.equal(push(folder, { intent: 'create' }), null)
+  assert.equal(push(folder, { intent: 'update' }).payload.name, 'Reports')
+})
+
+test('a create with no name at all is declined rather than guessed', () => {
+  assert.equal(push({ node_type: 'raisin:Asset', properties: {} }, { intent: 'create' }), null)
+  assert.equal(push(null, { intent: 'create' }), null)
+})
+
+test('mapper_capabilities reports the write half, and to_node still works', () => {
+  assert.deepEqual(handler({ operation: 'mapper_capabilities', mount: MOUNT }), {
+    to_external: true,
+  })
+  // An absent operation is to_node, so the read path is unchanged.
+  assert.equal(call(item({ is_folder: true })).node_type, 'raisin:Folder')
+  assert.equal(handler({ operation: 'to_node', external_item: item(), mount: MOUNT }).node_type,
+    'raisin:Asset')
 })

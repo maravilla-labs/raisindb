@@ -30,6 +30,7 @@ pub(super) fn candidates(
     nodes: Vec<VirtualNodeRef>,
     plan: &FieldPlan,
     limit: usize,
+    accepts_content: bool,
 ) -> Vec<Candidate> {
     let mut out: Vec<Candidate> = nodes
         .into_iter()
@@ -56,7 +57,14 @@ pub(super) fn candidates(
             // its own local values — see [`super::push::push_one`] for why
             // baselining is the one outcome that can silently lose an edit.
             let view = node.write_view.as_ref()?;
+            // The BYTES are a second kind of divergence, and the watched-field
+            // check cannot see it: replacing a file's contents changes no
+            // property a `mutable_fields` list would sensibly contain, so a
+            // drive mount that only looked at fields pushed on rename and on
+            // create and never on an edit. Gated on the capability that already
+            // means "this mount moves bytes".
             let nominate = view.diverges(&plan.push)
+                || (accepts_content && view.content_diverges())
                 || (plan.policy == MovePolicy::Reject && plan.moved(view));
             nominate.then_some(Candidate {
                 node_id: node.id,
@@ -92,6 +100,7 @@ mod tests {
             // No `pushed` at all, so every watched field counts as diverged —
             // i.e. this node WOULD be a candidate if nothing filtered it.
             write_view: Some(Box::new(WriteView {
+                content: None,
                 watched,
                 pushed: None,
             })),
@@ -109,6 +118,69 @@ mod tests {
         }
     }
 
+    /// A file whose BYTES changed is a candidate even though every watched
+    /// field is converged.
+    ///
+    /// This is the whole reason `accepts_content` reaches this function: with
+    /// field divergence alone, a drive mount pushed on rename and on create and
+    /// never on an edit — someone replaces a document, the node's `title` is
+    /// unchanged, and the new version silently never reaches the provider.
+    #[test]
+    fn replacing_a_files_bytes_nominates_it() {
+        let mut node = diverged_ref("doc", "/drives/onedrive/report.docx");
+        let view = node.write_view.as_mut().expect("view");
+        // Converged on fields: what was pushed is what the node holds.
+        view.watched = Map::new();
+        view.pushed = Some(Map::from_iter([(
+            crate::jobs::handlers::virtual_mount_sync::materializer::PUSHED_CONTENT_KEY.to_string(),
+            serde_json::json!({ "storage_key": "old-key", "size": 10 }),
+        )]));
+        view.content = Some(serde_json::json!({ "storage_key": "new-key", "size": 12 }));
+
+        let fields = plain(&["title"]);
+        assert!(
+            candidates(vec![node.clone()], &fields, 10, false).is_empty(),
+            "a mount that does not move bytes must not be woken by them"
+        );
+        assert_eq!(
+            candidates(vec![node], &fields, 10, true).len(),
+            1,
+            "a content mount must nominate the changed file"
+        );
+    }
+
+    /// The same bytes must not be uploaded twice: once stamped, the node is
+    /// converged on content as well as on fields.
+    #[test]
+    fn unchanged_bytes_are_not_re_uploaded() {
+        let mut node = diverged_ref("doc", "/drives/onedrive/report.docx");
+        let identity = serde_json::json!({ "storage_key": "k1", "size": 10 });
+        let view = node.write_view.as_mut().expect("view");
+        view.watched = Map::new();
+        view.pushed = Some(Map::from_iter([(
+            crate::jobs::handlers::virtual_mount_sync::materializer::PUSHED_CONTENT_KEY.to_string(),
+            identity.clone(),
+        )]));
+        view.content = Some(identity);
+        assert!(candidates(vec![node], &plain(&["title"]), 10, true).is_empty());
+    }
+
+    /// A file the provider has never been given is diverged, which is what
+    /// makes a mount that gains `accepts_content` later work through its
+    /// backlog rather than ignoring every file already in the tree.
+    #[test]
+    fn a_file_never_pushed_is_diverged() {
+        let mut node = diverged_ref("doc", "/drives/onedrive/report.docx");
+        let view = node.write_view.as_mut().expect("view");
+        view.watched = Map::new();
+        view.pushed = Some(Map::new());
+        view.content = Some(serde_json::json!({ "storage_key": "k1", "size": 10 }));
+        assert_eq!(
+            candidates(vec![node], &plain(&["title"]), 10, true).len(),
+            1
+        );
+    }
+
     /// A derived recurrence occurrence must never be nominated for a push. The
     /// projection regenerates it from its series master, so anything pushed
     /// from one is discarded locally at the next rebuild while the provider
@@ -120,7 +192,7 @@ mod tests {
             diverged_ref("real", "/mail/inbox/real"),
             diverged_ref("occ", "/_occurrences/m1/2026/03/20260331T070000Z"),
         ];
-        let out = candidates(nodes, &fields, 10);
+        let out = candidates(nodes, &fields, 10, false);
         assert_eq!(out.len(), 1, "only the ordinary node is a candidate");
         assert_eq!(out[0].node_id, "real");
     }
@@ -131,7 +203,7 @@ mod tests {
     #[test]
     fn a_sibling_sharing_the_prefix_is_still_a_candidate() {
         let nodes = vec![diverged_ref("sib", "/_occurrences_archive/thing")];
-        assert_eq!(candidates(nodes, &plain(&["unread"]), 10).len(), 1);
+        assert_eq!(candidates(nodes, &plain(&["unread"]), 10, false).len(), 1);
     }
 
     /// A node that diverges ONLY on a withheld move field is nominated under
@@ -159,13 +231,13 @@ mod tests {
 
         let detach = FieldPlan::new(effective(), &caps, MovePolicy::Detach);
         assert!(
-            candidates(vec![node.clone()], &detach, 10).is_empty(),
+            candidates(vec![node.clone()], &detach, 10, false).is_empty(),
             "a detached move must not nominate the node at all"
         );
 
         let reject = FieldPlan::new(effective(), &caps, MovePolicy::Reject);
         assert_eq!(
-            candidates(vec![node], &reject, 10).len(),
+            candidates(vec![node], &reject, 10, false).len(),
             1,
             "a rejected move must be nominated so the refusal can be reported"
         );

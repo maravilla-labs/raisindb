@@ -139,6 +139,19 @@ export function statusIsRaw(opts, status) {
 
 // Single authorized request. `raisin.http.fetch` is synchronous and returns
 // { status, headers, body }.
+//
+// TWO BODY CHANNELS, and the difference is not cosmetic. `opts.body` is a JSON
+// value the host serializes; `opts.bodyBase64` is RAW BYTES, which the host
+// base64-decodes before sending (execution/callbacks/http.rs). Passing file
+// content through `opts.body` would transmit its BASE64 TEXT as the request
+// body, so every uploaded document would land at the provider corrupt and the
+// provider would report 201. The host prefers `bodyBase64` when both are set;
+// no caller here sends both.
+//
+// A byte upload also needs its own `Content-Type` (Graph wants the file's own
+// media type on a `PUT .../content`, not application/json). That already works
+// through `opts.headers`, which is merged over the Authorization header below —
+// so a raw PUT simply passes the type it means.
 export function graphFetch(credential, method, url, opts) {
   opts = opts || {};
   // The engine passes `credential: null` when no account is selected. Without
@@ -158,6 +171,7 @@ export function graphFetch(credential, method, url, opts) {
   }
   var request = { method: method, headers: headers };
   if (opts.body !== undefined) request.body = opts.body;
+  if (opts.bodyBase64 !== undefined) request.bodyBase64 = opts.bodyBase64;
   var resp = raisin.http.fetch(url, request);
   if (!statusIsRaw(opts, resp.status)) {
     raiseForStatus(resp, opts.context || method + " " + url);

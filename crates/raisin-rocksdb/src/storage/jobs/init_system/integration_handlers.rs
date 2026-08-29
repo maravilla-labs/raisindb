@@ -10,8 +10,8 @@ use raisin_locks::LockManagerHandle;
 
 use crate::jobs::handlers::virtual_mount_sync::{AdapterInvokerHandle, FunctionAdapterInvoker};
 use crate::jobs::{
-    BinaryStorageCallback, FunctionExecutorCallback, IntegrationTokenRefreshHandler,
-    VirtualMountSyncHandler,
+    BinaryRetrievalCallback, BinaryStorageCallback, FunctionExecutorCallback,
+    IntegrationTokenRefreshHandler, VirtualMountSyncHandler,
 };
 use crate::storage::RocksDBStorage;
 
@@ -38,17 +38,25 @@ pub fn create_integration_token_refresh_handler(
 /// `binary_storage` backs the on-demand attachment fetch (`get_content`). When
 /// `None` the sync still materializes attachment METADATA — only the fetch of
 /// the bytes themselves is unavailable, and it says so.
+/// `binary_retrieval` is its mirror on the WRITE path: the bytes of a local
+/// file node being pushed to a provider. When `None`, a content-carrying push
+/// fails with that as its reason rather than silently sending metadata only —
+/// a file created at the provider with no bytes is worse than one not created.
 pub fn create_virtual_mount_sync_handler(
     storage: Arc<RocksDBStorage>,
     function_executor: Option<FunctionExecutorCallback>,
     lock_manager: Option<LockManagerHandle>,
     binary_storage: Option<&BinaryStorageCallback>,
+    binary_retrieval: Option<&BinaryRetrievalCallback>,
 ) -> Arc<VirtualMountSyncHandler> {
     let invoker: Option<AdapterInvokerHandle> = function_executor
         .map(|cb| Arc::new(FunctionAdapterInvoker::new(cb)) as AdapterInvokerHandle);
     let mut handler = VirtualMountSyncHandler::new(storage, invoker, lock_manager);
     if let Some(callback) = binary_storage {
         handler = handler.with_binary_store(callback.clone());
+    }
+    if let Some(callback) = binary_retrieval {
+        handler = handler.with_binary_retrieval(callback.clone());
     }
     Arc::new(handler)
 }

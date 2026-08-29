@@ -24,13 +24,22 @@ properties:
   entry_file: index.js:handler
   execution_mode: Async
   enabled: true
-  version: 1
+  # 2: the drive WRITE path (create/update/delete + finalize_upload).
+  version: 2
   resource_limits:
     timeout_ms: 120000
     max_memory_bytes: 67108864
   # Outbound access is restricted to Microsoft Graph and the Microsoft identity
   # platform. `**` is required: `*` does not cross `/`, so it would not match
   # multi-segment Graph paths like /v1.0/me/mailFolders/inbox/messages.
+  #
+  # THE DRIVE WRITE PATH ADDS NOTHING HERE, and that is the design rather than an
+  # omission. `createUploadSession` is an ordinary POST to graph.microsoft.com,
+  # already covered. The session's own upload URL is a pre-authenticated
+  # *.sharepoint.com host — the ENGINE streams the bytes to it in Rust, under the
+  # operator's egress policy, exactly as it downloads a read's `fetch_url`. If
+  # that host were listed here it would mean the adapter was uploading megabytes
+  # through a QuickJS string, which is the thing the second call exists to avoid.
   network_policy:
     http_enabled: true
     request_timeout_ms: 120000
@@ -47,8 +56,9 @@ properties:
         type: string
         description: >
           One of capabilities, list, get, get_content, get_changes, create
-          (calendar only), update (mail + calendar), delete (calendar only),
-          submit, subscribe, renew, unsubscribe, browse
+          (calendar + files), update (mail + calendar + files), delete
+          (calendar + files), finalize_upload (files, after the engine streamed
+          an upload session), submit, subscribe, renew, unsubscribe, browse
       params:
         type: object
         description: Operation-specific arguments

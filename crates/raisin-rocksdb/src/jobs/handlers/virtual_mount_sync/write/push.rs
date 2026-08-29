@@ -53,6 +53,7 @@ pub(super) async fn push_one(
     candidate: &Candidate,
     plan: &FieldPlan,
     policy: &ConflictPolicy,
+    accepts_content: bool,
 ) -> std::result::Result<Pushed, AdapterError> {
     let fields = &plan.push;
     // 2. Read the node as it stands NOW. The index entry that nominated it was
@@ -141,7 +142,11 @@ pub(super) async fn push_one(
     //    push carries the stored `__etag` as its concurrency base, so a node
     //    whose remote moved since the last sync is rejected by the provider
     //    rather than overwritten with a stale local value.
-    if !view.diverges(fields) {
+    // The BYTES are the second kind of divergence. Replacing a document changes
+    // no watched field — the title is still the title — so a fields-only guard
+    // dropped exactly the edit a drive mount exists to propagate.
+    let content_diverges = accepts_content && view.content_diverges();
+    if !view.diverges(fields) && !content_diverges {
         return Ok(Pushed::Skipped);
     }
 
@@ -150,7 +155,11 @@ pub(super) async fn push_one(
     // Microsoft Graph resends meeting invites to every attendee whenever
     // `attendees` appears in a PATCH — so an update triggered by a title edit
     // must not carry the attendee list along just because the mount permits
-    // attendee edits. `diverges()` above guarantees this is non-empty.
+    // attendee edits.
+    //
+    // EMPTY on a content-only push, which is a legitimate update rather than a
+    // malformed one: the new bytes are the change, and the adapter is expected
+    // to send them with no metadata patch at all.
     let push_fields = view.diverged_fields(fields);
     let push_fields = &push_fields;
 
@@ -161,15 +170,28 @@ pub(super) async fn push_one(
         .map_err(|e| AdapterError::Transient(format!("node serialize failed: {e}")))?;
     let payload = match map_to_external(ctx, &node_json, Some(push_fields), "update").await? {
         ToExternalOutcome::Mapped(mapped) => mapped,
-        // Not an error: the mapper declining this node is an answer. Nothing is
-        // stamped either, so if the mapper is fixed the edit is still pending.
+        // A decline is an answer, not an error — EXCEPT when the bytes are what
+        // changed. A mapper asked to translate an empty field list has nothing
+        // to say and correctly says nothing; treating that as "skip" would drop
+        // every content-only update, silently, for a mount whose whole purpose
+        // is content. The push continues with an empty payload and the adapter
+        // decides what an update with bytes and no metadata means.
+        //
+        // Nothing is stamped on a genuine decline either, so if the mapper is
+        // fixed the edit is still pending.
         ToExternalOutcome::NotWritable | ToExternalOutcome::NoMapper => {
-            tracing::debug!(
-                mount_id = %ctx.scope.mount_id,
-                external_id = %candidate.external_id,
-                "mapper declined to translate this node outward; not pushing"
-            );
-            return Ok(Pushed::Skipped);
+            if !content_diverges {
+                tracing::debug!(
+                    mount_id = %ctx.scope.mount_id,
+                    external_id = %candidate.external_id,
+                    "mapper declined to translate this node outward; not pushing"
+                );
+                return Ok(Pushed::Skipped);
+            }
+            super::ToExternal {
+                payload: serde_json::Value::Object(Default::default()),
+                external_id: None,
+            }
         }
     };
 
@@ -188,17 +210,24 @@ pub(super) async fn push_one(
     //    rate limits, config errors — is still returned raw, because the
     //    conflict policy has nothing to say about them and pretending otherwise
     //    would route a broken credential through a merge function.
-    let result = match ctx
-        .call(
-            "update",
-            json!({
-                "item_id": item_id,
-                "payload": payload.payload,
-                "fields": push_fields,
-                "etag": stored_etag,
-            }),
-        )
-        .await
+    // `call_with_content` rather than `ctx.call`: on a mirror over a
+    // file-shaped provider an edit can be to the BYTES, and an update that
+    // pushed only properties would leave the provider's copy stale while the
+    // node looked converged.
+    let result = match super::content::call_with_content(
+        ctx,
+        "update",
+        json!({
+            "item_id": item_id,
+            "payload": payload.payload,
+            "fields": push_fields,
+            "etag": stored_etag,
+        }),
+        &node,
+        accepts_content,
+        Some(item_id.as_str()),
+    )
+    .await
     {
         Ok(result) => result,
         Err(e) if conflict::is_conflict(&e) => {
@@ -289,7 +318,17 @@ pub(super) async fn push_one(
             // all "diverged" again next drain: a perpetual re-push, and for a
             // presence-side-effect field like `attendees` the exact invite
             // spam the diverged-subset push exists to prevent.
-            Some(pushed_map(view.pushed.as_ref(), &view.watched, push_fields)),
+            Some(pushed_map(
+                view.pushed.as_ref(),
+                &view.watched,
+                push_fields,
+                // Only when this push actually carried the bytes. Recording the
+                // identity of content the provider was never given would make
+                // `content_diverges` answer false forever and drop the upload
+                // silently — the same class of lie the null-result guard above
+                // exists to prevent.
+                accepts_content.then(|| view.content.clone()).flatten(),
+            )),
             // Not a merge: an ordinary push writes no node properties, only the
             // engine's own metadata.
             None,
@@ -311,6 +350,7 @@ fn pushed_map(
     prior: Option<&Map<String, Value>>,
     watched: &Map<String, Value>,
     sent: &[String],
+    content: Option<Value>,
 ) -> Map<String, Value> {
     let mut out = prior.cloned().unwrap_or_default();
     for field in sent {
@@ -324,6 +364,16 @@ fn pushed_map(
                 out.remove(field);
             }
         }
+    }
+    // The bytes this push carried, so the next drain does not send them again.
+    // Absent when the mount does not move content at all, in which case any
+    // prior entry is left exactly as it was rather than cleared: a mount does
+    // not lose its content baseline because one metadata-only push happened.
+    if let Some(content) = content {
+        out.insert(
+            crate::jobs::handlers::virtual_mount_sync::materializer::PUSHED_CONTENT_KEY.to_string(),
+            content,
+        );
     }
     out
 }

@@ -42,8 +42,11 @@
  *   - mail     -> `update` (a state PATCH — today the read flag) + `submit`
  *   - calendar -> the full mirror set (`create`/`update`/`delete`) + `submit`
  *                 (RSVP)
- *   - files    -> read-only; a Graph drive write is an upload session, not a
- *                 JSON body
+ *   - files    -> the full mirror set (`create`/`update`/`delete`) PLUS bytes:
+ *                 `accepts_content` makes the engine send the file, and
+ *                 anything over Microsoft's 4 MiB simple-PUT ceiling is
+ *                 answered with an upload session the ENGINE streams to,
+ *                 followed by a `finalize_upload` call back into here
  * A capability with no implementation behind it is how a mount resolves to a
  * mode that throws at drain time, after the engine has claimed its candidates —
  * so silence here is deliberate, not an oversight.
@@ -67,7 +70,10 @@
  *   capabilities.js what this adapter declares, per resource
  *   read.js         list / get / get_content
  *   changes.js      the delta feed and the one-node-per-series collapse
- *   write.js        create / update / delete
+ *   write-common.js the etag header, the receipt, status -> write diagnosis
+ *   write.js        create / update / delete, dispatched per resource
+ *   drive.js        the OneDrive/SharePoint write path (driveItems)
+ *   drive-upload.js its byte half: the size fork, sessions, finalize_upload
  *   submit.js       send, reply, forward, RSVP
  *   subscribe.js    Graph push subscriptions
  *   browse.js       discovery for the mount editor (never called during sync)
@@ -76,6 +82,7 @@
 import { opCapabilities } from "./capabilities.js";
 import { opList, opGet, opGetContent } from "./read.js";
 import { opCreate, opUpdate, opDelete } from "./write.js";
+import { opFinalizeUpload } from "./drive-upload.js";
 import { opSubmit } from "./submit.js";
 import { opGetChanges } from "./changes.js";
 import { opSubscribe, opRenew, opUnsubscribe } from "./subscribe.js";
@@ -104,6 +111,13 @@ export function handler(input) {
       return opUpdate(credential, mount, params);
     case "delete":
       return opDelete(credential, mount, params);
+    // The engine streamed the bytes itself and is handing back the provider's
+    // final response. No credential is involved: the upload URL carried its own
+    // authorization, and all that is left is reading a driveItem's id and etag
+    // out of a body — provider-shaped parsing, which is why it comes back here
+    // instead of being done in Rust.
+    case "finalize_upload":
+      return opFinalizeUpload(mount, params);
     case "submit":
       return opSubmit(credential, mount, params);
     case "get_changes":

@@ -260,6 +260,7 @@ impl RocksDBStorage {
             function_executor_for_vmount,
             lock_manager,
             binary_storage.as_ref(),
+            binary_retrieval.as_ref(),
         );
 
         // Published to the storage so the on-demand attachment fetch can reach

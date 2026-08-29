@@ -196,10 +196,23 @@ async fn capabilities_declare_update_for_mail_and_submit_for_mail_and_calendar()
     .await
     .output
     .expect("files capabilities");
-    assert_eq!(files["can_write"], json!(false), "files stays read-only");
-    assert!(files.get("can_update").is_none());
+    // Files became writable when the engine grew a byte channel (`content` on
+    // create/update, plus the deferred-upload handshake). `accepts_content` is
+    // the load-bearing flag: without it the engine offers no bytes and a mirror
+    // would create empty objects at the provider.
+    assert_eq!(files["can_write"], json!(true));
+    assert_eq!(files["can_create"], json!(true));
+    assert_eq!(files["can_update"], json!(true));
+    assert_eq!(files["can_delete"], json!(true));
+    assert_eq!(files["accepts_content"], json!(true));
+    // A drive item is not a command surface — sending one is not a thing Graph
+    // offers here, and declaring it would let a `submit` mount resolve.
     assert!(files.get("can_submit").is_none());
     assert_eq!(files["can_read"], json!(true));
+    // Graph's DELETE is a recycle-bin move and there is no per-item permanent
+    // delete, so `trash` is the only policy this adapter can honestly serve.
+    assert_eq!(files["supports_trash"], json!(true));
+    assert_eq!(files["default_delete_policy"], json!("trash"));
 }
 
 /// The PATCH is MAILBOX-scoped (`/users/{upn}/messages/{id}`), not folder-scoped
@@ -351,21 +364,24 @@ async fn update_omits_if_match_for_a_timestamp_shaped_etag() {
     assert_eq!(run.output.expect("output")["etag"], Value::Null);
 }
 
-/// `files` has no `update`, and that refusal is terminal — the engine stops
-/// rather than retrying an unsupported request forever. A Graph drive write is
-/// an upload session rather than a PATCH, so this is a real gap, not a missing
-/// `case`. (Calendar WAS in this list; it now updates — see
-/// `tests_ms_graph_calendar_write`.)
+/// An update with nothing to say is refused, terminally, and BEFORE the network.
+///
+/// Every resource is writable now — files last, once the engine could carry
+/// bytes — so what this pins is the other half of the contract: a push the
+/// adapter cannot turn into a provider call must throw `config_error` rather
+/// than issue an empty request that the provider answers 400 to on every drain,
+/// forever, for a change that can never converge.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn update_refuses_unwritable_resources_and_empty_payloads() {
-    for resource in ["files"] {
-        let run = call_adapter(update_input(mount(resource, None), "x", None), vec![]).await;
-        let err = run
-            .error
-            .unwrap_or_else(|| panic!("{resource} update must throw"));
-        assert!(err.contains("[code=config_error]"), "{resource}: {err}");
-        assert!(run.calls.is_empty(), "{resource} reached the network");
-    }
+    // A drive update with neither a metadata payload nor `content` has no
+    // request to make: the bytes are what a file update usually IS, and their
+    // absence here is the caller's mistake, not a provider limitation.
+    let mut empty_drive = update_input(mount("files", None), "01ABC", None);
+    empty_drive["params"]["payload"] = json!({});
+    let run = call_adapter(empty_drive, vec![]).await;
+    let err = run.error.expect("an empty drive update must throw");
+    assert!(err.contains("[code=config_error]"), "files: {err}");
+    assert!(run.calls.is_empty(), "files reached the network");
 
     let mut input = update_input(mount("mail", None), "AAMk1", None);
     input["params"]["payload"] = json!({});

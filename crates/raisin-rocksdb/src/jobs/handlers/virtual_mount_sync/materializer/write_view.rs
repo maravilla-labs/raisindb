@@ -20,6 +20,16 @@ use serde_json::{Map, Value};
 /// the change entirely.
 pub const PUSHED_STATE_PROP: &str = "__pushed_state";
 
+/// Key under which a node's file-content identity is recorded inside
+/// [`PUSHED_STATE_PROP`].
+///
+/// Reserved, and namespaced away from any real property: it is not a field an
+/// adapter or a mapper ever sees. It exists because a mount that carries BYTES
+/// has a second kind of divergence, and the watched-field machinery cannot see
+/// it — replacing a file's contents changes no property a `mutable_fields` list
+/// would sensibly contain.
+pub const PUSHED_CONTENT_KEY: &str = "__content";
+
 /// The `state_only` write view of one node: the watched fields as they stand
 /// now, and the values last pushed to the provider.
 ///
@@ -34,6 +44,20 @@ pub struct WriteView {
     /// [`PUSHED_STATE_PROP`] as stored. `None` means this node has never been
     /// stamped — NOT that nothing was ever pushed.
     pub pushed: Option<Map<String, Value>>,
+    /// Identity of the node's FILE BYTES, when it carries any: the binary
+    /// store's key and the size.
+    ///
+    /// The key is minted per stored object (`nanoid`), so replacing a file's
+    /// contents always produces a new one — which makes this a reliable "the
+    /// bytes changed" signal without hashing anything. Size rides along as a
+    /// cheap second opinion.
+    ///
+    /// Deliberately NOT a member of `watched`: `mutable_fields` means "node
+    /// property names the engine hands the mapper as `fields`", and a storage
+    /// key is not a provider property. Putting it there would oblige every
+    /// adapter and every custom mapper to know one field name it must silently
+    /// ignore, and the one that forgot would send it to the provider.
+    pub content: Option<Value>,
 }
 
 impl WriteView {
@@ -79,6 +103,27 @@ impl WriteView {
     /// to every attendee whenever `attendees` appears in a PATCH, changed or
     /// not — so a mount that allows attendee edits used to spam every attendee
     /// each time someone fixed a typo in the title.
+    /// Whether the node's BYTES differ from those last pushed.
+    ///
+    /// Only meaningful on a mount whose adapter declared `accepts_content`;
+    /// the caller gates on that, because for every other mount the file
+    /// resource is metadata the provider owns and re-pushing it would be an
+    /// echo, not an edit.
+    ///
+    /// A node with content and no recorded content counts as diverged — the
+    /// first push of a file the provider has never been given, which is exactly
+    /// the create case and, on a mount that gained `accepts_content` later, the
+    /// backlog it should work through.
+    pub fn content_diverges(&self) -> bool {
+        let Some(current) = self.content.as_ref() else {
+            return false;
+        };
+        match self.pushed.as_ref().and_then(|p| p.get(PUSHED_CONTENT_KEY)) {
+            Some(pushed) => pushed != current,
+            None => true,
+        }
+    }
+
     pub fn diverged_fields(&self, fields: &[String]) -> Vec<String> {
         let pushed = self.pushed.as_ref();
         fields
@@ -93,7 +138,11 @@ impl WriteView {
 /// nothing. Shared by index load and by the staging path, so the two can never
 /// disagree about what "current value" means.
 pub fn write_view_of(node: &Node, watched_fields: &[String]) -> Option<Box<WriteView>> {
-    if watched_fields.is_empty() {
+    let content = content_identity(node);
+    // A mirror may legitimately watch no fields at all and still have something
+    // to push: a file node's bytes. Returning `None` here would make that mount
+    // nominate nothing, forever, with no error.
+    if watched_fields.is_empty() && content.is_none() {
         return None;
     }
     let mut watched = Map::new();
@@ -107,7 +156,26 @@ pub fn write_view_of(node: &Node, watched_fields: &[String]) -> Option<Box<Write
     Some(Box::new(WriteView {
         watched,
         pushed: pushed_state_of(node),
+        content,
     }))
+}
+
+/// The identity of a node's file bytes, if it carries any.
+///
+/// Read from the `file` Resource the read path stamps (and an upload writes) —
+/// the same property `write::content` sends to the adapter, so the thing
+/// compared here is the thing pushed.
+pub fn content_identity(node: &Node) -> Option<Value> {
+    let raisin_models::nodes::properties::PropertyValue::Resource(resource) =
+        node.properties.get("file")?
+    else {
+        return None;
+    };
+    let key = match resource.metadata.as_ref()?.get("storage_key")? {
+        raisin_models::nodes::properties::PropertyValue::String(s) if !s.is_empty() => s.clone(),
+        _ => return None,
+    };
+    Some(serde_json::json!({ "storage_key": key, "size": resource.size }))
 }
 
 /// [`PUSHED_STATE_PROP`] exactly as stored on a node, independent of what the

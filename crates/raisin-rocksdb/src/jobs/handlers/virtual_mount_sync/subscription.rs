@@ -104,6 +104,9 @@ pub fn adapter_ctx<'a>(
         // budget never applies. Far-future so nothing can read it as expired.
         deadline: i64::MAX,
         // Subscription contexts never drain.
+        // Subscription management never pushes a node, so it needs no byte
+        // channel — this context exists to call subscribe/renew/unsubscribe.
+        binary_retrieval: None,
         write_mode: std::sync::OnceLock::new(),
     }
 }

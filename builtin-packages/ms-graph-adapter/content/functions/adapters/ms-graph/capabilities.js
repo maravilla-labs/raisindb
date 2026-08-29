@@ -13,10 +13,9 @@ import { opCreate, opDelete, opUpdate } from "./write.js";
 // `supports_changes` (a non-primary calendar has no delta feed) and the write
 // flags (only mail has an `update`).
 //
-// The write flags are declared for MAIL ONLY. Declaring them adapter-wide would
-// let a calendar or files mount resolve to a writable mode and then discover at
-// drain time that every push throws — after the engine had already claimed the
-// candidates. Calendar and files must stay byte-identical to what they were.
+// The write flags are declared PER RESOURCE. Declaring them adapter-wide would
+// let a mount resolve to a writable mode and then discover at drain time that
+// every push throws — after the engine had already claimed the candidates.
 //
 // `mutable_fields` holds the NODE property name (`unread`), not the Graph name
 // (`isRead`): the engine intersects it with the mount's
@@ -24,11 +23,11 @@ import { opCreate, opDelete, opUpdate } from "./write.js";
 // survivors to the MAPPER as `fields`. The Graph spelling is the mapper's
 // business and appears nowhere in this file.
 //
-// Declared per RESOURCE, and only for what is actually implemented below — the
+// Declared per RESOURCE, and only for what is actually implemented — the
 // engine's serde defaults every write flag to false, so silence is read as
-// read-only. Mail gets update + submit; calendar gets the full mirror set plus
-// submit; files stays read-only, because a Graph drive write is an upload
-// session rather than a JSON body and declaring a capability with no
+// read-only. Mail gets update + submit; calendar and files get the full mirror
+// set (files plus `accepts_content`, which is what makes the engine send bytes
+// at all); calendar also gets submit. Declaring a capability with no
 // implementation behind it is how a mount resolves to a mode that throws at
 // drain time, after the engine has already claimed its candidates.
 export function opCapabilities(mount) {
@@ -103,6 +102,37 @@ export function opCapabilities(mount) {
     // delete at all, so `trash` is the honest default AND the only policy this
     // adapter can serve; `opDelete` refuses `purge` rather than quietly
     // soft-deleting and reporting success.
+    caps.supports_trash = true;
+    caps.default_delete_policy = "trash";
+  }
+  if (resource === "files") {
+    // A full MIRROR surface over driveItems: `driveCreate` / `driveUpdate` /
+    // `driveDelete` in drive.js, plus `finalize_upload` for the bytes the
+    // ENGINE streams when a file is too large to pass inline.
+    caps.can_write = true;
+    caps.can_create = true;
+    caps.can_update = true;
+    caps.can_delete = true;
+    // THE BYTE CHANNEL. Without this the engine sends metadata only, and a
+    // "mirrored" file would arrive at OneDrive as a name with no content —
+    // which is exactly what this surface did before the write path existed.
+    caps.accepts_content = true;
+    // NOT declared: `can_create_folders`. Graph can create one, this adapter
+    // does not, and the gap is visible rather than papered over — a mirror mount
+    // can only create files inside folders the walk already imported.
+    //
+    // NOT declared either: `can_submit`. A drive has no command surface.
+    //
+    // NODE property names. `title` is what the files mapper reads to produce the
+    // driveItem `name`; the Graph spelling appears nowhere in this file. A
+    // driveItem's other writable metadata (description, its parent — a MOVE) is
+    // left out until it is implemented, for the reason above.
+    caps.mutable_fields = ["title"];
+    // Graph's DELETE moves a drive item to the recycle bin, where a user can
+    // restore it, and v1.0 offers no permanent delete for one item — so `trash`
+    // is the honest default AND the only policy this adapter can serve.
+    // `driveDelete` refuses `purge` rather than soft-deleting and reporting
+    // success.
     caps.supports_trash = true;
     caps.default_delete_policy = "trash";
   }

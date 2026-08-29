@@ -14,6 +14,9 @@
 //    that had stated one, which is how throttling becomes self-sustaining.
 //  * default (mutable) message ids — moving a mail between folders reads as
 //    delete + create, destroying the node with its attachments and history.
+//  * a drive write that carries bytes through `body` rather than `bodyBase64` —
+//    the host would send the BASE64 TEXT of the file and the provider would
+//    answer 201, so every uploaded document lands corrupt and reports success.
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -22,7 +25,9 @@ import { opList, opGetContent } from './read.js'
 import { opGetChanges } from './changes.js'
 import { raiseForStatus } from './http.js'
 import { outlookHeaders, useImmutableIds } from './mount.js'
-import { opUpdate } from './write.js'
+import { opCreate, opDelete, opUpdate } from './write.js'
+import { opFinalizeUpload, SIMPLE_PUT_MAX, UPLOAD_CHUNK_SIZE } from './drive-upload.js'
+import { opCapabilities } from './capabilities.js'
 import { toExternalItem } from './items.js'
 
 // ---- host stub -------------------------------------------------------------
@@ -454,4 +459,270 @@ test('Outlook reads and writes share one id space, on by default', () => {
   const merged = outlookHeaders(mailMount(), { 'If-Match': 'W/"1"' })
   assert.equal(merged['If-Match'], 'W/"1"')
   assert.equal(merged['Prefer'], 'IdType="ImmutableId"')
+})
+
+// ---- the drive write path -------------------------------------------------
+//
+// A drive write is the only one in this adapter that carries BYTES, and every
+// case below is a way that goes silently wrong: the base64 sent as text, a file
+// Graph will not take in one request sent as one anyway, and an upload that
+// reports success with nothing the engine can match the file to.
+
+/** The engine's `content` for a file small enough to pass inline. */
+function inlineContent(extra) {
+  return {
+    name: 'report.pdf',
+    mime_type: 'application/pdf',
+    size: 11,
+    content_base64: 'aGVsbG8gd29ybGQ=',
+    inline: true,
+    ...extra,
+  }
+}
+
+const FILE_PAYLOAD = { name: 'report.pdf', '@microsoft.graph.conflictBehavior': 'rename' }
+
+test('a small create PUTs the BYTES and returns an adoptable id', () => {
+  const calls = stubHttp([
+    { status: 201, body: { id: '01NEW', eTag: '"{GUID},1"', name: 'report.pdf' } },
+  ])
+  const receipt = opCreate(CREDENTIAL, filesMount(), {
+    payload: FILE_PAYLOAD,
+    parent_id: 'FOLDER-1',
+    content: inlineContent(),
+  })
+
+  assert.equal(calls[0].request.method, 'PUT')
+  assert.match(calls[0].url, /\/items\/FOLDER-1:\/report\.pdf:\/content/)
+  // THE bug this file exists for: `body` would transmit the base64 TEXT.
+  assert.equal(calls[0].request.bodyBase64, 'aGVsbG8gd29ybGQ=')
+  assert.equal(calls[0].request.body, undefined)
+  assert.equal(calls[0].request.headers['Content-Type'], 'application/pdf')
+
+  assert.equal(receipt.external_id, '01NEW')
+  // The walk's own formula, so the next run does not mismatch its own write.
+  assert.equal(
+    receipt.etag,
+    toExternalItem({ id: '01NEW', eTag: '"{GUID},1"' }, 'files', filesMount()).etag
+  )
+  assert.equal(receipt.upload, undefined)
+})
+
+test('a create with no parent_id writes into the mount root', () => {
+  const calls = stubHttp([{ status: 201, body: { id: '01NEW', eTag: '"e"' } }])
+  opCreate(CREDENTIAL, filesMount(), { payload: FILE_PAYLOAD, content: inlineContent() })
+  assert.match(calls[0].url, /\/items\/ROOT:\/report\.pdf:\/content/)
+})
+
+test('an oversized create answers with an upload session and NO external_id', () => {
+  // Decided from `content.size`, never from whether base64 arrived: the engine
+  // inlines up to 8 MiB and Microsoft's simple PUT stops at 4, so bytes can be
+  // present and still have to go through a session.
+  const big = inlineContent({ size: SIMPLE_PUT_MAX + 1 })
+  const calls = stubHttp([{ body: { uploadUrl: 'https://contoso.sharepoint.com/_api/upl' } }])
+  const out = opCreate(CREDENTIAL, filesMount(), {
+    payload: FILE_PAYLOAD,
+    parent_id: 'FOLDER-1',
+    content: big,
+  })
+
+  assert.match(calls[0].url, /:\/report\.pdf:\/createUploadSession$/)
+  assert.equal(calls[0].request.method, 'POST')
+  // An ordinary JSON POST to Graph — no bytes, no new host in allowed_urls.
+  assert.equal(calls[0].request.bodyBase64, undefined)
+  assert.equal(calls[0].request.body.item['@microsoft.graph.conflictBehavior'], 'rename')
+
+  assert.equal(out.upload.url, 'https://contoso.sharepoint.com/_api/upl')
+  assert.equal(out.upload.chunk_size % (320 * 1024), 0, 'Graph rejects a non-multiple mid-transfer')
+  assert.equal(out.upload.chunk_size, UPLOAD_CHUNK_SIZE)
+  // Nothing to adopt yet. An external_id here would make the engine adopt a
+  // node for a file that does not exist.
+  assert.equal(out.external_id, undefined)
+  // The session URL is pre-authenticated; forwarding our bearer token would
+  // hand a Graph credential to a host we do not otherwise talk to.
+  assert.equal(out.upload.headers, undefined)
+})
+
+test('an unknown size takes the session path rather than guessing small', () => {
+  // Guessing "small" costs a 413 no retry can turn into a success.
+  const calls = stubHttp([{ body: { uploadUrl: 'https://contoso.sharepoint.com/u' } }])
+  const out = opCreate(CREDENTIAL, filesMount(), {
+    payload: FILE_PAYLOAD,
+    content: { name: 'report.pdf', inline: false },
+  })
+  assert.match(calls[0].url, /createUploadSession$/)
+  assert.ok(out.upload.url)
+})
+
+test('inline bytes that never arrived are refused, not stored as an empty file', () => {
+  // Graph would answer 201 with a real id and the engine would adopt a
+  // zero-byte file as successfully mirrored.
+  stubHttp([])
+  assert.throws(
+    () =>
+      opCreate(CREDENTIAL, filesMount(), {
+        payload: FILE_PAYLOAD,
+        content: { name: 'report.pdf', size: 11, inline: true },
+      }),
+    (e) => e.code === 'config_error' && /content_base64/.test(e.message)
+  )
+})
+
+test('a metadata-only update is a plain PATCH and attempts no upload', () => {
+  const calls = stubHttp([
+    { body: { id: '01ABC', eTag: '"{GUID},2"', name: 'renamed.pdf' } },
+  ])
+  const receipt = opUpdate(CREDENTIAL, filesMount(), {
+    item_id: '01ABC',
+    payload: { name: 'renamed.pdf' },
+    etag: '"{GUID},1"',
+  })
+  assert.equal(calls.length, 1, 'one request — no content PUT, no session')
+  assert.equal(calls[0].request.method, 'PATCH')
+  assert.match(calls[0].url, /\/items\/01ABC$/)
+  assert.doesNotMatch(calls[0].url, /content|createUploadSession/)
+  assert.equal(calls[0].request.headers['If-Match'], '"{GUID},1"')
+  assert.equal(receipt.external_id, '01ABC')
+})
+
+test('an update with bytes writes the content, and applies a rename first', () => {
+  // A content PUT addresses the item by id and cannot rename it. Dropping the
+  // rename silently would still be baselined as pushed, and the two names then
+  // diverge permanently.
+  const calls = stubHttp([
+    { body: { id: '01ABC', eTag: '"{GUID},2"' } }, // the rename PATCH
+    { body: { id: '01ABC', eTag: '"{GUID},3"' } }, // the content PUT
+  ])
+  const receipt = opUpdate(CREDENTIAL, filesMount(), {
+    item_id: '01ABC',
+    payload: { name: 'renamed.pdf' },
+    content: inlineContent(),
+  })
+  assert.equal(calls[0].request.method, 'PATCH')
+  assert.equal(calls[1].request.method, 'PUT')
+  assert.match(calls[1].url, /\/items\/01ABC\/content$/)
+  assert.equal(calls[1].request.bodyBase64, 'aGVsbG8gd29ybGQ=')
+  // The receipt is the LAST write's state, not the rename's.
+  assert.equal(receipt.etag, '"{GUID},3"')
+})
+
+test('finalize_upload parses the id and the etag out of the session response', () => {
+  const receipt = opFinalizeUpload(filesMount(), {
+    status: 201,
+    intent: 'create',
+    body: { id: '01BIG', '@odata.etag': 'W/"7"', name: 'movie.mp4' },
+  })
+  assert.equal(receipt.external_id, '01BIG')
+  assert.equal(receipt.etag, 'W/"7"')
+})
+
+test('finalize_upload throws when the final response carries no id', () => {
+  // An upload that reports success without an id makes the engine adopt a node
+  // it cannot match — undeletable, and duplicated by the next reconcile.
+  assert.throws(
+    () => opFinalizeUpload(filesMount(), { status: 200, intent: 'create', body: {} }),
+    (e) => /no driveItem id/.test(e.message)
+  )
+  // 202 means Graph is still waiting for the next fragment.
+  assert.throws(
+    () => opFinalizeUpload(filesMount(), { status: 202, body: { id: 'X' } }),
+    (e) => e.code === 'config_error' && /not finished/.test(e.message)
+  )
+  // A failure keeps the shared taxonomy rather than growing a second one.
+  assert.throws(
+    () => opFinalizeUpload(filesMount(), { status: 401, body: {} }),
+    (e) => e.code === 'auth_expired'
+  )
+})
+
+test('a drive delete trashes, and refuses to pretend it can purge', () => {
+  const calls = stubHttp([{ status: 204, body: {} }])
+  const out = opDelete(CREDENTIAL, filesMount(), { item_id: '01ABC', policy: 'trash' })
+  assert.equal(calls[0].request.method, 'DELETE')
+  assert.deepEqual(out, { external_id: '01ABC', deleted: true })
+
+  // Graph v1.0 has no permanent delete for a driveItem. Answering "destroyed"
+  // to an operator who typed the one policy nothing defaults to is the failure
+  // that matters here.
+  stubHttp([])
+  assert.throws(
+    () => opDelete(CREDENTIAL, filesMount(), { item_id: '01ABC', policy: 'purge' }),
+    (e) => e.code === 'config_error' && /no permanent delete/.test(e.message)
+  )
+
+  // Already gone is SUCCESS — the desired end state is already true.
+  stubHttp([{ status: 404, body: {} }])
+  assert.deepEqual(opDelete(CREDENTIAL, filesMount(), { item_id: 'GONE' }), {
+    external_id: 'GONE',
+    deleted: true,
+  })
+})
+
+test('a 403 on a drive write names the FILES scope, not the mail one', () => {
+  // 403 on a write is almost never a stale token; it is the write scope the
+  // connector never requested.
+  stubHttp([{ status: 403, body: { error: { code: 'accessDenied' } } }])
+  assert.throws(
+    () =>
+      opUpdate(CREDENTIAL, filesMount(), { item_id: '01ABC', payload: { name: 'x' } }),
+    (e) => e.code === 'config_error' && /Files\.ReadWrite/.test(e.message)
+  )
+})
+
+// ---- capabilities: what the write flags promise ---------------------------
+
+test('files declares the mirror set and the byte channel; mail and calendar are unchanged', () => {
+  const files = opCapabilities(filesMount())
+  assert.equal(files.can_write, true)
+  assert.equal(files.can_create, true)
+  assert.equal(files.can_update, true)
+  assert.equal(files.can_delete, true)
+  // Without this the engine sends metadata only, and a "mirrored" file arrives
+  // at OneDrive as a name with no content.
+  assert.equal(files.accepts_content, true)
+  assert.equal(files.supports_trash, true)
+  assert.equal(files.default_delete_policy, 'trash')
+  // Declared only for what is implemented: no folder create, no command surface.
+  assert.equal(files.can_create_folders, false)
+  assert.equal(files.can_submit, undefined)
+
+  // Mail keeps update + submit and nothing else; the drive work must not have
+  // widened it.
+  const mail = opCapabilities(mailMount())
+  assert.equal(mail.can_update, true)
+  assert.equal(mail.can_submit, true)
+  assert.equal(mail.can_create, undefined)
+  assert.equal(mail.can_delete, undefined)
+  assert.equal(mail.accepts_content, undefined)
+  assert.deepEqual(mail.mutable_fields, ['unread', 'is_read'])
+
+  // Calendar keeps the full mirror set and carries NO byte channel.
+  const cal = opCapabilities({ sync_config: { resource: 'calendar' } })
+  assert.equal(cal.can_create, true)
+  assert.equal(cal.can_delete, true)
+  assert.equal(cal.can_submit, true)
+  assert.equal(cal.accepts_content, undefined)
+  assert.equal(cal.default_delete_policy, 'trash')
+})
+
+test('mail and calendar still refuse what they cannot do', () => {
+  stubHttp([])
+  assert.throws(
+    () => opCreate(CREDENTIAL, mailMount(), { payload: { subject: 'x' } }),
+    (e) => e.code === 'config_error' && /submit/.test(e.message)
+  )
+  stubHttp([])
+  assert.throws(
+    () => opDelete(CREDENTIAL, mailMount(), { item_id: 'MSG-1' }),
+    (e) => e.code === 'config_error'
+  )
+  stubHttp([])
+  assert.throws(
+    () =>
+      opDelete(CREDENTIAL, { sync_config: { resource: 'calendar' } }, {
+        item_id: 'EV-1',
+        policy: 'purge',
+      }),
+    (e) => e.code === 'config_error' && /no permanent delete/.test(e.message)
+  )
 })

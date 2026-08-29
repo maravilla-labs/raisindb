@@ -49,6 +49,7 @@ pub(super) async fn drain_creates(
     batcher: &mut SyncBatcher<'_>,
     state: &mut super::super::MountState,
     stats: &mut super::DrainStats,
+    accepts_content: bool,
 ) {
     let nodes = match ctx.materializer.scan_mount_nodes(&ctx.scope).await {
         Ok(nodes) => nodes,
@@ -124,7 +125,7 @@ pub(super) async fn drain_creates(
             stats.pending += pending.len() - i;
             break;
         }
-        match create_one(ctx, batcher, node).await {
+        match create_one(ctx, batcher, node, accepts_content).await {
             Ok(Created::Adopted) => stats.pushed += 1,
             Ok(Created::Skipped) => stats.skipped += 1,
             // Counted as a failure, not a skip: the node may now have a remote
@@ -198,6 +199,7 @@ pub(super) async fn create_one(
     ctx: &SyncCtx<'_>,
     batcher: &mut SyncBatcher<'_>,
     node: &raisin_models::nodes::Node,
+    accepts_content: bool,
 ) -> Result<Created, AdapterError> {
     let node_bytes = estimate_node_bytes(node);
     let node_json = serde_json::to_value(node)
@@ -220,19 +222,26 @@ pub(super) async fn create_one(
         }
     };
 
-    let result = ctx
-        .call(
-            "create",
-            json!({
-                "payload": payload.payload,
-                // The mount's own remote root, so an adapter that files new
-                // objects into a container (a Drive folder, a named calendar)
-                // does not have to re-derive it. Absent on a default-container
-                // mount, which is not an error.
-                "parent_id": ctx.mount.remote_root,
-            }),
-        )
-        .await?;
+    // Through `call_with_content` rather than `ctx.call` so a node carrying
+    // FILE BYTES sends them: metadata alone would create an empty object at the
+    // provider that then looks synced forever, because the node and the item
+    // agree on everything the engine compares.
+    let result = super::content::call_with_content(
+        ctx,
+        "create",
+        json!({
+            "payload": payload.payload,
+            // The mount's own remote root, so an adapter that files new
+            // objects into a container (a Drive folder, a named calendar)
+            // does not have to re-derive it. Absent on a default-container
+            // mount, which is not an error.
+            "parent_id": ctx.mount.remote_root,
+        }),
+        node,
+        accepts_content,
+        None,
+    )
+    .await?;
 
     // No id, no adoption. An adapter that answers `null`, or an object without
     // `external_id`, has told us nothing we can use to match this node again —
@@ -270,9 +279,20 @@ pub(super) async fn create_one(
     // values as remote for an object the engine had never written, whereas here
     // the engine just created the remote object FROM these values, so the
     // assertion is one it is entitled to make.
-    let pushed = write_view_of(node, &ctx.scope.watched_fields)
+    let mut pushed = write_view_of(node, &ctx.scope.watched_fields)
         .map(|view| view.watched.clone())
         .unwrap_or_default();
+    // A create sends the bytes as well as the fields, so the baseline records
+    // them — otherwise the very next drain sees content that was never pushed
+    // and uploads the same file a second time.
+    if accepts_content {
+        if let Some(identity) = super::super::materializer::content_identity(node) {
+            pushed.insert(
+                super::super::materializer::PUSHED_CONTENT_KEY.to_string(),
+                identity,
+            );
+        }
+    }
 
     batcher
         .stage_adopt(&node.id, external_id, etag, Some(pushed), node_bytes)

@@ -60,6 +60,9 @@
 //! nominate.
 
 mod candidates;
+/// Reading a local node's bytes for a push, and deciding whether they travel
+/// inline or as a deferred transfer.
+pub(crate) mod content;
 // `pub(crate)` so `resolve.rs` can map the policy onto
 // `MountScope::read_local_wins`; the enum itself stays `pub(crate)` too, so the
 // materializer never grows a dependency on resolver plumbing.
@@ -81,6 +84,8 @@ mod submit;
 mod submit_outcome;
 mod submit_record;
 mod submit_step;
+/// Streaming deferred bytes to an adapter-supplied URL.
+pub(crate) mod upload;
 mod verdict;
 
 use super::*;
@@ -339,7 +344,7 @@ pub(super) async fn drain_pending(
             external_id: external_id.to_string(),
         };
         if let Ok(push::Pushed::Sent) =
-            push::push_one(ctx, batcher, &candidate, &fields, &policy).await
+            push::push_one(ctx, batcher, &candidate, &fields, &policy, false).await
         {
             pushed += 1;
         }
@@ -466,7 +471,14 @@ pub(super) async fn drain(
     // needs — which the index cannot serve, since a never-synced node is not in
     // it — is not paid for by every mirror mount.
     if mirror.is_some() && ctx.mount.write_config.creates_locally() {
-        create::drain_creates(ctx, batcher, state, &mut stats).await;
+        create::drain_creates(
+            ctx,
+            batcher,
+            state,
+            &mut stats,
+            mirror.is_some_and(|m| m.accepts_content),
+        )
+        .await;
     }
 
     // Bounded by the mount's own per-sync item cap: a drain that discovered a
@@ -474,7 +486,12 @@ pub(super) async fn drain(
     // and leave no room for the read phase. What is left over is picked up by
     // the next run, in a stable order.
     let limit = ctx.mount.sync_config.max_items_per_sync.max(1) as usize;
-    let candidates = candidates::candidates(batcher.virtual_nodes(), fields, limit);
+    let candidates = candidates::candidates(
+        batcher.virtual_nodes(),
+        fields,
+        limit,
+        mirror.is_some_and(|m| m.accepts_content),
+    );
     // No field updates is NOT an early exit. This used to `return stats` here,
     // and it was the only return in the whole drain that came after work may
     // have been staged and before BOTH the flush below and the status block —
@@ -528,7 +545,16 @@ pub(super) async fn drain(
             );
             break;
         }
-        match push::push_one(ctx, batcher, candidate, fields, &policy).await {
+        match push::push_one(
+            ctx,
+            batcher,
+            candidate,
+            fields,
+            &policy,
+            mirror.is_some_and(|m| m.accepts_content),
+        )
+        .await
+        {
             Ok(push::Pushed::Sent) => stats.pushed += 1,
             Ok(push::Pushed::Skipped) => stats.skipped += 1,
             Ok(push::Pushed::Gone) => stats.gone += 1,

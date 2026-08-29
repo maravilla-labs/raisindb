@@ -53,6 +53,12 @@ pub(crate) struct MirrorPlan {
     pub fields: FieldPlan,
     pub delete: DeletePolicy,
     pub limits: DeleteLimits,
+    /// Whether the adapter wants a node's FILE BYTES alongside its properties.
+    ///
+    /// Mirror only, and deliberately not offered to `state_only`: that mode's
+    /// contract is "push the named properties and nothing else", and bytes are
+    /// not a property. A file-shaped provider that wants content is a mirror.
+    pub accepts_content: bool,
 }
 
 /// Resolve what this mount may actually push.
@@ -236,6 +242,11 @@ fn resolve_mirror(
             move_policy.expect("no reason recorded, so resolution succeeded"),
         ),
         delete: delete.expect("no reason recorded, so resolution succeeded"),
+        // Taken from the adapter alone. There is no mount switch for it on
+        // purpose: whether a provider's objects HAVE bytes is a fact about the
+        // provider, not an operator preference, and a mount that could turn it
+        // off would just be a mount that creates empty files.
+        accepts_content: capabilities.accepts_content,
         limits: DeleteLimits {
             max_per_run: write_config
                 .max_deletes_per_run

@@ -99,6 +99,14 @@ pub struct VirtualMountSyncHandler {
     /// [`Self::fetch_content`] fails — the read path must not depend on a
     /// capability only the on-demand fetch needs.
     binary_store: Option<crate::jobs::handlers::package_install::BinaryStorageCallback>,
+    /// Where a locally-authored node's file bytes are READ from, for the write
+    /// path: a `raisin:Asset` created under a mirror mount is metadata plus a
+    /// storage key, and the provider wants the bytes.
+    ///
+    /// The mirror image of `binary_store`, and optional for the same reason —
+    /// a deployment without it still syncs metadata in both directions, and
+    /// only a content-carrying push fails, with a reason that says so.
+    binary_retrieval: Option<crate::jobs::handlers::package_install::BinaryRetrievalCallback>,
     /// Per-process identity, used to build the lease owner string.
     instance_id: String,
 }
@@ -119,6 +127,7 @@ impl VirtualMountSyncHandler {
             materializer,
             lock_manager,
             binary_store: None,
+            binary_retrieval: None,
             instance_id: nanoid::nanoid!(8),
         }
     }
@@ -134,6 +143,20 @@ impl VirtualMountSyncHandler {
         callback: crate::jobs::handlers::package_install::BinaryStorageCallback,
     ) -> Self {
         self.binary_store = Some(callback);
+        self
+    }
+
+    /// Wire the binary retrieval the WRITE path reads node bytes through.
+    ///
+    /// Separate from [`Self::with_binary_store`] because they are opposite
+    /// directions and a deployment can legitimately have one and not the other:
+    /// the store is what an inbound attachment is written into, this is what an
+    /// outbound file is read out of.
+    pub fn with_binary_retrieval(
+        mut self,
+        callback: crate::jobs::handlers::package_install::BinaryRetrievalCallback,
+    ) -> Self {
+        self.binary_retrieval = Some(callback);
         self
     }
 

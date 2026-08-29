@@ -126,9 +126,25 @@ Needed only for the cross-principal mounts described above:
 - `User.ReadBasic.All` — the directory list behind the mailbox / user pickers.
 - `Place.Read.All` — the room-mailbox picker.
 
+Needed to WRITE, and nothing narrower substitutes — with read-only consent a
+push comes back 403 and the adapter reports a `config_error` naming the scope:
+
+- `Mail.ReadWrite` / `Mail.ReadWrite.Shared` — the read flag and other message
+  state.
+- `Mail.Send` / `Mail.Send.Shared` — an outbox mount. Separate at Microsoft;
+  `Mail.ReadWrite` does not imply it.
+- `Calendars.ReadWrite` / `Calendars.ReadWrite.Shared` — event edits and RSVPs.
+- `Files.ReadWrite` — upload to the connected account's own OneDrive.
+- `Files.ReadWrite.All` — upload to another user's OneDrive (`drive` = `user`).
+- `Sites.ReadWrite.All` — upload to a SharePoint library (`drive` = `site`).
+
+A drive write is an upload session rather than a JSON body, which is why it
+arrived after mail and calendar; the scopes above are what it consents to.
+
 These are **delegated**, not application, permissions: the connected account
 still reaches only what a human has been granted, so adding them does not widen
-access on its own.
+access on its own. Leave the write scopes out and every mount still works
+read-only.
 
 #### What delegated permissions cannot do
 

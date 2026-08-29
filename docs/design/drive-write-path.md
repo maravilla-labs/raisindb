@@ -1,6 +1,11 @@
 # Writing bytes to a provider: the drive write path
 
-**Status:** design, not built. Written 2026-08-29 after the Microsoft 365 mount
+**Status:** ENGINE SIDE BUILT (2026-08-29). The contract below is implemented in
+`write/content.rs` and `write/upload.rs`; the reference documentation is
+`docs/reference/virtual-node-adapters.md` ("Content on the write path"). Kept as
+the record of WHY it is shaped this way.
+
+**Originally:** design, not built. Written 2026-08-29 after the Microsoft 365 mount
 bundle shipped read-only drive mounts and the obvious next question — "can I
 create a file in RaisinDB and have it land in OneDrive?" — turned out to have a
 firm answer: **not today**, and the reason is one missing channel rather than a

@@ -182,6 +182,7 @@ impl VirtualMountSyncHandler {
             credential,
             mount_snapshot,
             deadline: Utc::now().timestamp() + SYNC_WALL_CLOCK_BUDGET.as_secs() as i64,
+            binary_retrieval: self.binary_retrieval.clone(),
             write_mode: std::sync::OnceLock::new(),
         };
 

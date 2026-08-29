@@ -88,6 +88,11 @@ pub struct SyncCtx<'a> {
     ///
     /// `None` for scheduled runs and for pushes that carried no body.
     pub pushed_events: Option<Value>,
+    /// How the write path reads a local file node's bytes. `None` on a
+    /// deployment with no binary retrieval wired, which makes a
+    /// content-carrying push fail with that as its reason rather than create an
+    /// empty object at the provider.
+    pub binary_retrieval: Option<crate::jobs::handlers::package_install::BinaryRetrievalCallback>,
     pub write_mode: std::sync::OnceLock<write::WriteMode>,
 }
 
