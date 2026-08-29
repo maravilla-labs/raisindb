@@ -134,22 +134,80 @@ export function enrichAttachments(credential, mount, items) {
 // reconcile it away anyway. Every other failure — 429, 5xx, an expired token —
 // is a statement about the request, not about the message, and must reach the
 // engine so it backs off rather than acting on a listing it never got.
+// What every attachment kind has. `contentBytes` is deliberately absent (see
+// above); everything here is on the BASE `microsoft.graph.attachment` type and
+// is therefore always selectable.
+var ATTACHMENT_SELECT = "id,name,contentType,size,isInline";
+
+// `contentId` is NOT on the base type — it belongs to the derived
+// `microsoft.graph.fileAttachment`, so selecting it unqualified makes Graph
+// reject the WHOLE request:
+//
+//   Could not find a property named 'contentId' on type 'microsoft.graph.attachment'
+//
+// which arrives as a 400, is classified `config_error`, and stops the mount —
+// every message, not just the ones with attachments. OData addresses a derived
+// property by casting, which is what this does.
+var ATTACHMENT_SELECT_CID =
+  ATTACHMENT_SELECT + ",microsoft.graph.fileAttachment/contentId";
+
+function attachmentsUrl(mount, messageId, select) {
+  return (
+    GRAPH +
+    principal(mount) +
+    "/messages/" +
+    enc(messageId) +
+    "/attachments?$select=" +
+    select
+  );
+}
+
+// Does this 400 mean "that select is not valid here"?
+//
+// Narrow on purpose: a 400 about anything else must still surface. The cast
+// above is the documented form, but a tenant or a future Graph revision that
+// refuses it should cost inline `cid:` resolution, not the whole mailbox.
+function isSelectRejection(resp) {
+  if (!resp || resp.status !== 400) return false;
+  var body = resp.body || {};
+  var message = (body.error && body.error.message) || "";
+  return /select|contentId|expand/i.test(String(message));
+}
+
 export function mailAttachments(credential, mount, messageId) {
   var resp = graphFetch(
     credential,
     "GET",
-    GRAPH +
-      principal(mount) +
-      "/messages/" +
-      enc(messageId) +
-      "/attachments?$select=id,name,contentType,size,isInline,contentId",
+    attachmentsUrl(mount, messageId, ATTACHMENT_SELECT_CID),
     {
       context: "list attachments",
       headers: outlookHeaders(mount),
+      // 404 stays the caller's (the message vanished); 400 is taken raw so the
+      // select rejection can be told apart from every other bad request —
+      // `raiseForStatus` would otherwise map it to config_error and stop the
+      // mount before this function saw it.
       rawStatusOk: true,
+      rawStatuses: [400],
     }
   );
+  // Retried WITHOUT the cast rather than failing the mount. The cost is
+  // `content_id: null`, so an inline image still imports as an Asset child and
+  // only its `cid:` reference in the body goes unresolved.
+  if (isSelectRejection(resp)) {
+    resp = graphFetch(
+      credential,
+      "GET",
+      attachmentsUrl(mount, messageId, ATTACHMENT_SELECT),
+      {
+        context: "list attachments",
+        headers: outlookHeaders(mount),
+        rawStatusOk: true,
+      }
+    );
+  }
   if (resp.status === 404) return null;
+  // Every non-2xx that survived the retry is mapped here as before, including a
+  // 400 about something other than the select.
   raiseForStatus(resp, "list attachments");
   var list = (resp.body && resp.body.value) || [];
   var out = [];

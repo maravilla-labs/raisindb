@@ -984,3 +984,85 @@ test('mail and calendar relative paths are untouched', () => {
   const cal = opGetChanges(CREDENTIAL, calMount, { since_token: calToken })
   assert.equal(cal.items[0].relative_path, 'EV-9')
 })
+
+// ---- attachments: the derived-type select ---------------------------------
+//
+// Production incident: `$select=…,contentId` on `/attachments` returns
+//
+//   Could not find a property named 'contentId' on type 'microsoft.graph.attachment'
+//
+// because contentId belongs to the DERIVED fileAttachment. Graph rejects the
+// whole request with a 400, the adapter classifies it `config_error`, and the
+// mount stops after three failures — for every message, not only ones with
+// attachments. A mailbox that had just enabled attachments stopped syncing.
+
+test('the attachment select casts to the derived type that owns contentId', () => {
+  const calls = stubHttp([
+    { body: { value: [{ id: 'M1', subject: 's' }] } },
+    { body: { value: [] } },
+  ])
+  opList(CREDENTIAL, mailMount({ sync_config: { resource: 'mail', include_attachments: true } }), {})
+
+  const listing = calls.find((c) => /\/attachments\?/.test(c.url))
+  assert.ok(listing, 'attachments must be listed when the mount opted in')
+  assert.match(
+    listing.url,
+    /microsoft\.graph\.fileAttachment\/contentId/,
+    'contentId is not on the base attachment type; unqualified it 400s the ' +
+      'whole request and stops the mount',
+  )
+})
+
+test('a select Graph will not accept degrades to no contentId, not to a dead mount', () => {
+  const calls = stubHttp([
+    { body: { value: [{ id: 'M1', subject: 's' }] } },
+    {
+      status: 400,
+      body: {
+        error: {
+          code: 'RequestBroker--ParseUri',
+          message:
+            "Parsing OData Select and Expand failed: Could not find a property " +
+            "named 'contentId' on type 'microsoft.graph.attachment'.",
+        },
+      },
+    },
+    { body: { value: [{ id: 'A1', name: 'logo.png', isInline: true }] } },
+  ])
+
+  const out = opList(
+    CREDENTIAL,
+    mailMount({ sync_config: { resource: 'mail', include_attachments: true } }),
+    {},
+  )
+
+  const retried = calls.filter((c) => /\/attachments\?/.test(c.url))
+  assert.equal(retried.length, 2, 'the rejected select must be retried once')
+  assert.doesNotMatch(retried[1].url, /contentId/, 'the retry drops the cast')
+
+  const item = out.items[0]
+  assert.equal(item.metadata.attachments.length, 1, 'the attachment still imports')
+  assert.equal(
+    item.metadata.attachments[0].content_id,
+    null,
+    'only the cid: reference is lost, and it is lost honestly',
+  )
+  assert.ok(!item.metadata.children_unknown, 'this is a known listing, not an unknown one')
+})
+
+test('a 400 about anything else still fails the mount', () => {
+  stubHttp([
+    { body: { value: [{ id: 'M1', subject: 's' }] } },
+    { status: 400, body: { error: { code: 'ErrorInvalidUser', message: 'The mailbox is unavailable.' } } },
+  ])
+  assert.throws(
+    () =>
+      opList(
+        CREDENTIAL,
+        mailMount({ sync_config: { resource: 'mail', include_attachments: true } }),
+        {},
+      ),
+    /mailbox is unavailable/i,
+    'a select fallback must not swallow unrelated 400s',
+  )
+})

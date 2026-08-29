@@ -1,5 +1,5 @@
 name: ms-graph-adapter
-version: 1.9.0
+version: 1.9.1
 title: Microsoft 365 Adapter (Preview)
 description: >
   EXPERIMENTAL virtual-node adapter for Microsoft 365 over Microsoft Graph v1.0.
