@@ -65,7 +65,8 @@ pub(crate) use node_paths::{
 };
 pub use ops::{dedup_ops, estimate_node_bytes, estimate_op_bytes, BatchOp, BatchStats};
 pub use write_view::{
-    content_identity, write_view_of, WriteView, PUSHED_CONTENT_KEY, PUSHED_STATE_PROP,
+    content_identity, pushed_state_of, write_view_of, WriteView, PUSHED_CONTENT_KEY,
+    PUSHED_STATE_PROP,
 };
 
 use async_trait::async_trait;

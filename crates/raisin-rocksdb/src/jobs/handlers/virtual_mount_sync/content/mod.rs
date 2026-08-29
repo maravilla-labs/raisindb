@@ -238,6 +238,31 @@ impl VirtualMountSyncHandler {
             .insert("file_size".to_string(), PropertyValue::Integer(stored.size));
         node.properties
             .insert("content_hash".to_string(), PropertyValue::String(hash));
+
+        // Record these bytes as the PROVIDER's state, not just as ours.
+        //
+        // The write path treats "this node has content that was never pushed"
+        // as diverged, which is right for a file a user replaced and wrong for
+        // one the engine just downloaded FROM the provider — without this, the
+        // first drain of a mirror mount uploads every fetched file straight
+        // back where it came from. Unlike baselining a watched FIELD, this
+        // asserts nothing the engine did not verify: the bytes are the
+        // provider's, because the provider is where they were read.
+        let identity = serde_json::json!({
+            "storage_key": stored.key.clone(),
+            "size": stored.size,
+        });
+        let mut pushed = super::materializer::pushed_state_of(&node).unwrap_or_default();
+        pushed.insert(
+            super::materializer::PUSHED_CONTENT_KEY.to_string(),
+            identity,
+        );
+        if let Ok(value) =
+            serde_json::from_value::<PropertyValue>(serde_json::Value::Object(pushed))
+        {
+            node.properties
+                .insert(super::materializer::PUSHED_STATE_PROP.to_string(), value);
+        }
         // NOT `__etag`. The etag is the provider's change token for the ITEM and
         // is what the sync's skip-write compares; overwriting it here would make
         // the next sync believe the attachment metadata had changed (or, worse,
