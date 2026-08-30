@@ -132,3 +132,33 @@ test('an item with no external_id is skipped', () => {
   assert.equal(handler({ mount, external_item: { name: 'x' } }), null);
   assert.equal(handler({ mount }), null);
 });
+
+test('every time column is ISO 8601, and the RAW header is kept out of them', () => {
+  // The adapter normalises the Date header into `meta.date` and preserves the
+  // sender's original string in `headers.date`. `sent_at` used to be read from
+  // that raw header, which put "Wed, 2 Sep ..." into a column the nodetype
+  // declares as ISO 8601 and indexes as a Property — a second wire shape for
+  // one field, sorting by weekday name.
+  const out = map({
+    subject: 'Hello',
+    date: '2026-09-02T07:00:00Z',
+    headers: { date: 'Wed, 2 Sep 2026 09:00:00 +0200', subject: 'Hello' },
+  });
+  for (const column of ['date', 'received_at', 'sent_at']) {
+    assert.equal(out.properties[column], '2026-09-02T07:00:00Z', column);
+  }
+  // Nothing is lost: the raw header is still one hop away.
+  assert.equal(
+    out.properties.provider_metadata.headers.date,
+    'Wed, 2 Sep 2026 09:00:00 +0200',
+  );
+});
+
+test('a message the adapter could not date has no invented time', () => {
+  // The adapter emits an empty date when the header will not parse; the mapper
+  // must write an ABSENT column, never "now" and never the unparsable string.
+  const out = map({ subject: 'Hello', date: '', headers: { date: 'not a date' } });
+  assert.equal(out.properties.date, null);
+  assert.equal(out.properties.received_at, null);
+  assert.equal(out.properties.sent_at, null);
+});
