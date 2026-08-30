@@ -1208,3 +1208,886 @@ test('a create with no content and no is_folder is still treated as a folder', (
   opCreate(CREDENTIAL, filesMount(), { payload: { name: 'Loose' }, parent_id: 'ROOT' })
   assert.match(calls[0].url, /\/children$/)
 })
+
+// ---- mail folder TREE mounts ----------------------------------------------
+//
+// Graph's message delta is FOLDER-SCOPED — v1.0 documents only
+// `/mailFolders/{id}/messages/delta`, there is no mailbox-wide feed — so a
+// mount that spans a subtree holds ONE DELTA LINK PER FOLDER inside the single
+// opaque cursor the engine stores. Everything below is a failure that shape
+// makes available:
+//
+//  * the walk and the delta disagreeing about a message's path by one segment,
+//    which relocates the node on every run (it shipped twice already: once on
+//    google-drive, once on ms-graph drive)
+//  * a NEW folder seeded with `$deltatoken=latest`, silently dropping an entire
+//    folder's history with nothing to observe
+//  * a folder RENAME that changes no message etag, so `can_skip_unmapped`
+//    returns before rel_path is read and every message stays at its old path
+//    forever — repairable only by force_rewrite
+//  * an `@removed` emitted as a delete, which Graph also sends for a MOVE OUT
+//    of the folder — so filing an email destroys its node
+//  * an unbounded or unpersisted folder rotation, which starves every quiet
+//    folder behind one busy one and still reports `ok`
+
+import { MAIL_TREE_SLICE, entryUrl } from './changes.js'
+import { folderSegment } from './mail-folders.js'
+import { subscriptionResource } from './subscribe.js'
+
+/** A URL-routed host stub: a walk makes many calls and their order is the
+ *  engine's business, not the test's. */
+function stubRouter(route) {
+  const calls = []
+  globalThis.raisin = {
+    http: {
+      fetch(url, request) {
+        calls.push({ url, request })
+        const r = route(url)
+        if (!r) throw new Error(`unrouted request: ${url}`)
+        return { status: 200, headers: {}, body: {}, ...r }
+      },
+    },
+  }
+  return calls
+}
+
+/** A deltaLink shaped the way Graph really mints one: the whole query frozen
+ *  into it, including the ~330-char URL-encoded $select the cursor must NOT
+ *  store a hundred copies of. */
+function deltaLinkFor(id) {
+  return (
+    `https://graph.microsoft.com/v1.0/me/mailFolders/${id}/messages/delta` +
+    `?%24select=${encodeURIComponent('id,subject,from,toRecipients,receivedDateTime,parentFolderId')}` +
+    `&%24deltatoken=TOK-${id}`
+  )
+}
+
+function treeMount(extra) {
+  return {
+    remote_root: 'inbox',
+    sync_config: { resource: 'mail', folder_scope: 'tree' },
+    ...extra,
+  }
+}
+
+/** Build a router over a fixture mailbox. */
+function mailboxRouter(fx) {
+  const folderById = { [fx.root.id]: fx.root }
+  for (const f of fx.folders) folderById[f.id] = f
+  const idOf = (url) => {
+    const m = /\/mailFolders\/([^/?]+)/.exec(url)
+    return m ? decodeURIComponent(m[1]) : null
+  }
+  const resolve = (id) => (id === 'inbox' ? fx.root : folderById[id])
+  const deltaBody = (id, url) => {
+    if (fx.delta) {
+      const custom = fx.delta(id, url)
+      if (custom) return custom
+    }
+    return {
+      body: {
+        value: (fx.messages[id] || []).slice(),
+        '@odata.deltaLink': deltaLinkFor(id),
+      },
+    }
+  }
+  return (url) => {
+    const id = idOf(url)
+    if (!id) return null
+    if (url.includes('/childFolders')) {
+      const parent = resolve(id).id
+      return { body: { value: fx.folders.filter((f) => f.parentFolderId === parent) } }
+    }
+    if (url.includes('/messages/delta')) return deltaBody(resolve(id).id, url)
+    if (url.includes('/messages')) {
+      return { body: { value: (fx.messages[resolve(id).id] || []).slice() } }
+    }
+    return { body: resolve(id) || null }
+  }
+}
+
+/** Drive `opList` the way `full.rs` drives it: an explicit folder stack, the
+ *  prefix accumulated from each folder item's own resolved path. */
+function mailWalkPaths(mount, route) {
+  const out = {}
+  const stack = [[mount.remote_root || null, '']]
+  while (stack.length) {
+    const [folderId, prefix] = stack.pop()
+    let cursor = null
+    do {
+      stubRouter(route)
+      const page = opList(CREDENTIAL, mount, { folder_id: folderId, cursor, limit: 500 })
+      for (const item of page.items) {
+        const rel = prefix ? `${prefix}/${item.name}` : item.name
+        out[item.external_id] = rel
+        if (item.is_folder) stack.push([item.external_id, rel])
+      }
+      cursor = page.next_cursor
+    } while (cursor)
+  }
+  return out
+}
+
+const FIXTURE = {
+  root: { id: 'F-INBOX', displayName: 'Inbox', parentFolderId: null, childFolderCount: 2 },
+  folders: [
+    { id: 'F-PROJ', displayName: 'Projects', parentFolderId: 'F-INBOX', childFolderCount: 1 },
+    // A slash in an Outlook folder name is ONE folder, not two path segments.
+    { id: 'F-ACME', displayName: 'Acme/Corp', parentFolderId: 'F-PROJ', childFolderCount: 0 },
+    { id: 'F-NEWS', displayName: 'Newsletters', parentFolderId: 'F-INBOX', childFolderCount: 0 },
+  ],
+  messages: {
+    'F-INBOX': [msg('M-ROOT', 'F-INBOX')],
+    'F-PROJ': [msg('M-PROJ', 'F-PROJ')],
+    'F-ACME': [msg('M-ACME', 'F-ACME')],
+    'F-NEWS': [msg('M-NEWS', 'F-NEWS')],
+  },
+}
+
+function msg(id, parentFolderId, etag) {
+  return {
+    id,
+    parentFolderId,
+    subject: `subject ${id}`,
+    receivedDateTime: '2026-08-12T10:00:00Z',
+    '@odata.etag': etag || `W/"${id}-1"`,
+  }
+}
+
+test('the mail tree walk and the mail tree delta resolve every message to the SAME path', () => {
+  // THE invariant, written as a property over the whole fixture rather than as
+  // two literals — two literals would pass happily while both paths were wrong
+  // in the same way. `get_changes`' relative_path must equal the walk's
+  // {prefix}/{item.name} for the SAME message, or the engine relocates the node
+  // on every run where they disagree.
+  const mount = treeMount()
+  const route = mailboxRouter(FIXTURE)
+
+  const fromWalk = mailWalkPaths(mount, route)
+
+  stubRouter(route)
+  const out = opGetChanges(CREDENTIAL, mount, {})
+  const fromDelta = Object.fromEntries(
+    out.items.map((c) => [c.item.external_id, c.relative_path])
+  )
+
+  for (const id of ['M-ROOT', 'M-PROJ', 'M-ACME', 'M-NEWS']) {
+    assert.equal(
+      fromDelta[id],
+      fromWalk[id],
+      `${id}: the delta path and the walk path must be byte-identical`
+    )
+  }
+  // And the layout is the concrete one, at both ends — so a shared bug in both
+  // resolvers cannot make the property above vacuously true.
+  assert.equal(fromWalk['M-ROOT'], 'M-ROOT')
+  assert.equal(fromWalk['M-PROJ'], 'Projects/M-PROJ')
+  assert.equal(fromWalk['M-ACME'], 'Projects/Acme-Corp/M-ACME')
+  assert.equal(fromWalk['M-NEWS'], 'Newsletters/M-NEWS')
+  // The folder NODES land on the chain their children hang from.
+  assert.equal(fromWalk['F-ACME'], 'Projects/Acme-Corp')
+})
+
+test('a folder-mode mail mount is untouched by any of this', () => {
+  // Every existing mount keeps today's behaviour byte for byte: one flat
+  // listing of one folder, the id as the path, no folder requests at all.
+  const calls = stubHttp([{ body: { value: [msg('MSG-1', 'F-INBOX')] } }])
+  const page = opList(CREDENTIAL, mailMount(), {})
+  assert.equal(calls.length, 1, 'folder mode resolves no folder map')
+  assert.match(calls[0].url, /\/mailFolders\/inbox\/messages\?/)
+  assert.doesNotMatch(calls[0].url, /parentFolderId/, 'the projection is unwidened, so no stored cursor is invalidated')
+  assert.equal(page.items.length, 1)
+  assert.equal(page.items[0].etag, 'W/"MSG-1-1"', 'and the etag is the bare provider one')
+})
+
+test('a new folder is seeded with an ENUMERATION, never with $deltatoken=latest', () => {
+  // The mount-level rule is INVERTED for a folder that appeared later: none of
+  // its messages has ever been imported, so `latest` would drop the whole
+  // folder's history with nothing anywhere to observe.
+  const mount = treeMount()
+  stubRouter(mailboxRouter(FIXTURE))
+  const first = opGetChanges(CREDENTIAL, mount, {})
+
+  const grown = {
+    ...FIXTURE,
+    root: { ...FIXTURE.root, childFolderCount: 3 },
+    folders: [
+      ...FIXTURE.folders,
+      { id: 'F-NEW', displayName: 'Invoices', parentFolderId: 'F-INBOX', childFolderCount: 0 },
+    ],
+    messages: { ...FIXTURE.messages, 'F-NEW': [msg('M-OLD', 'F-NEW')] },
+  }
+  const calls = stubRouter(mailboxRouter(grown))
+  const second = opGetChanges(CREDENTIAL, mount, { since_token: first.next_token })
+
+  const seeded = calls.filter((c) => c.url.includes('F-NEW'))
+  assert.ok(seeded.length, 'the new folder is polled')
+  for (const c of seeded) {
+    assert.doesNotMatch(
+      c.url,
+      /deltatoken=latest/,
+      'a new folder seeded with `latest` silently loses everything already in it'
+    )
+  }
+  const paths = Object.fromEntries(second.items.map((c) => [c.item.external_id, c.relative_path]))
+  assert.equal(paths['M-OLD'], 'Invoices/M-OLD', 'and its existing mail arrives at its real path')
+})
+
+test('a baseline call fetches nothing and seeds every folder from now on', () => {
+  // `capture_delta_baseline` discards the items and keeps only the token, so
+  // pulling pages there is pure cost — and after a completed walk "from now on"
+  // is the truth for every folder at once.
+  const calls = stubRouter(mailboxRouter(FIXTURE))
+  const out = opGetChanges(CREDENTIAL, treeMount(), { since_token: null, baseline_only: true })
+  assert.deepEqual(out.items, [])
+  assert.equal(out.has_more, false)
+  assert.equal(
+    calls.filter((c) => c.url.includes('/messages/delta')).length,
+    0,
+    'a baseline reads no message feed at all'
+  )
+  const stored = readTree(out.next_token)
+  for (const fid of Object.keys(stored.m)) {
+    assert.equal(stored.m[fid].t, 'latest')
+    assert.equal(stored.m[fid].s, 'delta')
+    // And the token still rebuilds the exact URL the old cursor stored whole.
+    assert.match(entryUrl(treeMount(), fid, stored.m[fid]), /deltatoken=latest/)
+  }
+})
+
+test('a folder RENAME re-emits its messages at the new path, with a new etag', () => {
+  // `batch.rs` can_skip_unmapped compares external_id + etag and RETURNS BEFORE
+  // rel_path is consulted. An Outlook rename changes no message etag, so
+  // without the folder path folded into the etag every message in the renamed
+  // folder is skipped as unchanged and stays at its OLD path forever — a full
+  // walk does not repair it either, only force_rewrite does.
+  const mount = treeMount()
+  stubRouter(mailboxRouter(FIXTURE))
+  const first = opGetChanges(CREDENTIAL, mount, {})
+  const before = first.items.find((c) => c.item.external_id === 'M-PROJ')
+  assert.equal(before.relative_path, 'Projects/M-PROJ')
+
+  const renamed = {
+    ...FIXTURE,
+    folders: FIXTURE.folders.map((f) =>
+      f.id === 'F-PROJ' ? { ...f, displayName: 'Programs' } : f
+    ),
+  }
+  const calls = stubRouter(mailboxRouter(renamed))
+  const second = opGetChanges(CREDENTIAL, mount, { since_token: first.next_token })
+
+  const projCalls = calls.filter((c) => c.url.includes('F-PROJ') && c.url.includes('delta'))
+  assert.ok(
+    projCalls.some((c) => c.url.includes('/messages/delta?$select=')),
+    'the renamed folder is re-ENUMERATED; its stored delta link would report ' +
+      'nothing at all, because none of its messages changed'
+  )
+  const after = second.items.find((c) => c.item.external_id === 'M-PROJ')
+  assert.equal(after.relative_path, 'Programs/M-PROJ')
+  assert.notEqual(
+    after.item.etag,
+    before.item.etag,
+    'the etag must move with the path, or the engine skips the relocation'
+  )
+  assert.match(after.item.etag, /\|p=Programs$/)
+  // The message underneath is untouched: a rename is not a re-import.
+  assert.equal(after.item.external_id, before.item.external_id)
+  // Its CHILD folder moves with it, and so does the grandchild's mail.
+  assert.equal(
+    second.items.find((c) => c.item.external_id === 'M-ACME').relative_path,
+    'Programs/Acme-Corp/M-ACME'
+  )
+})
+
+test('an @removed in tree mode emits NO delete, because Graph cannot tell one from a move', () => {
+  // Microsoft documents @removed reason:"deleted" as covering an item DELETED
+  // OR MOVED FROM the folder, as a collection-level event. The destination
+  // folder's create carries the same immutable id on a different feed with no
+  // ordering guarantee, so emitting the delete races the create and destroys
+  // the node under the ordinary act of filing an email.
+  const mount = treeMount()
+  stubRouter(mailboxRouter(FIXTURE))
+  const first = opGetChanges(CREDENTIAL, mount, {})
+
+  const moved = {
+    ...FIXTURE,
+    delta: (id) => {
+      if (id === 'F-INBOX') {
+        return {
+          body: {
+            value: [{ id: 'M-ROOT', '@removed': { reason: 'deleted' } }],
+            '@odata.deltaLink': deltaLinkFor('F-INBOX'),
+          },
+        }
+      }
+      if (id === 'F-NEWS') {
+        return {
+          body: {
+            value: [msg('M-ROOT', 'F-NEWS')],
+            '@odata.deltaLink': deltaLinkFor('F-NEWS'),
+          },
+        }
+      }
+      return null
+    },
+  }
+  stubRouter(mailboxRouter(moved))
+  const second = opGetChanges(CREDENTIAL, mount, { since_token: first.next_token })
+
+  assert.equal(
+    second.items.filter((c) => c.type === 'deleted').length,
+    0,
+    'the walk reconcile is the only remover in tree mode'
+  )
+  const relocated = second.items.find((c) => c.item.external_id === 'M-ROOT')
+  assert.equal(relocated.type, 'updated')
+  assert.equal(relocated.relative_path, 'Newsletters/M-ROOT', 'the move lands as a relocation')
+})
+
+test('folder mode still deletes on @removed', () => {
+  // The ambiguity is real there too, but a one-folder mount has nowhere else
+  // inside itself for the message to go — so the existing arm is unchanged.
+  const token = mintCursor(mailMount())
+  stubHttp([
+    {
+      body: {
+        value: [{ id: 'MSG-GONE', '@removed': { reason: 'deleted' } }],
+        '@odata.deltaLink': 'https://graph/d',
+      },
+    },
+  ])
+  const out = opGetChanges(CREDENTIAL, mailMount(), { since_token: token })
+  assert.equal(out.items[0].type, 'deleted')
+  assert.equal(out.items[0].relative_path, 'MSG-GONE')
+})
+
+/** The tree cursor, unwrapped. */
+function readTree(token) {
+  return JSON.parse(token.slice(token.indexOf(':') + 1))
+}
+
+/** A mailbox that is `count` flat folders under the root. */
+function wideMailbox(count) {
+  const fx = {
+    root: { id: 'F-INBOX', displayName: 'Inbox', parentFolderId: null, childFolderCount: count },
+    folders: [],
+    messages: {},
+  }
+  for (let i = 1; i <= count; i++) {
+    const id = `F-${i}`
+    fx.folders.push({ id, displayName: `Folder ${i}`, parentFolderId: 'F-INBOX', childFolderCount: 0 })
+    fx.messages[id] = [msg(`M-${i}`, id)]
+  }
+  return fx
+}
+
+const polledFolders = (calls) =>
+  new Set(
+    calls
+      .filter((c) => c.url.includes('/messages/delta'))
+      .map((c) => /mailFolders\/(F-[A-Z0-9]+)/.exec(c.url)[1])
+  )
+
+test('the folder rotation advances, wraps, and starves nobody', () => {
+  // Unpersisted or unbounded, one busy folder consumes the whole
+  // max_items_per_sync budget every run and the other N-1 never advance — with
+  // items written and nothing anywhere saying the rest of the mailbox is
+  // standing still.
+  const wide = wideMailbox(6)
+  const n = 1 + wide.folders.length // the root counts as a folder of the tree
+  assert.ok(n > MAIL_TREE_SLICE, 'the fixture must be wider than one slice')
+
+  const mount = treeMount()
+
+  let calls = stubRouter(mailboxRouter(wide))
+  const first = opGetChanges(CREDENTIAL, mount, {})
+  assert.equal(first.has_more, true, 'folders are still unvisited this round')
+  const firstPolled = polledFolders(calls)
+  assert.equal(firstPolled.size, MAIL_TREE_SLICE, 'exactly one slice per call')
+  // THE RESUME POINT IS A FOLDER ID, not a position — see the next test.
+  assert.deepEqual([...firstPolled].sort(), ['F-1', 'F-2', 'F-3', 'F-4', 'F-5'])
+  assert.equal(readTree(first.next_token).r, 'F-6', 'the resume point names the folder to visit next')
+
+  calls = stubRouter(mailboxRouter(wide))
+  const second = opGetChanges(CREDENTIAL, mount, { since_token: first.next_token })
+  assert.equal(readTree(second.next_token).r, null, 'the round closes once every folder has been visited')
+  assert.equal(second.has_more, false, 'and only then is the mount caught up')
+  const secondPolled = polledFolders(calls)
+  for (const f of firstPolled) {
+    assert.ok(!secondPolled.has(f), `${f} was polled twice while others waited`)
+  }
+  assert.equal(firstPolled.size + secondPolled.size, n, 'every folder is reached in one round')
+})
+
+test('the rotation resumes at a folder ID, so adding a folder shifts nothing', () => {
+  // `order` is SORTED, so a persisted INDEX means one folder created or deleted
+  // since the last call moves every folder after it: the resumed slice then
+  // skipped a folder or visited one twice, silently, for as long as the mailbox
+  // kept changing. Only an id survives a re-sort.
+  const wide = wideMailbox(6)
+  const mount = treeMount()
+
+  stubRouter(mailboxRouter(wide))
+  const first = opGetChanges(CREDENTIAL, mount, {})
+  const cur = readTree(first.next_token)
+  const resumeAt = cur.r
+  assert.equal(typeof resumeAt, 'string', 'the resume point is an id, not a number')
+
+  // A folder appears that sorts BEFORE the resume point — the exact shift that
+  // moved an index off by one. Injected into the cursor because that is what a
+  // mid-round rebuild-on-miss leaves behind.
+  cur.m['F-0'] = { t: null, s: 'enum', p: 'Folder 0' }
+  const shifted = 'rsn-mailtree-2:' + JSON.stringify(cur)
+
+  const grown = {
+    ...wide,
+    root: { ...wide.root, childFolderCount: 7 },
+    folders: [
+      { id: 'F-0', displayName: 'Folder 0', parentFolderId: 'F-INBOX', childFolderCount: 0 },
+      ...wide.folders,
+    ],
+    messages: { ...wide.messages, 'F-0': [msg('M-0', 'F-0')] },
+  }
+  const calls = stubRouter(mailboxRouter(grown))
+  opGetChanges(CREDENTIAL, mount, { since_token: shifted })
+  const polled = polledFolders(calls)
+
+  assert.ok(polled.has(resumeAt), `the rotation resumed at ${resumeAt}, the folder it named`)
+  for (const f of ['F-1', 'F-2', 'F-3', 'F-4', 'F-5']) {
+    assert.ok(!polled.has(f), `${f} was already visited this round and must not repeat`)
+  }
+})
+
+test('the rotation resumes past a folder that has been DELETED since', () => {
+  // The persisted id can name a folder that is simply gone. Landing on the next
+  // one in sort order is the only answer that neither restarts the round nor
+  // skips the folders after it.
+  const wide = wideMailbox(6)
+  const mount = treeMount()
+  stubRouter(mailboxRouter(wide))
+  const cur = readTree(opGetChanges(CREDENTIAL, mount, {}).next_token)
+  assert.equal(cur.r, 'F-6')
+  delete cur.m['F-6']
+  const token = 'rsn-mailtree-2:' + JSON.stringify(cur)
+
+  const calls = stubRouter(mailboxRouter(wide))
+  const out = opGetChanges(CREDENTIAL, mount, { since_token: token })
+  assert.deepEqual([...polledFolders(calls)], ['F-INBOX'], 'it lands on the next folder, not the first')
+  assert.equal(readTree(out.next_token).r, null, 'and the round still closes')
+})
+
+test('a hidden folder under a parent Graph calls CHILDLESS still reaches the delta', () => {
+  // The walk and the delta have to discover the SAME folders. The map used to
+  // skip listing a folder whose `childFolderCount` was 0, while the walk lists
+  // unconditionally — and this adapter passes includeHiddenFolders precisely
+  // BECAUSE hidden folders are missing from a default listing, so a count taken
+  // from that view can say 0 over a real subtree. The walk would then materialize
+  // the folder and its mail while the delta never polled it: those messages
+  // arrived only after a complete full walk, if ever.
+  const sneaky = {
+    root: { ...FIXTURE.root, childFolderCount: 2 },
+    folders: [
+      ...FIXTURE.folders,
+      // Graph reports Newsletters as a leaf, and it is not: Clutter hangs under
+      // it and is hidden, which is exactly the pair that hid the subtree.
+      { id: 'F-CLUTTER', displayName: 'Clutter', parentFolderId: 'F-NEWS', childFolderCount: 0, isHidden: true },
+    ],
+    messages: { ...FIXTURE.messages, 'F-CLUTTER': [msg('M-CLUTTER', 'F-CLUTTER')] },
+  }
+  const mount = treeMount()
+  const route = mailboxRouter(sneaky)
+
+  const fromWalk = mailWalkPaths(mount, route)
+  assert.equal(fromWalk['M-CLUTTER'], 'Newsletters/Clutter/M-CLUTTER', 'the walk finds it either way')
+
+  stubRouter(route)
+  const out = opGetChanges(CREDENTIAL, mount, {})
+  const fromDelta = Object.fromEntries(
+    out.items.map((c) => [c.item.external_id, c.relative_path])
+  )
+  assert.equal(
+    fromDelta['M-CLUTTER'],
+    fromWalk['M-CLUTTER'],
+    'the delta must poll the hidden folder and place its mail exactly where the walk does'
+  )
+})
+
+test('the folder map is built ONCE PER ROUND, not once per poll', () => {
+  // THE RATE LIMIT. `buildFolderMap` costs 1 + (folders with children) requests
+  // and used to run on EVERY get_changes call, idle polls included. With a slice
+  // of 5, a 100-folder tree paid for a whole map build 20 times per round; on a
+  // folder-heavy mailbox that approaches ~2,000 childFolders requests per round
+  // for ONE mount, against a Graph ceiling of 10,000 per 10 minutes per app per
+  // mailbox. Proving the cost here rather than asserting it in a comment.
+  const wide = wideMailbox(12)
+  // Every folder has a child, so a map build is maximally expensive: one
+  // childFolders request per folder, not the cheap all-leaves case.
+  for (const f of [...wide.folders]) {
+    f.childFolderCount = 1
+    const kid = `${f.id}-K`
+    wide.folders.push({ id: kid, displayName: `Kid of ${f.displayName}`, parentFolderId: f.id, childFolderCount: 0 })
+    wide.messages[kid] = []
+  }
+  const n = 1 + wide.folders.length
+  const rounds = Math.ceil(n / MAIL_TREE_SLICE)
+  assert.ok(rounds >= 4, 'the fixture must span several polls per round')
+
+  const mapCost = (calls) =>
+    calls.filter((c) => c.url.includes('/childFolders') || /mailFolders\/[^/]+\?/.test(c.url)).length
+
+  const mount = treeMount()
+  let token = null
+  const perPoll = []
+  for (let i = 0; i < rounds; i++) {
+    const calls = stubRouter(mailboxRouter(wide))
+    const out = opGetChanges(CREDENTIAL, mount, token ? { since_token: token } : {})
+    perPoll.push(mapCost(calls))
+    token = out.next_token
+  }
+
+  assert.ok(perPoll[0] > 1, 'the first poll of a round does build the map')
+  for (let i = 1; i < perPoll.length; i++) {
+    assert.equal(
+      perPoll[i],
+      0,
+      `poll ${i + 1} of the round rebuilt the folder map (${perPoll[i]} requests); ` +
+        'the chains are cached in the cursor precisely so it does not'
+    )
+  }
+  assert.equal(readTree(token).r, null, 'the round did close, so the next poll rebuilds')
+  // And the round boundary is where the rebuild comes back — not never.
+  const boundary = stubRouter(mailboxRouter(wide))
+  opGetChanges(CREDENTIAL, mount, { since_token: token })
+  assert.ok(mapCost(boundary) > 1, 'a closed round rebuilds, or a rename is never seen')
+})
+
+test('the cursor stores delta TOKENS, not whole links', () => {
+  // `delta.rs` rewrites this blob after every page. A Graph message-delta link is
+  // dominated by the URL-encoded $select — ~330 chars once include_body and
+  // parentFolderId are on — so at max_folders 100 the old cursor spent ~33 KB of
+  // ~95 KB storing one constant a hundred times. It is reconstructible from the
+  // cursor IDENTITY, which already pins $select.
+  const wide = wideMailbox(20)
+  const mount = treeMount()
+  stubRouter(mailboxRouter(wide))
+  let out = opGetChanges(CREDENTIAL, mount, {})
+  // Run the rotation to completion so every folder holds a real Graph token.
+  for (let guard = 0; out.has_more && guard < 50; guard++) {
+    stubRouter(mailboxRouter(wide))
+    out = opGetChanges(CREDENTIAL, mount, { since_token: out.next_token })
+  }
+  assert.equal(out.has_more, false, 'the rotation must terminate')
+  const stored = readTree(out.next_token)
+
+  assert.equal(Object.keys(stored.m).length, 21)
+  for (const [fid, e] of Object.entries(stored.m)) {
+    assert.equal(e.t, `TOK-${fid}`, 'the token alone is kept')
+    assert.equal(e.u, undefined, 'and never the whole link beside it')
+    // The rebuilt URL is the query Graph minted, $select and all.
+    const rebuilt = entryUrl(mount, fid, e)
+    assert.match(rebuilt, /\$deltatoken=TOK-F-/)
+    assert.match(rebuilt, /\$select=/)
+  }
+  assert.doesNotMatch(
+    JSON.stringify(stored.m),
+    /select|receivedDateTime/,
+    'not one of the 21 entries may carry a copy of the projection'
+  )
+  // The identity keeps the ONE copy that makes the rebuild sound, and that is
+  // the whole saving: one projection, not one per folder.
+  assert.match(stored.k, /sel=id,subject/)
+
+  // Measured against what the previous shape stored: the same cursor with each
+  // entry holding its whole Graph link.
+  const asLinks = JSON.stringify({
+    k: stored.k,
+    r: stored.r,
+    i: stored.i,
+    m: Object.fromEntries(
+      Object.keys(stored.m).map((fid) => [fid, { u: deltaLinkFor(fid), p: stored.m[fid].p, s: 'delta' }])
+    ),
+  })
+  const saved = 1 - out.next_token.length / asLinks.length
+  assert.ok(saved > 0.5, `the cursor should shrink by more than half; it shrank by ${(saved * 100) | 0}%`)
+  // Identity still guards it: the reconstructed $select is only correct because
+  // a changed projection invalidates the cursor rather than replaying.
+  assert.throws(
+    () =>
+      opGetChanges(
+        CREDENTIAL,
+        treeMount({ sync_config: { resource: 'mail', folder_scope: 'tree', include_body: true } }),
+        { since_token: out.next_token }
+      ),
+    /different query/
+  )
+})
+
+test('a link whose token cannot be read is kept whole, never rebuilt from a guess', () => {
+  // Degrading to the old size is fine; rebuilding a query from a token we did
+  // not actually find is how a cursor silently starts replaying the wrong feed.
+  const opaque = {
+    ...FIXTURE,
+    delta: (id) => ({
+      body: { value: [], '@odata.deltaLink': `https://graph.microsoft.com/opaque/${id}` },
+    }),
+  }
+  const mount = treeMount()
+  stubRouter(mailboxRouter(opaque))
+  const out = opGetChanges(CREDENTIAL, mount, {})
+  const stored = readTree(out.next_token)
+  for (const [fid, e] of Object.entries(stored.m)) {
+    assert.equal(e.t, null)
+    assert.equal(e.u, `https://graph.microsoft.com/opaque/${fid}`)
+    assert.equal(entryUrl(mount, fid, e), `https://graph.microsoft.com/opaque/${fid}`)
+  }
+})
+
+test('a NEW or RENAMED folder emits the folder ITEM too, not just its messages', () => {
+  // Without it the delta relocated the MESSAGES and left the folder NODE behind:
+  // `ensure_ancestors` invented a plain raisin:Folder at the new chain carrying
+  // no __external_id — so reconcile_deletes could never prune it — while the
+  // real mount-owned folder node kept its old, now-empty path until the next
+  // COMPLETE full walk. The user saw both.
+  const mount = treeMount()
+  stubRouter(mailboxRouter(FIXTURE))
+  const first = opGetChanges(CREDENTIAL, mount, {})
+  const walked = mailWalkPaths(mount, mailboxRouter(FIXTURE))
+
+  // The first round emits every folder, and BYTE-IDENTICALLY to the walk — the
+  // etag included, or one path would skip-write over the other's placement.
+  stubRouter(mailboxRouter(FIXTURE))
+  const walkItems = {}
+  {
+    const stack = [['inbox', '']]
+    while (stack.length) {
+      const [fid, prefix] = stack.pop()
+      stubRouter(mailboxRouter(FIXTURE))
+      for (const it of opList(CREDENTIAL, mount, { folder_id: fid, limit: 500 }).items) {
+        const rel = prefix ? `${prefix}/${it.name}` : it.name
+        if (it.is_folder) {
+          walkItems[it.external_id] = it
+          stack.push([it.external_id, rel])
+        }
+      }
+    }
+  }
+  const deltaFolders = Object.fromEntries(
+    first.items.filter((c) => c.item.is_folder).map((c) => [c.item.external_id, c])
+  )
+  assert.deepEqual(
+    Object.keys(deltaFolders).sort(),
+    ['F-ACME', 'F-NEWS', 'F-PROJ'],
+    'every folder of the subtree arrives as a folder item; the mount ROOT does not'
+  )
+  for (const fid of Object.keys(deltaFolders)) {
+    assert.deepEqual(deltaFolders[fid].item, walkItems[fid], `${fid}: the walk and the delta must emit ONE shape`)
+    assert.equal(deltaFolders[fid].relative_path, walked[fid], `${fid}: and one path`)
+  }
+
+  // A RENAME re-emits the folder item at the new chain with a new etag, so the
+  // folder node itself relocates rather than being stranded.
+  const renamed = {
+    ...FIXTURE,
+    folders: FIXTURE.folders.map((f) => (f.id === 'F-PROJ' ? { ...f, displayName: 'Programs' } : f)),
+  }
+  stubRouter(mailboxRouter(renamed))
+  const second = opGetChanges(CREDENTIAL, mount, { since_token: first.next_token })
+  const moved = second.items.filter((c) => c.item.is_folder)
+  const byId = Object.fromEntries(moved.map((c) => [c.item.external_id, c]))
+  assert.equal(byId['F-PROJ'].relative_path, 'Programs')
+  assert.equal(byId['F-PROJ'].item.etag, 'mailfolder-1|p=Programs')
+  assert.notEqual(byId['F-PROJ'].item.etag, deltaFolders['F-PROJ'].item.etag)
+  assert.equal(byId['F-ACME'].relative_path, 'Programs/Acme-Corp', 'and the child folder node moves with it')
+  assert.equal(byId['F-NEWS'], undefined, 'a folder that did not move emits nothing')
+
+  // A NEW folder arrives as a folder item on the delta as well.
+  const grown = {
+    ...FIXTURE,
+    root: { ...FIXTURE.root, childFolderCount: 3 },
+    folders: [
+      ...FIXTURE.folders,
+      { id: 'F-INV', displayName: 'Invoices', parentFolderId: 'F-INBOX', childFolderCount: 0 },
+    ],
+    messages: { ...FIXTURE.messages, 'F-INV': [] },
+  }
+  stubRouter(mailboxRouter(grown))
+  const third = opGetChanges(CREDENTIAL, mount, { since_token: first.next_token })
+  const born = third.items.find((c) => c.item.external_id === 'F-INV')
+  assert.ok(born, 'a folder created at the provider becomes a mount-owned node')
+  assert.equal(born.item.is_folder, true)
+  assert.equal(born.relative_path, 'Invoices')
+  assert.equal(born.item.parent_id, 'F-INBOX')
+})
+
+test('a mail-tree page cursor carries the chain, so a second page costs no lookups', () => {
+  // mailTreeList re-resolved the mount root (one request) and re-walked the
+  // folder's whole ancestor chain (one per level) on EVERY page. A folder three
+  // levels down with ten pages of mail paid forty requests to re-learn a string
+  // that cannot change between two pages of one listing.
+  const paged = (url) => {
+    if (url === 'https://graph/page2') return { body: { value: [msg('M-P2', 'F-ACME')] } }
+    if (url.includes('/mailFolders/F-ACME/messages?')) {
+      return { body: { value: [msg('M-P1', 'F-ACME')], '@odata.nextLink': 'https://graph/page2' } }
+    }
+    return mailboxRouter(FIXTURE)(url)
+  }
+  const mount = treeMount()
+
+  let calls = stubRouter(paged)
+  const page1 = opList(CREDENTIAL, mount, { folder_id: 'F-ACME', limit: 500 })
+  assert.ok(page1.next_cursor, 'there is a second page')
+  const stubFirst = calls
+
+  calls = stubRouter(paged)
+  const page2 = opList(CREDENTIAL, mount, { folder_id: 'F-ACME', cursor: page1.next_cursor, limit: 500 })
+  const lookups = (cs) => cs.filter((c) => /\/mailFolders\/[^/?]+\?/.test(c.url)).length
+  assert.equal(lookups(calls), 0, 'a resumed page resolves neither the root nor the chain again')
+  assert.ok(lookups(stubFirst) >= 2, 'while the first page pays for the root AND the ancestor walk')
+  // And the resumed page places its messages at the SAME chain, or the two pages
+  // of one folder would materialize in two different places.
+  assert.equal(page2.items[0].etag, 'W/"M-P2-1"|p=Projects/Acme-Corp')
+  assert.equal(page1.items[0].etag, 'W/"M-P1-1"|p=Projects/Acme-Corp')
+})
+
+test('flipping folder_scope invalidates the cursor instead of replaying the old query', () => {
+  // A folder-scoped link under a tree mount would sync one folder of N and
+  // report healthy; a tree map under a folder mount is not a Graph link at all.
+  const folderToken = mintCursor(mailMount())
+  assert.throws(
+    () => opGetChanges(CREDENTIAL, treeMount(), { since_token: folderToken }),
+    /cursor_invalid|folder-tree/
+  )
+
+  stubRouter(mailboxRouter(FIXTURE))
+  const treeToken = opGetChanges(CREDENTIAL, treeMount(), {}).next_token
+  assert.throws(
+    () => opGetChanges(CREDENTIAL, mailMount(), { since_token: treeToken }),
+    /cursor identity|different query|predates/
+  )
+})
+
+test('a truncated folder set is refused, never silently synced', () => {
+  // A truncated listing is a PARTIAL `seen` set for the walk, and
+  // reconcile_deletes would then prune every message in the folders that fell
+  // off the end. Refusing is recoverable; deleting real content is not.
+  const mount = treeMount({ sync_config: { resource: 'mail', folder_scope: 'tree', max_folders: 2 } })
+  stubRouter(mailboxRouter(FIXTURE))
+  assert.throws(() => opGetChanges(CREDENTIAL, mount, {}), /max_folders/)
+})
+
+test('a tree mount subscribes MAILBOX-WIDE, not to one folder out of N', () => {
+  assert.equal(subscriptionResource(treeMount()), '/me/messages')
+  assert.equal(subscriptionResource(mailMount()), '/me/mailFolders/inbox/messages')
+  // A shared mailbox keeps its principal on both.
+  assert.equal(
+    subscriptionResource(treeMount({ sync_config: { resource: 'mail', folder_scope: 'tree', principal: 'sales@x.test' } })),
+    '/users/sales%40x.test/messages'
+  )
+})
+
+test('a folder name that is a path, or nothing at all, cannot escape the mount', () => {
+  // The engine joins relative_path to mount_path VERBATIM.
+  assert.equal(folderSegment('Acme/Corp', 'F-1'), 'Acme-Corp')
+  assert.equal(folderSegment('..', 'F-1'), 'F-1')
+  assert.equal(folderSegment('.', 'F-1'), 'F-1')
+  assert.equal(folderSegment('   ', 'F-1'), 'F-1')
+  assert.equal(folderSegment(null, 'F-1'), 'F-1')
+  assert.equal(folderSegment('a\\b', 'F-1'), 'a-b')
+})
+
+test('hidden folders are enumerated, so their mail arrives from a feed we hold', () => {
+  // Clutter and friends are excluded from a folder listing by default. Left
+  // out, their messages arrive from no feed at all and are invisible with
+  // nothing to observe.
+  const calls = stubRouter(mailboxRouter(FIXTURE))
+  opGetChanges(CREDENTIAL, treeMount(), {})
+  const listings = calls.filter((c) => c.url.includes('/childFolders'))
+  assert.ok(listings.length)
+  for (const c of listings) assert.match(c.url, /includeHiddenFolders=true/)
+})
+
+test('an expired delta link reseeds THAT folder, never the whole tree cursor', () => {
+  // Graph expires a mail delta token and answers 410 / syncStateNotFound, which
+  // `http.js` maps to `cursor_invalid`. Let out of a tree mount that is a
+  // WHOLE-MAILBOX RE-IMPORT: the engine recovers `cursor_invalid` by clearing
+  // `last_sync_token` and running a full walk (`phases.rs`), so one of N links
+  // aging out discards the N-1 that were fine and re-walks every folder and
+  // every message in the subtree.
+  const mount = treeMount()
+  stubRouter(mailboxRouter(FIXTURE))
+  const first = opGetChanges(CREDENTIAL, mount, {})
+  const before = readTree(first.next_token).m
+  assert.equal(before['F-NEWS'].s, 'delta', 'the fixture must start with live links')
+
+  // F-PROJ's stored link is the only one Graph now rejects.
+  const expired = (url) => {
+    if (url.includes('F-PROJ') && url.includes('deltatoken')) {
+      return {
+        status: 410,
+        body: { error: { code: 'syncStateNotFound', message: 'Sync state not found' } },
+      }
+    }
+    return mailboxRouter(FIXTURE)(url)
+  }
+  stubRouter(expired)
+  const second = opGetChanges(CREDENTIAL, mount, { since_token: first.next_token })
+  const after = readTree(second.next_token).m
+
+  assert.equal(after['F-PROJ'].s, 'enum', 'the rejected folder is reseeded with an enumeration')
+  assert.equal(after['F-PROJ'].t, null, 'with NO token, which is what a fresh enumeration is')
+  const reseeded = entryUrl(mount, 'F-PROJ', after['F-PROJ'])
+  assert.match(reseeded, /\/mailFolders\/F-PROJ\/messages\/delta\?\$select=/)
+  assert.doesNotMatch(reseeded, /deltatoken=latest/, 'and never with `latest`, or its backlog is lost')
+  for (const fid of ['F-INBOX', 'F-NEWS', 'F-ACME']) {
+    assert.equal(after[fid].t, before[fid].t, `${fid}'s still-valid token must survive`)
+    assert.equal(after[fid].s, 'delta')
+  }
+  assert.equal(second.has_more, true, 'the rotation comes back to the reseeded folder')
+})
+
+test('the walk refuses a mailbox above max_folders, at the START of the backfill', () => {
+  // buildFolderMap throws config_error above the ceiling, but only get_changes
+  // called it — so an over-ceiling mailbox backfilled in full and only then
+  // discovered, on its first delta, that it can never sync. The operator learned
+  // about the limit at the one moment the expensive work was already done.
+  const mount = treeMount({ sync_config: { resource: 'mail', folder_scope: 'tree', max_folders: 2 } })
+  stubRouter(mailboxRouter(FIXTURE))
+  assert.throws(() => opList(CREDENTIAL, mount, { folder_id: 'inbox', limit: 500 }), /max_folders/)
+
+  // Once per WALK, not once per page or once per folder: a resumed page and a
+  // subfolder pop pay nothing for the check.
+  const roomy = treeMount()
+  let calls = stubRouter(mailboxRouter(FIXTURE))
+  opList(CREDENTIAL, roomy, { folder_id: 'F-PROJ', limit: 500 })
+  const subtreeListings = calls.filter((c) => c.url.includes('/childFolders')).length
+  const withPage2 = (url) =>
+    url === 'https://graph/next' ? { body: { value: [] } } : mailboxRouter(FIXTURE)(url)
+  calls = stubRouter(withPage2)
+  opList(CREDENTIAL, roomy, { folder_id: 'inbox', cursor: 'https://graph/next', limit: 500 })
+  assert.equal(
+    calls.filter((c) => c.url.includes('/childFolders')).length <= subtreeListings,
+    true,
+    'a resumed page does not rebuild the folder map'
+  )
+})
+
+test('a page cursor that wears our prefix but does not parse is never FETCHED as a url', () => {
+  // `params.cursor` doubles as the raw Graph link (a bare link persisted by the
+  // previous cursor shape still resumes), so a truncated `rsn-mailpage-1:` blob
+  // would be handed to graphFetch verbatim and issue a request to a nonsense
+  // host — one page of one folder silently lost, or a hard failure, depending
+  // on what the http layer does with it.
+  const mount = treeMount()
+  const calls = stubRouter(mailboxRouter(FIXTURE))
+  const page = opList(CREDENTIAL, mount, {
+    folder_id: 'F-PROJ',
+    cursor: 'rsn-mailpage-1:{"u":"https://graph/nex',
+    limit: 500,
+  })
+  for (const c of calls) {
+    assert.match(c.url, /^https:\/\/graph\.microsoft\.com\//, `fetched a non-url: ${c.url}`)
+  }
+  // It restarts this folder's listing rather than resuming a page it cannot
+  // read; re-reading a page is idempotent through the etag skip-write.
+  assert.deepEqual(page.items.map((i) => i.external_id).sort(), ['F-ACME', 'M-PROJ'])
+})

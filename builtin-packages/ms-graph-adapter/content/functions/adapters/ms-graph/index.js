@@ -11,7 +11,13 @@
  *   input = { operation, params, credential, mount }
  *
  * `input.mount.sync_config.resource` selects the surface:
- *   - "mail"     (default) -> {principal}/mailFolders/{id}/messages
+ *   - "mail"     (default) -> {principal}/mailFolders/{id}/messages.
+ *                             `sync_config.folder_scope: "tree"` widens the
+ *                             mount to that folder's SUBTREE: the walk recurses
+ *                             child folders and the delta carries one
+ *                             folder-scoped delta link per folder inside the
+ *                             single opaque cursor, because Graph v1.0 has no
+ *                             mailbox-wide /messages/delta
  *   - "calendar"           -> {principal}/calendars/{calId}/events, and
  *                             {principal}/calendarView/delta for the PRIMARY
  *                             calendar only (v1.0 has no per-calendar delta, so
@@ -66,7 +72,9 @@
  *   mount.js        which surface/principal/calendar a mount addresses, $select
  *   mail.js         address formatting, mail metadata, attachment enrichment
  *   calendar.js     patternedRecurrence -> RFC 5545, event metadata
- *   items.js        provider object -> ExternalItem, per resource
+ *   mail-folders.js folder identity for a mail TREE mount: the id -> path chain
+*                   both the walk and the delta resolve through
+*   items.js        provider object -> ExternalItem, per resource
  *   capabilities.js what this adapter declares, per resource
  *   read.js         list / get / get_content
  *   changes.js      the delta feed and the one-node-per-series collapse

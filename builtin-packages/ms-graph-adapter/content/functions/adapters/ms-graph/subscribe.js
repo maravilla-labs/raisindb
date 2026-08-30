@@ -7,7 +7,7 @@
 
 import { enc } from "./common.js";
 import { GRAPH, graphFetch, raiseForStatus } from "./http.js";
-import { calendarId, driveBase, mailFolderId, principal, resourceOf } from "./mount.js";
+import { calendarId, driveBase, isMailTree, mailFolderId, principal, resourceOf } from "./mount.js";
 
 // ---- push subscriptions (mail / calendar / files) -------------------------
 
@@ -31,6 +31,15 @@ export function subscriptionResource(mount) {
       : principal(mount) + "/calendars/" + cal + "/events";
   }
   if (resource === "files") return driveBase(mount) + "/root";
+  // A TREE mount goes MAILBOX-WIDE. The per-folder collection covers exactly
+  // one folder out of N and would report a perfectly healthy subscription while
+  // never notifying about anything in the other N-1 — the same silent mismatch
+  // the comment above describes, only harder to see because one folder DOES
+  // deliver. Microsoft documents `/users/{id}/messages` and `/me/messages` as
+  // supported change-notification resources, with a ceiling of 1,000 active
+  // Outlook subscriptions per mailbox across all applications, so one
+  // subscription and one renewal is well inside it.
+  if (isMailTree(mount)) return principal(mount) + "/messages";
   return principal(mount) + "/mailFolders/" + mailFolderId(mount) + "/messages";
 }
 

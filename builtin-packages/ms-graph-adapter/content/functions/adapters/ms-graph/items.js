@@ -64,7 +64,10 @@ export function filesMeta(v) {
 // item materializes at and a subject would collide constantly. For FILES it is
 // the FILENAME, and that difference is load-bearing rather than cosmetic — see
 // the files branch below.
-export function toExternalItem(v, resource, mount) {
+// `folderPath` is TREE MODE ONLY, and only for mail: the resolved folder chain
+// this message materializes under, `""` at the mount root. Anything else passes
+// it as undefined and gets today's item back byte for byte.
+export function toExternalItem(v, resource, mount, folderPath) {
   var id = v.id;
   var item = {
     external_id: id,
@@ -108,6 +111,25 @@ export function toExternalItem(v, resource, mount) {
     item.metadata = calendarMeta(v, mount);
   } else {
     item.metadata = mailMeta(v);
+    if (typeof folderPath === "string") {
+      // THE FOLDER PATH IS FOLDED INTO THE ETAG, AND IT HAS TO BE.
+      //
+      // `batch.rs` `can_skip_unmapped` compares external_id + etag and RETURNS
+      // BEFORE rel_path is ever consulted — on the full walk as well as the
+      // delta. Renaming an Outlook folder changes no message's `@odata.etag`,
+      // so without this every message in that folder is skipped as unchanged
+      // and stays at its OLD path forever: a full walk does not repair it
+      // either, only `force_rewrite` does.
+      //
+      // Folder mode keeps the bare provider etag, so no existing mount
+      // re-writes a single node because this exists.
+      if (item.etag) item.etag = item.etag + "|p=" + folderPath;
+      item.metadata.folder_id = v.parentFolderId || null;
+      // What the MAPPER reads for raisin:Mail's `folder`, instead of
+      // `mount.remote_root` — a mount-level constant that is simply wrong once
+      // one mount spans many folders.
+      item.metadata.folder_path = folderPath;
+    }
   }
   return item;
 }
