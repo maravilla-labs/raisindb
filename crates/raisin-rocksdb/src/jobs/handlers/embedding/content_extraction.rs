@@ -383,6 +383,98 @@ mod tests {
         assert!(!out.contains("x:Unknown"));
     }
 
+    /// An asset's CAPTION reaches the embeddable text, including the
+    /// array-valued `keywords`.
+    ///
+    /// The plan below is what `IndexingPolicy::properties_to_index` produces
+    /// for `raisin:Asset` under `IndexType::Vector` now that
+    /// `raisin_asset.yaml` marks all three caption fields `Vector` — the YAML
+    /// half is pinned by
+    /// `raisin_core::nodetype_init::tests::asset_caption_fields_are_vector_indexed`.
+    ///
+    /// `keywords` is the one worth asserting rather than assuming: it is an
+    /// `Array`, and the walk carries the include flag DOWN into array items
+    /// rather than deciding per item. A change that made arrays opaque would
+    /// leave `description` and `alt_text` searchable and `keywords` silently
+    /// not — the half-working state that is hardest to notice.
+    ///
+    /// `__extracted_text` is asserted ABSENT on purpose. It is deliberately not
+    /// Vector-indexed here: a document body gets its own `doc` spec so a
+    /// 40-page contract is not glued onto a filename and a caption, producing
+    /// one vector that matches neither well.
+    #[test]
+    fn an_asset_caption_is_embeddable_text() {
+        let plan = NodeIndexPlan {
+            node_type: "raisin:Asset".to_string(),
+            archetype: None,
+            top_level_props: Some(vec![
+                "title".to_string(),
+                "description".to_string(),
+                "alt_text".to_string(),
+                "keywords".to_string(),
+            ]),
+            element_plans: HashMap::new(),
+            legacy_index_all_strings: false,
+        };
+
+        let mut props = HashMap::new();
+        props.insert(
+            "title".to_string(),
+            PropertyValue::String("IMG_4471.jpg".to_string()),
+        );
+        props.insert(
+            "description".to_string(),
+            PropertyValue::String(
+                "A sailing boat hauled out on hardstanding under a tarpaulin".to_string(),
+            ),
+        );
+        props.insert(
+            "alt_text".to_string(),
+            PropertyValue::String("Yacht ashore for the winter".to_string()),
+        );
+        props.insert(
+            "keywords".to_string(),
+            PropertyValue::Array(vec![
+                PropertyValue::String("marina".to_string()),
+                PropertyValue::String("hardstanding".to_string()),
+            ]),
+        );
+        // Vaulted by the extraction job, NOT part of the default spec.
+        props.insert(
+            "__extracted_text".to_string(),
+            PropertyValue::String("PAGE ONE OF THE MANUAL".to_string()),
+        );
+        // Engine bookkeeping: never embeddable.
+        props.insert(
+            "__extract_fingerprint".to_string(),
+            PropertyValue::String("sha256:deadbeef".to_string()),
+        );
+
+        let out = collect_plan_values(&plan, &props);
+
+        assert!(
+            out.contains("hauled out on hardstanding"),
+            "`description` must be embeddable: {out}"
+        );
+        assert!(
+            out.contains("Yacht ashore for the winter"),
+            "`alt_text` must be embeddable: {out}"
+        );
+        assert!(
+            out.contains("marina") && out.contains("hardstanding"),
+            "EVERY `keywords` item must be embeddable, not just the first: {out}"
+        );
+        assert!(
+            !out.contains("PAGE ONE OF THE MANUAL"),
+            "`__extracted_text` rides its own `doc` spec and must not be glued \
+             onto the caption vector: {out}"
+        );
+        assert!(
+            !out.contains("deadbeef"),
+            "engine bookkeeping must never reach an embedding: {out}"
+        );
+    }
+
     #[test]
     fn legacy_plan_embeds_all_top_level_strings() {
         let plan = NodeIndexPlan {

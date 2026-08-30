@@ -71,6 +71,10 @@ raisin-sql-execution = { path = "../raisin-sql-execution", optional = true }
 raisin-binary = { path = "../raisin-binary" }
 raisin-core = { path = "../raisin-core" }
 raisin-context = { path = "../raisin-context" }
+# For `env_secrets`: the single declaration of the secrets required outside
+# --dev-mode, shared with both transports so the boot preflight and the
+# runtime readers cannot drift.
+raisin-crypto = { path = "../raisin-crypto" }
 raisin-audit = { path = "../raisin-audit" }
 raisin-error = { path = "../raisin-error" }
 raisin-events = { path = "../raisin-events" }

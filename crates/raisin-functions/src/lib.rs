@@ -45,6 +45,7 @@ pub mod api;
 pub mod execution;
 pub mod executor;
 pub mod loader;
+pub mod media_capabilities;
 pub mod plugin;
 pub mod plugin_loader;
 pub mod runtime;
@@ -73,7 +74,13 @@ pub use execution::{
 };
 pub use executor::{ExecutionHandle, FunctionExecutor};
 pub use loader::FunctionLoader;
-pub use plugin::{register_function_plugin, FunctionBindingPlugin};
+pub use media_capabilities::{
+    capability_report, log_capability_report, CapabilityRow, Provider, MEDIA_KINDS,
+};
+pub use plugin::{
+    plugin_manifest, register_function_plugin, registered_plugin_methods, rejected_plugins,
+    FunctionBindingPlugin, PluginManifestEntry, PluginRejection,
+};
 pub use plugin_loader::{load_plugins_from_dir, RAISIN_PLUGIN_ABI_VERSION};
 pub use runtime::{FunctionRuntime, RuntimeRegistry};
 pub use types::*;

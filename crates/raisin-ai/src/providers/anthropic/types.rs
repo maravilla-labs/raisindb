@@ -43,6 +43,25 @@ pub(super) enum AnthropicContent {
         tool_use_id: String,
         content: String,
     },
+    /// An image block.
+    ///
+    /// Anthropic wraps the payload in a `source` object rather than putting the
+    /// bytes on the block itself, and the discriminator inside that object
+    /// (`base64` vs `url`) is separate from the block's own `type: "image"`.
+    Image {
+        source: AnthropicImageSource,
+    },
+}
+
+/// Where an [`AnthropicContent::Image`]'s bytes come from.
+///
+/// `untagged` is wrong here — the two shapes share no field names but the API
+/// requires the inner `type` discriminator to be present, so it is tagged.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(super) enum AnthropicImageSource {
+    Base64 { media_type: String, data: String },
+    Url { url: String },
 }
 
 /// Tool definition for Anthropic API.

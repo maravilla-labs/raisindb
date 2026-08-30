@@ -30,6 +30,9 @@ indexmap = { version = "2.2", features = ["serde"] }
 nanoid = { workspace = true }
 chrono = { workspace = true }
 rust_decimal = { workspace = true }
+# Same crate and semantics ScopeMatcher uses, so a workspaces => glob and a
+# permission workspace glob cannot mean different things.
+glob = "0.3"
 
 # RaisinDB crates (storage and execution dependencies)
 raisin-context = { path = "../raisin-context" }
@@ -58,6 +61,7 @@ geohash = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 anyhow = { workspace = true }
+async-trait = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 proptest = "1.0"
 raisin-storage-memory = { path = "../raisin-storage-memory" }

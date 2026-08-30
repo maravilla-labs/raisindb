@@ -143,6 +143,57 @@ pub async fn workspace_catalog_with_embeddings<S: Storage + ?Sized>(
     Ok(catalog)
 }
 
+static NAMES_CACHE: std::sync::OnceLock<raisin_core::TtlCache<Arc<Vec<String>>>> =
+    std::sync::OnceLock::new();
+
+fn names_cache() -> &'static raisin_core::TtlCache<Arc<Vec<String>>> {
+    NAMES_CACHE.get_or_init(|| {
+        // Same reason as `catalog_cache()`: checkpoint SST ingest writes the
+        // workspaces column family directly and emits no events, so the
+        // per-repo invalidation below never fires for it.
+        raisin_core::register_invalidator(invalidate_all_workspace_catalogs);
+        raisin_core::TtlCache::new(CATALOG_TTL)
+    })
+}
+
+/// Every workspace name in a repo, sorted, cached per `(tenant, repo)`.
+///
+/// This is the universe the search table functions resolve `workspaces => ...`
+/// against. It sits on the hot path of an agent's RAG loop, one listing per
+/// statement otherwise, and workspaces change about as often as schemas do.
+///
+/// # Bias the staleness toward INCLUDING, deliberately
+///
+/// A cached set that still lists a workspace the caller has since lost is
+/// harmless: the per-row RLS check drops those rows anyway and the only cost is
+/// wasted candidates. A cached set that is MISSING a workspace the caller just
+/// gained is a silent recall loss: the RAG corpus quietly shrinks and nothing
+/// anywhere says so. Same shape as the `has encrypted fields` gate in
+/// CLAUDE.md, opposite direction, identical reasoning. If you ever "optimise"
+/// this, optimise toward keeping entries, never toward dropping them early.
+pub async fn workspace_names<S: Storage + ?Sized>(
+    storage: &S,
+    tenant_id: &str,
+    repo_id: &str,
+) -> Result<Arc<Vec<String>>> {
+    let key = format!("{tenant_id}:{repo_id}:names");
+    if let Some(cached) = names_cache().get(&key) {
+        return Ok(cached);
+    }
+
+    let workspaces = storage
+        .workspaces()
+        .list(RepoScope::new(tenant_id, repo_id))
+        .await?;
+    let mut names: Vec<String> = workspaces.into_iter().map(|w| w.name).collect();
+    names.sort();
+    names.dedup();
+
+    let names = Arc::new(names);
+    names_cache().put(&key, names.clone());
+    Ok(names)
+}
+
 /// Drop a repo's cached catalogs. Call this whenever a workspace is created,
 /// renamed or deleted.
 ///
@@ -155,12 +206,17 @@ pub async fn workspace_catalog_with_embeddings<S: Storage + ?Sized>(
 pub fn invalidate_workspace_catalog(tenant_id: &str, repo_id: &str) {
     let prefix = scope_prefix(tenant_id, repo_id);
     catalog_cache().invalidate_prefix(&prefix);
+    // The name list derived from the SAME listing, invalidated from the SAME
+    // call. Two caches over one source with two invalidation entry points is how
+    // the search scope and the planner's table set would come to disagree.
+    names_cache().invalidate_prefix(&prefix);
     tracing::debug!(scope = %prefix, "Workspace catalog cache invalidated");
 }
 
 /// Drop every cached catalog. Intended for tests and administrative resets.
 pub fn invalidate_all_workspace_catalogs() {
     catalog_cache().invalidate_all();
+    names_cache().invalidate_all();
 }
 
 #[cfg(test)]

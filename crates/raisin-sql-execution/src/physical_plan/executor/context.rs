@@ -175,6 +175,39 @@ impl<S: Storage> ExecutionContext<S> {
         self
     }
 
+    /// The provider to embed this statement's query text with.
+    ///
+    /// Prefer this over reading [`Self::embedding_provider`] directly. That
+    /// field is only ever populated by an explicit
+    /// [`Self::with_embedding_provider`] call, and for most of this server's
+    /// life exactly ONE of the five SQL surfaces made one — so reading the field
+    /// is reading "did the HTTP handler build this engine?", not "can this
+    /// tenant embed?". Every other surface saw `None` and quietly skipped the
+    /// vector half of `HYBRID_SEARCH`.
+    ///
+    /// Resolution order:
+    /// 1. an explicitly wired provider (tests, and the HTTP path that already
+    ///    resolved one), so no existing behaviour changes;
+    /// 2. the process-wide embedder installed at server startup, which is what
+    ///    gives pgwire, WebSocket and `raisin.sql()` an embedder at all.
+    ///
+    /// `Ok(None)` means this tenant genuinely has no embedding configuration, or
+    /// has switched it off. `Err` means one exists and is broken. Callers must
+    /// keep those apart: reporting a broken config as "no vector search" is how
+    /// a silent fulltext-only answer gets returned as if it were hybrid.
+    pub async fn resolve_embedding_provider(
+        &self,
+    ) -> Result<Option<Arc<dyn EmbeddingProvider>>, raisin_error::Error> {
+        if let Some(provider) = &self.embedding_provider {
+            return Ok(Some(provider.clone()));
+        }
+
+        match raisin_embeddings::query_embedder() {
+            Some(embedder) => embedder.embedder_for(&self.tenant_id).await,
+            None => Ok(None),
+        }
+    }
+
     /// Set the embedding storage for populating virtual `embedding` column
     ///
     /// This allows SQL queries to access node embeddings stored in RocksDB.

@@ -204,6 +204,7 @@ impl RocksDBStorage {
                 workspace_repo_arc.clone(),
                 operation_capture.clone(),
                 element_type_repo_arc.clone(),
+                archetype_repo_arc.clone(),
                 secret_store_slot.clone(),
             ),
             node_types: (*node_type_repo_arc).clone(),

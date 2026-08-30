@@ -154,6 +154,13 @@ pub struct QueryEngine<S: Storage> {
     /// Tenant embedding config store for AI config SQL statements
     pub(crate) embedding_config_store:
         Option<Arc<dyn raisin_embeddings::TenantEmbeddingConfigStore>>,
+    /// Tenant AI config store, needed to resolve a `ai_provider_ref`.
+    ///
+    /// Without it, `TEST EMBEDDING CONNECTION` can only see the legacy fields
+    /// — which is how a console-configured tenant (the console writes the
+    /// unified ref) got "No API key configured for this tenant" from a config
+    /// the embedding job resolved perfectly well.
+    pub(crate) ai_config_store: Option<Arc<dyn raisin_embeddings::resolve::TenantAIConfigStore>>,
     /// Master key for API key encryption/decryption
     pub(crate) master_key: Option<[u8; 32]>,
     /// Shared schema stats cache for data-driven selectivity estimation
@@ -204,6 +211,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             repository_config: None,
             auth_context: None,
             embedding_config_store: None,
+            ai_config_store: None,
             master_key: None,
             schema_stats_cache: None,
         }
@@ -313,6 +321,16 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         store: Arc<dyn raisin_embeddings::TenantEmbeddingConfigStore>,
     ) -> Self {
         self.embedding_config_store = Some(store);
+        self
+    }
+
+    /// Wire the tenant AI config store, so `ai_provider_ref` resolves here the
+    /// same way it does on the write path.
+    pub fn with_ai_config_store(
+        mut self,
+        store: Arc<dyn raisin_embeddings::resolve::TenantAIConfigStore>,
+    ) -> Self {
+        self.ai_config_store = Some(store);
         self
     }
 
@@ -634,6 +652,32 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         // Save branch for user lookup
         let branch_for_lookup = branch.clone();
 
+        let ctx = self.build_execution_context(branch, workspace, max_revision, locales);
+
+        // Set function context for system functions (RAISIN_CURRENT_USER).
+        // Resolves the user node only when the SQL can actually call it.
+        self.install_function_context(sql, &branch_for_lookup).await;
+
+        // 6. Execute physical plan
+        let stream = execute_plan(&physical_plan, &ctx).await?;
+        Ok(stream)
+    }
+
+    /// Assemble the execution context from whatever this engine was configured
+    /// with.
+    ///
+    /// Extracted so the typed [`search`](Self::search) entry point cannot end up
+    /// wiring a DIFFERENT context from the SQL path: an engine that forgets to
+    /// attach `auth_context` on one of two paths is a silent RLS bypass, and an
+    /// engine that forgets `indexing_engine` on one of them is a search that
+    /// quietly runs on one leg.
+    fn build_execution_context(
+        &self,
+        branch: String,
+        workspace: String,
+        max_revision: Option<raisin_hlc::HLC>,
+        locales: Vec<String>,
+    ) -> ExecutionContext<S> {
         let mut ctx = ExecutionContext::new(
             self.storage.clone(),
             self.tenant_id.clone(),
@@ -673,13 +717,64 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         if let Some(ref mgr) = self.lock_manager {
             ctx.lock_manager = Some(mgr.clone());
         }
+        ctx
+    }
 
-        // Set function context for system functions (RAISIN_CURRENT_USER).
-        // Resolves the user node only when the SQL can actually call it.
-        self.install_function_context(sql, &branch_for_lookup).await;
+    /// Run a search built programmatically, with no SQL text involved.
+    ///
+    /// This is the entry point for the HTTP hybrid-search endpoint and the MCP
+    /// `search_nodes` tool. They used to be a second and a third implementation
+    /// of leg dispatch and rank fusion, and NEITHER applied row-level security:
+    /// the HTTP module contained no reference to `auth` at all and the MCP
+    /// provider bound its identity parameter as `_identity`. Both now go through
+    /// the same scope resolver, the same per-hit `rls_filter_search_hit`, the
+    /// same over-fetch/backfill loop and the same columns as SQL.
+    ///
+    /// Rows come back qualified with `table_name` (e.g. `hybrid_search.path`),
+    /// exactly as the table function emits them.
+    pub async fn search(
+        &self,
+        args: crate::physical_plan::search::args::SearchArgs,
+        table_name: &str,
+    ) -> Result<Vec<crate::physical_plan::executor::Row>, Error> {
+        use futures::StreamExt;
 
-        // 6. Execute physical plan
-        let stream = execute_plan(&physical_plan, &ctx).await?;
-        Ok(stream)
+        let max_revision = match self
+            .storage
+            .branches()
+            .get_branch(&self.tenant_id, &self.repo_id, &self.branch)
+            .await?
+        {
+            Some(branch) => Some(branch.head),
+            None => Some(raisin_hlc::HLC::new(0, 0)),
+        };
+
+        // The context workspace is irrelevant to a search: every hit is fetched
+        // in ITS OWN workspace (that is the half of the hit key that exists for
+        // this reason), and the corpus comes from the resolved scope. Passing a
+        // placeholder here is deliberate -- a real-looking value would invite
+        // someone to start filtering by it.
+        let ctx = self.build_execution_context(
+            self.branch.clone(),
+            "default".to_string(),
+            max_revision,
+            Vec::new(),
+        );
+
+        let mut stream = crate::physical_plan::search::emit::execute_parsed(
+            args,
+            // No residual: an API caller has no WHERE clause. `limit` therefore
+            // means exactly "rows delivered after permissions".
+            None,
+            table_name.to_string(),
+            &ctx,
+        )
+        .await?;
+
+        let mut rows = Vec::new();
+        while let Some(row) = stream.next().await {
+            rows.push(row?);
+        }
+        Ok(rows)
     }
 }

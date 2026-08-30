@@ -413,15 +413,17 @@ impl AppState {
     /// In dev-mode, falls back to a hard-coded development key with a warning.
     /// In production mode, returns an error if not set.
     pub(crate) fn get_signing_secret(&self) -> raisin_error::Result<Vec<u8>> {
-        match std::env::var("RAISINDB_SIGNING_SECRET") {
-            Ok(s) => Ok(s.into_bytes()),
-            Err(_) if self.dev_mode => {
+        // Shared reader, so what the boot preflight accepts and what actually
+        // signs a URL cannot disagree; an empty value counts as unset.
+        match raisin_crypto::signing_secret() {
+            Some(s) => Ok(s),
+            None if self.dev_mode => {
                 tracing::warn!(
                     "RAISINDB_SIGNING_SECRET not set — using insecure fallback (dev-mode)"
                 );
-                Ok(b"raisindb-dev-signing-secret-key!".to_vec())
+                Ok(raisin_crypto::DEV_SIGNING_SECRET.to_vec())
             }
-            Err(_) => Err(raisin_error::Error::Validation(
+            None => Err(raisin_error::Error::Validation(
                 "RAISINDB_SIGNING_SECRET must be set. \
                  Use --dev-mode to allow insecure defaults."
                     .to_string(),

@@ -12,7 +12,7 @@ mod provider;
 mod tests;
 
 pub use chunking::{ChunkingConfig, OverlapConfig, SplitterType};
-pub use embedder::{EmbedderId, EmbeddingKind, EmbeddingSettings};
+pub use embedder::{EmbedderId, EmbeddingKind, EmbeddingPartition, EmbeddingSettings};
 pub use processing::{ProcessingDefaults, DEFAULT_CAPTION_MODEL, DEFAULT_IMAGE_EMBEDDING_MODEL};
 pub use provider::{
     validate_slug, AIModelConfig, AIProvider, AIProviderConfig, AIUseCase, SlugError, MAX_SLUG_LEN,

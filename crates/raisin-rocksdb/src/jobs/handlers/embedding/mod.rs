@@ -8,4 +8,4 @@
 mod content_extraction;
 mod handler;
 
-pub use handler::EmbeddingJobHandler;
+pub use handler::{EmbeddingJobHandler, EXTRACTED_TEXT_SPEC};

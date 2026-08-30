@@ -1,17 +1,17 @@
 //! AssetProcessingHandler struct, model management, and job handling
 
-use raisin_ai::{BlipCaptioner, ClipEmbedder, ModelRegistry, MoondreamCaptioner};
+use raisin_ai::{ClipEmbedder, ModelRegistry};
+use raisin_core::services::node_service::NodeService;
 use raisin_error::{Error, Result};
-use raisin_models::nodes::properties::PropertyValue;
 use raisin_storage::jobs::{JobContext, JobInfo, JobType};
 use raisin_storage::{NodeRepository, Storage, StorageScope};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use super::captioner::CachedCaptioner;
-use super::helpers::{extract_mime_type, extract_storage_key, is_image_mime, process_pdf};
+use super::helpers::{extract_mime_type, extract_storage_key, is_image_mime, process_extractable};
 use super::types::{AssetProcessingResult, BinaryRetrievalCallback};
+use super::{ExtractStatus, ExtractionArtifact};
 use crate::RocksDBStorage;
 
 /// Handler for automatic asset processing jobs.
@@ -31,7 +31,6 @@ pub struct AssetProcessingHandler {
     binary_callback: Option<BinaryRetrievalCallback>,
     model_registry: Arc<RwLock<Option<ModelRegistry>>>,
     clip_embedder: Arc<RwLock<Option<ClipEmbedder>>>,
-    captioner_cache: Arc<RwLock<Option<CachedCaptioner>>>,
 }
 
 impl AssetProcessingHandler {
@@ -42,7 +41,6 @@ impl AssetProcessingHandler {
             binary_callback: None,
             model_registry: Arc::new(RwLock::new(None)),
             clip_embedder: Arc::new(RwLock::new(None)),
-            captioner_cache: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -121,86 +119,6 @@ impl AssetProcessingHandler {
         Ok(())
     }
 
-    /// Get or download and load the captioner for the specified model
-    async fn get_or_load_captioner(&self, requested_model_id: Option<&str>) -> Result<String> {
-        let model_id = requested_model_id.unwrap_or(raisin_ai::default_caption_model());
-
-        {
-            let captioner = self.captioner_cache.read().await;
-            if let Some(ref cached) = *captioner {
-                if cached.model_id() == model_id {
-                    return Ok(model_id.to_string());
-                }
-                tracing::info!(
-                    cached_model = %cached.model_id(),
-                    requested_model = %model_id,
-                    "Captioner model changed, will reload"
-                );
-            }
-        }
-
-        self.ensure_model_registry().await?;
-
-        let model_path: PathBuf;
-
-        {
-            let registry_guard = self.model_registry.read().await;
-            let registry = registry_guard
-                .as_ref()
-                .ok_or_else(|| Error::Backend("Model registry not initialized".to_string()))?;
-
-            if !registry.is_model_ready(model_id).await {
-                drop(registry_guard);
-
-                tracing::info!(model_id = %model_id, "Downloading captioning model on-demand");
-                let registry_guard = self.model_registry.read().await;
-                let registry = registry_guard
-                    .as_ref()
-                    .ok_or_else(|| Error::Backend("Model registry not initialized".to_string()))?;
-
-                let path = registry.download_model(model_id, None).await.map_err(|e| {
-                    Error::Backend(format!("Failed to download captioning model: {}", e))
-                })?;
-                model_path = path;
-            } else {
-                model_path = registry.model_path(model_id);
-            }
-        }
-
-        let device = raisin_ai::select_device(true)
-            .map_err(|e| Error::Backend(format!("Failed to select device: {}", e)))?;
-        tracing::info!(model_id = %model_id, device = ?device, "Loading captioner");
-
-        let cached = if raisin_ai::is_moondream_model(model_id) {
-            let captioner =
-                MoondreamCaptioner::with_model_id(&model_path, device, model_id.to_string())
-                    .map_err(|e| {
-                        Error::Backend(format!("Failed to load Moondream captioner: {}", e))
-                    })?;
-            CachedCaptioner::Moondream {
-                captioner,
-                model_id: model_id.to_string(),
-            }
-        } else if raisin_ai::is_blip_model(model_id) {
-            let captioner = BlipCaptioner::with_model_id(&model_path, device, model_id.to_string())
-                .map_err(|e| Error::Backend(format!("Failed to load BLIP captioner: {}", e)))?;
-            CachedCaptioner::Blip {
-                captioner,
-                model_id: model_id.to_string(),
-            }
-        } else {
-            return Err(Error::Backend(format!(
-                "Unsupported caption model: '{}'. Supported: Moondream or BLIP.",
-                model_id
-            )));
-        };
-
-        let mut cache_guard = self.captioner_cache.write().await;
-        *cache_guard = Some(cached);
-
-        Ok(model_id.to_string())
-    }
-
     /// Generate image embedding using CLIP
     async fn generate_image_embedding(&self, image_bytes: &[u8]) -> Result<Vec<f32>> {
         self.get_or_load_clip().await?;
@@ -213,49 +131,6 @@ impl AssetProcessingHandler {
         embedder
             .embed_image(image_bytes)
             .map_err(|e| Error::Backend(format!("CLIP embedding failed: {}", e)))
-    }
-
-    /// Generate image caption using the specified model
-    async fn generate_image_caption(
-        &self,
-        image_bytes: &[u8],
-        model_id: Option<&str>,
-        alt_text_prompt: Option<&str>,
-        description_prompt: Option<&str>,
-    ) -> Result<(String, String, String)> {
-        let actual_model = self.get_or_load_captioner(model_id).await?;
-
-        let mut cache_guard = self.captioner_cache.write().await;
-        let cached = cache_guard
-            .as_mut()
-            .ok_or_else(|| Error::Backend("Captioner not loaded".to_string()))?;
-
-        let (caption, alt_text) = cached
-            .generate(image_bytes, alt_text_prompt, description_prompt)
-            .map_err(|e| Error::Backend(format!("Image captioning failed: {}", e)))?;
-
-        Ok((caption, alt_text, actual_model))
-    }
-
-    /// Generate keywords for an image using the specified model
-    async fn generate_image_keywords(
-        &self,
-        image_bytes: &[u8],
-        model_id: Option<&str>,
-        keywords_prompt: Option<&str>,
-    ) -> Result<Vec<String>> {
-        let _actual_model = self.get_or_load_captioner(model_id).await?;
-
-        let mut cache_guard = self.captioner_cache.write().await;
-        let cached = cache_guard
-            .as_mut()
-            .ok_or_else(|| Error::Backend("Captioner not loaded".to_string()))?;
-
-        let keywords = cached
-            .generate_keywords(image_bytes, keywords_prompt)
-            .map_err(|e| Error::Backend(format!("Keyword extraction failed: {}", e)))?;
-
-        Ok(keywords)
     }
 
     /// Handle an asset processing job
@@ -282,7 +157,6 @@ impl AssetProcessingHandler {
             node_id = %node_id,
             extract_pdf = options.extract_pdf_text,
             gen_img_embed = options.generate_image_embedding,
-            gen_img_caption = options.generate_image_caption,
             "Processing asset"
         );
 
@@ -313,12 +187,30 @@ impl AssetProcessingHandler {
         // Get binary data if we have a callback
         let binary_data = self.retrieve_binary_data(job, &node_id, &node).await;
 
+        // THE EXTRACTION OUTCOME, produced for every path through this block —
+        // including the ones that produce no text. `None` here means "nobody
+        // asked for text from this asset"; every other case is a durable record.
+        let mut artifact: Option<ExtractionArtifact> = None;
+        let fingerprint = super::helpers::asset_fingerprint(&node);
+
         // Process based on mime type and options
         if let Some(ref data) = binary_data {
-            // PDF processing
-            if mime_type.as_deref() == Some("application/pdf") && options.extract_pdf_text {
-                match process_pdf(data, &options).await {
-                    Ok(pdf_result) => {
+            // Text extraction. The mime vocabulary lives in `is_extractable_mime`
+            // / `process_extractable`, NOT in a literal here — the enqueue side
+            // reads the same one.
+            if options.extract_pdf_text {
+                match process_extractable(&mime_type, data, &options).await {
+                    Some(Ok(pdf_result)) => {
+                        let source = if pdf_result.used_ocr {
+                            "core-pdf-ocr"
+                        } else {
+                            "core-pdf"
+                        };
+                        artifact = Some(ExtractionArtifact::extracted(
+                            fingerprint.clone(),
+                            source,
+                            pdf_result.text.clone(),
+                        ));
                         result.extracted_text = Some(pdf_result.text);
                         result.pdf_page_count = Some(pdf_result.page_count);
                         result.used_ocr = pdf_result.used_ocr;
@@ -329,16 +221,53 @@ impl AssetProcessingHandler {
                             page_count = pdf_result.page_count,
                             used_ocr = pdf_result.used_ocr,
                             text_length = result.extracted_text.as_ref().map(|t| t.len()).unwrap_or(0),
-                            "PDF text extraction complete"
+                            "Text extraction complete"
                         );
                     }
-                    Err(e) => {
+                    Some(Err(e)) => {
+                        // A retryable failure, recorded as one. It must NOT read
+                        // as `unsupported`, or a backfill looking for
+                        // newly-readable formats would sweep it up forever.
+                        artifact = Some(ExtractionArtifact::failed(
+                            fingerprint.clone(),
+                            "core-pdf",
+                            e.to_string(),
+                        ));
                         tracing::error!(
                             job_id = %job.id, node_id = %node_id, error = %e,
-                            "PDF text extraction failed"
+                            "Text extraction failed"
+                        );
+                    }
+                    None => {
+                        artifact = Some(ExtractionArtifact::unsupported(
+                            fingerprint.clone(),
+                            unsupported_detail(&mime_type, &options),
+                        ));
+                        tracing::warn!(
+                            job_id = %job.id, node_id = %node_id, mime_type = ?mime_type,
+                            "Text extraction requested but no extractor handles this mime type \
+                             (see is_extractable_mime / process_extractable)"
                         );
                     }
                 }
+            } else if options.extract_text_requested {
+                // THE CASE THIS WHOLE ARTIFACT EXISTS FOR. The routing table
+                // asked for text and this process cannot produce it — a `.docx`
+                // on a server with no media plugin. Before, `extract_pdf_text`
+                // was already false here and the job wrote NOTHING: a node with
+                // no text and no record that anything had been skipped,
+                // indistinguishable from an empty document forever. Now it is
+                // one row a backfill can find.
+                artifact = Some(ExtractionArtifact::unsupported(
+                    fingerprint.clone(),
+                    unsupported_detail(&mime_type, &options),
+                ));
+                tracing::info!(
+                    job_id = %job.id, node_id = %node_id, mime_type = ?mime_type,
+                    blocked = ?options.blocked_tasks,
+                    "Text was requested but nothing on this server can read these bytes; \
+                     recording __extract_status = 'unsupported'"
+                );
             }
 
             // Image processing (CLIP embeddings)
@@ -346,21 +275,159 @@ impl AssetProcessingHandler {
                 self.process_image_embedding(job, &node_id, data, &mut result)
                     .await;
             }
+        } else if options.extract_text_requested {
+            // Asked for text and the bytes could not be read at all. Retryable,
+            // so `failed` and not `unsupported` — a better extractor would not
+            // help here.
+            artifact = Some(ExtractionArtifact::failed(
+                fingerprint.clone(),
+                "none",
+                "binary could not be retrieved from storage",
+            ));
+        }
 
-            // AI captioning is disabled - use trigger functions instead
-            self.log_deprecated_captioning_warning(job, &node_id, &mime_type, &options);
+        // PERSIST. Everything above only produced values in memory; until this
+        // ran, the job serialised them into its result JSON and returned, so an
+        // operator who switched on "extract PDF text" got a job that reported
+        // success and changed nothing anywhere.
+        if let Some(artifact) = artifact {
+            self.persist_extraction_artifact(job, &node, &artifact, &options, &mut result, context)
+                .await;
         }
 
         tracing::info!(
             job_id = %job.id,
             node_id = %node_id,
             has_extracted_text = result.extracted_text.is_some(),
+            stored = result.extracted_text_stored,
             has_caption = result.caption.is_some(),
             has_keywords = result.keywords.is_some(),
             "Asset processing complete"
         );
 
         Ok(Some(serde_json::to_value(result).unwrap_or_default()))
+    }
+
+    /// Write the EXTRACTION ARTIFACT onto the node.
+    ///
+    /// # Why a node property, and why through `NodeService`
+    ///
+    /// A node property is the one shape every downstream index already
+    /// understands. Writing it through the normal write path means the existing
+    /// commit → `emit_node_events` → fulltext + `EmbeddingGenerate` funnel picks
+    /// the text up with no new plumbing, replication carries it to peers for
+    /// free (an arriving replica already HAS the text, so it never re-extracts —
+    /// the apply path does not run this job), and the text is visible to SQL,
+    /// `FULLTEXT_MATCH` and the vector search through the same surfaces as any
+    /// other property.
+    ///
+    /// It is also what makes PUBLISH work without an extractor: Studio publish
+    /// is a SQL copy of `node_type, archetype, properties, updated_at`, so an
+    /// artifact in `properties` rides along to the publish branch and the
+    /// embedding there is a pure embed call over text that is already present.
+    /// That is why the artifact is INLINE and not a child node or a blob
+    /// reference — see `raisin_models::nodes::extraction`.
+    ///
+    /// The alternative — an index writer of its own here, or teaching the
+    /// synchronous embedding text walk to open files — would be a second
+    /// extraction/indexing path beside this one, which is precisely the drift
+    /// this codebase keeps paying for.
+    ///
+    /// `storage.nodes().update(...)` would NOT do: the raw repository emits no
+    /// `node:updated`, so nothing downstream would ever see the text.
+    ///
+    /// # It writes on EVERY outcome
+    ///
+    /// Including `unsupported`, and including when `store_extracted_text` is
+    /// off. The text is content and honours that setting; the status is
+    /// BOOKKEEPING about the binary, and dropping it is what made a skip
+    /// invisible in the first place.
+    async fn persist_extraction_artifact(
+        &self,
+        job: &JobInfo,
+        node: &raisin_models::nodes::Node,
+        artifact: &ExtractionArtifact,
+        options: &raisin_storage::jobs::AssetProcessingOptions,
+        result: &mut AssetProcessingResult,
+        context: &JobContext,
+    ) {
+        if !options.store_extracted_text {
+            // Honour the option literally for the TEXT. `trigger_embedding`
+            // cannot be honoured on its own: the embedding is generated from the
+            // node's indexed properties, so with nothing stored there is nothing
+            // to embed. The status record is written regardless.
+            tracing::info!(
+                job_id = %job.id, node_id = %node.id,
+                trigger_embedding = options.trigger_embedding,
+                "Extracted text discarded: store_extracted_text is off. \
+                 Embedding needs a stored property, so trigger_embedding alone does nothing. \
+                 The extraction STATUS is still recorded."
+            );
+        }
+
+        // Written as a NAMED engine actor, not as plain `system`: the write-path
+        // shield (`raisin_models::nodes::is_engine_write_actor`) opens only for
+        // the two actors that own `__` properties, and `AuthContext::system()`
+        // is what half the internal services and every test harness present.
+        let svc: NodeService<RocksDBStorage> = NodeService::new_with_context(
+            self.storage.clone(),
+            context.tenant_id.clone(),
+            context.repo_id.clone(),
+            context.branch.clone(),
+            context.workspace_id.clone(),
+        )
+        .with_auth(raisin_models::auth::AuthContext::system_as(
+            raisin_models::nodes::EXTRACTION_ACTOR,
+        ));
+
+        // Re-read at HEAD rather than writing back the revision the job was
+        // handed: extraction is seconds of work, and anything an editor changed
+        // meanwhile must not be reverted by us.
+        let fresh = match svc.get(&node.id).await {
+            Ok(Some(n)) => n,
+            Ok(None) => {
+                tracing::warn!(
+                    job_id = %job.id, node_id = %node.id,
+                    "Node vanished before the extraction artifact could be stored"
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::error!(
+                    job_id = %job.id, node_id = %node.id, error = %e,
+                    "Failed to re-read node to store the extraction artifact"
+                );
+                return;
+            }
+        };
+
+        let mut updated = fresh;
+        // ONE writer of the artifact's property shape, in `raisin-models`, so a
+        // partially-written artifact (a status with no fingerprint, which
+        // re-extracts forever; a fingerprint with no status, which is the
+        // invisible skip again) is not expressible here.
+        artifact.apply(&mut updated.properties, options.store_extracted_text);
+
+        match svc.update_node(updated).await {
+            Ok(()) => {
+                result.extracted_text_stored =
+                    options.store_extracted_text && artifact.status == ExtractStatus::Ok;
+                tracing::info!(
+                    job_id = %job.id, node_id = %node.id,
+                    status = %artifact.status.as_str(),
+                    source = %artifact.source,
+                    text_length = artifact.text.len(),
+                    fingerprint = %artifact.fingerprint,
+                    "Stored extraction artifact on node; fulltext + embedding follow from the node event"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    job_id = %job.id, node_id = %node.id, error = %e,
+                    "Failed to store the extraction artifact on node"
+                );
+            }
+        }
     }
 
     /// Retrieve binary data from storage using the callback
@@ -434,24 +501,25 @@ impl AssetProcessingHandler {
             }
         }
     }
+}
 
-    /// Log deprecation warning for captioning
-    fn log_deprecated_captioning_warning(
-        &self,
-        job: &JobInfo,
-        node_id: &str,
-        mime_type: &Option<String>,
-        options: &raisin_storage::jobs::AssetProcessingOptions,
-    ) {
-        let would_caption = is_image_mime(mime_type) && options.generate_image_caption;
-        let would_generate_keywords = is_image_mime(mime_type) && options.generate_keywords;
-
-        if would_caption || would_generate_keywords {
-            tracing::warn!(
-                job_id = %job.id, node_id = %node_id,
-                "AI captioning/keywords generation is disabled in AssetProcessingHandler. \
-                 Use trigger functions with raisin.ai.completion() instead."
-            );
-        }
+/// One sentence naming WHY nothing could read these bytes.
+///
+/// It is stored on the node, not only logged, because the log line an operator
+/// would have to correlate it with is hours old by the time anyone asks. The
+/// blocked-task list comes from the routing plan, so a `.docx` on a server with
+/// no media plugin says so by name instead of saying "unsupported".
+fn unsupported_detail(
+    mime_type: &Option<String>,
+    options: &raisin_storage::jobs::AssetProcessingOptions,
+) -> String {
+    let mime = mime_type.as_deref().unwrap_or("unknown");
+    if options.blocked_tasks.is_empty() {
+        format!("no extractor on this server handles {mime}")
+    } else {
+        format!(
+            "no extractor on this server handles {mime}; blocked tasks: {}",
+            options.blocked_tasks.join(", ")
+        )
     }
 }

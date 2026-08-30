@@ -6,6 +6,7 @@
 //! HNSW indexes are typically small enough to be transferred as complete files
 //! rather than chunked streaming.
 
+mod bundle;
 mod manager;
 mod receiver;
 #[cfg(test)]

@@ -127,10 +127,18 @@ pub(crate) fn admin_routes(state: &AppState) -> Router<AppState> {
             "/api/repository/{repo}/{branch}/fulltext/search",
             post(crate::handlers::repo::fulltext_search),
         )
-        // Hybrid search (fulltext + vector with RRF)
+        // Hybrid search (fulltext + vector with RRF).
+        //
+        // `optional_auth_middleware` is load-bearing, not decoration: the handler
+        // takes `Option<Extension<AuthContext>>` and `None` means "system caller,
+        // do not filter". Without this layer the extension is ALWAYS absent, so
+        // every request read as a system caller and the endpoint returned node
+        // names, paths and types with no row-level security at all. Same layer
+        // the SQL route below carries, for the same reason.
         .route(
             "/api/search/{repo}",
-            get(crate::handlers::hybrid_search::hybrid_search),
+            get(crate::handlers::hybrid_search::hybrid_search)
+                .layer(from_fn_with_state(state.clone(), optional_auth_middleware)),
         )
         .route(
             "/api/sql/{repo}",

@@ -17,10 +17,12 @@
 
 mod capture;
 mod collect;
+mod events;
 mod helpers;
 mod prune;
 mod relations;
 mod roots;
+mod schema;
 mod secrets;
 mod stage;
 mod translations;
@@ -68,6 +70,14 @@ struct CopyAccumulators {
     secrets: Vec<crate::secret_store::StoredSecret>,
     /// Edge deltas the promotion produced on the target, for replication.
     relation_ops: Vec<raisin_replication::OpType>,
+    /// Ids of target nodes the copy rewrote with byte-identical content.
+    ///
+    /// The row is still written (new revision, refreshed indexes — the copy
+    /// stays self-healing), but nothing OBSERVABLE changed, so no node event is
+    /// published for it. Without this a steady-state re-publish would re-embed
+    /// every unchanged node on every run. Mirrors `track_update`'s no-op guard
+    /// on the transaction path; see `events.rs`.
+    content_unchanged: HashSet<String>,
 }
 
 /// One source node staged for copying, with its resolved parent ids.
@@ -106,7 +116,7 @@ impl NodeRepositoryImpl {
         source_revision: Option<&raisin_hlc::HLC>,
         operation_meta: Option<raisin_models::operations::OperationMeta>,
     ) -> Result<CrossBranchCopySummary> {
-        let (target, root_ctxs) = self
+        let (mut target, root_ctxs) = self
             .resolve_cross_branch_roots(
                 tenant_id,
                 repo_id,
@@ -118,10 +128,7 @@ impl NodeRepositoryImpl {
             )
             .await?;
 
-        // ========== STEP 1: single revision for the whole operation ==========
-        let revision = self.revision_repo.allocate_revision();
-
-        // ========== STEP 2: collect the source node set (BFS, parents first) ==========
+        // ========== STEP 1: collect the source node set (BFS, parents first) ==========
         let (entries, src_ids) = self.collect_cross_branch_entries(
             tenant_id,
             repo_id,
@@ -132,7 +139,52 @@ impl NodeRepositoryImpl {
             source_revision,
         )?;
 
-        // ========== STEP 3: build the single WriteBatch ==========
+        // ========== STEP 2: carry the schema the node set references ==========
+        //
+        // Content promoted onto a branch that has no definition for its
+        // node_type is indexed by the planner's legacy fallback (per-field
+        // VECTOR/FULLTEXT selection silently discarded) while a `__branch` SQL
+        // write onto the same branch is REFUSED. Carrying the schema is what
+        // makes the two legs agree; see `schema.rs` for why the fix is here and
+        // not in either policy.
+        //
+        // Deliberately BEFORE the copy revision is allocated: these upserts are
+        // separate transactions with their own revisions, so running them first
+        // keeps the schema strictly older than the content that needs it and
+        // leaves the target HEAD monotonic. It is best-effort — a name that
+        // does not resolve on the source is skipped, never fatal.
+        let carried_schema = self
+            .carry_schema_to_target(
+                &entries,
+                tenant_id,
+                repo_id,
+                source_branch,
+                target_branch,
+                source_revision,
+                operation_meta
+                    .as_ref()
+                    .map(|m| m.actor.as_str())
+                    .unwrap_or("system"),
+                operation_meta.as_ref().map(|m| m.is_system).unwrap_or(true),
+            )
+            .await?;
+        if carried_schema.wrote_anything() {
+            // The carry advanced the target HEAD, so the `target` snapshot
+            // taken above is stale and `rev_meta.parent` would name a revision
+            // that is no longer the tip. Re-read it.
+            if let Some(refreshed) = self
+                .branch_repo
+                .get_branch(tenant_id, repo_id, target_branch)
+                .await?
+            {
+                target = refreshed;
+            }
+        }
+
+        // ========== STEP 3: single revision for the whole operation ==========
+        let revision = self.revision_repo.allocate_revision();
+
+        // ========== STEP 4: build the single WriteBatch ==========
         let mut batch = WriteBatch::default();
         let now = chrono::Utc::now();
 
@@ -194,6 +246,7 @@ impl NodeRepositoryImpl {
             max_label_per_parent,
             secrets: Vec::new(),
             relation_ops: Vec::new(),
+            content_unchanged: HashSet::new(),
         };
         for entry in &entries {
             self.stage_cross_branch_entry(&mut batch, entry, &scope, &mut acc)
@@ -206,6 +259,7 @@ impl NodeRepositoryImpl {
             max_label_per_parent,
             secrets,
             relation_ops,
+            content_unchanged,
         } = acc;
 
         let copied = entries.len();
@@ -239,7 +293,7 @@ impl NodeRepositoryImpl {
             }
         }
 
-        // ========== STEP 4: delete_missing — prune target-only nodes ==========
+        // ========== STEP 5: delete_missing — prune target-only nodes ==========
         let deleted_ids = if delete_missing {
             self.prune_missing_targets(
                 &mut batch,
@@ -259,7 +313,7 @@ impl NodeRepositoryImpl {
         };
         let deleted = deleted_ids.len();
 
-        // ========== STEP 5: revision index + branch HEAD in the same batch ==========
+        // ========== STEP 6: revision index + branch HEAD in the same batch ==========
         for change in &changes {
             self.revision_repo.index_node_change_to_batch(
                 &mut batch,
@@ -275,7 +329,7 @@ impl NodeRepositoryImpl {
             .update_head_to_batch(&mut batch, tenant_id, repo_id, target_branch, revision)
             .await?;
 
-        // ========== STEP 6: atomic commit ==========
+        // ========== STEP 7: atomic commit ==========
         self.db.write(batch).map_err(|e| {
             raisin_error::Error::storage(format!("Atomic cross-branch copy failed: {}", e))
         })?;
@@ -289,7 +343,7 @@ impl NodeRepositoryImpl {
             revision
         );
 
-        // ========== STEP 7: replication + revision metadata (post-commit) ==========
+        // ========== STEP 8: replication + revision metadata (post-commit) ==========
         self.branch_repo
             .capture_head_update_for_replication(
                 tenant_id,
@@ -336,6 +390,23 @@ impl NodeRepositoryImpl {
                 )
                 .await;
         }
+
+        // Derived state (embeddings, fulltext, spatial, triggers, WS
+        // subscribers) is driven ENTIRELY by node events, and this path never
+        // touches the transaction commit that normally emits them. Emitting here
+        // rather than in each caller is what makes the WS handler and the
+        // function binding — i.e. Studio publish — behave identically. See
+        // `events.rs` for the full rationale and the no-op suppression.
+        self.emit_cross_branch_events(
+            tenant_id,
+            repo_id,
+            target_branch,
+            workspace,
+            &revision,
+            &meta_actor,
+            &changes,
+            &content_unchanged,
+        );
 
         // Always store revision metadata — this is what makes the promotion
         // visible to branch diffs and change tracking.

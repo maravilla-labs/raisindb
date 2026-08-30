@@ -12,7 +12,10 @@ pub struct HnswIndexMetadata {
     /// Branch name
     pub branch: String,
 
-    /// File size in bytes
+    /// Which embedding space, `{embedder_hash}{kind}`
+    pub partition: raisin_hnsw::PartitionId,
+
+    /// Bundle size in bytes (graph + sidecar)
     pub size_bytes: u64,
 
     /// CRC32 checksum

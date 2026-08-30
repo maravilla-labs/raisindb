@@ -18,6 +18,10 @@ use super::OpenRouterProvider;
 #[async_trait]
 impl AIProviderTrait for OpenRouterProvider {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse> {
+        // Fail LOUDLY rather than dropping the image. See
+        // `provider::reject_unsupported_images` for why silence is the one
+        // unacceptable answer here.
+        crate::provider::reject_unsupported_images("openrouter", &request.messages)?;
         // Convert messages to OpenAI format, including system messages
         let mut messages = Vec::new();
 

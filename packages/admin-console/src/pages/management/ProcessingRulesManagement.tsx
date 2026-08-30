@@ -29,7 +29,6 @@ import {
   UpdateRuleRequest,
   TestRuleMatchRequest,
 } from '../../api/processing-rules'
-import { aiApi, LocalCaptionModel } from '../../api/ai'
 import { ApiError } from '../../api/client'
 
 interface ProcessingRulesManagementProps {
@@ -472,16 +471,6 @@ export default function ProcessingRulesManagement({ repo }: ProcessingRulesManag
                       Image Embed
                     </span>
                   )}
-                  {rule.settings.generate_image_caption && (
-                    <span className="px-2 py-0.5 bg-green-500/20 border border-green-500/30 text-green-300 text-xs rounded" title={rule.settings.caption_model || 'Default model'}>
-                      Caption{rule.settings.caption_model ? `: ${rule.settings.caption_model.split('/').pop()}` : ''}
-                    </span>
-                  )}
-                  {rule.settings.generate_keywords && (
-                    <span className="px-2 py-0.5 bg-teal-500/20 border border-teal-500/30 text-teal-300 text-xs rounded">
-                      Keywords
-                    </span>
-                  )}
                   {rule.settings.pdf_strategy && (
                     <span className="px-2 py-0.5 bg-yellow-500/20 border border-yellow-500/30 text-yellow-300 text-xs rounded">
                       PDF: {formatPdfStrategy(rule.settings.pdf_strategy)}
@@ -548,33 +537,6 @@ function RuleEditor({ rule, onSave, onCancel, saving }: RuleEditorProps) {
   const [matcherProperty, setMatcherProperty] = useState({ name: '', value: '' })
   const [settings, setSettings] = useState<ProcessingSettings>(rule?.settings || {})
   const [expanded, setExpanded] = useState(true)
-
-  // Caption model state
-  const [captionModels, setCaptionModels] = useState<LocalCaptionModel[]>([])
-  const [defaultCaptionModel, setDefaultCaptionModel] = useState('')
-  const [loadingModels, setLoadingModels] = useState(true)
-
-  // Load caption models on mount
-  useEffect(() => {
-    const loadModels = async () => {
-      try {
-        const response = await aiApi.listLocalCaptionModels()
-        setCaptionModels(response.models.filter(m => m.supported))
-        setDefaultCaptionModel(response.default_model)
-      } catch (error) {
-        console.error('Failed to load caption models:', error)
-        // Fallback to hardcoded defaults if API fails
-        setCaptionModels([
-          { id: 'Salesforce/blip-image-captioning-large', name: 'BLIP Large', size_mb: 1880, supported: true, description: 'High quality captioning' },
-          { id: 'lmz/candle-blip', name: 'BLIP Large (Quantized)', size_mb: 271, supported: true, description: 'Faster CPU inference' },
-        ])
-        setDefaultCaptionModel('Salesforce/blip-image-captioning-large')
-      } finally {
-        setLoadingModels(false)
-      }
-    }
-    loadModels()
-  }, [])
 
   // Initialize matcher value from rule
   useEffect(() => {
@@ -777,159 +739,32 @@ function RuleEditor({ rule, onSave, onCancel, saving }: RuleEditorProps) {
                 </div>
               </label>
 
-              {/* Image Captioning */}
-              <div className="space-y-2">
-                <label className="flex items-center gap-3 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={settings.generate_image_caption || false}
-                    onChange={(e) =>
-                      setSettings({
-                        ...settings,
-                        generate_image_caption: e.target.checked,
-                        // Reset model when unchecking
-                        caption_model: e.target.checked ? settings.caption_model : undefined,
-                      })
-                    }
-                    className="w-4 h-4 rounded border-white/20 bg-white/5 text-purple-500"
-                  />
-                  <div>
-                    <span className="text-white font-medium">Generate Image Captions</span>
-                    <p className="text-gray-400 text-xs">Auto-generate alt text for images</p>
-                  </div>
-                </label>
+              {/*
+                NO CAPTIONING CONTROLS HERE.
 
-                {/* Caption Model Selector (shown when caption generation is enabled) */}
-                {settings.generate_image_caption && (
-                  <div className="ml-7 mt-2">
-                    <label className="block text-sm text-gray-300 mb-1">
-                      Caption Model <span className="text-gray-500">(optional override)</span>
-                    </label>
-                    <select
-                      value={settings.caption_model || ''}
-                      onChange={(e) =>
-                        setSettings({
-                          ...settings,
-                          caption_model: e.target.value || undefined,
-                          // Clear custom prompts when switching to BLIP (which doesn't support them)
-                          alt_text_prompt: e.target.value?.toLowerCase().includes('blip') ? undefined : settings.alt_text_prompt,
-                          description_prompt: e.target.value?.toLowerCase().includes('blip') ? undefined : settings.description_prompt,
-                        })
-                      }
-                      disabled={loadingModels}
-                      className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 disabled:opacity-50"
-                    >
-                      <option value="" className="bg-gray-900">
-                        Use tenant default ({defaultCaptionModel.split('/').pop()})
-                      </option>
-                      {captionModels.map((model) => (
-                        <option key={model.id} value={model.id} className="bg-gray-900">
-                          {model.name} ({model.size_mb} MB)
-                        </option>
-                      ))}
-                    </select>
-                    <p className="text-gray-500 text-xs mt-1">
-                      Override the tenant-level default caption model for this rule
-                    </p>
+                Six of them used to live at this spot — Generate Image Captions,
+                a caption-model picker, an alt-text prompt, a description
+                prompt, Generate Keywords and a keywords prompt. Every one of
+                them wrote a setting that NOTHING read: the engine answered all
+                six with a single `tracing::warn!` saying captioning is disabled
+                and to use a trigger function instead. An operator could turn
+                captioning on, watch it save, and get nothing, with the only
+                evidence in a log they were not reading.
 
-                    {/* Custom Prompts & Keywords (Moondream only) */}
-                    {(!settings.caption_model || settings.caption_model.toLowerCase().includes('moondream')) && (
-                      <div className="mt-4 p-3 bg-white/5 rounded-lg border border-white/10">
-                        <p className="text-sm text-purple-300 font-medium mb-3">
-                          Custom Prompts <span className="text-gray-500 font-normal">(Moondream only)</span>
-                        </p>
+                Captioning is a product-layer feature now: a trigger function on
+                asset update that picks its own model and prompt, calls
+                raisin.ai.completion with an image content part, and writes
+                description / alt_text / keywords back. Core's half is that
+                those three fields on raisin:Asset are Vector-indexed, so
+                whatever the trigger writes becomes semantically searchable
+                through the ordinary write path.
 
-                        <div className="space-y-3">
-                          <div>
-                            <label className="block text-xs text-gray-400 mb-1">
-                              Alt-Text Prompt
-                            </label>
-                            <input
-                              type="text"
-                              value={settings.alt_text_prompt || ''}
-                              onChange={(e) =>
-                                setSettings({
-                                  ...settings,
-                                  alt_text_prompt: e.target.value || undefined,
-                                })
-                              }
-                              placeholder="Describe this image briefly in one sentence for accessibility."
-                              className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder-gray-500 text-sm focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20"
-                            />
-                          </div>
-
-                          <div>
-                            <label className="block text-xs text-gray-400 mb-1">
-                              Description Prompt
-                            </label>
-                            <input
-                              type="text"
-                              value={settings.description_prompt || ''}
-                              onChange={(e) =>
-                                setSettings({
-                                  ...settings,
-                                  description_prompt: e.target.value || undefined,
-                                })
-                              }
-                              placeholder="Describe this image in detail."
-                              className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder-gray-500 text-sm focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20"
-                            />
-                          </div>
-                        </div>
-
-                        <p className="text-gray-500 text-xs mt-2">
-                          Leave empty to use default prompts. Custom prompts let you tailor the AI's output for your specific use case.
-                        </p>
-
-                        {/* Keywords Generation */}
-                        <div className="mt-4 pt-3 border-t border-white/10">
-                          <label className="flex items-center gap-3 cursor-pointer">
-                            <input
-                              type="checkbox"
-                              checked={settings.generate_keywords || false}
-                              onChange={(e) =>
-                                setSettings({
-                                  ...settings,
-                                  generate_keywords: e.target.checked,
-                                  keywords_prompt: e.target.checked ? settings.keywords_prompt : undefined,
-                                })
-                              }
-                              className="w-4 h-4 rounded border-white/20 bg-white/5 text-purple-500"
-                            />
-                            <div>
-                              <span className="text-white font-medium text-sm">Generate Keywords</span>
-                              <p className="text-gray-400 text-xs">Extract descriptive keywords from images</p>
-                            </div>
-                          </label>
-
-                          {settings.generate_keywords && (
-                            <div className="mt-3 ml-7">
-                              <label className="block text-xs text-gray-400 mb-1">
-                                Keywords Prompt
-                              </label>
-                              <input
-                                type="text"
-                                value={settings.keywords_prompt || ''}
-                                onChange={(e) =>
-                                  setSettings({
-                                    ...settings,
-                                    keywords_prompt: e.target.value || undefined,
-                                  })
-                                }
-                                placeholder="List 5-10 keywords that describe this image, separated by commas."
-                                className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder-gray-500 text-sm focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20"
-                              />
-                              <p className="text-gray-500 text-xs mt-1">
-                                Keywords will be stored as an array on the node for search and filtering.
-                              </p>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
+                The settings were removed from ProcessingSettings and from the
+                job payload in the same change as these controls — deliberately
+                together, because dropping the UI alone would leave them still
+                deserializing off stored rules and still serializing into every
+                job, invisible from both ends.
+              */}
 
               {/* PDF Strategy */}
               <div>

@@ -17,15 +17,81 @@ use serde::{Deserialize, Serialize};
 /// Options for asset processing jobs
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct AssetProcessingOptions {
-    /// Extract text from PDF files
+    /// The task slugs this job was asked to run, already filtered to the ones
+    /// this process can actually perform.
+    ///
+    /// Resolved at enqueue time by `raisin_ai::plan_tasks` from the matched
+    /// processing rule, so it — not the booleans below — is the authoritative
+    /// record of what the routing table decided. The booleans are kept as the
+    /// dispatch shape the handler already reads and as the wire-compatible
+    /// spelling for jobs persisted before this field existed; they are a
+    /// PROJECTION of this list and must never be set independently of it.
+    ///
+    /// Empty on a job enqueued by an older binary, which is why the handler
+    /// still dispatches on the booleans rather than on this.
+    #[serde(default)]
+    pub tasks: Vec<String>,
+
+    /// Extract text from PDF files.
+    ///
+    /// "The routing table asked for text AND this process can read these
+    /// bytes." See [`Self::extract_text_requested`] for the other half.
     #[serde(default = "default_true")]
     pub extract_pdf_text: bool,
+
+    /// The routing table asked for text from this binary, WHETHER OR NOT
+    /// anything here can read it.
+    ///
+    /// # Why this is separate from `extract_pdf_text`
+    ///
+    /// It used to be one flag, computed as "wanted AND supported". That single
+    /// conjunction is what made a skip invisible: a `.docx` uploaded with no
+    /// media plugin loaded produced `extract_pdf_text = false`, which the
+    /// handler read as "nobody asked", so it wrote nothing at all — a node with
+    /// no text and no record that anything had been skipped, indistinguishable
+    /// from an empty document forever, and impossible to find later when a
+    /// plugin gains the format.
+    ///
+    /// Splitting the two lets the handler write the durable
+    /// `__extract_status = 'unsupported'` artifact for exactly the assets that
+    /// were asked for and could not be read. `wanted` is the question the
+    /// routing table answers; `supported` is the question this binary answers;
+    /// conflating them loses the difference between "not asked" and "asked and
+    /// skipped".
+    ///
+    /// Defaults to false so a job persisted by an older binary keeps its old
+    /// behaviour (no artifact) rather than mass-labelling a backlog
+    /// `unsupported` on the strength of a field it never set.
+    #[serde(default)]
+    pub extract_text_requested: bool,
+
+    /// Task slugs the routing table asked for that CANNOT run in this process —
+    /// typically a media-plugin transform on a server with no such plugin.
+    ///
+    /// Carried into the job rather than only logged at enqueue time, so the
+    /// artifact can name the reason an asset was skipped (`doc_to_markdown
+    /// needs media.doc.toMarkdown`) instead of recording a bare "unsupported"
+    /// that an operator has to correlate with a log line from hours earlier.
+    #[serde(default)]
+    pub blocked_tasks: Vec<String>,
     /// Generate image embeddings using CLIP
     #[serde(default)]
     pub generate_image_embedding: bool,
-    /// Generate image captions using BLIP
-    #[serde(default)]
-    pub generate_image_caption: bool,
+    // NO captioning fields. `generate_image_caption`, `caption_model`,
+    // `alt_text_prompt`, `description_prompt`, `generate_keywords` and
+    // `keywords_prompt` used to be serialized into every asset job and read by
+    // nothing — the handler answered all six with one warn line. They are gone
+    // from the rule settings, this payload, the handler and the console
+    // together, because removing any one of those alone leaves a state that is
+    // invisible from both ends: no UI, but still on the wire.
+    //
+    // Captioning is a product-layer feature (a trigger function picking its own
+    // model and prompt). Core's half is that `raisin:Asset`'s `description` /
+    // `alt_text` / `keywords` are Vector-indexed, so whatever such a trigger
+    // writes is semantically searchable through the ordinary write path.
+    //
+    // Serde ignores unknown fields, so a job persisted by an older binary still
+    // deserializes; the dead keys are dropped.
     /// PDF extraction strategy (auto, native, ocr)
     #[serde(default)]
     pub pdf_strategy: PdfExtractionStrategy,
@@ -39,24 +105,9 @@ pub struct AssetProcessingOptions {
     /// When set, prevents re-processing the same binary content
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<String>,
-    /// Model ID for image captioning
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub caption_model: Option<String>,
     /// Model ID for image embeddings
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding_model: Option<String>,
-    /// Custom prompt for alt-text generation (Moondream only)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub alt_text_prompt: Option<String>,
-    /// Custom prompt for description generation (Moondream only)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description_prompt: Option<String>,
-    /// Generate image keywords (Moondream only)
-    #[serde(default)]
-    pub generate_keywords: bool,
-    /// Custom prompt for keyword extraction (Moondream only)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub keywords_prompt: Option<String>,
 }
 
 fn default_true() -> bool {

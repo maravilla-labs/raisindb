@@ -55,6 +55,15 @@ pub(crate) fn create_document(
     doc.add_date(fields.updated_at, updated_at);
     doc.add_text(fields.name, name);
     doc.add_text(fields.content, content);
+    // The same text again, into this language's stemmed pair, so it is analysed
+    // with that language's stemmer. Absent for a language with no stemmer (ja,
+    // zh, ko, …) and for an index built before the pair existed — in both cases
+    // the neutral fields above are the whole story, which is what the searcher
+    // assumes too.
+    if let Some(stemmed) = fields.stemmed.get(language) {
+        doc.add_text(stemmed.name, name);
+        doc.add_text(stemmed.content, content);
+    }
     // Only written when the on-disk schema has the field (v2+); a pre-v2 index
     // omits shape_types until it is rebuilt.
     if let Some(shape_field) = fields.shape_types {

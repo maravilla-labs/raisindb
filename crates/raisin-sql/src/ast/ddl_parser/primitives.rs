@@ -77,6 +77,26 @@ pub(crate) fn identifier(input: &str) -> IResult<&str, &str> {
     .parse(input)
 }
 
+/// Parse the NAME of a schema object (nodetype / mixin / archetype / elementtype).
+///
+/// Accepts BOTH spellings, and every CREATE / ALTER / DROP parser for every
+/// schema-object kind goes through this one function, so the twelve sites
+/// cannot drift apart on what a name looks like:
+///
+/// - quoted, the form the docs use:  `'proof:Doc'` / `"proof:Doc"`
+/// - bare, the form every other SQL dialect lets you write: `proof:Doc`, `Doc`
+///
+/// A bare name is `ident[:ident]` — a namespace segment and a local segment.
+/// It deliberately stops at whitespace, `(` and `,`, so the clause parsers that
+/// follow still see their keywords.
+pub(crate) fn schema_object_name(input: &str) -> IResult<&str, &str> {
+    alt((
+        quoted_string,
+        recognize(pair(identifier, opt(pair(char(':'), identifier)))),
+    ))
+    .parse(input)
+}
+
 /// Parse a boolean literal: true or false
 pub(crate) fn boolean_literal(input: &str) -> IResult<&str, bool> {
     alt((

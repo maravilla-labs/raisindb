@@ -22,9 +22,14 @@ pub enum RuleMatcher {
         pattern: String,
     },
 
-    /// Matches nodes with a specific MIME type.
+    /// Matches nodes by MIME type, exactly or by family.
+    ///
+    /// This is the routing table's primary key: an asset pipeline is "route by
+    /// mimetype to a set of tasks", and the pattern here is the mimetype half.
+    /// See [`mime_matches`] for the accepted forms.
     MimeType {
-        /// The MIME type to match (e.g., "application/pdf", "image/png").
+        /// The MIME pattern to match: `application/pdf` (exact),
+        /// `image/*` (family), `image/` (legacy prefix), or `*` / `*/*` (any).
         mime_type: String,
     },
 
@@ -67,9 +72,11 @@ impl RuleMatcher {
                 }
             }
 
-            RuleMatcher::MimeType { mime_type } => {
-                context.mime_type.as_deref() == Some(mime_type.as_str())
-            }
+            RuleMatcher::MimeType { mime_type } => context
+                .mime_type
+                .as_deref()
+                .map(|actual| mime_matches(mime_type, actual))
+                .unwrap_or(false),
 
             RuleMatcher::Combined { matchers } => matchers.iter().all(|m| m.matches(context)),
 
@@ -142,6 +149,78 @@ impl RuleMatchContext {
         self.properties.insert(name.into(), value.into());
         self
     }
+}
+
+// =============================================================================
+// MIME Matching Helper
+// =============================================================================
+
+/// Match a MIME pattern from a processing rule against a node's actual MIME type.
+///
+/// # Why this is not `==`
+///
+/// It used to be. That made [`ProcessingRuleSet::default_rules`] ship an image
+/// rule matching the literal string `"image/"` — a value no asset can ever
+/// carry, because an upload's mime type is `image/png` or `image/jpeg`. The
+/// shipped default for every image in every installation therefore matched
+/// nothing, silently fell through to the catch-all rule, and
+/// `ProcessingSettings::image()` was unreachable code. There was also no way to
+/// write the rule correctly: exact equality cannot express a family, so an
+/// operator wanting "all images" had to enumerate every subtype they could
+/// think of and quietly miss `image/avif`.
+///
+/// A media pipeline routes by FAMILY far more often than by exact type — "every
+/// image gets a thumbnail", "every video gets a poster frame" — so the family
+/// form is the one that has to work.
+///
+/// # Accepted forms
+///
+/// * `application/pdf` — exact, case-insensitive.
+/// * `image/*` — family: any subtype of `image`.
+/// * `image/` — the same family, in the trailing-slash spelling the shipped
+///   defaults already used. Kept so existing persisted rule sets start working
+///   rather than needing a migration.
+/// * `*` or `*/*` — any mime type at all. (`RuleMatcher::All` matches a node
+///   with NO mime type too; this one still requires one to be present, which is
+///   how you say "any asset with bytes".)
+///
+/// Parameters after a `;` are ignored on the actual value, so
+/// `text/plain; charset=utf-8` matches the pattern `text/plain`. A pattern is
+/// never parameterised — an operator writing one would expect it to match, and
+/// silently never matching is the failure this function exists to end.
+///
+/// # Not a glob
+///
+/// Deliberately: `image/pn*` is not supported and matches nothing. MIME types
+/// are a two-level tree, not a path, and a partial-subtype pattern has no
+/// meaning anyone would agree on. Widening this to [`glob_match`] would also
+/// make `*` match across the `/`, so `image/*` would start matching
+/// `application/pdf`.
+pub fn mime_matches(pattern: &str, actual: &str) -> bool {
+    let pattern = pattern.trim();
+    // Strip parameters from the actual value only: `text/plain; charset=utf-8`.
+    let actual = actual.split(';').next().unwrap_or(actual).trim();
+
+    if pattern.is_empty() || actual.is_empty() {
+        return false;
+    }
+
+    if pattern == "*" || pattern == "*/*" {
+        return true;
+    }
+
+    // Family form: `image/*` or the legacy `image/`.
+    if let Some(family) = pattern
+        .strip_suffix("/*")
+        .or_else(|| pattern.strip_suffix('/'))
+    {
+        return actual
+            .split('/')
+            .next()
+            .is_some_and(|t| t.eq_ignore_ascii_case(family));
+    }
+
+    pattern.eq_ignore_ascii_case(actual)
 }
 
 // =============================================================================

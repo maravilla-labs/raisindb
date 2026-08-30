@@ -47,14 +47,24 @@ pub(super) fn fulltext_function_keywords() -> Vec<KeywordInfo> {
             category: KeywordCategory::SqlFunction,
             description: "Full-text search using Tantivy. Supports AND, OR, NOT, wildcards (*), fuzzy (~), phrases.".into(),
             syntax: Some("FULLTEXT_MATCH(query, language)".into()),
-            example: Some("SELECT * FROM nodes WHERE FULLTEXT_MATCH('rust AND database', 'english')".into()),
+            example: Some("SELECT * FROM nodes WHERE FULLTEXT_MATCH('rust AND database', 'en')".into()),
         },
         KeywordInfo {
             keyword: "FULLTEXT_SEARCH".into(),
             category: KeywordCategory::TableFunction,
-            description: "Table function for cross-workspace full-text search.".into(),
-            syntax: Some("FULLTEXT_SEARCH(query, language)".into()),
-            example: Some("SELECT * FROM FULLTEXT_SEARCH('content management', 'english')".into()),
+            description: "Full-text search. The workspace scope is REQUIRED: name one, \
+                 'a, b, c' for several, 'content-*' for a family, or 'ALL READABLE' for \
+                 every workspace you may read. Language is an ISO 639-1 code ('en', not \
+                 'english' -- the index stores two-letter codes)."
+                .into(),
+            syntax: Some(
+                "FULLTEXT_SEARCH(query, language, workspaces => '<scope>' [, limit => n])".into(),
+            ),
+            example: Some(
+                "SELECT * FROM FULLTEXT_SEARCH('content management', 'en', \
+                 workspaces => 'library', limit => 50)"
+                    .into(),
+            ),
         },
     ]
 }
@@ -67,22 +77,55 @@ pub(super) fn vector_function_keywords() -> Vec<KeywordInfo> {
             category: KeywordCategory::SqlFunction,
             description: "Generate embedding vector from text for similarity search.".into(),
             syntax: Some("EMBEDDING(text)".into()),
-            example: Some("SELECT * FROM KNN(EMBEDDING('find similar articles'), 10)".into()),
+            example: Some(
+                "SELECT * FROM KNN(EMBEDDING('find similar articles'), 10, \
+                 workspaces => 'ALL READABLE')"
+                    .into(),
+            ),
         },
         KeywordInfo {
             keyword: "KNN".into(),
             category: KeywordCategory::TableFunction,
-            description: "K-nearest neighbors vector search. Returns node_id and distance.".into(),
-            syntax: Some("KNN(vector, k)".into()),
-            example: Some("SELECT * FROM KNN(EMBEDDING('search query'), 10)".into()),
+            description: "Pure vector search: HYBRID_SEARCH with the full-text leg switched \
+                 off, same columns (full-text ones NULL), same row-level security. \
+                 Argument 1 is a text literal, EMBEDDING('<text>'), or a vector literal. \
+                 The workspace scope is REQUIRED."
+                .into(),
+            syntax: Some(
+                "KNN(query, limit, workspaces => '<scope>' [, max_distance => 0.9] \
+                 [, kind => 'text'|'image'|'all'])"
+                    .into(),
+            ),
+            example: Some(
+                "SELECT * FROM KNN(EMBEDDING('search query'), 10, \
+                 workspaces => 'ALL READABLE')"
+                    .into(),
+            ),
         },
         KeywordInfo {
             keyword: "HYBRID_SEARCH".into(),
             category: KeywordCategory::TableFunction,
-            description:
-                "Combined fulltext + vector search with RRF ranking. Returns merged results.".into(),
-            syntax: Some("HYBRID_SEARCH(query_text, limit)".into()),
-            example: Some("SELECT * FROM HYBRID_SEARCH('find articles about AI', 10)".into()),
+            description: "Full-text + vector search fused with Reciprocal Rank Fusion. The \
+                 workspace scope is REQUIRED and is part of the query text, so you can \
+                 always read the corpus off the statement: one name, 'a, b, c', a glob \
+                 'content-*', or 'ALL READABLE' for every workspace you may read (the \
+                 recommended RAG form). Set fulltext_weight => 0 for a cross-lingual query \
+                 whose lexical leg would only add noise, or vector_weight => 0 for keyword \
+                 search without an embedding provider. Each hit reports its own workspace \
+                 in workspace_id."
+                .into(),
+            syntax: Some(
+                "HYBRID_SEARCH(query, limit [, workspace], workspaces => '<scope>' \
+                 [, language => 'en'] [, vector_weight => 1.0] \
+                 [, fulltext_weight => 1.0] [, max_distance => 0.6] \
+                 [, kind => 'text'|'image'|'all'])"
+                    .into(),
+            ),
+            example: Some(
+                "SELECT * FROM HYBRID_SEARCH('find articles about AI', 10, \
+                 workspaces => 'library, handbook')"
+                    .into(),
+            ),
         },
         KeywordInfo {
             keyword: "NEIGHBORS".into(),

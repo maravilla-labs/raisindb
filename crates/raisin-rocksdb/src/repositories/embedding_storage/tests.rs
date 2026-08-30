@@ -34,6 +34,7 @@ fn create_test_embedding() -> EmbeddingData {
         chunk_content: Some("test content".to_string()),
         generated_at: Utc::now(),
         text_hash: 12345,
+        spec_hash: Some(12345),
         model: "test-model".to_string(),
         provider: EmbeddingProvider::OpenAI,
     }
@@ -90,6 +91,7 @@ fn test_revision_ordering() {
         chunk_content: Some("test content 1".to_string()),
         generated_at: Utc::now(),
         text_hash: 12345,
+        spec_hash: Some(12345),
         model: "test-model".to_string(),
         provider: EmbeddingProvider::OpenAI,
     };
@@ -105,6 +107,7 @@ fn test_revision_ordering() {
         chunk_content: Some("test content 2".to_string()),
         generated_at: Utc::now(),
         text_hash: 12345,
+        spec_hash: Some(12345),
         model: "test-model".to_string(),
         provider: EmbeddingProvider::OpenAI,
     };
@@ -381,4 +384,394 @@ fn a_node_embedded_by_two_embedders_is_listed_once() {
         "one node embedded twice must appear once, got {listed:?}",
     );
     assert_eq!(listed[0].0, "node-a");
+}
+
+/// `list_workspaces` is what lets an administrative operation cover the
+/// workspaces that actually hold embeddings instead of naming one by literal.
+///
+/// Before it existed, `HnswManagement` hardcoded `"staff"` and SQL's
+/// `REBUILD VECTOR INDEX` hardcoded `"default"`, while the embedding job writes
+/// under whichever workspace the node lives in — so a rebuild was a silent
+/// no-op for every other workspace.
+#[test]
+fn test_list_workspaces_finds_every_workspace_holding_embeddings() {
+    let db = create_test_db();
+    let storage = RocksDBEmbeddingStorage::new(db);
+
+    let embedding = create_test_embedding();
+    let revision = HLC::new(42, 0);
+
+    // Three workspaces on the same branch. "marketing" is deliberately neither
+    // of the two literals the old code could name.
+    for (workspace, node) in [
+        ("default", "node-d"),
+        ("staff", "node-s"),
+        ("marketing", "node-m"),
+    ] {
+        storage
+            .store_embedding(
+                "tenant1", "repo1", "main", workspace, node, &revision, &embedding,
+            )
+            .unwrap();
+    }
+
+    let workspaces = storage.list_workspaces("tenant1", "repo1", "main").unwrap();
+
+    assert_eq!(
+        workspaces,
+        vec![
+            "default".to_string(),
+            "marketing".to_string(),
+            "staff".to_string()
+        ],
+        "every workspace holding an embedding must be listed, sorted"
+    );
+}
+
+/// A workspace with many embeddings is reported once, and enumeration does not
+/// leak across branch or tenant.
+#[test]
+fn test_list_workspaces_dedups_and_respects_scope() {
+    let db = create_test_db();
+    let storage = RocksDBEmbeddingStorage::new(db);
+
+    let embedding = create_test_embedding();
+
+    // Same workspace, several nodes and several revisions.
+    for node in ["n1", "n2", "n3"] {
+        for counter in 0..3u64 {
+            storage
+                .store_embedding(
+                    "tenant1",
+                    "repo1",
+                    "main",
+                    "content",
+                    node,
+                    &HLC::new(100 + counter, counter),
+                    &embedding,
+                )
+                .unwrap();
+        }
+    }
+
+    // Neighbours that must NOT show up: another branch, another repo, another
+    // tenant. Each uses a workspace name unique to it, so a leak is visible.
+    storage
+        .store_embedding(
+            "tenant1",
+            "repo1",
+            "other-branch",
+            "branch-only",
+            "n9",
+            &HLC::new(1, 0),
+            &embedding,
+        )
+        .unwrap();
+    storage
+        .store_embedding(
+            "tenant1",
+            "other-repo",
+            "main",
+            "repo-only",
+            "n9",
+            &HLC::new(1, 0),
+            &embedding,
+        )
+        .unwrap();
+    storage
+        .store_embedding(
+            "other-tenant",
+            "repo1",
+            "main",
+            "tenant-only",
+            "n9",
+            &HLC::new(1, 0),
+            &embedding,
+        )
+        .unwrap();
+
+    let workspaces = storage.list_workspaces("tenant1", "repo1", "main").unwrap();
+
+    assert_eq!(
+        workspaces,
+        vec!["content".to_string()],
+        "nine embeddings in one workspace is one entry, and no neighbour scope leaks in"
+    );
+}
+
+/// Seed one chunk row exactly as the embedding job writes it: the DOCUMENT's
+/// source id, distinguished by the chunk index.
+fn store_chunk(
+    storage: &RocksDBEmbeddingStorage,
+    node_id: &str,
+    index: usize,
+    total: usize,
+    revision: &HLC,
+) {
+    let data = EmbeddingData {
+        chunk_index: index,
+        total_chunks: total,
+        ..embedding_for(node_id, vec![0.1, 0.2, 0.3])
+    };
+    storage
+        .store_embedding("t", "r", "main", "ws", node_id, revision, &data)
+        .unwrap();
+}
+
+fn embedder_hash() -> String {
+    raisin_ai::config::EmbedderId::new("openai", "test-model", 3).to_key_hash()
+}
+
+fn chunk_indexes(storage: &RocksDBEmbeddingStorage, node_id: &str, revision: &HLC) -> Vec<usize> {
+    let mut indexes: Vec<usize> = storage
+        .list_source_chunks("t", "r", "main", "ws", &embedder_hash(), 'T', node_id)
+        .unwrap()
+        .into_iter()
+        .filter(|(_, rev)| rev == revision)
+        .map(|(idx, _)| idx)
+        .collect();
+    indexes.sort_unstable();
+    indexes
+}
+
+/// Re-chunking a document into FEWER pieces must not leave the surplus rows of
+/// the SAME revision behind, and must not touch the rows of an older one.
+///
+/// This is the whole distinction the sweep has to get right. The key carries the
+/// revision, so an older revision's chunk set is that revision's correct content
+/// and is retained by design; a chunk of the revision being written that the new
+/// chunking no longer produces is an orphan that will otherwise keep matching
+/// queries forever — and be read straight back out of RocksDB by anything that
+/// rebuilds from storage.
+#[test]
+fn the_orphan_sweep_prunes_this_revision_and_spares_history() {
+    let db = create_test_db();
+    let storage = RocksDBEmbeddingStorage::new(db);
+    let hash = embedder_hash();
+
+    let old_revision = HLC::new(100, 0);
+    let revision = HLC::new(200, 0);
+
+    // An earlier revision embedded the document in 4 chunks.
+    for i in 0..4 {
+        store_chunk(&storage, "doc", i, 4, &old_revision);
+    }
+    // So did an earlier run at THIS revision, before the chunking changed.
+    for i in 0..4 {
+        store_chunk(&storage, "doc", i, 4, &revision);
+    }
+    // A neighbouring node id that shares a prefix — deleting it would be data
+    // loss.
+    store_chunk(&storage, "document", 0, 1, &revision);
+
+    // The new chunking writes 2.
+    for i in 0..2 {
+        store_chunk(&storage, "doc", i, 2, &revision);
+    }
+
+    let pruned = storage
+        .prune_chunks_from("t", "r", "main", "ws", &hash, 'T', "doc", 2, &revision)
+        .unwrap();
+
+    assert_eq!(
+        pruned,
+        vec![2, 3],
+        "only the surplus chunks of the revision being written are orphans"
+    );
+    assert_eq!(
+        chunk_indexes(&storage, "doc", &revision),
+        vec![0, 1],
+        "what remains at this revision is exactly the new chunking"
+    );
+    assert_eq!(
+        chunk_indexes(&storage, "doc", &old_revision),
+        vec![0, 1, 2, 3],
+        "the older revision is that revision's content, not an orphan"
+    );
+    assert_eq!(
+        chunk_indexes(&storage, "document", &revision),
+        vec![0],
+        "a node id that merely shares a prefix must not be swept"
+    );
+}
+
+/// `get_chunk` addresses ONE chunk of ONE embedder — neither of which
+/// `get_embedding` can express, which is why it answers a chunked document with
+/// chunk 0 and a two-model node with whichever row it meets first.
+#[test]
+fn get_chunk_addresses_one_chunk_of_one_embedder() {
+    let db = create_test_db();
+    let storage = RocksDBEmbeddingStorage::new(db);
+    let revision = HLC::new(100, 0);
+    let hash = embedder_hash();
+
+    for i in 0..3 {
+        store_chunk(&storage, "doc", i, 3, &revision);
+    }
+
+    for i in 0..3 {
+        let got = storage
+            .get_chunk(
+                "t",
+                "r",
+                "main",
+                "ws",
+                &hash,
+                'T',
+                "doc",
+                i,
+                Some(&revision),
+            )
+            .unwrap()
+            .expect("chunk must be readable at its own index");
+        assert_eq!(got.chunk_index, i);
+    }
+    assert!(
+        storage
+            .get_chunk(
+                "t",
+                "r",
+                "main",
+                "ws",
+                &hash,
+                'T',
+                "doc",
+                3,
+                Some(&revision)
+            )
+            .unwrap()
+            .is_none(),
+        "a chunk index that was never written must read as absent"
+    );
+
+    // Another model embedded the same node; asking about ours must not return
+    // its vector, and vice versa.
+    let other = raisin_ai::config::EmbedderId::new("ollama", "other-model", 3);
+    let mut foreign = embedding_for("solo", vec![9.0, 9.0, 9.0]);
+    foreign.embedder_id = other.clone();
+    storage
+        .store_embedding("t", "r", "main", "ws", "solo", &revision, &foreign)
+        .unwrap();
+
+    assert!(
+        storage
+            .get_chunk(
+                "t",
+                "r",
+                "main",
+                "ws",
+                &hash,
+                'T',
+                "solo",
+                0,
+                Some(&revision)
+            )
+            .unwrap()
+            .is_none(),
+        "the node is embedded, but not by the model asked about"
+    );
+    assert!(storage
+        .get_chunk(
+            "t",
+            "r",
+            "main",
+            "ws",
+            &other.to_key_hash(),
+            'T',
+            "solo",
+            0,
+            Some(&revision)
+        )
+        .unwrap()
+        .is_some());
+}
+
+/// A branch with no embeddings at all enumerates to nothing — not to a
+/// hardcoded guess.
+#[test]
+fn test_list_workspaces_is_empty_when_nothing_is_embedded() {
+    let db = create_test_db();
+    let storage = RocksDBEmbeddingStorage::new(db);
+
+    let workspaces = storage.list_workspaces("tenant1", "repo1", "main").unwrap();
+
+    assert!(
+        workspaces.is_empty(),
+        "expected no workspaces, got {workspaces:?}"
+    );
+}
+
+/// Every scan of this CF must reach EVERY row under its prefix, not just the
+/// first — at all three prefix lengths it is scanned at.
+///
+/// The wanted row is deliberately never the first key under the prefix, so a
+/// scan that stops early fails here. That is the failure mode `scan_from`'s
+/// explicit seek is defending against (see its doc comment): the day this CF
+/// gains a prefix extractor, `prefix_iterator_cf` would cut each of these
+/// scans short at a boundary the extractor chose, and all three symptoms are
+/// silent —
+///
+/// * `list_source_chunk_indexes` under-reporting a chunked source as having
+///   ONE vector. `VECTOR_OF` reads "unambiguous" out of that count, so a wrong
+///   1 is exactly the silent chunk-0 pick the feature exists to refuse;
+/// * `get_embedding` answering NULL for every node in a workspace but the one
+///   holding the first key;
+/// * `list_workspaces` reporting one workspace, so an administrative rebuild
+///   skips the rest of the branch.
+#[test]
+fn a_prefix_scan_reaches_every_row_not_only_the_first() {
+    let db = create_test_db();
+    let storage = RocksDBEmbeddingStorage::new(db);
+    let revision = HLC::new(100, 0);
+    let hash = embedder_hash();
+
+    // One chunked source ...
+    for i in 0..5 {
+        store_chunk(&storage, "chunky", i, 5, &revision);
+    }
+    // ... and several single-vector sources sharing the workspace prefix, so
+    // the wanted row is not the first key under it.
+    for node in ["aaa", "bbb", "ccc", "zzz"] {
+        store_chunk(&storage, node, 0, 1, &revision);
+    }
+
+    assert_eq!(
+        storage
+            .list_source_chunk_indexes("t", "r", "main", "ws", &hash, 'T', "chunky")
+            .unwrap(),
+        vec![0, 1, 2, 3, 4],
+        "a five-chunk source must report five chunks; reporting 1 is what makes \
+         VECTOR_OF believe a chunked document is unambiguous"
+    );
+
+    for node in ["aaa", "bbb", "ccc", "zzz", "chunky"] {
+        assert!(
+            storage
+                .get_embedding("t", "r", "main", "ws", node, None)
+                .unwrap()
+                .is_some(),
+            "every node with a stored vector must read one back, not just the \
+             one holding the first key in the workspace ({node})"
+        );
+    }
+
+    // And the same scan one segment higher: several workspaces under a branch.
+    for ws in ["alpha", "beta", "gamma"] {
+        let data = embedding_for("solo", vec![0.1, 0.2, 0.3]);
+        storage
+            .store_embedding("t", "r", "main", ws, "solo", &revision, &data)
+            .unwrap();
+    }
+    let mut workspaces = storage.list_workspaces("t", "r", "main").unwrap();
+    workspaces.sort();
+    assert_eq!(
+        workspaces,
+        vec![
+            "alpha".to_string(),
+            "beta".to_string(),
+            "gamma".to_string(),
+            "ws".to_string()
+        ],
+        "every workspace holding an embedding must be listed"
+    );
 }

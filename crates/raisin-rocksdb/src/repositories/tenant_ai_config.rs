@@ -36,6 +36,42 @@ impl TenantAIConfigRepository {
         Self { db }
     }
 
+    /// Read a tenant's AI config WITHOUT an await point.
+    ///
+    /// `TenantAIConfigStore::get_config` is `async` only because the trait is;
+    /// its body is a plain `get_cf`. The HNSW engine's index-spec resolver runs
+    /// on the cache-MISS path of `get_or_load_index`, which is called from
+    /// `spawn_blocking` job handlers and from inside a synchronous read lock, so
+    /// it cannot await — and it needs this row to name the index partition of a
+    /// tenant that uses the unified provider. So the synchronous body is
+    /// factored out here and the async trait method delegates to it. One read,
+    /// one deserialisation, two entry points.
+    pub fn get_config_blocking(&self, tenant_id: &str) -> Result<TenantAIConfig> {
+        let cf = self.cf_handle()?;
+        let key = tenant_id.as_bytes();
+
+        match self.db.get_cf(cf, key) {
+            Ok(Some(bytes)) => {
+                // Deserialize using MessagePack
+                let config: TenantAIConfig = rmp_serde::from_slice(&bytes)
+                    .map_err(|e| StorageError::DeserializationError(e.to_string()))?;
+
+                Ok(config)
+            }
+            Ok(None) => Err(StorageError::NotFound(tenant_id.to_string())),
+            Err(e) => {
+                error!(
+                    "Failed to retrieve AI config for tenant {}: {}",
+                    tenant_id, e
+                );
+                Err(StorageError::BackendError(format!(
+                    "Failed to read from storage: {}",
+                    e
+                )))
+            }
+        }
+    }
+
     /// Get the column family handle for tenant AI configs.
     fn cf_handle(&self) -> Result<&rocksdb::ColumnFamily> {
         self.db
@@ -52,34 +88,15 @@ impl TenantAIConfigRepository {
 #[async_trait]
 impl TenantAIConfigStore for TenantAIConfigRepository {
     async fn get_config(&self, tenant_id: &str) -> Result<TenantAIConfig> {
-        let cf = self.cf_handle()?;
-        let key = tenant_id.as_bytes();
-
-        match self.db.get_cf(cf, key) {
-            Ok(Some(bytes)) => {
-                info!("Retrieved AI config for tenant: {}", tenant_id);
-
-                // Deserialize using MessagePack
-                let config: TenantAIConfig = rmp_serde::from_slice(&bytes)
-                    .map_err(|e| StorageError::DeserializationError(e.to_string()))?;
-
-                Ok(config)
+        let result = self.get_config_blocking(tenant_id);
+        match &result {
+            Ok(_) => info!("Retrieved AI config for tenant: {}", tenant_id),
+            Err(StorageError::NotFound(_)) => {
+                info!("No AI config found for tenant: {}", tenant_id)
             }
-            Ok(None) => {
-                info!("No AI config found for tenant: {}", tenant_id);
-                Err(StorageError::NotFound(tenant_id.to_string()))
-            }
-            Err(e) => {
-                error!(
-                    "Failed to retrieve AI config for tenant {}: {}",
-                    tenant_id, e
-                );
-                Err(StorageError::BackendError(format!(
-                    "Failed to read from storage: {}",
-                    e
-                )))
-            }
+            Err(_) => {}
         }
+        result
     }
 
     async fn set_config(&self, config: &TenantAIConfig) -> Result<()> {

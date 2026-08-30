@@ -220,15 +220,71 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
                 Error::Validation("No embedding configuration found for this tenant".to_string())
             })?;
 
-        let api_key = self.decrypt_api_key(&config)?;
+        // Resolution goes through the ONE resolver, the same one the embedding
+        // job handler uses. That is the whole point of this statement: a green
+        // "Connection successful" here must mean the job will succeed. It used
+        // to demand an API key unconditionally and ignore `ai_provider_ref`
+        // entirely, so it disagreed with the job in both directions — a
+        // keyless Ollama config was rejected here and worked there, and a
+        // console-configured unified ref was tested against the stale legacy
+        // fields.
+        let master_key = self.master_key.as_ref().ok_or_else(|| {
+            Error::Validation("Master key not configured, cannot resolve provider".to_string())
+        })?;
 
-        let provider = raisin_embeddings::create_provider_with_url(
-            &config.provider,
-            &api_key,
-            &config.model,
-            config.base_url.as_deref(),
-        )
-        .map_err(|e| Error::Backend(format!("Failed to create embedding provider: {}", e)))?;
+        let ai_config = if config.uses_unified_provider() {
+            let store = self.ai_config_store.as_ref().ok_or_else(|| {
+                Error::Validation("AI provider config store not available".to_string())
+            })?;
+            Some(
+                store
+                    .get_config(&self.tenant_id)
+                    .await
+                    .map_err(|e| Error::Backend(format!("Failed to read AI config: {}", e)))?,
+            )
+        } else {
+            None
+        };
+
+        // `resolve_settings` first, so the row can name the model the job will
+        // actually request. `config.model` is stale by construction under a
+        // unified `ai_provider_ref`, so reporting it would have this statement
+        // announce a successful test against a model it never called.
+        let resolved =
+            match raisin_embeddings::resolve_settings(&config, ai_config.as_ref(), master_key) {
+                Ok(r) => r,
+                // A resolution failure IS the test result — reporting it as a
+                // statement error would hide exactly the misconfiguration this
+                // statement exists to surface.
+                Err(e) => {
+                    let mut row = Row::new();
+                    row.insert(
+                        "result".to_string(),
+                        PropertyValue::String(format!("Connection failed: {}", e)),
+                    );
+                    row.insert(
+                        "model".to_string(),
+                        PropertyValue::String(config.model.clone()),
+                    );
+                    row.insert("success".to_string(), PropertyValue::Boolean(false));
+                    return Ok(Box::pin(stream::once(async move { Ok(row) })));
+                }
+            };
+
+        let model = resolved.model.clone();
+        let provider = match resolved.build() {
+            Ok(p) => p,
+            Err(e) => {
+                let mut row = Row::new();
+                row.insert(
+                    "result".to_string(),
+                    PropertyValue::String(format!("Connection failed: {}", e)),
+                );
+                row.insert("model".to_string(), PropertyValue::String(model));
+                row.insert("success".to_string(), PropertyValue::Boolean(false));
+                return Ok(Box::pin(stream::once(async move { Ok(row) })));
+            }
+        };
 
         match provider.test_connection().await {
             Ok(dimensions) => {
@@ -241,10 +297,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
                     "dimensions".to_string(),
                     PropertyValue::Integer(dimensions as i64),
                 );
-                row.insert(
-                    "model".to_string(),
-                    PropertyValue::String(config.model.clone()),
-                );
+                row.insert("model".to_string(), PropertyValue::String(model));
                 row.insert("success".to_string(), PropertyValue::Boolean(true));
                 Ok(Box::pin(stream::once(async move { Ok(row) })))
             }
@@ -254,6 +307,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
                     "result".to_string(),
                     PropertyValue::String(format!("Connection failed: {}", e)),
                 );
+                row.insert("model".to_string(), PropertyValue::String(model));
                 row.insert("success".to_string(), PropertyValue::Boolean(false));
                 Ok(Box::pin(stream::once(async move { Ok(row) })))
             }
@@ -381,72 +435,67 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         self.execute_test_embedding_connection().await
     }
 
+    /// `REBUILD VECTOR INDEX`
+    ///
+    /// Delegates to `HnswManagement::rebuild_index` — the SAME implementation
+    /// the HTTP management endpoint uses. This used to be a second, drifted
+    /// copy of that loop which:
+    ///   * hardcoded the workspace to `"default"` (management hardcoded
+    ///     `"staff"`), so it rebuilt nothing for content living anywhere else,
+    ///     while the embedding job indexes whatever workspace the node is in;
+    ///   * never compared a stored vector's width to the configured one, so a
+    ///     width change silently produced an index the engine then rejected;
+    ///   * discarded both the fetch error and the insert error (`if let Ok`,
+    ///     `let _ =`); and
+    ///   * reported the number of embeddings LISTED, not added — which is how
+    ///     "Vector index rebuilt with 6 embeddings" could sit next to
+    ///     `SHOW VECTOR INDEX HEALTH -> count: 0`.
     async fn execute_rebuild_vector_index(&self) -> Result<RowStream, Error> {
         let engine = self
             .hnsw_engine
             .as_ref()
             .ok_or_else(|| Error::Validation("HNSW engine not configured".to_string()))?;
 
-        let branch = self.effective_branch().await;
-
-        // Purge existing index
-        engine
-            .purge_index(&self.tenant_id, &self.repo_id, &branch, "default")
-            .map_err(|e| Error::Backend(format!("Failed to purge vector index: {}", e)))?;
-
-        // Get embedding config for dimensions
-        let store = self
+        let config_store = self
             .embedding_config_store
             .as_ref()
             .ok_or_else(|| Error::Validation("Embedding config store not available".to_string()))?;
-        let config = store
-            .get_config(&self.tenant_id)
-            .map_err(|e| Error::Backend(format!("Failed to read embedding config: {}", e)))?
-            .unwrap_or_else(|| {
-                raisin_embeddings::TenantEmbeddingConfig::new(self.tenant_id.clone())
-            });
 
-        // Create fresh index with configured dimensions
-        engine
-            .create_index_with_dimensions(
-                &self.tenant_id,
-                &self.repo_id,
-                &branch,
-                config.dimensions,
-            )
-            .map_err(|e| Error::Backend(format!("Failed to create new index: {}", e)))?;
+        let Some(ref emb_storage) = self.embedding_storage else {
+            return ai_config_ok(
+                "Vector index not rebuilt: no embedding storage available to read from.",
+            );
+        };
 
-        // Re-populate from embedding storage
-        if let Some(ref emb_storage) = self.embedding_storage {
-            let embeddings = emb_storage
-                .list_embeddings(&self.tenant_id, &self.repo_id, &branch, "default")
-                .map_err(|e| Error::Backend(format!("Failed to list embeddings: {}", e)))?;
+        let branch = self.effective_branch().await;
 
-            let count = embeddings.len();
-            for (node_id, revision) in &embeddings {
-                if let Ok(Some(data)) = emb_storage.get_embedding(
-                    &self.tenant_id,
-                    &self.repo_id,
-                    &branch,
-                    "default",
-                    node_id,
-                    Some(revision),
-                ) {
-                    let _ = engine.add_embedding(
-                        &self.tenant_id,
-                        &self.repo_id,
-                        &branch,
-                        "default",
-                        node_id,
-                        *revision,
-                        data.vector,
-                    );
-                }
-            }
+        let management = raisin_rocksdb::HnswManagement::from_stores(
+            engine.clone(),
+            emb_storage.clone(),
+            config_store.clone(),
+        );
 
-            ai_config_ok(format!("Vector index rebuilt with {} embeddings", count))
+        let stats = management
+            .rebuild_index(&self.tenant_id, &self.repo_id, &branch, None)
+            .await
+            .map_err(|e| Error::Backend(format!("Failed to rebuild vector index: {}", e)))?;
+
+        let where_ = if stats.workspaces.is_empty() {
+            "no workspaces hold embeddings".to_string()
         } else {
-            ai_config_ok("Vector index purged. No embedding storage available to repopulate.")
+            format!("workspaces: {}", stats.workspaces.join(", "))
+        };
+
+        if stats.errors > 0 {
+            ai_config_ok(format!(
+                "Vector index rebuilt: {} embeddings indexed, {} skipped ({})",
+                stats.items_processed, stats.errors, where_
+            ))
+        } else {
+            ai_config_ok(format!(
+                "Vector index rebuilt: {} embeddings indexed ({})",
+                stats.items_processed, where_
+            ))
         }
     }
 
@@ -490,12 +539,97 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         ))
     }
 
+    /// `SHOW VECTOR INDEX HEALTH` — one row per PARTITION.
+    ///
+    /// A branch holds one index per embedding space (`{embedder_hash}{kind}`),
+    /// so a single-row answer could only ever describe one of them, and an
+    /// operator cannot rebuild a partition they cannot see. The `partition`
+    /// column is the file stem on disk, so a row here names the thing
+    /// `REBUILD VECTOR INDEX` acts on.
+    ///
+    /// `quantization` and `metric` are the ones the graph was BUILT with, read
+    /// out of its `.hnsw.meta` sidecar — not the tenant's current config. That
+    /// distinction is the point: an index keeps the shape it was written with,
+    /// and comparing these two columns against the config is how an operator
+    /// finds out a setting has not taken effect yet.
     async fn execute_show_vector_index_health(&self) -> Result<RowStream, Error> {
-        if let Some(ref engine) = self.hnsw_engine {
-            let branch = self.effective_branch().await;
-            match engine.stats(&self.tenant_id, &self.repo_id, &branch) {
+        let Some(ref engine) = self.hnsw_engine else {
+            let mut row = Row::new();
+            row.insert(
+                "status".to_string(),
+                PropertyValue::String("unavailable".to_string()),
+            );
+            row.insert(
+                "details".to_string(),
+                PropertyValue::String("HNSW engine not configured".to_string()),
+            );
+            return ai_config_result_rows(vec![row]);
+        };
+
+        let branch = self.effective_branch().await;
+        let configured = engine.default_text_partition(&self.tenant_id, &self.repo_id, &branch);
+
+        let partitions = match engine.list_partitions(&self.tenant_id, &self.repo_id, &branch) {
+            Ok(p) => p,
+            Err(e) => {
+                let mut row = Row::new();
+                row.insert(
+                    "status".to_string(),
+                    PropertyValue::String("error".to_string()),
+                );
+                row.insert(
+                    "details".to_string(),
+                    PropertyValue::String(format!("{}", e)),
+                );
+                return ai_config_result_rows(vec![row]);
+            }
+        };
+
+        // No file on disk yet is not an error — it is what a branch that has
+        // never been embedded looks like. Report the partition the tenant WOULD
+        // write to, so the operator sees the identity even before the first
+        // vector exists.
+        if partitions.is_empty() {
+            let mut row = Row::new();
+            row.insert(
+                "status".to_string(),
+                PropertyValue::String("empty".to_string()),
+            );
+            row.insert(
+                "partition".to_string(),
+                PropertyValue::String(
+                    configured
+                        .map(|p| p.to_string())
+                        .unwrap_or_else(|| "(unresolved)".to_string()),
+                ),
+            );
+            row.insert("count".to_string(), PropertyValue::Integer(0));
+            row.insert(
+                "details".to_string(),
+                PropertyValue::String(
+                    "no vector index has been written for this branch yet".to_string(),
+                ),
+            );
+            return ai_config_result_rows(vec![row]);
+        }
+
+        let mut rows = Vec::with_capacity(partitions.len());
+        for partition in partitions {
+            let mut row = Row::new();
+            row.insert(
+                "partition".to_string(),
+                PropertyValue::String(partition.to_string()),
+            );
+            // Which of these the SQL query path actually reads. With more than
+            // one partition present, "queried the wrong partition" is a new
+            // cause of zero results and this column is what distinguishes it.
+            row.insert(
+                "queried".to_string(),
+                PropertyValue::Boolean(configured.as_ref() == Some(&partition)),
+            );
+
+            match engine.stats(&self.tenant_id, &self.repo_id, &branch, &partition) {
                 Ok(stats) => {
-                    let mut row = Row::new();
                     row.insert(
                         "status".to_string(),
                         PropertyValue::String("available".to_string()),
@@ -512,10 +646,16 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
                         "memory_bytes".to_string(),
                         PropertyValue::Integer(stats.memory_bytes as i64),
                     );
-                    ai_config_result_rows(vec![row])
+                    row.insert(
+                        "quantization".to_string(),
+                        PropertyValue::String(stats.quantization.to_string()),
+                    );
+                    row.insert(
+                        "metric".to_string(),
+                        PropertyValue::String(stats.distance_metric.to_string()),
+                    );
                 }
                 Err(e) => {
-                    let mut row = Row::new();
                     row.insert(
                         "status".to_string(),
                         PropertyValue::String("error".to_string()),
@@ -524,21 +664,12 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
                         "details".to_string(),
                         PropertyValue::String(format!("{}", e)),
                     );
-                    ai_config_result_rows(vec![row])
                 }
             }
-        } else {
-            let mut row = Row::new();
-            row.insert(
-                "status".to_string(),
-                PropertyValue::String("unavailable".to_string()),
-            );
-            row.insert(
-                "details".to_string(),
-                PropertyValue::String("HNSW engine not configured".to_string()),
-            );
-            ai_config_result_rows(vec![row])
+            rows.push(row);
         }
+
+        ai_config_result_rows(rows)
     }
 
     async fn execute_verify_vector_index(&self) -> Result<RowStream, Error> {
@@ -549,18 +680,56 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
 
         let branch = self.effective_branch().await;
 
-        // Get HNSW index count
-        let hnsw_count = match engine.stats(&self.tenant_id, &self.repo_id, &branch) {
-            Ok(stats) => stats.count,
-            Err(_) => 0,
-        };
+        // Get HNSW index count, summed over every PARTITION on the branch.
+        //
+        // Per-partition, because `list_embeddings` below counts every row in
+        // `cf::EMBEDDINGS` regardless of which embedder wrote it. Comparing a
+        // branch-wide row count against ONE partition's vector count would
+        // report a permanent mismatch the moment a second embedding space
+        // existed — the same shape of false alarm that the workspace fix
+        // removed from the other side of this comparison.
+        let partitions = engine
+            .list_partitions(&self.tenant_id, &self.repo_id, &branch)
+            .unwrap_or_default();
+        let hnsw_count: usize = partitions
+            .iter()
+            .filter_map(|p| {
+                engine
+                    .stats(&self.tenant_id, &self.repo_id, &branch, p)
+                    .ok()
+                    .map(|s| s.count)
+            })
+            .sum();
 
-        // Get embedding storage count
+        // Get embedding storage count.
+        //
+        // `engine.stats` above counts the whole branch, across every workspace.
+        // This side used to count only the workspace literally named "default",
+        // so any deployment with content elsewhere compared a branch-wide
+        // number against a one-workspace number and reported a permanent
+        // "mismatch" that no REBUILD could ever clear. Sum the same set the
+        // engine covers.
+        //
+        // And count INDEX ENTRIES, not nodes. `list_embeddings` returns one row
+        // per source, so a chunked corpus compared a per-node count against the
+        // index's per-chunk count: a healthy 31-vector index over 9 documents
+        // reported `mismatch 31/9` and told the operator to run a REBUILD — the
+        // one command that would then actually break it. `list_index_entries`
+        // is the unit the index stores, and it is the same list the rebuild
+        // iterates, so agreement here means the two really do agree.
         let storage_count = if let Some(ref emb_storage) = self.embedding_storage {
-            emb_storage
-                .list_embeddings(&self.tenant_id, &self.repo_id, &branch, "default")
-                .map(|list| list.len())
-                .unwrap_or(0)
+            match emb_storage.list_workspaces(&self.tenant_id, &self.repo_id, &branch) {
+                Ok(workspaces) => workspaces
+                    .iter()
+                    .map(|ws| {
+                        emb_storage
+                            .list_index_entries(&self.tenant_id, &self.repo_id, &branch, ws)
+                            .map(|list| list.len())
+                            .unwrap_or(0)
+                    })
+                    .sum(),
+                Err(_) => 0,
+            }
         } else {
             0
         };
@@ -593,24 +762,6 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         }
 
         ai_config_result_rows(vec![row])
-    }
-
-    fn decrypt_api_key(
-        &self,
-        config: &raisin_embeddings::TenantEmbeddingConfig,
-    ) -> Result<String, Error> {
-        let encrypted = config.api_key_encrypted.as_ref().ok_or_else(|| {
-            Error::Validation("No API key configured for this tenant".to_string())
-        })?;
-
-        let master_key = self.master_key.as_ref().ok_or_else(|| {
-            Error::Validation("Master key not configured, cannot decrypt API key".to_string())
-        })?;
-
-        let encryptor = ApiKeyEncryptor::new(master_key);
-        encryptor
-            .decrypt(encrypted)
-            .map_err(|e| Error::Backend(format!("Failed to decrypt API key: {}", e)))
     }
 }
 

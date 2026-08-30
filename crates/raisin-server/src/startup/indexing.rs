@@ -38,13 +38,38 @@ pub fn init_tantivy_engine(
 }
 
 /// Initialize the HNSW vector indexing engine.
+///
+/// The engine gets a per-partition SHAPE resolver, not a width. Width, distance
+/// metric and scalar quantization are all properties of the tenant's embedding
+/// configuration (768 for `nomic-embed-text`, 1024 for `bge-m3`, 1536 for
+/// OpenAI's small models), and they are already stored in
+/// `TenantEmbeddingConfig` — which the `EmbeddingGenerate` job handler and
+/// `REBUILD VECTOR INDEX` both read. Passing a constant here instead is what made a
+/// correctly configured tenant look broken: every generated vector reached
+/// `cf::EMBEDDINGS` and was then refused by an index built at somebody else's width,
+/// so vector queries returned nothing while the embedding count climbed.
+///
+/// The 512 MB cache budget is shared by every tenant AND, now, by every
+/// partition — a branch holds one index per embedding space. It only became a
+/// real bound with the re-weigh fix in `raisin-hnsw`: moka calls its weigher
+/// once at insert and never again, so a created index was pinned at ~0 bytes
+/// forever and a loaded one at its load-time size, and this number bounded
+/// nothing.
 #[cfg(feature = "storage-rocksdb")]
-pub fn init_hnsw_engine(hnsw_path: PathBuf) -> Arc<HnswIndexingEngine> {
+pub fn init_hnsw_engine(
+    hnsw_path: PathBuf,
+    storage: &Arc<raisin_rocksdb::RocksDBStorage>,
+) -> Arc<HnswIndexingEngine> {
     tracing::info!("Initializing HNSW engine (shared by API and job system)...");
 
     let cache_size = 512 * 1024 * 1024;
+    let spec_resolver = Arc::new(raisin_rocksdb::TenantEmbeddingSpecResolver::new(
+        storage.db().clone(),
+    ));
     let engine = Arc::new(
-        HnswIndexingEngine::new(hnsw_path, cache_size, 1536).expect("Failed to create HNSW engine"),
+        HnswIndexingEngine::new(hnsw_path, cache_size, raisin_hnsw::FALLBACK_DIMENSIONS)
+            .expect("Failed to create HNSW engine")
+            .with_spec_resolver(spec_resolver),
     );
 
     let _snapshot_handle = engine.start_snapshot_task();

@@ -81,6 +81,88 @@ pub fn filter_node(node: Node, auth: &AuthContext, scope: &PermissionScope) -> O
     None
 }
 
+/// Which of `candidates` this caller may read *at all*, as an UPPER BOUND.
+///
+/// The search table functions need the readable workspace set before they query
+/// an index, for two reasons that are not the same reason:
+///
+/// * **rank honesty** — Reciprocal Rank Fusion consumes *ranks*. A rank computed
+///   over a pool containing rows the caller can never see is a wrong rank,
+///   printed in a column named `fulltext_rank`. Over-fetching does not repair
+///   it; narrowing the pool before ranking does.
+/// * **recall** — every candidate slot spent on a workspace the caller cannot
+///   read is a slot that produced no row.
+///
+/// It lives here, next to [`filter_node`], because its early returns must MIRROR
+/// that function's exactly. They diverged once already in review: `permissions()
+/// == None` looks like "no restrictions" and is in fact a DENY here, matching
+/// `filter_node`. A resolver that got that backwards would hand a caller with
+/// unresolved permissions the whole repository.
+///
+/// # This is not authorisation
+///
+/// Workspace is ONE of four RLS dimensions (workspace, path, node_type, REL
+/// condition) plus field filtering. A workspace appearing in this set means only
+/// that *some* node in it might be readable — never that any particular node is.
+/// Every row still goes through [`filter_node`] / `filter_node_async`. Deleting
+/// the per-row check because "the scope is already restricted" is the way this
+/// becomes a read bypass.
+pub fn readable_workspaces(
+    auth: Option<&AuthContext>,
+    candidates: &[String],
+    branch: &str,
+) -> ReadableWorkspaces {
+    // No identity at all: the system/internal caller convention every scan
+    // executor and GRAPH_TABLE already use. Unfiltered.
+    let Some(auth) = auth else {
+        return ReadableWorkspaces::All;
+    };
+
+    if auth.is_system {
+        return ReadableWorkspaces::All;
+    }
+
+    // Deny, exactly as `filter_node` does above. NOT "no restrictions".
+    let Some(permissions) = auth.permissions() else {
+        return ReadableWorkspaces::Only(Vec::new());
+    };
+
+    if permissions.is_system_admin {
+        return ReadableWorkspaces::All;
+    }
+
+    // A permission's workspace is a GLOB, so this tests each candidate against
+    // each grant rather than enumerating the grants — `content-*` names no
+    // workspace but matches many. Pure CPU, O(candidates x permissions), and the
+    // matchers are compiled once and cached on the Permission.
+    let readable: Vec<String> = candidates
+        .iter()
+        .filter(|ws| {
+            let scope = PermissionScope::new(ws.as_str(), branch);
+            permissions.permissions.iter().any(|p| {
+                p.operations.contains(&Operation::Read) && p.scope_matcher().matches(&scope)
+            })
+        })
+        .cloned()
+        .collect();
+
+    ReadableWorkspaces::Only(readable)
+}
+
+/// Result of [`readable_workspaces`].
+///
+/// `All` and an empty `Only` are DIFFERENT and must stay different. Modelling
+/// this as `Option<Vec<String>>` and collapsing the empty vector to `None` turns
+/// "may read nothing" into "search everything" — a complete read-path bypass one
+/// keystroke away, in the same area that just closed one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadableWorkspaces {
+    /// Every candidate is readable; push no workspace filter.
+    All,
+    /// Exactly these are readable. An EMPTY vector means nothing is.
+    Only(Vec<String>),
+}
+
 /// Filter multiple nodes based on RLS rules.
 ///
 /// Returns only the nodes the user can read, with field filtering applied.

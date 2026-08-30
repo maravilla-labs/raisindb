@@ -145,8 +145,66 @@ impl<'a> AnalyzerContext<'a> {
                 self.analyze_is_distinct_from(left, right, true)
             }
 
+            // `ARRAY[0.1, 0.2, ...]` — the shape the FUNCTIONS runtime renders a
+            // bound JSON array into (`callbacks::sql_params::format_value`).
+            // An all-numeric one is a vector literal; anything else is still
+            // unsupported, so this widens nothing but the vector case.
+            //
+            // The SQL/HTTP substituter renders the same bound array as the TEXT
+            // `'[0.1,0.2]'` instead, which `vector_literal::parse_vector_text`
+            // recognises at the call site. Two renderings, one meaning — which
+            // is the point: before this, one surface embedded the string and the
+            // other returned `UnsupportedExpression`.
+            SqlExpr::Array(array) => self.analyze_array(&array.elem, expr),
+
             _ => Err(AnalysisError::UnsupportedExpression(format!("{:?}", expr))),
         }
+    }
+
+    /// An all-numeric `ARRAY[...]` becomes a [`Literal::Vector`].
+    ///
+    /// Deliberately narrow. A general SQL array type does not exist in this
+    /// analyzer, and inventing one here to carry a vector would be a second
+    /// notion of "a list of numbers" beside `Literal::Vector`. A non-numeric or
+    /// empty array therefore keeps the error it had before.
+    fn analyze_array(&self, elements: &[SqlExpr], original: &SqlExpr) -> Result<TypedExpr> {
+        use crate::analyzer::typed_expr::Literal;
+
+        let mut values: Vec<f32> = Vec::with_capacity(elements.len());
+        for element in elements {
+            let typed = self.analyze_expr(element)?;
+            let value = match &typed.expr {
+                Expr::Literal(Literal::Double(v)) => *v,
+                Expr::Literal(Literal::Int(v)) => *v as f64,
+                Expr::Literal(Literal::BigInt(v)) => *v as f64,
+                _ => {
+                    return Err(AnalysisError::UnsupportedExpression(format!(
+                        "{:?}",
+                        original
+                    )))
+                }
+            };
+            if !value.is_finite() {
+                return Err(AnalysisError::UnsupportedExpression(format!(
+                    "{:?}",
+                    original
+                )));
+            }
+            values.push(value as f32);
+        }
+
+        if values.is_empty() {
+            return Err(AnalysisError::UnsupportedExpression(format!(
+                "{:?}",
+                original
+            )));
+        }
+
+        let len = values.len();
+        Ok(TypedExpr::new(
+            Expr::Literal(Literal::Vector(values)),
+            DataType::Vector(len),
+        ))
     }
 
     /// Desugar `a IS [NOT] DISTINCT FROM b` into a NULL-safe boolean expression

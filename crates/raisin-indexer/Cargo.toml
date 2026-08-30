@@ -23,3 +23,8 @@ tantivy = "0.25.0"
 uuid = { version = "1.11.0", features = ["v4", "serde"] }
 tracing = "0.1"
 moka = { version = "0.12", features = ["sync"] }
+
+[dev-dependencies]
+# Used by tests/all/language_analysis.rs to fabricate a pre-v3 on-disk index and
+# prove the schema-version migration is an either/or, not a half-migration.
+tantivy = "0.25.0"

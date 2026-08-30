@@ -9,7 +9,10 @@ pub(super) fn statement_keywords() -> Vec<KeywordInfo> {
             keyword: "CREATE".into(),
             category: KeywordCategory::Statement,
             description: "Creates a new schema object (NODETYPE, ARCHETYPE, or ELEMENTTYPE)".into(),
-            syntax: Some("CREATE NODETYPE|ARCHETYPE|ELEMENTTYPE 'name' ...".into()),
+            syntax: Some(
+                "CREATE NODETYPE|ARCHETYPE|ELEMENTTYPE name ... (the name may be quoted or bare)"
+                    .into(),
+            ),
             example: Some(
                 "CREATE NODETYPE 'myapp:Article' PROPERTIES (title String REQUIRED)".into(),
             ),
@@ -42,7 +45,7 @@ pub(super) fn schema_object_keywords() -> Vec<KeywordInfo> {
             keyword: "NODETYPE".into(),
             category: KeywordCategory::SchemaObject,
             description: "Defines a node type schema with properties, inheritance, and behavior flags".into(),
-            syntax: Some("CREATE NODETYPE 'namespace:Name' [EXTENDS 'parent'] PROPERTIES (...)".into()),
+            syntax: Some("CREATE NODETYPE namespace:Name [EXTENDS 'parent'] PROPERTIES (...)   -- or the shorthand: CREATE NODETYPE namespace:Name (col Type MODIFIERS, ...)".into()),
             example: Some("CREATE NODETYPE 'cms:Article' EXTENDS 'raisin:Page' PROPERTIES (title String REQUIRED)".into()),
         },
         KeywordInfo {
@@ -56,7 +59,7 @@ pub(super) fn schema_object_keywords() -> Vec<KeywordInfo> {
             keyword: "ELEMENTTYPE".into(),
             category: KeywordCategory::SchemaObject,
             description: "Defines a reusable element type for composite content blocks".into(),
-            syntax: Some("CREATE ELEMENTTYPE 'namespace:Name' FIELDS (...)".into()),
+            syntax: Some("CREATE ELEMENTTYPE namespace:Name FIELDS (...)   -- or the shorthand: CREATE ELEMENTTYPE namespace:Name (col Type, ...)".into()),
             example: Some("CREATE ELEMENTTYPE 'ui:HeroBanner' FIELDS (heading String REQUIRED, image Resource)".into()),
         },
     ]

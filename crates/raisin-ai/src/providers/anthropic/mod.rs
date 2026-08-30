@@ -19,7 +19,7 @@ use super::http_helpers::{build_client, SecretKey};
 use super::structured_output::STRUCTURED_OUTPUT_TOOL;
 use crate::model_cache::{ModelCache, ModelCapabilities, ModelInfo};
 use crate::provider::{ProviderError, Result};
-use crate::types::{CompletionRequest, CompletionResponse, ResponseFormat, Role};
+use crate::types::{CompletionRequest, CompletionResponse, ContentPart, ResponseFormat, Role};
 use reqwest::Client;
 use std::sync::Arc;
 use std::time::Duration;
@@ -203,9 +203,44 @@ impl AnthropicProvider {
                             content
                         }
                     } else {
-                        vec![AnthropicContent::Text {
-                            text: msg.content.clone(),
-                        }]
+                        // Images FIRST, then the text.
+                        //
+                        // Anthropic's own guidance is that a prompt referring to
+                        // an image reads better with the image ahead of the
+                        // question; more importantly it is the order every
+                        // example in their docs uses, so it is the order the
+                        // models were tuned on. Ordering is not cosmetic for a
+                        // captioning prompt whose entire text is "describe
+                        // this".
+                        let mut content: Vec<AnthropicContent> = msg
+                            .image_parts()
+                            .iter()
+                            .filter_map(|part| {
+                                let source = match part {
+                                    ContentPart::Image { data, media_type } => {
+                                        AnthropicImageSource::Base64 {
+                                            media_type: media_type.clone(),
+                                            data: data.clone(),
+                                        }
+                                    }
+                                    ContentPart::ImageUrl { url } => {
+                                        AnthropicImageSource::Url { url: url.clone() }
+                                    }
+                                    ContentPart::Text { .. } => return None,
+                                };
+                                Some(AnthropicContent::Image { source })
+                            })
+                            .collect();
+
+                        // `effective_text`, not `content`: for a multimodal
+                        // message the authored text lives in the parts, and
+                        // `content` is only the flattened copy the constructor
+                        // happened to make.
+                        let text = msg.effective_text();
+                        if !text.is_empty() || content.is_empty() {
+                            content.push(AnthropicContent::Text { text });
+                        }
+                        content
                     };
 
                     let role_str = match msg.role {

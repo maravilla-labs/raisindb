@@ -30,7 +30,8 @@ impl<'a> PlanBuilder<'a> {
             .collect();
 
         // Split WHERE clause predicates by table reference
-        let (table_predicates, remaining_predicates) = if let Some(predicate) = &query.selection {
+        let (table_predicates, mut remaining_predicates) = if let Some(predicate) = &query.selection
+        {
             // Collect all table refs (FROM + JOINs)
             let mut all_table_refs = vec![query.from[0].clone()];
             for join_info in &query.joins {
@@ -52,7 +53,15 @@ impl<'a> PlanBuilder<'a> {
             .get(&first_table_name)
             .and_then(|preds| Self::combine_with_and(preds.clone()));
 
-        let mut plan = self.build_table_source(&query.from[0], query, first_table_filter)?;
+        // Whatever a relation did not consume comes back here and is folded into
+        // the TOP-LEVEL filter below. Never above the individual relation: for
+        // the right side of an outer join those are not equivalent, and pushing
+        // it down there would turn a LEFT JOIN into an inner one.
+        let (mut plan, unconsumed) =
+            self.build_table_source(&query.from[0], query, first_table_filter)?;
+        if let Some(pred) = unconsumed {
+            remaining_predicates.extend(Self::split_conjunctions(&pred));
+        }
 
         // 1.5. Add joins if present
         for join_info in &query.joins {
@@ -76,7 +85,11 @@ impl<'a> PlanBuilder<'a> {
                 .get(&right_table_name)
                 .and_then(|preds| Self::combine_with_and(preds.clone()));
 
-            let right_scan = self.build_table_source(right_table, query, right_table_filter)?;
+            let (right_scan, unconsumed) =
+                self.build_table_source(right_table, query, right_table_filter)?;
+            if let Some(pred) = unconsumed {
+                remaining_predicates.extend(Self::split_conjunctions(&pred));
+            }
 
             // Create Join node
             plan = LogicalPlan::Join {

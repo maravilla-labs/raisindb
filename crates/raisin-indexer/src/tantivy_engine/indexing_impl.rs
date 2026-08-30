@@ -10,7 +10,6 @@ use raisin_storage::fulltext::{
 };
 
 use super::document::create_document;
-use super::language::register_language_tokenizer;
 use super::properties::flatten_properties;
 use super::search::execute_search;
 use super::types::TantivyIndexingEngine;
@@ -26,8 +25,6 @@ impl IndexingEngine for TantivyIndexingEngine {
         let cached = self.get_or_create_index(&job.tenant_id, &job.repo_id, &job.branch)?;
         let index = &cached.index;
         let default_lang = &job.default_language;
-
-        register_language_tokenizer(index, default_lang)?;
 
         let fields = &cached.fields;
         let flattened = flatten_properties(plan, &node.properties);
@@ -48,8 +45,6 @@ impl IndexingEngine for TantivyIndexingEngine {
                 if lang_code == default_lang {
                     continue;
                 }
-
-                register_language_tokenizer(index, lang_code)?;
 
                 let translated_name = translations
                     .get(&format!("name_{}", lang_code))
@@ -72,21 +67,20 @@ impl IndexingEngine for TantivyIndexingEngine {
             }
         }
 
-        let mut writer = Self::get_writer(index)?;
-        let node_id_term = tantivy::Term::from_field_text(fields.node_id, &node.id);
-        writer.delete_term(node_id_term);
+        let index_key = Self::index_key(&job.tenant_id, &job.repo_id, &job.branch);
+        self.with_writer(&index_key, index, |writer| {
+            // Delete first, add after: tantivy applies a delete only to documents
+            // added BEFORE it, so the replacements below survive their own delete.
+            let node_id_term = tantivy::Term::from_field_text(fields.node_id, &node.id);
+            writer.delete_term(node_id_term);
 
-        for doc in documents {
-            writer
-                .add_document(doc)
-                .map_err(|e| Error::storage(format!("Failed to add document: {}", e)))?;
-        }
-
-        writer
-            .commit()
-            .map_err(|e| Error::storage(format!("Failed to commit index: {}", e)))?;
-
-        Ok(())
+            for doc in documents {
+                writer
+                    .add_document(doc)
+                    .map_err(|e| Error::storage(format!("Failed to add document: {}", e)))?;
+            }
+            Ok(())
+        })
     }
 
     fn do_delete_node(&self, job: &FullTextIndexJob) -> Result<()> {
@@ -94,18 +88,15 @@ impl IndexingEngine for TantivyIndexingEngine {
         let index = &cached.index;
 
         let fields = &cached.fields;
-        let mut writer = Self::get_writer(index)?;
+        let index_key = Self::index_key(&job.tenant_id, &job.repo_id, &job.branch);
 
-        if let Some(node_id) = &job.node_id {
-            let node_id_term = tantivy::Term::from_field_text(fields.node_id, node_id);
-            writer.delete_term(node_id_term);
-        }
-
-        writer
-            .commit()
-            .map_err(|e| Error::storage(format!("Failed to commit deletion: {}", e)))?;
-
-        Ok(())
+        self.with_writer(&index_key, index, |writer| {
+            if let Some(node_id) = &job.node_id {
+                let node_id_term = tantivy::Term::from_field_text(fields.node_id, node_id);
+                writer.delete_term(node_id_term);
+            }
+            Ok(())
+        })
     }
 
     fn do_branch_created(&self, job: &FullTextIndexJob) -> Result<()> {

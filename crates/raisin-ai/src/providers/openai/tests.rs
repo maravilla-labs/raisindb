@@ -20,6 +20,68 @@ fn test_provider_capabilities() {
     assert!(!provider.available_models().is_empty());
 }
 
+/// The Responses-API body an image actually goes out in.
+///
+/// There is no live OpenAI leg in this suite, so the wire SHAPE is what gets
+/// asserted — and the shape is where this API is easy to get wrong in a way
+/// that only shows up as a 400 naming a field and not a reason:
+///
+///   * the Responses API says `input_text` / `input_image`, NOT the Chat
+///     Completions API's `text` / `image_url`;
+///   * `input_image`'s `image_url` is a BARE STRING, not `{ "url": … }`;
+///   * a `data:` URL is a legal value there, which is what lets an inline
+///     base64 part go out with no extra round trip.
+#[test]
+fn a_multimodal_user_message_serializes_as_responses_api_parts() {
+    let json = serde_json::json!({
+        "model": "gpt-4o",
+        "messages": [{
+            "role": "user",
+            "content": [
+                { "type": "text", "text": "What is in this image?" },
+                { "type": "image_url", "image_url": {
+                    "url": "data:image/png;base64,AAAB"
+                }}
+            ]
+        }]
+    });
+    let request: crate::types::CompletionRequest = serde_json::from_value(json).unwrap();
+    let body = OpenAIProvider::build_responses_request(&request, false);
+    let wire = serde_json::to_value(&body).unwrap();
+
+    let content = &wire["input"][0]["content"];
+    assert!(
+        content.is_array(),
+        "a message carrying an image must use the ARRAY content form: {wire}"
+    );
+    assert_eq!(content[0]["type"], "input_text");
+    assert_eq!(content[0]["text"], "What is in this image?");
+    assert_eq!(content[1]["type"], "input_image");
+    assert_eq!(
+        content[1]["image_url"], "data:image/png;base64,AAAB",
+        "`input_image.image_url` is a bare string on the Responses API, not an object"
+    );
+}
+
+/// A TEXT-ONLY message must keep the bare-string form byte for byte.
+///
+/// The array form is a different request body. Switching every existing
+/// text-only call onto a newly-written code path in order to support images
+/// would put the risk on the 99% of requests that gain nothing from it.
+#[test]
+fn a_text_only_message_keeps_the_bare_string_content_form() {
+    let request = crate::types::CompletionRequest::new(
+        "gpt-4o".to_string(),
+        vec![crate::types::Message::user("hello")],
+    );
+    let wire =
+        serde_json::to_value(OpenAIProvider::build_responses_request(&request, false)).unwrap();
+    assert_eq!(
+        wire["input"][0]["content"], "hello",
+        "text-only content must stay a plain string: {wire}"
+    );
+}
+
 // ── Streaming SSE parsing (Responses API) ─────────────────────────
 
 use super::trait_impl::parse_sse_events;

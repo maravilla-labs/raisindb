@@ -46,6 +46,14 @@ impl CheckpointServer {
             Vec::new()
         };
 
+        // The wire carries the partition as a plain string; `raisin-replication`
+        // cannot depend on `raisin-hnsw`, so the typed token is rendered here and
+        // re-parsed on the way back in.
+        let indexes = indexes
+            .into_iter()
+            .map(|(t, r, b, p)| (t, r, b, p.to_string()))
+            .collect();
+
         let response = ReplicationMessage::HnswIndexList { indexes };
         raisin_replication::tcp_helpers::send_message(stream, &response).await?;
 
@@ -218,11 +226,13 @@ impl CheckpointServer {
         tenant_id: &str,
         repo_id: &str,
         branch: &str,
+        partition: &raisin_hnsw::PartitionId,
     ) -> Result<()> {
         info!(
             tenant_id = %tenant_id,
             repo_id = %repo_id,
             branch = %branch,
+            partition = %partition,
             "Handling HNSW index request"
         );
 
@@ -231,8 +241,11 @@ impl CheckpointServer {
             .as_ref()
             .ok_or_else(|| Error::storage("No HNSW manager configured".to_string()))?;
 
-        // Load index data
-        let index_data = manager.load_index_data(tenant_id, repo_id, branch).await?;
+        // Load the BUNDLE: graph file plus `.hnsw.meta` sidecar. Sending the
+        // graph alone is what used to destroy the receiving node's index.
+        let index_data = manager
+            .load_index_data(tenant_id, repo_id, branch, partition)
+            .await?;
 
         match index_data {
             Some((data, crc32)) => {
@@ -243,6 +256,7 @@ impl CheckpointServer {
                     tenant_id: tenant_id.to_string(),
                     repo_id: repo_id.to_string(),
                     branch: branch.to_string(),
+                    partition: partition.to_string(),
                     data,
                     crc32,
                 };
@@ -285,6 +299,7 @@ impl CheckpointServer {
                     tenant_id: tenant_id.to_string(),
                     repo_id: repo_id.to_string(),
                     branch: branch.to_string(),
+                    partition: partition.to_string(),
                     data: Vec::new(),
                     crc32: 0,
                 };

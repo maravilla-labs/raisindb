@@ -1248,3 +1248,205 @@ mod compound_index_alterations {
         );
     }
 }
+
+// =============================================================================
+// The natural spelling: bare name, implied PROPERTIES
+//
+// `CREATE NODETYPE proof:Doc (body String REQUIRED VECTOR FULLTEXT)` is what a
+// user (or an LLM writing SQL) types. It used to be rejected, and - because the
+// 12-arm `alt()` reported its LAST arm's failure - the rejection read
+// "Invalid property type 'CREATE'" at position 0.
+// =============================================================================
+
+/// The literal statement from the embeddings proof run.
+#[test]
+fn test_create_nodetype_bare_name_and_implied_properties() {
+    let sql = "CREATE NODETYPE proof:Doc (body String REQUIRED VECTOR FULLTEXT)";
+    let result = parse_ddl(sql).unwrap().unwrap();
+    match result {
+        DdlStatement::CreateNodeType(create) => {
+            assert_eq!(create.name, "proof:Doc");
+            assert_eq!(create.properties.len(), 1);
+            let body = &create.properties[0];
+            assert_eq!(body.name, "body");
+            assert_eq!(body.property_type, PropertyTypeDef::String);
+            assert!(body.required);
+            assert!(body.index.contains(&IndexTypeDef::Vector));
+            assert!(body.index.contains(&IndexTypeDef::Fulltext));
+        }
+        _ => panic!("Expected CreateNodeType"),
+    }
+}
+
+/// A bare name is accepted everywhere a quoted one is - and means the same.
+#[test]
+fn test_bare_name_equals_quoted_name() {
+    for (bare, quoted) in [
+        (
+            "CREATE NODETYPE proof:Doc PROPERTIES (body String)",
+            "CREATE NODETYPE 'proof:Doc' PROPERTIES (body String)",
+        ),
+        (
+            "ALTER NODETYPE proof:Doc ADD PROPERTY subtitle String",
+            "ALTER NODETYPE 'proof:Doc' ADD PROPERTY subtitle String",
+        ),
+        (
+            "DROP NODETYPE proof:Doc CASCADE",
+            "DROP NODETYPE 'proof:Doc' CASCADE",
+        ),
+        (
+            "CREATE MIXIN proof:Seo PROPERTIES (slug String)",
+            "CREATE MIXIN 'proof:Seo' PROPERTIES (slug String)",
+        ),
+        (
+            "CREATE ELEMENTTYPE proof:Hero FIELDS (title String)",
+            "CREATE ELEMENTTYPE 'proof:Hero' FIELDS (title String)",
+        ),
+        (
+            "CREATE ARCHETYPE proof:Post BASE_NODE_TYPE 'proof:Doc' FIELDS (title String)",
+            "CREATE ARCHETYPE 'proof:Post' BASE_NODE_TYPE 'proof:Doc' FIELDS (title String)",
+        ),
+    ] {
+        let from_bare = parse_ddl(bare).unwrap().unwrap();
+        let from_quoted = parse_ddl(quoted).unwrap().unwrap();
+        assert_eq!(
+            from_bare, from_quoted,
+            "bare and quoted disagree for: {bare}"
+        );
+    }
+}
+
+/// A namespace-less bare name works too.
+#[test]
+fn test_bare_name_without_namespace() {
+    let sql = "CREATE NODETYPE Doc (body String VECTOR)";
+    match parse_ddl(sql).unwrap().unwrap() {
+        DdlStatement::CreateNodeType(create) => {
+            assert_eq!(create.name, "Doc");
+            assert_eq!(create.properties.len(), 1);
+        }
+        _ => panic!("Expected CreateNodeType"),
+    }
+}
+
+/// The implied-PROPERTIES shorthand is the SAME list the keyword form parses.
+#[test]
+fn test_implied_properties_equals_explicit_properties() {
+    let implied = parse_ddl(
+        "CREATE NODETYPE 'proof:Doc' (body String REQUIRED VECTOR FULLTEXT, n Number DEFAULT 1)",
+    )
+    .unwrap()
+    .unwrap();
+    let explicit = parse_ddl(
+        "CREATE NODETYPE 'proof:Doc' PROPERTIES (body String REQUIRED VECTOR FULLTEXT, n Number DEFAULT 1)",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(implied, explicit);
+}
+
+/// Flags still parse after the shorthand list.
+#[test]
+fn test_implied_properties_then_flags() {
+    match parse_ddl("CREATE NODETYPE proof:Doc (body String) VERSIONABLE AUDITABLE")
+        .unwrap()
+        .unwrap()
+    {
+        DdlStatement::CreateNodeType(create) => {
+            assert_eq!(create.properties.len(), 1);
+            assert!(create.versionable);
+            assert!(create.auditable);
+        }
+        _ => panic!("Expected CreateNodeType"),
+    }
+}
+
+/// The shorthand must NOT shadow the paren-wrapper form: a wrapper opens with a
+/// clause keyword, which is never a `name Type` pair.
+#[test]
+fn test_wrapper_form_still_parses_as_clauses() {
+    match parse_ddl(
+        "CREATE NODETYPE 'myapp:Article' (EXTENDS 'raisin:Page' PROPERTIES (title String) VERSIONABLE)",
+    )
+    .unwrap()
+    .unwrap()
+    {
+        DdlStatement::CreateNodeType(create) => {
+            assert_eq!(create.extends, Some("raisin:Page".to_string()));
+            assert_eq!(create.properties.len(), 1);
+            assert_eq!(create.properties[0].name, "title");
+            assert!(create.versionable);
+        }
+        _ => panic!("Expected CreateNodeType"),
+    }
+}
+
+/// FIELDS is implied for elementtypes and archetypes the same way.
+#[test]
+fn test_implied_fields_for_elementtype_and_archetype() {
+    match parse_ddl("CREATE ELEMENTTYPE proof:Hero (title String REQUIRED)")
+        .unwrap()
+        .unwrap()
+    {
+        DdlStatement::CreateElementType(create) => {
+            assert_eq!(create.name, "proof:Hero");
+            assert_eq!(create.fields.len(), 1);
+            assert_eq!(create.fields[0].name, "title");
+        }
+        _ => panic!("Expected CreateElementType"),
+    }
+
+    match parse_ddl(
+        "CREATE ARCHETYPE proof:Post (title String REQUIRED) BASE_NODE_TYPE 'proof:Doc'",
+    )
+    .unwrap()
+    .unwrap()
+    {
+        DdlStatement::CreateArchetype(create) => {
+            assert_eq!(create.name, "proof:Post");
+            assert_eq!(create.fields.len(), 1);
+            assert_eq!(create.base_node_type, Some("proof:Doc".to_string()));
+        }
+        _ => panic!("Expected CreateArchetype"),
+    }
+}
+
+/// A real mistake is now reported against the statement the user wrote, not
+/// against the last `alt()` arm. This is the regression test for
+/// "Invalid property type 'CREATE'" at position 0.
+#[test]
+fn test_error_points_at_the_real_problem() {
+    let err = parse_ddl("CREATE NODETYPE 'proof:Doc' PROPERTIES (body Strng)").unwrap_err();
+    assert!(
+        err.message.contains("Strng"),
+        "error should name the bad type, got: {}",
+        err.message
+    );
+    assert!(
+        !err.message.contains("'CREATE'"),
+        "error must not blame the CREATE keyword, got: {}",
+        err.message
+    );
+    let pos = err.position.expect("position");
+    assert!(pos > 0, "position should point past the keyword, got {pos}");
+}
+
+/// `CREATE\n  NODETYPE` - the old prefix test required exactly one space and
+/// silently handed this to the generic SQL parser.
+#[test]
+fn test_keyword_recognised_across_newlines() {
+    let sql = "CREATE\n  NODETYPE 'proof:Doc'\n  PROPERTIES (body String)";
+    match parse_ddl(sql).unwrap().unwrap() {
+        DdlStatement::CreateNodeType(create) => assert_eq!(create.name, "proof:Doc"),
+        _ => panic!("Expected CreateNodeType"),
+    }
+}
+
+/// Non-DDL statements are still handed to the SQL parser untouched.
+#[test]
+fn test_ddl_kind_rejects_non_ddl() {
+    assert!(parse_ddl("SELECT * FROM 'default'").unwrap().is_none());
+    assert!(parse_ddl("CREATE TABLE t (a int)").unwrap().is_none());
+    assert!(parse_ddl("CREATE").unwrap().is_none());
+    assert!(parse_ddl("").unwrap().is_none());
+}

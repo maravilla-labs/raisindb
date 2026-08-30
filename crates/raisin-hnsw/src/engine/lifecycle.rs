@@ -50,8 +50,7 @@ impl HnswIndexingEngine {
 
         for key in dirty {
             if let Some(index_arc) = self.index_cache.get(&key) {
-                // Parse key: {tenant}/{repo}/{branch}/{workspace}
-                let path = self.get_index_path(&key);
+                let path = key.index_path(self.base_path());
 
                 // Save to disk
                 let index_guard = index_arc.read().unwrap();
@@ -68,8 +67,15 @@ impl HnswIndexingEngine {
                     }
                 }
             } else {
-                // Index was evicted, remove from dirty set
+                // The index is no longer resident. It used to be dropped from
+                // the dirty set right here, WITHOUT being saved — silent loss of
+                // every vector added since the last snapshot, and more likely
+                // the more cache entries there are (which partitioning
+                // increases). The eviction listener now saves a dirty index as
+                // it leaves the cache, so reaching this branch means it was
+                // already written out; drop the bookkeeping only.
                 self.dirty_indexes.write().unwrap().remove(&key);
+                self.mutations_since_weigh.write().unwrap().remove(&key);
             }
         }
 

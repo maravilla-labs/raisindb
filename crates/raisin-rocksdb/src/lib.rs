@@ -47,6 +47,7 @@ pub mod checkpoint;
 pub mod compound_state;
 pub mod config;
 mod constants;
+pub mod embedding_provider;
 mod error_ext;
 pub mod fractional_index;
 pub mod graph;
@@ -145,7 +146,7 @@ pub use repositories::{
     OpLogRepository, OpLogStats, ProximityResult, RocksDBAuditRepo, RocksDBEmbeddingJobStore,
     RocksDBEmbeddingStorage, RocksDBTranslationRepository, RocksDbJobStore, SpatialIndexEntry,
     SpatialIndexRepository, SystemUpdateRepositoryImpl, TenantAIConfigRepository,
-    TenantEmbeddingConfigRepository, DEFAULT_AUDIT_READ_LIMIT,
+    TenantEmbeddingConfigRepository, TenantEmbeddingSpecResolver, DEFAULT_AUDIT_READ_LIMIT,
     DEFAULT_SPATIAL_MAX_ENTRIES_PER_CELL,
 };
 
@@ -164,6 +165,12 @@ pub use jobs::handlers::{McpDiscoveryDeps, McpToolDiscoveryHandler};
 // job system or driving the handler directly — so an integration test that has to
 // prove what a REAL rebuild writes (entry revisions, precision sets) needs this.
 pub use jobs::handlers::spatial_index::{SpatialBuildReport, SpatialIndexJobHandler};
+
+// Re-exported for the same reason as the spatial handler above: whether a
+// re-embed is a no-op, and whether an orphaned chunk survives it, is only
+// observable by driving the real handler — the decision is made inside it, and
+// the alternative is booting the whole job system.
+pub use jobs::handlers::embedding::{EmbeddingJobHandler, EXTRACTED_TEXT_SPEC};
 
 // Re-export the fulltext error counter so transport-http can render
 // it without needing access to the (private) `jobs` module.

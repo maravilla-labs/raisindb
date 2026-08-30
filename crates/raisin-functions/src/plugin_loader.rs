@@ -175,7 +175,16 @@ pub fn load_plugins_from_dir(dir: impl AsRef<Path>) {
             Ok(name) => {
                 tracing::info!(plugin = %name, path = %path.display(), "loaded function plugin")
             }
-            Err(e) => tracing::error!(path = %path.display(), error = %e, "skipping plugin"),
+            Err(e) => {
+                // Recorded, not just logged. A rejected plugin (ABI mismatch
+                // above all) leaves a server that boots perfectly and has lost
+                // every `raisin.<ns>.*` binding for every tenant; one ERROR line
+                // in the journal is not something a deploy can assert on. The
+                // startup capability report and the management surface read
+                // this back.
+                tracing::error!(path = %path.display(), error = %e, "skipping plugin");
+                crate::plugin::record_plugin_rejection(path.display().to_string(), e);
+            }
         }
     }
 }

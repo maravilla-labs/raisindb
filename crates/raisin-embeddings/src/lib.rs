@@ -56,15 +56,28 @@ pub mod crypto;
 pub mod embedding_storage;
 pub mod models;
 pub mod provider;
+pub mod query_embedder;
+pub mod resolve;
+pub mod spec;
 pub mod storage;
 
 // Re-export commonly used types
 pub use config::{EmbeddingProvider, TenantEmbeddingConfig};
 pub use crypto::{ApiKeyEncryptor, CryptoError};
-pub use embedding_storage::{EmbeddingJobStore, EmbeddingStorage};
+pub use embedding_storage::{EmbeddingJobStore, EmbeddingStorage, StoredIndexEntry};
 pub use models::{EmbeddingData, EmbeddingJob, EmbeddingJobKind};
 pub use provider::{
-    create_provider, create_provider_with_url, EmbeddingProvider as EmbeddingProviderTrait,
-    OllamaProvider, OpenAIProvider, VoyageProvider,
+    create_provider, create_provider_full, create_provider_with_url,
+    EmbeddingProvider as EmbeddingProviderTrait, OllamaProvider, OpenAIProvider, VoyageProvider,
 };
+pub use query_embedder::{configure_query_embedder, query_embedder, TenantQueryEmbedder};
+// `EmbeddingData` has PUBLIC fields of these two types, so anyone who can
+// construct or read one already needs to name them. They live in
+// `raisin_ai::config` (this crate cannot hold them — see `raisin-hnsw`'s
+// `partition` module docs for why the identity types sit where they do), and
+// not re-exporting them meant every caller took a `raisin-ai` dependency just
+// to spell a field type of a struct this crate owns.
+pub use raisin_ai::config::{EmbedderId, EmbeddingKind};
+pub use resolve::{resolve_provider, resolve_settings, ResolvedEmbeddingProvider};
+pub use spec::{EmbeddingSpec, EMBEDDING_PIPELINE_VERSION, FORCE_REEMBED_KEY};
 pub use storage::{StorageError, TenantEmbeddingConfigStore};

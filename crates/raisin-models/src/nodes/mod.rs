@@ -11,6 +11,7 @@
 // by the Apache License, Version 2.0.
 
 pub mod audit_log;
+pub mod extraction;
 pub mod integrations;
 pub mod types;
 pub mod version;
@@ -33,3 +34,12 @@ pub mod properties;
 
 // Re-export audit_log module
 pub use audit_log::*;
+
+// Re-export the extraction artifact vocabulary
+pub use extraction::{
+    extract_fingerprint, extract_status, extract_version, extracted_text,
+    is_extraction_artifact_key, ExtractStatus, ExtractionArtifact, EXTRACTED_TEXT_PROP,
+    EXTRACTION_ARTIFACT_KEYS, EXTRACTION_ARTIFACT_VERSION, EXTRACT_CHARS_PROP, EXTRACT_DETAIL_PROP,
+    EXTRACT_FINGERPRINT_PROP, EXTRACT_SOURCE_PROP, EXTRACT_STATUS_PROP, EXTRACT_VERSION_PROP,
+    MAX_INLINE_EXTRACT_BYTES,
+};

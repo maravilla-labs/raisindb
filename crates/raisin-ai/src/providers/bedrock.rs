@@ -352,6 +352,10 @@ fn document_to_json(doc: &aws_smithy_types::Document) -> serde_json::Value {
 #[async_trait]
 impl AIProviderTrait for BedrockProvider {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse> {
+        // Fail LOUDLY rather than dropping the image. See
+        // `provider::reject_unsupported_images` for why silence is the one
+        // unacceptable answer here.
+        crate::provider::reject_unsupported_images("bedrock", &request.messages)?;
         use aws_sdk_bedrockruntime::types as bt;
 
         Self::validate_model(&request.model)?;
@@ -694,6 +698,10 @@ impl BedrockProvider {
 #[async_trait]
 impl AIProviderTrait for BedrockProvider {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse> {
+        // Fail LOUDLY rather than dropping the image. See
+        // `provider::reject_unsupported_images` for why silence is the one
+        // unacceptable answer here.
+        crate::provider::reject_unsupported_images("bedrock", &request.messages)?;
         Self::validate_model(&request.model)?;
 
         Err(ProviderError::UnsupportedOperation(

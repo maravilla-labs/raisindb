@@ -67,7 +67,7 @@ pub use system_updates::SystemUpdateRepositoryImpl;
 pub use tags::TagRepositoryImpl;
 pub use tenant_ai_config::TenantAIConfigRepository;
 pub use tenant_auth_config::TenantAuthConfigRepository;
-pub use tenant_embedding_config::TenantEmbeddingConfigRepository;
+pub use tenant_embedding_config::{TenantEmbeddingConfigRepository, TenantEmbeddingSpecResolver};
 pub use translations::RocksDBTranslationRepository;
 pub use trees::TreeRepositoryImpl;
 pub use unique_index::UniqueIndexManager;

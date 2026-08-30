@@ -1,3 +1,15 @@
 packages:
   - 'packages/*'
   - 'tooling/packages/*/pkg'
+
+# esbuild's postinstall is what links its platform binary
+# (@esbuild/<os>-<arch>) into the package. Without it `vite build` — and so
+# `crates/raisin-server/build.rs`, which panics "Frontend build failed" — cannot
+# run. pnpm >= 10 refuses to run any dependency lifecycle script that is not
+# allowlisted here, and exits 1 with ERR_PNPM_IGNORED_BUILDS rather than
+# skipping it, so leaving this unset breaks `cargo build -p raisin-server` from
+# a clean checkout. pnpm rewrites this file with a
+# "set this to true or false" placeholder when the decision is missing; that
+# placeholder is not a resolution, it is the same failure.
+allowBuilds:
+  esbuild: true

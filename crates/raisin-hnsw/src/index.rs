@@ -6,7 +6,7 @@
 //! a full graph rebuild on every mutation. usearch supports incremental
 //! insertions and deletions, and persists the full graph to disk.
 
-use crate::types::{DistanceMetric, QuantizationType, SearchResult};
+use crate::types::{DistanceMetric, QuantizationType, SearchResult, MAX_FETCH_K};
 use raisin_error::Result;
 use raisin_hlc::HLC;
 use serde::{Deserialize, Serialize};
@@ -23,6 +23,83 @@ pub(crate) enum IndexLoadState {
     Viewed,
     /// Fully loaded into RAM via `load()`. Supports mutations.
     Loaded,
+}
+
+/// Over-draw used by the post-filter FALLBACK only.
+///
+/// The index-side filtered walk needs no over-draw at all — it returns `k`
+/// in-scope neighbours or says the index has no more. This multiplier exists
+/// solely so the fallback is no worse than the behaviour it replaced.
+const POST_FILTER_OVERDRAW: usize = 5;
+
+/// Operator escape hatch: `RAISIN_HNSW_DISABLE_FILTERED_SEARCH=1` forces every
+/// scoped search down the post-filter fallback.
+///
+/// Two reasons it exists. The filtered walk is deeper than an unfiltered one
+/// when a scope is very selective (it only stops once the IN-SCOPE result set
+/// is full), so an operator who would rather have fast wrong answers than slow
+/// right ones needs a way back without a rollback. And it is the only way to
+/// reach the fallback deliberately — otherwise that code runs only when usearch
+/// errors, which is to say never, until the day it matters.
+///
+/// Read ONCE: this is consulted per query, and `std::env::var` on every vector
+/// search would be a lock and an allocation in the hot path.
+fn filtered_search_disabled() -> bool {
+    static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DISABLED.get_or_init(|| {
+        matches!(
+            std::env::var("RAISIN_HNSW_DISABLE_FILTERED_SEARCH").as_deref(),
+            Ok("1") | Ok("true")
+        )
+    })
+}
+
+/// How a workspace restriction was applied to one vector search.
+///
+/// Carried out of the index so the caller's "returned fewer than asked" log can
+/// say WHY, instead of leaving an operator to guess between index selectivity
+/// and a permission drop — which is how this defect hid for so long.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeFilterMode {
+    /// No workspace restriction was requested.
+    Unrestricted,
+    /// Applied inside the graph walk. A short result means the index genuinely
+    /// holds no more in-scope neighbours.
+    IndexSide,
+    /// Applied AFTER an unfiltered walk, because the filtered walk was
+    /// unavailable. A short result may be pure selectivity: the walk never
+    /// visited this workspace's region of the graph.
+    PostFilter,
+}
+
+/// One workspace-scoped search, with enough context to explain a short result.
+#[derive(Debug)]
+pub struct ScopedSearch {
+    /// Matches, nearest first.
+    pub results: Vec<SearchResult>,
+
+    /// How the workspace restriction was applied.
+    pub mode: ScopeFilterMode,
+
+    /// Candidates the walk produced BEFORE the workspace restriction. Equal to
+    /// `results.len()` for an index-side walk; larger for a post-filter.
+    pub drawn: usize,
+
+    /// Live vectors the index holds in the requested scope. The ceiling on what
+    /// any search of this scope could return, and the number that turns "search
+    /// came back short" into a diagnosis.
+    pub in_scope_total: usize,
+}
+
+/// Build the workspace -> vector-count map from the metadata map.
+///
+/// Used on load, where the counts arrive derived rather than maintained.
+fn count_workspaces(key_to_meta: &HashMap<u64, NodeMeta>) -> HashMap<String, usize> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for meta in key_to_meta.values() {
+        *counts.entry(meta.workspace_id.clone()).or_insert(0) += 1;
+    }
+    counts
 }
 
 /// Metadata for a vector entry (stored in the JSON sidecar, not in usearch).
@@ -46,7 +123,21 @@ pub struct HnswIndex {
     node_to_key: HashMap<String, u64>,
 
     /// usearch key -> node metadata
+    ///
+    /// Never mutated directly: every write goes through [`HnswIndex::insert_meta`]
+    /// / [`HnswIndex::remove_meta`], which keep `workspace_counts` in step. Two
+    /// maps that can disagree about what the index holds is exactly the drift
+    /// this codebase keeps getting bitten by.
     key_to_meta: HashMap<u64, NodeMeta>,
+
+    /// workspace_id -> number of live vectors in that workspace.
+    ///
+    /// Derived from `key_to_meta`, maintained incrementally so a scoped search
+    /// can answer "how many candidates could this scope possibly yield?" in O(1)
+    /// instead of walking the whole metadata map. It is what turns a short
+    /// result into a diagnosable one, and it lets an empty scope skip the graph
+    /// walk entirely.
+    workspace_counts: HashMap<String, usize>,
 
     /// Vector dimensions
     dimensions: usize,
@@ -99,6 +190,7 @@ impl HnswIndex {
             index,
             node_to_key: HashMap::new(),
             key_to_meta: HashMap::new(),
+            workspace_counts: HashMap::new(),
             dimensions,
             distance_metric: metric,
             quantization: params.quantization,
@@ -141,6 +233,7 @@ impl HnswIndex {
         Ok(Self {
             index,
             node_to_key,
+            workspace_counts: count_workspaces(&key_to_meta),
             key_to_meta,
             dimensions,
             distance_metric: metric,
@@ -187,6 +280,7 @@ impl HnswIndex {
         Ok(Self {
             index,
             node_to_key,
+            workspace_counts: count_workspaces(&key_to_meta),
             key_to_meta,
             dimensions,
             distance_metric: metric,
@@ -275,7 +369,7 @@ impl HnswIndex {
             self.index.remove(old_key).map_err(|e| {
                 raisin_error::Error::storage(format!("Failed to remove old vector: {}", e))
             })?;
-            self.key_to_meta.remove(&old_key);
+            self.remove_meta(old_key);
         }
 
         let key = self.next_key;
@@ -295,7 +389,7 @@ impl HnswIndex {
             .map_err(|e| raisin_error::Error::storage(format!("Failed to add vector: {}", e)))?;
 
         self.node_to_key.insert(node_id.clone(), key);
-        self.key_to_meta.insert(
+        self.insert_meta(
             key,
             NodeMeta {
                 node_id,
@@ -305,6 +399,55 @@ impl HnswIndex {
         );
 
         Ok(())
+    }
+
+    /// Record one key's metadata, keeping `workspace_counts` in step.
+    ///
+    /// The ONE place `key_to_meta` gains an entry. Replacing an existing key
+    /// decrements the old workspace, so a node moved between workspaces cannot
+    /// leave a phantom count behind.
+    fn insert_meta(&mut self, key: u64, meta: NodeMeta) {
+        *self
+            .workspace_counts
+            .entry(meta.workspace_id.clone())
+            .or_insert(0) += 1;
+        if let Some(previous) = self.key_to_meta.insert(key, meta) {
+            self.decrement_workspace(&previous.workspace_id);
+        }
+    }
+
+    /// Forget one key's metadata, keeping `workspace_counts` in step.
+    ///
+    /// The ONE place `key_to_meta` loses an entry.
+    fn remove_meta(&mut self, key: u64) {
+        if let Some(previous) = self.key_to_meta.remove(&key) {
+            self.decrement_workspace(&previous.workspace_id);
+        }
+    }
+
+    /// Drop one vector from a workspace's count, removing the entry at zero so
+    /// the map cannot grow without bound across a long-lived index.
+    fn decrement_workspace(&mut self, workspace_id: &str) {
+        if let Some(count) = self.workspace_counts.get_mut(workspace_id) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.workspace_counts.remove(workspace_id);
+            }
+        }
+    }
+
+    /// How many live vectors the index holds across `workspaces`.
+    ///
+    /// An EMPTY slice means "every workspace" — the same convention the search
+    /// API uses — and answers with the whole index size.
+    pub fn vectors_in_workspaces(&self, workspaces: &[String]) -> usize {
+        if workspaces.is_empty() {
+            return self.key_to_meta.len();
+        }
+        workspaces
+            .iter()
+            .filter_map(|ws| self.workspace_counts.get(ws.as_str()))
+            .sum()
     }
 
     /// Remove a vector from the index.
@@ -319,13 +462,57 @@ impl HnswIndex {
                 raisin_error::Error::storage(format!("Failed to remove vector: {}", e))
             })?;
             self.node_to_key.remove(node_id);
-            self.key_to_meta.remove(&key);
+            self.remove_meta(key);
         }
         Ok(())
     }
 
-    /// Search for k nearest neighbors.
+    /// Is `node_id` present in the index?
+    ///
+    /// A pure read — no `ensure_mutable`, so it does not promote a viewed
+    /// (memory-mapped) index. The id map is part of the persisted metadata, so a
+    /// viewed index answers this correctly.
+    pub fn contains(&self, node_id: &str) -> bool {
+        self.node_to_key.contains_key(node_id)
+    }
+
+    /// Search for k nearest neighbors, with no workspace restriction.
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<SearchResult>> {
+        Ok(self.search_scoped(query, k, &[])?.results)
+    }
+
+    /// Search for k nearest neighbors within a set of workspaces.
+    ///
+    /// An EMPTY `workspaces` slice means "every workspace"; it is never "match
+    /// nothing" — a caller that resolved to "nothing readable" must not reach
+    /// this function at all.
+    ///
+    /// # The restriction is applied INSIDE the graph walk
+    ///
+    /// usearch takes a per-candidate predicate (`filtered_search`, present in
+    /// the pinned 2.24). Out-of-scope nodes are still *expanded* through — so
+    /// the graph stays connected and the walk keeps navigating — but they never
+    /// occupy a result slot. The walk therefore continues until it has `k`
+    /// IN-SCOPE neighbours or the reachable graph is exhausted.
+    ///
+    /// This replaces a post-filter over a fixed over-draw, which returned SHORT
+    /// (frequently empty) whenever a narrow scope sat inside a large index: the
+    /// unfiltered walk simply never visited that workspace's region of the
+    /// graph, and no over-draw heuristic fixes that.
+    ///
+    /// # Cost
+    ///
+    /// A very selective scope makes the walk deep: the candidate queue only
+    /// stops growing once the in-scope result set is full, so a scope holding
+    /// far fewer than `k` vectors traverses most of the reachable graph. That is
+    /// the price of a correct answer instead of an empty one, and the zero-count
+    /// early return below removes the worst case (a scope with nothing in it).
+    pub fn search_scoped(
+        &self,
+        query: &[f32],
+        k: usize,
+        workspaces: &[String],
+    ) -> Result<ScopedSearch> {
         if query.len() != self.dimensions {
             return Err(raisin_error::Error::storage(format!(
                 "Query dimension mismatch: expected {}, got {}",
@@ -334,15 +521,145 @@ impl HnswIndex {
             )));
         }
 
-        if self.node_to_key.is_empty() {
-            return Ok(Vec::new());
+        let in_scope_total = self.vectors_in_workspaces(workspaces);
+
+        if self.node_to_key.is_empty() || in_scope_total == 0 {
+            return Ok(ScopedSearch {
+                results: Vec::new(),
+                mode: ScopeFilterMode::IndexSide,
+                drawn: 0,
+                in_scope_total,
+            });
         }
 
+        if workspaces.is_empty() {
+            let matches = self
+                .index
+                .search(query, k)
+                .map_err(|e| raisin_error::Error::storage(format!("Search failed: {}", e)))?;
+            let results = self.hydrate(&matches);
+            let drawn = results.len();
+            return Ok(ScopedSearch {
+                results,
+                mode: ScopeFilterMode::Unrestricted,
+                drawn,
+                in_scope_total,
+            });
+        }
+
+        if filtered_search_disabled() {
+            return self.post_filtered(query, k, workspaces, in_scope_total);
+        }
+
+        match self.filtered_matches(query, k, workspaces) {
+            Ok(matches) => {
+                let results = self.hydrate(&matches);
+                let drawn = results.len();
+                Ok(ScopedSearch {
+                    results,
+                    mode: ScopeFilterMode::IndexSide,
+                    drawn,
+                    in_scope_total,
+                })
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "usearch filtered_search failed; falling back to an UNFILTERED walk with a \
+                     post-filter, which can return short for a narrow scope"
+                );
+                self.post_filtered(query, k, workspaces, in_scope_total)
+            }
+        }
+    }
+
+    /// The fallback, and the only one: an unfiltered walk plus a post-filter.
+    ///
+    /// This is the algorithm the index-side walk replaced, kept for the two
+    /// cases that cannot use the filtered walk — a `filtered_search` failure,
+    /// and an operator who has turned it off. It is the SAME implementation for
+    /// both, so the escape hatch exercises exactly the code the error path
+    /// would take.
+    ///
+    /// It is retained rather than deleted because losing selectivity is better
+    /// than losing search, but its shortfall is a different phenomenon from an
+    /// index-side one and the caller reports it as such — see `ScopeFilterMode`.
+    pub(crate) fn post_filtered(
+        &self,
+        query: &[f32],
+        k: usize,
+        workspaces: &[String],
+        in_scope_total: usize,
+    ) -> Result<ScopedSearch> {
+        let overdrawn = k.saturating_mul(POST_FILTER_OVERDRAW).min(MAX_FETCH_K);
         let matches = self
             .index
-            .search(query, k)
+            .search(query, overdrawn)
             .map_err(|e| raisin_error::Error::storage(format!("Search failed: {}", e)))?;
+        let mut results = self.hydrate(&matches);
+        let drawn = results.len();
+        results.retain(|r| workspaces.iter().any(|ws| ws == &r.workspace_id));
+        results.truncate(k);
+        Ok(ScopedSearch {
+            results,
+            mode: ScopeFilterMode::PostFilter,
+            drawn,
+            in_scope_total,
+        })
+    }
 
+    /// Run the workspace-filtered usearch walk.
+    ///
+    /// # Safety / soundness
+    ///
+    /// `filtered_search` passes the closure to C++ as a raw function pointer
+    /// plus an opaque state pointer (usearch 2.24 `rust/lib.rs:718-740`), and
+    /// C++ calls it back through a `noexcept` lambda
+    /// (`index_dense.hpp:2079`). Three things make that sound here:
+    ///
+    /// 1. **Lifetime.** usearch takes the address of its own by-value `filter`
+    ///    parameter, so the closure outlives every call: the C++ side has
+    ///    returned before `filtered_search` does. The closure borrows
+    ///    `&self.key_to_meta` and `workspaces`, both of which outlive this
+    ///    function — `&self` is held by the caller's read guard for the whole
+    ///    search.
+    /// 2. **Threading.** A single-query usearch search runs on the calling
+    ///    thread; even if it did not, the closure only performs shared reads of
+    ///    a `HashMap` and a slice, which are `Sync`. It takes NO lock — a lock
+    ///    here could deadlock against the one the caller already holds, and a
+    ///    poisoned-lock `unwrap` would be a panic (see 3).
+    /// 3. **Unwinding.** A panic crossing the `noexcept` C++ frame is undefined
+    ///    behaviour, and the usearch trampoline has no `catch_unwind` of its
+    ///    own. The body is panic-free by construction (two lookups, no
+    ///    indexing, no allocation, no `unwrap`), and is wrapped in
+    ///    `catch_unwind` anyway so that any future edit — or a panicking
+    ///    hasher — fails CLOSED (candidate dropped) instead of unwinding into
+    ///    C++.
+    fn filtered_matches(
+        &self,
+        query: &[f32],
+        k: usize,
+        workspaces: &[String],
+    ) -> std::result::Result<usearch::ffi::Matches, String> {
+        let key_to_meta = &self.key_to_meta;
+        let predicate = move |key: u64| -> bool {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match key_to_meta.get(&key) {
+                    Some(meta) => workspaces.iter().any(|ws| ws == &meta.workspace_id),
+                    None => false,
+                }
+            }))
+            .unwrap_or(false)
+        };
+
+        self.index
+            .filtered_search(query, k, predicate)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Turn raw usearch matches into results, dropping any key the metadata map
+    /// no longer knows about.
+    fn hydrate(&self, matches: &usearch::ffi::Matches) -> Vec<SearchResult> {
         let mut results = Vec::with_capacity(matches.keys.len());
         for i in 0..matches.keys.len() {
             let key = matches.keys[i];
@@ -356,8 +673,7 @@ impl HnswIndex {
                 ));
             }
         }
-
-        Ok(results)
+        results
     }
 
     /// Get the number of vectors in the index.
@@ -417,11 +733,11 @@ impl HnswIndex {
         &self.key_to_meta
     }
 
-    pub(crate) fn dimensions(&self) -> usize {
+    pub fn dimensions(&self) -> usize {
         self.dimensions
     }
 
-    pub(crate) fn quantization(&self) -> QuantizationType {
+    pub fn quantization(&self) -> QuantizationType {
         self.quantization
     }
 
@@ -933,5 +1249,79 @@ mod tests {
             viewed_mem,
             loaded_mem
         );
+    }
+
+    /// The workspace counts drive the scoped search's zero-check and its
+    /// diagnostics, so a count that drifts from `key_to_meta` is either a
+    /// silently empty search or a lie in the log. Every mutation path is
+    /// exercised here: insert, in-place update that MOVES a node between
+    /// workspaces, and remove.
+    #[test]
+    fn test_workspace_counts_never_drift_from_the_metadata_map() {
+        let mut index = HnswIndex::new(4);
+
+        index
+            .add(
+                "n1".to_string(),
+                "wsA".to_string(),
+                HLC::new(1, 0),
+                vec![1.0, 0.0, 0.0, 0.0],
+            )
+            .unwrap();
+        index
+            .add(
+                "n2".to_string(),
+                "wsA".to_string(),
+                HLC::new(2, 0),
+                vec![0.0, 1.0, 0.0, 0.0],
+            )
+            .unwrap();
+
+        assert_eq!(index.vectors_in_workspaces(&["wsA".to_string()]), 2);
+        assert_eq!(index.vectors_in_workspaces(&[]), 2, "empty = whole index");
+
+        // Re-adding an existing node under a different workspace must MOVE the
+        // count, not double it.
+        index
+            .add(
+                "n1".to_string(),
+                "wsB".to_string(),
+                HLC::new(3, 0),
+                vec![1.0, 0.0, 0.0, 0.0],
+            )
+            .unwrap();
+
+        assert_eq!(index.vectors_in_workspaces(&["wsA".to_string()]), 1);
+        assert_eq!(index.vectors_in_workspaces(&["wsB".to_string()]), 1);
+        assert_eq!(index.vectors_in_workspaces(&[]), 2);
+
+        index.remove("n1").unwrap();
+        assert_eq!(index.vectors_in_workspaces(&["wsB".to_string()]), 0);
+        assert_eq!(index.vectors_in_workspaces(&[]), 1);
+
+        // A workspace that never existed is zero, not a panic.
+        assert_eq!(index.vectors_in_workspaces(&["nope".to_string()]), 0);
+    }
+
+    /// An empty scope must be answered as EMPTY, never as "no filter".
+    #[test]
+    fn test_scoped_search_of_an_absent_workspace_is_empty() {
+        let mut index = HnswIndex::new(4);
+        index
+            .add(
+                "n1".to_string(),
+                "wsA".to_string(),
+                HLC::new(1, 0),
+                vec![1.0, 0.0, 0.0, 0.0],
+            )
+            .unwrap();
+
+        let scoped = index
+            .search_scoped(&[1.0, 0.0, 0.0, 0.0], 5, &["wsB".to_string()])
+            .unwrap();
+
+        assert!(scoped.results.is_empty());
+        assert_eq!(scoped.in_scope_total, 0);
+        assert_eq!(scoped.mode, ScopeFilterMode::IndexSide);
     }
 }

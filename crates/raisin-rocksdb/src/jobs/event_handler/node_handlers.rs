@@ -135,16 +135,28 @@ impl UnifiedJobEventHandler {
                 .await;
         }
 
-        // Embedding generation - only for LOCAL events
-        if !is_remote_event {
-            self.handle_embedding_generation(node_event, &context, &index_settings)
-                .await?;
-        } else {
-            tracing::debug!(
-                node_id = %node_event.node_id,
-                "Skipping vector embedding for replicated event (embeddings are replicated separately)"
-            );
-        }
+        // Vector embedding runs for BOTH local and remote events, for the same
+        // reason the fulltext and spatial arms above do: a vector is DERIVED
+        // state, and nothing replicates it.
+        //
+        // This arm used to be local-only, justified by a comment claiming
+        // "embeddings are replicated separately". That was never true. No
+        // `OpType` in `raisin-replication` carries a vector, the crate does not
+        // mention embeddings at all, and `RocksDBEmbeddingStorage::store_embedding`
+        // is a raw `db.put_cf` that never passes through operation capture. So a
+        // replica ended up with fulltext but no vectors — and because a hybrid
+        // query fuses two legs, it did not fail, it silently degraded to
+        // fulltext-only results. The delete side gave the asymmetry away: it has
+        // always enqueued `EmbeddingDelete` for remote events too.
+        //
+        // The cost is real and deliberate: each node embeds independently, so an
+        // N-node cluster pays N times the embedder spend. Job dedup is
+        // per-PROCESS, so that duplication is by design, not a bug to squash with
+        // a lease. The operator's lever is the per-node tenant embedding config,
+        // which does not replicate either: a node with embeddings disabled skips
+        // here and simply serves no vector leg.
+        self.handle_embedding_generation(node_event, &context, &index_settings)
+            .await?;
 
         // Asset processing - only for LOCAL events
         if !is_remote_event {
@@ -307,17 +319,34 @@ impl UnifiedJobEventHandler {
         let options = self.get_asset_processing_options(node, context).await;
         let mime_type = self.extract_mime_type(node);
 
+        // `extract_text_requested` is in this condition, and it is the whole
+        // difference between a skip that is recorded and a skip that is
+        // invisible.
+        //
+        // The other flags all mean "this process can do something with these
+        // bytes", so gating solely on them made a `.docx` (or any binary no
+        // extractor here can read) enqueue NOTHING — and the job is the only
+        // thing that writes the durable `__extract_status` artifact. The asset
+        // therefore ended up with no text and no record that anything had been
+        // attempted: indistinguishable from an empty document forever, and
+        // impossible to find later when a media plugin gains the format.
+        //
+        // Recording a skip costs one job that reads no bytes and one node
+        // revision, once per binary — the fingerprint gate in
+        // `should_process_asset` closes immediately afterwards, so it does not
+        // repeat.
         if options.extract_pdf_text
+            || options.extract_text_requested
             || options.generate_image_embedding
-            || options.generate_image_caption
         {
             tracing::info!(
                 node_id = %node_event.node_id,
                 mime_type = ?mime_type,
                 content_hash = ?options.content_hash,
                 pdf = %options.extract_pdf_text,
+                text_requested = %options.extract_text_requested,
+                blocked = ?options.blocked_tasks,
                 clip = %options.generate_image_embedding,
-                blip = %options.generate_image_caption,
                 "Enqueuing AssetProcessing job"
             );
 

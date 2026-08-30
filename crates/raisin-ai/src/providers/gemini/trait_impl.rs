@@ -17,6 +17,10 @@ use super::GeminiProvider;
 #[async_trait]
 impl AIProviderTrait for GeminiProvider {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse> {
+        // Fail LOUDLY rather than dropping the image. See
+        // `provider::reject_unsupported_images` for why silence is the one
+        // unacceptable answer here.
+        crate::provider::reject_unsupported_images("gemini", &request.messages)?;
         // Filter out system messages (handled separately)
         let non_system_messages: Vec<_> = request
             .messages

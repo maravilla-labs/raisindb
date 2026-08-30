@@ -38,6 +38,7 @@ use crate::config::EmbeddingProvider;
 ///     chunk_content: Some("Sample text".to_string()),
 ///     generated_at: chrono::Utc::now(),
 ///     text_hash: 12345678,
+///     spec_hash: Some(87654321),
 ///
 ///     // Legacy fields (deprecated but kept for backward compatibility)
 ///     model: "text-embedding-3-small".to_string(),
@@ -76,9 +77,27 @@ pub struct EmbeddingData {
     /// When generated
     pub generated_at: DateTime<Utc>,
 
-    /// Hash of source text (to detect if re-embedding needed)
-    /// This allows us to skip re-generation if node content hasn't changed
+    /// Hash of THIS CHUNK's text.
+    ///
+    /// Kept with its original meaning — it is a debugging aid and the legacy
+    /// staleness signal — but it is NOT the staleness answer: it says nothing
+    /// about the embedder, the chunking configuration or the pipeline that
+    /// produced the chunk. Use [`Self::spec_hash`] for that.
     pub text_hash: u64,
+
+    /// Hash of EVERY input that decided these vectors — extracted text,
+    /// embedder identity, chunking configuration, pipeline version. See
+    /// [`crate::spec::EmbeddingSpec`].
+    ///
+    /// `None` on a row written before the spec hash existed. A row whose spec is
+    /// unknown is never treated as current, so it is regenerated once on its
+    /// next job and then carries a spec hash like any other. Absent rather than
+    /// a sentinel because the value is a hash: no bit pattern is free.
+    // No `skip_serializing_if`: the compact (array) MessagePack encoding used
+    // by some callers positions fields by index, and an omitted one shifts every
+    // field after it.
+    #[serde(default)]
+    pub spec_hash: Option<u64>,
 
     // =========================================================================
     // LEGACY FIELDS (Deprecated - kept for backward compatibility)
@@ -106,6 +125,22 @@ fn default_provider() -> EmbeddingProvider {
 }
 
 impl EmbeddingData {
+    /// Is this stored row exactly what the current inputs would produce?
+    ///
+    /// THE staleness question, answered in ONE place so the job handler, an
+    /// administrative regenerate and any future sweeper cannot disagree about
+    /// what "stale" means.
+    ///
+    /// It is deliberately conservative in both directions that matter:
+    /// - a row with no `spec_hash` (written before spec hashing existed) is
+    ///   never current, because we cannot know what produced it;
+    /// - `total_chunks` is compared as well as the hash. It is implied by the
+    ///   spec, but it is the field an orphan sweep acts on, so a row that
+    ///   disagrees about it is not one to trust.
+    pub fn is_current_for(&self, spec_hash: u64, total_chunks: usize) -> bool {
+        self.spec_hash == Some(spec_hash) && self.total_chunks == total_chunks
+    }
+
     /// Estimate memory usage in bytes
     pub fn estimated_size_bytes(&self) -> usize {
         // Vector: f32 = 4 bytes per element
@@ -261,6 +296,7 @@ mod tests {
             chunk_content: Some("test content".to_string()),
             generated_at: Utc::now(),
             text_hash: 12345,
+            spec_hash: Some(12345),
             model: "test-model".to_string(),
             provider: EmbeddingProvider::OpenAI,
         };
@@ -274,6 +310,82 @@ mod tests {
         assert_eq!(data.text_hash, deserialized.text_hash);
         assert_eq!(data.chunk_index, deserialized.chunk_index);
         assert_eq!(data.total_chunks, deserialized.total_chunks);
+        assert_eq!(data.spec_hash, deserialized.spec_hash);
+    }
+
+    /// A row written BEFORE spec hashing existed must still deserialize — the
+    /// CF is MessagePack and there is no migration — and must read as "spec
+    /// unknown", never as "spec matches whatever we happen to ask about".
+    ///
+    /// The stored format is `to_vec_named` (a map), which is what makes the new
+    /// field additive: an absent key falls back to the serde default.
+    #[test]
+    fn legacy_row_without_spec_hash_is_never_current() {
+        #[derive(Serialize)]
+        struct LegacyEmbeddingData {
+            vector: Vec<f32>,
+            embedder_id: EmbedderId,
+            embedding_kind: EmbeddingKind,
+            source_id: String,
+            chunk_index: usize,
+            total_chunks: usize,
+            chunk_content: Option<String>,
+            generated_at: DateTime<Utc>,
+            text_hash: u64,
+            model: String,
+            provider: EmbeddingProvider,
+        }
+
+        let legacy = LegacyEmbeddingData {
+            vector: vec![0.1, 0.2, 0.3],
+            embedder_id: EmbedderId::new("openai", "test-model", 3),
+            embedding_kind: EmbeddingKind::Text,
+            source_id: "node1".to_string(),
+            chunk_index: 0,
+            total_chunks: 1,
+            chunk_content: Some("test content".to_string()),
+            generated_at: Utc::now(),
+            text_hash: 12345,
+            model: "test-model".to_string(),
+            provider: EmbeddingProvider::OpenAI,
+        };
+
+        let bytes = rmp_serde::to_vec_named(&legacy).unwrap();
+        let read: EmbeddingData = rmp_serde::from_slice(&bytes).unwrap();
+
+        assert_eq!(read.spec_hash, None, "legacy row must read as spec-unknown");
+        assert!(
+            !read.is_current_for(12345, 1),
+            "an unknown spec must never claim to be current — not even against \
+             the legacy text_hash value, which is a DIFFERENT hash of DIFFERENT \
+             inputs"
+        );
+    }
+
+    #[test]
+    fn is_current_for_compares_spec_and_chunk_count() {
+        #[allow(deprecated)]
+        let data = EmbeddingData {
+            vector: vec![0.1],
+            embedder_id: EmbedderId::new("ollama", "bge-m3", 1),
+            embedding_kind: EmbeddingKind::Text,
+            source_id: "n".to_string(),
+            chunk_index: 0,
+            total_chunks: 3,
+            chunk_content: None,
+            generated_at: Utc::now(),
+            text_hash: 1,
+            spec_hash: Some(99),
+            model: "bge-m3".to_string(),
+            provider: EmbeddingProvider::Ollama,
+        };
+
+        assert!(data.is_current_for(99, 3));
+        assert!(!data.is_current_for(100, 3), "changed spec is stale");
+        assert!(
+            !data.is_current_for(99, 2),
+            "same spec but a different chunk count is not a row to trust"
+        );
     }
 
     #[test]
@@ -328,6 +440,7 @@ mod tests {
             chunk_content: Some("Sample text".to_string()),
             generated_at: Utc::now(),
             text_hash: 12345,
+            spec_hash: Some(12345),
             model: "text-embedding-3-small".to_string(),
             provider: EmbeddingProvider::OpenAI,
         };

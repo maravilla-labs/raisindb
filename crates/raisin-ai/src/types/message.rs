@@ -200,6 +200,20 @@ impl Message {
         self.content_parts.as_ref()?.extract_first_image()
     }
 
+    /// Returns EVERY image part in this message, in order.
+    ///
+    /// `first_image` exists too and returns only inline base64 — it predates
+    /// this and several providers still want exactly one. Prefer this one: a
+    /// caption prompt that shows a model two crops of the same asset is an
+    /// ordinary request, and silently sending one of them is the failure mode
+    /// this whole area already had once.
+    pub fn image_parts(&self) -> Vec<&ContentPart> {
+        match &self.content_parts {
+            Some(MessageContent::Parts(parts)) => parts.iter().filter(|p| p.is_image()).collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Returns true if this message contains image content.
     pub fn has_images(&self) -> bool {
         self.content_parts

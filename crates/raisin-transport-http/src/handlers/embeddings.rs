@@ -13,7 +13,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use raisin_embeddings::{
-    config::{EmbeddingDistanceMetric, EmbeddingProvider, TenantEmbeddingConfig},
+    config::{
+        EmbeddingDistanceMetric, EmbeddingProvider, EmbeddingQuantization, TenantEmbeddingConfig,
+    },
     crypto::ApiKeyEncryptor,
     storage::TenantEmbeddingConfigStore,
 };
@@ -59,6 +61,21 @@ pub struct SetConfigRequest {
     /// Base URL for self-hosted providers (e.g., Ollama remote instance)
     #[serde(default)]
     pub base_url: Option<String>,
+
+    /// Scalar precision the HNSW index stores vectors at (`F32` | `F16` | `Int8`).
+    ///
+    /// The admin console has SENT this field since it shipped
+    /// (`TenantEmbeddingSettings.tsx` renders the `<select>` and puts the value
+    /// in its save payload). There was nowhere for it to land, so serde dropped
+    /// it and every index was F32 — a control that looked live and did nothing.
+    /// Now it reaches `TenantEmbeddingConfig` and, through the engine's
+    /// `IndexSpecResolver`, the usearch `ScalarKind` an index is built with.
+    ///
+    /// Takes effect on the NEXT index build: the scalar kind is baked into the
+    /// graph and persisted in its `.hnsw.meta` sidecar, so an existing index
+    /// keeps the precision it was written with until `REBUILD VECTOR INDEX`.
+    #[serde(default)]
+    pub quantization: Option<EmbeddingQuantization>,
 }
 
 /// Response body for GET config (no API key exposed)
@@ -95,6 +112,12 @@ pub struct ConfigResponse {
     /// Base URL for self-hosted providers
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+
+    /// Scalar precision new HNSW indexes are built at.
+    ///
+    /// Echoed back so the console's `<select>` shows what was actually stored
+    /// rather than what it last sent — the two used to differ silently.
+    pub quantization: EmbeddingQuantization,
 }
 
 /// Response for test connection
@@ -159,6 +182,7 @@ pub async fn get_tenant_embedding_config(
                 max_embeddings_per_repo: cfg.max_embeddings_per_repo,
                 chunking: cfg.chunking,
                 base_url: cfg.base_url,
+                quantization: cfg.quantization,
             };
             Ok(Json(response))
         }
@@ -179,6 +203,7 @@ pub async fn get_tenant_embedding_config(
                 max_embeddings_per_repo: default_config.max_embeddings_per_repo,
                 chunking: None,
                 base_url: None,
+                quantization: default_config.quantization,
             };
             Ok(Json(response))
         }
@@ -213,6 +238,7 @@ pub async fn set_tenant_embedding_config(
         default_max_distance: None,
         distance_metric: req.distance_metric.unwrap_or_default(),
         base_url: req.base_url,
+        quantization: req.quantization.unwrap_or_default(),
     };
 
     // Encrypt API key if provided
@@ -319,17 +345,33 @@ pub async fn test_embedding_connection(
             )
         })?;
 
-    // Ollama doesn't need an API key
-    let is_ollama = matches!(config.provider, EmbeddingProvider::Ollama);
+    // Whether a key is required is asked ONCE, inside the shared resolver, of
+    // the provider variant itself. This endpoint used to hard-code
+    // `matches!(config.provider, Ollama)` while the embedding job handler
+    // demanded a key unconditionally - so "Test connection" returned a green
+    // 768-dimension success for a config under which every job then failed
+    // with "No API key configured for embeddings", and nothing surfaced it.
+    //
+    // It also used `create_provider_with_url`, which drops `dimensions`: a
+    // model outside the vendor's built-in name table tested as an "invalid
+    // provider configuration" even when the endpoint was perfectly reachable.
+    let rocksdb = state.rocksdb_storage().ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "RocksDB storage required for embedding configuration".to_string(),
+            }),
+        )
+    })?;
 
-    if !is_ollama && config.api_key_encrypted.is_none() {
-        return Ok(Json(TestConnectionResponse {
-            success: false,
-            dimensions: None,
-            model: config.model,
-            error: Some("No API key configured".to_string()),
-        }));
-    }
+    let master_key = state.get_master_key().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Master key error: {}", e),
+            }),
+        )
+    })?;
 
     tracing::info!(
         "Test connection for tenant {} (provider: {:?}, model: {})",
@@ -338,57 +380,57 @@ pub async fn test_embedding_connection(
         config.model
     );
 
-    // Decrypt API key and test the provider
-    let api_key = if is_ollama {
-        String::new()
-    } else {
-        let master_key = state.get_master_key().map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Master key error: {}", e),
-                }),
-            )
-        })?;
-        let encryptor = ApiKeyEncryptor::new(&master_key);
-        encryptor
-            .decrypt(config.api_key_encrypted.as_ref().unwrap())
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: format!("Failed to decrypt API key: {}", e),
-                    }),
-                )
-            })?
-    };
-
-    let provider = raisin_embeddings::create_provider_with_url(
-        &config.provider,
-        &api_key,
-        &config.model,
-        config.base_url.as_deref(),
+    // A resolution failure is the answer, not a 5xx: it is exactly what the
+    // job would hit, and reporting it in the same shape as a transport failure
+    // is what makes this endpoint honest about the job's fate.
+    // `resolve_settings` first, so the response can name the model the job will
+    // actually request. Reporting `config.model` here is a lie under a unified
+    // `ai_provider_ref`, where the legacy field is stale by construction: this
+    // endpoint would report "text-embedding-3-small" for a test it had just run
+    // against nomic-embed-text.
+    let resolved = match raisin_rocksdb::embedding_provider::resolve_settings(
+        rocksdb,
+        &tenant_id,
+        &config,
+        &master_key,
     )
-    .map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!("Invalid provider configuration: {}", e),
-            }),
-        )
-    })?;
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return Ok(Json(TestConnectionResponse {
+                success: false,
+                dimensions: None,
+                model: config.model,
+                error: Some(format!("{}", e)),
+            }))
+        }
+    };
+    let model = resolved.model.clone();
+
+    let provider = match resolved.build() {
+        Ok(p) => p,
+        Err(e) => {
+            return Ok(Json(TestConnectionResponse {
+                success: false,
+                dimensions: None,
+                model,
+                error: Some(format!("{}", e)),
+            }))
+        }
+    };
 
     match provider.test_connection().await {
         Ok(dims) => Ok(Json(TestConnectionResponse {
             success: true,
             dimensions: Some(dims),
-            model: config.model,
+            model,
             error: None,
         })),
         Err(e) => Ok(Json(TestConnectionResponse {
             success: false,
             dimensions: None,
-            model: config.model,
+            model,
             error: Some(format!("{}", e)),
         })),
     }

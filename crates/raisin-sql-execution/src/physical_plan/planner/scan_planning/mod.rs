@@ -90,9 +90,15 @@ impl PhysicalPlanner {
         }
 
         // Priority 1: Full-text search gets absolute priority
-        if let Some((language, query, limit)) = self.extract_fulltext_predicate(&canonical) {
+        //
+        // The scan GUARANTEES exactly the FULLTEXT_MATCH predicate and nothing
+        // else. Every other conjunct the user wrote — `node_type = '...'`,
+        // `path = '...'`, a property equality, a subtree predicate — has to
+        // survive as a row-level filter, or a scoped search silently answers
+        // with the unscoped result set.
+        if let Some((ft_index, language, query, limit)) = self.find_fulltext_predicate(&canonical) {
             if self.index_catalog.has_fulltext_index() {
-                return Ok(PhysicalPlan::FullTextScan {
+                let scan = PhysicalPlan::FullTextScan {
                     tenant_id: self.default_tenant_id.to_string(),
                     repo_id: self.default_repo_id.to_string(),
                     branch: branch.to_string(),
@@ -103,7 +109,20 @@ impl PhysicalPlanner {
                     query,
                     limit,
                     projection,
-                });
+                };
+
+                let remaining = Self::remove_predicate_at(&canonical, ft_index);
+                if !remaining.is_empty() {
+                    tracing::info!(
+                        "   FullTextScan keeps {} predicate(s) as a residual row filter",
+                        remaining.len()
+                    );
+                }
+
+                return Ok(Self::wrap_with_residual(
+                    scan,
+                    self.combine_canonical_predicates(&remaining),
+                ));
             }
         }
 
@@ -112,7 +131,7 @@ impl PhysicalPlanner {
             let remaining = self.remove_id_predicate(&canonical);
             let remaining_filter = self.combine_canonical_predicates(&remaining);
 
-            let mut scan = PhysicalPlan::NodeIdScan {
+            let scan = PhysicalPlan::NodeIdScan {
                 tenant_id: self.default_tenant_id.to_string(),
                 repo_id: self.default_repo_id.to_string(),
                 branch: branch.to_string(),
@@ -123,19 +142,12 @@ impl PhysicalPlanner {
                 projection: projection.clone(),
             };
 
-            if let Some(filter_expr) = remaining_filter {
-                scan = PhysicalPlan::Filter {
-                    input: Box::new(scan),
-                    predicates: vec![filter_expr],
-                };
-            }
-
             tracing::info!(
                 "   Using NodeIdScan for direct node lookup: id='{}'",
                 id_value
             );
 
-            return Ok(scan);
+            return Ok(Self::wrap_with_residual(scan, remaining_filter));
         }
 
         // Priority 3: Path equality (path = '/exact/path')
@@ -144,7 +156,7 @@ impl PhysicalPlanner {
                 let remaining = self.remove_path_predicate(&canonical);
                 let remaining_filter = self.combine_canonical_predicates(&remaining);
 
-                let mut scan = PhysicalPlan::PathIndexScan {
+                let scan = PhysicalPlan::PathIndexScan {
                     tenant_id: self.default_tenant_id.to_string(),
                     repo_id: self.default_repo_id.to_string(),
                     branch: branch.to_string(),
@@ -155,19 +167,12 @@ impl PhysicalPlanner {
                     projection: projection.clone(),
                 };
 
-                if let Some(filter_expr) = remaining_filter {
-                    scan = PhysicalPlan::Filter {
-                        input: Box::new(scan),
-                        predicates: vec![filter_expr],
-                    };
-                }
-
                 tracing::info!(
                     "   Using PathIndexScan for exact path lookup: path='{}'",
                     path_value
                 );
 
-                return Ok(scan);
+                return Ok(Self::wrap_with_residual(scan, remaining_filter));
             }
         }
 
@@ -263,6 +268,47 @@ impl PhysicalPlanner {
             fallback_filter,
             projection,
         ))
+    }
+
+    /// Wrap a scan in a residual `Filter` for everything the scan does NOT
+    /// itself guarantee.
+    ///
+    /// **This is the one place a scan acquires its residual filter.** Every
+    /// index scan consumes exactly one predicate (the one it is an index for)
+    /// and leaves the rest; dropping that remainder is not a ranking quirk, it
+    /// is a scoping failure — `FULLTEXT_MATCH(...) AND node_type = 'X'`
+    /// answering with every fulltext hit of every type, presented as correct.
+    ///
+    /// The rule was previously open-coded in the NodeIdScan and PathIndexScan
+    /// branches and simply absent from the FullTextScan and VectorScan ones,
+    /// which is exactly the mirrored-paths-that-drift bug class this codebase
+    /// keeps paying for. Callers compute WHICH predicates remain; this decides
+    /// what to do with them, once.
+    pub(in crate::physical_plan::planner) fn wrap_with_residual(
+        scan: PhysicalPlan,
+        residual: Option<TypedExpr>,
+    ) -> PhysicalPlan {
+        match residual {
+            Some(filter_expr) => PhysicalPlan::Filter {
+                input: Box::new(scan),
+                predicates: vec![filter_expr],
+            },
+            None => scan,
+        }
+    }
+
+    /// All predicates except the one at `index` — the residual set for a scan
+    /// that consumed exactly that predicate.
+    fn remove_predicate_at(
+        predicates: &[CanonicalPredicate],
+        index: usize,
+    ) -> Vec<CanonicalPredicate> {
+        predicates
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != index)
+            .map(|(_, p)| p.clone())
+            .collect()
     }
 
     /// Expand an indexable `col IN (...)` predicate into a `Union` of per-value

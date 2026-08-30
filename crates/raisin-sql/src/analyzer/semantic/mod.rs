@@ -135,7 +135,25 @@ impl<'a> AnalyzerContext<'a> {
         }
     }
 
-    fn fulltext_search_table_def(name: &str) -> TableDef {
+    /// The columns EVERY search table function returns, declared once.
+    ///
+    /// `FULLTEXT_SEARCH` used to emit timestamps but no ranks and `HYBRID_SEARCH`
+    /// ranks but no timestamps, so a retriever that reranks by recency could not
+    /// get `updated_at` out of the hybrid function, and `KNN` declared a single
+    /// opaque `result JSONB`. Three near-identical hand-maintained column lists
+    /// is the same drift class as three fetch loops, and the executor now builds
+    /// exactly one row shape -- so this is the one declaration that has to match
+    /// it.
+    ///
+    /// Order is FIXED as listed: a `SELECT *` consumer reading by position
+    /// depends on it.
+    ///
+    /// There is deliberately no `truncated` or `dropped_by_permission` column.
+    /// Telling the caller how many rows permissions removed turns the function
+    /// into a differential oracle -- hold the scope, vary the query, count rows,
+    /// enumerate documents you may not read. The shortfall goes to the operator
+    /// log instead (see `search::emit`).
+    fn search_result_table_def(name: &str) -> TableDef {
         TableDef {
             name: name.to_string(),
             columns: vec![
@@ -143,37 +161,44 @@ impl<'a> AnalyzerContext<'a> {
                 ColumnDef::simple("workspace_id", DataType::Text),
                 ColumnDef::simple("name", DataType::Text),
                 ColumnDef::simple("path", DataType::Text),
+                // The node's OWN type, not its indexed shape identity: the
+                // full-text `shape_types` field also carries archetypes and
+                // nested element types, and this column must not.
                 ColumnDef::simple("node_type", DataType::Text),
                 ColumnDef::simple("score", DataType::Double),
+                // NULL when that leg did not contribute -- which includes the
+                // leg not having run at all, because its weight was 0.
+                ColumnDef::nullable("fulltext_rank", DataType::BigInt),
+                ColumnDef::nullable("vector_rank", DataType::BigInt),
+                ColumnDef::nullable("vector_distance", DataType::Double),
+                // Which chunk of the document the vector leg matched. NULL when
+                // the row had no vector hit; 0 for a document that was never
+                // chunked. A RAG caller needs it to know where in a long
+                // document the answer lives.
+                ColumnDef::nullable("chunk_index", DataType::BigInt),
+                // Which embedding space produced the vector hit: 'text' or
+                // 'image'. NULL exactly when `vector_rank` is NULL. It exists
+                // because `kind => 'all'` fuses two towers into one ranking, and
+                // without this the caller cannot tell which one matched -- nor
+                // that `vector_distance` is measured on a different scale
+                // depending on the answer.
+                ColumnDef::nullable("embedding_kind", DataType::Text),
                 ColumnDef::simple("revision", DataType::BigInt),
-                ColumnDef::simple("properties", DataType::JsonB),
                 ColumnDef::nullable("created_at", DataType::Text),
                 ColumnDef::nullable("updated_at", DataType::Text),
+                ColumnDef::simple("properties", DataType::JsonB),
             ],
             primary_key: vec![],
             indexes: vec![],
         }
     }
 
+    fn fulltext_search_table_def(name: &str) -> TableDef {
+        Self::search_result_table_def(name)
+    }
+
     fn hybrid_search_table_def(name: &str) -> TableDef {
-        TableDef {
-            name: name.to_string(),
-            columns: vec![
-                ColumnDef::simple("node_id", DataType::Text),
-                ColumnDef::simple("workspace_id", DataType::Text),
-                ColumnDef::simple("name", DataType::Text),
-                ColumnDef::simple("path", DataType::Text),
-                ColumnDef::simple("node_type", DataType::Text),
-                ColumnDef::simple("score", DataType::Double),
-                ColumnDef::nullable("fulltext_rank", DataType::BigInt),
-                ColumnDef::nullable("vector_rank", DataType::BigInt),
-                ColumnDef::nullable("vector_distance", DataType::Double),
-                ColumnDef::simple("revision", DataType::BigInt),
-                ColumnDef::simple("properties", DataType::JsonB),
-            ],
-            primary_key: vec![],
-            indexes: vec![],
-        }
+        Self::search_result_table_def(name)
     }
 
     fn cypher_table_def(name: &str) -> TableDef {
@@ -209,12 +234,10 @@ impl<'a> AnalyzerContext<'a> {
     }
 
     fn knn_table_def(name: &str) -> TableDef {
-        TableDef {
-            name: name.to_string(),
-            columns: vec![ColumnDef::nullable("result", DataType::JsonB)],
-            primary_key: vec![],
-            indexes: vec![],
-        }
+        // Was a single opaque `result JSONB` for a function that had no executor
+        // at all. `KNN` is now `HYBRID_SEARCH` with the full-text leg switched
+        // off, so it returns the same columns with the full-text ones NULL.
+        Self::search_result_table_def(name)
     }
 
     fn neighbors_table_def(name: &str) -> TableDef {

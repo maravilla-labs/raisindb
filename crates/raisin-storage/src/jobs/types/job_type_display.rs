@@ -58,11 +58,8 @@ impl fmt::Display for JobType {
             }
             Self::AssetProcessing { node_id, options } => write!(
                 f,
-                "AssetProcessing({}, pdf={}, img_embed={}, caption={})",
-                node_id,
-                options.extract_pdf_text,
-                options.generate_image_embedding,
-                options.generate_image_caption
+                "AssetProcessing({}, pdf={}, img_embed={})",
+                node_id, options.extract_pdf_text, options.generate_image_embedding
             ),
             Self::ReplicationGC { tenant_id, repo_id } => {
                 write!(f, "ReplicationGC({}/{})", tenant_id, repo_id)

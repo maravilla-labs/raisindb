@@ -1662,3 +1662,613 @@ async fn cross_branch_copy_carries_relations_and_their_removal() -> Result<()> {
     );
     Ok(())
 }
+
+// ===========================================================================
+// Publish-time indexing: the node events the target branch's derived state
+// (embeddings, fulltext, spatial, triggers, WS subscribers) is built from.
+// ===========================================================================
+
+/// Collects every `Event::Node` the bus publishes, so a test can assert on
+/// what a promotion notified — the only signal that drives target-branch
+/// indexing.
+struct NodeEventCollector {
+    events: std::sync::Arc<std::sync::Mutex<Vec<raisin_events::NodeEvent>>>,
+}
+
+impl raisin_events::EventHandler for NodeEventCollector {
+    fn handle<'a>(
+        &'a self,
+        event: &'a raisin_events::Event,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>> {
+        let captured = match event {
+            raisin_events::Event::Node(e) => Some(e.clone()),
+            _ => None,
+        };
+        let sink = self.events.clone();
+        Box::pin(async move {
+            if let Some(e) = captured {
+                sink.lock().unwrap().push(e);
+            }
+            Ok(())
+        })
+    }
+
+    fn name(&self) -> &str {
+        "test-node-event-collector"
+    }
+}
+
+/// Subscribe a collector to the storage's event bus.
+fn collect_node_events(
+    storage: &RocksDBStorage,
+) -> std::sync::Arc<std::sync::Mutex<Vec<raisin_events::NodeEvent>>> {
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    storage
+        .event_bus()
+        .subscribe(std::sync::Arc::new(NodeEventCollector {
+            events: events.clone(),
+        }));
+    events
+}
+
+/// The bus dispatches each handler in a spawned task, so settle before reading.
+async fn settle_events() {
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
+    }
+}
+
+fn take_events(
+    sink: &std::sync::Arc<std::sync::Mutex<Vec<raisin_events::NodeEvent>>>,
+) -> Vec<raisin_events::NodeEvent> {
+    std::mem::take(&mut *sink.lock().unwrap())
+}
+
+/// REGRESSION — Studio publish left published nodes with no vector and no
+/// fulltext entry on the publish branch.
+///
+/// `copy_nodes_across_branches` writes in one raw `WriteBatch` and never goes
+/// through the transaction commit that normally emits node events. Every piece
+/// of target-branch derived state is driven by those events: `EmbeddingGenerate`,
+/// the fulltext batch indexer, spatial reconciliation, triggers, WS subscribers.
+/// The WS handler used to publish them in its own body while the function
+/// binding — the one Studio publish actually calls — published none, so a
+/// promoted page was visible to `SELECT` on `publish` and invisible to both
+/// semantic search and `FULLTEXT_MATCH`, with no error anywhere.
+///
+/// This asserts the primitive itself notifies, which is what makes BOTH callers
+/// correct. Assert on the events, not on a caller: an assertion that lived in
+/// the transport is exactly what let the function path drift.
+#[tokio::test]
+async fn cross_branch_copy_emits_node_events_on_the_target_branch() -> Result<()> {
+    let t = TestStorage::new().await?;
+    let storage = &t.storage;
+    let nodes = storage.nodes();
+
+    let main = || StorageScope::new(TENANT, REPO, "main", WORKSPACE);
+
+    nodes
+        .create(main(), make_node("/page", "raisin:Folder"), no_validation())
+        .await?;
+    for child in ["a", "b"] {
+        nodes
+            .create(
+                main(),
+                make_node(&format!("/page/{child}"), "raisin:Page"),
+                no_validation(),
+            )
+            .await?;
+    }
+    create_empty_branch(storage, "publish").await?;
+
+    let sink = collect_node_events(storage);
+    let roots = vec!["/page".to_string()];
+
+    let summary = nodes
+        .copy_nodes_across_branches(
+            TENANT, REPO, "main", "publish", WORKSPACE, &roots, true, false, None, None,
+        )
+        .await?;
+    assert_eq!(summary.copied, 3);
+
+    settle_events().await;
+    let events = take_events(&sink);
+    assert_eq!(
+        events.len(),
+        3,
+        "one event per promoted node; got {:?}",
+        events
+            .iter()
+            .map(|e| (&e.node_id, &e.kind))
+            .collect::<Vec<_>>()
+    );
+    for e in &events {
+        assert_eq!(
+            e.branch, "publish",
+            "the event must be scoped to the TARGET branch — a 'main' event \
+             would index the publish content into main's vector/fulltext index"
+        );
+        assert_eq!(e.workspace_id, WORKSPACE);
+        assert_eq!(e.revision, summary.revision);
+        assert!(
+            matches!(e.kind, raisin_events::NodeEventKind::Created),
+            "first promotion onto an empty branch is a create: {:?}",
+            e.kind
+        );
+        assert!(e.node_type.is_some(), "indexers select a plan by node_type");
+        assert!(e.path.is_some());
+        // `source: local` is what UnifiedJobEventHandler reads to tell a local
+        // write from a replicated one; without it the local-only arms (triggers,
+        // asset processing) are skipped.
+        let meta = e.metadata.as_ref().expect("event metadata");
+        assert_eq!(
+            meta.get("source").and_then(|v| v.as_str()),
+            Some("local"),
+            "promotion is a local write"
+        );
+        assert!(
+            meta.contains_key("actor"),
+            "audit attributes writes by actor"
+        );
+    }
+
+    let mut ids: Vec<&str> = events.iter().map(|e| e.node_id.as_str()).collect();
+    ids.sort_unstable();
+    let mut expected: Vec<&str> = summary.changes.iter().map(|c| c.node_id.as_str()).collect();
+    expected.sort_unstable();
+    assert_eq!(ids, expected);
+
+    Ok(())
+}
+
+/// A steady-state re-publish must be free.
+///
+/// The copy rewrites every node in its set at a fresh revision whether or not
+/// anything changed, so emitting unconditionally would re-embed (real embedder
+/// spend) and re-index the entire published site on every publish click. Only
+/// the nodes whose content actually changed may notify — mirroring the no-op
+/// guard the transaction path already has in `create/tracking.rs::track_update`,
+/// which is why the `__branch` SQL publish leg was correctly silent.
+#[tokio::test]
+async fn cross_branch_copy_re_promotion_is_silent_for_unchanged_nodes() -> Result<()> {
+    use raisin_models::nodes::properties::PropertyValue;
+
+    let t = TestStorage::new().await?;
+    let storage = &t.storage;
+    let nodes = storage.nodes();
+
+    let main = || StorageScope::new(TENANT, REPO, "main", WORKSPACE);
+
+    nodes
+        .create(main(), make_node("/page", "raisin:Folder"), no_validation())
+        .await?;
+    for child in ["a", "b"] {
+        let mut n = make_node(&format!("/page/{child}"), "raisin:Page");
+        n.properties.insert(
+            "body".to_string(),
+            PropertyValue::String(format!("body of {child}")),
+        );
+        nodes.create(main(), n, no_validation()).await?;
+    }
+    create_empty_branch(storage, "publish").await?;
+
+    let roots = vec!["/page".to_string()];
+    nodes
+        .copy_nodes_across_branches(
+            TENANT, REPO, "main", "publish", WORKSPACE, &roots, true, false, None, None,
+        )
+        .await?;
+
+    // Subscribe only now: the first promotion's events are not under test.
+    let sink = collect_node_events(storage);
+
+    // (1) Nothing changed on main -> a second promotion notifies nobody.
+    let summary = nodes
+        .copy_nodes_across_branches(
+            TENANT, REPO, "main", "publish", WORKSPACE, &roots, true, false, None, None,
+        )
+        .await?;
+    assert_eq!(summary.copied, 3, "the rows are still rewritten");
+    settle_events().await;
+    let events = take_events(&sink);
+    assert!(
+        events.is_empty(),
+        "re-publishing unchanged content must not re-embed or re-index: {:?}",
+        events
+            .iter()
+            .map(|e| (&e.node_id, &e.kind))
+            .collect::<Vec<_>>()
+    );
+
+    // (2) Change ONE node -> exactly that node notifies.
+    nodes
+        .update_property_by_path(
+            main(),
+            "/page/a",
+            "body",
+            PropertyValue::String("edited".to_string()),
+        )
+        .await?;
+    let changed_id = nodes
+        .get_by_path(main(), "/page/a", None)
+        .await?
+        .unwrap()
+        .id;
+
+    nodes
+        .copy_nodes_across_branches(
+            TENANT, REPO, "main", "publish", WORKSPACE, &roots, true, false, None, None,
+        )
+        .await?;
+    settle_events().await;
+    let events = take_events(&sink);
+    assert_eq!(
+        events.len(),
+        1,
+        "only the edited node may notify; got {:?}",
+        events
+            .iter()
+            .map(|e| (&e.node_id, &e.kind))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(events[0].node_id, changed_id);
+    assert_eq!(events[0].branch, "publish");
+    assert!(matches!(
+        events[0].kind,
+        raisin_events::NodeEventKind::Updated
+    ));
+
+    Ok(())
+}
+
+/// UNPUBLISH: a pruned node must notify a Deleted on the target branch, or its
+/// vector and fulltext entry stay behind and the content remains semantically
+/// searchable after it was taken down — a governance problem, not just a stale
+/// cache.
+#[tokio::test]
+async fn cross_branch_copy_prune_emits_delete_events() -> Result<()> {
+    let t = TestStorage::new().await?;
+    let storage = &t.storage;
+    let nodes = storage.nodes();
+
+    let main = || StorageScope::new(TENANT, REPO, "main", WORKSPACE);
+
+    nodes
+        .create(main(), make_node("/page", "raisin:Folder"), no_validation())
+        .await?;
+    for child in ["a", "b"] {
+        nodes
+            .create(
+                main(),
+                make_node(&format!("/page/{child}"), "raisin:Page"),
+                no_validation(),
+            )
+            .await?;
+    }
+    create_empty_branch(storage, "publish").await?;
+
+    let roots = vec!["/page".to_string()];
+    nodes
+        .copy_nodes_across_branches(
+            TENANT, REPO, "main", "publish", WORKSPACE, &roots, true, true, None, None,
+        )
+        .await?;
+
+    let doomed = nodes
+        .get_by_path(main(), "/page/b", None)
+        .await?
+        .unwrap()
+        .id;
+    nodes
+        .delete_by_path(main(), "/page/b", DeleteNodeOptions::default())
+        .await?;
+
+    let sink = collect_node_events(storage);
+    let summary = nodes
+        .copy_nodes_across_branches(
+            TENANT, REPO, "main", "publish", WORKSPACE, &roots, true, true, None, None,
+        )
+        .await?;
+    assert_eq!(summary.deleted, 1);
+
+    settle_events().await;
+    let events = take_events(&sink);
+    let deletes: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e.kind, raisin_events::NodeEventKind::Deleted))
+        .collect();
+    assert_eq!(
+        deletes.len(),
+        1,
+        "the pruned node must notify a Deleted so its vector and fulltext \
+         entry are removed from the publish branch; got {:?}",
+        events
+            .iter()
+            .map(|e| (&e.node_id, &e.kind))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(deletes[0].node_id, doomed);
+    assert_eq!(deletes[0].branch, "publish");
+
+    Ok(())
+}
+
+/// REGRESSION — a TRANSLATED node re-embedded on every publish.
+///
+/// The no-op suppression above exempted any node carrying a translation:
+/// `copy_translations_to_batch` pushed a `NodeChangeInfo` for every locale it
+/// copied, unconditionally, and the caller read "did the change_infos list
+/// grow?" as "did anything change?". Since the copy rewrites every overlay at
+/// the fresh revision on every run — that is what keeps it self-healing — the
+/// answer was permanently yes.
+///
+/// The observable cost is exactly the one the untranslated case was fixed for,
+/// aimed at the half of a multilingual site that has translations: a scheduled
+/// publish re-embeds (real embedder spend) and re-indexes every translated page
+/// forever, and mints a node revision for each.
+///
+/// The fix makes the translation copy report whether an overlay actually
+/// DIFFERED from the one the target already held.
+#[tokio::test]
+async fn cross_branch_copy_re_promotion_is_silent_for_translated_nodes() -> Result<()> {
+    use raisin_hlc::HLC;
+    use raisin_models::nodes::properties::PropertyValue;
+    use raisin_models::translations::{JsonPointer, LocaleCode, LocaleOverlay, TranslationMeta};
+    use raisin_storage::TranslationRepository;
+
+    let t = TestStorage::new().await?;
+    let storage = &t.storage;
+    let nodes = storage.nodes();
+    let main = || StorageScope::new(TENANT, REPO, "main", WORKSPACE);
+
+    let mut node = make_node("/doc", "raisin:Page");
+    node.properties.insert(
+        "title".to_string(),
+        PropertyValue::String("Hello world".to_string()),
+    );
+    let node_id = node.id.clone();
+    nodes.create(main(), node, no_validation()).await?;
+
+    // A second, UNtranslated node, so the test also proves the suppression
+    // still works for the case it always worked for.
+    nodes
+        .create(main(), make_node("/plain", "raisin:Page"), no_validation())
+        .await?;
+
+    let locale = LocaleCode::parse("de").expect("valid locale");
+    let store_overlay = |value: &str| {
+        let mut overlay_map = HashMap::new();
+        overlay_map.insert(
+            JsonPointer::new("/title"),
+            PropertyValue::String(value.to_string()),
+        );
+        LocaleOverlay::properties(overlay_map)
+    };
+    let meta = TranslationMeta::system(locale.clone(), HLC::new(11, 0), "init".to_string());
+    storage
+        .translations()
+        .store_translation(
+            TENANT,
+            REPO,
+            "main",
+            WORKSPACE,
+            &node_id,
+            &locale,
+            &store_overlay("Hallo Welt"),
+            &meta,
+        )
+        .await?;
+
+    create_empty_branch(storage, "publish").await?;
+
+    let roots = vec!["/doc".to_string(), "/plain".to_string()];
+    let promote = || {
+        raisin_storage::NodeRepository::copy_nodes_across_branches(
+            nodes, TENANT, REPO, "main", "publish", WORKSPACE, &roots, true, false, None, None,
+        )
+    };
+
+    promote().await?;
+
+    // Subscribe only now: the first promotion's events are not under test.
+    let sink = collect_node_events(storage);
+
+    // (1) Nothing changed on main -> a re-promotion notifies nobody, INCLUDING
+    //     the translated node. This is what failed before the fix: the
+    //     translated node emitted an Updated on every run.
+    let summary = promote().await?;
+    assert_eq!(summary.copied, 2, "the rows are still rewritten");
+    settle_events().await;
+    let events = take_events(&sink);
+    assert!(
+        events.is_empty(),
+        "re-publishing a translated node whose overlay did not change must not \
+         re-embed or re-index it: {:?}",
+        events
+            .iter()
+            .map(|e| (&e.node_id, &e.kind))
+            .collect::<Vec<_>>()
+    );
+
+    // (2) Change the OVERLAY only — the base node is untouched — and exactly
+    //     that node must notify. Suppressing on "the node blob is identical"
+    //     alone would wrongly swallow this: an overlay is indexed content too.
+    let meta2 = TranslationMeta::system(locale.clone(), HLC::new(12, 0), "edit".to_string());
+    storage
+        .translations()
+        .store_translation(
+            TENANT,
+            REPO,
+            "main",
+            WORKSPACE,
+            &node_id,
+            &locale,
+            &store_overlay("Guten Tag"),
+            &meta2,
+        )
+        .await?;
+
+    promote().await?;
+    settle_events().await;
+    let events = take_events(&sink);
+    assert_eq!(
+        events.len(),
+        1,
+        "an edited overlay must notify, and only for its own node; got {:?}",
+        events
+            .iter()
+            .map(|e| (&e.node_id, &e.kind))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(events[0].node_id, node_id);
+    assert_eq!(events[0].branch, "publish");
+
+    // (3) And back to steady state: the overlay now matches on both branches.
+    promote().await?;
+    settle_events().await;
+    assert!(
+        take_events(&sink).is_empty(),
+        "the run after the edit must be silent again"
+    );
+
+    Ok(())
+}
+
+/// REGRESSION — promotion carried CONTENT but not the SCHEMA it references, and
+/// the two publish legs then disagreed about that gap.
+///
+/// On a target branch with no `test:Doc`, the indexing planner failed OPEN
+/// ("NodeType unresolved; falling back to legacy index-all-strings" — so
+/// per-field VECTOR/FULLTEXT selection was silently discarded) while a
+/// `__branch`-targeted SQL write onto the same branch failed CLOSED
+/// ("NodeType not found: test:Doc"). Same condition, opposite policies, decided
+/// by which publish leg the caller happened to use.
+///
+/// The fix removes the condition: a promotion carries the definitions its nodes
+/// reference, transitively through `extends` and `mixins`.
+#[tokio::test]
+async fn cross_branch_copy_carries_referenced_node_types() -> Result<()> {
+    use raisin_models::nodes::types::NodeType;
+    use raisin_storage::NodeTypeRepository;
+
+    let t = TestStorage::new().await?;
+    let storage = &t.storage;
+    let nodes = storage.nodes();
+    let main_branch = BranchScope::new(TENANT, REPO, "main");
+    let publish_branch = BranchScope::new(TENANT, REPO, "publish");
+    let main = || StorageScope::new(TENANT, REPO, "main", WORKSPACE);
+
+    let node_type = |name: &str, extends: Option<&str>, mixins: Vec<&str>| -> NodeType {
+        serde_json::from_value(serde_json::json!({
+            "name": name,
+            "extends": extends,
+            "mixins": mixins,
+        }))
+        .expect("nodetype should deserialize")
+    };
+
+    // A three-level shape: the node's own type extends a base and pulls in a
+    // mixin. A partial closure is worse than none — resolving `test:Doc` fails
+    // just as hard when its supertype is missing, and the error then names a
+    // type the publisher never heard of.
+    for nt in [
+        node_type("test:Base", None, vec![]),
+        node_type("test:Seo", None, vec![]),
+        node_type("test:Doc", Some("test:Base"), vec!["test:Seo"]),
+        // Never referenced by the promoted set — must NOT be carried.
+        node_type("test:Unrelated", None, vec![]),
+    ] {
+        storage
+            .node_types()
+            .create(main_branch, nt, commit())
+            .await?;
+    }
+
+    nodes
+        .create(main(), make_node("/doc", "test:Doc"), no_validation())
+        .await?;
+    create_empty_branch(storage, "publish").await?;
+
+    assert!(
+        storage
+            .node_types()
+            .get(publish_branch, "test:Doc", None)
+            .await?
+            .is_none(),
+        "precondition: the target branch starts with no schema"
+    );
+
+    let roots = vec!["/doc".to_string()];
+    let promote = || {
+        raisin_storage::NodeRepository::copy_nodes_across_branches(
+            nodes, TENANT, REPO, "main", "publish", WORKSPACE, &roots, true, false, None, None,
+        )
+    };
+    promote().await?;
+
+    for name in ["test:Doc", "test:Base", "test:Seo"] {
+        assert!(
+            storage
+                .node_types()
+                .get(publish_branch, name, None)
+                .await?
+                .is_some(),
+            "'{name}' is in the promoted set's inheritance closure and must be \
+             carried to the target branch"
+        );
+    }
+    assert!(
+        storage
+            .node_types()
+            .get(publish_branch, "test:Unrelated", None)
+            .await?
+            .is_none(),
+        "a promotion carries the schema its nodes REFERENCE, not the whole registry"
+    );
+
+    // A steady-state re-publish must write NOTHING here. `upsert` stamps
+    // `updated_at` and bumps `version`, so comparing whole structs would
+    // rewrite every definition on every publish forever; the comparison must
+    // ignore store-owned versioning metadata.
+    let version_before = storage
+        .node_types()
+        .get(publish_branch, "test:Doc", None)
+        .await?
+        .and_then(|nt| nt.version);
+    promote().await?;
+    let version_after = storage
+        .node_types()
+        .get(publish_branch, "test:Doc", None)
+        .await?
+        .and_then(|nt| nt.version);
+    assert_eq!(
+        version_before, version_after,
+        "re-promoting unchanged schema must not mint a new NodeType version"
+    );
+
+    // A REAL schema edit on main must reach the target.
+    let mut edited = storage
+        .node_types()
+        .get(main_branch, "test:Doc", None)
+        .await?
+        .expect("test:Doc on main");
+    edited.description = Some("now documented".to_string());
+    storage
+        .node_types()
+        .update(main_branch, edited, commit())
+        .await?;
+
+    promote().await?;
+    assert_eq!(
+        storage
+            .node_types()
+            .get(publish_branch, "test:Doc", None)
+            .await?
+            .and_then(|nt| nt.description),
+        Some("now documented".to_string()),
+        "an edited definition must be carried on the next promotion"
+    );
+
+    Ok(())
+}

@@ -2,7 +2,6 @@
 
 //! Types for hybrid search: query parameters, results, and responses.
 
-use raisin_hlc::HLC;
 use serde::{Deserialize, Serialize};
 
 /// Hybrid search request parameters.
@@ -24,17 +23,35 @@ pub struct HybridSearchQuery {
     #[serde(default = "default_limit")]
     pub limit: usize,
 
-    /// RRF k parameter (default: 60)
+    /// DEPRECATED and IGNORED. RRF's k is a global constant (60).
+    ///
+    /// Varying it per request makes two callers' scores incomparable, and
+    /// tuning it hides real faults: someone whose vector leg is dead finds that
+    /// lowering k "improves" results and never looks for the cause.
     #[serde(default = "default_rrf_k")]
     pub k: f32,
 
-    /// Workspace to search in (default: "default")
+    /// Workspace scope. Same grammar as the SQL `workspaces =>` argument: one
+    /// name, `'a, b, c'`, a glob `'content-*'`, or `'ALL READABLE'` for every
+    /// workspace the caller may read.
     #[serde(default = "default_workspace")]
     pub workspace: String,
 
     /// Branch to search in (default: "main")
     #[serde(default = "default_branch")]
     pub branch: String,
+
+    /// Which embedding space(s) the vector leg reads: `text`, `image` or `all`.
+    ///
+    /// Same values and same default (`text`) as the SQL `kind =>` argument,
+    /// because this endpoint and `HYBRID_SEARCH` are one implementation and a
+    /// second spelling here is how the two drift apart again.
+    #[serde(default = "default_kind")]
+    pub kind: String,
+}
+
+fn default_kind() -> String {
+    "text".to_string()
 }
 
 fn default_strategy() -> String {
@@ -84,8 +101,8 @@ pub struct HybridSearchResult {
     /// Vector distance (if available, lower is better)
     pub vector_distance: Option<f32>,
 
-    /// Revision number
-    pub revision: HLC,
+    /// Node revision (its version counter), matching the SQL `revision` column.
+    pub revision: i64,
 }
 
 /// Hybrid search response.

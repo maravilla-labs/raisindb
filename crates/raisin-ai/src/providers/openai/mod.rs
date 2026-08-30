@@ -266,12 +266,43 @@ impl OpenAIProvider {
 
     // ── Message conversion ─────────────────────────────────────────
 
+    /// Builds a user message's content, using the multimodal array form only
+    /// when there is actually an image to carry.
+    ///
+    /// Text-only messages keep the bare-string form they have always had. That
+    /// is deliberate rather than tidy: the array form is a different request
+    /// body, and making every existing text request take a newly-written code
+    /// path in order to support images would put the risk on the 99% of calls
+    /// that gain nothing from it.
+    ///
+    /// An image is passed as a `data:` URL when it is inline base64 and as its
+    /// own URL when it is remote — both are legal values of `input_image`'s
+    /// `image_url`, so OpenAI needs no distinction and neither does this.
+    fn user_content(msg: &Message) -> OpenAIContent {
+        let images = msg.image_parts();
+        if images.is_empty() {
+            return OpenAIContent::Text(msg.content.clone());
+        }
+
+        let mut parts = Vec::with_capacity(images.len() + 1);
+        let text = msg.effective_text();
+        if !text.is_empty() {
+            parts.push(OpenAIContentPart::InputText { text });
+        }
+        for image in images {
+            if let Some(url) = image.as_url() {
+                parts.push(OpenAIContentPart::InputImage { image_url: url });
+            }
+        }
+        OpenAIContent::Parts(parts)
+    }
+
     /// Converts our Message type to OpenAI Responses API input format
     fn convert_messages(msg: &Message) -> Vec<OpenAIInputItem> {
         match msg.role {
             Role::User => vec![OpenAIInputItem::Message(OpenAIMessage {
                 role: "user".to_string(),
-                content: msg.content.clone(),
+                content: Self::user_content(msg),
             })],
             Role::Assistant => {
                 let mut items = Vec::new();
@@ -279,7 +310,7 @@ impl OpenAIProvider {
                 if !msg.content.is_empty() {
                     items.push(OpenAIInputItem::Message(OpenAIMessage {
                         role: "assistant".to_string(),
-                        content: msg.content.clone(),
+                        content: msg.content.clone().into(),
                     }));
                 }
 
@@ -296,7 +327,7 @@ impl OpenAIProvider {
                 if items.is_empty() {
                     items.push(OpenAIInputItem::Message(OpenAIMessage {
                         role: "assistant".to_string(),
-                        content: String::new(),
+                        content: String::new().into(),
                     }));
                 }
 
@@ -313,7 +344,7 @@ impl OpenAIProvider {
             Role::System => {
                 vec![OpenAIInputItem::Message(OpenAIMessage {
                     role: "user".to_string(),
-                    content: format!("[System]: {}", msg.content),
+                    content: format!("[System]: {}", msg.content).into(),
                 })]
             }
         }

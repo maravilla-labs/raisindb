@@ -4,6 +4,10 @@
 //! from node properties, and builds processing options based on configured rules.
 
 use super::UnifiedJobEventHandler;
+use crate::jobs::handlers::asset_processing::helpers as asset_helpers;
+use crate::jobs::handlers::asset_processing::{
+    EXTRACTION_ARTIFACT_VERSION, EXTRACTION_FINGERPRINT_PROP, EXTRACT_VERSION_PROP,
+};
 use raisin_ai::RuleMatchContext;
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_storage::jobs::{AssetProcessingOptions, JobContext, PdfExtractionStrategy};
@@ -15,7 +19,18 @@ impl UnifiedJobEventHandler {
     /// Returns true if:
     /// 1. Node type is "raisin:Asset"
     /// 2. File property exists with a storage_key (file is ready)
-    /// 3. Processing rules allow this asset to be processed
+    /// 3. The current binary has not already been extracted (see below)
+    ///
+    /// # The fingerprint gate is what makes extraction terminate
+    ///
+    /// Extraction now lands in a node property, and writing a node property
+    /// emits `node:updated` — the same event that gets us here. Without a gate,
+    /// one upload would extract, write, extract, write, forever, each round
+    /// minting a node revision, a fulltext reindex and an embedding call.
+    ///
+    /// This is the SINGLE gate for both enqueue call sites
+    /// (`enqueue_asset_processing_if_needed` is reached from the metadata path
+    /// and from the fetch-from-storage path), so it cannot be half-applied.
     ///
     /// # Arguments
     /// * `node` - The node to check (required for file property inspection)
@@ -36,97 +51,101 @@ impl UnifiedJobEventHandler {
             return false;
         }
 
+        // Already extracted from exactly these bytes, BY THIS PIPELINE? Then
+        // this event is our own write-back (or a replicated copy of it), and
+        // there is nothing to redo. Replacing the file changes the fingerprint
+        // and re-opens the gate.
+        //
+        // The VERSION is checked alongside the fingerprint, and that is what
+        // makes a backfill possible at all. A stored `unsupported` is a durable
+        // record that these bytes were offered to the extractors and none of
+        // them could read them; the fingerprint alone would then close the gate
+        // FOREVER, so the day a media plugin gains the format the asset would
+        // still never be reconsidered. Bumping
+        // `EXTRACTION_ARTIFACT_VERSION` re-opens every asset exactly once —
+        // which is the operation "we can read more formats now" actually needs.
+        if let Some(PropertyValue::String(stamped)) =
+            node.properties.get(EXTRACTION_FINGERPRINT_PROP)
+        {
+            let current = asset_helpers::asset_fingerprint(node);
+            let stored_version = match node.properties.get(EXTRACT_VERSION_PROP) {
+                Some(PropertyValue::Integer(v)) => *v,
+                // An artifact written before the version existed. Treat it as
+                // generation 0, i.e. superseded, so it is redone once and then
+                // carries a version like everything else.
+                _ => 0,
+            };
+            if *stamped == current && stored_version >= EXTRACTION_ARTIFACT_VERSION {
+                tracing::debug!(
+                    node_id = %node.id,
+                    fingerprint = %current,
+                    version = stored_version,
+                    "Skipping asset processing: this binary has already been extracted"
+                );
+                return false;
+            }
+        }
+
         true
     }
 
-    /// Extract a string value from a PropertyValue
-    fn property_value_as_str(pv: &PropertyValue) -> Option<String> {
-        match pv {
-            PropertyValue::String(s) => Some(s.clone()),
-            _ => None,
-        }
-    }
-
-    /// Extract storage_key from a node's file property
+    /// Extract storage_key from a node's file property.
     ///
-    /// Handles both Resource and Object property value types
+    /// Delegates to the ONE set of asset accessors, shared with the job
+    /// handler. This used to be a second, narrower copy: it missed a storage
+    /// key sitting directly on an `Object` `file` under `storageKey`, and a
+    /// mime type in `contentType`, so an asset the handler could have processed
+    /// was never enqueued in the first place — a gap visible nowhere, because
+    /// both halves "worked".
     pub(crate) fn extract_storage_key(&self, node: &raisin_models::nodes::Node) -> Option<String> {
-        node.properties.get("file").and_then(|file_prop| {
-            match file_prop {
-                PropertyValue::Resource(res) => res
-                    .metadata
-                    .as_ref()
-                    .and_then(|m| m.get("storage_key"))
-                    .and_then(Self::property_value_as_str),
-                PropertyValue::Object(obj) => {
-                    // Also check nested metadata.storage_key for Object format
-                    obj.get("metadata")
-                        .and_then(|m| {
-                            if let PropertyValue::Object(inner) = m {
-                                inner
-                                    .get("storage_key")
-                                    .and_then(Self::property_value_as_str)
-                            } else {
-                                None
-                            }
-                        })
-                        // Fallback to direct storage_key
-                        .or_else(|| obj.get("storage_key").and_then(Self::property_value_as_str))
-                }
-                _ => None,
-            }
-        })
+        asset_helpers::extract_storage_key(node).ok()
     }
 
-    /// Extract content_hash from a node's file property
-    ///
-    /// Used for deduplication - prevents re-processing the same binary
+    /// Extract content_hash from a node's file property. See
+    /// [`Self::extract_storage_key`] for why this delegates.
     pub(crate) fn extract_content_hash(&self, node: &raisin_models::nodes::Node) -> Option<String> {
-        node.properties
-            .get("file")
-            .and_then(|file_prop| match file_prop {
-                PropertyValue::Resource(res) => res
-                    .metadata
-                    .as_ref()
-                    .and_then(|m| m.get("content_hash"))
-                    .and_then(Self::property_value_as_str),
-                PropertyValue::Object(obj) => obj
-                    .get("metadata")
-                    .and_then(|m| {
-                        if let PropertyValue::Object(inner) = m {
-                            inner
-                                .get("content_hash")
-                                .and_then(Self::property_value_as_str)
-                        } else {
-                            None
-                        }
-                    })
-                    .or_else(|| {
-                        obj.get("content_hash")
-                            .and_then(Self::property_value_as_str)
-                    }),
-                _ => None,
-            })
+        asset_helpers::extract_content_hash(node)
     }
 
-    /// Extract MIME type from a node's file property
+    /// Extract MIME type from a node's file property. See
+    /// [`Self::extract_storage_key`] for why this delegates.
     pub(crate) fn extract_mime_type(&self, node: &raisin_models::nodes::Node) -> Option<String> {
-        node.properties
-            .get("file")
-            .and_then(|file_prop| match file_prop {
-                PropertyValue::Resource(res) => res.mime_type.clone(),
-                PropertyValue::Object(obj) => obj
-                    .get("mime_type")
-                    .and_then(Self::property_value_as_str)
-                    .or_else(|| obj.get("mimeType").and_then(Self::property_value_as_str)),
-                _ => None,
-            })
+        asset_helpers::extract_mime_type(node)
     }
 
-    /// Build asset processing options based on file type and processing rules
+    /// Build asset processing options by ROUTING the node's mimetype to a set
+    /// of tasks, then projecting that task list onto the options this job
+    /// understands.
     ///
-    /// Looks up processing rules configured in admin-console for the repository.
-    /// Falls back to MIME-type based defaults if no rules are configured.
+    /// # Why the booleans are derived and no longer decided here
+    ///
+    /// This function used to make the routing decision twice: once inside the
+    /// matched-rule branch and once in a mime-defaults fallback below it, each
+    /// spelling out "PDF means extract, `image/*` means embed and caption" in
+    /// its own literals. That is the mirrored-path drift CLAUDE.md names as this
+    /// repo's #1 recurring bug class, and it had already produced one: the
+    /// shipped `image-default` rule matched the literal string `"image/"`
+    /// against an exact-equality matcher, so it selected nothing, every image
+    /// fell through to the catch-all, and the fallback's `is_image` defaults
+    /// were what actually ran. Two descriptions, one of them dead, and no error
+    /// anywhere.
+    ///
+    /// Now `ProcessingSettings::effective_tasks` is the single derivation — an
+    /// explicit `tasks` list if the rule has one, otherwise the legacy booleans
+    /// projected onto the same vocabulary using the same mime defaults — and
+    /// this function only asks the planner which of those tasks THIS process can
+    /// run.
+    ///
+    /// # `|_| false` is not a placeholder
+    ///
+    /// The availability predicate says: no plugin method is reachable from here.
+    /// That is the truth and it is structural, not a TODO. `raisin-functions`
+    /// (which owns the plugin registry) depends on `raisin-rocksdb`, and Cargo
+    /// rejects package cycles regardless of features — so this crate can never
+    /// call `media.doc.toMarkdown`. A rule naming a plugin task is reported
+    /// `blocked` here and has to be executed from the function/flow layer.
+    /// Answering `true` would enqueue a job that silently does nothing, which is
+    /// the exact failure this whole path was fixed to stop producing.
     pub(crate) async fn get_asset_processing_options(
         &self,
         node: &raisin_models::nodes::Node,
@@ -136,8 +155,11 @@ impl UnifiedJobEventHandler {
         let content_hash = self.extract_content_hash(node);
         let mime = mime_type.as_deref().unwrap_or("");
 
-        // Try to find matching processing rule
-        if let Ok(Some(rule_set)) = self
+        // Resolve the matching rule's settings, or the defaults. `get_settings`
+        // is first-match-wins over the persisted rule set; a repo with no rules
+        // configured yields `ProcessingSettings::default()`, whose
+        // `effective_tasks` reproduces the old mime defaults exactly.
+        let settings = match self
             .processing_rules
             .get_rules(raisin_storage::RepoScope::new(
                 &context.tenant_id,
@@ -145,78 +167,111 @@ impl UnifiedJobEventHandler {
             ))
             .await
         {
-            // Build match context from node
-            let match_context = RuleMatchContext::new()
-                .with_node_type(&node.node_type)
-                .with_path(&node.path)
-                .with_mime_type(mime)
-                .with_workspace(&context.workspace_id);
+            Ok(Some(rule_set)) => {
+                let match_context = RuleMatchContext::new()
+                    .with_node_type(&node.node_type)
+                    .with_path(&node.path)
+                    .with_mime_type(mime)
+                    .with_workspace(&context.workspace_id);
 
-            // Find matching rule
-            if let Some(rule) = rule_set.find_matching_rule(&match_context) {
-                tracing::debug!(
-                    rule_id = %rule.id,
-                    rule_name = %rule.name,
-                    node_path = %node.path,
-                    mime_type = %mime,
-                    "Matched processing rule"
-                );
-
-                let settings = &rule.settings;
-                return AssetProcessingOptions {
-                    extract_pdf_text: mime == "application/pdf",
-                    generate_image_embedding: settings.generate_image_embedding.unwrap_or(false),
-                    generate_image_caption: settings.generate_image_caption.unwrap_or(false),
-                    pdf_strategy: settings
-                        .pdf_strategy
-                        .map(|s| match s {
-                            raisin_ai::PdfStrategy::Auto => PdfExtractionStrategy::Auto,
-                            raisin_ai::PdfStrategy::NativeOnly => PdfExtractionStrategy::NativeOnly,
-                            raisin_ai::PdfStrategy::OcrOnly => PdfExtractionStrategy::OcrOnly,
-                            raisin_ai::PdfStrategy::ForceOcr => PdfExtractionStrategy::ForceOcr,
-                        })
-                        .unwrap_or_default(),
-                    store_extracted_text: settings.store_extracted_text.unwrap_or(true),
-                    trigger_embedding: settings.trigger_embedding.unwrap_or(true),
-                    content_hash,
-                    caption_model: settings.caption_model.clone(),
-                    embedding_model: settings.embedding_model.clone(),
-                    alt_text_prompt: settings.alt_text_prompt.clone(),
-                    description_prompt: settings.description_prompt.clone(),
-                    generate_keywords: settings
-                        .generate_keywords
-                        .unwrap_or(mime.starts_with("image/")),
-                    keywords_prompt: settings.keywords_prompt.clone(),
-                };
+                match rule_set.find_matching_rule(&match_context) {
+                    Some(rule) => {
+                        tracing::debug!(
+                            rule_id = %rule.id,
+                            rule_name = %rule.name,
+                            node_path = %node.path,
+                            mime_type = %mime,
+                            "Matched processing rule"
+                        );
+                        rule.settings.clone()
+                    }
+                    None => raisin_ai::ProcessingSettings::default(),
+                }
             }
+            _ => raisin_ai::ProcessingSettings::default(),
+        };
+
+        let requested = settings.effective_tasks(mime_type.as_deref());
+        let plan = raisin_ai::plan_tasks(&requested, |_| false);
+
+        // A task an operator configured that cannot run HERE is worth a line.
+        // The silence this replaces is the reported symptom: uploading a .docx
+        // produced one debug message and no record that anything was expected.
+        if !plan.blocked.is_empty() {
+            tracing::info!(
+                node_path = %node.path,
+                mime_type = %mime,
+                blocked = ?plan.blocked,
+                "Configured tasks cannot run in the AssetProcessing job; they need \
+                 the function/flow layer (see raisin_ai::rules::tasks)"
+            );
         }
 
-        // Fall back to MIME-type based defaults (no rules configured)
-        let is_pdf = mime == "application/pdf";
-        let is_image = mime.starts_with("image/");
+        // "Was text asked for" and "can this process produce it" are now two
+        // answers, not one. The first is the routing table's; the second is
+        // this binary's extractor vocabulary. Collapsing them into a single
+        // boolean is what made a skipped `.docx` invisible: the handler was
+        // told nobody had asked, so it wrote no record at all. See
+        // `AssetProcessingOptions::extract_text_requested`.
+        let text_requested = plan.will_run("extract_text")
+            || plan.blocked.iter().any(|b| {
+                matches!(
+                    b.slug.as_str(),
+                    "extract_text" | "doc_to_markdown" | "doc_to_pdf" | "image_ocr"
+                )
+            });
 
-        tracing::debug!(
-            node_path = %node.path,
-            mime_type = %mime,
-            is_pdf = %is_pdf,
-            is_image = %is_image,
-            "No processing rule matched, using MIME-type defaults"
-        );
+        // Carried into the job so the durable artifact can NAME the reason,
+        // rather than recording a bare "unsupported" an operator has to
+        // correlate with a log line.
+        let blocked_tasks: Vec<String> = plan
+            .blocked
+            .iter()
+            .map(|b| match &b.blocked {
+                raisin_ai::BlockedReason::PluginMissing { method } => {
+                    format!("{} (needs plugin method {})", b.slug, method)
+                }
+                raisin_ai::BlockedReason::MalformedSlug => {
+                    format!("{} (malformed task slug)", b.slug)
+                }
+                // NOT an error and NOT a typo — a legible rule aimed one layer
+                // down. Recording it verbatim means the asset's durable
+                // artifact tells whoever asks what actually performs the task,
+                // instead of leaving them to discover on their own that
+                // "captioning is on" meant nothing.
+                raisin_ai::BlockedReason::HandledAbove { how } => {
+                    format!("{} (handled above this layer: {})", b.slug, how)
+                }
+                raisin_ai::BlockedReason::Unknown => {
+                    format!("{} (no provider on this server)", b.slug)
+                }
+            })
+            .collect();
 
         AssetProcessingOptions {
-            extract_pdf_text: is_pdf,
-            generate_image_embedding: is_image,
-            generate_image_caption: is_image,
-            pdf_strategy: Default::default(),
-            store_extracted_text: true,
-            trigger_embedding: true,
+            // Projection of the plan, not a second decision. `extract_text` is
+            // additionally gated on the extractor vocabulary — a rule may ask
+            // for it on a mimetype nothing here can read, and the handler says
+            // so rather than reporting a silent success.
+            extract_pdf_text: plan.will_run("extract_text")
+                && asset_helpers::is_extractable_mime(&mime_type),
+            extract_text_requested: text_requested,
+            blocked_tasks,
+            generate_image_embedding: plan.will_run("image_embedding"),
+            tasks: plan.runnable.iter().map(|t| t.slug.clone()).collect(),
+            pdf_strategy: settings
+                .pdf_strategy
+                .map(|s| match s {
+                    raisin_ai::PdfStrategy::Auto => PdfExtractionStrategy::Auto,
+                    raisin_ai::PdfStrategy::NativeOnly => PdfExtractionStrategy::NativeOnly,
+                    raisin_ai::PdfStrategy::OcrOnly => PdfExtractionStrategy::OcrOnly,
+                    raisin_ai::PdfStrategy::ForceOcr => PdfExtractionStrategy::ForceOcr,
+                })
+                .unwrap_or_default(),
+            store_extracted_text: settings.store_extracted_text.unwrap_or(true),
+            trigger_embedding: settings.trigger_embedding.unwrap_or(true),
             content_hash,
-            caption_model: None,         // Use system default (Moondream)
-            embedding_model: None,       // Use system default (CLIP)
-            alt_text_prompt: None,       // Use default prompts
-            description_prompt: None,    // Use default prompts
-            generate_keywords: is_image, // Default to generating keywords for images
-            keywords_prompt: None,       // Use default prompt
+            embedding_model: settings.embedding_model.clone(),
         }
     }
 }

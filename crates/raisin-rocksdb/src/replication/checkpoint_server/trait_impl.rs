@@ -75,8 +75,16 @@ impl raisin_replication::CheckpointProvider for CheckpointServer {
         tenant_id: &str,
         repo_id: &str,
         branch: &str,
+        partition: &str,
     ) -> Result<(), raisin_replication::CoordinatorError> {
-        self.handle_hnsw_index_request(stream, tenant_id, repo_id, branch)
+        // The trust boundary for a peer-supplied token: it becomes a path
+        // component, so `../..` must not survive.
+        let partition = raisin_hnsw::PartitionId::parse(partition).ok_or_else(|| {
+            raisin_replication::CoordinatorError::Storage(format!(
+                "peer requested an invalid HNSW partition token {partition:?}"
+            ))
+        })?;
+        self.handle_hnsw_index_request(stream, tenant_id, repo_id, branch, &partition)
             .await
             .map_err(|e| {
                 raisin_replication::CoordinatorError::Storage(format!(

@@ -4,8 +4,6 @@
 
 use std::sync::Arc;
 
-use raisin_embeddings::crypto::ApiKeyEncryptor;
-use raisin_embeddings::provider::create_provider;
 use raisin_embeddings::TenantEmbeddingConfigStore;
 use raisin_models::auth::AuthContext;
 use raisin_sql_execution::engine::catalog_cache::workspace_catalog_with_embeddings;
@@ -199,10 +197,11 @@ pub(super) fn create_restore_tree_registrar(
 }
 
 /// Configure a QueryEngine with optional features.
-pub(super) fn configure_engine_features(
+pub(super) async fn configure_engine_features(
     mut engine: QueryEngine<crate::state::Store>,
     state: &AppState,
     embedding_config: Option<raisin_embeddings::TenantEmbeddingConfig>,
+    tenant_id: &str,
     rocksdb_storage: &raisin_rocksdb::RocksDBStorage,
 ) -> Result<QueryEngine<crate::state::Store>, ApiError> {
     if let Some(idx_engine) = &state.indexing_engine {
@@ -213,15 +212,31 @@ pub(super) fn configure_engine_features(
         engine = engine.with_hnsw_engine(hnsw_engine.clone());
     }
 
+    // Reading stored vectors needs no provider at all: `embedding <=> $1` over
+    // a literal vector, ORDER BY on a stored distance, SHOW VECTOR INDEX
+    // HEALTH. Wiring the store used to sit inside the provider setup, so any
+    // reason the provider was skipped — embeddings disabled, no API key —
+    // silently took the reader with it.
+    engine = engine.with_embedding_storage(Arc::new(raisin_rocksdb::RocksDBEmbeddingStorage::new(
+        rocksdb_storage.db().clone(),
+    )));
+
     if let Some(config) = embedding_config {
         if config.enabled {
-            engine = configure_embedding_provider(engine, &config, rocksdb_storage)?;
+            engine =
+                configure_embedding_provider(engine, &config, tenant_id, rocksdb_storage).await?;
         }
     }
 
     // Wire embedding config store for SQL AI config management
     let config_store = rocksdb_storage.tenant_embedding_config_repository();
     engine = engine.with_embedding_config_store(Arc::new(config_store));
+
+    // ...and the AI provider store beside it, so `TEST EMBEDDING CONNECTION`
+    // resolves an `ai_provider_ref` the same way the embedding job does. Wired
+    // unconditionally: the statement is how an operator diagnoses a config,
+    // so it must work on exactly the configs that are broken.
+    engine = engine.with_ai_config_store(Arc::new(rocksdb_storage.tenant_ai_config_repository()));
 
     if let Ok(master_key) = state.get_master_key() {
         engine = engine.with_master_key(master_key);
@@ -445,39 +460,36 @@ pub(super) fn create_function_invoke_sync_callback(
     )
 }
 
-/// Configure the embedding provider and storage on the query engine.
-fn configure_embedding_provider(
-    mut engine: QueryEngine<crate::state::Store>,
+/// Configure the embedding provider on the query engine.
+///
+/// Resolution goes through the ONE resolver
+/// (`raisin_rocksdb::embedding_provider`), shared with the embedding job
+/// handler, HTTP hybrid search, the MCP search tool and the test endpoint. This
+/// path used to derive it locally and ignored `ai_provider_ref` entirely, so a
+/// tenant configured through the console — which writes the unified ref — got
+/// embeddings written on the job path and a query engine with no provider at
+/// all, with no error and no log line.
+async fn configure_embedding_provider(
+    engine: QueryEngine<crate::state::Store>,
     config: &raisin_embeddings::TenantEmbeddingConfig,
+    tenant_id: &str,
     rocksdb_storage: &raisin_rocksdb::RocksDBStorage,
 ) -> Result<QueryEngine<crate::state::Store>, ApiError> {
-    // Decrypt API key. Goes through the shared loader so this path honours the
-    // legacy EMBEDDING_MASTER_KEY fallback like the rest of the server does.
+    // Goes through the shared loader so this path honours the legacy
+    // EMBEDDING_MASTER_KEY fallback like the rest of the server does.
     let master_key_bytes = raisin_crypto::master_key_with_embedding_fallback()
         .map_err(|e| ApiError::internal(format!("Invalid master key: {}", e)))?
         .ok_or_else(|| ApiError::internal("RAISIN_MASTER_KEY not set"))?;
 
-    let encryptor = ApiKeyEncryptor::new(&master_key_bytes);
-    if let Some(api_key_encrypted) = &config.api_key_encrypted {
-        let api_key = encryptor
-            .decrypt(api_key_encrypted)
-            .map_err(|e| ApiError::internal(format!("Failed to decrypt API key: {}", e)))?;
+    let provider = raisin_rocksdb::embedding_provider::resolve_provider(
+        rocksdb_storage,
+        tenant_id,
+        config,
+        &master_key_bytes,
+    )
+    .await
+    .map_err(|e| ApiError::internal(format!("Failed to create embedding provider: {}", e)))?;
 
-        // Create embedding provider
-        let provider = create_provider(&config.provider, &api_key, &config.model).map_err(|e| {
-            ApiError::internal(format!("Failed to create embedding provider: {}", e))
-        })?;
-
-        engine = engine.with_embedding_provider(Arc::from(provider));
-        tracing::debug!("   Embedding provider configured: {:?}", config.provider);
-
-        // Also configure embedding storage for reading embeddings from RocksDB
-        let embedding_storage = Arc::new(raisin_rocksdb::RocksDBEmbeddingStorage::new(
-            rocksdb_storage.db().clone(),
-        ));
-        engine = engine.with_embedding_storage(embedding_storage);
-        tracing::debug!("   Embedding storage configured (can read embeddings from RocksDB)");
-    }
-
-    Ok(engine)
+    tracing::debug!("   Embedding provider configured: {:?}", config.provider);
+    Ok(engine.with_embedding_provider(Arc::from(provider)))
 }

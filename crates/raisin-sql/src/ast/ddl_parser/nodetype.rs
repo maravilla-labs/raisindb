@@ -16,13 +16,18 @@ use nom::{
 
 use super::super::ddl::{AlterNodeType, CreateNodeType, DropNodeType, NodeTypeAlteration};
 use super::compound_index::compound_index;
-use super::primitives::{boolean_literal, quoted_string, quoted_string_list, ws_and_comments};
-use super::property::{preceded_property_list, property_def, property_name_or_path};
+use super::primitives::{
+    boolean_literal, quoted_string, quoted_string_list, schema_object_name, ws_and_comments,
+};
+use super::property::{
+    implicit_property_list, preceded_property_list, property_def, property_name_or_path,
+};
 
 /// Parse CREATE NODETYPE statement
-/// Supports both syntaxes:
+/// Supports all three syntaxes:
 ///   CREATE NODETYPE 'name' PROPERTIES (...) FLAGS;
 ///   CREATE NODETYPE 'name' (PROPERTIES (...) FLAGS);
+///   CREATE NODETYPE name (col Type MODIFIERS, ...) FLAGS;   -- PROPERTIES implied
 pub(crate) fn create_nodetype(input: &str) -> IResult<&str, CreateNodeType> {
     let (input, _) = (
         tag_no_case("CREATE"),
@@ -32,11 +37,7 @@ pub(crate) fn create_nodetype(input: &str) -> IResult<&str, CreateNodeType> {
     )
         .parse(input)?;
 
-    let (input, name) = quoted_string(input)?;
-    let (input, _) = multispace0.parse(input)?;
-
-    // Check for optional opening paren (SQL-conformant syntax)
-    let (input, has_paren) = opt(char('(')).parse(input)?;
+    let (input, name) = schema_object_name(input)?;
     let (input, _) = multispace0.parse(input)?;
 
     // Parse optional clauses in any order
@@ -44,6 +45,28 @@ pub(crate) fn create_nodetype(input: &str) -> IResult<&str, CreateNodeType> {
         name: name.to_string(),
         ..Default::default()
     };
+
+    // The SQL-conformant shorthand `CREATE NODETYPE 'n' (body String REQUIRED VECTOR)`,
+    // with the PROPERTIES keyword implied - the spelling every other dialect
+    // uses and the one people actually type. It is tried before the
+    // paren-WRAPPER form below and cannot shadow it: a wrapper always opens
+    // with a clause keyword, which is never a `name Type` pair, so
+    // `implicit_property_list` rejects it and leaves the input untouched.
+    let (input, implicit) = opt(implicit_property_list).parse(input)?;
+    let has_implicit = implicit.is_some();
+    if let Some(props) = implicit {
+        result.properties = props;
+    }
+    let (input, _) = multispace0.parse(input)?;
+
+    // Check for optional opening paren (SQL-conformant wrapper syntax).
+    // The shorthand already consumed its own parens, so don't look for another.
+    let (input, has_paren) = if has_implicit {
+        (input, None)
+    } else {
+        opt(char('(')).parse(input)?
+    };
+    let (input, _) = multispace0.parse(input)?;
 
     let (input, _) = parse_nodetype_clauses(input, &mut result)?;
 
@@ -201,7 +224,7 @@ pub(crate) fn alter_nodetype(input: &str) -> IResult<&str, AlterNodeType> {
     )
         .parse(input)?;
 
-    let (input, name) = quoted_string(input)?;
+    let (input, name) = schema_object_name(input)?;
     let (input, _) = multispace0.parse(input)?;
 
     let (input, alterations) = many0(preceded(multispace0, nodetype_alteration)).parse(input)?;
@@ -491,7 +514,7 @@ pub(crate) fn drop_nodetype(input: &str) -> IResult<&str, DropNodeType> {
     )
         .parse(input)?;
 
-    let (input, name) = quoted_string(input)?;
+    let (input, name) = schema_object_name(input)?;
     let (input, _) = multispace0.parse(input)?;
 
     let (input, cascade) = opt(tag_no_case("CASCADE")).parse(input)?;

@@ -18,6 +18,10 @@ use super::AzureOpenAIProvider;
 #[async_trait]
 impl AIProviderTrait for AzureOpenAIProvider {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse> {
+        // Fail LOUDLY rather than dropping the image. See
+        // `provider::reject_unsupported_images` for why silence is the one
+        // unacceptable answer here.
+        crate::provider::reject_unsupported_images("azure_openai", &request.messages)?;
         // Build messages including system prompt if provided
         let mut messages: Vec<AzureChatMessage> = Vec::new();
 

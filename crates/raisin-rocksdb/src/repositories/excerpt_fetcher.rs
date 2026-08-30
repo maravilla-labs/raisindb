@@ -222,6 +222,7 @@ mod tests {
             chunk_content: Some(content.to_string()),
             generated_at: Utc::now(),
             text_hash: 12345,
+            spec_hash: Some(12345),
             model: "text-embedding-3-small".to_string(),
             provider: EmbeddingProvider::OpenAI,
         }

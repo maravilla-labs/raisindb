@@ -52,6 +52,36 @@ pub enum ProviderError {
 
 pub type Result<T> = std::result::Result<T, ProviderError>;
 
+/// Refuse a request that carries images when this provider cannot send them.
+///
+/// # Why this exists rather than "the image is just ignored"
+///
+/// Every provider builds its own wire format, so image support is necessarily
+/// per-provider. What is NOT acceptable is the shape that produced this
+/// function: a provider whose message conversion reads `msg.content` — a
+/// `String` — and therefore drops `content_parts` on the floor with no error
+/// anywhere. The request succeeds, the model answers, and the answer is a
+/// confident description of an image it was never shown. There is no log line,
+/// no status code and no way for the caller to tell that apart from a working
+/// vision call, which makes it the worst possible failure for a captioning
+/// feature: it does not break, it just quietly invents.
+///
+/// So every provider that has not been taught to carry images calls this at the
+/// top of its message conversion. Erroring costs nothing — nobody has a working
+/// vision flow through those providers today, because the image never left the
+/// process.
+pub fn reject_unsupported_images(provider: &str, messages: &[crate::types::Message]) -> Result<()> {
+    let count: usize = messages.iter().map(|m| m.image_parts().len()).sum();
+    if count == 0 {
+        return Ok(());
+    }
+    Err(ProviderError::UnsupportedOperation(format!(
+        "the `{provider}` provider cannot send images: {count} image content \
+         part(s) were supplied and would have been silently dropped. Providers \
+         that carry images today: ollama, openai, anthropic."
+    )))
+}
+
 /// Core trait for AI providers.
 ///
 /// This trait defines the interface that all AI providers (OpenAI, Anthropic, etc.)

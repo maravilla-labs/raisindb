@@ -84,9 +84,7 @@ impl AIProviderTrait for OllamaProvider {
         }
 
         // Add conversation messages
-        for msg in &request.messages {
-            ollama_messages.push(Self::convert_message(msg));
-        }
+        ollama_messages.extend(Self::convert_messages(&request.messages)?);
 
         let tools = request.tools.as_ref().map(|tools| {
             tools
@@ -324,9 +322,7 @@ impl AIProviderTrait for OllamaProvider {
                 tool_calls: None,
             });
         }
-        for msg in &request.messages {
-            ollama_messages.push(Self::convert_message(msg));
-        }
+        ollama_messages.extend(Self::convert_messages(&request.messages)?);
 
         let format = request.response_format.as_ref().and_then(|rf| match rf {
             ResponseFormat::Text => None,

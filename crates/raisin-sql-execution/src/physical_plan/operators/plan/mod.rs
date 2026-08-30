@@ -112,11 +112,18 @@ define_physical_plan! {
         TableFunction {
             name: String,
             alias: Option<String>,
-            args: Vec<TypedExpr>,
+            args: Vec<raisin_sql::analyzer::TableFunctionArg>,
             schema: Arc<TableSchema>,
             workspace: Option<String>,
             branch_override: Option<String>,
             max_revision: Option<raisin_hlc::HLC>,
+            /// ADVISORY copy of the WHERE conjuncts that reference only this
+            /// function. See `LogicalPlan::TableFunction::filter`: the
+            /// authoritative `Filter` above this node is what makes the query
+            /// correct, and it stays there. This copy exists so an executor can
+            /// hand a narrower request to an index (a `node_type` term to the
+            /// full-text leg, say) without that narrowing becoming load-bearing.
+            filter: Option<TypedExpr>,
         },
         /// Prefix scan on path hierarchy
         PrefixScan {
@@ -376,6 +383,19 @@ define_physical_plan! {
             distance_metric: VectorDistanceMetric,
             vector_column: String,
             k: usize,
+            /// Multiplier on `k` when drawing candidates from the index.
+            ///
+            /// `1` when this scan answers the query on its own. Greater than 1
+            /// when a residual `Filter` sits above it: the index ranks by
+            /// distance and knows nothing of the residual, so the k nearest can
+            /// all be rejected and leave the query empty. Widening the pool is
+            /// what makes a SCOPED k-NN return k rows instead of none — the
+            /// same device `raisin-hnsw` already applies for the workspace
+            /// filter, and it multiplies with that one.
+            ///
+            /// `k` stays the user's k so `EXPLAIN` and the `Limit` above both
+            /// read the number that was written.
+            overfetch: usize,
             max_distance: Option<f32>,
             projection: Option<Vec<String>>,
             distance_alias: Option<String>,

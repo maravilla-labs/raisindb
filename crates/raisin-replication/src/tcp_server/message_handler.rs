@@ -122,9 +122,12 @@ impl ReplicationServer {
                 tenant_id,
                 repo_id,
                 branch,
+                partition,
             } => {
-                self.handle_request_hnsw_index(stream, peer_id, &tenant_id, &repo_id, &branch)
-                    .await
+                self.handle_request_hnsw_index(
+                    stream, peer_id, &tenant_id, &repo_id, &branch, &partition,
+                )
+                .await
             }
             _ => {
                 warn!(peer_id = %peer_id, "Unexpected message type: {:?}", message);
@@ -475,6 +478,7 @@ impl ReplicationServer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_request_hnsw_index(
         &self,
         stream: &mut TcpStream,
@@ -482,24 +486,27 @@ impl ReplicationServer {
         tenant_id: &str,
         repo_id: &str,
         branch: &str,
+        partition: &str,
     ) -> Result<(), CoordinatorError> {
         info!(
             peer_id = %peer_id,
             tenant_id = %tenant_id,
             repo_id = %repo_id,
             branch = %branch,
+            partition = %partition,
             "Peer requesting HNSW index"
         );
 
         if let Some(ref checkpoint_provider) = self.checkpoint_provider {
             checkpoint_provider
-                .handle_hnsw_index_request(stream, tenant_id, repo_id, branch)
+                .handle_hnsw_index_request(stream, tenant_id, repo_id, branch, partition)
                 .await?;
             info!(
                 peer_id = %peer_id,
                 tenant_id = %tenant_id,
                 repo_id = %repo_id,
                 branch = %branch,
+                partition = %partition,
                 "HNSW index served successfully"
             );
             Ok(())

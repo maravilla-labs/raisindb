@@ -15,8 +15,10 @@ use nom::{
 use super::super::ddl::{
     AlterElementType, CreateElementType, DropElementType, ElementTypeAlteration,
 };
-use super::primitives::{boolean_literal, identifier, quoted_string, ws_and_comments};
-use super::property::{property_def, property_list};
+use super::primitives::{
+    boolean_literal, identifier, quoted_string, schema_object_name, ws_and_comments,
+};
+use super::property::{implicit_property_list, property_def, property_list};
 
 /// Parse CREATE ELEMENTTYPE statement
 /// Supports both syntaxes:
@@ -31,17 +33,35 @@ pub(crate) fn create_elementtype(input: &str) -> IResult<&str, CreateElementType
     )
         .parse(input)?;
 
-    let (input, name) = quoted_string(input)?;
-    let (input, _) = multispace0.parse(input)?;
-
-    // Check for optional opening paren (SQL-conformant syntax)
-    let (input, has_paren) = opt(char('(')).parse(input)?;
+    let (input, name) = schema_object_name(input)?;
     let (input, _) = multispace0.parse(input)?;
 
     let mut result = CreateElementType {
         name: name.to_string(),
         ..Default::default()
     };
+
+    // The SQL-conformant shorthand `CREATE ELEMENTTYPE 'n' (title String REQUIRED)`,
+    // with the FIELDS keyword implied - the spelling every other dialect
+    // uses and the one people actually type. It is tried before the
+    // paren-WRAPPER form below and cannot shadow it: a wrapper always opens
+    // with a clause keyword, which is never a `name Type` pair, so
+    // `implicit_property_list` rejects it and leaves the input untouched.
+    let (input, implicit) = opt(implicit_property_list).parse(input)?;
+    let has_implicit = implicit.is_some();
+    if let Some(fields) = implicit {
+        result.fields = fields;
+    }
+    let (input, _) = multispace0.parse(input)?;
+
+    // Check for optional opening paren (SQL-conformant wrapper syntax).
+    // The shorthand already consumed its own parens, so don't look for another.
+    let (input, has_paren) = if has_implicit {
+        (input, None)
+    } else {
+        opt(char('(')).parse(input)?
+    };
+    let (input, _) = multispace0.parse(input)?;
 
     let (input, _) = parse_elementtype_clauses(input, &mut result)?;
 
@@ -118,7 +138,7 @@ pub(crate) fn alter_elementtype(input: &str) -> IResult<&str, AlterElementType> 
     )
         .parse(input)?;
 
-    let (input, name) = quoted_string(input)?;
+    let (input, name) = schema_object_name(input)?;
     let (input, _) = multispace0.parse(input)?;
 
     let (input, alterations) = many0(preceded(multispace0, elementtype_alteration)).parse(input)?;
@@ -231,7 +251,7 @@ pub(crate) fn drop_elementtype(input: &str) -> IResult<&str, DropElementType> {
     )
         .parse(input)?;
 
-    let (input, name) = quoted_string(input)?;
+    let (input, name) = schema_object_name(input)?;
     let (input, _) = multispace0.parse(input)?;
 
     let (input, cascade) = opt(tag_no_case("CASCADE")).parse(input)?;

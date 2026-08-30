@@ -3,6 +3,7 @@
 //! Tantivy-based full-text search indexing engine for RaisinDB.
 
 mod batch;
+mod cjk;
 mod document;
 mod index_manager;
 mod indexing_impl;

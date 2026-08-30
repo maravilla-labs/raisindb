@@ -19,7 +19,7 @@ mod property;
 #[cfg(test)]
 mod tests;
 
-use nom::{branch::alt, combinator::map, IResult, Parser};
+use nom::{combinator::map, IResult, Parser};
 
 use super::ddl::DdlStatement;
 use archetype::{alter_archetype, create_archetype, drop_archetype};
@@ -59,18 +59,19 @@ pub fn parse_ddl(sql: &str) -> Result<Option<DdlStatement>, DdlParseError> {
 
     // Strip leading SQL comments to find the actual statement
     let statement_start = strip_leading_comments(trimmed);
-    let upper = statement_start.to_uppercase();
 
-    // Check if this looks like a DDL statement
-    if !is_ddl_statement(&upper) {
+    // Check if this looks like a DDL statement, and remember WHICH one: the
+    // same answer then picks the single parser that runs, so a parse failure is
+    // reported by the parser the user was actually writing.
+    let Some(kind) = ddl_kind(statement_start) else {
         return Ok(None);
-    }
+    };
 
     // Calculate offset from original SQL to statement_start for position mapping
     let offset_to_statement_start = statement_start.as_ptr() as usize - sql.as_ptr() as usize;
 
     // Parse the DDL statement (starting from after comments)
-    match ddl_statement(statement_start) {
+    match ddl_statement(kind, statement_start) {
         Ok((remaining, stmt)) => {
             // Verify we consumed all input (except whitespace and semicolon)
             let remaining_trimmed = remaining.trim().trim_end_matches(';').trim();
@@ -169,41 +170,92 @@ pub fn parse_ddl(sql: &str) -> Result<Option<DdlStatement>, DdlParseError> {
 /// Re-export strip_leading_comments for use by sibling parser modules
 pub(crate) use primitives::strip_leading_comments;
 
-/// Check if the SQL looks like a DDL statement we should parse
-fn is_ddl_statement(upper: &str) -> bool {
-    upper.starts_with("CREATE NODETYPE")
-        || upper.starts_with("ALTER NODETYPE")
-        || upper.starts_with("DROP NODETYPE")
-        || upper.starts_with("CREATE MIXIN")
-        || upper.starts_with("ALTER MIXIN")
-        || upper.starts_with("DROP MIXIN")
-        || upper.starts_with("CREATE ARCHETYPE")
-        || upper.starts_with("ALTER ARCHETYPE")
-        || upper.starts_with("DROP ARCHETYPE")
-        || upper.starts_with("CREATE ELEMENTTYPE")
-        || upper.starts_with("ALTER ELEMENTTYPE")
-        || upper.starts_with("DROP ELEMENTTYPE")
+/// Which DDL statement the input opens with.
+///
+/// One value per `VERB OBJECT` pair the parser understands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DdlKind {
+    CreateNodeType,
+    AlterNodeType,
+    DropNodeType,
+    CreateMixin,
+    AlterMixin,
+    DropMixin,
+    CreateArchetype,
+    AlterArchetype,
+    DropArchetype,
+    CreateElementType,
+    AlterElementType,
+    DropElementType,
 }
 
-/// Parse any DDL statement
-fn ddl_statement(input: &str) -> IResult<&str, DdlStatement> {
-    alt((
-        // NodeType
-        map(create_nodetype, DdlStatement::CreateNodeType),
-        map(alter_nodetype, DdlStatement::AlterNodeType),
-        map(drop_nodetype, DdlStatement::DropNodeType),
-        // Mixin
-        map(create_mixin, DdlStatement::CreateMixin),
-        map(alter_mixin, DdlStatement::AlterMixin),
-        map(drop_mixin, DdlStatement::DropMixin),
-        // Archetype
-        map(create_archetype, DdlStatement::CreateArchetype),
-        map(alter_archetype, DdlStatement::AlterArchetype),
-        map(drop_archetype, DdlStatement::DropArchetype),
-        // ElementType
-        map(create_elementtype, DdlStatement::CreateElementType),
-        map(alter_elementtype, DdlStatement::AlterElementType),
-        map(drop_elementtype, DdlStatement::DropElementType),
-    ))
-    .parse(input)
+/// Leading `[A-Za-z0-9_]` run of a token, so a name glued to its keyword
+/// (`DROP NODETYPE'x'`) still identifies the statement.
+fn leading_word(token: &str) -> String {
+    token
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect::<String>()
+        .to_ascii_uppercase()
+}
+
+/// Recognise the leading `VERB OBJECT` of a DDL statement.
+///
+/// This is the ONE place that maps keywords to statements: `parse_ddl` uses it
+/// both to decide whether the input is DDL at all and to pick the parser that
+/// runs. It used to be two mirrored lists - a `starts_with` chain and a 12-arm
+/// `alt()` - and because `alt()` reports the LAST arm's failure, a malformed
+/// `CREATE NODETYPE` was diagnosed against the `DROP ELEMENTTYPE` parser and
+/// came back as `Invalid property type 'CREATE'` at position 0, pointing at the
+/// first word of a statement whose real problem was 30 characters later.
+///
+/// Splitting on whitespace (rather than `starts_with("CREATE NODETYPE")`) also
+/// means `CREATE\n  NODETYPE 'x'` is recognised, which the old prefix test,
+/// requiring exactly one space, silently sent to the generic SQL parser.
+fn ddl_kind(sql: &str) -> Option<DdlKind> {
+    let mut words = sql.split_whitespace();
+    let verb = leading_word(words.next()?);
+    let object = leading_word(words.next()?);
+
+    match (verb.as_str(), object.as_str()) {
+        ("CREATE", "NODETYPE") => Some(DdlKind::CreateNodeType),
+        ("ALTER", "NODETYPE") => Some(DdlKind::AlterNodeType),
+        ("DROP", "NODETYPE") => Some(DdlKind::DropNodeType),
+        ("CREATE", "MIXIN") => Some(DdlKind::CreateMixin),
+        ("ALTER", "MIXIN") => Some(DdlKind::AlterMixin),
+        ("DROP", "MIXIN") => Some(DdlKind::DropMixin),
+        ("CREATE", "ARCHETYPE") => Some(DdlKind::CreateArchetype),
+        ("ALTER", "ARCHETYPE") => Some(DdlKind::AlterArchetype),
+        ("DROP", "ARCHETYPE") => Some(DdlKind::DropArchetype),
+        ("CREATE", "ELEMENTTYPE") => Some(DdlKind::CreateElementType),
+        ("ALTER", "ELEMENTTYPE") => Some(DdlKind::AlterElementType),
+        ("DROP", "ELEMENTTYPE") => Some(DdlKind::DropElementType),
+        _ => None,
+    }
+}
+
+/// Run the one parser the leading keywords selected.
+fn ddl_statement(kind: DdlKind, input: &str) -> IResult<&str, DdlStatement> {
+    match kind {
+        DdlKind::CreateNodeType => map(create_nodetype, DdlStatement::CreateNodeType).parse(input),
+        DdlKind::AlterNodeType => map(alter_nodetype, DdlStatement::AlterNodeType).parse(input),
+        DdlKind::DropNodeType => map(drop_nodetype, DdlStatement::DropNodeType).parse(input),
+        DdlKind::CreateMixin => map(create_mixin, DdlStatement::CreateMixin).parse(input),
+        DdlKind::AlterMixin => map(alter_mixin, DdlStatement::AlterMixin).parse(input),
+        DdlKind::DropMixin => map(drop_mixin, DdlStatement::DropMixin).parse(input),
+        DdlKind::CreateArchetype => {
+            map(create_archetype, DdlStatement::CreateArchetype).parse(input)
+        }
+        DdlKind::AlterArchetype => map(alter_archetype, DdlStatement::AlterArchetype).parse(input),
+        DdlKind::DropArchetype => map(drop_archetype, DdlStatement::DropArchetype).parse(input),
+        DdlKind::CreateElementType => {
+            map(create_elementtype, DdlStatement::CreateElementType).parse(input)
+        }
+        DdlKind::AlterElementType => {
+            map(alter_elementtype, DdlStatement::AlterElementType).parse(input)
+        }
+        DdlKind::DropElementType => {
+            map(drop_elementtype, DdlStatement::DropElementType).parse(input)
+        }
+    }
 }

@@ -471,11 +471,45 @@ impl TableRef {
     }
 }
 
+/// One argument of a table-valued function call.
+///
+/// `name` carries the `name => value` spelling and is `None` for a positional
+/// argument. It is a field of the argument rather than a parallel
+/// `Vec<Option<String>>` on the call, because two lists that must stay
+/// index-aligned are two lists that will eventually disagree.
+///
+/// Before this existed, `analyze_table_function_args` matched
+/// `FunctionArg::Named { arg, .. }` and pushed only the expression, so
+/// `HYBRID_SEARCH('q', workspaces => 'library')` parsed cleanly and then ran as
+/// *limit 10, every workspace* — the name was accepted and silently discarded.
+#[derive(Debug, Clone)]
+pub struct TableFunctionArg {
+    /// Argument name from the `name => value` form; `None` when positional.
+    pub name: Option<String>,
+    /// The analyzed argument expression.
+    pub value: TypedExpr,
+}
+
+impl TableFunctionArg {
+    /// A positional argument.
+    pub fn positional(value: TypedExpr) -> Self {
+        Self { name: None, value }
+    }
+
+    /// A `name => value` argument.
+    pub fn named(name: impl Into<String>, value: TypedExpr) -> Self {
+        Self {
+            name: Some(name.into()),
+            value,
+        }
+    }
+}
+
 /// Metadata for table-valued function references
 #[derive(Debug, Clone)]
 pub struct TableFunctionRef {
     pub name: String,
-    pub args: Vec<TypedExpr>,
+    pub args: Vec<TableFunctionArg>,
     pub schema: TableDef,
 }
 

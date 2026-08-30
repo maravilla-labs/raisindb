@@ -17,13 +17,43 @@ use super::super::ddl::{IndexTypeDef, PropertyDef, PropertyTypeDef};
 use super::primitives::{default_value, identifier, integer_literal, quoted_string};
 
 /// Parse a list of properties: (prop1 Type MOD, prop2 Type MOD, ...)
+///
+/// When the list stops short of its `)` the error is reported at the token that
+/// actually broke rather than at the head of the list. `separated_list0`
+/// backtracks the whole element on failure, so the naive `delimited(...)` form
+/// blamed the property NAME for a bad TYPE - `PROPERTIES (body Strng)` came
+/// back as "Invalid property type 'body'".
+///
+/// The error stays SOFT (`nom::Err::Error`, not `Failure`): the paren-wrapper
+/// syntax and the implied-PROPERTIES shorthand both depend on this parser
+/// backtracking cleanly. `preceded_property_list` is where the `cut` lives.
 pub(crate) fn property_list(input: &str) -> IResult<&str, Vec<PropertyDef>> {
-    delimited(
-        (char('('), multispace0),
-        separated_list0((multispace0, char(','), multispace0), property_def),
-        (multispace0, opt(char(',')), multispace0, char(')')),
-    )
-    .parse(input)
+    let (rest, _) = (char('('), multispace0).parse(input)?;
+    let (rest, props) =
+        separated_list0((multispace0, char(','), multispace0), property_def).parse(rest)?;
+    let (rest, _) = (multispace0, opt(char(',')), multispace0).parse(rest)?;
+
+    match char::<&str, nom::error::Error<&str>>(')').parse(rest) {
+        Ok((rest, _)) => Ok((rest, props)),
+        Err(_) => Err(nom::Err::Error(nom::error::Error::new(
+            blame_position(rest),
+            nom::error::ErrorKind::Char,
+        ))),
+    }
+}
+
+/// Where to point when a property list stops short of its closing paren.
+///
+/// If what is left starts with a valid property NAME followed by whitespace,
+/// the name was fine and the type is the problem, so blame what comes after it.
+fn blame_position(rest: &str) -> &str {
+    if let Ok((after_name, _)) = property_name_or_path(rest) {
+        let after_space = after_name.trim_start();
+        if after_space.len() < after_name.len() && !after_space.is_empty() {
+            return after_space;
+        }
+    }
+    rest
 }
 
 /// Parse a single property definition: name Type [MODIFIERS] [DEFAULT value]
@@ -225,4 +255,25 @@ pub(crate) fn object_type(input: &str) -> IResult<&str, PropertyTypeDef> {
 /// Parse a property list preceded by PROPERTIES keyword with cut for error propagation
 pub(crate) fn preceded_property_list(input: &str) -> IResult<&str, Vec<PropertyDef>> {
     preceded((tag_no_case("PROPERTIES"), multispace0), cut(property_list)).parse(input)
+}
+
+/// The SQL-conformant shorthand: a bare `(col Type MODIFIERS, ...)` directly
+/// after the object name, with the `PROPERTIES` / `FIELDS` keyword implied —
+/// i.e. what `CREATE TABLE t (...)` looks like in every other dialect.
+///
+/// This is the SAME `property_list` the keyword forms use, so a modifier only
+/// has to be taught to one parser. It requires at least one property, which is
+/// what keeps it from colliding with the paren-WRAPPER form
+/// (`CREATE NODETYPE 'n' (PROPERTIES (...) VERSIONABLE)`): a clause keyword is
+/// never a `name Type` pair, so the wrapper always yields an empty list here
+/// and falls through to the clause parser untouched.
+pub(crate) fn implicit_property_list(input: &str) -> IResult<&str, Vec<PropertyDef>> {
+    let (rest, props) = property_list(input)?;
+    if props.is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::SeparatedList,
+        )));
+    }
+    Ok((rest, props))
 }

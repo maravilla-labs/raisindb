@@ -150,7 +150,14 @@ pub use pdf::{PdfExtractError, PdfTextResult};
 
 // Processing rules
 pub use rules::{
-    ProcessingRule, ProcessingRuleSet, ProcessingSettings, RuleMatchContext, RuleMatcher,
+    is_text_bearing, mime_matches, ProcessingRule, ProcessingRuleSet, ProcessingSettings,
+    RuleMatchContext, RuleMatcher,
+};
+// The task vocabulary a rule routes a mimetype to, and the planner that says
+// which of those tasks THIS process can actually run. See `rules::tasks`.
+pub use rules::{
+    is_valid_task_slug, lookup_task, plan_tasks, BlockedReason, BlockedTask, PipelinePlan,
+    PlannedTask, TaskProvider, TaskSpec, KNOWN_TASKS,
 };
 
 // Candle-based local AI inference (requires "candle" feature)

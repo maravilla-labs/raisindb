@@ -26,18 +26,10 @@ export interface ProcessingSettings {
   pdf_strategy?: PdfStrategy
   /** Generate image embeddings (CLIP) */
   generate_image_embedding?: boolean
-  /** Generate image captions (Moondream/BLIP) */
-  generate_image_caption?: boolean
-  /** Caption model override (default: Moondream) */
-  caption_model?: string
-  /** Custom prompt for alt-text generation (Moondream only) */
-  alt_text_prompt?: string
-  /** Custom prompt for description generation (Moondream only) */
-  description_prompt?: string
-  /** Generate image keywords (Moondream only) */
-  generate_keywords?: boolean
-  /** Custom prompt for keyword extraction (Moondream only) */
-  keywords_prompt?: string
+  // No captioning settings. The six that used to be here mirrored Rust fields
+  // that nothing read, and the engine answered all of them with one warn line.
+  // Captioning is a trigger function's job now; see the comment where the
+  // controls used to be in ProcessingRulesManagement.tsx.
   /** Embedding model override */
   embedding_model?: string
   /** Trigger embedding generation after extraction */

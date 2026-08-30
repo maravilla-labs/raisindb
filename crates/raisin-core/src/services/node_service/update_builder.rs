@@ -97,20 +97,20 @@ impl<'a, S: Storage + TransactionalStorage> UpdateBuilder<'a, S> {
 
         // 2. Apply updates (ONLY mutable fields)
         if let Some(mut props) = self.properties {
-            // On a mount-owned node the `__` properties are the sync engine's
-            // bookkeeping, not content — and this path REPLACES the map
-            // wholesale, so a client that omits them would detach the node
-            // from its mount and one that echoes a stale snapshot would roll
-            // the engine's divergence baseline back (the edit is then read as
-            // "already pushed" and silently never written to the provider).
-            // The stored values win either way unless the writer is the sync
-            // engine itself.
-            if models::nodes::is_mount_owned(&node.properties)
-                && self.service.commit_actor() != models::nodes::SYNC_ACTOR
-            {
-                props.retain(|key, _| !models::nodes::is_engine_owned_property_key(key));
-                for (key, value) in &node.properties {
-                    if models::nodes::is_engine_owned_property_key(key) {
+            // Engine-owned (`__`) properties are the platform's bookkeeping,
+            // not content — and this path REPLACES the map wholesale, so a
+            // client that omits them would detach a node from its mount or
+            // erase its extraction artifact, and one that echoes a stale
+            // snapshot would roll the sync engine's divergence baseline back
+            // (the edit is then read as "already pushed" and silently never
+            // written to the provider). The stored values win either way
+            // unless the writer is an engine actor. Which keys are shielded is
+            // decided by the SAME predicate the commit path uses.
+            if !models::nodes::is_engine_write_actor(&self.service.commit_actor()) {
+                let stored = node.properties.clone();
+                props.retain(|key, _| !models::nodes::is_shielded_property_key(key, &stored));
+                for (key, value) in &stored {
+                    if models::nodes::is_shielded_property_key(key, &stored) {
                         props.insert(key.clone(), value.clone());
                     }
                 }

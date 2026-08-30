@@ -80,7 +80,17 @@ async fn main() {
     {
         let plugin_dir = std::env::var("RAISIN_PLUGIN_DIR")
             .unwrap_or_else(|_| format!("{}/plugins", server_config.data_dir));
+        tracing::info!(plugin_dir = %plugin_dir, "scanning for function plugins");
         raisin_functions::load_plugins_from_dir(&plugin_dir);
+
+        // Say on BOOT what this server can actually do with a binary asset —
+        // "docx: plugin OK (maravilla-media)", "pdf: core", "mp4: UNSUPPORTED" —
+        // and name every plugin file the loader refused and why. A rejected
+        // plugin (an ABI bump above all) leaves a server that boots perfectly
+        // and has silently lost `raisin.media.*` for every tenant; the only
+        // previous signal was one ERROR line in the journal, which no deploy
+        // asserts on. See CORE-PLUGIN-DEPLOYMENT.md §5.
+        raisin_functions::log_capability_report();
     }
 
     // ========================================================================
@@ -104,31 +114,25 @@ async fn main() {
             tracing::warn!("  Locks subsystem defaulted to in-process (dev-mode).");
         }
     } else {
-        // In production mode, required secrets must be set
-        let jwt_secret = std::env::var("JWT_SECRET").unwrap_or_default();
-        if jwt_secret.is_empty() || jwt_secret == "default_jwt_secret_change_in_production" {
+        // In production mode every required secret must be set. This used to
+        // be three `if missing { error; exit(1) }` blocks, so an operator
+        // bringing up a node learned the requirements ONE BOOT AT A TIME —
+        // and the master-key block checked variable NAMES, which meant a
+        // deployment that had migrated to the `RAISIN_MASTER_KEYS` keyring
+        // could not start at all even though every runtime reader accepts it.
+        // `raisin_crypto::env_secrets` now owns both the list and the
+        // validation, checking through the same loaders the running server
+        // uses, and reports every unmet requirement in one pass.
+        let problems = raisin_crypto::production_secret_problems();
+        if !problems.is_empty() {
             tracing::error!(
-                "JWT_SECRET is not set or uses the insecure default. \
-                 Set a strong JWT_SECRET or use --dev-mode for development."
+                "Refusing to start: {} required production secret(s) missing or invalid. \
+                 Set all of them, or pass --dev-mode for development.",
+                problems.len()
             );
-            std::process::exit(1);
-        }
-
-        if std::env::var("RAISINDB_SIGNING_SECRET").is_err() {
-            tracing::error!(
-                "RAISINDB_SIGNING_SECRET is not set. \
-                 Set a random 32+ byte string or use --dev-mode for development."
-            );
-            std::process::exit(1);
-        }
-
-        if std::env::var("RAISIN_MASTER_KEY").is_err()
-            && std::env::var("EMBEDDING_MASTER_KEY").is_err()
-        {
-            tracing::error!(
-                "RAISIN_MASTER_KEY (or EMBEDDING_MASTER_KEY) is not set. \
-                 Provide a 64-char hex key or use --dev-mode for development."
-            );
+            for problem in &problems {
+                tracing::error!("  {}", problem);
+            }
             std::process::exit(1);
         }
     }
@@ -313,9 +317,35 @@ async fn main() {
 
     #[cfg(feature = "storage-rocksdb")]
     let hnsw_engine = {
-        let engine = startup::indexing::init_hnsw_engine(hnsw_path);
+        let engine = startup::indexing::init_hnsw_engine(hnsw_path, &storage);
         Some(engine)
     };
+
+    // The query-side partner of the HNSW engine above, installed process-wide so
+    // that EVERY SQL surface can embed query text — not just the one that
+    // remembered to.
+    //
+    // `with_embedding_provider` had a single call site in the whole workspace
+    // (the HTTP `/api/sql` handler). pgwire simple query, pgwire extended query,
+    // the WebSocket `sql_query` request and the three engine constructions
+    // behind `raisin.sql()` all wired the HNSW engine and stopped there, so
+    // `HYBRID_SEARCH` on those four surfaces skipped its vector half and
+    // returned a plain full-text search with `vector_rank` NULL on every row and
+    // nothing in the log. Installing it here rather than adding a seventh
+    // `.with_embedding_provider(...)` line is deliberate: the seventh line is
+    // exactly what was forgotten six times, and a surface added later inherits
+    // this one automatically.
+    #[cfg(feature = "storage-rocksdb")]
+    {
+        let embedder = std::sync::Arc::new(
+            raisin_rocksdb::embedding_provider::TenantQueryEmbedderResolver::new(storage.clone()),
+        );
+        if raisin_embeddings::configure_query_embedder(embedder) {
+            tracing::info!("Query embedder installed for all SQL surfaces");
+        } else {
+            tracing::warn!("Query embedder was already installed; keeping the first one");
+        }
+    }
 
     // ========================================================================
     // Binary storage
@@ -1303,8 +1333,11 @@ async fn main() {
     let app = {
         tracing::info!("Initializing WebSocket transport...");
 
-        let jwt_secret = std::env::var("JWT_SECRET")
-            .unwrap_or_else(|_| "default_jwt_secret_change_in_production".to_string());
+        // Same reader as the auth service and the preflight — a fourth copy of
+        // the placeholder literal here is how the WS transport would end up
+        // accepting a secret the rest of the process had already rejected.
+        let jwt_secret = raisin_crypto::jwt_secret()
+            .unwrap_or_else(|| raisin_crypto::INSECURE_JWT_DEFAULT.to_string());
 
         let require_auth = std::env::var("WS_REQUIRE_AUTH")
             .ok()

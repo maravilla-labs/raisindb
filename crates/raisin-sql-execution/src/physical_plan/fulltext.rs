@@ -95,7 +95,7 @@ pub async fn execute_fulltext_scan<S: Storage + 'static>(
             query: tantivy_query,
             limit, // Already usize, not Option
             revision: ctx_clone.max_revision, // Point-in-time search: None = HEAD/latest
-            shape_type: None,
+            shape_types: None,
         };
 
         // Execute search (not async)

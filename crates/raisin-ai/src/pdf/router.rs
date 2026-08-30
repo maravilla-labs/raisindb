@@ -126,10 +126,18 @@ pub enum ExtractionMethod {
     Hybrid,
 }
 
-/// Legacy PDF processor stub.
+/// Bytes-shaped entry point to PDF text extraction.
 ///
-/// The actual PDF processing has moved to `process_pdf_from_storage` in
-/// storage_processor.rs which uses pdf_oxide for pure Rust processing.
+/// This used to be a stub that returned `NotAvailable("Use
+/// process_pdf_from_storage() instead")` unconditionally — while being the only
+/// thing the AssetProcessing job could call, since that job holds bytes and not
+/// a `BinaryStorage` handle. The result was an "extract PDF text" option that
+/// could never succeed.
+///
+/// It now delegates to the same `extract_markdown_from_path` body that
+/// `process_pdf_from_storage` uses, staging the bytes in a temp file exactly as
+/// the S3 branch of `get_as_path` does. There is ONE extractor; these are two
+/// ways of handing it a path.
 pub struct PdfProcessor;
 
 impl PdfProcessor {
@@ -138,18 +146,36 @@ impl PdfProcessor {
         Self
     }
 
-    /// Process a PDF file.
+    /// Process a PDF file held in memory, returning markdown text.
     ///
-    /// Note: This is a stub. Use `process_pdf_from_storage` instead for
-    /// actual PDF processing with pdf_oxide.
+    /// `options.strategy` is accepted for source compatibility but pdf_oxide
+    /// decides natively-extract-vs-OCR itself, so there is nothing to dispatch
+    /// on here; `ExtractionMethod::Native` is reported. Do not add a second
+    /// strategy dispatch in this function — that is how the fork came back.
     pub async fn process(
         &self,
-        _pdf_data: &[u8],
+        pdf_data: &[u8],
         _options: &PdfProcessingOptions,
     ) -> ProcessingResult<PdfProcessedResult> {
-        Err(PdfProcessingError::NotAvailable(
-            "Use process_pdf_from_storage() instead".to_string(),
-        ))
+        // Blocking file + parse work: keep it off the async worker thread.
+        let data = pdf_data.to_vec();
+        let extracted = tokio::task::spawn_blocking(move || {
+            super::storage_processor::extract_markdown_from_bytes(&data)
+        })
+        .await
+        .map_err(|e| PdfProcessingError::Extraction(format!("PDF task panicked: {e}")))?
+        .map_err(|e| PdfProcessingError::Extraction(e.to_string()))?;
+
+        Ok(PdfProcessedResult {
+            text: extracted.text,
+            method_used: if extracted.ocr_used {
+                ExtractionMethod::Ocr
+            } else {
+                ExtractionMethod::Native
+            },
+            page_count: extracted.page_count,
+            ocr_pages: Vec::new(),
+        })
     }
 }
 

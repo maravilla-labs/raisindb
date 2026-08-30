@@ -238,7 +238,19 @@ pub async fn resolve_index_plan(
 
 /// Collects the distinct `element_type` names of every nested Element/Composite
 /// block in a node's properties (iterative; overflow-safe for deep nesting).
-fn collect_element_types(properties: &HashMap<String, PropertyValue>) -> HashSet<String> {
+/// Every ElementType name that appears anywhere in a node's property tree.
+///
+/// `pub(crate)` because cross-branch promotion needs exactly this set to know
+/// which ElementType definitions to carry onto the target branch
+/// (`repositories/nodes/queries/copy/cross_branch/schema.rs`). It is shared
+/// rather than reimplemented there on purpose: a promotion that collected a
+/// DIFFERENT set from the one the planner resolves would carry the wrong
+/// definitions, and the two would drift silently — a node whose blocks are
+/// nested one level deeper than the copier looks would publish with no schema
+/// and fall back to legacy indexing, with nothing logged.
+pub(crate) fn collect_element_types(
+    properties: &HashMap<String, PropertyValue>,
+) -> HashSet<String> {
     let mut found = HashSet::new();
     let mut stack: Vec<&PropertyValue> = properties.values().collect();
 

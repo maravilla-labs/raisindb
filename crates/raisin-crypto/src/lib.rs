@@ -62,6 +62,7 @@
 //! historical call sites' error semantics.
 
 pub mod context;
+pub mod env_secrets;
 pub mod envelope;
 mod error;
 pub mod keyring;
@@ -72,6 +73,10 @@ mod secret_box;
 mod test_support;
 
 pub use context::{SecretContext, V1Policy};
+pub use env_secrets::{
+    jwt_secret, production_secret_problems, signing_secret, SecretProblem, DEV_SIGNING_SECRET,
+    INSECURE_JWT_DEFAULT,
+};
 pub use envelope::{Envelope, MAGIC, V1_MIN_LEN, V2_MIN_LEN};
 pub use error::{CryptoError, Result};
 pub use keyring::{

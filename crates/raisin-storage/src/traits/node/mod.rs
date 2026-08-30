@@ -698,6 +698,17 @@ pub trait NodeRepository: Send + Sync {
     /// * `operation_meta` - optional actor/message recorded in the revision
     ///   metadata (defaults to a system commit)
     ///
+    /// # Events
+    /// The implementation publishes one `Event::Node` per touched node on the
+    /// TARGET branch, **and callers must not publish their own**. That is what
+    /// keeps the target branch's derived state — embeddings, fulltext, spatial,
+    /// triggers, WS subscribers — in step with the promotion; this path never
+    /// goes through the transaction commit that normally emits those. A node
+    /// whose content is byte-identical to what the target already held is
+    /// deliberately silent (no event, no re-embed), matching the no-op guard on
+    /// the transaction path. Emitting per-caller instead is what made Studio
+    /// publish (the function binding) index nothing while the WS caller worked.
+    ///
     /// # Errors
     /// - `Error::NotFound` - a branch or a source root doesn't exist
     /// - `Error::Forbidden` - the target branch is protected

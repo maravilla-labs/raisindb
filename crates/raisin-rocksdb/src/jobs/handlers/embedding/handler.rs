@@ -6,12 +6,9 @@
 use super::content_extraction::{extract_embeddable_content, hash_text};
 use crate::jobs::handlers::fulltext::IndexPlanCache;
 use crate::RocksDBStorage;
-use raisin_ai::config::AIProvider;
-use raisin_ai::storage::TenantAIConfigStore;
-use raisin_embeddings::config::{EmbeddingProvider, TenantEmbeddingConfig};
-use raisin_embeddings::crypto::ApiKeyEncryptor;
+use raisin_embeddings::config::TenantEmbeddingConfig;
 use raisin_embeddings::models::EmbeddingData;
-use raisin_embeddings::provider::create_provider_full;
+use raisin_embeddings::resolve::ResolvedEmbeddingProvider;
 use raisin_embeddings::EmbeddingStorage;
 use raisin_embeddings::TenantEmbeddingConfigStore;
 use raisin_error::{Error, Result};
@@ -19,6 +16,25 @@ use raisin_hnsw::HnswIndexingEngine;
 use raisin_storage::jobs::{JobContext, JobInfo, JobType};
 use raisin_storage::{NodeRepository, Storage, StorageScope};
 use std::sync::Arc;
+
+/// The name of the spec that embeds a node's EXTRACTION ARTIFACT.
+///
+/// Written down once, here, and validated by a test against
+/// `raisin_hnsw::is_valid_spec_name` — a name that fails that grammar produces
+/// index ids the parse cannot take apart, and therefore `SearchResult`s whose
+/// `node_id` cannot be fetched.
+pub const EXTRACTED_TEXT_SPEC: &str = "doc";
+
+/// One named embedding a node should carry, and the text it is made from.
+struct EmbedTask {
+    /// `None` is the default spec — the node's own authored fields, filed under
+    /// the bare node id exactly as before named specs existed.
+    spec: Option<&'static str>,
+    /// The text to embed. Never empty: a spec with no text is not produced at
+    /// all, because a vector of the empty string is a near-neighbour of every
+    /// query.
+    text: String,
+}
 
 /// Handler for embedding generation jobs
 ///
@@ -106,19 +122,13 @@ impl EmbeddingJobHandler {
             .resolve_embedding_provider(&config, &context.tenant_id)
             .await?;
 
-        // Create embedding provider.
-        //
-        // `base_url` and `dimensions` are both load-bearing for any endpoint that is not
-        // the vendor's own: the built-in dimension tables only know the vendors' model
-        // names, so a self-hosted or gateway endpoint cannot be reached without them.
-        let provider = create_provider_full(
-            &resolved.provider,
-            &resolved.api_key,
-            &resolved.model,
-            resolved.base_url.as_deref(),
-            Some(config.dimensions),
-        )?;
-        let model = resolved.model;
+        // Build the client from the resolution rather than from loose parts:
+        // `base_url` and `dimensions` are both load-bearing for any endpoint
+        // that is not the vendor's own (the built-in dimension tables only know
+        // the vendors' model names), and passing the struct means a caller
+        // cannot forget one.
+        let provider = resolved.build()?;
+        let model = resolved.model.clone();
 
         // Fetch node at exact revision
         let node = self
@@ -137,60 +147,176 @@ impl EmbeddingJobHandler {
             .await?
             .ok_or_else(|| Error::NotFound(format!("Node {} not found", node_id)))?;
 
-        // Extract embeddable content using schema-driven approach
-        let text = extract_embeddable_content(
-            &node,
-            &config,
+        // The embedding TASKS this node carries — one per NAMED SPEC.
+        //
+        // A node is not limited to one vector any more. The default spec is the
+        // node's own authored fields, exactly as before; a named spec is an
+        // additional, separately-addressable embedding of some other text the
+        // node carries — today the extraction artifact a binary asset holds in
+        // `__extracted_text`, which is a Word document's body and has nothing
+        // in common with the node's title and caption.
+        //
+        // They stay separate rather than being concatenated because they answer
+        // different queries and want different chunking: a 40-page contract
+        // glued onto a filename produces one vector that matches neither.
+        let tasks = self.embedding_tasks(&node, &config, context).await?;
+
+        if tasks.is_empty() {
+            tracing::warn!(node_id = %node_id, "No embeddable content found, skipping");
+            return Ok(());
+        }
+
+        // Embedder identity for multi-model support — derived from the
+        // RESOLUTION, not from the config row.
+        //
+        // These two must describe the same model, because `provider` above is
+        // what embeds the text and `embedder_id` is what the resulting vector
+        // is filed under (`EmbedderId::to_key_hash` is the `{embedder_hash}`
+        // segment of the `cf::EMBEDDINGS` key). Building one from `resolved`
+        // and the other from `config` is how they came apart: in unified mode
+        // (`ai_provider_ref` set) `config.provider` / `config.model` are the
+        // untouched `TenantEmbeddingConfig::new` defaults — OpenAI /
+        // text-embedding-3-small — so an Ollama tenant's vectors were stored
+        // labelled as OpenAI's model, under OpenAI's hash, and repointing the
+        // ref at another same-width model left them sharing one partition with
+        // no error anywhere.
+        //
+        // The derivation itself lives in
+        // `raisin_embeddings::resolve::ResolvedEmbeddingProvider::embedder_id`
+        // so there stays exactly one of it; see its docs for why the provider
+        // component must remain the enum variant name and never a slug.
+        let embedder_id = resolved.embedder_id();
+
+        // At info, because it is the one line that tells an operator which model
+        // actually ran. `SHOW VECTOR INDEX HEALTH` reports a width and nothing
+        // else, so before this a tenant could not distinguish "my new 1024-wide
+        // model is live" from "the old 1024-wide one still is".
+        tracing::info!(
+            node_id = %node_id,
+            specs = tasks.len(),
+            embedder_provider = %embedder_id.provider,
+            embedder_model = %embedder_id.model,
+            embedder_dimensions = embedder_id.dimensions,
+            embedder_hash = %embedder_id.to_key_hash(),
+            "Embedder identity these vectors will be stored under"
+        );
+
+        // Chunking, routed the same way everything else about this node is.
+        let chunking = self.resolve_chunking(&node, &config, context).await;
+
+        for task in &tasks {
+            self.embed_one_spec(
+                node_id,
+                task,
+                &config,
+                &embedder_id,
+                chunking.as_ref(),
+                provider.as_ref(),
+                context,
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Every named embedding this node should carry, with the text each one is
+    /// made from.
+    ///
+    /// ONE derivation, so the writer, a future sweeper and any administrative
+    /// regenerate cannot disagree about how many vectors a node has. A spec that
+    /// yields no text is not returned at all — an empty spec must produce NO row
+    /// rather than a row embedding the empty string, or every such node becomes
+    /// a near-neighbour of every query.
+    async fn embedding_tasks(
+        &self,
+        node: &raisin_models::nodes::Node,
+        config: &TenantEmbeddingConfig,
+        context: &JobContext,
+    ) -> Result<Vec<EmbedTask>> {
+        let mut tasks = Vec::new();
+
+        // The default spec: the node's own authored fields, via the shape-driven
+        // vector index plan. Unchanged, and still filed under the BARE node id,
+        // which is what every existing row and every existing reader contains.
+        let own = extract_embeddable_content(
+            node,
+            config,
             self.storage.clone(),
             context,
             &self.plan_cache,
         )
         .await?;
-
-        if text.is_empty() {
-            tracing::warn!(node_id = %node_id, "No embeddable content found, skipping");
-            return Ok(());
+        if !own.trim().is_empty() {
+            tasks.push(EmbedTask {
+                spec: None,
+                text: own,
+            });
         }
 
-        // Log the actual text being embedded (truncated for readability)
-        let text_preview = if text.len() > 200 {
-            format!(
-                "{}... [truncated, total {} chars]",
-                &text[..200],
-                text.len()
-            )
-        } else {
-            text.clone()
-        };
+        // The `doc` spec: the durable extraction artifact.
+        //
+        // Read through `raisin_models::nodes::extracted_text`, which returns
+        // text ONLY for `__extract_status = 'ok'`. An `unsupported` node has an
+        // empty `__extracted_text` and a durable record saying why; embedding
+        // that would file a vector of nothing and erase the distinction.
+        //
+        // This is what makes PUBLISH cheap: the artifact travels in `properties`
+        // with the SQL copy, so the publish branch builds this vector from text
+        // that is already there — no extractor, no media plugin, no re-read of
+        // the binary.
+        if let Some(text) = raisin_models::nodes::extracted_text(&node.properties) {
+            tasks.push(EmbedTask {
+                spec: Some(EXTRACTED_TEXT_SPEC),
+                text: text.to_string(),
+            });
+        }
+
+        Ok(tasks)
+    }
+
+    /// Generate, store and index the vectors of ONE named spec for one node.
+    ///
+    /// Everything below is per-spec: the chunk plan, the spec hash, the
+    /// staleness check, the HNSW ids and the orphan sweep. They are addressed
+    /// through `raisin_hnsw::chunk_id`, whose `namespaced_source_id` puts the
+    /// spec into the `cf::EMBEDDINGS` `{source_id}` key segment and leaves the
+    /// default spec byte-identical to the bare node id it has always been — so
+    /// N named embeddings per node is a key-VALUE change with no key-FORMAT
+    /// change and no migration.
+    #[allow(clippy::too_many_arguments)]
+    async fn embed_one_spec(
+        &self,
+        node_id: &str,
+        task: &EmbedTask,
+        config: &TenantEmbeddingConfig,
+        embedder_id: &raisin_ai::config::EmbedderId,
+        chunking: Option<&raisin_ai::config::ChunkingConfig>,
+        provider: &dyn raisin_embeddings::EmbeddingProviderTrait,
+        context: &JobContext,
+    ) -> Result<()> {
+        let spec = task.spec;
+        let text = &task.text;
+
+        // The `{source_id}` key segment and the HNSW id space this spec owns.
+        let source_id = raisin_hnsw::namespaced_source_id(node_id, spec);
+
+        let text_preview: String = text.chars().take(200).collect();
         tracing::info!(
             node_id = %node_id,
-            node_name = %node.name,
-            node_type = %node.node_type,
+            spec = %spec.unwrap_or("(default)"),
             text_length = text.len(),
             text_preview = %text_preview,
             "About to generate embedding for this text"
         );
 
-        // Create embedder identity for multi-model support.
-        //
-        // The first field MUST stay the provider KIND (here the legacy
-        // `EmbeddingProvider` enum), never a provider slug. `EmbedderId` is
-        // hashed into the RocksDB embedding key (see `EmbedderId::to_key_hash`),
-        // so feeding it a slug would change every key hash and make all
-        // existing vectors unaddressable — a silent, total loss of the
-        // embedding index with no error anywhere.
-        let embedder_id = raisin_ai::config::EmbedderId::new(
-            format!("{:?}", config.provider).to_lowercase(),
-            config.model.clone(),
-            config.dimensions,
-        );
-
         // Split text into chunks if chunking is configured
-        let chunks: Vec<(String, usize)> = if let Some(ref chunking_config) = config.chunking {
-            match raisin_ai::chunking::TextChunker::chunk_text(&text, chunking_config) {
+        let chunks: Vec<(String, usize)> = if let Some(chunking_config) = chunking {
+            match raisin_ai::chunking::TextChunker::chunk_text(text, chunking_config) {
                 Ok(text_chunks) if text_chunks.len() > 1 => {
                     tracing::info!(
                         node_id = %node_id,
+                        spec = %spec.unwrap_or("(default)"),
                         chunk_count = text_chunks.len(),
                         "Split text into {} chunks for embedding",
                         text_chunks.len()
@@ -200,10 +326,7 @@ impl EmbeddingJobHandler {
                         .map(|c| (c.content, c.index))
                         .collect()
                 }
-                Ok(_) => {
-                    // Single chunk or empty - treat as whole document
-                    vec![(text.clone(), 0)]
-                }
+                Ok(_) => vec![(text.clone(), 0)],
                 Err(e) => {
                     tracing::warn!(
                         node_id = %node_id,
@@ -219,56 +342,178 @@ impl EmbeddingJobHandler {
 
         let total_chunks = chunks.len();
 
-        // Remove old chunks from HNSW before adding new ones (handles re-embedding)
-        self.remove_old_chunks_from_hnsw(node_id, context, total_chunks)
-            .await?;
+        // THE staleness identity: every input that decided these vectors, in one
+        // hash. Computed from the same `text`, `embedder_id` and `chunking` the
+        // lines above resolved — not re-derived — so what is stored describes
+        // what actually ran. The spec NAME is part of it too, so a row can be
+        // checked against the spec it claims to be and not only against where it
+        // happens to sit.
+        let spec_hash = raisin_embeddings::EmbeddingSpec::new(text, embedder_id, chunking)
+            .for_spec(spec)
+            .hash();
+        let embedder_hash = embedder_id.to_key_hash();
+        let kind_char = raisin_ai::config::EmbeddingKind::Text.to_key_char();
 
-        // Generate embeddings - use batch API if multiple chunks
-        let chunk_texts: Vec<String> = chunks.iter().map(|(content, _)| content.clone()).collect();
-        let embeddings = if chunk_texts.len() > 1 {
-            let mut batch = provider.generate_embeddings_batch(&chunk_texts).await?;
-            for emb in &mut batch {
-                *emb = raisin_hnsw::normalize_vector(emb);
-            }
-            batch
-        } else {
-            let mut emb = provider.generate_embedding(&chunk_texts[0]).await?;
-            emb = raisin_hnsw::normalize_vector(&emb);
-            vec![emb]
-        };
-
-        tracing::info!(
-            node_id = %node_id,
-            embedding_dims = embeddings[0].len(),
-            total_chunks = total_chunks,
-            text_length = text.len(),
-            "Successfully generated and normalized {} embedding(s)",
-            embeddings.len()
+        // The SAME two segments, rendered once, as the HNSW index's partition.
+        // `EmbeddingPartition::to_index_token` is the only rendering there is,
+        // and a test in `repositories::embedding_storage::storage` asserts its
+        // bytes equal segments 5 and 6 of the key `store_embedding` writes — so
+        // a vector cannot be stored under one identity and indexed under
+        // another.
+        let partition = raisin_hnsw::PartitionId::new(
+            raisin_ai::config::EmbeddingPartition::new(
+                embedder_id.clone(),
+                raisin_ai::config::EmbeddingKind::Text,
+            )
+            .to_index_token(),
         );
 
-        // Get embedding storage from RocksDB
+        // The HNSW ids this run owns. Note the two vocabularies: a chunk is a
+        // `{node}[#{spec}]#{n}` ID in the index, but in `cf::EMBEDDINGS` it is
+        // the spec's source id plus a chunk-index key segment. Both have to be
+        // swept, and each by its own rule.
+        let live_ids: std::collections::HashSet<String> =
+            raisin_hnsw::chunk_id_set(node_id, spec, total_chunks)
+                .into_iter()
+                .collect();
+
+        let force = force_requested(context);
+
+        // Steady state: identical inputs, already done, nothing to do.
+        //
+        // This is what stops a periodic re-embed pass from calling the provider
+        // for a corpus that has not changed and rewriting every row it reads —
+        // and it is only sound because the comparison is against the SPEC, not
+        // the text. A text-only check would call every re-chunked document
+        // unchanged for the chunks whose boundaries happened not to move.
+        if !force
+            && self
+                .is_already_current(
+                    &source_id,
+                    context,
+                    &embedder_hash,
+                    kind_char,
+                    &partition,
+                    &live_ids,
+                    spec_hash,
+                    total_chunks,
+                )
+                .await?
+        {
+            tracing::info!(
+                node_id = %node_id,
+                spec = %spec.unwrap_or("(default)"),
+                total_chunks = total_chunks,
+                spec_hash = spec_hash,
+                "Embedding is current for these inputs — skipping (no provider call, no write)"
+            );
+            return Ok(());
+        }
+
+        // Remove old chunks from HNSW before adding new ones (handles re-embedding)
+        self.remove_old_chunks_from_hnsw(
+            &source_id,
+            context,
+            &embedder_hash,
+            kind_char,
+            &partition,
+            &live_ids,
+        )
+        .await?;
+
         let embedding_storage =
             crate::repositories::RocksDBEmbeddingStorage::new(self.storage.db().clone());
 
+        // CARRY FORWARD: the same inputs at an EARLIER revision.
+        //
+        // `is_already_current` is pinned to `context.revision`, so any rewrite of
+        // the node — a publish that copies identical properties onto another
+        // branch, a save that touched a field nothing embeds — misses it and
+        // would call the provider again for text that has not changed. The rows
+        // are keyed by revision so a new row is genuinely needed; the VECTOR is
+        // not, and a vector is the expensive part.
+        //
+        // This is what makes "publish carries the artifact" pay off twice: the
+        // first publish embeds once, and every re-publish of unchanged content
+        // costs zero provider calls. Note the limit — rows are branch-scoped, so
+        // this reuses within a branch (and across a FORK, which copies
+        // `cf::EMBEDDINGS`), never from another branch's rows.
+        let carried = if force {
+            None
+        } else {
+            Self::carry_forward_vectors(
+                &embedding_storage,
+                context,
+                &embedder_hash,
+                kind_char,
+                &source_id,
+                spec_hash,
+                total_chunks,
+            )
+        };
+
+        let chunk_texts: Vec<String> = chunks.iter().map(|(content, _)| content.clone()).collect();
+        let embeddings = match carried {
+            Some(vectors) => {
+                tracing::info!(
+                    node_id = %node_id,
+                    spec = %spec.unwrap_or("(default)"),
+                    total_chunks = total_chunks,
+                    spec_hash = spec_hash,
+                    "Reused the vectors of an earlier revision — same inputs, no provider call"
+                );
+                vectors
+            }
+            None => {
+                let mut generated = if chunk_texts.len() > 1 {
+                    provider.generate_embeddings_batch(&chunk_texts).await?
+                } else {
+                    vec![provider.generate_embedding(&chunk_texts[0]).await?]
+                };
+                for emb in &mut generated {
+                    *emb = raisin_hnsw::normalize_vector(emb);
+                }
+                tracing::info!(
+                    node_id = %node_id,
+                    spec = %spec.unwrap_or("(default)"),
+                    embedding_dims = generated[0].len(),
+                    total_chunks = total_chunks,
+                    text_length = text.len(),
+                    "Successfully generated and normalized {} embedding(s)",
+                    generated.len()
+                );
+                generated
+            }
+        };
+
         // Store each chunk and add to HNSW
         for ((chunk_content, chunk_index), embedding) in chunks.iter().zip(embeddings.into_iter()) {
-            let chunk_node_id = if total_chunks > 1 {
-                format!("{}#{}", node_id, chunk_index)
-            } else {
-                node_id.clone()
-            };
+            // ONE derivation of the chunk id, shared with the orphan sweep and
+            // the HNSW cleanup. A `format!` here and a second one there is
+            // exactly how a chunk becomes unreachable by the code meant to
+            // delete it.
+            let chunk_id = raisin_hnsw::chunk_source_id(node_id, spec, *chunk_index, total_chunks);
 
             #[allow(deprecated)]
             let embedding_data = EmbeddingData {
                 vector: embedding.clone(),
                 embedder_id: embedder_id.clone(),
                 embedding_kind: raisin_ai::config::EmbeddingKind::Text,
-                source_id: node_id.clone(),
+                // The NAMESPACED source id: `{node}` for the default spec,
+                // `{node}#{spec}` for a named one. This is the `{source_id}`
+                // key segment, and it is the whole of the namespacing change.
+                source_id: source_id.clone(),
                 chunk_index: *chunk_index,
                 total_chunks,
                 chunk_content: Some(chunk_content.chars().take(200).collect()),
                 generated_at: chrono::Utc::now(),
+                // Per-chunk text hash: unchanged meaning, a debugging aid.
                 text_hash: hash_text(chunk_content),
+                // Per-SPEC spec hash: the answer to "is this stale?". Every
+                // chunk of one run carries the same value, because they are all
+                // the product of the same inputs — that is what lets a single
+                // read of the first chunk decide the whole spec.
+                spec_hash: Some(spec_hash),
                 // Legacy fields (deprecated)
                 model: config.model.clone(),
                 provider: config.provider.clone(),
@@ -279,27 +524,29 @@ impl EmbeddingJobHandler {
                 &context.repo_id,
                 &context.branch,
                 &context.workspace_id,
-                &chunk_node_id,
+                &chunk_id,
                 &context.revision,
                 &embedding_data,
             )?;
 
             // Add to HNSW index (use spawn_blocking as HNSW operations are sync)
             let engine_clone = Arc::clone(&self.hnsw_engine);
-            let chunk_id = chunk_node_id.clone();
+            let index_id = chunk_id.clone();
             let tenant_id = context.tenant_id.clone();
             let repo_id = context.repo_id.clone();
             let branch = context.branch.clone();
             let workspace_id = context.workspace_id.clone();
             let revision = context.revision;
+            let partition_clone = partition.clone();
 
             tokio::task::spawn_blocking(move || {
                 engine_clone.add_embedding(
                     &tenant_id,
                     &repo_id,
                     &branch,
+                    &partition_clone,
                     &workspace_id,
-                    &chunk_id,
+                    &index_id,
                     revision,
                     embedding,
                 )
@@ -310,12 +557,183 @@ impl EmbeddingJobHandler {
 
         tracing::debug!(
             node_id = %node_id,
+            spec = %spec.unwrap_or("(default)"),
             total_chunks = total_chunks,
             "Added {} chunk(s) to HNSW index",
             total_chunks
         );
 
+        // Orphan sweep, AFTER the new rows are in: re-chunking into fewer pieces
+        // leaves the surplus high-index rows of THIS revision behind, and they
+        // keep matching queries forever — anything that rebuilds the index reads
+        // them straight back out of RocksDB, so removing them from the index
+        // alone is not a fix. Rows at OTHER revisions are that revision's
+        // correct content and are left exactly where they are.
+        let pruned = embedding_storage.prune_chunks_from(
+            &context.tenant_id,
+            &context.repo_id,
+            &context.branch,
+            &context.workspace_id,
+            &embedder_hash,
+            kind_char,
+            &source_id,
+            total_chunks,
+            &context.revision,
+        )?;
+        if !pruned.is_empty() {
+            tracing::info!(
+                node_id = %node_id,
+                spec = %spec.unwrap_or("(default)"),
+                total_chunks = total_chunks,
+                orphans = ?pruned,
+                "Deleted orphaned chunk rows left by the previous chunking at this revision"
+            );
+        }
+
         Ok(())
+    }
+
+    /// The vectors of an EARLIER revision, when the inputs have not moved.
+    ///
+    /// Returns `Some(vectors)` only when every chunk of the newest stored
+    /// revision of this spec carries this exact spec hash and chunk count.
+    /// Anything less returns `None`, so the outcome of a doubt is a provider
+    /// call and never a wrong vector.
+    ///
+    /// # Why the exact-revision check is not enough on its own
+    ///
+    /// `is_already_current` reads the row AT `context.revision`. Every rewrite
+    /// of a node mints a new revision, so it misses on: a Studio publish (a SQL
+    /// copy of identical properties onto the `publish` branch), a save that
+    /// touched a field nothing embeds, a replicated write. In each of those the
+    /// text, the embedder and the chunking are byte-identical and the vector
+    /// would come back identical too — for the price of a provider call per
+    /// chunk, per node, per publish.
+    ///
+    /// The ROW still has to be written (revision is part of the key, and the
+    /// vector legs read the latest row per source id). It is the VECTOR that is
+    /// carried, which is the part that costs money and latency.
+    fn carry_forward_vectors(
+        embedding_storage: &crate::repositories::RocksDBEmbeddingStorage,
+        context: &JobContext,
+        embedder_hash: &str,
+        kind_char: char,
+        source_id: &str,
+        spec_hash: u64,
+        total_chunks: usize,
+    ) -> Option<Vec<Vec<f32>>> {
+        let mut vectors = Vec::with_capacity(total_chunks);
+        for chunk_index in 0..total_chunks {
+            let stored = embedding_storage
+                .get_chunk(
+                    &context.tenant_id,
+                    &context.repo_id,
+                    &context.branch,
+                    &context.workspace_id,
+                    embedder_hash,
+                    kind_char,
+                    source_id,
+                    chunk_index,
+                    // Latest revision, whatever it is — the whole point is that
+                    // it is NOT this one.
+                    None,
+                )
+                .ok()
+                .flatten()?;
+            if !stored.is_current_for(spec_hash, total_chunks) || stored.vector.is_empty() {
+                return None;
+            }
+            vectors.push(stored.vector);
+        }
+        Some(vectors)
+    }
+
+    /// Does a stored embedding already match these inputs exactly?
+    ///
+    /// Three things have to agree, and dropping any one of them is a bug in a
+    /// different direction:
+    ///
+    /// - every chunk row of this revision must exist and carry this spec hash
+    ///   and chunk count, or the inputs have moved and the vectors are stale;
+    /// - there must be NO row above the new chunk count at this revision, or a
+    ///   previous, longer chunking has left orphans that still need sweeping;
+    /// - every live chunk id must actually be IN the HNSW index. Snapshots lag
+    ///   (`raisin-hnsw` `lifecycle.rs`), so a restart can leave the row present
+    ///   and the vector gone. Skipping on the rows alone would make that node
+    ///   permanently unsearchable until a full REBUILD.
+    #[allow(clippy::too_many_arguments)]
+    async fn is_already_current(
+        &self,
+        source_id: &str,
+        context: &JobContext,
+        embedder_hash: &str,
+        kind_char: char,
+        partition: &raisin_hnsw::PartitionId,
+        live_ids: &std::collections::HashSet<String>,
+        spec_hash: u64,
+        total_chunks: usize,
+    ) -> Result<bool> {
+        let embedding_storage =
+            crate::repositories::RocksDBEmbeddingStorage::new(self.storage.db().clone());
+
+        for chunk_index in 0..total_chunks {
+            let stored = embedding_storage.get_chunk(
+                &context.tenant_id,
+                &context.repo_id,
+                &context.branch,
+                &context.workspace_id,
+                embedder_hash,
+                kind_char,
+                source_id,
+                chunk_index,
+                Some(&context.revision),
+            )?;
+            match stored {
+                Some(data) if data.is_current_for(spec_hash, total_chunks) => {}
+                _ => return Ok(false),
+            }
+        }
+
+        // An orphan of a previous, longer chunking is work still outstanding at
+        // this revision, so it is not a steady state however current the rows
+        // below it look.
+        let has_orphan = embedding_storage
+            .list_source_chunks(
+                &context.tenant_id,
+                &context.repo_id,
+                &context.branch,
+                &context.workspace_id,
+                embedder_hash,
+                kind_char,
+                source_id,
+            )?
+            .into_iter()
+            .any(|(chunk_index, revision)| {
+                chunk_index >= total_chunks && revision == context.revision
+            });
+        if has_orphan {
+            return Ok(false);
+        }
+
+        let engine = Arc::clone(&self.hnsw_engine);
+        let tenant_id = context.tenant_id.clone();
+        let repo_id = context.repo_id.clone();
+        let branch = context.branch.clone();
+        let ids: Vec<String> = live_ids.iter().cloned().collect();
+        let partition = partition.clone();
+
+        let indexed = tokio::task::spawn_blocking(move || -> Result<bool> {
+            for id in &ids {
+                if !engine.contains_embedding(&tenant_id, &repo_id, &branch, &partition, id)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        })
+        .await
+        .map_err(|e| Error::storage(format!("Blocking task failed: {}", e)))??;
+
+        Ok(indexed)
     }
 
     /// Handle embedding deletion job
@@ -323,7 +741,20 @@ impl EmbeddingJobHandler {
     /// This method:
     /// 1. Extracts node_id from JobType::EmbeddingDelete
     /// 2. Checks for existing chunk count via embedding storage
-    /// 3. Removes all chunks (or single embedding) from HNSW index
+    /// 3. Removes all chunks (or single embedding) from the HNSW index
+    /// 4. Removes the same rows from `cf::EMBEDDINGS`
+    ///
+    /// Step 4 is not optional. Dropping only the HNSW entry leaves the stored
+    /// vector behind, and `cf::EMBEDDINGS` is the source of truth every
+    /// administrative operation reads: `VERIFY VECTOR INDEX` then reports a
+    /// permanent `mismatch` (hnsw_count < storage_count) telling the operator to
+    /// run `REBUILD VECTOR INDEX`, and the rebuild dutifully RE-INSERTS the
+    /// deleted node's vector. Its content does not leak — the row-fetch stage
+    /// drops it with a `Node not found` warning — but it wins ANN slots that
+    /// belong to live documents, so a `LIMIT k` silently returns fewer than k
+    /// rows. Measured on the unpublish path (`DELETE ... WHERE __branch=`), where
+    /// the residue accumulates once per unpublished node and recall degrades
+    /// with every one.
     pub async fn handle_delete(&self, job: &JobInfo, context: &JobContext) -> Result<()> {
         // Extract node_id from job type
         let node_id = match &job.job_type {
@@ -346,25 +777,86 @@ impl EmbeddingJobHandler {
             "Processing embedding deletion job"
         );
 
-        // Check if this node had chunked embeddings by reading chunk 0's data
-        let total_chunks = self.get_existing_chunk_count(node_id, context);
+        // TWO VOCABULARIES, and they are not interchangeable — which is the
+        // trap this function used to fall into by iterating one list against
+        // both stores.
+        //
+        // * the HNSW index is keyed by INDEX ID: `{node}`, `{node}#{n}`, or
+        //   `{node}#{spec}#{n}`;
+        // * `cf::EMBEDDINGS` is keyed by SOURCE ID (`{node}` or
+        //   `{node}#{spec}`) with the chunk index as a SEPARATE key segment, so
+        //   one delete per source id removes every chunk at every revision.
+        //
+        // Handing an index id to the row store matches nothing. The default
+        // spec got away with it only because the bare node id happens to be
+        // both, and it is exactly what left a named spec's rows behind: the
+        // vectors survived, `VERIFY VECTOR INDEX` reported a permanent
+        // mismatch, and a REBUILD re-inserted the deleted node's document
+        // vector so it went on winning ANN slots that belong to live content.
+        //
+        // Both lists cover EVERY spec the node may carry. A deleted node must
+        // lose all of its vectors, not the ones the default spec happened to
+        // write.
+        let mut index_ids: Vec<String> = Vec::new();
+        let mut source_ids: Vec<String> = Vec::new();
+        for spec in [None, Some(EXTRACTED_TEXT_SPEC)] {
+            let source_id = raisin_hnsw::namespaced_source_id(node_id, spec);
+            let total_chunks = self.get_existing_chunk_count(&source_id, context);
+
+            // The bare node id is an index id unconditionally: it is both the
+            // single-chunk DEFAULT id and the legacy non-chunked id, and a node
+            // that was once written unchunked and later chunked has entries
+            // under both.
+            if spec.is_none() {
+                index_ids.push(node_id.clone());
+            }
+            index_ids.extend(raisin_hnsw::chunk_id_set(node_id, spec, total_chunks));
+            source_ids.push(source_id);
+        }
+        index_ids.sort();
+        index_ids.dedup();
+        source_ids.sort();
+        source_ids.dedup();
 
         let engine_clone = Arc::clone(&self.hnsw_engine);
-        let node_id_clone = node_id.clone();
+        let db = self.storage.db().clone();
         let tenant_id = context.tenant_id.clone();
         let repo_id = context.repo_id.clone();
         let branch = context.branch.clone();
+        let workspace_id = context.workspace_id.clone();
+        let index_ids_clone = index_ids.clone();
+        let source_ids_clone = source_ids.clone();
 
         tokio::task::spawn_blocking(move || -> Result<()> {
-            // Remove the base node_id (for non-chunked or legacy embeddings)
-            engine_clone.remove_embedding(&tenant_id, &repo_id, &branch, &node_id_clone)?;
-
-            // Remove all chunk IDs if this was a chunked document
-            if total_chunks > 1 {
-                for i in 0..total_chunks {
-                    let chunk_id = format!("{}#{}", node_id_clone, i);
-                    engine_clone.remove_embedding(&tenant_id, &repo_id, &branch, &chunk_id)?;
+            let embedding_storage = crate::repositories::RocksDBEmbeddingStorage::new(db);
+            // EVERY partition, not the one this tenant currently writes. A
+            // deleted node must lose all of its vectors — including a previous
+            // model's, and (once image embedding exists) its image vector.
+            // Removing an id a partition does not hold is a no-op, so the sweep
+            // is safe as well as complete; a partition-blind delete would leave
+            // a deleted node winning ANN slots forever, which is the same class
+            // of residue the spec-blind delete used to leave.
+            let partitions = engine_clone.list_partitions(&tenant_id, &repo_id, &branch)?;
+            for partition in &partitions {
+                for id in &index_ids_clone {
+                    engine_clone.remove_embedding(&tenant_id, &repo_id, &branch, partition, id)?;
                 }
+            }
+            for source_id in &source_ids_clone {
+                // `revision: None` purges EVERY stored revision of this source
+                // id on this branch — which is what a delete means here. Older
+                // revisions are not reachable state for search: the vector legs
+                // (live query, VERIFY, REBUILD) all read the latest row per
+                // source id, so leaving them would recreate the exact residue
+                // this call exists to remove.
+                embedding_storage.delete_embedding(
+                    &tenant_id,
+                    &repo_id,
+                    &branch,
+                    &workspace_id,
+                    source_id,
+                    None,
+                )?;
             }
 
             Ok(())
@@ -374,76 +866,127 @@ impl EmbeddingJobHandler {
 
         tracing::debug!(
             node_id = %node_id,
-            total_chunks = total_chunks,
-            "Removed {} embedding(s) from HNSW index",
-            total_chunks.max(1)
+            index_ids = index_ids.len(),
+            source_ids = ?source_ids,
+            "Removed embedding(s) from the HNSW index and from cf::EMBEDDINGS"
         );
 
         Ok(())
     }
 
-    /// Look up the existing chunk count for a node from embedding storage.
-    /// Returns 1 if no chunked embedding is found (single or legacy).
-    fn get_existing_chunk_count(&self, node_id: &str, context: &JobContext) -> usize {
+    /// Look up the existing chunk count for one SPEC of a node.
+    ///
+    /// `source_id` is the namespaced id (`{node}` or `{node}#{spec}`), because
+    /// the chunk count is per-spec: a page's own two chunks say nothing about
+    /// how its attached document was split.
+    fn get_existing_chunk_count(&self, source_id: &str, context: &JobContext) -> usize {
         let embedding_storage =
             crate::repositories::RocksDBEmbeddingStorage::new(self.storage.db().clone());
 
-        // Try chunk 0 first (chunked format: {node_id}#0)
-        if let Ok(Some(data)) = embedding_storage.get_embedding(
-            &context.tenant_id,
-            &context.repo_id,
-            &context.branch,
-            &context.workspace_id,
-            &format!("{}#0", node_id),
-            None,
-        ) {
-            return data.total_chunks;
-        }
-
-        // Try base node_id (legacy non-chunked format)
-        if let Ok(Some(data)) = embedding_storage.get_embedding(
-            &context.tenant_id,
-            &context.repo_id,
-            &context.branch,
-            &context.workspace_id,
-            node_id,
-            None,
-        ) {
-            return data.total_chunks;
+        for candidate in [format!("{}#0", source_id), source_id.to_string()] {
+            if let Ok(Some(data)) = embedding_storage.get_embedding(
+                &context.tenant_id,
+                &context.repo_id,
+                &context.branch,
+                &context.workspace_id,
+                &candidate,
+                None,
+            ) {
+                return data.total_chunks;
+            }
         }
 
         1
     }
 
-    /// Remove old chunks from HNSW index before re-embedding.
-    /// This handles the case where a node previously had N chunks but now has M.
+    /// Drop from the HNSW index every id of this node that the run about to
+    /// happen will NOT rewrite.
+    ///
+    /// The candidate set comes from what is actually STORED — the chunk indexes
+    /// this node has ever been written under, at any revision — rather than from
+    /// arithmetic over a recorded chunk count. Two cases the old count-based
+    /// version got wrong, both leaving a stale vector answering queries:
+    ///
+    /// - a document that was ONE embedding and is now chunked: the old code
+    ///   returned early on `old_total <= 1` saying "add() replaces it", but the
+    ///   new vectors go in under `{node}#0…`, so the whole-document vector under
+    ///   the bare id was never replaced and never removed;
+    /// - a document re-chunked into FEWER pieces where the surplus indexes were
+    ///   written by an earlier revision: `total_chunks` on the latest row no
+    ///   longer names them, so `0..old_total` never reached them.
+    ///
+    /// Removing an id the index does not hold is a no-op, so covering both id
+    /// forms costs nothing and closes the case where a row's own chunk count
+    /// cannot be known from its key.
+    #[allow(clippy::too_many_arguments)]
     async fn remove_old_chunks_from_hnsw(
         &self,
-        node_id: &str,
+        source_id: &str,
         context: &JobContext,
-        _new_chunk_count: usize,
+        embedder_hash: &str,
+        kind_char: char,
+        partition: &raisin_hnsw::PartitionId,
+        live_ids: &std::collections::HashSet<String>,
     ) -> Result<()> {
-        let old_total = self.get_existing_chunk_count(node_id, context);
+        let embedding_storage =
+            crate::repositories::RocksDBEmbeddingStorage::new(self.storage.db().clone());
 
-        if old_total <= 1 {
-            // Single embedding or no prior embedding - the HNSW add() handles replacement
+        let stored = embedding_storage.list_source_chunks(
+            &context.tenant_id,
+            &context.repo_id,
+            &context.branch,
+            &context.workspace_id,
+            embedder_hash,
+            kind_char,
+            source_id,
+        )?;
+
+        // The bare id (how a single-chunk DEFAULT-spec run indexes) plus every
+        // chunk index ever stored for this spec (how every other run does).
+        //
+        // Built from the SOURCE id, so a named spec sweeps its own namespace and
+        // cannot reach into the default one — `{node}#doc#0` and `{node}#0` are
+        // different vectors of the same node and neither supersedes the other.
+        let parsed = raisin_hnsw::parse_index_id(source_id);
+        let spec = parsed.spec.as_deref();
+        // The bare id is a candidate only for the DEFAULT spec, where it is a
+        // real index id (a single-chunk run, and every legacy row). A NAMED
+        // spec always writes `{node}#{spec}#{n}`, so `{node}#{spec}` is not an
+        // id anything ever indexed and listing it would sweep a string that
+        // cannot exist.
+        let mut candidates: Vec<String> = if spec.is_none() {
+            vec![source_id.to_string()]
+        } else {
+            Vec::new()
+        };
+        for (chunk_index, _) in &stored {
+            candidates.push(raisin_hnsw::chunk_index_id(
+                &parsed.node_id,
+                spec,
+                *chunk_index,
+            ));
+        }
+        candidates.sort();
+        candidates.dedup();
+        let stale: Vec<String> = candidates
+            .into_iter()
+            .filter(|id| !live_ids.contains(id))
+            .collect();
+
+        if stale.is_empty() {
             return Ok(());
         }
 
-        // Remove all old chunk entries from HNSW
         let engine_clone = Arc::clone(&self.hnsw_engine);
-        let node_id_clone = node_id.to_string();
         let tenant_id = context.tenant_id.clone();
         let repo_id = context.repo_id.clone();
         let branch = context.branch.clone();
+        let to_remove = stale.clone();
+        let partition = partition.clone();
 
         tokio::task::spawn_blocking(move || -> Result<()> {
-            // Remove base node_id (backward compat)
-            engine_clone.remove_embedding(&tenant_id, &repo_id, &branch, &node_id_clone)?;
-            // Remove all old chunks
-            for i in 0..old_total {
-                let chunk_id = format!("{}#{}", node_id_clone, i);
-                engine_clone.remove_embedding(&tenant_id, &repo_id, &branch, &chunk_id)?;
+            for id in &to_remove {
+                engine_clone.remove_embedding(&tenant_id, &repo_id, &branch, &partition, id)?;
             }
             Ok(())
         })
@@ -451,9 +994,9 @@ impl EmbeddingJobHandler {
         .map_err(|e| Error::storage(format!("Blocking task failed: {}", e)))??;
 
         tracing::debug!(
-            node_id = %node_id,
-            old_chunks = old_total,
-            "Removed old chunks from HNSW index before re-embedding"
+            source_id = %source_id,
+            removed = ?stale,
+            "Removed superseded chunk ids from the HNSW index before re-embedding"
         );
 
         Ok(())
@@ -507,142 +1050,120 @@ impl EmbeddingJobHandler {
         Ok(())
     }
 
+    /// Resolve the chunking configuration for one node.
+    ///
+    /// # Why chunking is routed and not merely global
+    ///
+    /// One chunk size cannot be right for everything a repo holds. A scanned
+    /// contract wants large, overlapping chunks so a clause survives a page
+    /// break; a product description wants one chunk and no overlap, because
+    /// splitting it makes every fragment match everything. Since the routing
+    /// table already answers "what kind of content is this" per mimetype and
+    /// per path, it is also the right place to answer "and how should it be
+    /// split" — which is what a user customising chunking is actually asking
+    /// for.
+    ///
+    /// # This field was already there, and already dead
+    ///
+    /// `ProcessingSettings::chunking` has been persisted in
+    /// `CF_PROCESSING_RULES`, editable over the processing-rules HTTP surface,
+    /// and covered by a round-trip test in `repositories/processing_rules.rs` —
+    /// and read by nothing. An operator could set it, save it, reload it and
+    /// see it come back, while every embedding was chunked by the tenant-wide
+    /// setting. Threading it here is what makes that surface mean something; it
+    /// is not a new concept.
+    ///
+    /// Precedence is rule-then-tenant, most specific first, and the tenant value
+    /// remains the answer when no rule sets one — so an installation that never
+    /// opens the rules editor is unaffected.
+    ///
+    /// This deliberately applies to ANY node, not only a `raisin:Asset`. A rule
+    /// can match on node type, path or workspace, so "everything under
+    /// `/handbook/**` chunks at 1024" is expressible for ordinary content nodes
+    /// that have no binary at all. `mime_type` is simply absent for those, and a
+    /// mimetype matcher then does not match.
+    async fn resolve_chunking(
+        &self,
+        node: &raisin_models::nodes::Node,
+        config: &TenantEmbeddingConfig,
+        context: &JobContext,
+    ) -> Option<raisin_ai::config::ChunkingConfig> {
+        // `get_rules` lives on the trait, not the impl.
+        use raisin_storage::ProcessingRulesRepository as _;
+
+        let rule_chunking = match self
+            .storage
+            .processing_rules_repository()
+            .get_rules(raisin_storage::RepoScope::new(
+                &context.tenant_id,
+                &context.repo_id,
+            ))
+            .await
+        {
+            Ok(Some(rule_set)) => {
+                let mut match_context = raisin_ai::RuleMatchContext::new()
+                    .with_node_type(&node.node_type)
+                    .with_path(&node.path)
+                    .with_workspace(&context.workspace_id);
+                // The same accessor the enqueue gate and the asset job use, so a
+                // mimetype rule selects the same rule for chunking that it
+                // selects for extraction. A second, narrower reader here is
+                // exactly how the two would come apart.
+                if let Some(mime) =
+                    crate::jobs::handlers::asset_processing::helpers::extract_mime_type(node)
+                {
+                    match_context = match_context.with_mime_type(mime);
+                }
+                rule_set
+                    .find_matching_rule(&match_context)
+                    .and_then(|r| r.settings.chunking.clone())
+            }
+            _ => None,
+        };
+
+        if let Some(chunking) = rule_chunking {
+            tracing::info!(
+                node_id = %node.id,
+                node_path = %node.path,
+                chunk_size = chunking.chunk_size,
+                "Chunking taken from the matching processing rule"
+            );
+            return Some(chunking);
+        }
+
+        config.chunking.clone()
+    }
+
     /// Resolve the embedding provider configuration.
     ///
-    /// This method supports two modes:
-    /// 1. **Unified Provider (preferred)**: If `ai_provider_ref` is set in the embedding config,
-    ///    look up the provider and API key from `TenantAIConfig`.
-    /// 2. **Legacy Mode**: Use the `provider`, `model`, and `api_key_encrypted` fields directly
-    ///    from `TenantEmbeddingConfig`.
-    ///
-    /// Returns: (EmbeddingProvider, api_key, model)
+    /// Delegates to the ONE resolver — `raisin_embeddings::resolve` via
+    /// [`crate::embedding_provider`] — which every read-path surface also goes
+    /// through. This method used to be the only correct derivation of five;
+    /// keeping it as a thin wrapper is what stops it becoming that again.
     async fn resolve_embedding_provider(
         &self,
         config: &TenantEmbeddingConfig,
         tenant_id: &str,
     ) -> Result<ResolvedEmbeddingProvider> {
-        let encryptor = ApiKeyEncryptor::new(&self.master_key);
-
-        if config.uses_unified_provider() {
-            // Unified provider mode - look up from TenantAIConfig
-            let provider_ref = config.ai_provider_ref.as_ref().unwrap();
-
-            // Get TenantAIConfig
-            let ai_config_repo = self.storage.tenant_ai_config_repository();
-            let ai_config = ai_config_repo.get_config(tenant_id).await.map_err(|e| {
-                Error::Backend(format!(
-                    "Failed to get AI config for unified provider: {}",
-                    e
-                ))
-            })?;
-
-            // Find the provider in TenantAIConfig by SLUG.
-            //
-            // `ai_provider_ref` was always a string naming one provider entry, so the
-            // slug is what it is now — and matching on it fixes a bug in passing: the
-            // previous `format!("{:?}", kind).to_lowercase()` produced `azureopenai`,
-            // which can never equal the `azure_openai` a caller would write, so an
-            // Azure ref has never resolved. Legacy refs keep working because entries
-            // stored before slugs existed are slugged after the kind's serde name.
-            let ai_provider = ai_config.get_provider(provider_ref).ok_or_else(|| {
-                Error::Validation(format!(
-                    "AI provider '{}' not found in tenant config",
-                    provider_ref
-                ))
-            })?;
-
-            // The default embedding model follows the provider KIND, not the slug: a
-            // tenant may call its OpenAI entry anything, but `text-embedding-3-small`
-            // is still what OpenAI serves.
-            let model_ref =
-                config
-                    .ai_model_ref
-                    .as_ref()
-                    .cloned()
-                    .unwrap_or_else(|| match ai_provider.kind {
-                        AIProvider::Ollama => "nomic-embed-text".to_string(),
-                        _ => "text-embedding-3-small".to_string(),
-                    });
-
-            // Decrypt API key from TenantAIConfig
-            let api_key = if let Some(encrypted) = &ai_provider.api_key_encrypted {
-                encryptor
-                    .decrypt(encrypted)
-                    .map_err(|e| Error::Backend(format!("Failed to decrypt API key: {}", e)))?
-            } else {
-                return Err(Error::Validation(format!(
-                    "No API key configured for provider '{}'",
-                    provider_ref
-                )));
-            };
-
-            // Map the provider KIND to EmbeddingProvider — which wire protocol to speak
-            // is a property of the kind, and the slug is free-form.
-            let embedding_provider = match ai_provider.kind {
-                // Everything that speaks OpenAI's `/embeddings` shape shares one client;
-                // they differ only in host, which `api_endpoint` supplies.
-                AIProvider::OpenAI
-                | AIProvider::AzureOpenAI
-                | AIProvider::Groq
-                | AIProvider::OpenRouter
-                | AIProvider::Custom => EmbeddingProvider::OpenAI,
-                AIProvider::Anthropic => EmbeddingProvider::Claude,
-                AIProvider::Ollama => EmbeddingProvider::Ollama,
-                _ => {
-                    return Err(Error::Validation(format!(
-                        "Provider '{}' does not support embeddings",
-                        provider_ref
-                    )))
-                }
-            };
-
-            tracing::debug!(
-                provider = %provider_ref,
-                model = %model_ref,
-                "Using unified AI provider for embeddings"
-            );
-
-            Ok(ResolvedEmbeddingProvider {
-                provider: embedding_provider,
-                api_key,
-                model: model_ref,
-                // Previously dropped on the floor, which is why a tenant could configure
-                // a custom endpoint, see it accepted, and still have every embedding go
-                // to the vendor's default host.
-                base_url: ai_provider.api_endpoint.clone(),
-            })
-        } else {
-            // Legacy mode - use fields directly from TenantEmbeddingConfig
-            let api_key_encrypted = config.api_key_encrypted.as_ref().ok_or_else(|| {
-                Error::Validation("No API key configured for embeddings".to_string())
-            })?;
-            let api_key = encryptor
-                .decrypt(api_key_encrypted)
-                .map_err(|e| Error::Backend(format!("Failed to decrypt API key: {}", e)))?;
-
-            tracing::debug!(
-                provider = ?config.provider,
-                model = %config.model,
-                "Using legacy embedding provider configuration"
-            );
-
-            Ok(ResolvedEmbeddingProvider {
-                provider: config.provider.clone(),
-                api_key,
-                model: config.model.clone(),
-                base_url: config.base_url.clone(),
-            })
-        }
+        crate::embedding_provider::resolve_settings(
+            &self.storage,
+            tenant_id,
+            config,
+            &self.master_key,
+        )
+        .await
     }
 }
 
-/// Everything needed to build an embedding client for a tenant.
+/// Did the enqueuer ask for an unconditional re-embed?
 ///
-/// A struct rather than a tuple because `base_url` was the field that used to get lost:
-/// a 3-tuple made "provider, key, model" look complete when it was not.
-struct ResolvedEmbeddingProvider {
-    provider: EmbeddingProvider,
-    api_key: String,
-    model: String,
-    base_url: Option<String>,
+/// The key is [`raisin_embeddings::FORCE_REEMBED_KEY`] — defined in the crate
+/// the enqueuing HTTP handler also depends on, so the two cannot spell it
+/// differently.
+fn force_requested(context: &JobContext) -> bool {
+    context
+        .metadata
+        .get(raisin_embeddings::FORCE_REEMBED_KEY)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
 }

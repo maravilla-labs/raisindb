@@ -7,7 +7,8 @@
 //! - Subqueries in FROM clause (derived tables)
 
 use super::types::{
-    JoinInfo, JoinType, LateralFunctionRef, SubqueryRef, TableFunctionRef, TableRef,
+    JoinInfo, JoinType, LateralFunctionRef, SubqueryRef, TableFunctionArg, TableFunctionRef,
+    TableRef,
 };
 use super::{AnalyzerContext, Result};
 use crate::analyzer::{
@@ -447,11 +448,20 @@ impl<'a> AnalyzerContext<'a> {
         })
     }
 
-    /// Analyze table function arguments
+    /// Analyze table function arguments, KEEPING the `name => value` names.
+    ///
+    /// `sqlparser` already parses `workspaces => 'library'` into
+    /// `FunctionArg::Named`; the previous version of this function matched that
+    /// variant only to push `arg` and drop `name`. The result was a query that
+    /// parsed, analysed, planned and ran while meaning something the author
+    /// never wrote: `HYBRID_SEARCH('q', workspaces => 'library')` searched every
+    /// workspace in the repository. Accepting a name and ignoring it is worse
+    /// than rejecting it, so the name now travels with the value and each
+    /// function validates it.
     pub(super) fn analyze_table_function_args(
         &self,
         args: &TableFunctionArgs,
-    ) -> Result<Vec<TypedExpr>> {
+    ) -> Result<Vec<TableFunctionArg>> {
         if args.settings.is_some() {
             return Err(AnalysisError::UnsupportedExpression(
                 "SETTINGS clause not supported for table-valued functions".into(),
@@ -461,12 +471,39 @@ impl<'a> AnalyzerContext<'a> {
         let mut result = Vec::with_capacity(args.args.len());
         for arg in &args.args {
             match arg {
-                FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
-                | FunctionArg::Named {
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => {
+                    result.push(TableFunctionArg::positional(self.analyze_expr(expr)?));
+                }
+                FunctionArg::Named {
+                    name,
                     arg: FunctionArgExpr::Expr(expr),
                     ..
                 } => {
-                    result.push(self.analyze_expr(expr)?);
+                    result.push(TableFunctionArg::named(
+                        name.value.clone(),
+                        self.analyze_expr(expr)?,
+                    ));
+                }
+                // Which of these two variants sqlparser produces depends on the
+                // dialect's `supports_named_fn_args_with_expr_name`, which is
+                // TRUE here -- so `workspaces => 'library'` arrives as
+                // `ExprNamed`, not `Named`. Handling only the documented one is
+                // how a named argument silently became a positional again.
+                FunctionArg::ExprNamed {
+                    name,
+                    arg: FunctionArgExpr::Expr(expr),
+                    ..
+                } => {
+                    let key = match name {
+                        sqlparser::ast::Expr::Identifier(ident) => ident.value.clone(),
+                        other => {
+                            return Err(AnalysisError::UnsupportedExpression(format!(
+                                "table-valued function argument names must be plain \
+                                 identifiers, got {other}"
+                            )))
+                        }
+                    };
+                    result.push(TableFunctionArg::named(key, self.analyze_expr(expr)?));
                 }
                 FunctionArg::Unnamed(FunctionArgExpr::Wildcard)
                 | FunctionArg::Unnamed(FunctionArgExpr::QualifiedWildcard(_))
@@ -484,8 +521,7 @@ impl<'a> AnalyzerContext<'a> {
                 }
                 FunctionArg::ExprNamed { .. } => {
                     return Err(AnalysisError::UnsupportedExpression(
-                        "Named expression arguments not supported for table-valued functions"
-                            .into(),
+                        "Wildcard arguments not supported for table-valued functions".into(),
                     ))
                 }
             }
@@ -494,10 +530,10 @@ impl<'a> AnalyzerContext<'a> {
     }
 
     /// Build schema for GRAPH_TABLE from its COLUMNS clause
-    pub(super) fn build_graph_table_schema(&self, args: &[TypedExpr]) -> Result<TableDef> {
+    pub(super) fn build_graph_table_schema(&self, args: &[TableFunctionArg]) -> Result<TableDef> {
         // GRAPH_TABLE argument should be a string literal containing the full query
         let query_str = if let Some(arg) = args.first() {
-            match &arg.expr {
+            match &arg.value.expr {
                 Expr::Literal(Literal::Text(s)) => s.clone(),
                 _ => {
                     // Fall back to static schema if we can't parse

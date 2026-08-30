@@ -20,7 +20,7 @@ impl UnifiedJobEventHandler {
     /// pre-generated so context can be stored before the job is dispatched.
     pub(crate) async fn enqueue_job(&self, job_type: JobType, context: &JobContext) -> Result<()> {
         // Generate dedup key: context scope + job type specifics
-        let dedup_key = format!(
+        let mut dedup_key = format!(
             "{}:{}:{}:{}:{}",
             context.tenant_id,
             context.repo_id,
@@ -28,6 +28,43 @@ impl UnifiedJobEventHandler {
             context.workspace_id,
             job_type.dedup_key()
         );
+
+        // `EmbeddingGenerate` additionally keys on the REVISION, because it is
+        // the one job here that reads the node at `context.revision` and whose
+        // whole output is decided by what it reads.
+        //
+        // # The bug this fixes, reproduced live
+        //
+        // Uploading a PDF writes the asset node, which enqueues job A. The
+        // extraction job then stores the extracted text on that node, which
+        // emits `node:updated` and tries to enqueue job B. Both had the dedup
+        // key `…:embedding_gen:{node_id}`, so B was DROPPED — and its context,
+        // the only carrier of the newer revision, was discarded with it. Job A
+        // then ran against the revision from BEFORE the text existed. The
+        // document's body was extracted, stored, indexed for full text… and
+        // never embedded, permanently, until something unrelated touched the
+        // node again. Observed as `Skipped duplicate job
+        // job_type=EmbeddingGenerate(...)` immediately after `Stored extraction
+        // artifact on node`.
+        //
+        // # Why this is now cheap enough to do
+        //
+        // Dedup-by-node existed to stop a burst of edits calling the embedding
+        // provider once per edit. That reason is gone: the spec hash decides
+        // staleness from the actual INPUTS, and a run whose inputs have not
+        // moved carries the previous revision's vectors forward instead of
+        // calling the provider (`carry_forward_vectors`). So the extra runs a
+        // burst now produces cost a row write each and no provider call — while
+        // the collapse they replace cost a permanently missing embedding.
+        //
+        // Only this job type is keyed on the revision. The others here are
+        // either not revision-scoped or genuinely idempotent per node, and
+        // widening the rule to them would multiply job volume for no
+        // correctness gain.
+        if matches!(job_type, JobType::EmbeddingGenerate { .. }) {
+            dedup_key.push(':');
+            dedup_key.push_str(&context.revision.to_string());
+        }
 
         // Pre-generate job_id so we can store context BEFORE registration
         // This avoids race condition where DispatchingMonitor dispatches

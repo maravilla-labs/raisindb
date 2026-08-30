@@ -62,7 +62,39 @@ pub(crate) enum OpenAIInputItem {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct OpenAIMessage {
     pub role: String,
-    pub content: String,
+    pub content: OpenAIContent,
+}
+
+/// The Responses API accepts a message's `content` as either a bare string or
+/// an array of typed parts, and only the array form can carry an image.
+///
+/// `untagged` so the string form serializes byte-identically to what this
+/// provider sent before — a text-only request must not change shape just
+/// because the type it goes through grew a second case.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum OpenAIContent {
+    Text(String),
+    Parts(Vec<OpenAIContentPart>),
+}
+
+impl From<String> for OpenAIContent {
+    fn from(s: String) -> Self {
+        OpenAIContent::Text(s)
+    }
+}
+
+/// One part of a Responses-API multimodal message.
+///
+/// NOTE the spellings: the Responses API uses `input_text` / `input_image`,
+/// NOT the Chat Completions API's `text` / `image_url`, and `input_image`
+/// carries `image_url` as a BARE STRING rather than an object. Getting either
+/// of those wrong is a 400 that names the field and not the reason.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum OpenAIContentPart {
+    InputText { text: String },
+    InputImage { image_url: String },
 }
 
 /// Function call in input

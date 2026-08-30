@@ -1,151 +1,154 @@
 // SPDX-License-Identifier: BSL-1.1
 
-//! [`SearchProvider`] backed by the Tantivy full-text and HNSW vector engines.
+//! [`SearchProvider`] backed by the shared search implementation.
+//!
+//! # What this used to be
+//!
+//! A third implementation. It built its own `FullTextSearchQuery`, resolved its
+//! own embedding provider, called the HNSW engine itself, and bound the caller's
+//! identity as `_identity` -- so the `search_nodes` MCP tool returned node ids,
+//! paths and types with NO row-level security, to whatever identity the session
+//! had. Its full-text leg also hard-coded `language: "en"`.
+//!
+//! It now builds a `SearchArgs` and hands it to `QueryEngine::search`, exactly
+//! as the SQL table function and the HTTP endpoint do: one scope resolver, one
+//! per-hit `rls_filter_search_hit`, one over-fetch loop, one column set.
 
 use std::future::Future;
 use std::pin::Pin;
 
 use raisin_mcp::{McpError, McpIdentity, SearchHit, SearchMode, SearchProvider, SearchQuery};
+use raisin_models::auth::AuthContext;
+use raisin_models::nodes::properties::PropertyValue;
+use raisin_sql_execution::physical_plan::search::args::{
+    EmbeddingKindFilter, QueryInput, SearchArgs, SearchFunction,
+};
+use raisin_sql_execution::QueryEngine;
 
 use crate::state::AppState;
 
 /// Full-text + semantic search over RaisinDB content for the MCP `search_nodes`
 /// tool.
-///
-/// Full-text queries use the Tantivy [`IndexingEngine`](raisin_storage::IndexingEngine);
-/// semantic queries embed the query string with the tenant's configured provider
-/// and search the HNSW index. Both engines are synchronous/CPU-bound, so the work
-/// is offloaded to a blocking pool.
 #[derive(Clone)]
 pub(in crate::handlers::mcp) struct HttpSearchProvider {
     state: AppState,
     tenant_id: String,
     repo: String,
+    /// The request's resolved auth context -- the SAME one the data tools get.
+    ///
+    /// Passing it here rather than rebuilding it from the `McpIdentity` is
+    /// load-bearing: a rebuilt context carries no resolved permissions, which
+    /// RLS treats as deny-all. `None` is the system/internal caller.
+    auth: Option<AuthContext>,
 }
 
 impl HttpSearchProvider {
-    /// Bind a search provider to the request's tenant / repo scope.
+    /// Bind a search provider to the request's tenant / repo scope and identity.
     pub(in crate::handlers::mcp) fn new(
         state: AppState,
         tenant_id: impl Into<String>,
         repo: impl Into<String>,
+        auth: Option<AuthContext>,
     ) -> Self {
         Self {
             state,
             tenant_id: tenant_id.into(),
             repo: repo.into(),
+            auth,
         }
     }
 
-    /// Synchronous Tantivy search (run inside `spawn_blocking`).
-    fn fulltext(&self, query: &SearchQuery) -> raisin_mcp::Result<Vec<SearchHit>> {
-        use raisin_storage::{FullTextSearchQuery, IndexingEngine};
-
-        let engine = self
-            .state
-            .indexing_engine
-            .as_ref()
-            .ok_or_else(|| McpError::not_found("full-text search is not enabled"))?;
-
-        let ftq = FullTextSearchQuery {
-            tenant_id: self.tenant_id.clone(),
-            repo_id: self.repo.clone(),
-            workspace_ids: Some(vec![query.workspace.clone()]),
-            branch: query.branch.clone(),
-            language: "en".to_string(),
-            query: query.query.clone(),
-            limit: query.limit.max(1),
-            revision: None,
-            shape_type: query.node_type.clone(),
+    async fn run(&self, query: SearchQuery) -> raisin_mcp::Result<Vec<SearchHit>> {
+        // A mode picks a leg by zeroing the other weight, which SKIPS it
+        // entirely -- so `fulltext` mode needs no embedding provider and
+        // `vector` mode needs no full-text index.
+        let (fulltext_weight, vector_weight) = match query.mode {
+            SearchMode::Fulltext => (1.0, 0.0),
+            SearchMode::Vector => (0.0, 1.0),
         };
 
-        let results = engine
-            .search(&ftq)
-            .map_err(|e| McpError::protocol(format!("full-text search failed: {e}")))?;
+        let args = SearchArgs::from_api(
+            SearchFunction::Hybrid,
+            QueryInput::Text(query.query.clone()),
+            query.limit.max(1),
+            &query.workspace,
+            None,
+            "en",
+            fulltext_weight,
+            vector_weight,
+            None,
+            // Text only. The MCP tool returns node hits to an agent that asked
+            // to search documents; folding an image tower in silently would
+            // change what every existing agent's `search_nodes` returns.
+            EmbeddingKindFilter::default(),
+        )
+        .map_err(|e| McpError::protocol(e.to_string()))?;
 
-        Ok(results
-            .into_iter()
-            .map(|r| SearchHit {
-                node_id: r.node_id,
-                workspace: r.workspace_id,
-                score: r.score,
-                path: r.path,
-                node_type: r.node_type,
+        let mut engine = QueryEngine::new(
+            self.state.storage.clone(),
+            self.tenant_id.as_str(),
+            self.repo.as_str(),
+            query.branch.as_str(),
+        );
+        if let Some(ref indexing) = self.state.indexing_engine {
+            engine = engine.with_indexing_engine(indexing.clone());
+        }
+        if let Some(ref hnsw) = self.state.hnsw_engine {
+            engine = engine.with_hnsw_engine(hnsw.clone());
+        }
+        if let Some(ref auth) = self.auth {
+            engine = engine.with_auth(auth.clone());
+        }
+
+        // `node_type` is NOT pushed down as a filter argument: the index field
+        // it would reach is multi-valued (node_type + archetype + nested
+        // element_type) and so over-matches, and there is no residual filter on
+        // this path to make that safe. Filtering the returned rows is exact.
+        let wanted_type = query.node_type.clone();
+
+        let rows = engine
+            .search(args, "search_nodes")
+            .await
+            .map_err(|e| McpError::protocol(format!("search failed: {e}")))?;
+
+        Ok(rows
+            .iter()
+            .filter(|row| match &wanted_type {
+                Some(t) => text(row, "node_type").as_deref() == Some(t.as_str()),
+                None => true,
+            })
+            .map(|row| SearchHit {
+                node_id: text(row, "node_id").unwrap_or_default(),
+                workspace: text(row, "workspace_id").unwrap_or_default(),
+                score: number(row, "score").unwrap_or(0.0) as f32,
+                path: text(row, "path"),
+                node_type: text(row, "node_type"),
             })
             .collect())
     }
+}
 
-    /// Semantic search: embed the query, then search the HNSW index.
-    async fn vector(&self, query: &SearchQuery) -> raisin_mcp::Result<Vec<SearchHit>> {
-        use raisin_embeddings::crypto::ApiKeyEncryptor;
-        use raisin_embeddings::provider::create_provider;
-        use raisin_embeddings::TenantEmbeddingConfigStore;
+/// Rows arrive qualified (`search_nodes.path`), so match on the suffix.
+fn column<'a>(row: &'a raisin_sql_execution::Row, name: &str) -> Option<&'a PropertyValue> {
+    let suffix = format!(".{name}");
+    row.columns
+        .iter()
+        .find(|(key, _)| key.as_str() == name || key.ends_with(&suffix))
+        .map(|(_, value)| value)
+}
 
-        let engine = self
-            .state
-            .hnsw_engine
-            .as_ref()
-            .ok_or_else(|| McpError::not_found("vector search is not enabled"))?
-            .clone();
+fn text(row: &raisin_sql_execution::Row, name: &str) -> Option<String> {
+    match column(row, name) {
+        Some(PropertyValue::String(s)) => Some(s.clone()),
+        _ => None,
+    }
+}
 
-        let rocksdb = self
-            .state
-            .rocksdb_storage
-            .as_ref()
-            .ok_or_else(|| McpError::not_found("vector search requires the RocksDB backend"))?;
-
-        let config = rocksdb
-            .tenant_embedding_config_repository()
-            .get_config(&self.tenant_id)
-            .map_err(|e| McpError::protocol(format!("embedding config lookup failed: {e}")))?
-            .ok_or_else(|| McpError::not_found("no embedding configuration for tenant"))?;
-
-        if !config.enabled {
-            return Err(McpError::not_found("embeddings are not enabled for tenant"));
-        }
-
-        let master_key = self.state.get_master_key().map_err(McpError::from)?;
-        let encryptor = ApiKeyEncryptor::new(&master_key);
-        let api_key_encrypted = config
-            .api_key_encrypted
-            .as_ref()
-            .ok_or_else(|| McpError::not_found("no embedding API key configured"))?;
-        let api_key = encryptor
-            .decrypt(api_key_encrypted)
-            .map_err(|e| McpError::protocol(format!("failed to decrypt embedding key: {e}")))?;
-
-        let provider = create_provider(&config.provider, &api_key, &config.model)
-            .map_err(|e| McpError::protocol(format!("embedding provider error: {e}")))?;
-        let embedding = provider
-            .generate_embedding(&query.query)
-            .await
-            .map_err(|e| McpError::protocol(format!("query embedding failed: {e}")))?;
-        let embedding = raisin_hnsw::normalize_vector(&embedding);
-
-        let tenant = self.tenant_id.clone();
-        let repo = self.repo.clone();
-        let branch = query.branch.clone();
-        let workspace = query.workspace.clone();
-        let limit = query.limit.max(1);
-
-        let results = tokio::task::spawn_blocking(move || {
-            engine.search(&tenant, &repo, &branch, Some(&workspace), &embedding, limit)
-        })
-        .await
-        .map_err(|e| McpError::protocol(format!("vector search task failed: {e}")))?
-        .map_err(|e| McpError::protocol(format!("vector search failed: {e}")))?;
-
-        Ok(results
-            .into_iter()
-            .map(|r| SearchHit {
-                node_id: r.node_id,
-                workspace: r.workspace_id,
-                // Lower distance is closer; expose similarity as a descending score.
-                score: 1.0 - r.distance,
-                path: None,
-                node_type: None,
-            })
-            .collect())
+fn number(row: &raisin_sql_execution::Row, name: &str) -> Option<f64> {
+    match column(row, name) {
+        Some(PropertyValue::Float(v)) => Some(*v),
+        Some(PropertyValue::Integer(v)) => Some(*v as f64),
+        _ => None,
     }
 }
 
@@ -155,18 +158,10 @@ impl SearchProvider for HttpSearchProvider {
         _identity: &'a McpIdentity,
         query: SearchQuery,
     ) -> Pin<Box<dyn Future<Output = raisin_mcp::Result<Vec<SearchHit>>> + Send + 'a>> {
-        Box::pin(async move {
-            match query.mode {
-                SearchMode::Fulltext => {
-                    let provider = self.clone();
-                    tokio::task::spawn_blocking(move || provider.fulltext(&query))
-                        .await
-                        .map_err(|e| {
-                            McpError::protocol(format!("full-text search task failed: {e}"))
-                        })?
-                }
-                SearchMode::Vector => self.vector(&query).await,
-            }
-        })
+        // The identity is deliberately unused HERE: enforcement uses the
+        // resolved `AuthContext` captured at construction, because an identity
+        // re-derived at this point carries no permissions and RLS would deny
+        // everything. See the `auth` field.
+        Box::pin(async move { self.run(query).await })
     }
 }

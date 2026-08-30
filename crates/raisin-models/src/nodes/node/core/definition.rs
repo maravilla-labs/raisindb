@@ -63,6 +63,48 @@ pub fn is_engine_owned_property_key(key: &str) -> bool {
     key.starts_with("__")
 }
 
+/// The actor the extraction step writes as. Named, not `"system"`, for the
+/// same reason [`SYNC_ACTOR`] is: `AuthContext::system()` is what half the
+/// internal services and every test harness present, so it identifies "no human
+/// behind this" and NOT "this write is the extraction pipeline". Treating
+/// `"system"` as an engine actor would open the shield to every one of them.
+pub const EXTRACTION_ACTOR: &str = "asset-extraction";
+
+/// May `actor` move engine-owned properties?
+///
+/// Exactly the two named engine writers. A tenant cannot present either id:
+/// both are stamped server-side by the job that owns the property, never
+/// carried in a request.
+pub fn is_engine_write_actor(actor: &str) -> bool {
+    actor == SYNC_ACTOR || actor == EXTRACTION_ACTOR
+}
+
+/// Must this property key be preserved from its STORED value on a write by a
+/// non-engine actor?
+///
+/// Two rules, and the difference between them is deliberate:
+///
+/// * **Extraction-artifact keys are shielded on EVERY node.** They are written
+///   only by the extraction step and they are the record of whether a binary
+///   was ever read. A client that echoes a stale `__extract_status` back claims
+///   a document was extracted when it was not; one that echoes a stale
+///   `__extract_fingerprint` either re-extracts the same bytes forever or
+///   switches extraction off for that asset permanently. Neither is something
+///   a client should be able to say by accident.
+/// * **Every other `__` key is shielded only on a MOUNT-OWNED node.** That is
+///   the existing rule and it stays: import and restore flows write `__`-style
+///   properties onto ordinary nodes, and a test pins that they still can.
+///
+/// Keying the first rule on the KEY rather than on the node is what stops a
+/// client forging an artifact onto a node that has none — a node-shaped gate
+/// would only close after the forgery had already landed.
+pub fn is_shielded_property_key(key: &str, properties: &HashMap<String, PropertyValue>) -> bool {
+    if !is_engine_owned_property_key(key) {
+        return false;
+    }
+    crate::nodes::extraction::is_extraction_artifact_key(key) || is_mount_owned(properties)
+}
+
 /// Whether this property map marks a node as owned by a virtual mount.
 pub fn is_mount_owned(properties: &HashMap<String, PropertyValue>) -> bool {
     matches!(

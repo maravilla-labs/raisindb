@@ -28,6 +28,7 @@ pub mod semantic;
 mod statement_analysis;
 pub mod typed_expr;
 pub mod types;
+pub mod vector_literal;
 
 // Re-export commonly used types
 pub use catalog::{Catalog, ColumnDef, StaticCatalog, TableDef};
@@ -38,13 +39,14 @@ pub use semantic::{
     AnalyzedQuery, AnalyzedRelate, AnalyzedRelateEndpoint, AnalyzedRestore, AnalyzedShow,
     AnalyzedStatement, AnalyzedTranslate, AnalyzedTranslateFilter, AnalyzedTranslationValue,
     AnalyzedUnrelate, AnalyzedUpdate, DmlTableTarget, ExplainFormat, ExplainStatement, JoinInfo,
-    JoinType, TableRef,
+    JoinType, TableFunctionArg, TableFunctionRef, TableRef,
 };
 pub use typed_expr::{
     BinaryOperator, Expr, FrameBound, FrameMode, Literal, TypedExpr, UnaryOperator, WindowFrame,
     WindowFunction,
 };
 pub use types::DataType;
+pub use vector_literal::parse_vector_text;
 
 /// Semantic analyzer
 pub struct Analyzer {

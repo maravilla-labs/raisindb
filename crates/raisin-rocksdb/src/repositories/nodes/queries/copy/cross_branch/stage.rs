@@ -196,7 +196,14 @@ impl NodeRepositoryImpl {
 
         // Carry translations (node-level and block-level) to the target
         // branch under the SAME node id.
-        self.copy_translations_to_batch(
+        //
+        // The returned flag is "an overlay DIFFERED from the target's", not
+        // "an overlay was written" — every overlay is rewritten at the fresh
+        // revision on every run, so the write itself says nothing. Deriving it
+        // from the `change_infos` length delta (what this used to do) made
+        // every translated node look changed forever and silently exempted the
+        // whole multilingual half of a site from the suppression below.
+        let translations_differed = self.copy_translations_to_batch(
             batch,
             &node.id,
             scope.tenant_id,
@@ -216,6 +223,31 @@ impl NodeRepositoryImpl {
         // Carry the node's outgoing edges — branch-scoped, in their own
         // keyspace, and therefore NOT part of the node write above.
         self.copy_relations_to_batch(batch, &node.id, scope, &mut acc.relation_ops)?;
+
+        // Did this re-copy actually change anything OBSERVABLE on the target?
+        // A publish is normally re-run over a set that is mostly untouched, and
+        // the copy rewrites every node in it at a fresh revision regardless — so
+        // without this the event emitted below would re-embed (real spend) and
+        // re-index every unchanged node on every run. The row is still written;
+        // only the notification is suppressed. Mirrors the transaction path's
+        // no-op guard in `create/tracking.rs::track_update`, widened from
+        // `properties` alone to everything an indexer reads (path and name feed
+        // fulltext; node_type selects the indexing plan) and to the translation
+        // overlays, which are indexed too. Erring toward "changed" costs one
+        // wasted re-index; erring toward "unchanged" leaves the target's derived
+        // state permanently stale, so every doubt resolves to emitting.
+        if operation == ChangeOperation::Modified && !translations_differed {
+            if let Some(old) = &old_dst {
+                if old.properties == node.properties
+                    && old.path == node.path
+                    && old.name == node.name
+                    && old.node_type == node.node_type
+                    && old.archetype == node.archetype
+                {
+                    acc.content_unchanged.insert(node.id.clone());
+                }
+            }
+        }
 
         // Track the max label per parent for the last-child metadata cache.
         let slot = acc

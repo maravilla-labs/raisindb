@@ -222,11 +222,26 @@ impl OllamaProvider {
     }
 
     /// Converts our Message type to Ollama format
+    ///
+    /// Ollama's `/api/chat` takes images as a per-message `images: [<base64>]`
+    /// array with no media type — the server sniffs the bytes — so an inline
+    /// [`ContentPart::Image`] maps across directly and ALL of them are sent,
+    /// not just the first.
+    ///
+    /// A remote [`ContentPart::ImageUrl`] cannot be sent: Ollama will not fetch
+    /// a URL, and having the server fetch it on the model's behalf would mean
+    /// this process issuing an arbitrary outbound request on behalf of tenant
+    /// content — precisely what `raisin.http.fetch`'s egress policy exists to
+    /// prevent. It is refused by [`Self::convert_messages`] rather than dropped.
     pub(crate) fn convert_message(msg: &Message) -> OllamaMessage {
-        // Extract first image from multimodal content (Ollama supports multiple, but we start with one)
-        let images = msg
-            .first_image()
-            .map(|(image_data, _media_type)| vec![image_data.to_string()]);
+        let images: Option<Vec<String>> = {
+            let inline: Vec<String> = msg
+                .image_parts()
+                .iter()
+                .filter_map(|p| p.as_image_data().map(|(data, _mime)| data.to_string()))
+                .collect();
+            (!inline.is_empty()).then_some(inline)
+        };
 
         OllamaMessage {
             role: match msg.role {
@@ -250,6 +265,26 @@ impl OllamaProvider {
                     .collect()
             }),
         }
+    }
+
+    /// Converts a whole conversation, refusing what cannot be represented.
+    ///
+    /// The refusal is here, once, rather than inside `convert_message`, because
+    /// `convert_message` returns a value and not a `Result` — and quietly
+    /// returning a message minus its image is exactly the bug this work exists
+    /// to remove.
+    pub(crate) fn convert_messages(messages: &[Message]) -> Result<Vec<OllamaMessage>> {
+        for msg in messages {
+            if let Some(url) = msg.image_parts().iter().find_map(|p| p.as_image_url()) {
+                return Err(ProviderError::UnsupportedOperation(format!(
+                    "ollama cannot fetch a remote image URL ({}); supply the \
+                     bytes inline, e.g. a `data:image/png;base64,…` URL or a \
+                     `{{ type: 'image', data, media_type }}` part",
+                    url.chars().take(80).collect::<String>()
+                )));
+            }
+        }
+        Ok(messages.iter().map(Self::convert_message).collect())
     }
 }
 

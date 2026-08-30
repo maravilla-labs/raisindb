@@ -843,7 +843,16 @@ mod tests {
             .iter()
             .find(|nt| nt.name == "raisin:Asset")
             .expect("raisin_asset.yaml must load");
-        assert_eq!(asset.version, Some(3), "the widening must bump the version");
+        // `>=`, not `==`. This assertion is about the widening that made `file`
+        // optional (version 3); pinning it exactly turns every LATER, unrelated
+        // bump into a failure of a test that has nothing to say about the
+        // change — which is what happened between 3 and 5, leaving a red test
+        // that named the wrong cause.
+        assert!(
+            asset.version.unwrap_or(0) >= 3,
+            "the widening must bump the version (got {:?})",
+            asset.version
+        );
         let props = asset
             .properties
             .as_ref()
@@ -858,6 +867,70 @@ mod tests {
         assert!(
             by_name("inline").is_some() && by_name("content_id").is_some(),
             "inline images need `inline` + `content_id` to resolve `cid:` refs in body_html"
+        );
+    }
+
+    /// A caption must be SEMANTICALLY searchable, not merely lexically.
+    ///
+    /// `description` / `alt_text` / `keywords` are the only text an IMAGE ever
+    /// has: the binary contributes nothing to `__extracted_text`, so the `doc`
+    /// spec is empty for a photo and the node's own vector is the only one it
+    /// gets. Without `Vector` on these three, everything a captioning trigger
+    /// writes is reachable only by the literal words someone typed — the
+    /// feature would produce captions nobody can find by meaning.
+    ///
+    /// `alt_text` is called out separately because it had no `index:` key at
+    /// all, which is a quieter bug than a wrong one: absent reads as "not
+    /// indexed for anything", so it was invisible to BOTH engines.
+    ///
+    /// This is the whole core-side contract behind the captioning boundary
+    /// decision (Studio picks the model and the prompt; core turns the text it
+    /// writes into a vector), so it is asserted rather than assumed.
+    #[test]
+    fn asset_caption_fields_are_vector_indexed() {
+        use raisin_models::nodes::properties::schema::IndexType;
+
+        let nodetypes = load_global_nodetypes();
+        let asset = nodetypes
+            .iter()
+            .find(|nt| nt.name == "raisin:Asset")
+            .expect("raisin_asset.yaml must load");
+        let props = asset
+            .properties
+            .as_ref()
+            .expect("Asset declares properties");
+
+        for field in ["description", "alt_text", "keywords"] {
+            let prop = props
+                .iter()
+                .find(|p| p.name.as_deref() == Some(field))
+                .unwrap_or_else(|| panic!("raisin:Asset must declare `{field}`"));
+            let index = prop
+                .index
+                .as_ref()
+                .unwrap_or_else(|| panic!("`{field}` must declare an `index:` list"));
+            assert!(
+                index.contains(&IndexType::Vector),
+                "`{field}` must be Vector-indexed or a caption written into it is \
+                 semantically invisible; got {index:?}"
+            );
+            assert!(
+                index.contains(&IndexType::Fulltext),
+                "`{field}` must stay Fulltext-indexed: an exact-word search for a \
+                 caption must keep working; got {index:?}"
+            );
+        }
+
+        // The type-level gate. `index_settings.vector` is read from THIS list,
+        // and it is what decides whether an `EmbeddingGenerate` job is enqueued
+        // at all — per-property `Vector` flags are inert without it.
+        assert!(
+            asset
+                .index_types
+                .as_ref()
+                .is_some_and(|t| t.contains(&IndexType::Vector)),
+            "raisin:Asset must be Vector-indexable at the type level, or no \
+             embedding job is ever enqueued for an asset"
         );
     }
 

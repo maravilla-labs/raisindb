@@ -4,8 +4,33 @@
 
 use raisin_hlc::HLC;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fmt;
+
+/// Ceiling on the number of candidates handed to usearch in one walk.
+///
+/// Mirrors `raisin_sql_execution::physical_plan::search::SEARCH_LEG_CAP`. Both
+/// exist so a `limit` near the top of its validated range cannot turn an
+/// over-draw into a full-index scan.
+///
+/// It lives here, not next to a caller, because two call sites need it (the
+/// engine's fetch sizing and the index's post-filter fallback) and a second
+/// copy of a tuning constant is how they drift apart.
+pub const MAX_FETCH_K: usize = 2000;
+
+/// Distance cutoff applied to every vector search that does not override it.
+///
+/// For cosine distance on normalized vectors:
+///   0.0 - 0.2  = Very similar   (cosine sim > 0.80)
+///   0.2 - 0.4  = Similar        (cosine sim 0.80-0.60)
+///   0.4 - 0.6  = Weakly related (cosine sim 0.60-0.40)
+///   0.6+       = Not related    (cosine sim < 0.40)
+///
+/// ONE declaration. It was previously written out twice inside `engine/search.rs`
+/// — once per search path — so a tenant tuning one of them silently kept the old
+/// cutoff on the other, and the two paths could disagree about which results
+/// exist at all.
+pub const DEFAULT_MAX_DISTANCE: f32 = 0.6;
 
 /// Distance metric for HNSW vector similarity search.
 ///
@@ -82,7 +107,7 @@ impl fmt::Display for QuantizationType {
 ///
 /// Controls the accuracy/speed/memory tradeoff of the HNSW graph.
 /// Zero values mean "use library defaults" (usearch defaults are generally good).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HnswParams {
     /// Graph connectivity (M parameter). Higher = more accurate, more memory.
     /// Default: 0 (usearch default, typically 16).
@@ -148,10 +173,47 @@ impl VectorPoint {
 }
 
 /// Search result with distance metric.
+///
+/// # `node_id` is the SOURCE node, not the index entry
+///
+/// The index stores one entry per *chunk*. A document split into chunks is
+/// filed under `{node_id}#{chunk_index}` (see the embedding job handler), and
+/// that id exists only inside the index — `storage.nodes().get(scope, "abc#3")`
+/// returns `None`. Every consumer of a search result does exactly one thing
+/// with the id: fetch the node back. So `node_id` carries the source id, which
+/// is what can be fetched and what fuses against a full-text hit, and the raw
+/// index entry is kept alongside it as `chunk_id`.
+///
+/// Splitting them here rather than at each call site is deliberate: there are
+/// four independent consumers (`HYBRID_SEARCH`, the SQL `VectorScan`, the HTTP
+/// hybrid-search endpoint and the MCP search provider) and every one of them
+/// was fetching by the chunk id. A chunk-unaware caller now gets the right
+/// behaviour by default instead of having to know about chunking at all.
 #[derive(Debug, Clone)]
 pub struct SearchResult {
-    /// Node identifier
+    /// Source node identifier — the id to fetch from node storage, and the id
+    /// to fuse on. Never carries a `#chunk` suffix.
     pub node_id: String,
+
+    /// The raw index entry id: `{node_id}#{chunk_index}` for a chunked
+    /// document, byte-identical to `node_id` for an unchunked one. Use it to
+    /// address the vector itself (removal, excerpt lookup), never to fetch a
+    /// node.
+    pub chunk_id: String,
+
+    /// Zero-based chunk index within the source document (`0` when the
+    /// document was not chunked).
+    pub chunk_index: usize,
+
+    /// Which NAMED embedding spec produced this vector, or `None` for the
+    /// default one (the node's own authored fields).
+    ///
+    /// One node can carry several named embeddings — a page's own copy under
+    /// the default spec and its attached document's extracted body under
+    /// `doc`, say. They are different vectors of the same node, so a caller
+    /// that fuses or deduplicates by `node_id` still gets one row per node,
+    /// and a caller that wants to say WHY a node matched reads this.
+    pub spec: Option<String>,
 
     /// Workspace identifier
     pub workspace_id: String,
@@ -165,10 +227,18 @@ pub struct SearchResult {
 }
 
 impl SearchResult {
-    /// Create a new search result
-    pub fn new(node_id: String, workspace_id: String, revision: HLC, distance: f32) -> Self {
+    /// Create a new search result from a raw index entry id.
+    ///
+    /// `index_id` is what the index stores, i.e. possibly `{node}#{chunk}`.
+    /// The split happens here, in the ONE constructor, so no code path can
+    /// produce a `SearchResult` whose `node_id` is unfetchable.
+    pub fn new(index_id: String, workspace_id: String, revision: HLC, distance: f32) -> Self {
+        let parsed = crate::chunk_id::parse_index_id(&index_id);
         Self {
-            node_id,
+            node_id: parsed.node_id,
+            chunk_id: index_id,
+            chunk_index: parsed.chunk_index,
+            spec: parsed.spec,
             workspace_id,
             revision,
             distance,
@@ -178,6 +248,11 @@ impl SearchResult {
     /// Convert distance to similarity score (0.0 = dissimilar, 1.0 = identical)
     pub fn similarity(&self) -> f32 {
         1.0 - (self.distance / 2.0).min(1.0)
+    }
+
+    /// True when this hit came from a chunk of a multi-chunk document.
+    pub fn is_chunk(&self) -> bool {
+        self.chunk_id != self.node_id
     }
 }
 
@@ -252,7 +327,10 @@ pub struct SearchRequest {
     pub mode: SearchMode,
 
     /// Optional workspace filter (None = all workspaces)
-    pub workspace_filter: Option<String>,
+    /// Restrict to these workspaces. EMPTY means "every workspace"; it never
+    /// means "no workspace". A caller that resolved to "nothing readable" must
+    /// not issue a search at all.
+    pub workspace_filters: Vec<String>,
 
     /// Maximum distance threshold (0.0 = identical, 2.0 = opposite for cosine).
     ///
@@ -285,7 +363,7 @@ impl SearchRequest {
             query_vector,
             k,
             mode: SearchMode::default(),
-            workspace_filter: None,
+            workspace_filters: Vec::new(),
             max_distance: None,
             scoring: None,
         }
@@ -299,7 +377,7 @@ impl SearchRequest {
 
     /// Set the workspace filter.
     pub fn with_workspace(mut self, workspace_id: String) -> Self {
-        self.workspace_filter = Some(workspace_id);
+        self.workspace_filters = vec![workspace_id];
         self
     }
 
@@ -365,16 +443,17 @@ impl ChunkSearchResult {
         total_chunks: usize,
         excerpt: Option<String>,
     ) -> Self {
-        let (source_id, chunk_index) = parse_chunk_id(&result.node_id);
-
+        // `SearchResult` already carries the split (`SearchResult::new` is the
+        // one place that parses a chunk id); re-parsing here would be a second
+        // copy of that rule, free to drift from the first.
         Self {
-            source_id,
+            source_id: result.node_id,
             workspace: result.workspace_id,
-            chunk_index,
+            chunk_index: result.chunk_index,
             total_chunks,
             distance: result.distance,
             excerpt,
-            node_id: result.node_id,
+            node_id: result.chunk_id,
             revision: result.revision,
             adjusted_score: None,
         }
@@ -437,34 +516,37 @@ impl DocumentSearchResult {
     }
 }
 
-/// Parse chunk information from a node_id.
+/// Parse chunk information from an index id.
 ///
-/// Expected format: `{source_id}#{chunk_index}`
-/// If no `#` is found, treats the entire node_id as source_id with chunk_index = 0.
-///
-/// # Arguments
-///
-/// * `node_id` - Node identifier potentially containing chunk information
+/// A thin, spec-unaware view over [`crate::chunk_id::parse_index_id`] — the ONE
+/// implementation of the grammar. Kept because several callers only ever wanted
+/// `(source_id, chunk_index)`; anything that needs to know WHICH named
+/// embedding spec a hit came from must call `parse_index_id` instead, or it
+/// will read `{node}#{spec}#{n}` as a node called `{node}#{spec}`.
 ///
 /// # Returns
 ///
 /// Tuple of (source_id, chunk_index)
 pub fn parse_chunk_id(node_id: &str) -> (String, usize) {
-    if let Some(pos) = node_id.rfind('#') {
-        let source_id = &node_id[..pos];
-        let chunk_str = &node_id[pos + 1..];
-
-        // Try to parse chunk index, default to 0 if parsing fails
-        let chunk_index = chunk_str.parse::<usize>().unwrap_or(0);
-
-        (source_id.to_string(), chunk_index)
-    } else {
-        // No chunk suffix, treat entire node_id as source_id
-        (node_id.to_string(), 0)
-    }
+    let parsed = crate::chunk_id::parse_index_id(node_id);
+    (parsed.node_id, parsed.chunk_index)
 }
 
 /// Deduplicate search results by source document, keeping the best chunk per document.
+///
+/// One row per source node, always. Without this a long document occupies as
+/// many result slots as it has chunks, so `LIMIT k` stops meaning "k documents"
+/// and a single verbose page can crowd out every other answer.
+///
+/// # Determinism
+///
+/// Results are sorted by distance with a **stable** sort and the first entry
+/// per `(workspace, node_id)` is kept. Because the caller hands us the index's
+/// own distance-ascending order, "first" is the best chunk, and two identical
+/// queries return byte-identical rows. The previous implementation collected
+/// into a `HashMap` and re-sorted, so chunks tying on distance came back in
+/// random order — a hybrid ranking that reshuffles between two runs of the same
+/// query is indistinguishable from a broken one.
 ///
 /// # Arguments
 ///
@@ -474,34 +556,29 @@ pub fn parse_chunk_id(node_id: &str) -> (String, usize) {
 /// # Returns
 ///
 /// Vector of deduplicated results, one per source document
-pub fn deduplicate_by_document(results: Vec<SearchResult>, k: usize) -> Vec<SearchResult> {
-    let mut seen_sources: HashMap<String, SearchResult> = HashMap::new();
-
-    // Group by source_id, keeping the best (lowest distance) chunk per source
-    for result in results {
-        let (source_id, _chunk_index) = parse_chunk_id(&result.node_id);
-
-        // Only insert if we haven't seen this source, or this chunk is better
-        seen_sources
-            .entry(source_id)
-            .and_modify(|existing| {
-                if result.distance < existing.distance {
-                    *existing = result.clone();
-                }
-            })
-            .or_insert(result);
-    }
-
-    // Collect and sort by distance
-    let mut deduplicated: Vec<SearchResult> = seen_sources.into_values().collect();
-    deduplicated.sort_by(|a, b| {
+pub fn deduplicate_by_document(mut results: Vec<SearchResult>, k: usize) -> Vec<SearchResult> {
+    // Stable, so an already-ordered input keeps its order among equal distances.
+    results.sort_by(|a, b| {
         a.distance
             .partial_cmp(&b.distance)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    // Limit to k results
-    deduplicated.truncate(k);
+    // Keyed on (workspace, node) rather than node alone: a node id is only
+    // unique within its workspace, and one index spans every workspace of a
+    // branch. `node_id` is already the SOURCE id — `SearchResult::new` split it
+    // — so there is nothing to re-parse here.
+    let mut seen: HashSet<(String, String)> = HashSet::new();
+    let mut deduplicated: Vec<SearchResult> = Vec::with_capacity(k.min(results.len()));
+    for result in results {
+        if deduplicated.len() >= k {
+            break;
+        }
+        if seen.insert((result.workspace_id.clone(), result.node_id.clone())) {
+            deduplicated.push(result);
+        }
+    }
+
     deduplicated
 }
 
@@ -521,15 +598,72 @@ mod tests {
         assert_eq!(source, "doc123");
         assert_eq!(chunk, 0);
 
-        // Multiple # characters (uses rightmost)
+        // Two `#` components: the middle one is an embedding SPEC NAME, not
+        // part of the node id.
+        //
+        // THIS CHANGED when named specs arrived, and it had to. The old reading
+        // ("everything before the last `#` is the source id") produced
+        // `path/to#doc` — a source id `storage.nodes().get()` cannot resolve,
+        // i.e. exactly the unfetchable-`node_id` failure this module warns
+        // about. The grammar is decidable because a spec name must start with a
+        // lowercase letter and a chunk index is all digits; see
+        // `crate::chunk_id`.
         let (source, chunk) = parse_chunk_id("path/to#doc#3");
-        assert_eq!(source, "path/to#doc");
+        assert_eq!(source, "path/to");
         assert_eq!(chunk, 3);
 
-        // Invalid chunk index
+        // ...and a middle component that is NOT a well-formed spec name stays
+        // part of the id, so nothing that predates named specs is reinterpreted.
+        let (source, chunk) = parse_chunk_id("path/to#Doc#3");
+        assert_eq!(source, "path/to#Doc");
+        assert_eq!(chunk, 3);
+
+        // A non-numeric suffix is NOT a chunk marker. The id is returned
+        // whole, because stripping it would invent a source id that does not
+        // exist and turn a fetchable node into a silent miss.
         let (source, chunk) = parse_chunk_id("doc123#invalid");
-        assert_eq!(source, "doc123");
+        assert_eq!(source, "doc123#invalid");
         assert_eq!(chunk, 0);
+
+        // Same for an empty suffix.
+        let (source, chunk) = parse_chunk_id("doc123#");
+        assert_eq!(source, "doc123#");
+        assert_eq!(chunk, 0);
+    }
+
+    /// A chunk hit must name the node you can actually fetch.
+    ///
+    /// Regression: the vector half of `HYBRID_SEARCH` ranked ids like `abc#3`,
+    /// which fuse against nothing (the full-text leg produces `abc`) and which
+    /// `storage.nodes().get()` cannot resolve — the hit consumed a result slot
+    /// and produced no row.
+    #[test]
+    fn test_search_result_splits_chunk_id() {
+        let chunked = SearchResult::new(
+            "abc#3".to_string(),
+            "library".to_string(),
+            HLC::new(1, 0),
+            0.2,
+        );
+        assert_eq!(chunked.node_id, "abc", "node_id must be the fetchable id");
+        assert_eq!(chunked.chunk_id, "abc#3");
+        assert_eq!(chunked.chunk_index, 3);
+        assert!(chunked.is_chunk());
+
+        let plain = SearchResult::new(
+            "abc".to_string(),
+            "library".to_string(),
+            HLC::new(1, 0),
+            0.2,
+        );
+        assert_eq!(plain.node_id, "abc");
+        assert_eq!(plain.chunk_id, "abc");
+        assert_eq!(plain.chunk_index, 0);
+        assert!(!plain.is_chunk());
+
+        // The whole point of the split: a chunked and an unchunked hit on the
+        // same document agree on the id fusion keys on.
+        assert_eq!(chunked.node_id, plain.node_id);
     }
 
     #[test]
@@ -557,12 +691,11 @@ mod tests {
         // Should have 3 documents (doc1, doc2, doc3)
         assert_eq!(deduplicated.len(), 3);
 
-        // doc1 should use chunk #0 (distance 0.1, best of 0.1, 0.15, 0.3)
-        let doc1_result = deduplicated
-            .iter()
-            .find(|r| r.node_id.starts_with("doc1"))
-            .unwrap();
-        assert_eq!(doc1_result.node_id, "doc1#0");
+        // doc1 should use chunk #0 (distance 0.1, best of 0.1, 0.15, 0.3).
+        // `node_id` is the SOURCE id; the chunk that won is named by `chunk_id`.
+        let doc1_result = deduplicated.iter().find(|r| r.node_id == "doc1").unwrap();
+        assert_eq!(doc1_result.chunk_id, "doc1#0");
+        assert_eq!(doc1_result.chunk_index, 0);
         assert_eq!(doc1_result.distance, 0.1);
 
         // Results should be sorted by distance
@@ -583,8 +716,48 @@ mod tests {
 
         // Should limit to 2 results
         assert_eq!(deduplicated.len(), 2);
-        assert_eq!(deduplicated[0].node_id, "doc1#0");
-        assert_eq!(deduplicated[1].node_id, "doc2#0");
+        assert_eq!(deduplicated[0].node_id, "doc1");
+        assert_eq!(deduplicated[1].node_id, "doc2");
+    }
+
+    /// Two chunks tying on distance must not reshuffle between runs.
+    ///
+    /// The previous implementation collected into a `HashMap` and re-sorted, so
+    /// equal-distance hits came back in random order — a ranking that changes
+    /// between two runs of the same query is indistinguishable from a broken
+    /// one, and the cross-lingual proof relies on repeatability.
+    #[test]
+    fn test_deduplicate_is_deterministic_on_ties() {
+        let build = || {
+            vec![
+                SearchResult::new("docA#0".to_string(), "ws1".to_string(), HLC::new(1, 0), 0.2),
+                SearchResult::new("docB#0".to_string(), "ws1".to_string(), HLC::new(2, 0), 0.2),
+                SearchResult::new("docC#0".to_string(), "ws1".to_string(), HLC::new(3, 0), 0.2),
+            ]
+        };
+        let first: Vec<String> = deduplicate_by_document(build(), 3)
+            .into_iter()
+            .map(|r| r.node_id)
+            .collect();
+        for _ in 0..25 {
+            let again: Vec<String> = deduplicate_by_document(build(), 3)
+                .into_iter()
+                .map(|r| r.node_id)
+                .collect();
+            assert_eq!(first, again);
+        }
+        assert_eq!(first, vec!["docA", "docB", "docC"]);
+    }
+
+    /// The same node id in two workspaces is two documents, not one.
+    #[test]
+    fn test_deduplicate_is_workspace_scoped() {
+        let results = vec![
+            SearchResult::new("doc1#0".to_string(), "ws1".to_string(), HLC::new(1, 0), 0.1),
+            SearchResult::new("doc1#0".to_string(), "ws2".to_string(), HLC::new(2, 0), 0.2),
+        ];
+        let deduplicated = deduplicate_by_document(results, 10);
+        assert_eq!(deduplicated.len(), 2);
     }
 
     #[test]
@@ -605,7 +778,7 @@ mod tests {
 
         assert_eq!(request.k, 10);
         assert_eq!(request.mode, SearchMode::Chunks);
-        assert_eq!(request.workspace_filter, Some("test".to_string()));
+        assert_eq!(request.workspace_filters, vec!["test".to_string()]);
         assert_eq!(request.max_distance, Some(0.5));
         assert!(request.scoring.is_some());
     }

@@ -214,17 +214,52 @@ async fn run_embedding_regeneration(
 
     tracing::info!("Expected dimensions: {}", expected_dims);
 
-    // List all embeddings
-    let embeddings_list = match emb_storage.list_embeddings(&tenant, &repo, &branch, "staff") {
-        Ok(list) => list,
+    // List all embeddings, across EVERY workspace on the branch.
+    //
+    // This used to list from a workspace named by the literal `"staff"`, and
+    // then stamp that same literal into the JobContext of every regeneration
+    // job it queued. The embedding job writes under the workspace the NODE
+    // lives in, so on any deployment whose content is not in a workspace
+    // called "staff" this scan found nothing and reported success over zero
+    // rows. `list_workspaces` is the shared way to discover the real set —
+    // `HnswManagement::rebuild_index` and SQL's `REBUILD VECTOR INDEX` go
+    // through it too.
+    let workspaces = match emb_storage.list_workspaces(&tenant, &repo, &branch) {
+        Ok(ws) => ws,
         Err(e) => {
-            tracing::error!("Failed to list embeddings: {}", e);
+            tracing::error!("Failed to list workspaces: {}", e);
             let _ = job_registry
-                .mark_failed(&job_id, format!("Failed to list embeddings: {}", e))
+                .mark_failed(&job_id, format!("Failed to list workspaces: {}", e))
                 .await;
             return;
         }
     };
+
+    tracing::info!(
+        "Scanning {} workspace(s): {:?}",
+        workspaces.len(),
+        workspaces
+    );
+
+    // Each entry carries the workspace it came from, so the embedding is read
+    // back from — and requeued into — the workspace it actually lives in.
+    let mut embeddings_list = Vec::new();
+    for workspace in &workspaces {
+        match emb_storage.list_embeddings(&tenant, &repo, &branch, workspace) {
+            Ok(list) => {
+                for (node_id, revision) in list {
+                    embeddings_list.push((workspace.clone(), node_id, revision));
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to list embeddings: {}", e);
+                let _ = job_registry
+                    .mark_failed(&job_id, format!("Failed to list embeddings: {}", e))
+                    .await;
+                return;
+            }
+        }
+    }
 
     let total_embeddings = embeddings_list.len();
     tracing::info!("Found {} embeddings to check", total_embeddings);
@@ -245,8 +280,9 @@ async fn run_embedding_regeneration(
     let mut skipped = 0;
     let mut errors = 0;
 
-    for (idx, (node_id, revision)) in embeddings_list.iter().enumerate() {
-        match emb_storage.get_embedding(&tenant, &repo, &branch, "staff", node_id, Some(revision)) {
+    for (idx, (workspace, node_id, revision)) in embeddings_list.iter().enumerate() {
+        match emb_storage.get_embedding(&tenant, &repo, &branch, workspace, node_id, Some(revision))
+        {
             Ok(Some(embedding_data)) => {
                 if force || embedding_data.vector.len() != expected_dims {
                     if force && embedding_data.vector.len() == expected_dims {
@@ -266,13 +302,27 @@ async fn run_embedding_regeneration(
 
                     // Store the context BEFORE registering so dispatch can
                     // never observe the job without its context.
+                    //
+                    // `force` has to travel WITH the job. The handler now skips
+                    // a node whose stored embedding matches the current spec
+                    // exactly — which is what makes a periodic re-embed pass
+                    // free — and without this flag an operator's explicit
+                    // "regenerate everything" would queue thousands of jobs that
+                    // each decided to do nothing.
+                    let mut metadata = HashMap::new();
+                    if force {
+                        metadata.insert(
+                            raisin_embeddings::FORCE_REEMBED_KEY.to_string(),
+                            serde_json::Value::Bool(true),
+                        );
+                    }
                     let context = JobContext {
                         tenant_id: tenant.clone(),
                         repo_id: repo.clone(),
                         branch: branch.clone(),
-                        workspace_id: "staff".to_string(),
+                        workspace_id: workspace.clone(),
                         revision: *revision,
-                        metadata: HashMap::new(),
+                        metadata,
                     };
 
                     let embedding_job_id = raisin_storage::JobId::new();

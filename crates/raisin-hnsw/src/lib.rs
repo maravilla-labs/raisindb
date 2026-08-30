@@ -48,20 +48,31 @@
 //! snapshot_handle.abort();
 //! ```
 
+pub mod chunk_id;
+pub mod dims;
 pub mod engine;
 pub mod excerpt;
 pub mod index;
 mod migration;
+pub mod partition;
 mod persistence;
 pub mod types;
 
+pub use chunk_id::{
+    chunk_id_set, chunk_index_id, chunk_source_id, index_id_for_stored, is_valid_spec_name,
+    namespaced_source_id, parse_index_id, split_source_id, ParsedIndexId, MAX_SPEC_NAME_LEN,
+};
+pub use dims::{IndexSpec, IndexSpecResolver, FALLBACK_DIMENSIONS};
+pub use engine::key::{index_path, meta_path, IndexKey};
 pub use engine::metrics::VectorMetricsSnapshot;
-pub use engine::HnswIndexingEngine;
+pub use engine::{list_partitions_in, HnswIndexingEngine, IndexStats};
 pub use excerpt::{ExcerptFetcher, ExcerptRequest};
-pub use index::HnswIndex;
+pub use index::{HnswIndex, ScopeFilterMode, ScopedSearch};
+pub use partition::PartitionId;
 pub use types::{
     ChunkSearchResult, DistanceMetric, DocumentSearchResult, HnswParams, QuantizationType,
-    ScoringConfig, SearchMode, SearchRequest, SearchResult, VectorPoint,
+    ScoringConfig, SearchMode, SearchRequest, SearchResult, VectorPoint, DEFAULT_MAX_DISTANCE,
+    MAX_FETCH_K,
 };
 
 // Re-export key types

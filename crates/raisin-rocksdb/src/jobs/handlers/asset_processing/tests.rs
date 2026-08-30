@@ -148,6 +148,7 @@ fn test_asset_processing_result_serialization() {
     let result = AssetProcessingResult {
         node_id: "node-123".to_string(),
         extracted_text: Some("Sample text".to_string()),
+        extracted_text_stored: true,
         pdf_page_count: Some(5),
         used_ocr: true,
         caption: Some("A beautiful landscape".to_string()),
@@ -310,4 +311,177 @@ fn test_extract_mime_type_priority() {
 
     // file.metadata.mime_type should take priority
     assert_eq!(extract_mime_type(&node), Some("image/png".to_string()));
+}
+
+// ---------------------------------------------------------------------------
+// Extraction fingerprint — the gate that makes the write-back terminate.
+//
+// Extraction lands in a node property; writing a node property emits
+// `node:updated`; `node:updated` is what enqueues asset processing. The
+// fingerprint is the only thing standing between one upload and an infinite
+// extract/write loop, so its two load-bearing properties are asserted directly:
+//
+//   1. it does NOT change when our own write-back adds text to the node, and
+//   2. it DOES change when the underlying binary is replaced.
+// ---------------------------------------------------------------------------
+
+use super::helpers::{asset_fingerprint, extract_content_hash};
+
+/// An asset whose `file` Resource carries a storage key and a content hash.
+fn asset_with_file(storage_key: &str, content_hash: &str) -> Node {
+    let mut node = Node::default();
+    node.node_type = "raisin:Asset".to_string();
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        "storage_key".to_string(),
+        PropertyValue::String(storage_key.to_string()),
+    );
+    metadata.insert(
+        "content_hash".to_string(),
+        PropertyValue::String(content_hash.to_string()),
+    );
+    node.properties.insert(
+        "file".to_string(),
+        PropertyValue::Resource(test_resource(Some(metadata))),
+    );
+    node
+}
+
+#[test]
+fn fingerprint_survives_the_write_back_it_guards() {
+    let node = asset_with_file("uploads/t/doc.pdf", "sha256-aaa");
+    let before = asset_fingerprint(&node);
+
+    // Exactly what `persist_extraction_artifact` writes — through the ONE
+    // writer, so a drift between this test and the real write is not
+    // expressible.
+    let mut after_write = node.clone();
+    super::ExtractionArtifact::extracted(
+        before.clone(),
+        "core-pdf",
+        "Applying the brake pedal...".to_string(),
+    )
+    .apply(&mut after_write.properties, true);
+
+    assert_eq!(
+        asset_fingerprint(&after_write),
+        before,
+        "the write-back must not change the fingerprint, or extraction never terminates"
+    );
+}
+
+/// The single most important property of the extraction artifact: a binary
+/// nothing could read leaves a DURABLE, QUERYABLE record that it was skipped.
+///
+/// Before this, a `.docx` uploaded with no media plugin loaded produced a node
+/// with no text and no trace of the attempt — indistinguishable from an empty
+/// document forever, so the day a plugin gained the format there was no way to
+/// find the assets it should now be run over.
+#[test]
+fn an_unsupported_upload_is_recorded_and_does_not_re_extract_forever() {
+    use raisin_models::nodes::{extract_status, ExtractStatus, EXTRACT_STATUS_PROP};
+
+    let node = asset_with_file("uploads/t/report.docx", "sha256-ccc");
+    let before = asset_fingerprint(&node);
+
+    let mut after_write = node.clone();
+    super::ExtractionArtifact::unsupported(
+        before.clone(),
+        "no extractor on this server handles \
+         application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    .apply(&mut after_write.properties, true);
+
+    // Queryable: this is the row a backfill selects on.
+    assert_eq!(
+        extract_status(&after_write.properties),
+        Some(ExtractStatus::Unsupported)
+    );
+    assert!(matches!(
+        after_write.properties.get(EXTRACT_STATUS_PROP),
+        Some(PropertyValue::String(v)) if v == "unsupported"
+    ));
+
+    // And the write-back does not re-open the enqueue gate, so recording the
+    // skip does not cost an extraction loop.
+    assert_eq!(
+        asset_fingerprint(&after_write),
+        before,
+        "recording a skip must not re-trigger the job that recorded it"
+    );
+
+    // Replacing the file still re-opens it: new bytes deserve a new attempt.
+    let replaced = asset_with_file("uploads/t/report.docx", "sha256-ddd");
+    assert_ne!(asset_fingerprint(&replaced), before);
+}
+
+/// The named spec that embeds the artifact must be a name the index-id grammar
+/// accepts, or every vector it writes gets an id whose `node_id` cannot be
+/// fetched.
+#[test]
+fn the_extracted_text_spec_name_is_a_legal_index_id_component() {
+    use crate::jobs::handlers::embedding::EXTRACTED_TEXT_SPEC;
+
+    assert!(raisin_hnsw::is_valid_spec_name(EXTRACTED_TEXT_SPEC));
+
+    let id = raisin_hnsw::chunk_source_id("nodeA", Some(EXTRACTED_TEXT_SPEC), 0, 1);
+    let parsed = raisin_hnsw::parse_index_id(&id);
+    assert_eq!(
+        parsed.node_id, "nodeA",
+        "a search hit must name a fetchable node"
+    );
+    assert_eq!(parsed.spec.as_deref(), Some(EXTRACTED_TEXT_SPEC));
+}
+
+#[test]
+fn fingerprint_changes_when_the_binary_is_replaced() {
+    let original = asset_fingerprint(&asset_with_file("uploads/t/doc.pdf", "sha256-aaa"));
+
+    // Same key, new bytes (re-upload in place).
+    assert_ne!(
+        asset_fingerprint(&asset_with_file("uploads/t/doc.pdf", "sha256-bbb")),
+        original,
+        "new content hash must re-open the extraction gate"
+    );
+
+    // New key, same hash.
+    assert_ne!(
+        asset_fingerprint(&asset_with_file("uploads/t/doc-v2.pdf", "sha256-aaa")),
+        original,
+        "new storage key must re-open the extraction gate"
+    );
+}
+
+#[test]
+fn fingerprint_is_defined_with_neither_hash_nor_key() {
+    // A metadata-only mail attachment: no bytes yet. Must not panic, and must
+    // not collide with a real binary's fingerprint.
+    let mut bare = Node::default();
+    bare.node_type = "raisin:Asset".to_string();
+    let bare_fp = asset_fingerprint(&bare);
+    assert!(bare_fp.starts_with("v1:"));
+    assert_ne!(
+        bare_fp,
+        asset_fingerprint(&asset_with_file("uploads/t/doc.pdf", "sha256-aaa"))
+    );
+}
+
+#[test]
+fn content_hash_is_read_from_every_spelling_the_writers_use() {
+    // Resource metadata (upload path).
+    assert_eq!(
+        extract_content_hash(&asset_with_file("k", "sha-res")),
+        Some("sha-res".to_string())
+    );
+
+    // Top-level property: `raisin:Asset` declares `content_hash`, and both the
+    // package installer and the on-demand attachment fetch set it there.
+    let mut top = Node::default();
+    top.properties.insert(
+        "content_hash".to_string(),
+        PropertyValue::String("sha-top".to_string()),
+    );
+    assert_eq!(extract_content_hash(&top), Some("sha-top".to_string()));
+
+    assert_eq!(extract_content_hash(&Node::default()), None);
 }

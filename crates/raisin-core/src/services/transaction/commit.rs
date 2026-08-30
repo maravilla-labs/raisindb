@@ -228,21 +228,24 @@ impl<S: TransactionalStorage> Transaction<S> {
                         raisin_error::Error::NotFound(format!("Node {} not found", node_id))
                     })?;
 
-                // On a mount-owned node the `__` properties are the sync
-                // engine's bookkeeping, not content. A client that loads a
-                // node, edits one field and sends the whole map back echoes a
-                // STALE `__pushed_state` / `__etag` over the engine's current
+                // Engine-owned (`__`) properties are the platform's
+                // bookkeeping, not content. A client that loads a node, edits
+                // one field and sends the whole map back echoes a STALE
+                // `__pushed_state` / `__etag` over the sync engine's current
                 // ones — after which the drain reads the user's newest edit as
                 // "already pushed" and silently never writes it to the
-                // provider. Only the sync engine itself may move these keys;
-                // everyone else's copy is dropped, never merged.
-                let shield_engine_keys = raisin_models::nodes::is_mount_owned(&node.properties)
-                    && actor != raisin_models::nodes::SYNC_ACTOR;
+                // provider — or a stale `__extract_status` over a fresh
+                // extraction artifact, claiming a binary was read when it was
+                // not. Which keys are shielded is decided in ONE place,
+                // `is_shielded_property_key`, shared with the UpdateBuilder
+                // path below; everyone but an engine actor has their copy
+                // dropped, never merged.
+                let shield_engine_keys = !raisin_models::nodes::is_engine_write_actor(actor);
 
                 if let Some(props) = properties.as_object() {
                     for (key, value) in props {
                         if shield_engine_keys
-                            && raisin_models::nodes::is_engine_owned_property_key(key)
+                            && raisin_models::nodes::is_shielded_property_key(key, &node.properties)
                         {
                             continue;
                         }

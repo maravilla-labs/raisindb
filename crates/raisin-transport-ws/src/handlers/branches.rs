@@ -341,9 +341,14 @@ where
 /// Handle cross-branch node-set copy (branch promotion).
 ///
 /// Delegates to `NodeRepository::copy_nodes_across_branches` — one atomic
-/// commit on the target branch, node ids preserved — then publishes one node
-/// event per touched node on the TARGET branch so live subscribers see the
-/// promoted changes.
+/// commit on the target branch, node ids preserved. The node events for the
+/// target branch are published by that primitive itself (see
+/// `repositories/nodes/queries/copy/cross_branch/events.rs`); this handler used
+/// to publish them in its own body, which meant the OTHER caller of the same
+/// primitive — the `raisin.branches.copyNodes` function binding that Studio
+/// publish goes through — silently emitted none, and published content never
+/// reached the target branch's vector or fulltext index. Do not reintroduce a
+/// per-caller loop here.
 pub async fn handle_branch_copy_nodes<S, B>(
     state: &Arc<WsState<S, B>>,
     _connection_state: &Arc<RwLock<ConnectionState>>,
@@ -353,8 +358,6 @@ where
     S: Storage + TransactionalStorage,
     B: raisin_binary::BinaryStorage,
 {
-    use raisin_events::{Event, NodeEvent, NodeEventKind};
-    use raisin_models::tree::ChangeOperation;
     use raisin_storage::NodeRepository;
 
     let payload: BranchCopyNodesPayload = serde_json::from_value(request.payload.clone())?;
@@ -391,28 +394,6 @@ where
             None, // OperationMeta: actor attribution TODO (see other branch ops)
         )
         .await?;
-
-    // Emit node events for the target branch (storage emits none for this op).
-    let event_bus = state.storage.event_bus();
-    for change in &summary.changes {
-        let kind = match change.operation {
-            ChangeOperation::Added => NodeEventKind::Created,
-            ChangeOperation::Deleted => NodeEventKind::Deleted,
-            ChangeOperation::Modified | ChangeOperation::Reordered => NodeEventKind::Updated,
-        };
-        event_bus.publish(Event::Node(NodeEvent {
-            tenant_id: tenant_id.clone(),
-            repository_id: repo.clone(),
-            branch: payload.target_branch.clone(),
-            workspace_id: payload.workspace.clone(),
-            node_id: change.node_id.clone(),
-            node_type: Some(change.node_type.clone()),
-            revision: summary.revision,
-            kind,
-            path: Some(change.path.clone()),
-            metadata: None,
-        }));
-    }
 
     Ok(Some(ResponseEnvelope::success(
         request.request_id,

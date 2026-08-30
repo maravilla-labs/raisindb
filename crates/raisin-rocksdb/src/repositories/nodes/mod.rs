@@ -60,6 +60,18 @@ pub struct NodeRepositoryImpl {
     branch_repo: Arc<crate::repositories::BranchRepositoryImpl>,
     tag_repo: Arc<crate::repositories::TagRepositoryImpl>,
     pub(crate) node_type_repo: Arc<crate::repositories::NodeTypeRepositoryImpl>,
+    /// Archetype and ElementType definitions, held for the same reason
+    /// `node_type_repo` is: cross-branch promotion has to carry the schema the
+    /// promoted nodes reference onto the target branch (see
+    /// `queries/copy/cross_branch/schema.rs`).
+    ///
+    /// These are the WIRED instances — the ones built in `storage/init.rs` with
+    /// the event bus and the replication capture attached. Constructing fresh
+    /// ones from `db` here would compile and would silently drop both: the
+    /// target branch's index-plan cache would never be invalidated, and a peer
+    /// would never receive the carried definition.
+    pub(crate) archetype_repo: Arc<crate::repositories::ArchetypeRepositoryImpl>,
+    pub(crate) element_type_repo: Arc<crate::repositories::ElementTypeRepositoryImpl>,
     workspace_repo: Arc<crate::repositories::WorkspaceRepositoryImpl>,
     /// Per-parent ordering locks to prevent concurrent modification of child order
     /// Key format: {tenant_id}/{repo_id}/{branch}/{workspace}/{parent_id}
@@ -108,11 +120,12 @@ impl NodeRepositoryImpl {
         workspace_repo: Arc<crate::repositories::WorkspaceRepositoryImpl>,
         operation_capture: Arc<crate::OperationCapture>,
         element_type_repo: Arc<crate::repositories::ElementTypeRepositoryImpl>,
+        archetype_repo: Arc<crate::repositories::ArchetypeRepositoryImpl>,
         secret_store: Arc<std::sync::OnceLock<Arc<crate::secret_store::SecretStore>>>,
     ) -> Self {
         let vaulter = crate::vaulting::Vaulter::new(
             node_type_repo.clone(),
-            element_type_repo,
+            element_type_repo.clone(),
             secret_store,
             db.clone(),
             revision_repo.hlc_state(),
@@ -124,6 +137,8 @@ impl NodeRepositoryImpl {
             branch_repo,
             tag_repo,
             node_type_repo,
+            archetype_repo,
+            element_type_repo,
             workspace_repo,
             ordering_locks: Arc::new(Mutex::new(HashMap::new())),
             operation_capture,

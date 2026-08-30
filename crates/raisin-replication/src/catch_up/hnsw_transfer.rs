@@ -18,12 +18,14 @@ impl CatchUpCoordinator {
         tenant_id: &str,
         repo_id: &str,
         branch: &str,
+        partition: &str,
     ) -> Result<()> {
         // Request HNSW index
         let request = ReplicationMessage::RequestHnswIndex {
             tenant_id: tenant_id.to_string(),
             repo_id: repo_id.to_string(),
             branch: branch.to_string(),
+            partition: partition.to_string(),
         };
         Self::send_message(stream, &request).await?;
 
@@ -35,6 +37,7 @@ impl CatchUpCoordinator {
                 tenant_id: _,
                 repo_id: _,
                 branch: _,
+                partition: _,
                 data,
                 crc32,
             } => {
@@ -42,13 +45,13 @@ impl CatchUpCoordinator {
 
                 // Receive and verify
                 let staging_path = receiver
-                    .receive_index(tenant_id, repo_id, branch, data, crc32)
+                    .receive_index(tenant_id, repo_id, branch, partition, data, crc32)
                     .await
                     .map_err(|e| Error::Backend(format!("Failed to receive HNSW index: {}", e)))?;
 
                 // Ingest
                 receiver
-                    .ingest_index(&staging_path, tenant_id, repo_id, branch)
+                    .ingest_index(&staging_path, tenant_id, repo_id, branch, partition)
                     .await
                     .map_err(|e| Error::Backend(format!("Failed to ingest HNSW index: {}", e)))?;
 

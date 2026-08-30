@@ -103,7 +103,7 @@ pub async fn fulltext_search(
             query: req.query,
             limit,
             revision: None, // HTTP API uses latest/HEAD by default
-            shape_type: req.shape_type.clone(),
+            shape_types: req.shape_type.clone().map(|t| vec![t]),
         };
 
         // Execute search
@@ -152,7 +152,7 @@ pub async fn fulltext_search(
         query: req.query.clone(),
         limit,
         revision: None, // HTTP API uses latest/HEAD by default
-        shape_type: req.shape_type,
+        shape_types: req.shape_type.map(|t| vec![t]),
     };
 
     // Execute cross-workspace search

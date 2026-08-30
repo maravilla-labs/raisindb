@@ -30,11 +30,16 @@
 
 mod matcher;
 mod settings;
+pub mod tasks;
 #[cfg(test)]
 mod tests;
 
-pub use matcher::{RuleMatchContext, RuleMatcher};
-pub use settings::ProcessingSettings;
+pub use matcher::{mime_matches, RuleMatchContext, RuleMatcher};
+pub use settings::{is_text_bearing, ProcessingSettings};
+pub use tasks::{
+    is_valid_task_slug, lookup_task, plan_tasks, BlockedReason, BlockedTask, PipelinePlan,
+    PlannedTask, TaskProvider, TaskSpec, KNOWN_TASKS,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -208,8 +213,13 @@ impl ProcessingRuleSet {
                 .with_matcher(RuleMatcher::Combined {
                     matchers: vec![
                         RuleMatcher::NodeType("raisin:Asset".to_string()),
+                        // `image/*`, not `image/png`: the shipped default has to
+                        // cover every image subtype, including ones postdating
+                        // this table (`image/avif`). This used to read `"image/"`
+                        // against an exact-equality matcher, so it matched no
+                        // asset that has ever existed — see `mime_matches`.
                         RuleMatcher::MimeType {
-                            mime_type: "image/".to_string(),
+                            mime_type: "image/*".to_string(),
                         },
                     ],
                 })

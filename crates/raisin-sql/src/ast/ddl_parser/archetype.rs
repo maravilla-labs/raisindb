@@ -15,8 +15,10 @@ use nom::{
 };
 
 use super::super::ddl::{AlterArchetype, ArchetypeAlteration, CreateArchetype, DropArchetype};
-use super::primitives::{boolean_literal, identifier, quoted_string, ws_and_comments};
-use super::property::{property_def, property_list};
+use super::primitives::{
+    boolean_literal, identifier, quoted_string, schema_object_name, ws_and_comments,
+};
+use super::property::{implicit_property_list, property_def, property_list};
 
 /// Parse CREATE ARCHETYPE statement
 /// Supports both syntaxes:
@@ -31,17 +33,35 @@ pub(crate) fn create_archetype(input: &str) -> IResult<&str, CreateArchetype> {
     )
         .parse(input)?;
 
-    let (input, name) = quoted_string(input)?;
-    let (input, _) = multispace0.parse(input)?;
-
-    // Check for optional opening paren (SQL-conformant syntax)
-    let (input, has_paren) = opt(char('(')).parse(input)?;
+    let (input, name) = schema_object_name(input)?;
     let (input, _) = multispace0.parse(input)?;
 
     let mut result = CreateArchetype {
         name: name.to_string(),
         ..Default::default()
     };
+
+    // The SQL-conformant shorthand `CREATE ARCHETYPE 'n' (title String REQUIRED)`,
+    // with the FIELDS keyword implied - the spelling every other dialect
+    // uses and the one people actually type. It is tried before the
+    // paren-WRAPPER form below and cannot shadow it: a wrapper always opens
+    // with a clause keyword, which is never a `name Type` pair, so
+    // `implicit_property_list` rejects it and leaves the input untouched.
+    let (input, implicit) = opt(implicit_property_list).parse(input)?;
+    let has_implicit = implicit.is_some();
+    if let Some(fields) = implicit {
+        result.fields = fields;
+    }
+    let (input, _) = multispace0.parse(input)?;
+
+    // Check for optional opening paren (SQL-conformant wrapper syntax).
+    // The shorthand already consumed its own parens, so don't look for another.
+    let (input, has_paren) = if has_implicit {
+        (input, None)
+    } else {
+        opt(char('(')).parse(input)?
+    };
+    let (input, _) = multispace0.parse(input)?;
 
     let (input, _) = parse_archetype_clauses(input, &mut result)?;
 
@@ -142,7 +162,7 @@ pub(crate) fn alter_archetype(input: &str) -> IResult<&str, AlterArchetype> {
     )
         .parse(input)?;
 
-    let (input, name) = quoted_string(input)?;
+    let (input, name) = schema_object_name(input)?;
     let (input, _) = multispace0.parse(input)?;
 
     let (input, alterations) = many0(preceded(multispace0, archetype_alteration)).parse(input)?;
@@ -303,7 +323,7 @@ pub(crate) fn drop_archetype(input: &str) -> IResult<&str, DropArchetype> {
     )
         .parse(input)?;
 
-    let (input, name) = quoted_string(input)?;
+    let (input, name) = schema_object_name(input)?;
     let (input, _) = multispace0.parse(input)?;
 
     let (input, cascade) = opt(tag_no_case("CASCADE")).parse(input)?;

@@ -41,13 +41,25 @@ pub enum LogicalPlan {
     TableFunction {
         name: String,
         alias: Option<String>,
-        args: Vec<TypedExpr>,
+        args: Vec<crate::analyzer::TableFunctionArg>,
         schema: Arc<TableSchema>,
         workspace: Option<String>,
         branch_override: Option<String>,
         max_revision: Option<raisin_hlc::HLC>,
         /// Locales for translation resolution
         locales: Vec<String>,
+        /// ADVISORY copy of the WHERE conjuncts that reference only this
+        /// function, offered to the executor as a push-down hint.
+        ///
+        /// It is **not** the correctness mechanism: `build_query` also places an
+        /// authoritative `Filter` above this node carrying the same predicate.
+        /// An executor may use this to ask its index for a narrower candidate
+        /// pool and may equally ignore it; a push-down that under-narrows — or
+        /// one that OVER-matches, as the full-text `shape_types` term
+        /// deliberately does — costs candidates and never rows. Deleting the
+        /// residual `Filter` because "the push-down already does it" is the way
+        /// this becomes a bug.
+        filter: Option<TypedExpr>,
     },
 
     /// Filter rows based on predicate

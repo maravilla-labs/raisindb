@@ -231,8 +231,10 @@ async fn a_wholesale_replace_keeps_the_stored_engine_keys() {
 }
 
 /// A node that is NOT mount-owned keeps today's behaviour: the shield keys on
-/// `__virtual`, not on the key prefix alone, so import/restore flows that
-/// write `__`-style properties on ordinary nodes are untouched.
+/// `__virtual` for the MOUNT keys, not on the key prefix alone, so
+/// import/restore flows that write `__`-style properties on ordinary nodes
+/// are untouched. (The extraction-artifact keys are the exception, and are
+/// shielded on every node — see the test below.)
 #[tokio::test]
 async fn ordinary_nodes_are_not_shielded() {
     let storage = setup_storage();
@@ -255,4 +257,87 @@ async fn ordinary_nodes_are_not_shielded() {
 
     let after = service.get_by_path("/plain").await.unwrap().unwrap();
     assert_eq!(prop_str(&after, "__etag"), "imported");
+}
+
+/// The extraction artifact is shielded on EVERY node, mount-owned or not.
+///
+/// It is not a mount's bookkeeping, it is the record of whether a binary was
+/// ever read — so the key, not the node, decides. A client that loads an asset,
+/// edits its title and saves the whole map back must not be able to claim the
+/// document was extracted (or, worse, to move `__extract_fingerprint` and
+/// thereby switch extraction off for that asset permanently, or re-open it into
+/// a loop).
+#[tokio::test]
+async fn the_extraction_artifact_is_shielded_on_an_ordinary_node() {
+    use raisin_models::nodes::{
+        EXTRACTED_TEXT_PROP, EXTRACTION_ACTOR, EXTRACT_FINGERPRINT_PROP, EXTRACT_STATUS_PROP,
+    };
+
+    let storage = setup_storage();
+    register_lamp_type(storage.as_ref()).await;
+    let service = NodeService::new(storage.clone()).with_auth(AuthContext::system());
+
+    // An ordinary, NON-mount node carrying an artifact the extraction step wrote.
+    let mut node = lamp("/asset");
+    node.properties.remove("__virtual");
+    node.properties.remove("__mount_id");
+    node.properties
+        .insert(EXTRACT_STATUS_PROP.to_string(), s("unsupported"));
+    node.properties
+        .insert(EXTRACT_FINGERPRINT_PROP.to_string(), s("v1:sha-aaa|k|1"));
+
+    let mut tx = service.transaction();
+    tx.create(node);
+    tx.commit("materialize", EXTRACTION_ACTOR).await.unwrap();
+    let created = service.get_by_path("/asset").await.unwrap().unwrap();
+
+    // A console save: the real edit, plus a forged artifact.
+    let mut tx = service.transaction();
+    tx.update(
+        created.id.clone(),
+        serde_json::json!({
+            "on": true,
+            "__extract_status": "ok",
+            "__extracted_text": "text I made up",
+            "__extract_fingerprint": "v1:FORGED|k|1",
+        }),
+    );
+    tx.commit("edit", "console-user").await.unwrap();
+
+    let after = service.get_by_path("/asset").await.unwrap().unwrap();
+    assert_eq!(
+        after.properties.get("on"),
+        Some(&PropertyValue::Boolean(true)),
+        "the user's actual edit must land"
+    );
+    assert_eq!(
+        prop_str(&after, EXTRACT_STATUS_PROP),
+        "unsupported",
+        "a client must not be able to claim a binary was extracted"
+    );
+    assert_eq!(
+        prop_str(&after, EXTRACT_FINGERPRINT_PROP),
+        "v1:sha-aaa|k|1",
+        "moving the fingerprint would switch extraction off for this asset"
+    );
+    assert!(
+        !after.properties.contains_key(EXTRACTED_TEXT_PROP),
+        "invented extracted text must not reach the vector index"
+    );
+
+    // ...and the extraction actor itself is still free to write it.
+    let mut tx = service.transaction();
+    tx.update(
+        created.id.clone(),
+        serde_json::json!({
+            "__extract_status": "ok",
+            "__extracted_text": "really extracted",
+            "__extract_fingerprint": "v1:sha-bbb|k|2",
+        }),
+    );
+    tx.commit("extract", EXTRACTION_ACTOR).await.unwrap();
+
+    let after = service.get_by_path("/asset").await.unwrap().unwrap();
+    assert_eq!(prop_str(&after, EXTRACT_STATUS_PROP), "ok");
+    assert_eq!(prop_str(&after, EXTRACTED_TEXT_PROP), "really extracted");
 }

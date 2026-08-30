@@ -188,7 +188,14 @@ async fn build_engine(
         engine = engine.with_auth(auth);
     }
 
-    engine = engine::configure_engine_features(engine, state, embedding_config, rocksdb_storage)?;
+    engine = engine::configure_engine_features(
+        engine,
+        state,
+        embedding_config,
+        tenant_id,
+        rocksdb_storage,
+    )
+    .await?;
 
     // Wire schema stats cache for data-driven selectivity estimation
     if let Some(ref cache) = state.schema_stats_cache {

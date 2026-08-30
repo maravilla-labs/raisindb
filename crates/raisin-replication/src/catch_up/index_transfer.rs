@@ -101,11 +101,12 @@ impl CatchUpCoordinator {
 
         // Step 4: Transfer each HNSW index
         if let Some(ref hnsw_receiver) = self.hnsw_receiver {
-            for (tenant_id, repo_id, branch) in &hnsw_indexes {
+            for (tenant_id, repo_id, branch, partition) in &hnsw_indexes {
                 info!(
                     tenant_id = %tenant_id,
                     repo_id = %repo_id,
                     branch = %branch,
+                    partition = %partition,
                     "Transferring HNSW index"
                 );
 
@@ -116,6 +117,7 @@ impl CatchUpCoordinator {
                         tenant_id,
                         repo_id,
                         branch,
+                        partition,
                     )
                     .await
                 {
@@ -180,7 +182,7 @@ impl CatchUpCoordinator {
     async fn request_hnsw_index_list(
         &self,
         stream: &mut TcpStream,
-    ) -> Result<Vec<(String, String, String)>> {
+    ) -> Result<Vec<(String, String, String, String)>> {
         // Send request for HNSW index list
         let request = ReplicationMessage::RequestHnswIndexList;
         Self::send_message(stream, &request).await?;

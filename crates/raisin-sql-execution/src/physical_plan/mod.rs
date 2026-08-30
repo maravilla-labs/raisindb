@@ -70,6 +70,7 @@ pub mod pgq;
 pub mod planner;
 pub mod project;
 pub mod scan_executors;
+pub mod search;
 pub mod semi_join;
 pub mod sort;
 pub mod spatial_annotate;

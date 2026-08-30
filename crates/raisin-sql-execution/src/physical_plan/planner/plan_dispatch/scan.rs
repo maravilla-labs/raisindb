@@ -76,17 +76,31 @@ impl PhysicalPlanner {
         &self,
         name: &str,
         alias: &Option<String>,
-        args: &[raisin_sql::analyzer::TypedExpr],
+        args: &[raisin_sql::analyzer::TableFunctionArg],
         schema: &std::sync::Arc<raisin_sql::logical_plan::TableSchema>,
         workspace: &Option<String>,
         branch_override: &Option<String>,
         max_revision: Option<raisin_hlc::HLC>,
+        filter: &Option<raisin_sql::analyzer::TypedExpr>,
     ) -> Result<PhysicalPlan, Error> {
+        // A `name => value` argument that nobody reads is the defect this whole
+        // change exists to close, so a function that has no named arguments
+        // REJECTS them rather than ignoring them.
+        if let Some(named) = args.iter().find_map(|a| a.name.as_deref()) {
+            if name.eq_ignore_ascii_case("NEIGHBORS") || name.eq_ignore_ascii_case("GRAPH_TABLE") {
+                return Err(Error::Validation(format!(
+                    "{name} takes positional arguments only; '{named} => ...' is not                      an argument of {name}."
+                )));
+            }
+        }
+
         if name.eq_ignore_ascii_case("NEIGHBORS") {
             // Expect 3 arguments: start_id, direction, relation_type (nullable)
-            let mut start_id = Self::extract_string_literal(args.first(), name, 0)?;
-            let direction = Self::extract_string_literal(args.get(1), name, 1)?.to_uppercase();
-            let relation_type = match args.get(2) {
+            let mut start_id =
+                Self::extract_string_literal(args.first().map(|a| &a.value), name, 0)?;
+            let direction = Self::extract_string_literal(args.get(1).map(|a| &a.value), name, 1)?
+                .to_uppercase();
+            let relation_type = match args.get(2).map(|a| &a.value) {
                 Some(expr) => match &expr.expr {
                     Expr::Literal(Literal::Null) => None,
                     Expr::Literal(Literal::Text(v)) | Expr::Literal(Literal::Path(v)) => {
@@ -143,6 +157,9 @@ impl PhysicalPlanner {
                 workspace: workspace.clone(),
                 branch_override: branch_override.clone(),
                 max_revision,
+                // Advisory only — the residual `Filter` above this node is the
+                // authority. See `LogicalPlan::TableFunction::filter`.
+                filter: filter.clone(),
             })
         }
     }

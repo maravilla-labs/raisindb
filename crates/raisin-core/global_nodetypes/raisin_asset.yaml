@@ -3,10 +3,29 @@ description: Media asset (image, video, document, mail attachment)
 icon: image
 # BUMPED 2 -> 3: `file` is no longer required, and the mail-attachment
 # properties below are new. Both are widenings — an existing asset stays valid.
-version: 3
+#
+# BUMPED 3 -> 4: `extracted_text` / `extraction_fingerprint`, and `Vector` added
+# to `index_types`. Without `Vector` here the job event handler's
+# `index_settings.vector` is false for every asset, so an `EmbeddingGenerate`
+# job was NEVER enqueued for one — an uploaded file could not be found by its
+# contents no matter what the extraction side did.
+#
+# BUMPED 4 -> 5: the extraction output became a durable ARTIFACT under
+# engine-owned `__` names, and gained a STATUS. See the block below.
+#
+# BUMPED 5 -> 6: `Vector` added to `description`, `alt_text` and `keywords`, and
+# `alt_text` gained an `index:` key at all. These are the fields a caption is
+# written into, and until now a caption was LEXICALLY searchable and
+# SEMANTICALLY INVISIBLE — the only Vector-bearing text on an asset came out of
+# the binary, which for an image is nothing. Adding an index type is a widening,
+# so the content-hash resync applies it to existing repositories automatically
+# under the default `non_breaking` policy; the `version:` bump is what the
+# legacy version-gated init path (`nodetype_init::init_repository_nodetypes`)
+# needs, and both must be right because both still run.
+version: 6
 strict: false
 indexable: true
-index_types: [Fulltext, Property]
+index_types: [Fulltext, Property, Vector]
 
 # Declares the engine-owned `__` properties a virtual mount stamps. Mail
 # attachments arrive as mount-managed raisin:Asset children of a raisin:Mail,
@@ -51,19 +70,42 @@ properties:
       description: >-
         Provider-reported size. Present before the bytes are, so a UI can show
         "2.4 MB — download" without fetching anything.
+  # ---- The human/AI-authored caption fields ---------------------------------
+  #
+  # All three are `Vector` as well as `Fulltext`, and that is the whole point of
+  # them. A caption is the ONLY text an image has: the binary contributes
+  # nothing to `__extracted_text`, so without `Vector` here a photo is reachable
+  # only by the literal words someone happened to type. With it, the caption
+  # joins the node's default (bare-node-id) embedding through the shape-driven
+  # vector plan, and "a boat moored for the winter" finds a picture captioned
+  # "Segelboot im Winterlager" — no shared token, and across languages when the
+  # tenant's embedder is multilingual.
+  #
+  # They are grouped here because they are ONE decision, not three: captioning
+  # is a Studio feature (a trigger function picks the model and the prompt and
+  # writes these fields; see the captioning boundary decision), and core's whole
+  # side of that contract is "whatever text you write into these becomes a
+  # vector". Vector on two of the three would be a silently half-searchable
+  # asset.
+  #
+  # They ride the DEFAULT spec, not the `doc` spec below: they are short,
+  # authored, about-the-whole-asset text — exactly what the node's own vector is
+  # for — whereas `__extracted_text` is a document body that must be chunked
+  # separately or it drowns them.
   - name: description
     type: String
     required: false
-    index: [Fulltext]
+    index: [Fulltext, Vector]
   - name: alt_text
     type: String
     required: false
+    index: [Fulltext, Vector]
     meta:
       description: Brief accessibility description for screen readers
   - name: keywords
     type: Array
     required: false
-    index: [Fulltext]
+    index: [Fulltext, Vector]
     meta:
       description: Search keywords for categorization
   - name: meta
@@ -79,6 +121,133 @@ properties:
       description: >-
         SHA-256 of the file content. Used for change detection during package
         installation, and set by the on-demand attachment fetch.
+
+  # ---- Extraction artifact ------------------------------------------------
+  #
+  # Where the asset-processing job lands what it learned from the binary. A node
+  # property is the ONE shape every downstream index already understands, so the
+  # existing commit -> event -> fulltext+embedding funnel picks it up with no
+  # new plumbing; replication carries it to peers for free (an arriving replica
+  # already has the text, so it never re-extracts); and — the reason it is
+  # inline rather than a child node or a blob reference — Studio PUBLISH copies
+  # `node_type, archetype, properties, updated_at`, so the whole artifact rides
+  # along to the publish branch. The publish branch therefore needs no extractor
+  # and no media plugin: embedding there is a pure embed call over text that is
+  # already present.
+  #
+  # It is deliberately NOT the embedding job's business to open files: teaching
+  # the synchronous embedding text walk to do binary I/O and mimetype dispatch
+  # would give the system a second extraction path beside this job.
+  #
+  # All of these are `__`-prefixed ENGINE-OWNED properties. The write-path
+  # shield (`raisin_models::nodes::is_shielded_property_key`) preserves their
+  # stored values against any writer that is not the extraction actor, so a
+  # client that loads a node, edits one field and saves the whole map back
+  # cannot claim a binary was read when it was not.
+  #
+  # The vocabulary lives in `raisin_models::nodes::extraction`; this file only
+  # declares it so the shape-driven index plan can see it.
+  - name: __extracted_text
+    type: String
+    required: false
+    index: [Fulltext]
+    meta:
+      label: Extracted text
+      description: >-
+        Text extracted from the binary (PDF text/markdown today). Engine-owned;
+        written by the asset-processing job when the matching processing rule
+        has `store_extracted_text`. Truncated at 256 KiB; `__extract_chars`
+        records the real length.
+
+  # NOT indexed for Vector here, on purpose. The document body gets its OWN
+  # named embedding (`{node}#doc#{chunk}`, spec `doc`) rather than being glued
+  # onto the node's title and caption: a 40-page contract concatenated with a
+  # filename produces one vector that matches neither query well. See
+  # `raisin_hnsw::chunk_id` for the id grammar and
+  # `jobs/handlers/embedding/handler.rs::embedding_tasks` for the split.
+
+  # The OUTCOME, and the single most important property here.
+  #
+  # `unsupported` is a DURABLE record that these bytes were offered to the
+  # extractors and none of them could read them. Without it, a .docx uploaded to
+  # a server with no media plugin was a node with no text and no trace of the
+  # attempt — indistinguishable from an empty document forever, and impossible
+  # to find later. With it, the backfill is one statement:
+  #
+  #   SELECT path, file_type FROM 'assets'
+  #    WHERE properties->>'__extract_status'::String = 'unsupported'
+  - name: __extract_status
+    type: String
+    required: false
+    index: [Property]
+    meta:
+      label: Extraction status
+      description: >-
+        ok | empty | unsupported | failed. Engine-owned. `unsupported` means
+        nothing on this server could read the binary — query it to find the
+        assets a newly-installed media plugin should be run over. `failed` is
+        retryable and must not be confused with it.
+      enum: [ok, empty, unsupported, failed]
+
+  - name: __extract_source
+    type: String
+    required: false
+    index: [Property]
+    meta:
+      label: Extractor
+      description: >-
+        Which extractor produced the text: core-pdf, core-pdf-ocr,
+        plugin-libreoffice, none. Free-form, so an out-of-tree plugin can name
+        itself. Engine-owned.
+
+  - name: __extract_version
+    type: Number
+    required: false
+    index: [Property]
+    meta:
+      label: Extraction pipeline version
+      description: >-
+        Generation of the extraction pipeline that wrote this artifact. The
+        enqueue gate compares it as well as the fingerprint, which is what lets
+        a bump re-open every asset exactly once when the extractors improve.
+        Engine-owned.
+
+  - name: __extract_detail
+    type: String
+    required: false
+    meta:
+      label: Extraction detail
+      description: >-
+        Why, for the statuses that have a why: the mimetype nothing handled, the
+        blocked plugin task, the error text. Stored rather than only logged,
+        because by the time anyone asks the log line is hours old. Engine-owned.
+
+  - name: __extract_chars
+    type: Number
+    required: false
+    index: [Property]
+    meta:
+      label: Extracted characters
+      description: >-
+        FULL length of the extracted text before any truncation. Greater than
+        the stored `__extracted_text` means the artifact is truncated.
+        Engine-owned.
+
+  # The loop-breaker. Extraction WRITES the node, and that write emits
+  # `node:updated`, which is the same event that enqueues asset processing — so
+  # without a fingerprint to compare against, one upload extracts forever.
+  # It holds the fingerprint of the binary the artifact was produced FROM, so
+  # replacing the file (new storage_key / content_hash / size) re-extracts,
+  # while our own write-back does not.
+  - name: __extract_fingerprint
+    type: String
+    required: false
+    index: [Property]
+    meta:
+      label: Extraction fingerprint
+      description: >-
+        Identifies the binary this artifact was produced from. Engine-owned;
+        do not set by hand.
 
   # ---- Mail attachments ----------------------------------------------------
   - name: inline

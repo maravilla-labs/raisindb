@@ -148,10 +148,18 @@ pub struct FullTextSearchQuery {
     /// None = HEAD/latest, Some(revision) = search at specific revision
     pub revision: Option<HLC>,
 
-    /// Optional exact shape-type filter. When set, only nodes carrying this
-    /// type identity (their `node_type`, `archetype`, or any nested
-    /// `element_type`) match. The value must be the full `ns:TypeName`.
-    pub shape_type: Option<String>,
+    /// Optional shape-type filter: a node matches if it carries ANY of these
+    /// type identities. Each value must be the full `ns:TypeName`.
+    ///
+    /// The indexed field is multi-valued and holds `node_type` UNION `archetype`
+    /// UNION every nested `element_type` (see `tantivy_engine::properties`), so
+    /// this filter deliberately OVER-MATCHES a `node_type` predicate: it also
+    /// admits nodes whose *archetype* is the named type. That is sound only
+    /// where a residual row filter is authoritative -- it widens the candidate
+    /// pool and can never drop a needed row. It is also why there is no
+    /// `node_types =>` search argument: an argument would have to mean what its
+    /// name says, and this does not.
+    pub shape_types: Option<Vec<String>>,
 }
 
 /// Search result with relevance score

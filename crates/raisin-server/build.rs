@@ -8,6 +8,43 @@ use std::env;
 use std::path::Path;
 use std::process::Command;
 
+/// Spawn a child that will itself run cargo, with this build script's inherited
+/// cargo environment scrubbed.
+///
+/// EVERY nested build must go through here. There is no such thing as a child
+/// of this build script that may keep the outer invocation's cargo environment:
+/// each group below is a hang or a hard error, not a preference. Only the two
+/// `--version` probes, which build nothing, may use a bare `Command::new`.
+///
+/// * `CARGO_TARGET_DIR` / `CARGO_BUILD_TARGET_DIR` — **deadlock**. Cargo takes an
+///   exclusive `flock` on `<target-dir>/<profile>/.cargo-lock` (the host layout,
+///   taken even for a `--target wasm32-*` build) and holds it for the whole
+///   build. The outer `cargo build` that is running *us* already holds it. If the
+///   nested cargo resolves to the same target dir it blocks on that lock forever,
+///   waiting for a parent that is waiting for it. It does say
+///   "Blocking waiting for file lock on artifact directory" — but onto a build
+///   script's stdout, which cargo captures and only ever prints for a build that
+///   *finishes*, so nobody sees it. What you observe instead is a build sitting
+///   at 0% CPU with no rustc running and never returning. Anyone who exports
+///   `CARGO_TARGET_DIR` (a target dir shared across worktrees is the usual
+///   reason) could not build this crate at all. Removing the variables puts each
+///   nested crate back on its own crate-local `target/`, which is what every
+///   environment that does not export them already does.
+/// * `CARGO_ENCODED_RUSTFLAGS` / `RUSTFLAGS` / `CARGO_BUILD_RUSTFLAGS` — **hard
+///   error**. The workspace `.cargo/config.toml` sets `-C
+///   split-debuginfo=unpacked` for the host target; cargo propagates it to us,
+///   and a nested wasm32 build inheriting it fails with
+///   "`-Csplit-debuginfo=unpacked` is unstable on this platform".
+fn nested_build_command(program: &str) -> Command {
+    let mut cmd = Command::new(program);
+    cmd.env_remove("CARGO_TARGET_DIR")
+        .env_remove("CARGO_BUILD_TARGET_DIR")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_BUILD_RUSTFLAGS");
+    cmd
+}
+
 fn main() {
     let frontend_dir = "../../packages/admin-console";
     let flow_designer_dir = "../../packages/raisin-flow-designer";
@@ -77,7 +114,7 @@ fn main() {
 
     if wasm_pack_check.is_err() || !wasm_pack_check.as_ref().unwrap().status.success() {
         println!("cargo:warning=Installing wasm-pack...");
-        let install_status = Command::new("cargo")
+        let install_status = nested_build_command("cargo")
             .args(["install", "wasm-pack"])
             .status()
             .expect("Failed to install wasm-pack");
@@ -89,20 +126,11 @@ fn main() {
         }
     }
 
-    // Build WASM
-    //
-    // Clear the rustflags the outer `cargo build` exported into this build
-    // script's environment. The workspace `.cargo/config.toml` sets
-    // `-C split-debuginfo=unpacked` for the host target; cargo propagates it via
-    // `CARGO_ENCODED_RUSTFLAGS`, and nested wasm builds would otherwise inherit it
-    // and fail with "`-Csplit-debuginfo=unpacked` is unstable on this platform"
-    // (it is not valid for wasm32). Same applies to the frontend build below,
-    // which compiles `raisin-rel-wasm` via its prebuild step.
-    let wasm_status = Command::new("wasm-pack")
+    // Build WASM. See `nested_build_command` for why the inherited cargo
+    // environment must be scrubbed rather than passed through.
+    let wasm_status = nested_build_command("wasm-pack")
         .args(["build", "--target", "web", "--out-dir", "pkg", "--release"])
         .current_dir(wasm_dir)
-        .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .env_remove("RUSTFLAGS")
         .status();
 
     match wasm_status {
@@ -127,7 +155,7 @@ fn main() {
             // Step 1b: Install WASM package in admin-console
             // Path from admin-console to wasm pkg: ../../tooling/packages/raisin-sql-wasm/pkg
             println!("cargo:warning=Installing WASM package in admin-console...");
-            let install_wasm_status = Command::new(pkg_cmd)
+            let install_wasm_status = nested_build_command(pkg_cmd)
                 .args(["install", "../../tooling/packages/raisin-sql-wasm/pkg"])
                 .current_dir(frontend_dir)
                 .status();
@@ -151,7 +179,7 @@ fn main() {
     // Step 2: Check if node_modules exists
     if !Path::new(frontend_dir).join("node_modules").exists() {
         println!("cargo:warning=Installing dependencies for admin-console...");
-        let status = Command::new(pkg_cmd)
+        let status = nested_build_command(pkg_cmd)
             .args(["install"])
             .current_dir(frontend_dir)
             .status()
@@ -165,14 +193,11 @@ fn main() {
 
     // Step 3: Build the frontend
     println!("cargo:warning=Building admin-console frontend...");
-    let status = Command::new(pkg_cmd)
+    // The frontend prebuild shells out to `raisin-rel-wasm/build.sh`, i.e. one
+    // more nested wasm-pack: same scrub, same reasons.
+    let status = nested_build_command(pkg_cmd)
         .args(["run", "build"])
         .current_dir(frontend_dir)
-        // See note on the wasm-pack call above: the frontend prebuild compiles
-        // raisin-rel-wasm to wasm32, which must not inherit the host's
-        // `-C split-debuginfo=unpacked`.
-        .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .env_remove("RUSTFLAGS")
         .status()
         .expect("Failed to build frontend");
 

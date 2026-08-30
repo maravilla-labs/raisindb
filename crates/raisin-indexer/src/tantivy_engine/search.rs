@@ -25,7 +25,7 @@ pub(crate) fn execute_search(
     let text_query: Box<dyn tantivy::query::Query> = if contains_wildcards(&query.query) {
         build_wildcard_query(&query.query, fields)?
     } else {
-        build_fuzzy_query(index, &query.query, fields)?
+        build_text_query(index, &query.query, &query.language, fields)?
     };
 
     let language_term = tantivy::Term::from_field_text(fields.language, &query.language);
@@ -51,16 +51,7 @@ pub(crate) fn execute_search(
         must_clauses.push((tantivy::query::Occur::Must, revision_query));
     }
 
-    if let (Some(shape_type), Some(shape_field)) = (&query.shape_type, fields.shape_types) {
-        let shape_term = tantivy::Term::from_field_text(shape_field, shape_type);
-        let shape_query =
-            tantivy::query::TermQuery::new(shape_term, tantivy::schema::IndexRecordOption::Basic);
-        tracing::debug!("Shape-type exact filter: {}", shape_type);
-        must_clauses.push((
-            tantivy::query::Occur::Must,
-            Box::new(shape_query) as Box<dyn tantivy::query::Query>,
-        ));
-    }
+    add_shape_type_filter(&mut must_clauses, &query.shape_types, fields);
 
     let final_query = tantivy::query::BooleanQuery::new(must_clauses);
 
@@ -75,6 +66,13 @@ pub(crate) fn execute_search(
     extract_results(&searcher, top_docs, fields)
 }
 
+/// Wildcards run over the language-NEUTRAL fields only.
+///
+/// A regex over a stemmed term dictionary matches stems, not words, so
+/// `Datenbank*` would silently mean "starts with the stem of Datenbank" — the
+/// pattern the user wrote no longer describes what is being matched. Keeping
+/// wildcards on the unstemmed text is the predictable behaviour, and the
+/// neutral fields carry every document's full text.
 fn build_wildcard_query(
     query_str: &str,
     fields: &SchemaFields,
@@ -101,15 +99,46 @@ fn build_wildcard_query(
     ])))
 }
 
-fn build_fuzzy_query(
+/// The ordinary text query: the language-neutral fields with typo tolerance,
+/// plus this language's stemmed pair for morphology.
+///
+/// The two are complementary and neither subsumes the other:
+///
+/// * **Fuzzy** is edit distance. It reaches `Datenbnak` -> `Datenbank`, and it
+///   is deliberately confined to the neutral fields — an edit-distance-1 walk
+///   over a *stemmed* dictionary conflates unrelated stems and inflates recall
+///   with nonsense.
+/// * **Stemming** is morphology. It reaches `Datenbanken` -> `Datenbank`, which
+///   is edit distance 2 and not a prefix relation, so fuzzy cannot.
+///
+/// Tantivy analyses each query term with the analyzer of the field it is being
+/// parsed against, so the stemmed clause below is stemmed on the query side
+/// too — which is the only way it can meet the stemmed terms in the index.
+///
+/// A language with no stemmer (ja, zh, ko, th, …) and an index built before the
+/// pairs existed both fall back to the neutral fields alone, exactly matching
+/// what `create_document` wrote.
+fn build_text_query(
     index: &tantivy::Index,
     query_str: &str,
+    language: &str,
     fields: &SchemaFields,
 ) -> Result<Box<dyn tantivy::query::Query>> {
-    tracing::debug!("Regular fuzzy query: '{}'", query_str);
+    let stemmed = fields.stemmed.get(language).copied();
+    tracing::debug!(
+        query = %query_str,
+        language = %language,
+        stemmed = stemmed.is_some(),
+        "Building text query"
+    );
 
-    let mut query_parser =
-        tantivy::query::QueryParser::for_index(index, vec![fields.name, fields.content]);
+    let mut search_fields = vec![fields.name, fields.content];
+    if let Some(stemmed) = stemmed {
+        search_fields.push(stemmed.name);
+        search_fields.push(stemmed.content);
+    }
+
+    let mut query_parser = tantivy::query::QueryParser::for_index(index, search_fields);
 
     query_parser.set_field_fuzzy(fields.name, true, 1, true);
     query_parser.set_field_fuzzy(fields.content, true, 1, true);
@@ -165,6 +194,61 @@ fn add_workspace_filter(
             ));
         }
     }
+}
+
+/// Restrict to nodes carrying ANY of the given shape-type identities.
+///
+/// Mirrors `add_workspace_filter`: one value becomes a `TermQuery`, several
+/// become a `Should` boolean. `fields.shape_types` is absent on an index built
+/// before the field existed, and the filter then degrades to no filter rather
+/// than to no results.
+///
+/// The field is multi-valued (node_type + archetype + nested element_type), so
+/// this OVER-MATCHES a node_type predicate on purpose. It is a candidate-pool
+/// widener under an authoritative residual filter, never an authorisation or a
+/// correctness mechanism.
+fn add_shape_type_filter(
+    must_clauses: &mut Vec<(tantivy::query::Occur, Box<dyn tantivy::query::Query>)>,
+    shape_types: &Option<Vec<String>>,
+    fields: &SchemaFields,
+) {
+    let (Some(shape_types), Some(shape_field)) = (shape_types, fields.shape_types) else {
+        return;
+    };
+    if shape_types.is_empty() {
+        return;
+    }
+
+    let term_query = |value: &str| {
+        tantivy::query::TermQuery::new(
+            tantivy::Term::from_field_text(shape_field, value),
+            tantivy::schema::IndexRecordOption::Basic,
+        )
+    };
+
+    if shape_types.len() == 1 {
+        tracing::debug!("Shape-type exact filter: {}", shape_types[0]);
+        must_clauses.push((
+            tantivy::query::Occur::Must,
+            Box::new(term_query(&shape_types[0])) as Box<dyn tantivy::query::Query>,
+        ));
+        return;
+    }
+
+    let clauses: Vec<(tantivy::query::Occur, Box<dyn tantivy::query::Query>)> = shape_types
+        .iter()
+        .map(|value| {
+            (
+                tantivy::query::Occur::Should,
+                Box::new(term_query(value)) as Box<dyn tantivy::query::Query>,
+            )
+        })
+        .collect();
+    tracing::debug!("Shape-type filter (any of): {:?}", shape_types);
+    must_clauses.push((
+        tantivy::query::Occur::Must,
+        Box::new(tantivy::query::BooleanQuery::new(clauses)) as Box<dyn tantivy::query::Query>,
+    ));
 }
 
 fn extract_results(

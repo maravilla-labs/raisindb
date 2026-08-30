@@ -46,6 +46,7 @@ pub async fn execute_vector_scan<S: Storage + 'static>(
         distance_metric,
         _vector_column,
         k,
+        overfetch,
         max_distance,
         projection,
         distance_alias,
@@ -61,6 +62,7 @@ pub async fn execute_vector_scan<S: Storage + 'static>(
             distance_metric,
             vector_column,
             k,
+            overfetch,
             max_distance,
             projection,
             distance_alias,
@@ -75,6 +77,7 @@ pub async fn execute_vector_scan<S: Storage + 'static>(
             *distance_metric,
             vector_column.clone(),
             *k,
+            *overfetch,
             *max_distance,
             projection.clone(),
             distance_alias.clone(),
@@ -86,9 +89,15 @@ pub async fn execute_vector_scan<S: Storage + 'static>(
         }
     };
 
+    // How many candidates to draw from the index. Equal to `k` when this scan
+    // answers the query alone; wider when a residual `Filter` above it may
+    // reject candidates the index ranked highly (see `VectorScan::overfetch`).
+    // A `Limit` above the filter puts the answer back at `k`.
+    let fetch_k = k.saturating_mul(overfetch.max(1));
+
     tracing::info!(
-        "   VectorScan: tenant={}, repo={}, branch={}, workspace={}, metric={}, k={}, threshold={:?}",
-        tenant_id, repo_id, branch, workspace, distance_metric, k, max_distance
+        "   VectorScan: tenant={}, repo={}, branch={}, workspace={}, metric={}, k={}, fetch_k={}, threshold={:?}",
+        tenant_id, repo_id, branch, workspace, distance_metric, k, fetch_k, max_distance
     );
 
     let hnsw_engine = ctx.hnsw_engine.as_ref().ok_or_else(|| {
@@ -104,22 +113,41 @@ pub async fn execute_vector_scan<S: Storage + 'static>(
         evaluate_query_vector(&query_vector, ctx).await?
     };
 
-    // Step 2: Call HNSW search with distance threshold (the index uses the metric it was created with)
+    // Step 2: which index. A branch holds one index per embedding space now, so
+    // naming the branch is no longer enough. Resolved through the engine's one
+    // spec resolver — the same read the embedding job handler's partition comes
+    // from — because a read side and a write side that disagreed here would
+    // simply return zero rows, indistinguishable from "nothing matched".
+    let partition = hnsw_engine
+        .default_text_partition(&tenant_id, &repo_id, &branch)
+        .ok_or_else(|| {
+            Error::Backend(format!(
+                "no vector index partition for tenant '{}': its embedding configuration does \
+                 not resolve to an embedder, so there is nothing to search. Set one with \
+                 ALTER EMBEDDING CONFIG.",
+                tenant_id
+            ))
+        })?;
+
+    tracing::info!("   VectorScan: partition={}", partition);
+
+    // Step 3: Call HNSW search with distance threshold (the index uses the metric it was created with)
     let search_results = hnsw_engine
         .search_with_threshold(
             &tenant_id,
             &repo_id,
             &branch,
-            Some(&workspace),
+            &partition,
+            std::slice::from_ref(&workspace),
             &query_vec,
-            k,
+            fetch_k,
             max_distance,
         )
         .map_err(|e| Error::Backend(format!("HNSW search failed: {}", e)))?;
 
     tracing::debug!("   HNSW returned {} results", search_results.len());
 
-    // Step 3: Fetch nodes and build result rows
+    // Step 4: Fetch nodes and build result rows
     let storage = ctx.storage.clone();
     let max_revision = ctx.max_revision;
     let qualifier = alias.clone().unwrap_or_else(|| table.clone());

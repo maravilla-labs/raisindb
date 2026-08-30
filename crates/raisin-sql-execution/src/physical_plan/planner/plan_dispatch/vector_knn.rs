@@ -10,6 +10,20 @@ use super::super::{
 };
 use raisin_sql::analyzer::BinaryOperator;
 
+/// How much wider than `k` the candidate pool is drawn when a residual filter
+/// sits above the scan.
+///
+/// The index ranks by distance alone, so a scoped query (`node_type = 'X'`,
+/// a subtree, an installation's own folder) can have every one of its k global
+/// neighbours rejected by the filter. Fetching `k * RESIDUAL_OVERFETCH` gives
+/// the filter something to work with. The same device already exists one layer
+/// down for the workspace filter in `raisin-hnsw`, and multiplies with it.
+///
+/// This is a RE-EXPORT, not a second declaration. Row-level security is a
+/// residual filter too, so the search table functions face exactly this problem
+/// and must not answer it with a different number that drifts.
+const RESIDUAL_OVERFETCH: usize = crate::physical_plan::search::SEARCH_OVERFETCH;
+
 impl PhysicalPlanner {
     /// Try to optimise a `Limit { Sort { ... } }` pattern into a `VectorScan`
     /// when the sort expression is a vector distance function.
@@ -70,38 +84,23 @@ impl PhysicalPlanner {
             other => other,
         };
 
-        // Extract scan information from the input
-        // Look for a Scan or Filter(Scan) pattern
-        let (scan_input, filter_opt) = match actual_sort_input {
-            LogicalPlan::Scan { .. } => (actual_sort_input, None),
+        // Collect the scan input and EVERY conjunct constraining it.
+        //
+        // A filter reaches this point in two different shapes and the planner
+        // has to read BOTH. `Filter { Scan }` survives when predicate pushdown
+        // declined; when it succeeded — the normal case — there is no Filter
+        // node left at all and the predicate lives in `Scan.filter`. That
+        // second shape was never read here, which is why
+        // `WHERE node_type = 'X' ORDER BY embedding <=> EMBEDDING(q) LIMIT k`
+        // built a VectorScan carrying no constraint whatsoever and answered
+        // with the global k nearest neighbours, of any type, presented as
+        // correct.
+        let (scan_input, mut conjuncts) = match actual_sort_input {
+            LogicalPlan::Scan { .. } => (actual_sort_input, Vec::new()),
             LogicalPlan::Filter {
                 input: filter_input,
                 predicate,
-            } => {
-                // Check if ALL predicates are simple
-                // If any predicate is complex, fall back to full scan + embedding population
-                let all_simple = predicate
-                    .conjuncts
-                    .iter()
-                    .all(|p| self.is_simple_predicate(p));
-
-                if !all_simple {
-                    tracing::debug!(
-                        "Complex predicate detected - falling back to full scan + embedding population"
-                    );
-                    // Complex predicate - fall through to TopN
-                    let topn_context = PlanContext::with_limit(limit);
-                    return Ok(Some(PhysicalPlan::TopN {
-                        input: Box::new(self.plan_with_context(sort_input, &topn_context)?),
-                        sort_exprs: sort_exprs.to_vec(),
-                        limit,
-                    }));
-                }
-
-                // All predicates are simple - safe to use VectorScan
-                let combined = self.combine_predicates(&predicate.conjuncts);
-                (filter_input.as_ref(), Some(combined))
-            }
+            } => (filter_input.as_ref(), predicate.conjuncts.clone()),
             _ => {
                 // Not a recognizable pattern, fall through to TopN
                 tracing::debug!(
@@ -123,9 +122,14 @@ impl PhysicalPlanner {
             workspace,
             branch_override,
             projection,
+            filter: pushed_filter,
             ..
         } = scan_input
         {
+            if let Some(pushed) = pushed_filter {
+                conjuncts.extend(self.flatten_ands(pushed));
+            }
+
             let workspace_name = workspace
                 .clone()
                 .unwrap_or_else(|| self.default_workspace.to_string());
@@ -133,32 +137,58 @@ impl PhysicalPlanner {
                 .clone()
                 .unwrap_or_else(|| self.default_branch.to_string());
 
-            // Extract max_distance threshold from filter predicates
-            // Matches patterns like: WHERE distance_expr < 0.5, WHERE sim < 0.3
-            let max_distance = filter_opt.as_ref().and_then(|filter| {
-                self.extract_max_distance(filter, &vector_column, distance_alias.as_deref())
-            });
-
-            if let Some(ref alias_name) = distance_alias {
-                tracing::info!(
-                    "Detected vector k-NN pattern: {} {} LIMIT {} (distance alias: {})",
-                    vector_column,
-                    distance_metric,
-                    limit,
-                    alias_name
-                );
-            } else {
-                tracing::info!(
-                    "Detected vector k-NN pattern: {} {} LIMIT {}",
-                    vector_column,
-                    distance_metric,
-                    limit
-                );
+            // Split the conjuncts into what the scan CONSUMES and what has to
+            // survive as a row-level filter. Nothing may fall between the two —
+            // that gap is exactly what this split exists to close.
+            let mut max_distance: Option<f32> = None;
+            let mut residual: Vec<TypedExpr> = Vec::new();
+            for conjunct in conjuncts {
+                if max_distance.is_none() {
+                    if let Some(threshold) =
+                        self.conjunct_max_distance(&conjunct, distance_alias.as_deref())
+                    {
+                        max_distance = Some(threshold);
+                        continue;
+                    }
+                }
+                if Self::vector_scan_guarantees(&conjunct) {
+                    continue;
+                }
+                residual.push(conjunct);
             }
 
-            // VectorScan now outputs the distance column with the correct alias
-            // No need to wrap in Project - VectorScan handles the alias directly
-            return Ok(Some(PhysicalPlan::VectorScan {
+            let residual_count = residual.len();
+            let residual_filter = if residual.is_empty() {
+                None
+            } else {
+                Some(self.combine_predicates(&residual))
+            };
+
+            // A residual filter runs AFTER the index has truncated to its k
+            // nearest, so `LIMIT 5` scoped to a subtree could find its five
+            // global neighbours, reject all five and return nothing. Widen the
+            // candidate pool, the way the workspace filter already does inside
+            // the engine. The answer stays approximate — an ANN index always is
+            // — but it becomes an approximate answer to the question asked.
+            let overfetch = if residual_filter.is_some() {
+                RESIDUAL_OVERFETCH
+            } else {
+                1
+            };
+
+            tracing::info!(
+                "Detected vector k-NN pattern: {} {} LIMIT {} (distance alias: {:?}, residual predicates: {}, overfetch: {})",
+                vector_column,
+                distance_metric,
+                limit,
+                distance_alias,
+                residual_count,
+                overfetch
+            );
+
+            // VectorScan outputs the distance column with the correct alias, so
+            // there is no Project to wrap it in.
+            let scan = PhysicalPlan::VectorScan {
                 tenant_id: self.default_tenant_id.to_string(),
                 repo_id: self.default_repo_id.to_string(),
                 branch: effective_branch,
@@ -169,47 +199,41 @@ impl PhysicalPlanner {
                 distance_metric,
                 vector_column,
                 k: limit,
+                overfetch,
                 max_distance,
                 projection: projection.clone(),
                 distance_alias,
+            };
+
+            if residual_filter.is_none() {
+                return Ok(Some(scan));
+            }
+
+            // The same helper the FullTextScan / NodeIdScan / PathIndexScan
+            // branches use — one implementation of "wrap a scan in what it does
+            // not itself guarantee". The Limit re-imposes the user's k, which
+            // the widened candidate pool would otherwise overshoot.
+            return Ok(Some(PhysicalPlan::Limit {
+                input: Box::new(Self::wrap_with_residual(scan, residual_filter)),
+                limit,
+                offset: 0,
             }));
         }
 
         Ok(None)
     }
 
-    /// Extract a max_distance threshold from a filter expression.
+    /// The `max_distance` threshold this ONE conjunct expresses, if it is
+    /// nothing but a threshold.
     ///
-    /// Scans for patterns like:
-    /// - `embedding <=> EMBEDDING('query') < 0.5`  (direct distance comparison)
-    /// - `distance_alias < 0.5`  (comparison via alias column)
-    /// - Also handles `<=`, and reversed forms (`0.5 > expr`)
-    fn extract_max_distance(
-        &self,
-        filter: &TypedExpr,
-        _vector_column: &str,
-        distance_alias: Option<&str>,
-    ) -> Option<f32> {
-        self.extract_max_distance_from_expr(filter, distance_alias)
-    }
-
-    /// Recursively extract max_distance from an expression tree.
-    /// Handles AND-connected predicates by finding the first distance threshold.
-    fn extract_max_distance_from_expr(
-        &self,
-        expr: &TypedExpr,
-        distance_alias: Option<&str>,
-    ) -> Option<f32> {
+    /// Recognises `embedding <=> EMBEDDING('q') < 0.5`, `distance_alias <= 0.5`
+    /// and the reversed forms. It deliberately does NOT recurse through `AND`:
+    /// the caller has already flattened the filter into conjuncts, and a
+    /// version that answered `Some` for `x < 0.5 AND y = 1` would let the
+    /// caller consume the whole conjunct and throw `y = 1` away — the exact
+    /// failure this change exists to remove.
+    fn conjunct_max_distance(&self, expr: &TypedExpr, distance_alias: Option<&str>) -> Option<f32> {
         match &expr.expr {
-            // AND: check both sides
-            Expr::BinaryOp {
-                left,
-                op: BinaryOperator::And,
-                right,
-            } => self
-                .extract_max_distance_from_expr(left, distance_alias)
-                .or_else(|| self.extract_max_distance_from_expr(right, distance_alias)),
-
             // distance_expr < threshold  or  distance_expr <= threshold
             Expr::BinaryOp {
                 left,

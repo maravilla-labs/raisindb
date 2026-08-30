@@ -20,9 +20,11 @@ pub(crate) fn parse_asset_processing(s: &str) -> Result<Option<JobType>, String>
                         options.extract_pdf_text = val == "true";
                     } else if let Some(val) = part.strip_prefix("img_embed=") {
                         options.generate_image_embedding = val == "true";
-                    } else if let Some(val) = part.strip_prefix("caption=") {
-                        options.generate_image_caption = val == "true";
                     }
+                    // A `caption=` written by an older binary falls through
+                    // here and is IGNORED rather than rejected. The captioning
+                    // options are gone; an unparsed segment must not turn a
+                    // persisted job into a parse error and strand it.
                 }
                 return Ok(Some(JobType::AssetProcessing { node_id, options }));
             }

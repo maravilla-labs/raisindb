@@ -41,10 +41,10 @@ const REBUILD_CHUNK_SIZE: usize = 500;
 
 /// Default language / supported languages used when we don't have
 /// repository metadata at the rebuild site. The fulltext schema is
-/// language-aware (see `tantivy_engine::language::register_language_tokenizer`),
-/// so we register "en" as the default; per-language translations on
-/// each node are still indexed via `do_batch_index`'s built-in
-/// translation loop.
+/// language-aware (see `tantivy_engine::language`, which analyses each
+/// document with its own language's stemmer), so we pass "en" as the
+/// default; per-language translations on each node are still indexed via
+/// `do_batch_index`'s built-in translation loop.
 const DEFAULT_LANGUAGE: &str = "en";
 
 fn batch_context(

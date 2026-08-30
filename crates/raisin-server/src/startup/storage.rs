@@ -106,19 +106,21 @@ pub fn init_auth_service(
     // created them.
     let admin_user_store =
         AdminUserStore::new_with_capture(storage.db().clone(), storage.operation_capture().clone());
-    let jwt_secret = std::env::var("JWT_SECRET")
-        .unwrap_or_else(|_| "default_jwt_secret_change_in_production".to_string());
-
-    if jwt_secret == "default_jwt_secret_change_in_production" {
-        if dev_mode {
+    // One reader for the rule (unset, empty and the historical placeholder are
+    // all "not configured"); see `raisin_crypto::env_secrets`.
+    let jwt_secret = match raisin_crypto::jwt_secret() {
+        Some(secret) => secret,
+        None if dev_mode => {
             tracing::warn!("Using default JWT secret (dev-mode)");
-        } else {
-            // Startup validation in main.rs already exits before reaching here,
+            raisin_crypto::INSECURE_JWT_DEFAULT.to_string()
+        }
+        None => {
+            // The preflight in main.rs already exits before reaching here,
             // but keep this as a defense-in-depth check.
             tracing::error!("JWT_SECRET not set — refusing to start without --dev-mode");
             std::process::exit(1);
         }
-    }
+    };
 
     // Likewise for API keys: one that exists only where it was minted fails
     // authentication everywhere else in the cluster.

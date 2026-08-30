@@ -23,6 +23,10 @@ reqwest = { version = "0.12", features = ["json"] }
 tokio = { workspace = true, features = ["sync", "time"] }
 raisin-hlc = { version = "0.1.0", path = "../raisin-hlc" }
 raisin-ai = { version = "0.1.0", path = "../raisin-ai" }
+# Stable digest for the embedding spec hash — std's DefaultHasher is explicitly
+# not stable across Rust releases, and this hash is compared against one written
+# by an older binary.
+ring = "0.17"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

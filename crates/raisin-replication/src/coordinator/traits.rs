@@ -152,6 +152,7 @@ pub trait CheckpointProvider: Send + Sync {
     /// * `tenant_id` - Tenant identifier
     /// * `repo_id` - Repository identifier
     /// * `branch` - Branch name
+    /// * `partition` - Which embedding space, `{embedder_hash}{kind}`
     ///
     /// # Returns
     /// Ok(()) if index was successfully transferred, error otherwise
@@ -161,6 +162,7 @@ pub trait CheckpointProvider: Send + Sync {
         tenant_id: &str,
         repo_id: &str,
         branch: &str,
+        partition: &str,
     ) -> Result<(), CoordinatorError>;
 }
 
@@ -200,8 +202,13 @@ pub trait IndexLister: Send + Sync {
     async fn list_tantivy_indexes(&self)
         -> Result<Vec<(String, String, String)>, CoordinatorError>;
 
-    /// List all tenant/repo/branch combinations that have HNSW indexes
-    async fn list_hnsw_indexes(&self) -> Result<Vec<(String, String, String)>, CoordinatorError>;
+    /// List all tenant/repo/branch/partition combinations that have HNSW indexes
+    ///
+    /// The partition is part of the tuple because a branch holds one index per
+    /// embedding space; a request naming only the branch cannot say which.
+    async fn list_hnsw_indexes(
+        &self,
+    ) -> Result<Vec<(String, String, String, String)>, CoordinatorError>;
 }
 
 /// Trait for receiving and ingesting Tantivy indexes during catch-up
@@ -255,6 +262,7 @@ pub trait HnswIndexReceiver: Send + Sync {
         tenant_id: &str,
         repo_id: &str,
         branch: &str,
+        partition: &str,
         data: Vec<u8>,
         expected_crc32: u32,
     ) -> Result<std::path::PathBuf, CoordinatorError>;
@@ -266,6 +274,7 @@ pub trait HnswIndexReceiver: Send + Sync {
         tenant_id: &str,
         repo_id: &str,
         branch: &str,
+        partition: &str,
     ) -> Result<(), CoordinatorError>;
 
     /// Abort receive and clean up staging file
@@ -274,5 +283,6 @@ pub trait HnswIndexReceiver: Send + Sync {
         tenant_id: &str,
         repo_id: &str,
         branch: &str,
+        partition: &str,
     ) -> Result<(), CoordinatorError>;
 }

@@ -18,6 +18,15 @@ pub struct AssetProcessingResult {
     pub node_id: String,
     /// Text extracted from PDF (if applicable)
     pub extracted_text: Option<String>,
+    /// Whether the extracted text was actually written back onto the node.
+    ///
+    /// The distinction matters: `extracted_text.is_some()` only says the
+    /// extractor produced words, and for a long time that was ALL that
+    /// happened — the words went into this JSON and nowhere else. Only a `true`
+    /// here means the text reached a node property, and therefore the fulltext
+    /// and embedding indexes.
+    #[serde(default)]
+    pub extracted_text_stored: bool,
     /// Page count for PDF (if applicable)
     pub pdf_page_count: Option<usize>,
     /// Whether OCR was used for PDF extraction

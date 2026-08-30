@@ -13,4 +13,4 @@ pub use error_counter::{
     ErrorCounterKey, FulltextErrorCounter, FulltextErrorKind, FulltextErrorStats,
 };
 pub use handler::FulltextJobHandler;
-pub(crate) use plan::{resolve_index_plan, IndexPlanCache};
+pub(crate) use plan::{collect_element_types, resolve_index_plan, IndexPlanCache};

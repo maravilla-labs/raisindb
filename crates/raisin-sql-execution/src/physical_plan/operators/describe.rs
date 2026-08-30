@@ -30,12 +30,40 @@ impl PhysicalPlan {
                 }
                 desc
             }
-            PhysicalPlan::TableFunction { name, alias, .. } => {
+            PhysicalPlan::TableFunction {
+                name,
+                alias,
+                args,
+                filter,
+                ..
+            } => {
+                // Print the arguments AS WRITTEN, including named ones, and
+                // whether a residual filter sits above.
+                //
+                // `workspaces` decides which corpus a search covers, and until
+                // it was an explicit argument the answer was the ABSENCE of a
+                // filter -- which is exactly why a repo-wide search stayed
+                // unnoticed. The RESOLVED corpus needs a storage read and so
+                // cannot be produced here; the executor logs it at INFO on every
+                // search (`search::emit::plan_search`).
+                let mut desc = format!("TableFunction: {}", name);
                 if let Some(alias_name) = alias {
-                    format!("TableFunction: {} AS {}", name, alias_name)
-                } else {
-                    format!("TableFunction: {}", name)
+                    desc.push_str(&format!(" AS {}", alias_name));
                 }
+                let rendered: Vec<String> = args
+                    .iter()
+                    .map(|arg| match &arg.name {
+                        Some(key) => format!("{} => {:?}", key, arg.value.expr),
+                        None => format!("{:?}", arg.value.expr),
+                    })
+                    .collect();
+                if !rendered.is_empty() {
+                    desc.push_str(&format!(" ({})", rendered.join(", ")));
+                }
+                if let Some(f) = filter {
+                    desc.push_str(&format!(" [residual: {:?}]", f.expr));
+                }
+                desc
             }
             PhysicalPlan::PrefixScan {
                 path_prefix, limit, ..
@@ -295,6 +323,7 @@ impl PhysicalPlan {
                 vector_column,
                 distance_metric,
                 k,
+                overfetch,
                 max_distance,
                 ..
             } => {
@@ -302,6 +331,12 @@ impl PhysicalPlan {
                     "VectorScan: table={}, column={}, k={}, metric={}",
                     table, vector_column, k, distance_metric
                 );
+                if *overfetch > 1 {
+                    // Only ever > 1 because a residual Filter sits above this
+                    // scan; surfacing it is what makes the scoping visible in
+                    // EXPLAIN instead of invisible in the results.
+                    desc.push_str(&format!(", fetch_k={}", k.saturating_mul(*overfetch)));
+                }
                 if let Some(threshold) = max_distance {
                     desc.push_str(&format!(", max_distance={:.2}", threshold));
                 }

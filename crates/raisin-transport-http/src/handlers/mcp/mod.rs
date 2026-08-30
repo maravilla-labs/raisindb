@@ -271,8 +271,15 @@ async fn dispatch(
         caller_auth.clone(),
         agent,
     ));
-    let search: Arc<dyn raisin_mcp::SearchProvider> =
-        Arc::new(HttpSearchProvider::new(state.clone(), tenant_id, repo));
+    // Same resolved context as the data tools and the function invoker. The
+    // search tool used to take none at all, so it answered with node ids, paths
+    // and types regardless of what the caller could read.
+    let search: Arc<dyn raisin_mcp::SearchProvider> = Arc::new(HttpSearchProvider::new(
+        state.clone(),
+        tenant_id,
+        repo,
+        caller_auth.clone(),
+    ));
 
     let services = AssemblyServices {
         backend: backend.clone(),

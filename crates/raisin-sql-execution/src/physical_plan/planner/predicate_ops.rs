@@ -7,13 +7,20 @@ use super::{CanonicalPredicate, ComparisonOp, Expr, Literal, PhysicalPlanner, Ty
 use raisin_sql::analyzer::{BinaryOperator, DataType};
 
 impl PhysicalPlanner {
-    /// Extract full-text search predicate if present
-    pub(super) fn extract_fulltext_predicate(
+    /// Locate a full-text search predicate.
+    ///
+    /// Returns `(position, language, query, limit)`. The POSITION is part of the
+    /// answer on purpose: the caller must strip exactly this predicate from the
+    /// residual filter and keep every other one. A separate
+    /// `remove_fulltext_predicate` would be a second matcher free to drift from
+    /// this one, and the two disagreeing is how a predicate ends up applied
+    /// nowhere.
+    pub(super) fn find_fulltext_predicate(
         &self,
         predicates: &[CanonicalPredicate],
-    ) -> Option<(String, String, usize)> {
+    ) -> Option<(usize, String, String, usize)> {
         // Look for FULLTEXT_MATCH(query, language) function call in predicates
-        for pred in predicates {
+        for (position, pred) in predicates.iter().enumerate() {
             if let CanonicalPredicate::Other(expr) = pred {
                 // Check if this is a FULLTEXT_MATCH function call
                 if let Expr::Function { name, args, .. } = &expr.expr {
@@ -33,7 +40,7 @@ impl PhysicalPlanner {
                         };
 
                         if let (Some(q), Some(lang)) = (query, language) {
-                            return Some((lang, q, 1000)); // Default limit
+                            return Some((position, lang, q, 1000)); // Default limit
                         }
                     }
                 }
@@ -287,105 +294,26 @@ impl PhysicalPlanner {
         result
     }
 
-    /// Check if a predicate is simple enough for VectorScan optimization
+    /// Whether a VectorScan itself GUARANTEES this predicate, so it may be
+    /// dropped from the residual filter.
     ///
-    /// Simple predicates are those that can be efficiently applied BEFORE
-    /// vector search in the HNSW index, or are trivial checks. Complex
-    /// predicates require full scan + embedding population.
+    /// Exactly one thing qualifies: `embedding IS NOT NULL`. Membership of the
+    /// HNSW index IS that predicate — a node with no vector is not a candidate.
     ///
-    /// Simple predicates:
-    /// - `embedding IS NOT NULL` - Checks if node has embedding
-    /// - `path = 'constant'` - Exact path match
-    /// - `id = 'constant'` - Exact ID match
-    /// - Distance threshold: `distance_expr < 0.5` (handled by VectorScan)
-    ///
-    /// Complex predicates (NOT simple):
-    /// - `path STARTS WITH '/docs'` - Requires prefix scan
-    /// - `properties->>'status' = 'published'` - Requires property lookup
-    /// - `DEPTH(path) > 2` - Requires computation
-    /// - Anything with OR, NOT, or complex expressions
-    pub(super) fn is_simple_predicate(&self, expr: &TypedExpr) -> bool {
-        match &expr.expr {
-            // IS NULL / IS NOT NULL on embedding column
-            Expr::IsNull { expr } | Expr::IsNotNull { expr } => {
-                matches!(
-                    &expr.expr,
-                    Expr::Column { column, .. } if column == "embedding"
-                )
-            }
-
-            // Simple equality: column = literal
-            Expr::BinaryOp {
-                left,
-                op: BinaryOperator::Eq,
-                right,
-            } => {
-                // Left must be a simple column reference
-                let is_simple_column = matches!(
-                    &left.expr,
-                    Expr::Column { column, .. } if matches!(column.as_str(), "id" | "path")
-                );
-
-                // Right must be a literal (not an expression)
-                let is_literal = matches!(&right.expr, Expr::Literal(_));
-
-                is_simple_column && is_literal
-            }
-
-            // Distance threshold comparisons: distance_expr < literal or column_alias < literal
-            // These are handled by VectorScan's max_distance parameter
-            Expr::BinaryOp {
-                left,
-                op: BinaryOperator::Lt | BinaryOperator::LtEq,
-                right,
-            } => {
-                let is_numeric_literal = Self::is_numeric_literal(right);
-                let is_distance_expr = Self::is_vector_distance_expr(left)
-                    || matches!(&left.expr, Expr::Column { .. });
-                is_distance_expr && is_numeric_literal
-            }
-
-            // Also handle reversed form: literal > distance_expr
-            Expr::BinaryOp {
-                left,
-                op: BinaryOperator::Gt | BinaryOperator::GtEq,
-                right,
-            } => {
-                let is_numeric_literal = Self::is_numeric_literal(left);
-                let is_distance_expr = Self::is_vector_distance_expr(right)
-                    || matches!(&right.expr, Expr::Column { .. });
-                is_distance_expr && is_numeric_literal
-            }
-
-            // Everything else is complex
-            _ => false,
-        }
-    }
-
-    /// Check if an expression is a vector distance operator or function
-    fn is_vector_distance_expr(expr: &TypedExpr) -> bool {
-        match &expr.expr {
-            Expr::BinaryOp { op, .. } => matches!(
-                op,
-                BinaryOperator::VectorL2Distance
-                    | BinaryOperator::VectorCosineDistance
-                    | BinaryOperator::VectorInnerProduct
-            ),
-            Expr::Function { name, .. } => matches!(
-                name.to_uppercase().as_str(),
-                "VECTOR_L2_DISTANCE" | "VECTOR_COSINE_DISTANCE" | "VECTOR_INNER_PRODUCT"
-            ),
-            _ => false,
-        }
-    }
-
-    /// Check if an expression is a numeric literal
-    fn is_numeric_literal(expr: &TypedExpr) -> bool {
+    /// Nothing else belongs here. The distance threshold is handled separately
+    /// (it becomes `max_distance`), and every other conjunct — `path = ...`,
+    /// `node_type = ...`, a property equality — is applied as a residual filter
+    /// above the scan. This used to be an `is_simple_predicate` gate that
+    /// answered "can we use a VectorScan at all", which made a *performance*
+    /// judgement decide *correctness*: a predicate it called simple was then
+    /// consumed by nobody and silently vanished.
+    pub(super) fn vector_scan_guarantees(expr: &TypedExpr) -> bool {
         matches!(
             &expr.expr,
-            Expr::Literal(Literal::Double(_))
-                | Expr::Literal(Literal::Int(_))
-                | Expr::Literal(Literal::BigInt(_))
+            Expr::IsNotNull { expr } if matches!(
+                &expr.expr,
+                Expr::Column { column, .. } if column == "embedding"
+            )
         )
     }
 }

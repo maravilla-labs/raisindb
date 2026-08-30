@@ -73,6 +73,7 @@ impl PhysicalPlanner {
                 branch_override,
                 max_revision,
                 locales: _,
+                filter,
             } => self.plan_table_function(
                 name,
                 alias,
@@ -81,6 +82,7 @@ impl PhysicalPlanner {
                 workspace,
                 branch_override,
                 *max_revision,
+                filter,
             ),
 
             LogicalPlan::Filter { input, predicate } => {

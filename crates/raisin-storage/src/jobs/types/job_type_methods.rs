@@ -323,12 +323,11 @@ impl JobType {
                 format!("huggingface_model_delete:{}", model_id)
             }
             Self::AssetProcessing { node_id, options } => format!(
-                "asset_processing:{}:hash={}:pdf={}:img={}:cap={}",
+                "asset_processing:{}:hash={}:pdf={}:img={}",
                 node_id,
                 options.content_hash.as_deref().unwrap_or("none"),
                 options.extract_pdf_text,
-                options.generate_image_embedding,
-                options.generate_image_caption
+                options.generate_image_embedding
             ),
             Self::VirtualMountSyncCheck { tenant_id, repo_id } => format!(
                 "virtual_mount_sync_check:{}:{}",

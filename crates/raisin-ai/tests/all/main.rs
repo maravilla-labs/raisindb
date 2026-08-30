@@ -22,3 +22,4 @@ mod fixtures;
 mod blip_integration;
 mod clip_integration;
 mod moondream_integration;
+mod vision_integration;

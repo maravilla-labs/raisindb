@@ -98,6 +98,52 @@ pub struct TenantEmbeddingConfig {
     /// Used by Ollama (defaults to http://localhost:11434 if not set).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+
+    /// Scalar precision the HNSW index stores vectors at.
+    ///
+    /// The admin console has offered this control since it shipped
+    /// (`packages/admin-console/src/api/ai.ts` defines the enum, and
+    /// `TenantEmbeddingSettings.tsx` renders a live `<select>` and sends the
+    /// value in its save payload) — and until this field existed the Rust side
+    /// had nowhere to put it, so it was dropped on the way in and every index
+    /// was F32 regardless. A shipped control that silently does nothing is worse
+    /// than no control.
+    ///
+    /// Changing it requires `REBUILD VECTOR INDEX`: the scalar kind is baked
+    /// into the usearch graph at construction and is persisted in the `.hnsw.meta`
+    /// sidecar, so an existing index keeps the precision it was built with.
+    #[serde(default)]
+    pub quantization: EmbeddingQuantization,
+}
+
+/// Scalar precision an HNSW index stores its vectors at.
+///
+/// Variant names are the wire format the admin console already sends
+/// (`'F32' | 'F16' | 'Int8'`), so the two cannot disagree.
+///
+/// `Int8` is a configuration change only: usearch casts the caller's `&[f32]`
+/// into the index's scalar kind on insert and `scalar_words() == dimensions` for
+/// f32/f16/i8, so no signature changes. The f32→i8 cast L2-normalises and scales
+/// to ±127 and assumes a dot-product-like metric — which holds here because
+/// vectors are normalised on the way in and the metric is pinned in the same
+/// `IndexSpec` the quantization comes from.
+///
+/// There is deliberately no `B1` (binary / Hamming) variant: `scalar_words()`
+/// for b1 is `dimensions / 8`, so an `&[f32]` is rejected at the usearch binding
+/// boundary. It needs `add_b1x8` / `search_b1x8` / `filtered_search_b1x8`,
+/// caller-side bit packing, and a distance scale under which
+/// `DEFAULT_MAX_DISTANCE = 0.6` means something. Deferred, not forgotten.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum EmbeddingQuantization {
+    /// 32-bit float. Full precision; ~4 bytes per dimension per vector.
+    #[default]
+    F32,
+    /// 16-bit float. ~50% payload reduction.
+    F16,
+    /// 8-bit signed integer. ~75% payload reduction — a 1024-wide, 50k-vector
+    /// text index goes from ~222 MB to ~68 MB against the engine's shared
+    /// 512 MB budget.
+    Int8,
 }
 
 /// Supported embedding providers.
@@ -114,6 +160,35 @@ pub enum EmbeddingProvider {
 
     /// HuggingFace local inference (requires 'candle' feature)
     HuggingFace,
+}
+
+impl EmbeddingProvider {
+    /// Whether this provider requires an API key, given where it points.
+    ///
+    /// Asked in exactly ONE place — [`crate::resolve::resolve_settings`] — so a
+    /// keyless provider is exempt everywhere or nowhere. Before this, the HTTP
+    /// "test connection" endpoint hard-coded `matches!(provider, Ollama)` while
+    /// the embedding job handler demanded a key unconditionally: the test went
+    /// green with 768 dimensions for a config under which every job then failed
+    /// with *No API key configured for embeddings*, and nothing surfaced it.
+    ///
+    /// `base_url` is part of the question, not decoration. `OpenAI` here means
+    /// "speaks OpenAI's `/embeddings` shape", and a self-hosted server that
+    /// speaks it (vLLM, LocalAI, a gateway) authenticates however it likes —
+    /// usually not at all. A key is therefore only *required* when the request
+    /// is actually going to the vendor's own host. Demanding one regardless is
+    /// what forced `SET API_KEY='unused-but-required'` into self-hosted configs.
+    ///
+    /// Mirrors [`raisin_ai::config::AIProvider::requires_api_key`], which is
+    /// what the unified-provider branch asks of its own provider kinds.
+    pub fn requires_api_key(&self, base_url: Option<&str>) -> bool {
+        match self {
+            // Local: nothing to authenticate against, ever.
+            EmbeddingProvider::Ollama | EmbeddingProvider::HuggingFace => false,
+            // Vendor-hosted unless pointed somewhere else.
+            EmbeddingProvider::OpenAI | EmbeddingProvider::Claude => base_url.is_none(),
+        }
+    }
 }
 
 /// Distance metric for embedding similarity search.
@@ -160,6 +235,7 @@ impl TenantEmbeddingConfig {
             default_max_distance: None,
             distance_metric: EmbeddingDistanceMetric::default(),
             base_url: None,
+            quantization: EmbeddingQuantization::default(),
         }
     }
 

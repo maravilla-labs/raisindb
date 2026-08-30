@@ -356,8 +356,13 @@ pub enum ReplicationMessage {
 
     /// Response with list of HNSW indexes
     HnswIndexList {
-        /// List of (tenant_id, repo_id, branch) tuples
-        indexes: Vec<(String, String, String)>,
+        /// List of (tenant_id, repo_id, branch, partition) tuples.
+        ///
+        /// The partition — `{embedder_hash}{kind}`, the same two segments the
+        /// `cf::EMBEDDINGS` key carries — is part of an index's identity. A
+        /// branch holds one index per embedding space, so a request naming only
+        /// the branch cannot say which one it means.
+        indexes: Vec<(String, String, String, String)>,
     },
 
     /// Request HNSW vector index
@@ -370,9 +375,18 @@ pub enum ReplicationMessage {
 
         /// Branch name
         branch: String,
+
+        /// Partition token identifying the embedding space
+        partition: String,
     },
 
-    /// HNSW index data (entire file, typically small)
+    /// HNSW index data: the graph file AND its `.hnsw.meta` sidecar, bundled.
+    ///
+    /// `data` is a BUNDLE, not a bare `.hnsw`. It used to be the graph file
+    /// alone, and the receiving node — seeing no sidecar — routed it into the
+    /// old-bincode-format migration, which fails; the transferred index was
+    /// destroyed and the receiver's own copy had already been renamed away to
+    /// make room. See `raisin_rocksdb::hnsw_transfer::bundle`.
     HnswIndexData {
         /// Tenant ID
         tenant_id: String,
@@ -383,10 +397,13 @@ pub enum ReplicationMessage {
         /// Branch name
         branch: String,
 
-        /// Complete .hnsw file data
+        /// Partition token identifying the embedding space
+        partition: String,
+
+        /// Bundled index payload (graph + sidecar)
         data: Vec<u8>,
 
-        /// CRC32 checksum of entire file
+        /// CRC32 checksum of the whole bundle
         crc32: u32,
     },
 

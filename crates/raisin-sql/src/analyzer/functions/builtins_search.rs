@@ -40,6 +40,31 @@ pub(super) fn register(registry: &mut FunctionRegistry) {
         category: FunctionCategory::Vector,
     });
 
+    // VECTOR_OF(node_ref) / VECTOR_OF(node_ref, chunk_index)
+    //
+    // A node's OWN STORED vector, read out of `cf::EMBEDDINGS` rather than
+    // recomputed. It is only meaningful as argument 1 of `KNN`, which is where
+    // it is interpreted (`search::args::parse_query_input`); it is registered
+    // here so the analyzer accepts the call at all, exactly as `EMBEDDING` is.
+    //
+    // Two overloads, resolved by arity: without a chunk index the source must
+    // have exactly ONE stored vector, and a chunked document is a loud error
+    // naming its chunk count rather than a silent chunk 0.
+    registry.register(FunctionSignature {
+        name: "VECTOR_OF".into(),
+        params: vec![DataType::Text],
+        return_type: DataType::Unknown, // A Vector(dims) only the store knows.
+        is_deterministic: false,        // Reads the current stored vector.
+        category: FunctionCategory::Vector,
+    });
+    registry.register(FunctionSignature {
+        name: "VECTOR_OF".into(),
+        params: vec![DataType::Text, DataType::BigInt],
+        return_type: DataType::Unknown,
+        is_deterministic: false,
+        category: FunctionCategory::Vector,
+    });
+
     // VECTOR_L2_DISTANCE(vec1, vec2) - Euclidean distance (L2)
     registry.register(FunctionSignature {
         name: "VECTOR_L2_DISTANCE".into(),

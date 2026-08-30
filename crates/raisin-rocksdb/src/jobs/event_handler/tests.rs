@@ -278,3 +278,148 @@ async fn test_handle_node_delete_uses_delete_operation() {
         .any(|job| matches!(&job.job_type, JobType::TriggerEvaluation { .. }));
     assert!(has_trigger, "Expected TriggerEvaluation job");
 }
+
+/// Seed a real node so `get_index_settings` can resolve it (no NodeType is
+/// registered, which is the "treat as indexable" default).
+async fn seed_node(storage: &Arc<crate::RocksDBStorage>) {
+    use raisin_storage::BranchRepository;
+    storage
+        .branches_impl()
+        .create_branch(
+            "tenant1", "repo1", "main", "Initial", None, None, false, false,
+        )
+        .await
+        .unwrap();
+
+    let op = storage
+        .operation_capture()
+        .capture_create_node(
+            "tenant1".to_string(),
+            "repo1".to_string(),
+            "main".to_string(),
+            "node1".to_string(),
+            "Test Node".to_string(),
+            "Document".to_string(),
+            None,
+            None,
+            "order1".to_string(),
+            serde_json::json!({"title": "Test content"}),
+            None,
+            None,
+            "/Test Node".to_string(),
+            "test-actor".to_string(),
+        )
+        .await
+        .unwrap();
+
+    let revision = op
+        .revision
+        .unwrap_or_else(|| raisin_hlc::HLC::new(op.op_seq, 0));
+    let mut op_with_revision = op.clone();
+    op_with_revision.revision = Some(revision);
+
+    let applicator = crate::replication::OperationApplicator::new(
+        storage.db().clone(),
+        storage.event_bus().clone(),
+        Arc::new(storage.branches_impl().clone()),
+    );
+    applicator.apply_operation(&op_with_revision).await.unwrap();
+
+    storage
+        .branches_impl()
+        .update_head("tenant1", "repo1", "main", revision)
+        .await
+        .unwrap();
+}
+
+/// A REPLICATED node change must schedule vector embedding, exactly as it
+/// schedules fulltext.
+///
+/// Nothing replicates a vector: no `OpType` in `raisin-replication` carries one
+/// and `store_embedding` is a raw `put_cf` outside operation capture. A replica
+/// that skipped this arm therefore had fulltext but no vectors, and a hybrid
+/// query — which fuses the two legs — degraded to fulltext-only WITHOUT
+/// erroring. That silence is why this needs a test and not just a comment.
+#[tokio::test]
+async fn test_remote_node_change_still_enqueues_embedding_job() {
+    let (_temp_dir, storage) = setup_test_storage();
+    let job_registry = Arc::new(JobRegistry::new());
+    let job_data_store = Arc::new(crate::jobs::JobDataStore::new(storage.db().clone()));
+    let dispatcher = create_test_dispatcher();
+    let handler = UnifiedJobEventHandler::new(
+        storage.clone(),
+        job_registry.clone(),
+        job_data_store,
+        dispatcher,
+        storage.processing_rules_repository(),
+    );
+
+    seed_node(&storage).await;
+
+    let mut config = TenantEmbeddingConfig::new("tenant1".to_string());
+    config.enabled = true;
+    storage
+        .tenant_embedding_config_repository()
+        .set_config(&config)
+        .unwrap();
+
+    let mut metadata = std::collections::HashMap::new();
+    metadata.insert(
+        "source".to_string(),
+        serde_json::Value::String("replication".to_string()),
+    );
+
+    let node_event = NodeEvent {
+        tenant_id: "tenant1".to_string(),
+        repository_id: "repo1".to_string(),
+        workspace_id: "default".to_string(),
+        branch: "main".to_string(),
+        revision: raisin_hlc::HLC::new(1, 0),
+        node_id: "node1".to_string(),
+        node_type: Some("Document".to_string()),
+        kind: NodeEventKind::Created,
+        path: None,
+        metadata: Some(metadata),
+    };
+
+    assert!(
+        UnifiedJobEventHandler::is_remote_event(&node_event),
+        "test event must look remote or it proves nothing"
+    );
+
+    handler.handle_node_change(&node_event).await.unwrap();
+
+    let jobs = job_registry.list_jobs().await;
+
+    let has_fulltext = jobs.iter().any(|job| {
+        matches!(
+            &job.job_type,
+            JobType::FulltextIndex { operation, .. } if *operation == IndexOperation::AddOrUpdate
+        )
+    });
+    assert!(
+        has_fulltext,
+        "replica must index fulltext locally (existing behaviour)"
+    );
+
+    let has_embedding = jobs
+        .iter()
+        .any(|job| matches!(&job.job_type, JobType::EmbeddingGenerate { .. }));
+    assert!(
+        has_embedding,
+        "replica must embed locally too; nothing replicates the vector. Jobs seen: {:?}",
+        jobs.iter()
+            .map(|j| j.job_type.to_string())
+            .collect::<Vec<_>>()
+    );
+
+    // The local-only arms must stay local: a replicated edit re-firing triggers
+    // on every node is a different and much worse bug.
+    let has_trigger = jobs
+        .iter()
+        .any(|job| matches!(&job.job_type, JobType::TriggerEvaluation { .. }));
+    assert!(
+        !has_trigger,
+        "trigger evaluation must remain LOCAL-only for replicated events"
+    );
+}
