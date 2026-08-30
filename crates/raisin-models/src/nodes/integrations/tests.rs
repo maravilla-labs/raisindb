@@ -279,3 +279,79 @@ fn secret_fields_are_read_from_meta() {
     let props = vec![prop("host", false), prop("password", true)];
     assert_eq!(secret_field_names(&props), vec!["password".to_string()]);
 }
+
+// ---------------------------------------------------------------------------
+// Capabilities
+// ---------------------------------------------------------------------------
+
+/// Every declared field must survive the adapter -> struct -> cached-blob round
+/// trip, because that blob is the ONE `capabilities` property on the
+/// `raisin:Integration` node and whatever writes it last wins field-for-field.
+///
+/// This is the regression from the duplicate-struct era: the HTTP handler's
+/// copy of `Capabilities` had drifted by three keys, so a "Test connection"
+/// click parsed the adapter's answer into the narrower type and wrote the
+/// result back — stripping `accepts_content`, `move_fields` and
+/// `submit_unavailable_reason` from a value nobody had changed, and hiding the
+/// submit diagnosis from the console. There is now one declaration; this test
+/// guards the serde contract that made the drift destructive.
+#[test]
+fn capabilities_round_trip_keeps_every_declared_key() {
+    let answer = json!({
+        "can_read": true,
+        "can_write": true,
+        "can_create_folders": true,
+        "supports_changes": true,
+        "supports_webhooks": true,
+        "supports_search": true,
+        "supports_push": true,
+        "supports_browse": true,
+        "default_ttl": 86_400,
+        "max_file_size": 8_388_608,
+        "can_create": true,
+        "can_update": true,
+        "can_delete": true,
+        "can_submit": false,
+        "accepts_content": true,
+        "mutable_fields": ["unread", "folder"],
+        "move_fields": ["folder"],
+        "default_delete_policy": "trash",
+        "default_move_policy": "push",
+        "supports_trash": true,
+        "supports_idempotency_key": true,
+        "submit_unavailable_reason": "no email provider configured for this tenant",
+    });
+    let caps = Capabilities::from_adapter_value(&answer).expect("decodable");
+    let cached = serde_json::to_value(&caps).expect("encodable");
+
+    let want = answer.as_object().expect("object");
+    let got = cached.as_object().expect("object");
+    for (key, value) in want {
+        assert_eq!(
+            got.get(key),
+            Some(value),
+            "key `{key}` was dropped or changed"
+        );
+    }
+    assert_eq!(
+        got.len(),
+        want.len(),
+        "the struct declares a field this test does not exercise: {got:?}"
+    );
+}
+
+/// A null / non-object answer is not decodable; the caller substitutes the
+/// read-only fallback rather than inventing capabilities.
+#[test]
+fn capabilities_from_a_null_answer_is_none_and_the_fallback_is_read_only() {
+    assert!(Capabilities::from_adapter_value(&Value::Null).is_none());
+    assert!(Capabilities::from_adapter_value(&json!("nope")).is_none());
+
+    let fb = Capabilities::fallback();
+    assert!(fb.can_read);
+    assert!(!fb.can_write);
+    assert!(!fb.can_submit);
+    assert!(!fb.accepts_content);
+    assert!(fb.move_fields.is_empty());
+    assert!(fb.submit_unavailable_reason.is_none());
+}

@@ -9,24 +9,15 @@ use serde_json::{json, Value};
 
 use super::{Capabilities, Probe, PROBE_LIMIT};
 
-impl Capabilities {
-    /// Conservative fallback when the adapter has no usable `capabilities`
-    /// operation: assume read-only and nothing else.
-    pub(super) fn fallback() -> Self {
-        Self {
-            can_read: true,
-            ..Self::default()
-        }
-    }
-
-    /// Parse an adapter's `capabilities` return value, falling back when it is
-    /// null/absent or not a decodable capabilities object.
-    pub(super) fn from_value(value: &Value) -> Self {
-        if value.is_null() {
-            return Self::fallback();
-        }
-        serde_json::from_value(value.clone()).unwrap_or_else(|_| Self::fallback())
-    }
+/// Parse an adapter's `capabilities` return value, falling back to read-only
+/// when it is null/absent or not a decodable capabilities object.
+///
+/// A free function rather than an inherent method because [`Capabilities`] is
+/// now owned by `raisin-models` — the whole point of the move. The parse and
+/// the fallback are the engine's own, so the panel can no longer disagree with
+/// the sync about what an adapter answered.
+pub(super) fn capabilities_from_value(value: &Value) -> Capabilities {
+    Capabilities::from_adapter_value(value).unwrap_or_else(Capabilities::fallback)
 }
 
 /// Build a [`Probe`] from a `list` result: item **names** only, capped. URLs
@@ -384,10 +375,43 @@ mod tests {
 
     #[test]
     fn capabilities_fallback_is_read_only() {
-        let caps = Capabilities::from_value(&Value::Null);
+        let caps = capabilities_from_value(&Value::Null);
         assert!(caps.can_read);
         assert!(!caps.can_write);
         assert!(!caps.supports_changes);
+    }
+
+    /// The panel must surface the keys the sync engine carries, not a subset.
+    ///
+    /// This is the regression: the handler used to deserialize into its own
+    /// copy of `Capabilities`, which lacked `accepts_content`, `move_fields`
+    /// and `submit_unavailable_reason`, so an operator testing an IMAP outbox
+    /// saw no reason for `can_submit: false`, and the cached blob lost those
+    /// keys on every click.
+    #[test]
+    fn probe_keeps_the_late_added_capability_keys() {
+        let caps = capabilities_from_value(&json!({
+            "can_read": true,
+            "can_write": true,
+            "accepts_content": true,
+            "move_fields": ["folder"],
+            "submit_unavailable_reason": "email provider disabled for this tenant",
+        }));
+        assert!(caps.accepts_content);
+        assert_eq!(caps.move_fields, vec!["folder".to_string()]);
+        assert_eq!(
+            caps.submit_unavailable_reason.as_deref(),
+            Some("email provider disabled for this tenant")
+        );
+        // And they survive the round trip into the cached `capabilities` blob,
+        // which is the write that used to strip them.
+        let cached = serde_json::to_value(&caps).expect("encode");
+        assert_eq!(cached["accepts_content"], json!(true));
+        assert_eq!(cached["move_fields"], json!(["folder"]));
+        assert_eq!(
+            cached["submit_unavailable_reason"],
+            json!("email provider disabled for this tenant")
+        );
     }
 
     /// An integration node with no config of its own.

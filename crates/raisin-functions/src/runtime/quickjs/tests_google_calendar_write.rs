@@ -283,10 +283,17 @@ async fn a_google_calendar_mount_now_declares_the_full_mirror_surface() {
     assert_eq!(caps["supports_trash"], json!(false));
     assert_eq!(caps["default_delete_policy"], json!("detach"));
 
-    // No `can_submit`: an RSVP through Google is a PATCH of the caller's own
-    // attendee row, not a distinct action endpoint, and this adapter implements
-    // no command surface.
-    assert!(caps.get("can_submit").is_none(), "{caps:#?}");
+    // `can_submit` IS declared now, and the mechanism is worth stating because
+    // it is not Graph's. Google exposes no accept/decline endpoint: an RSVP is
+    // `events.patch` of the caller's own attendee row. It stays a COMMAND
+    // rather than a property edit for the same reason it is one on Graph —
+    // responding notifies the organizer, and an irreversible externally visible
+    // effect must not hide behind a field change.
+    //
+    // The adapter's patch must read-modify-write the whole attendees array:
+    // Google's array fields overwrite completely, so a patch carrying only the
+    // caller's row would DELETE every other guest from the meeting.
+    assert_eq!(caps["can_submit"], json!(true), "{caps:#?}");
 }
 
 /// NOBODY GETS EMAILED BY DEFAULT.

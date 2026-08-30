@@ -11,7 +11,9 @@
 use raisin_models::nodes::Node;
 use serde_json::{json, Value};
 
-use super::support::{adapter_error_code, error_is_auth_expired, probe_from_list, sanitize};
+use super::support::{
+    adapter_error_code, capabilities_from_value, error_is_auth_expired, probe_from_list, sanitize,
+};
 use super::{Capabilities, ProbeOutcome, PROBE_LIMIT};
 use crate::error::ApiError;
 use crate::handlers::integrations::adapter_invoke::{invoke_adapter, AdapterResult};
@@ -44,7 +46,7 @@ pub(super) async fn run_probe(
     )
     .await?
     {
-        AdapterResult::Ok(value) => Capabilities::from_value(&value),
+        AdapterResult::Ok(value) => capabilities_from_value(&value),
         AdapterResult::Failed(msg) => {
             if error_is_auth_expired(&msg) {
                 return Ok(expired(Some(Capabilities::fallback())));

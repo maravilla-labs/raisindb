@@ -72,26 +72,42 @@ pub(super) fn settle_resume_point(
 /// Reconcile deletes: remove mount-owned nodes not seen this pass.
 ///
 /// "Not seen" only means "deleted upstream" when THIS RUN saw everything.
-/// Three ways that is false, each of which deletes real content:
+/// Four ways that is false, each of which deletes real content:
 ///
-///  1. The walk hit `max_items_per_sync` (default 500) and stopped early. A
+///  1. The mount's `list` is not authoritative for its own content, so a walk
+///     that completed perfectly still enumerated only part of what the mount
+///     owns. That cannot be inferred — the engine is domain-blind — so the
+///     mount states it with `sync_config.reconcile_deletes: false`. See that
+///     field for the IMAP incident that forced it.
+///
+///  2. The walk hit `max_items_per_sync` (default 500) and stopped early. A
 ///     mailbox larger than the cap would have every message past item 500
 ///     deleted and recreated on every full sync — churn, a trigger storm,
 ///     and destroyed local edits, forever.
-///  2. The walk RESUMED a chunked backfill. `seen` then holds only the final
+///  3. The walk RESUMED a chunked backfill. `seen` then holds only the final
 ///     chunk, so reconciling would delete everything the earlier chunks
 ///     imported — the whole point of the backfill. `seen` is per-run and
 ///     cannot be accumulated across runs without persisting every external
 ///     id, so a resumed pass simply never reconciles.
-///  3. The provider answered with an empty listing (a silent hiccup, an
+///  4. The provider answered with an empty listing (a silent hiccup, an
 ///     emptied-then-refilled folder, a permissions change that reads as
 ///     "no items" rather than an error). Deleting the entire mount subtree
 ///     on the strength of one empty response is never the right trade.
 ///
-/// The safe action in all three is to skip reconciliation: a stale extra node
+/// The safe action in all four is to skip reconciliation: a stale extra node
 /// is recoverable on the next clean pass, deleted content is not. Deletes
-/// therefore only ever run on a single-run, start-to-finish walk — and
-/// upstream deletions still propagate promptly through the delta path.
+/// therefore only ever run on a single-run, start-to-finish walk.
+///
+/// Cases 2-4 are TRANSIENT — the next unhindered walk reconciles what this one
+/// could not, and upstream deletions reach the mount promptly through the delta
+/// path meanwhile. Case 1 is PERMANENT and must not be read as the same trade:
+/// a mount that turns `reconcile_deletes` off has no walk-based pruning ever
+/// again, and its delta feed may not carry deletions either. The IMAP adapter
+/// is exactly that shape — `opGetChanges` emits `type: "created"` items only —
+/// so on such a mount an upstream deletion is never reflected at all, and
+/// stale nodes are aged out by `sync_config.ephemeral` / `ttl_seconds` or not
+/// at all. That is the cost of the field, and it is the smaller one: the
+/// alternative was deleting every live message on a forced full run.
 pub(super) async fn reconcile_deletes(
     ctx: &SyncCtx<'_>,
     batcher: &mut SyncBatcher<'_>,
@@ -106,10 +122,25 @@ pub(super) async fn reconcile_deletes(
     // external ids it is actually going to remove, which is normally none.
     let existing_len = batcher.virtual_nodes_iter().count();
 
-    // A stopped walk joins the same guard: it saw only part of the provider, so
-    // `seen` cannot distinguish "deleted upstream" from "not reached before the
-    // operator stopped us". Reconciling on it would delete real content.
-    if flags.truncated || flags.resuming || flags.stopped {
+    if !ctx.mount.sync_config.reconcile_deletes {
+        // The mount has declared that its `list` is not authoritative for its
+        // own content, so `seen` is not a picture of everything that should
+        // exist. IMAP is why: `opList` enumerates MAILBOXES only and messages
+        // arrive through `get_changes`, so a forced full run staged every
+        // message node for delete and the delta path — `fetchSince` the highest
+        // uid — never brought them back.
+        tracing::info!(
+            mount_id = %ctx.mount.mount_id,
+            existing = existing_len,
+            seen = seen.len(),
+            "skipping reconcile deletes: sync_config.reconcile_deletes is off, so this mount's \
+             full walk is not authoritative for its own content"
+        );
+    // A stopped walk joins the same guard as a truncated or resumed one: it saw
+    // only part of the provider, so `seen` cannot distinguish "deleted upstream"
+    // from "not reached before the operator stopped us". Reconciling on it would
+    // delete real content.
+    } else if flags.truncated || flags.resuming || flags.stopped {
         tracing::info!(
             mount_id = %ctx.mount.mount_id,
             processed,
