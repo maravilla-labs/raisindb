@@ -82,7 +82,12 @@ function handler(input) {
     is_draft: flags.indexOf("draft") !== -1,
     has_attachments: Array.isArray(meta.attachments) && meta.attachments.length > 0,
     size: item.size_bytes != null ? item.size_bytes : null,
-    folder: mount.remote_root || meta.mailbox || null,
+    // folder_path FIRST, and only it is new. A tree mount spans N mailboxes, so
+    // mount.remote_root — a mount-level constant — would label every message in
+    // the tree with the mount root. It is empty for a message in the root
+    // mailbox and absent in folder mode, both of which fall through to exactly
+    // the value this line produced before, so no existing mount re-writes.
+    folder: meta.folder_path || mount.remote_root || meta.mailbox || null,
     provider: "imap",
     mime_type: item.mime_type || "message/rfc822",
     // Provider-specific passthrough is preserved verbatim.

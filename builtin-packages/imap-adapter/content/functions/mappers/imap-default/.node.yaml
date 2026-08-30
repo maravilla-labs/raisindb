@@ -11,7 +11,10 @@ properties:
   entry_file: index.js:handler
   execution_mode: Async
   enabled: true
-  version: 1
+  # 2: `folder` comes from the item's own metadata.folder_path first. A tree
+  #    mount spans N mailboxes, and mount.remote_root — a mount-level constant —
+  #    labelled every message in the tree with the mount root.
+  version: 2
   resource_limits:
     timeout_ms: 5000
     max_memory_bytes: 16777216

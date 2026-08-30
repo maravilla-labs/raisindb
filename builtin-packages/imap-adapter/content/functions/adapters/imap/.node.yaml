@@ -22,7 +22,21 @@ properties:
   enabled: true
   # 2: documents, at opList, that a forced FULL reconcile prunes every message
   #    node on this mount, because `list` enumerates mailboxes only.
-  version: 2
+  # 3: sync_config.folder_scope: "tree" — mailbox subtrees. The mount's mailbox
+  #    and everything under it, with the folder hierarchy materialised, a
+  #    per-mailbox cursor map inside the one opaque sync token, and a rotation
+  #    index so no mailbox starves. Mailbox identity and mailbox->path move to
+  #    mailboxes.js, which the walk and the delta BOTH call, because a path they
+  #    disagree about relocates every node under it on every run. Tree mode
+  #    changes the message id space (<mailbox>|<uidvalidity>.<uid>, the same
+  #    string the path leaf uses so a UIDVALIDITY reset moves BOTH), so a mount
+  #    switched to it re-imports once. get_changes also RE-ASSERTS the folder
+  #    set once per rotation round: the mount is ephemeral, the engine's TTL
+  #    sweep exempts nothing, and the walk that built the hierarchy runs only
+  #    once — so without that the folders were deleted a day after the backfill
+  #    and came back un-owned. Default is unchanged: absent or anything but the
+  #    literal "tree" is exactly today's single-mailbox behaviour.
+  version: 3
   resource_limits:
     timeout_ms: 180000
     max_memory_bytes: 67108864

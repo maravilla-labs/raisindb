@@ -46,7 +46,7 @@ function's `network_policy` (below), which the binding enforces on
 | `/adapters/imap` | `functions` | IMAP adapter function (`handler(input)`). |
 | `/mappers/imap-default` | `functions` | Default per-message mapping function. |
 | `/mappers/imap-outbox` | `functions` | Outbox mapper: `raisin:OutboundMail` → the message `submit` sends. |
-| `/integrations/imap` | `raisin:system` | Pre-configured `raisin:Integration` template, **disabled**. |
+| `/integrations/imap` | `raisin:system` | Pre-configured `raisin:Integration` template, **disabled**. Carries the `imap-mailbox` mount bundle (console: *Add bundle*), whose inbox is ephemeral with `reconcile_deletes: false` — see the warning below for why that flag is not optional. |
 
 ### Capabilities
 
@@ -270,31 +270,198 @@ keyed on the `UIDVALIDITY:UID` cursor. When the mailbox's `UIDVALIDITY` changes,
 adapter forces a full re-list from UID 0. Writes run under the `virtual-mount-sync`
 system actor.
 
-### ⚠️ Forcing a FULL resync prunes every message node
+### ⚠️ Forcing a FULL resync prunes every message node — unless the mount says so
 
 `list` on this adapter enumerates **mailboxes only** — messages arrive through
 `get_changes`, never through the walk. The engine's full reconcile does not know
 that: it treats everything the walk did not yield as stale and stages it for
-deletion. So a forced full run (the console's *Full resync* button, or a remap)
-deletes **every message node under the mount**, and they do not come back: the walk
-is followed by a delta baseline, which asks `get_changes` for a cursor and discards
-its items, so the next incremental pass resumes at the highest UID already seen and
-returns only NEW mail.
+deletion. `seen` holds mailbox ids, so it is non-empty and the engine's
+empty-reconcile guard does not fire either. A forced full run (the console's
+*Full resync* button, or a remap) therefore deletes **every message node under
+the mount**, and they do not come back: the walk is followed by a delta baseline,
+which asks `get_changes` for a cursor and discards its items, so the next
+incremental pass resumes at the highest UID already seen and returns only NEW
+mail.
 
-On the mount layout shown above this is survivable and is why the mount is written
-that way: `ephemeral: true` with a 24h TTL makes those nodes a one-day cache, and
-nothing is touched on the IMAP server. **On a non-ephemeral IMAP mount the message
-nodes are lost permanently.** Do not force a full resync on one.
+**The fix, and it is now shipped as a default:**
 
-The real fix is a contract addition — a mount whose `list` is not authoritative for
-its own content has no way to say so today (candidates: a
-`sync_config.reconcile_deletes: false` setting honoured by the engine's reconcile, or
-an adapter capability declaring that `list` enumerates containers only). Making
-`list` enumerate messages is **not** the fix: it re-opens the full-vs-delta
-`relative_path` divergence (a walk would nest a message under its mailbox,
-`INBOX/<subject>`, while `get_changes` emits the bare subject — or the UID when a
-message has none — so the same message has two paths and the engine remaps it on
-every disagreeing run) and costs a full mailbox fetch every run.
+```yaml
+sync_config:
+  reconcile_deletes: false   # this mount's `list` is not authoritative for its own content
+```
+
+The engine honours the key (default `true`); a mount that sets it false is never
+pruned by the walk. It was inert for this connector until it had a mount that set
+it — i.e. it protected only an operator who had read this section. The connector
+template now ships a **mount bundle** (`raisin:Integration.mount_bundles`, the
+admin console's *Add bundle*) whose inbox and outbox entries both set it, so a
+mount created the ordinary way is safe by default rather than by documentation.
+
+Ephemeral + `ttl_seconds` is still the layout to use: with no CONDSTORE and no
+EXPUNGE feed in the binding, a message deleted on the server is invisible to this
+adapter, and the TTL is the only thing that retires it. **On a non-ephemeral IMAP
+mount with `reconcile_deletes` left on, the message nodes are lost permanently.**
+
+Making `list` enumerate messages is **not** the fix: it costs a full mailbox
+fetch every run and re-opens the full-vs-delta `relative_path` divergence.
+
+## Subtrees: `sync_config.folder_scope`
+
+Default `folder` — one mailbox, exactly as before. `tree` syncs the mount's
+mailbox **and every mailbox beneath it**, materialising the folder hierarchy and
+filing each message under its own folder.
+
+```yaml
+sync_config:
+  mailbox: INBOX
+  folder_scope: tree
+  ephemeral: true
+  ttl_seconds: 86400
+  reconcile_deletes: false
+```
+
+What changes, and none of it is optional reading before switching a live mount:
+
+- **The message id space changes.** IMAP UID and UIDVALIDITY are per mailbox, so
+  the bare UID collapses `INBOX` uid 5 and `Archive` uid 5 onto one node. Tree
+  mode's `external_id` is `<mailboxPath>|<uidvalidity>.<uid>`. Switching an
+  existing mount from `folder` to `tree` therefore **re-imports it once**, with
+  new node ids and per-node history restarting — the same one-time cost the
+  ms-graph immutable-ids migration documents. The cursor carries the scope
+  family (`rsn-imaptree-1:`), so the flip re-baselines rather than resuming a
+  cursor that means something else.
+- **The path leaf becomes `<uidvalidity>.<uid>`, not the subject.** Folder mode
+  files a message at its bare subject; two messages sharing a subject collide
+  there, and the walk would place them somewhere else again. Tree mode files at
+  `<mailbox chain>/<uidvalidity>.<uid>`, which is what lets the walk's folder
+  path and the delta's message path agree byte for byte. The leaf is **the tail
+  of the `external_id`**, deliberately and by construction — one function emits
+  both. If it were the bare UID they would disagree the moment a mailbox's
+  **UIDVALIDITY changes** (restored from backup, server renumbering): the id
+  carries the uidvalidity and so becomes a new id, while the mailbox
+  re-enumerates from UID 0 and the paths repeat — a *new* node aimed at a path
+  the *old* node still occupies. `add_node` refuses that with a path conflict,
+  which the materializer treats as item-level: the message is **skipped and the
+  run still reports `ok`**, for every message, on every run, so a restored
+  mailbox silently stops importing. Nothing clears the old nodes either: a tree
+  mount runs `reconcile_deletes: false` and the walk never enumerates messages,
+  so only `ttl_seconds` retires them. With the uidvalidity in the leaf, a reset
+  instead costs one re-import of that mailbox at fresh paths, and the stale
+  nodes age out.
+  The separator is `.` and not `:` because the leaf is a path segment as well as
+  an id: name sanitisation keeps `[a-z0-9-_.]` and drops the rest, so `100:5`
+  and `10:05` would both reduce to `1005`. It is less readable than a subject,
+  deliberately; `path_template` cannot restore the old layout, because the
+  engine sanitises every placeholder value and would flatten a chain into one
+  segment.
+- **It costs one IMAP login per mailbox per poll.** Every binding call opens its
+  own TCP + TLS + LOGIN and logs out at the end. The adapter advances a bounded
+  slice of mailboxes per `get_changes` call (5 today) from a rotation index
+  persisted **inside the cursor**, so no mailbox starves — but the steady-state
+  cost is real. For Gmail specifically, Google documents **15** simultaneous
+  clients per account ([Add Gmail to another email
+  client](https://support.google.com/mail/answer/7126229) — past it you get
+  `Too many simultaneous connections`) and an IMAP download ceiling of **2500
+  MB/day** ([Gmail bandwidth
+  limits](https://knowledge.workspace.google.com/admin/gmail/gmail-bandwidth-limits),
+  which also states the limits may change without notice). A mount spanning
+  more than **50** mailboxes is refused with
+  `config_error`: mount a subtree instead. (A `raisin.imap.fetchSinceMulti`
+  binding — one session, N SELECTs — would raise the slice to 25; the adapter
+  uses it automatically if it appears.)
+- **Gmail's `[Gmail]/All Mail`, Trash and Spam are skipped**, together with
+  everything under them, keyed on their RFC 6154 SPECIAL-USE attributes
+  (`\All`, `\Trash`, `\Junk`) and never on their names, which Gmail localises.
+  All Mail re-lists every message in the account; syncing it would import the
+  whole mailbox a second time under a second path. A server that advertises no
+  SPECIAL-USE attributes gets none of this — use `exclude_patterns`, which works
+  because the mailbox chain *is* the relative path in tree mode.
+- **A poll delivers at most `max_items_per_sync` per mailbox, and the rest are
+  stepped over for good.** See *Known limit: the truncation cliff* below — it is
+  not fixable inside this package, and the mitigation is a config value.
+- **The delta baseline seeds a slice at a time.** The engine asks for a baseline
+  exactly once and never pages it, and a baseline that throws leaves the mount
+  re-walking the provider on every run. So the baseline probes one message in
+  each of the first few mailboxes, marks the cursor unfinished, and the ordinary
+  polls seed the remainder — emitting nothing for a mailbox until it has a
+  watermark, which is the same "from now on" the rest of the adapter has.
+- **Deletes still need `reconcile_deletes: false`.** The walk enumerates
+  mailboxes in tree mode too, so it is authoritative for folders and never for
+  messages.
+- **The delta re-asserts the folder tree, and it has to.** A tree mount is
+  `ephemeral: true` with a 24h TTL, and the engine's TTL sweep deletes *every*
+  mount-owned node whose `__synced_at` has aged out — there is no exemption for
+  folders. The walk that created them runs exactly once (after
+  `backfill_complete` the engine only calls `get_changes`), so without this the
+  whole hierarchy was deleted a day after the backfill; the next message then
+  re-created its parent through the store's auto-parent path as a stub with no
+  `__mount_id`, and from that point every walk that tried to stage the real
+  folder was skipped forever as *"foreign node occupies target path"* — the
+  mount could never own its own folders again, and a mailbox deleted upstream
+  could never be pruned. So `get_changes` emits the folder set at the start of
+  each rotation round, before the messages, using the same chain and the same
+  etag spelling the walk uses. On an ephemeral mount that etag carries a
+  freshness bucket of `ttl_seconds / 3`: an unchanged etag is *skipped without
+  re-stamping* `__synced_at`, so a folder that never changed would still have
+  been swept. Cost: each folder node is rewritten three times a day, and never
+  on a mount that is not ephemeral. It is also what gives a mailbox created
+  *after* the backfill a real folder node instead of the same stub.
+- **The hierarchy delimiter is read per mailbox**, not guessed. The binding does
+  not yet forward the delimiter it already reads from each `LIST` response
+  (`MailboxInfo` carries only `name` / `path` / `flags`), so the adapter derives
+  it from the path — exactly, and per mailbox, as RFC 2342 requires. It prefers
+  `MailboxInfo.delimiter` the moment the binding starts sending it.
+
+## Known limit: the truncation cliff (lives in the Rust binding, not this package)
+
+**A mailbox that gains more than `max_items_per_sync` messages between two
+visits loses the OLDEST of them permanently.** Not "until the next poll" —
+permanently, until someone forces a full re-import.
+
+Where it lives, exactly: `crates/raisin-functions/src/runtime/imap/client.rs`,
+`fetch_since_inner`. It runs `UID <cursor+1>:*`, sorts the hits ascending, and
+then — when there are more than `limit` of them — does
+`uids.split_off(uids.len() - limit)`, i.e. **keeps the newest `limit` and
+discards the rest**. The watermark it returns is the highest UID it *fetched*.
+So the cursor jumps *over* the discarded UIDs, and the next call asks for
+`UID > <that highest>`. The binding has no oldest-first mode and no UID-range
+fetch, so there is no second call that could ask for them again.
+
+Trigger condition, precisely — all of these at once:
+
+1. a single mailbox receives **more than `max_items_per_sync`** new messages
+   (default **200**; `sync_config.max_items_per_sync`),
+2. within the interval between two `get_changes` visits to *that mailbox*, and
+3. the mount already has a cursor for it (a first sync from UID 0 has the same
+   cliff against the mailbox's whole history, which is why the tree baseline
+   seeds a watermark and deliberately imports nothing older).
+
+Tree mode does not cause this and cannot fix it — it is identical in folder
+mode — but it does **widen the window**: a tree mount visits each mailbox once
+per rotation round, so with N mailboxes and a slice of 5 the interval between
+two visits to one mailbox is roughly `ceil(N / 5)` polls, not one.
+
+What the adapter does about it: nothing it can. `has_more` gets the *other*
+mailboxes seen sooner; it does not recover a stepped-over message. The
+per-mailbox page is deliberately the **whole** item budget rather than a
+fraction of it (dividing it across the slice lowered the cliff fivefold for no
+gain).
+
+Mitigations, in order of preference:
+
+- **Raise `max_items_per_sync`** above the burst you expect between visits
+  (this is the only real lever). The adapter clamps it to **1000**, so a burst
+  larger than that cannot be covered this way at all; and on a tree mount keep
+  the mailbox count low so rounds are short.
+- **Poll more often** — but not below the platform baseline; tightening poll
+  intervals is how accounts get rate-limited.
+- **Mount a subtree** rather than a whole account, so each mailbox is visited
+  every round or two.
+
+The actual fix is in the binding: either `fetch_since` keeps the **oldest**
+`limit` UIDs and reports *that* slice's highest as the watermark (so the rest
+are re-offered on the next call), or it grows a UID-range fetch. Both are Rust
+changes; neither can be emulated from this package.
 
 ## Worked example: fire an agent per new message
 
