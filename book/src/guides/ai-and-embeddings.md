@@ -684,16 +684,36 @@ LIMIT 5
 The `HYBRID_SEARCH` table function combines full-text search and vector search using Reciprocal Rank Fusion (RRF) to produce a single ranked result set:
 
 ```sql
--- Hybrid search combining fulltext + vector with RRF ranking
-SELECT * FROM HYBRID_SEARCH('machine learning tutorials', 10)
+-- Hybrid search combining fulltext + vector with RRF ranking.
+-- The workspace scope is REQUIRED; 'ALL READABLE' is the RAG form.
+SELECT * FROM HYBRID_SEARCH('machine learning tutorials', 10,
+                            workspaces => 'ALL READABLE')
 
--- With additional filtering
-SELECT id, name, properties, score
-FROM HYBRID_SEARCH('database optimization', 20)
+-- With additional filtering. `WHERE` composes normally; the function's own
+-- limit is retrieval depth, so ask it for what you want to receive.
+SELECT node_id, name, properties, score
+FROM HYBRID_SEARCH('database optimization', 20, workspaces => 'library')
 WHERE node_type = 'myapp:Article'
+
+-- Pure vector, no full-text index needed
+SELECT node_id, path, vector_distance
+FROM KNN(EMBEDDING('quarterly revenue'), 10, workspaces => 'ALL READABLE')
 ```
 
-Hybrid search runs both a full-text Tantivy query and a vector similarity search in parallel, then merges the results using RRF scoring. This typically produces better results than either search method alone, especially for queries where keyword matching and semantic similarity complement each other.
+Hybrid search runs both a full-text Tantivy query and a vector similarity search, then merges the results using RRF scoring. This typically produces better results than either search method alone, especially for queries where keyword matching and semantic similarity complement each other.
+
+Two exceptions worth knowing:
+
+- **Cross-lingual retrieval.** A German query against an English corpus shares
+  almost no lexical surface, so the full-text leg contributes noise ranks that
+  RRF fuses at full weight and that displace correct vector hits. Pass
+  `fulltext_weight => 0`.
+- **The distance cutoff.** Vector candidates beyond cosine distance
+  `max_distance` (default `0.6`) are discarded *before* fusion, so a document
+  at 0.61 that is not also a lexical match is invisible. Widen it deliberately
+  with `max_distance => 0.9` when recall matters more than precision.
+
+See the SQL reference for the full argument list and the `workspaces` grammar.
 
 ### EXPLAIN for Vector Queries
 

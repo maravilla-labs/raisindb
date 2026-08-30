@@ -120,6 +120,7 @@ const sidebars: SidebarsConfig = {
             'access/sql/graph_table',
             'access/sql/cypher',
             'access/sql/fulltext',
+            'access/sql/semantic-search',
           ],
         },
         {

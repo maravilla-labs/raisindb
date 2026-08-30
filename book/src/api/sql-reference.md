@@ -538,24 +538,265 @@ ORDER BY distance
 LIMIT 10
 ```
 
-#### HYBRID_SEARCH Table Function
+#### Search Table Functions: HYBRID_SEARCH, FULLTEXT_SEARCH, KNN
 
-Combines full-text search and vector search using Reciprocal Rank Fusion (RRF):
-
-```sql
--- Hybrid search: fulltext + vector with RRF ranking
-SELECT * FROM HYBRID_SEARCH('search query', 10)
-
--- With additional filters
-SELECT id, name, score
-FROM HYBRID_SEARCH('database optimization', 20)
-WHERE node_type = 'myapp:Article'
+```
+HYBRID_SEARCH  ( query [, limit] [, workspace] [, named ...] )
+FULLTEXT_SEARCH( query ,  language            [, named ...] )
+KNN            ( query [, limit]              [, named ...] )
 ```
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `query` | TEXT | Search query text |
-| `k` | INT | Number of results to return |
+All three take the **same** named arguments, return the **same** columns, and
+apply the **same** row-level security. `KNN` is `HYBRID_SEARCH` with the
+full-text leg switched off.
+
+**The workspace scope is required.** It is part of the query text, so you can
+always read the corpus off the statement:
+
+```sql
+-- one workspace
+SELECT node_id, path, score
+FROM   HYBRID_SEARCH('vector index rebuild', 10, workspaces => 'library');
+
+-- the same thing; the third positional is kept forever
+SELECT node_id, path, score
+FROM   HYBRID_SEARCH('vector index rebuild', 10, 'library');
+
+-- several, or a family
+SELECT * FROM HYBRID_SEARCH('retention policy', 10,
+                            workspaces => 'library, handbook, policies');
+SELECT * FROM FULLTEXT_SEARCH('rollback', 'en',
+                              workspaces => 'content-*', limit => 50);
+
+-- every workspace you may read: the recommended RAG form
+SELECT node_id, workspace_id, path, properties, score
+FROM   HYBRID_SEARCH('Wie baue ich einen Vektorindex neu auf?', 20,
+                     workspaces => 'ALL READABLE', language => 'de');
+```
+
+`HYBRID_SEARCH(query, k)` and `FULLTEXT_SEARCH(query, language)` used to search
+**every workspace in the repository** -- undocumented behaviour that returned
+build artifacts and binary assets to callers asking for documents. They now fail
+with an error naming the fix.
+
+| named argument | type | default | applies to |
+|---|---|---|---|
+| `workspaces` | TEXT (grammar below) | **required** | all three |
+| `limit` | INT, 1..=1000 | 10 / 100 (fulltext) / 10 | all three |
+| `language` | TEXT, ISO 639-1 | the repository default | hybrid, fulltext |
+| `vector_weight` | DOUBLE, >= 0.0 | 1.0 | hybrid |
+| `fulltext_weight` | DOUBLE, >= 0.0 | 1.0 | hybrid |
+| `max_distance` | DOUBLE, (0.0, 2.0] | 0.6 | hybrid, knn |
+
+`workspaces` accepts exactly five forms: one name (`'library'`), a
+comma-separated set (`'library, handbook, policies'`), a glob (`'content-*'`),
+or `'ALL READABLE'`. `'*'` and a bare `'ALL'` are errors -- there is exactly one
+spelling for "broad", so an operator can grep for it. Naming a workspace is an
+assertion: a name that does not exist, or that you may not read, is an error
+(with the same message for both, deliberately). A glob that matches fewer
+workspaces is not.
+
+A **weight of 0 skips that leg entirely**, including the embedding round trip.
+`vector_weight => 0` therefore works on a tenant with no embedding provider
+configured, and `fulltext_weight => 0` is what a cross-lingual query wants: a
+German query against an English corpus gets only noise from the lexical leg, and
+RRF fuses that noise at full weight.
+
+```sql
+-- cross-lingual: kill the noisy lexical leg and widen the distance cutoff
+SELECT node_id, workspace_id, path, vector_distance
+FROM   HYBRID_SEARCH('Wie baue ich einen Vektorindex neu auf?', 20,
+                     workspaces => 'ALL READABLE',
+                     fulltext_weight => 0, max_distance => 0.9);
+```
+
+`language` takes ISO 639-1 codes (`'en'`, not `'english'`) -- the index stores
+two-letter codes, so anything longer matches no documents.
+
+The RRF constant `k` is fixed at 60 and is not exposed: it is global, so varying
+it per query makes two callers' scores incomparable, and tuning it hides real
+faults (a dead vector leg looks like it improves when you lower k).
+
+### Which embedding space: `kind =>`
+
+Vectors are stored per *space*: a text tower and an image tower are separate
+indexes built by separate models, and `kind` selects which the vector leg reads.
+
+| value | meaning |
+|---|---|
+| `'text'` | text vectors only. **The default.** |
+| `'image'` | image vectors only |
+| `'all'` | every configured space, rank-fused |
+
+```sql
+-- documents only (the default; the argument is optional)
+SELECT node_id, path, vector_distance
+FROM   KNN('quarterly revenue', 10, workspaces => 'ALL READABLE');
+
+-- pictures only
+SELECT node_id, path, embedding_kind
+FROM   KNN('a red bicycle', 10, workspaces => 'assets', kind => 'image');
+
+-- both, fused into one ranking
+SELECT node_id, path, embedding_kind, vector_rank
+FROM   HYBRID_SEARCH('a red bicycle', 10,
+                     workspaces => 'ALL READABLE', kind => 'all');
+```
+
+`kind` defaults to `'text'` rather than `'all'` deliberately: were it `'all'`,
+the day an image tower first writes a vector every existing query would silently
+start fusing a second corpus in -- new rows in every result set, no error, and a
+`LIMIT 10` spending slots on pictures. Breadth is opt-in and says so in the query
+text, exactly as `workspaces => 'ALL READABLE'` is.
+
+`FULLTEXT_SEARCH` rejects `kind`: it has no vector leg.
+
+Each space becomes its own leg and they are fused **by rank**, never by
+distance. Two towers' distances are not comparable — a cosine distance of 0.31
+from a text model and 0.31 from an image model are not the same quantity — so a
+document found by both scores above one found by either alone, and the reported
+`vector_distance` is the one belonging to the best-*ranked* leg. `embedding_kind`
+says which leg that was, so you always know which scale the distance is on.
+
+### Search by reference: `VECTOR_OF(...)` and a bound vector
+
+`KNN` argument 1 accepts five forms. The last two answer "find things like this
+one" without any text at all.
+
+```sql
+KNN('some text')                       -- embedded with the tenant's provider
+KNN(EMBEDDING('some text'))            -- identical; the wrapper is unwrapped
+KNN(ARRAY[0.1, 0.2, ...])              -- a vector literal
+KNN('[0.1, 0.2, ...]')                 -- a BOUND vector (see below)
+KNN(VECTOR_OF('assets:/photos/cat.jpg'))   -- a node's own stored vector
+```
+
+#### `VECTOR_OF(node_ref [, chunk_index])`
+
+Reads the node's **stored** vector out of `cf::EMBEDDINGS` rather than
+recomputing it.
+
+```sql
+-- other pictures like this one
+SELECT node_id, path, vector_distance
+FROM   KNN(VECTOR_OF('assets:/photos/cat.jpg'), 10,
+           workspaces => 'assets', kind => 'image');
+
+-- by node id instead of path, and a named embedding spec
+SELECT * FROM KNN(VECTOR_OF('assets:0193f2ab-...'), 10, workspaces => 'assets');
+SELECT * FROM KNN(VECTOR_OF('library:/manuals/boiler#doc'), 10,
+                  workspaces => 'library');
+```
+
+The `workspace:` prefix is **required**, exactly as for
+`REFERENCES('workspace:/path')`: embeddings are keyed by the workspace the
+*node* lives in, which need not be one of the workspaces being searched, so it
+cannot be inferred — least of all under `workspaces => 'ALL READABLE'`.
+
+Reading beats re-encoding on four counts. There is no provider call, so no
+latency, cost or rate limit on a query. It works when the encoder is offline —
+which, for an image tower hosted outside the database, is exactly when you need
+it. For an image there is nothing to re-encode *from*: the pixels went through a
+model this process does not host. And it **cannot drift**: a re-encode is only
+comparable to the index if the query-time pipeline reproduces the index-time one
+exactly (same model, same revision, same field selection, same chunker, same
+normalisation), and when one of those moves the re-encoded vector lands
+elsewhere in the same space — every distance still finite, every ranking still
+plausible, nothing logged.
+
+**The reference node is excluded from its own results.** Its vector is at
+distance 0 from itself, so without this it is rank 1 in every such query and
+`LIMIT 10` spends a slot restating the question. The drop happens in the same
+pass as the RLS and `WHERE` drops, and the legs are already drawn wider than
+`limit`, so it does not cost you a row.
+
+**The reference node is permission-checked.** It goes through the same RLS pass
+every hit does; a node you may not read reports "no such node" rather than
+handing you its neighbourhood.
+
+**Chunking is explicit, never guessed.** An asset has one vector and the
+question has an answer. A chunked document has several, and they are different
+vectors: chunk 0 is merely the paragraph that came first, and a centroid of a
+multi-topic document is a point resembling none of its parts. So a source with
+one stored chunk resolves; a source with more is an **error** naming the count,
+and you say which:
+
+```sql
+-- ERROR: ... has 7 stored chunks in partition '...' (indexes 0, 1, ...), so
+-- 'similar to it' is ambiguous ... Name the chunk, e.g. VECTOR_OF('...', 0).
+SELECT * FROM KNN(VECTOR_OF('library:/manuals/boiler'), 10,
+                  workspaces => 'library');
+
+-- explicit, and therefore fine
+SELECT * FROM KNN(VECTOR_OF('library:/manuals/boiler', 2), 10,
+                  workspaces => 'library');
+```
+
+Under `kind => 'all'` the lookup is **per space**: the text index is searched
+with the node's text vector and the image index with its image vector. A space
+holding no vector for that node contributes no leg (logged at INFO); if none
+does, the statement fails naming the node and the spaces rather than returning
+an empty result that looks like an empty corpus.
+
+`VECTOR_OF` is `KNN`-only. `HYBRID_SEARCH` needs text for its full-text half,
+and accepting a vector there would be a vector-only search reported as hybrid.
+
+#### Binding a vector as a parameter
+
+The realistic way to search by a vector computed elsewhere — an image encoder
+outside the database — is to **bind** it:
+
+```js
+await raisin.sql.query(
+  `SELECT node_id, path, vector_distance
+     FROM KNN($1, 10, workspaces => 'assets', kind => 'image')`,
+  [embeddingFrom1024DimImageEncoder]   // a plain array of numbers
+);
+```
+
+`$1` is substituted into the SQL text before it is parsed, and the two
+substituters in this tree render a JSON array two ways: the HTTP and pgwire path
+produces the quoted string `'[0.1,0.2,...]'` (pgvector's own literal form), the
+functions runtime produces `ARRAY[0.1, 0.2, ...]`. `KNN` accepts both, so the
+same parameter means the same thing from either surface.
+
+The text form costs one ambiguity: a `KNN` whose search *text* is literally
+`'[1, 2, 3]'` is read as a 3-dimensional vector. That trade is deliberate,
+because the two failure modes are not symmetric — treating a bound vector as
+text is silent and unfixable from outside (it was the previous behaviour: the
+string `"[0.1,0.2,...]"` went to the embedding provider and the result ranked
+plausibly), while treating a bracketed phrase as a vector fails loudly on the
+first dimension check. Recognition is strict: brackets, at least one element,
+and every element a finite number. `'[a, b]'`, `'[]'` and `'[draft] notes'` stay
+text.
+
+**Returned columns** (identical for all three, in this order):
+`node_id`, `workspace_id`, `name`, `path`, `node_type`, `score`,
+`fulltext_rank`, `vector_rank`, `vector_distance`, `chunk_index`,
+`embedding_kind`, `revision`, `created_at`, `updated_at`, `properties`. Rank,
+distance and kind columns are NULL when that leg did not contribute -- including
+when its weight was 0.
+
+**The universe is an argument; everything else is `WHERE`.**
+
+```sql
+SELECT node_id, workspace_id, path, score
+FROM   HYBRID_SEARCH('retention policy', 10, workspaces => 'ALL READABLE')
+WHERE  node_type = 'myapp:Article';
+```
+
+`workspaces` is an argument because it changes what top-k *means*:
+`workspaces => 'a, b' LIMIT 10` returns the ten best rows in a and b, while
+`'ALL READABLE' ... WHERE workspace_id IN ('a','b') LIMIT 10` returns whichever
+of a's and b's rows survived the *global* best-N -- which can be empty while
+matching documents exist. There is no `node_types =>` and no `path_prefix =>`
+argument; those are columns, and they are filtered with `WHERE`.
+
+The function's own `limit` is **retrieval depth, not a display cap**:
+`HYBRID_SEARCH('q', 10, ...) LIMIT 100` returns 10. Ask the function for 100 to
+get 100. Permission filtering happens *before* the count, so a restricted caller
+asking for 10 receives up to 10 -- not "however many of the global top 10 they
+happened to be allowed to see".
 
 #### EXPLAIN for Vector Queries
 

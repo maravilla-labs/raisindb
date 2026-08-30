@@ -632,6 +632,164 @@ lease for exactly this reason — without it, two nodes presenting the same
 rotating OAuth refresh token can invalidate each other's, and two nodes writing
 the same node lose one another's update.
 
+## Derived indexes are rebuilt locally on EVERY node — nothing indexed replicates
+
+Replication carries **records**, never derived state. There is no `OpType` in
+`raisin-replication` that holds a Tantivy document, a spatial cell, a reference
+entry or a vector, and the writers for those go straight to RocksDB
+(`RocksDBEmbeddingStorage::store_embedding` is a bare `db.put_cf` that never
+passes through `OperationCapture`). So **every node rebuilds every index from
+the replicated node**, and any arm of `UnifiedJobEventHandler::handle_node_change`
+that is gated on `!is_remote_event` is a hole in exactly one index on every
+replica.
+
+That gate is the whole design surface of
+`raisin-rocksdb/src/jobs/event_handler/node_handlers.rs`, and it has now bitten
+twice. Which side of it a concern belongs on:
+
+| concern | local + remote? | why |
+|---|---|---|
+| fulltext index | **yes** | derived; each node owns its Tantivy index |
+| spatial index + policy reconcile | **yes** | derived; written inline in the write batch |
+| reference retarget (on `moved:true`) | **yes** | derived; forward paths are denormalized |
+| **vector embedding** | **yes** | derived; nothing replicates a vector |
+| embedding DELETE | **yes** | must match the create side, or vectors leak |
+| node-delete cleanup | **yes** | derived relation-index tombstones |
+| trigger evaluation | **no** | one edit must fire a trigger ONCE, not N times |
+| AI tool call execution | **no** | same — a side effect, not an index |
+| virtual-mount writeback | **no** | every replica would push the same change upstream |
+| asset processing | **no** | fetches and stores bytes; one node's job |
+
+**The test for which side a concern belongs on is not "is it expensive", it is
+"is it a pure function of the node, stored locally?"** If yes it must run on
+replicas, because no one else will ever compute it there.
+
+The two failures so far were both an index put on the side effect side.
+Embedding generation was skipped for remote events under a comment claiming
+"embeddings are replicated separately" — which was never true, and the
+give-away was that the DELETE side had always run for remote events too. The
+result was a replica with fulltext but no vectors, and since `HYBRID_SEARCH`
+fuses the two legs it did not error, it silently returned fulltext-only
+results. Regression test:
+`jobs::event_handler::tests::test_remote_node_change_still_enqueues_embedding_job`.
+
+Consequences of running these on every node, all intended:
+
+- **Job dedup is per-PROCESS** (see below), so N nodes each enqueue their own
+  copy. That duplication is the *point* — each is filling its own index. Do NOT
+  reach for a `raisin_locks` lease here; a lease would leave N-1 nodes unindexed.
+  Leases are for once-per-cluster *side effects*, not for local index builds.
+- **Embedding costs scale with node count**: an N-node cluster pays N times the
+  embedder spend, and the embedder must be reachable from every node. The lever
+  is the per-node tenant embedding config, which does not replicate either —
+  a node with `enabled = false` skips the arm and simply serves no vector leg.
+- A node that was down, or joined late, has correct records and cold indexes.
+  `REBUILD VECTOR INDEX` / the fulltext and spatial rebuild jobs are the repair,
+  and HNSW snapshots lag ~60s (`raisin-hnsw/src/engine/lifecycle.rs`), so a write
+  followed immediately by a restart legitimately reports a mismatch.
+
+## Search: one engine, three doors, and what each side counts
+
+`HYBRID_SEARCH`, `FULLTEXT_SEARCH` and `KNN` are ONE implementation
+(`raisin-sql-execution/src/physical_plan/search/`: `args`, `scope`, `legs`,
+`fusion`, `emit`). `KNN` is hybrid with the lexical leg off; `FULLTEXT_SEARCH` is
+hybrid with the vector leg off. The HTTP hybrid-search endpoint and the MCP
+`search_nodes` tool route through `SearchArgs::from_api` (`args.rs:238`) rather
+than keeping their own dispatch — they used to, and neither copy contained the
+word `auth`. Do not add a fourth reader of these arguments.
+
+- **Both legs must index the same corpus, or RRF silently biases.** A field
+  marked `Fulltext` but not `Vector` (or vice versa) puts documents in one leg's
+  reach and not the other's, and reciprocal rank fusion then systematically
+  favours the leg with the wider coverage. No error, no log line, just a ranking
+  that is wrong in a direction nobody chose. When you add an indexed field, ask
+  which legs must see it and mark both.
+- **Fusion is rank-only, and that is enforced by the TYPES, not a comment.**
+  `LegResult` (`search/fusion.rs:94`) carries `ordered: Vec<HitKey>` and has no
+  score, distance or similarity field anywhere. Two partitions are two embedding
+  spaces: 0.31 from a text tower and 0.31 from an image tower are not the same
+  quantity, every combination of them is finite and plausible, and nothing logs a
+  fault. Distances reach the caller through `VectorDetails`, attached AFTER
+  scoring. A maintainer reaching for `score += weight * (1.0 - distance)` must
+  find no distance to reach for — keep it that way.
+- **Partition by what makes vectors INCOMPARABLE; filter by what makes them
+  IRRELEVANT.** Embedder identity and kind are segments 5 and 6 of the
+  `cf::EMBEDDINGS` key and become the `PartitionId` — a different model means a
+  different index, because no width check can catch two same-width models
+  occupying unrelated regions of Rⁿ. Workspace and RLS are *filters*, applied
+  inside the graph walk. Getting these the wrong way round gives you either an
+  unnavigable index or a scan that returns short.
+- **A predicate handed to usearch `filtered_search` must be panic-free.** The
+  crate's trampoline calls the closure through a `noexcept` C++ frame with no
+  `catch_unwind` of its own, so an unwind there is UB. `HnswIndex`
+  (`raisin-hnsw/src/index.rs:615-656`) documents the three hazards — lifetime,
+  locking, unwinding — keeps the body to two lookups, and wraps it in
+  `catch_unwind` anyway, failing CLOSED (drop the candidate). Never take a lock
+  in it: a poisoned lock's `unwrap` is a panic, and it can deadlock against a
+  lock the surrounding search already holds.
+- **`kind` defaults to `Text`, never `All`** (`search/args.rs:110`). With `All`
+  as the default, the day an image tower first writes a vector every existing
+  query silently starts fusing a second corpus in — new rows everywhere, no error,
+  no query text changed. Breadth is opt-in and says so in the query, as
+  `workspaces => 'ALL READABLE'` does. A `kind` that selects no partition is an
+  ERROR: an empty leg reported as a search is indistinguishable from a corpus
+  that matched nothing.
+- **The workspace scope is REQUIRED and `'ALL READABLE'` is its only breadth
+  spelling** (`search/scope.rs`). `'*'` and `'ALL'` are rejected on purpose: two
+  uppercase words appear in no other context, so "which queries go repo-wide?" is
+  one grep. Do not add a shorter alias. A NAME is an assertion (fails loudly); a
+  GLOB is a question (matching nothing is fine); `Empty` is not `All`.
+
+### The unit an index stores is a CHUNK, not a node
+
+`EmbeddingStorage::list_embeddings` returns one row per SOURCE — the right answer
+to "which nodes have embeddings" and the wrong one for anything that reproduces
+or counts index entries. `list_index_entries`
+(`raisin-embeddings/src/embedding_storage.rs:203`,
+`raisin-rocksdb/.../embedding_storage/storage.rs:774`) returns one row per
+`(embedder_hash, kind, source_id, chunk_index)` at its newest revision — the unit
+the HNSW index holds, and the tuple `get_source_chunk` needs.
+
+Confusing the two made `REBUILD VECTOR INDEX` a **data-loss command**: it
+iterated sources and read each with `get_embedding`, which takes a bare node id
+and therefore always answers chunk 0, so a 23-chunk document was re-indexed as
+one vector and the other 22 were gone. `VERIFY` then compared a per-node storage
+count against a per-vector index count, reported a permanent `mismatch 31/9` on a
+HEALTHY index, and told the operator to run the very command that breaks it.
+Measured: `REBUILD` went 31 → 9 vectors and three chunk-specific queries went to
+zero rows or the wrong document.
+
+Four sites must count and iterate the chunk, and all four now do:
+`management/vector.rs` `rebuild_index` (:207 filters entries to the partition
+being rebuilt), `verify_index`, `get_health`, and SQL `VERIFY VECTOR INDEX`
+(`raisin-sql-execution/src/engine/ai_config.rs:726`). Regression test:
+`raisin-rocksdb/tests/all/rebuild_preserves_chunks_test.rs` (no network).
+
+**The index id has ONE grammar** (`raisin-hnsw/src/chunk_id.rs`). The writer
+calls `chunk_source_id(node, spec, chunk, total)`; a reader holding only a stored
+row calls `index_id_for_stored(source_id, chunk, total)` (:163), which splits the
+namespaced source id and lands on the same function. Re-deriving the id at a
+second site is how a rebuilt index ends up with ids the live path never produces
+— a search that finds nothing and reports no fault.
+
+### Captioning is Studio's; extraction is core's
+
+Core owns PRIMITIVES and DETERMINISM; Studio owns POLICY and MODEL CHOICE. PDF /
+OCR / tesseract extraction stays here (same bytes → same text, no model picker,
+no prompt), and so do chunking and embedding — they are guarded by the spec hash,
+which is what makes a steady-state run write NOTHING. Alt-text / description /
+keyword generation does NOT: it is a judgement call with a model behind it, and
+`jobs/handlers/asset_processing/handler.rs` already answers all six captioning
+settings with one `warn!` pointing at trigger functions. Do not reinstate it.
+
+What core owes the Studio feature is the retrieval side, and it is done:
+`raisin_asset.yaml` marks `description`, `alt_text` and `keywords`
+`[Fulltext, Vector]`, so a caption written by a trigger is findable by MEANING
+and not only by word. `__extracted_text` is `[Fulltext]` only — the document body
+gets its own named embedding (spec `doc`, ids `{node}#doc#{chunk}`) rather than
+being concatenated onto a filename, because one vector over a 40-page contract
+plus its title matches neither query well.
+
 ## Code Conventions
 
 - Use `{ workspace = true }` for common dependencies
