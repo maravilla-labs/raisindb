@@ -52,6 +52,17 @@ pub struct SyncRun {
     pub writeback_pending: u64,
     #[serde(default)]
     pub failed: u64,
+    /// Mount-owned nodes this run's reconcile left alone because they sit under
+    /// a path the mount's own filters now EXCLUDE.
+    ///
+    /// An excluded subtree is out of scope, not condemned: the walk stops
+    /// descending into it, so those nodes never land in `seen`, and without this
+    /// carve-out the very next clean run would prune every one of them — an
+    /// unbounded delete nobody asked for, triggered by adding one exclude
+    /// pattern. Surfaced here and not only in a log line because the operator who
+    /// changed the pattern is the one who needs to see the count.
+    #[serde(default)]
+    pub retained_excluded: u64,
     /// Items this run walked (the backfill chunk size, in practice).
     #[serde(default)]
     pub items_done: u64,

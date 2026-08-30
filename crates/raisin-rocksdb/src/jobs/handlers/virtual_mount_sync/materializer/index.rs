@@ -350,6 +350,19 @@ impl SyncIndex {
         self.by_external.get(external_id)
     }
 
+    /// Which mount-owned node currently claims `external_id`, if any.
+    ///
+    /// Exists for the re-key guard in `write::push`: an update on a
+    /// key-addressed store may report a new id, and on such a store writing to
+    /// an existing key is a legal OVERWRITE — so the reported id can already
+    /// belong to another node. Moving onto it would leave two nodes carrying one
+    /// `__external_id`, and `from_nodes` keys `by_external` by that id, so the
+    /// next run would see only one of them: the other is never matched, never
+    /// reconciled and never deleted — a permanent duplicate.
+    pub fn node_id_for_external(&self, external_id: &str) -> Option<&str> {
+        Some(self.by_external.get(external_id)?.id.as_str())
+    }
+
     /// The stored etag of an already-synced item, for the pre-mapping skip check.
     pub fn etag_for(&self, external_id: &str) -> Option<&str> {
         self.by_external.get(external_id)?.etag.as_deref()

@@ -4001,3 +4001,9 @@ mod write_submit_tests;
 
 #[path = "registry_tests.rs"]
 mod registry_tests;
+
+#[path = "filter_symmetry_tests.rs"]
+mod filter_symmetry_tests;
+
+#[path = "write_rekey_tests.rs"]
+mod write_rekey_tests;

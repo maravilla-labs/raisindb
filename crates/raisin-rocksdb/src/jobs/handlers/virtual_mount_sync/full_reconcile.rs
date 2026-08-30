@@ -7,7 +7,7 @@ use serde_json::json;
 
 use super::batch::SyncBatcher;
 use super::config::MountState;
-use super::{persist_state, AdapterError, StateWrite, SyncCtx};
+use super::{mount_relative, persist_state, AdapterError, PathFilter, StateWrite, SyncCtx};
 
 /// Why `seen` may be a partial picture of the provider. Any of these gates the
 /// reconcile deletes; see [`reconcile_deletes`].
@@ -94,6 +94,18 @@ pub(super) fn settle_resume_point(
 ///     "no items" rather than an error). Deleting the entire mount subtree
 ///     on the strength of one empty response is never the right trade.
 ///
+/// A fifth case is narrower than the four above and skips ONE NODE rather than
+/// the whole pass: the node's mount-relative path is EXCLUDED by this mount's
+/// filters. An excluded subtree is out of scope, which means the mount neither
+/// creates nodes there nor deletes them — "I do not manage this" is not
+/// "destroy what is there". Without this, adding `exclude: ["Archive"]` to a
+/// live mount is an unbounded silent DELETE: the next full walk no longer lists
+/// anything under `Archive` (it does not even descend), so every already-synced
+/// node in it is "not seen" and gets pruned, with no operator ever asking for
+/// it. The same [`PathFilter`] instance the walk used decides it here, so the
+/// two cannot answer differently — a walk/reconciler drift would delete exactly
+/// the nodes the walk deliberately stopped listing.
+///
 /// The safe action in all four is to skip reconciliation: a stale extra node
 /// is recoverable on the next clean pass, deleted content is not. Deletes
 /// therefore only ever run on a single-run, start-to-finish walk.
@@ -115,6 +127,7 @@ pub(super) async fn reconcile_deletes(
     flags: WalkFlags,
     processed: u64,
     max: u64,
+    filter: &PathFilter,
 ) -> std::result::Result<(), AdapterError> {
     // Served from the run's prefetched index, kept current by every flush above —
     // this used to be another full workspace scan. Borrowed rather than cloned:
@@ -166,6 +179,11 @@ pub(super) async fn reconcile_deletes(
         // `stage_delete` borrows the batcher mutably — and, like the clone it
         // replaces, that makes the set a snapshot taken before the first delete
         // rather than a live view being mutated as we walk it.
+        // Counted, not just skipped: a reconcile that silently leaves nodes
+        // behind is the same shape of invisible behaviour as one that silently
+        // deletes them, and this engine has paid for silence on both sides.
+        let mut retained_excluded = 0usize;
+        let mount_path = ctx.scope.mount_path.clone();
         let stale: Vec<String> = batcher
             .virtual_nodes_iter()
             // A COMMAND IS NOT A MIRROR. It was authored locally and sent, so
@@ -178,8 +196,44 @@ pub(super) async fn reconcile_deletes(
             // record of the send with it.
             .filter(|node| !node.is_command)
             .filter(|node| !seen.contains(&node.external_id))
+            // AN EXCLUDED SUBTREE IS OUT OF SCOPE, NOT CONDEMNED. The walk
+            // stopped listing (and stopped descending into) these paths, so
+            // "not seen" here says nothing about upstream at all. Judged with
+            // the walk's own filter, on the same mount-relative path the walk
+            // filtered, so the two cannot drift.
+            //
+            // A node whose path is not under the mount is left to the ordinary
+            // rules: `mount_relative` returning `None` means we cannot ask the
+            // question, and refusing to delete on an unanswerable question
+            // would make a mis-pathed node immortal.
+            .filter(|node| {
+                let excluded_here =
+                    mount_relative(&mount_path, &node.path).is_some_and(|rel| filter.excluded(rel));
+                if excluded_here {
+                    retained_excluded += 1;
+                }
+                !excluded_here
+            })
             .map(|node| node.external_id.clone())
             .collect();
+        if retained_excluded > 0 {
+            // ONE warn per run, naming the count and the reason. An operator who
+            // adds an exclude pattern to a live mount must be able to see that
+            // the already-synced nodes underneath it are still there and are now
+            // unmanaged — otherwise the only two readings of the mount ("they
+            // were deleted" / "they are being kept") are indistinguishable.
+            tracing::warn!(
+                mount_id = %ctx.mount.mount_id,
+                retained = retained_excluded,
+                exclude_patterns = ?ctx.mount.sync_config.exclude_patterns,
+                "reconcile left {} mount-owned node(s) in place because their path is EXCLUDED \
+                 by this mount's filters: an excluded subtree is out of scope, so the mount \
+                 neither syncs nor deletes there. Move or delete them by hand if they should \
+                 go.",
+                retained_excluded
+            );
+            batcher.note_retained_excluded(retained_excluded);
+        }
         let mut deleted = 0usize;
         for external_id in stale {
             batcher.stage_delete(&external_id).await?;

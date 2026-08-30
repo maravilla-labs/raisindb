@@ -111,6 +111,14 @@ impl<'a> SyncBatcher<'a> {
         self.index.external_id_at(path).map(str::to_string)
     }
 
+    /// The node already claiming `external_id`, if this mount has one (see
+    /// [`SyncIndex::node_id_for_external`]). The re-key guard reads it.
+    pub fn node_id_for_external(&self, external_id: &str) -> Option<String> {
+        self.index
+            .node_id_for_external(external_id)
+            .map(str::to_string)
+    }
+
     /// How many mount-owned nodes this mount currently holds.
     ///
     /// The denominator of the proportional blast-radius rail (`write::guard`),
@@ -195,6 +203,13 @@ impl<'a> SyncBatcher<'a> {
             .is_some_and(|etag| Some(etag) == item.etag.as_deref())
     }
 
+    /// Record nodes the reconcile left in place because their path is excluded.
+    /// See [`BatchStats::retained_excluded`] — this is the counter that makes
+    /// the retention visible to the run summary rather than only to the log.
+    pub fn note_retained_excluded(&mut self, n: usize) {
+        self.stats.retained_excluded += n;
+    }
+
     /// Count an item skipped before mapping (see [`Self::can_skip_unmapped`]).
     pub fn note_unmapped_skip(&mut self) {
         self.stats.skipped += 1;
@@ -257,6 +272,43 @@ impl<'a> SyncBatcher<'a> {
             pushed_state,
             merged,
             adopt: false,
+            rekey: None,
+            node_bytes,
+        })
+        .await
+    }
+
+    /// Stage the stamp-back for a push whose answer reported a NEW external id:
+    /// the same stamp, plus the node's provider identity moving from
+    /// `prev_external_id` to `external_id`.
+    ///
+    /// Its own call for the reason [`Self::stage_adopt`] is: rewriting
+    /// `__external_id` is not a variation on recording an etag. That property
+    /// is what the index, the delete rails and every later run use to decide
+    /// which remote object this node IS, so no ordinary push may change it by
+    /// passing the wrong argument.
+    ///
+    /// The caller must have established that the two ids actually differ and
+    /// that the new one is non-empty — see `write::push::push_one`, where an
+    /// empty id is refused as an adapter bug rather than obeyed.
+    pub async fn stage_rekey(
+        &mut self,
+        node_id: &str,
+        prev_external_id: &str,
+        external_id: &str,
+        etag: Option<String>,
+        pushed_state: Option<serde_json::Map<String, serde_json::Value>>,
+        node_bytes: usize,
+    ) -> std::result::Result<(), AdapterError> {
+        self.stage(BatchOp::StampVirtual {
+            node_id: node_id.to_string(),
+            external_id: external_id.to_string(),
+            etag,
+            synced_at: Utc::now().to_rfc3339(),
+            pushed_state,
+            merged: None,
+            adopt: false,
+            rekey: Some(prev_external_id.to_string()),
             node_bytes,
         })
         .await
@@ -287,6 +339,7 @@ impl<'a> SyncBatcher<'a> {
             pushed_state,
             merged: None,
             adopt: true,
+            rekey: None,
             node_bytes,
         })
         .await

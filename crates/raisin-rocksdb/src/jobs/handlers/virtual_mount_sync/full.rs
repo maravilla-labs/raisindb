@@ -33,8 +33,15 @@ pub async fn run_with(
     batcher: &mut SyncBatcher<'_>,
 ) -> std::result::Result<(), AdapterError> {
     let max = ctx.mount.sync_config.max_items_per_sync;
-    let include = &ctx.mount.sync_config.include_patterns;
-    let exclude = &ctx.mount.sync_config.exclude_patterns;
+    // ONE compiled filter for the whole run, shared with `reconcile_deletes`
+    // below. Compiled once rather than per item (see `PathFilter`), and SHARED
+    // rather than rebuilt, so the walk and the reconciler cannot answer the same
+    // exclusion question differently — a drift that here would mean deleting
+    // exactly the nodes the walk deliberately stopped listing.
+    let filter = super::PathFilter::new(
+        &ctx.mount.sync_config.include_patterns,
+        &ctx.mount.sync_config.exclude_patterns,
+    );
 
     let mut seen: HashSet<String> = HashSet::new();
     let mut processed: u64 = 0;
@@ -93,7 +100,7 @@ pub async fn run_with(
 
             for item in &page.items {
                 let rel_path = resolve_item_path(ctx, item, &prefix);
-                if super::passes_filters(&rel_path, include, exclude) {
+                if filter.passes(&rel_path) {
                     // Subordinate nodes (mail attachments) join `seen` with
                     // their parent. They are mount-owned and carry an
                     // `__external_id`, so `reconcile_deletes` considers them —
@@ -104,7 +111,17 @@ pub async fn run_with(
                     seen.insert(item.external_id.clone());
                     processed += 1;
                 }
-                if item.is_folder {
+                // Do not descend into an excluded folder. The filter
+                // now inherits exclusion down the tree, so every item inside
+                // one would be rejected on arrival anyway — but only after the
+                // walk had paged the whole subtree out of the provider and
+                // spent the run's item budget on it. Skipping the descent is
+                // the same answer, cheaply.
+                //
+                // Gated on EXCLUDE alone, never on `passes`: an include
+                // list names the items to keep (`*.pdf`), which no folder
+                // matches, so gating on it would refuse to descend anywhere.
+                if item.is_folder && !filter.excluded(&rel_path) {
                     stack.push((Some(item.external_id.clone()), rel_path));
                 }
             }
@@ -241,7 +258,7 @@ pub async fn run_with(
     }
 
     settle_resume_point(state, &stack, flags, processed, &ctx.mount.mount_id);
-    reconcile_deletes(ctx, batcher, &seen, flags, processed, max).await?;
+    reconcile_deletes(ctx, batcher, &seen, flags, processed, max, &filter).await?;
     capture_delta_baseline(ctx, state).await;
     Ok(())
 }

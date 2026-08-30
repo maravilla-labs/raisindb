@@ -55,6 +55,7 @@ impl RocksDbMaterializer {
         pushed_state: Option<&serde_json::Map<String, serde_json::Value>>,
         merged: Option<&serde_json::Map<String, serde_json::Value>>,
         adopt: bool,
+        rekey: Option<&str>,
     ) -> Result<Staged> {
         let Some(mut node) = tx.get_node(&scope.workspace, node_id).await? else {
             // The node was deleted between the drain reading it and this write.
@@ -97,6 +98,8 @@ impl RocksDbMaterializer {
         // made, not something a mapper or a resolver can supply. `mount_id`
         // comes from the running drain's scope for the same reason: an adopt
         // cannot name a mount other than the one doing the adopting.
+        // (`__external_id` itself is written by the shared block just below,
+        // which an adoption and a re-key both go through.)
         if adopt {
             node.properties
                 .insert("__virtual".to_string(), PropertyValue::Boolean(true));
@@ -104,6 +107,19 @@ impl RocksDbMaterializer {
                 "__mount_id".to_string(),
                 PropertyValue::String(scope.mount_id.clone()),
             );
+        }
+        // A RE-KEY: the update renamed a key-addressed object, so the provider
+        // answered with a new external id. `__external_id` is the node's
+        // provider identity — the index, `reconcile_deletes` and every later
+        // delta match on it — so it has to move with the object, or the next
+        // run finds nothing under the old id, prunes this node and re-imports
+        // the same object as a fresh one with no history and no local edits.
+        //
+        // Written from the typed argument, exactly as adoption is, and never
+        // from `merged`: a mapper or a conflict resolver must not be able to
+        // point a node at another object.
+        let rekeyed = rekey.filter(|prev| *prev != external_id);
+        if adopt || rekeyed.is_some() {
             node.properties.insert(
                 "__external_id".to_string(),
                 PropertyValue::String(external_id.to_string()),
@@ -129,6 +145,17 @@ impl RocksDbMaterializer {
         tx.upsert_node(&scope.workspace, &node).await?;
 
         let write_view = write_view_of(&node, &scope.watched_fields);
+        // Drop the OLD key before recording the new one, so nothing later in
+        // this run can still reach the node under an id the provider no longer
+        // has. `record_delete` removes the by-path entry too, and the `Upsert`
+        // that follows immediately re-inserts it for the same (unchanged) path
+        // — the two mutations are applied in this order, together, after the
+        // transaction commits.
+        if let Some(prev) = rekeyed {
+            pending.push(IndexMutation::Delete {
+                external_id: prev.to_string(),
+            });
+        }
         pending.push(IndexMutation::Upsert(VirtualNodeRef {
             id: node.id.clone(),
             path: node.path.clone(),
