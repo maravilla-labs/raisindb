@@ -27,12 +27,22 @@
  * RFC 5545 content lines (never a JSON blob), and a cancelled event is
  * MATERIALIZED with status="cancelled" rather than skipped.
  *
- * TIME: start_utc/end_utc are written only when the provider value carries a
- * zone designator. Graph returns a NAIVE local datetime plus a separate
- * timeZone, and converting that needs a tz database this mapper does not have —
- * so start_utc stays null until the adapter sends `Prefer:
- * outlook.timezone="UTC"`. A null is honest; a naive value in an ordered UTC
- * column is silently wrong. start_local/end_local are always written.
+ * TIME: BOTH forms are kept, and they answer different questions. The instant
+ * (start_utc/end_utc) is what a client converts to the viewer's own zone — that
+ * is the only way an event in another zone renders at the right hour, and the
+ * only way one that crosses midnight there is drawn on two days. The wall clock
+ * plus `timezone` is what a FUTURE event actually promises: "09:00 Zurich" must
+ * stay 09:00 Zurich even if a government moves a DST transition before the date,
+ * which an instant alone cannot survive. raisin:Event carries both for exactly
+ * this reason, so neither is derived away.
+ *
+ * start_utc/end_utc are written when the instant is RECOVERABLE — the value
+ * carries its own Z/offset, or its zone is UTC (which is what Graph returns
+ * here, since the adapter deliberately sends no `Prefer: outlook.timezone`).
+ * For a named zone like Europe/Berlin they stay null: `Intl` does not exist in
+ * this runtime (see time.js), and a null is honest where a naive value in an
+ * ordered UTC column is silently wrong. start_local/end_local are always
+ * written, unchanged.
  *
  * `name` stays the Graph item id so distinct events never collide on a path.
  * The engine stamps the reserved __ properties on top of what is returned; they
@@ -134,6 +144,7 @@ function toNode(input) {
   }
 
   var organizer = person(meta.organizer) || { email: null, name: null };
+  var startTz = meta.start_tz || meta.timezone || null;
   var recurrence = recurrenceLines(meta.recurrence);
 
   // Graph's own discriminator when the adapter forwards it; otherwise the
@@ -157,11 +168,15 @@ function toNode(input) {
     // left calendar_id null on every default-calendar mount.
     calendar_id: mount.remote_root || "calendar",
 
-    start_utc: allDay ? (dateOf(meta.start) ? dateOf(meta.start) + "T00:00:00Z" : null) : utcOf(meta.start),
-    end_utc: allDay ? (dateOf(meta.end) ? dateOf(meta.end) + "T00:00:00Z" : null) : utcOf(meta.end),
+    // The zone travels WITH the value: Graph puts the wall clock and its zone in
+    // two separate fields, and utcOf needs both to decide whether the instant is
+    // recoverable. `end_tz` falls back to `start_tz` because Graph omits it on
+    // some projections, and an event's two ends are always in one zone.
+    start_utc: allDay ? (dateOf(meta.start) ? dateOf(meta.start) + "T00:00:00Z" : null) : utcOf(meta.start, startTz),
+    end_utc: allDay ? (dateOf(meta.end) ? dateOf(meta.end) + "T00:00:00Z" : null) : utcOf(meta.end, meta.end_tz || startTz),
     start_local: localOf(meta.start, allDay),
     end_local: localOf(meta.end, allDay),
-    timezone: ianaZone(meta.start_tz || meta.timezone),
+    timezone: ianaZone(startTz),
     all_day: allDay,
 
     recurrence_type: recurrenceType,

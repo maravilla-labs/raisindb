@@ -21,7 +21,13 @@ properties:
   enabled: true
   # 3: the recurrence and time translations moved into sibling modules, one
   #    file per relationship, so the two directions of each cannot drift apart.
-  version: 3
+  # 4: start_utc/end_utc are derived when Graph's SEPARATE timeZone field says
+  #    UTC — which is what it always says here — instead of only when the
+  #    dateTime string itself carries Z. The instant was being thrown away on
+  #    every real event, so a client had nothing to convert and drew the wall
+  #    clock verbatim at the wrong hour for any viewer outside UTC. A NAMED
+  #    zone still yields null: QuickJS has no `Intl`.
+  version: 4
   resource_limits:
     timeout_ms: 5000
     max_memory_bytes: 16777216
