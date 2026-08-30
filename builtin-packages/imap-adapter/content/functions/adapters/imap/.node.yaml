@@ -20,7 +20,9 @@ properties:
   entry_file: index.js:handler
   execution_mode: Async
   enabled: true
-  version: 1
+  # 2: documents, at opList, that a forced FULL reconcile prunes every message
+  #    node on this mount, because `list` enumerates mailboxes only.
+  version: 2
   resource_limits:
     timeout_ms: 180000
     max_memory_bytes: 67108864

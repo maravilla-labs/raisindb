@@ -3,8 +3,8 @@
  * which changes belong to this mount and where they land.
  */
 
-import { enc } from "./common.js";
-import { DRIVE, driveFetch } from "./http.js";
+import { coded, enc } from "./common.js";
+import { DRIVE, driveFetch, errorReason, raiseForStatus } from "./http.js";
 import { FILE_FIELDS, toExternalItem } from "./items.js";
 import { changeRelativePath, newPathCache } from "./paths.js";
 
@@ -31,7 +31,48 @@ export function opGetChanges(credential, mount, params) {
       "newStartPageToken,nextPageToken,changes(fileId,removed,file(" + FILE_FIELDS + "))"
     ) +
     "&pageSize=200&supportsAllDrives=true&includeItemsFromAllDrives=true&includeRemoved=true";
-  var resp = driveFetch(credential, "GET", url, { context: "get_changes" });
+  // 400/404 come back RAW so this function — the only one that knows the token
+  // is a delta cursor — can classify them. Left to raiseForStatus they are a
+  // plain Error, which AdapterError::classify files as Transient: the engine
+  // then re-sends the SAME dead cursor on every drain, forever, importing
+  // nothing and emitting only a repeating transient error, because nothing ever
+  // says `cursor_invalid` and so no full reconcile is ever scheduled. This is
+  // the incident ms-graph already fixed for its 410/resyncRequired (http.js
+  // there). Google documents no expiry for Drive page tokens, but 400
+  // invalidPageToken is observed in the wild (issuetracker 196413673) and the
+  // documented recovery is exactly getStartPageToken + reconcile, which is what
+  // `cursor_invalid` makes the engine do.
+  var resp = driveFetch(credential, "GET", url, {
+    context: "get_changes",
+    rawStatusOk: true,
+    rawStatuses: [400, 404],
+  });
+  if (resp.status === 400 || resp.status === 404) {
+    // `invalid` is read as a token reason ONLY because the pageToken is the one
+    // variable in the URL above — the fields selection, the page size and the
+    // shared-drive flags are literals — and Drive answers a rejected pageToken
+    // with the bare reason `invalid` / message "Invalid Value". That is not a
+    // safe reading of a Drive 400 in general (a bad `fields` value reports the
+    // same reason), so if this URL ever takes a caller-supplied parameter, drop
+    // `invalid` from this list: a malformed request reported as cursor_invalid
+    // would silently re-baseline and full-walk on every run instead of saying
+    // what is wrong.
+    var reason = errorReason(resp);
+    if (resp.status === 404 || reason === "invalidPageToken" || reason === "invalid") {
+      throw coded(
+        "get_changes: Google Drive rejected the delta pageToken (" +
+          resp.status +
+          " " +
+          (reason || "not found") +
+          "). The cursor is unusable; re-baseline from changes.getStartPageToken " +
+          "and reconcile.",
+        "cursor_invalid"
+      );
+    }
+    // Any other 400 is a malformed request, not a dead cursor — hand it back to
+    // the single mapping point so it reads the same as everywhere else.
+    raiseForStatus(resp, "get_changes");
+  }
   var body = resp.body || {};
   var changes = body.changes || [];
   var cache = newPathCache();

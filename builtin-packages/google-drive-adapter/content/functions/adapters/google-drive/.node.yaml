@@ -23,7 +23,12 @@ properties:
   #    the resumable upload channel, and delta items that carry their FOLDER
   #    PATH — a webhook- or poll-delivered file now lands where the full walk
   #    would have put it instead of flat at the mount root.
-  version: 2
+  # 3: an unusable `changes` pageToken (400 invalidPageToken / 400 invalid /
+  #    404) is now thrown as `cursor_invalid` instead of a plain Error. As a
+  #    plain Error the engine classified it Transient and re-sent the SAME dead
+  #    cursor on every drain forever — the mount imported nothing and never
+  #    reconciled.
+  version: 3
   resource_limits:
     timeout_ms: 120000
     max_memory_bytes: 67108864

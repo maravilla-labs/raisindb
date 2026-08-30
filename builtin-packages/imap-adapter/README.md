@@ -26,7 +26,7 @@ This adapter speaks **real IMAP** (RFC 3501) over implicit TLS through the nativ
 | Delta feed (`get_changes`) | `raisin.imap.fetchSince(conn, sinceUid)` — messages with `UID > cursor` |
 | Cursor reset / full resync | mailbox `UIDVALIDITY` changed → re-list from UID 0 |
 | Message id (`external_id`) | IMAP `UID` |
-| Folder listing (`list`) | `raisin.imap.listMailboxes(conn)` |
+| Folder listing (`list`) | `raisin.imap.listMailboxes(conn)` — mailboxes ONLY; see the full-resync warning below |
 | Message body (`get` / `get_content`) | `raisin.imap.fetchMessage(conn, uid)` |
 
 There is **no JMAP proxy** and no `raisin.http.fetch` in this package. The binding
@@ -146,13 +146,22 @@ so a crash leaves evidence instead of an unbounded question.
 
 ### What is mapped, and what is declined
 
-Only `action: send`. `reply` / `reply_all` / `forward` are **declined** (the mapper
-returns `null`, the command settles `failed` with a reason): threading them needs
-`In-Reply-To` / `References` headers on the outgoing message, and `raisin.email.send`
-accepts no headers — a fresh message with a `Re:` subject breaks the recipient's
-thread silently.
+Only `action: send`. `reply` / `reply_all` / `forward` are **refused**: threading them
+needs `In-Reply-To` / `References` headers on the outgoing message, and
+`raisin.email.send` accepts no headers — a fresh message with a `Re:` subject breaks
+the recipient's thread silently. The refusal is the ADAPTER's, not the mapper's: the
+mapper passes the action through, `submit` throws a `config_error` naming the missing
+headers, and the command settles `failed` with **that** text. (It is claimed
+`queued -> sending` first — the refusal costs one state transition and buys a reason
+the author can act on.)
 
-A command with no recipient, no subject or no body is declined for the same reason.
+A command with no recipient, no subject or no body is declined by the mapper
+(`to_external` returns `null`). The reason the author sees is then the ENGINE's
+generic one — *"the mount's mapping function declined this command (to_external
+returned null) — either it is not finished being authored, or it has already been
+sent and must not be sent again"* — because a mapper has no channel for stating its
+own reason. Giving it one is an open design item.
+
 An HTML-only body gets a plain-text alternative generated from it, because the email
 API requires a non-empty `text` and would otherwise refuse every message composed in
 a rich editor. `importance` and attachments are not carried yet.
@@ -260,6 +269,32 @@ reconcile on first sync (folders via `list`), then incremental `get_changes` del
 keyed on the `UIDVALIDITY:UID` cursor. When the mailbox's `UIDVALIDITY` changes, the
 adapter forces a full re-list from UID 0. Writes run under the `virtual-mount-sync`
 system actor.
+
+### ⚠️ Forcing a FULL resync prunes every message node
+
+`list` on this adapter enumerates **mailboxes only** — messages arrive through
+`get_changes`, never through the walk. The engine's full reconcile does not know
+that: it treats everything the walk did not yield as stale and stages it for
+deletion. So a forced full run (the console's *Full resync* button, or a remap)
+deletes **every message node under the mount**, and they do not come back: the walk
+is followed by a delta baseline, which asks `get_changes` for a cursor and discards
+its items, so the next incremental pass resumes at the highest UID already seen and
+returns only NEW mail.
+
+On the mount layout shown above this is survivable and is why the mount is written
+that way: `ephemeral: true` with a 24h TTL makes those nodes a one-day cache, and
+nothing is touched on the IMAP server. **On a non-ephemeral IMAP mount the message
+nodes are lost permanently.** Do not force a full resync on one.
+
+The real fix is a contract addition — a mount whose `list` is not authoritative for
+its own content has no way to say so today (candidates: a
+`sync_config.reconcile_deletes: false` setting honoured by the engine's reconcile, or
+an adapter capability declaring that `list` enumerates containers only). Making
+`list` enumerate messages is **not** the fix: it re-opens the full-vs-delta
+`relative_path` divergence (a walk would nest a message under its mailbox,
+`INBOX/<subject>`, while `get_changes` emits the bare subject — or the UID when a
+message has none — so the same message has two paths and the engine remaps it on
+every disagreeing run) and costs a full mailbox fetch every run.
 
 ## Worked example: fire an agent per new message
 

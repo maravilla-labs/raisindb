@@ -15,9 +15,25 @@ properties:
        in this editor, then save.
     5. Copy the **Client ID** and **Client secret** into the fields on this page.
        The secret is encrypted at rest and never stored in cleartext.
-    6. Keep the default scope `calendar.readonly` for read-only sync.
-    7. Click **Connect account** and grant access, then create a mount for a
-       calendar.
+    6. Decide the scopes BEFORE connecting. The template ships two:
+       `calendar.readonly` and `calendar.events`.
+       * `calendar.readonly` alone gives a **read-only** mount, and is enough
+         for browsing the calendar list in the mount editor.
+       * `calendar.events` is what a **mirror** mount (create / edit / delete)
+         and an **RSVP** need. Without it every write returns 403 and the
+         adapter reports a `config_error` naming this scope.
+       Google issues a widened scope on **fresh consent only**, so an account
+       connected before a scope was added must be **reconnected** — re-running
+       sync will not upgrade it.
+    7. Click **Connect account** and grant access, then create a mount. Pick the
+       calendar from the list — `browse` reads your calendarList, so there is no
+       calendar id to type.
+    8. For RSVPs, add a SECOND mount beside the calendar one, conventionally
+       `/calendar/rsvp`, with `write_config.mode: submit` and the **Google
+       Calendar Outbox Mapper**. It holds `raisin:CalendarAction` nodes; nothing
+       is sent until one is moved to `queued`. It is a separate mount on
+       purpose: an RSVP notifies the organizer, so it must not be reachable by
+       an ordinary property edit on an event.
 
     **Push:** automatic. The engine registers a Calendar `events.watch` channel
     for you when a mount uses `mode: webhook` or `hybrid` — no manual webhook.

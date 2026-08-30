@@ -12,8 +12,19 @@
  * Reads: can_read + supports_changes, plus push (supports_push) via
  * events.watch channels — notifications are pure invalidation signals.
  *
- * Writes: the full MIRROR set — create, update and delete. Two provider facts
- * shape them and are worth knowing before reading the code:
+ * Writes: the full MIRROR set — create, update and delete — plus ONE command,
+ * `submit`, which is an RSVP.
+ *
+ * An RSVP is a command and not a property edit because it NOTIFIES THE
+ * ORGANIZER: irreversible, externally visible, and therefore not something a
+ * bulk property update or a mapper regression may reach by accident. That is
+ * the same reasoning raisin:CalendarAction carries, and the same division
+ * ms-graph draws. The Google-specific twist is that there is no RSVP endpoint
+ * at all — it is an events.patch of the caller's own attendee row — see
+ * submit.js for why that forces a read-modify-write.
+ *
+ * Two more provider facts shape the mirror writes and are worth knowing before
+ * reading the code:
  *   * Google has NO TRASH for events. A delete is immediate and unrecoverable,
  *     so `supports_trash` is false and the default policy is `detach`; deletes
  *     propagate only when an operator types `purge`.
@@ -37,6 +48,8 @@
  *   read.js         list / get / get_content
  *   changes.js      the syncToken baseline and delta
  *   write.js        create / update / delete
+ *   submit.js       the RSVP command (a submit mount)
+ *   browse.js       calendarList discovery for the mount editor
  *   subscribe.js    events.watch channel lifecycle
  *
  * Token lifecycle is owned entirely by the engine: `credential.access_token` is
@@ -68,6 +81,8 @@ import { opCapabilities } from "./capabilities.js";
 import { opList, opGet, opGetContent } from "./read.js";
 import { opGetChanges } from "./changes.js";
 import { opCreate, opUpdate, opDelete } from "./write.js";
+import { opSubmit } from "./submit.js";
+import { opBrowse } from "./browse.js";
 import { opSubscribe, opRenew, opUnsubscribe } from "./subscribe.js";
 
 // ---- dispatch -------------------------------------------------------------
@@ -95,6 +110,10 @@ export function handler(input) {
       return opUpdate(credential, mount, params);
     case "delete":
       return opDelete(credential, mount, params);
+    case "submit":
+      return opSubmit(credential, mount, params);
+    case "browse":
+      return opBrowse(credential, mount, params);
     case "subscribe":
       return opSubscribe(credential, mount, params);
     case "renew":

@@ -123,15 +123,31 @@ function toExternal(node) {
   var action = props.action;
   if (!action) return null;
 
-  // Only `send`. reply / reply_all / forward are declined rather than
-  // approximated: threading them correctly needs In-Reply-To and References
-  // headers on the outgoing message, and `raisin.email.send` accepts
+  // Only `send` is actually sendable. reply / reply_all / forward are refused
+  // rather than approximated: threading them correctly needs In-Reply-To and
+  // References headers on the outgoing message, and `raisin.email.send` accepts
   // { to, cc, bcc, subject, text, html, attachments, provider } and no headers
   // at all. A "reply" that is really a fresh message with a Re: subject breaks
-  // the recipient's thread silently, which is exactly the kind of guess a null
-  // exists to avoid — the engine records the command as failed with a stated
-  // reason instead.
-  if (action !== "send") return null;
+  // the recipient's thread silently.
+  //
+  // The refusal is the ADAPTER's, not a null here. `map_command` runs before the
+  // adapter is ever called, and a null makes the engine settle the command with
+  // its OWN generic text — "the mount's mapping function declined this command
+  // (to_external returned null) — either it is not finished being authored, or
+  // it has already been sent and must not be sent again" — so an author who
+  // queued a reply was told their command was unfinished or a duplicate, both
+  // wrong. Passing the action through reaches `opSubmit`, which throws a
+  // `config_error` naming the real reason (the missing headers) and which the
+  // engine settles terminally with the adapter's own text. Cost: the command is
+  // claimed (queued -> sending) before being refused — the same outcome, with a
+  // reason the author can act on.
+  //
+  // No body is built for these: `opSubmit` rejects on `action` before it looks
+  // at `body`, and a half-built message would only invite the guess this refusal
+  // exists to avoid.
+  if (action !== "send") {
+    return { payload: { action: String(action), body: null } };
+  }
 
   var to = recipients(props.to);
   if (!to) return null; // nowhere to send it

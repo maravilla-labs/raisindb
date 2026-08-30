@@ -238,6 +238,22 @@ function opCapabilities(mount) {
 
 // Enumerate mailboxes (folders). Messages arrive via get_changes
 // (supports_changes: true), so list returns only the folder structure.
+//
+// CONSEQUENCE, and there is no fix available inside this adapter: because the
+// walk yields no messages, a FORCED FULL reconcile stages every message node
+// under the mount for deletion — `seen` holds mailbox external_ids only, it is
+// non-empty so the engine's empty-reconcile guard does not fire, and the stale
+// filter exempts only `is_command` nodes. They do not come back: get_changes
+// resumes from the highest UID already seen. Survivable only because the
+// documented mount layout is `ephemeral: true` with a 24h TTL, i.e. a cache; a
+// non-ephemeral IMAP mount loses them permanently. See README, "Forcing a FULL
+// resync prunes every message node". Do NOT make this function enumerate
+// messages to dodge it — that re-opens the full-vs-delta relative_path
+// divergence (a walk would nest them under the mailbox, `INBOX/<subject>`,
+// while opGetChanges below emits the BARE subject — or the UID when a message
+// has none — so the same message lands at two paths and the engine remaps it on
+// every disagreeing run) and costs a full mailbox fetch per run. The fix belongs
+// in the engine contract.
 function opList(credential, mount, params) {
   var conn = buildConn(credential, mount);
   var boxes = imapCall(function () {

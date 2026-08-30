@@ -38,6 +38,26 @@ function retryAfterSeconds(resp) {
   return null;
 }
 
+/**
+ * Google's machine-readable `error.errors[0].reason`, or "" when the body has none.
+ *
+ * Exported because `changes.js` must tell `invalidPageToken` (a dead delta
+ * cursor, recoverable by re-baselining) from every other 400 — and it has to
+ * read the reason exactly the way this file does. Two parsers would eventually
+ * disagree about which 400 is a cursor problem.
+ */
+export function errorReason(resp) {
+  try {
+    var body = (resp && resp.body) || {};
+    if (body.error && body.error.errors && body.error.errors.length) {
+      return body.error.errors[0].reason || "";
+    }
+  } catch (_) {
+    return "";
+  }
+  return "";
+}
+
 // Throw the reserved error codes the engine dispatches on. Never swallow an
 // auth failure into an empty result — that reads as "everything was deleted".
 export function raiseForStatus(resp, context, isWrite) {
@@ -45,14 +65,7 @@ export function raiseForStatus(resp, context, isWrite) {
   if (status >= 200 && status < 300) return;
 
   var body = resp.body || {};
-  var reason = "";
-  try {
-    if (body && body.error && body.error.errors && body.error.errors.length) {
-      reason = body.error.errors[0].reason || "";
-    }
-  } catch (_) {
-    reason = "";
-  }
+  var reason = errorReason(resp);
 
   if (status === 401) {
     throw coded("Google Drive rejected the access token", "auth_expired");
@@ -110,7 +123,13 @@ export function driveFetch(credential, method, url, opts) {
   var request = { method: method, headers: headers };
   if (opts.body !== undefined) request.body = opts.body;
   var resp = raisin.http.fetch(url, request);
-  if (!opts.rawStatusOk || (resp.status !== 404 && resp.status !== 412)) {
+  // `rawStatuses` widens the set of statuses handed back unraised, for the ONE
+  // caller that can say something better about them than this file can.
+  // Defaulted, not global: making 400 raw everywhere would turn a genuine
+  // malformed request in write.js into a silent empty response.
+  var raw = opts.rawStatuses || [404, 412];
+  var isRaw = opts.rawStatusOk && raw.indexOf(resp.status) !== -1;
+  if (!isRaw) {
     raiseForStatus(resp, opts.context || method + " " + url, opts.write);
   }
   return resp;

@@ -26,9 +26,18 @@ function map(metadata, item = {}) {
   });
 }
 
-test('reports no writeback: the adapter has no write case at all', () => {
+// STALE EXPECTATION, CORRECTED. This asserted `{ to_external: false }` — that
+// the mapper cannot write — long after the mirror write path landed and
+// index.js started answering `true`. It survived because this file was the only
+// thing asserting it and nothing ran the suite to green; the claim then
+// propagated into docs/reference/virtual-node-adapters.md, which still called
+// both calendars read-only. `tests_google_calendar_write.rs`
+// (`the_google_mapper_now_declares_the_write_direction`) has been the only
+// guard telling the truth. Nothing about mapper OUTPUT is relaxed here: an
+// empty node still emits nothing, which is the assertion that matters.
+test('declares the write direction, and still emits nothing for a node with no writable field', () => {
   assert.deepEqual(handler({ operation: 'mapper_capabilities', mount }), {
-    to_external: false,
+    to_external: true,
   });
   assert.equal(handler({ operation: 'to_external', node: {}, mount }), null);
 });

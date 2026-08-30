@@ -10,26 +10,48 @@ sync. Events are leaves — there is no folder hierarchy.
 
 This package implements the frozen adapter contract in
 `docs/reference/virtual-node-adapters.md` over the Google Calendar **v3** REST
-API. It reads (`can_read`, `supports_changes`, `supports_push`) and it **writes**
-a full mirror (`can_create`, `can_update`, `can_delete`).
+API. It reads (`can_read`, `supports_changes`, `supports_push`), it **writes** a
+full mirror (`can_create`, `can_update`, `can_delete`), it issues **one command**
+(`can_submit` — an RSVP), and it offers **discovery** (`supports_browse`).
 
 ## What it ships
 
 | Path | Workspace | Purpose |
 |------|-----------|---------|
 | `/adapters/google-calendar` | `functions` | Calendar v3 adapter function (`handler(input)`). |
-| `/mappers/google-calendar-default` | `functions` | Default per-event mapping function. |
+| `/mappers/google-calendar-default` | `functions` | Default per-event mapping function (both directions). |
+| `/mappers/google-calendar-outbox` | `functions` | Outbox mapper: `raisin:CalendarAction` -> RSVP command. |
 | `/integrations/google-calendar` | `raisin:system` | Pre-configured `raisin:Integration` template, **disabled**. |
 
 ### Capabilities
 
-`can_read`, `supports_changes` and `supports_push` are `true`, and so are
-`can_create` / `can_update` / `can_delete`. Folder creation and search are not
-implemented, and neither is `submit`: an RSVP through Google is a PATCH of the
-caller's own attendee row rather than a distinct action endpoint.
+`can_read`, `supports_changes`, `supports_push` and `supports_browse` are `true`,
+and so are `can_create` / `can_update` / `can_delete` / `can_submit`. Folder
+creation and search are not implemented.
 
-Two provider facts shape the write path, and both are surprising enough to state
-before you enable it:
+`supports_browse` means the mount editor lists the account's calendars
+(`calendarList.list`) instead of asking for a hand-typed calendar id. It needs no
+scope beyond `calendar.readonly`.
+
+`can_submit` is an **RSVP** against a `raisin:CalendarAction` node on a separate
+`submit` mount (conventionally `/calendar/rsvp`), paired with the
+**google-calendar-outbox** mapper. It is a command rather than a property on the
+event because answering an invitation notifies the organizer: irreversible,
+externally visible, and not something a bulk property edit may reach.
+
+Google has no accept/decline endpoint — an RSVP is `events.patch` of the caller's
+own attendee row — and `events.patch` documents that *"array fields, if
+specified, overwrite the existing arrays"*. Sending only your own row would
+therefore **delete every other guest from the meeting**. The adapter reads the
+event, mutates the row marked `self` in place, and PATCHes the whole array back;
+that is why an RSVP costs two round trips where the Graph one costs one. It sends
+`sendUpdates=all` by default (override per command with
+`raisin:CalendarAction.send_response: false`) because for Google, telling the
+organizer *is* the RSVP — `sendUpdates=none` records the response and tells
+nobody.
+
+Two provider facts shape the mirror write path, and both are surprising enough to
+state before you enable it:
 
 - **Google has no trash for events.** A delete is immediate and unrecoverable, so
   the adapter declares `supports_trash: false` and defaults `delete_policy` to
@@ -49,9 +71,12 @@ The adapter has two complementary read paths:
 
 - **Full / list** — `events.list` bounded by a rolling time window:
   `timeMin = now - window.days_back`, `timeMax = now + window.days_ahead`
-  (defaults **7** days back, **90** days ahead), with `singleEvents=true` and
-  `orderBy=startTime`. Recurring events are expanded into individual instances.
-  Configure the window under the mount's `sync_config`:
+  (defaults **7** days back, **90** days ahead), with `showDeleted=true` and
+  **without** `singleEvents`. Google therefore returns the underlying records —
+  single events, recurring **masters** carrying their RRULE, and modified or
+  cancelled instances as their own records. Unmodified occurrences are not
+  returned and are not wanted: they are projected from the master by the
+  calendar expander. Configure the window under the mount's `sync_config`:
 
   ```yaml
   sync_config:
@@ -64,17 +89,27 @@ The adapter has two complementary read paths:
   - First call (no `since_token`): the engine has already run a full reconcile,
     so the adapter pages a windowed list to the end purely to harvest a
     `nextSyncToken`, returns **no** changes, and hands that token back.
-  - Subsequent calls pass `syncToken=since_token` (no `timeMin`/`timeMax`/
-    `orderBy` — those invalidate a syncToken). `next_token` is the response's
-    `nextSyncToken`, and is **never null**: it falls back to the page token
-    while paging, and otherwise echoes the caller's token so the cursor holds.
-  - On HTTP **410 GONE** the syncToken has expired; the adapter throws a
-    **transient** error. There is no dedicated resync opcode — the engine drops
-    the token and re-runs a full reconcile (`mode: "full"`), which is the
-    accepted recovery path.
+  - Subsequent calls pass `syncToken=since_token` and drop `timeMin`/`timeMax`/
+    `orderBy` — the only parameters Google exempts. **Every other parameter must
+    match the request that minted the token**, `showDeleted` included; a mismatch
+    either silently drops deletions from the delta or is rejected with a 400.
+    `next_token` is the response's `nextSyncToken`, and is **never null**: it
+    falls back to the page token while paging, and otherwise echoes the caller's
+    token so the cursor holds.
+  - On HTTP **410 GONE** (and on the one-time **400** after a parameter change)
+    the token is unusable; the adapter reports **`cursor_invalid`**, which makes
+    the engine drop the stored token and full-reconcile **in the same run**. It
+    is deliberately not a transient error — that had the engine retrying the same
+    rejected token every tick forever.
 
-Cancelled events (`status: "cancelled"`) surface as `deleted` changes and the
-default mapper returns `null` for them.
+A cancelled record is **not** uniformly a delete. One carrying a
+`recurringEventId` is a cancelled **occurrence** of a series and is materialized
+like any other exception, with `status: "cancelled"` — it is the only evidence
+that the meeting does not happen, and the expander suppresses a projected
+occurrence solely on the existence of an exception node at that slot. Only a
+cancelled record **without** a `recurringEventId` is reported as `deleted`. The
+default mapper materializes cancelled events rather than returning `null`, so
+both providers agree.
 
 ## Google Cloud setup
 
@@ -87,22 +122,25 @@ default mapper returns `null` for them.
    `https://<your-host>/api/integrations/oauth/callback`.
 5. Copy the **Client ID** and **Client secret**.
 
-### OAuth scope
+### OAuth scopes
 
-The template requests a single least-privilege scope:
+The template requests **two**:
 
 - `https://www.googleapis.com/auth/calendar.readonly` — read calendars and their
-  events.
+  events, and list them in the mount editor (`browse`).
+- `https://www.googleapis.com/auth/calendar.events` — create, edit and delete
+  events, **and** send an RSVP.
 
-**Writing needs more, and the template deliberately does not ask for it.** A
-mirror mount needs `https://www.googleapis.com/auth/calendar.events`; with only
-the read scope every write returns 403, which the adapter reports as a
-`config_error` naming this scope rather than as an expired token. Widening it is
-three steps and none can be skipped: add the scope to the **live**
-`raisin:Integration` node under `/integrations` (the `/connectors` template is
-package-owned and is overwritten on update), enable it on the Google Cloud
-consent screen, and **reconnect each account** — Google only issues a widened
-scope on fresh consent, never on refresh.
+Grant only the first and you get a read-only mount: every write and every RSVP
+returns 403, which the adapter reports as a `config_error` naming this scope
+rather than as an expired token.
+
+**A scope added after an account was connected does not take effect on its own.**
+Google issues a widened scope on fresh consent only, never on refresh, so the
+sequence is: make sure the scope is on the **live** `raisin:Integration` node
+under `/integrations` (the `/connectors` template is package-owned and is
+overwritten on update), enable it on the Google Cloud consent screen, and
+**reconnect each account**.
 
 The template sets `access_type: offline` + `prompt: consent` so Google issues a
 refresh token; the engine stores it encrypted and never passes it to the adapter.
@@ -130,7 +168,8 @@ properties:
   account_ref: "<connected_accounts[].id>"
   target_workspace: default
   mount_path: /calendars/team
-  remote_root: "primary"     # calendar id, or "primary" for the account's default
+  remote_root: "primary"     # calendar id (pick it from the browse list), or
+                             # "primary" for the account's default
   # mapping_function: /mappers/google-calendar-default   # optional; omit to use it
   sync_config:
     mode: poll
@@ -145,6 +184,31 @@ properties:
 
 The engine runs a full reconcile on first sync, then incremental `get_changes`
 deltas. Writes run under the `virtual-mount-sync` system actor.
+
+### An RSVP mount
+
+RSVPs live in their own mount, beside the calendar one, so that answering an
+invitation is never reachable by editing an event:
+
+```yaml
+node_type: raisin:VirtualMount
+properties:
+  title: Team Calendar RSVPs
+  integration_ref: /integrations/google-calendar
+  account_ref: "<connected_accounts[].id>"
+  target_workspace: default
+  mount_path: /calendars/team/rsvp
+  remote_root: "primary"     # the SAME calendar the RSVP is answered from
+  mapping_function: /mappers/google-calendar-outbox
+  write_config:
+    mode: submit
+  enabled: true
+```
+
+It holds `raisin:CalendarAction` nodes (`action`, `target_external_id`,
+optional `comment` and `send_response`). Nothing is sent until a node's `status`
+is moved to `queued`; an ambiguous outcome parks at `unknown` and is never
+auto-retried, because a retry means a second notification to the organizer.
 
 ## Security notes
 
