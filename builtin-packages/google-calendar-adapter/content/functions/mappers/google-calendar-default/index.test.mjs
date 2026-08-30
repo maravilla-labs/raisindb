@@ -197,11 +197,12 @@ test('a description is written only when the adapter returned one', () => {
 // and the only way that stays true is to compare the two mappers directly. This
 // reaches across package boundaries on purpose: a divergence reintroduced in
 // either file has to fail somewhere, and there is no shared file to put it in.
-const graphSrc = readFileSync(
-  new URL('../../../../../ms-graph-adapter/content/functions/mappers/ms-graph-calendar/index.js', import.meta.url),
-  'utf8',
-);
-const graphHandler = new Function(`${graphSrc}\nreturn handler;`)();
+//
+// A real import, not `new Function(src)`: that mapper is now split across
+// index.js + recurrence.js + time.js, and `new Function` cannot evaluate an
+// import statement, so it threw during evaluation and took the two convergence
+// tests below with it — silently, as an async uncaught error after the run.
+import { handler as graphHandler } from '../../../../../ms-graph-adapter/content/functions/mappers/ms-graph-calendar/index.js';
 
 function graphMap(metadata) {
   return graphHandler({

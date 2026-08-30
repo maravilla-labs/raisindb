@@ -36,28 +36,55 @@ pub(super) fn adapter_source() -> String {
 /// in storage. Without it every test here would execute an entrypoint whose
 /// imports resolve to nothing — and the resolver rejects an unknown specifier
 /// rather than silently returning undefined, so the failure would be total
-/// rather than subtle. `.mjs` is excluded deliberately: `index.test.mjs` is a
-/// standalone node test, not a module this adapter imports.
+/// rather than subtle.
 pub(super) fn adapter_files() -> HashMap<String, String> {
-    let dir = adapter_dir();
+    function_files(&adapter_dir())
+}
+
+/// The sibling modules of ANY function node — adapter or mapper — read from
+/// disk the way the engine reads them from storage.
+///
+/// This exists because the mapper harnesses used to pass `HashMap::new()`:
+/// the test supplied LESS than production does, so an `import` that resolves
+/// perfectly well in the engine failed in the test alone, and the failure was
+/// indistinguishable from a broken mapper. A harness that cannot load a
+/// two-file function is a harness that forbids splitting one.
+///
+/// An EMPTY map is legitimate — a single-file function has no siblings — so the
+/// path is proved by asserting the entrypoint is there instead. `.mjs` is
+/// excluded deliberately: `index.test.mjs` is a standalone node test, not a
+/// module the function imports.
+///
+/// NOT a full replica of the engine's `load_sibling_files`, and the difference
+/// is one-directional on purpose: that one prefix-scans the whole subtree and
+/// also admits `.mjs`/`.py`/`.star`, so it can only ever offer MORE than this
+/// does. Every function shipped here is a flat directory of `.js`, so the two
+/// agree today — but a module in a SUBDIRECTORY would resolve in production and
+/// fail here, which is the same asymmetry that made this helper necessary.
+pub(super) fn function_files(dir: &std::path::Path) -> HashMap<String, String> {
     let mut files = HashMap::new();
-    for entry in std::fs::read_dir(&dir).expect("read adapter dir") {
+    let mut saw_entrypoint = false;
+    for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
         let path = entry.expect("dir entry").path();
         let name = path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or_default();
-        if name == "index.js" || !name.ends_with(".js") {
+        if !name.ends_with(".js") {
+            continue;
+        }
+        if name == "index.js" {
+            saw_entrypoint = true;
             continue;
         }
         files.insert(
             name.to_string(),
-            std::fs::read_to_string(&path).expect("read adapter module"),
+            std::fs::read_to_string(&path).expect("read function module"),
         );
     }
     assert!(
-        !files.is_empty(),
-        "no sibling modules found in {}",
+        saw_entrypoint,
+        "no index.js in {} — wrong function directory",
         dir.display()
     );
     files

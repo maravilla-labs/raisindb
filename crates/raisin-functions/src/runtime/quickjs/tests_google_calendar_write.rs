@@ -16,16 +16,33 @@
 //! mount resolved to `Refused` against both shipped calendar providers.
 
 use super::tests_google_calendar_adapter::{call_adapter, mount};
+// `function_files` is provider-neutral despite its home; it reads a function
+// node's sibling modules off disk the way the engine does from storage.
+use super::tests_ms_graph_adapter::function_files;
 use super::*;
 use crate::api::MockFunctionApi;
 use serde_json::{json, Value};
 
+fn mapper_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+        "../../builtin-packages/google-calendar-adapter/content/functions/mappers/google-calendar-default",
+    )
+}
+
 fn mapper_source() -> String {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
-        "../../builtin-packages/google-calendar-adapter/content/functions/mappers/google-calendar-default/index.js",
-    );
+    let path = mapper_dir().join("index.js");
     std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read mapper at {}: {e}", path.display()))
+}
+
+/// The mapper's sibling MODULES, for the same reason the ms-graph calendar
+/// harness has them: passing `HashMap::new()` supplies LESS than production, so
+/// an `import` the engine resolves fine fails here and nowhere else — which is
+/// what silently forbade splitting the ms-graph calendar mapper for as long as
+/// it did. Empty today, because this mapper is still one file; the point is that
+/// it stops being a trap the day it is not.
+fn mapper_files() -> HashMap<String, String> {
+    function_files(&mapper_dir())
 }
 
 /// A mapper is pure and I/O-free, so it gets no scripted HTTP at all — and if it
@@ -42,7 +59,7 @@ async fn call_mapper(input: Value) -> (Option<Value>, Vec<Value>) {
             context,
             &metadata,
             api.clone() as Arc<dyn crate::api::FunctionApi>,
-            HashMap::new(),
+            mapper_files(),
         )
         .await
         .expect("runtime execute");

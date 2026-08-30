@@ -37,9 +37,20 @@
  * `name` stays the Graph item id so distinct events never collide on a path.
  * The engine stamps the reserved __ properties on top of what is returned; they
  * are declared by the raisin:VirtualNode mixin, not here.
+ *
+ * LAYOUT. This file owns the dispatch and the two field-by-field translations
+ * (`toNode`, `toExternal`). The two mappings that have to be EXACT INVERSES of
+ * each other live one per file — time.js (Graph's naive wall clock + Windows
+ * zone <-> UTC/local/IANA) and recurrence.js (patternedRecurrence <-> RRULE) —
+ * because when both directions of one relationship sat at opposite ends of this
+ * file they drifted, and a rule taught to only one side reschedules a real
+ * series on the next save.
  */
 
-function handler(input) {
+import { dateOf, graphTime, ianaZone, localOf, utcOf } from "./time.js";
+import { graphRecurrence, recurrenceLines } from "./recurrence.js";
+
+export function handler(input) {
   switch (input && input.operation) {
     case "to_external":
       return toExternal(input.node, input.mount, input.fields, input.intent);
@@ -49,66 +60,6 @@ function handler(input) {
     default:
       return toNode(input);
   }
-}
-
-// ---- time -----------------------------------------------------------------
-
-// An instant is only recoverable when the string carries Z or ±HH:MM.
-function utcOf(s) {
-  if (typeof s !== "string" || !s) return null;
-  if (!/(Z|[+-]\d{2}:?\d{2})$/.test(s)) return null;
-  var d = new Date(s);
-  if (isNaN(d.getTime())) return null;
-  return d.toISOString().replace(/\.\d+Z$/, "Z");
-}
-
-function dateOf(s) {
-  var m = typeof s === "string" ? /^(\d{4}-\d{2}-\d{2})/.exec(s) : null;
-  return m ? m[1] : null;
-}
-
-// Wall clock with no offset: "YYYY-MM-DDTHH:MM:SS", or the bare date.
-function localOf(s, allDay) {
-  var m = typeof s === "string" ? /^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}:\d{2}))?/.exec(s) : null;
-  if (!m) return null;
-  if (allDay) return m[1];
-  return m[2] ? m[1] + "T" + m[2] : m[1];
-}
-
-// Graph reports Windows zone names; raisin:Event.timezone is IANA. A name that
-// cannot be mapped becomes null rather than a wrong zone. The full CLDR
-// windowsZones table belongs in the adapter; this covers the common ones.
-var WINDOWS_TO_IANA = {
-  "UTC": "UTC",
-  "GMT Standard Time": "Europe/London",
-  "W. Europe Standard Time": "Europe/Berlin",
-  "Central Europe Standard Time": "Europe/Budapest",
-  "Romance Standard Time": "Europe/Paris",
-  "Central European Standard Time": "Europe/Warsaw",
-  "GTB Standard Time": "Europe/Bucharest",
-  "FLE Standard Time": "Europe/Kiev",
-  "Israel Standard Time": "Asia/Jerusalem",
-  "Russian Standard Time": "Europe/Moscow",
-  "Arab Standard Time": "Asia/Riyadh",
-  "India Standard Time": "Asia/Kolkata",
-  "China Standard Time": "Asia/Shanghai",
-  "Singapore Standard Time": "Asia/Singapore",
-  "Tokyo Standard Time": "Asia/Tokyo",
-  "AUS Eastern Standard Time": "Australia/Sydney",
-  "New Zealand Standard Time": "Pacific/Auckland",
-  "Eastern Standard Time": "America/New_York",
-  "Central Standard Time": "America/Chicago",
-  "Mountain Standard Time": "America/Denver",
-  "Pacific Standard Time": "America/Los_Angeles",
-  "Hawaiian Standard Time": "Pacific/Honolulu",
-  "E. South America Standard Time": "America/Sao_Paulo",
-  "South Africa Standard Time": "Africa/Johannesburg",
-};
-
-function ianaZone(name) {
-  if (typeof name !== "string" || !name) return null;
-  if (name.indexOf("/") !== -1) return name; // already IANA
-  return WINDOWS_TO_IANA[name] || null;
 }
 
 // ---- people ---------------------------------------------------------------
@@ -154,81 +105,6 @@ function attendeeOf(a) {
     response = RSVP[raw] || null;
   }
   return { email: p.email, name: p.name, type: type, response: response };
-}
-
-// ---- recurrence -----------------------------------------------------------
-
-var DAY = {
-  sunday: "SU",
-  monday: "MO",
-  tuesday: "TU",
-  wednesday: "WE",
-  thursday: "TH",
-  friday: "FR",
-  saturday: "SA",
-};
-var FREQ = {
-  daily: "DAILY",
-  weekly: "WEEKLY",
-  absoluteMonthly: "MONTHLY",
-  relativeMonthly: "MONTHLY",
-  absoluteYearly: "YEARLY",
-  relativeYearly: "YEARLY",
-};
-var SETPOS = { first: 1, second: 2, third: 3, fourth: 4, last: -1 };
-
-// RFC 5545 content lines.
-//
-// The ms-graph adapter now converts `patternedRecurrence` itself and hands over
-// an ARRAY of lines — the same shape Google Calendar puts on the wire natively,
-// which is the whole point of the convergence. That array is passed through
-// untouched.
-//
-// The patternedRecurrence branch below is a LEGACY fallback for an adapter that
-// has not been updated (a custom one, or a package still on the old build). It
-// duplicates logic that now lives in the adapter and should be deleted once no
-// shipped adapter emits the old shape.
-function recurrenceLines(raw) {
-  if (Array.isArray(raw)) {
-    var lines = [];
-    for (var k = 0; k < raw.length; k++) {
-      if (typeof raw[k] === "string" && raw[k]) lines.push(raw[k]);
-    }
-    return lines.length ? lines : null;
-  }
-  var r = raw;
-  if (typeof r === "string") {
-    try {
-      r = JSON.parse(r);
-    } catch (e) {
-      return null;
-    }
-  }
-  if (!r || !r.pattern) return null;
-  var p = r.pattern;
-  var freq = FREQ[p.type];
-  if (!freq) return null;
-
-  var parts = ["FREQ=" + freq];
-  if (p.interval && p.interval !== 1) parts.push("INTERVAL=" + p.interval);
-
-  var days = [];
-  for (var i = 0; i < (p.daysOfWeek || []).length; i++) {
-    var d = DAY[p.daysOfWeek[i]];
-    if (d) days.push(d);
-  }
-  if (days.length) parts.push("BYDAY=" + days.join(","));
-  if (p.dayOfMonth) parts.push("BYMONTHDAY=" + p.dayOfMonth);
-  if (p.month) parts.push("BYMONTH=" + p.month);
-  if (SETPOS[p.index] !== undefined && days.length) parts.push("BYSETPOS=" + SETPOS[p.index]);
-
-  var range = r.range || {};
-  if (range.type === "numbered" && range.numberOfOccurrences) {
-    parts.push("COUNT=" + range.numberOfOccurrences);
-  } else if (range.type === "endDate" && dateOf(range.endDate)) {
-    parts.push("UNTIL=" + dateOf(range.endDate).replace(/-/g, "") + "T235959Z");
-  }
-  return ["RRULE:" + parts.join(";")];
 }
 
 // ---- to_node --------------------------------------------------------------
@@ -336,25 +212,6 @@ function toNode(input) {
 // Cancelling is a DELETE (see the mount's delete_policy); RSVP is a `submit`
 // command on a separate mount, deliberately, because it notifies the organizer.
 
-var GRAPH_DAY_NAME = {
-  SU: "sunday",
-  MO: "monday",
-  TU: "tuesday",
-  WE: "wednesday",
-  TH: "thursday",
-  FR: "friday",
-  SA: "saturday",
-};
-var DOW_BY_INDEX = [
-  "sunday",
-  "monday",
-  "tuesday",
-  "wednesday",
-  "thursday",
-  "friday",
-  "saturday",
-];
-var GRAPH_INDEX_NAME = { 1: "first", 2: "second", 3: "third", 4: "fourth", "-1": "last" };
 var SHOW_AS_OUT = {
   free: "free",
   tentative: "tentative",
@@ -392,33 +249,6 @@ function str(v) {
   return typeof v === "string" && v ? v : null;
 }
 
-// "2026-08-11T09:00:00Z" / "2026-08-11T09:00:00" / "2026-08-11" -> the naive
-// local datetime Graph wants beside an explicit `timeZone`.
-function naive(s, allDay) {
-  var m = typeof s === "string" ? /^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}(?::\d{2})?))?/.exec(s) : null;
-  if (!m) return null;
-  if (allDay) return m[1] + "T00:00:00";
-  var t = m[2] || "00:00:00";
-  return m[1] + (t.length === 5 ? t + ":00" : t).replace(/^/, "T");
-}
-
-// One end of the event as a Graph dateTimeTimeZone, or null when the node does
-// not carry enough to name an instant.
-//
-// The zone question is the whole of it. `start_local` is a NAIVE wall clock and
-// `timezone` may legitimately be null (`toNode` writes null rather than guess a
-// zone it cannot map). Pairing a naive local with `timeZone: "UTC"` would move
-// every event in a non-UTC calendar by its offset — a silent, plausible-looking
-// corruption of real meetings. So a naive local without a zone falls back to the
-// UTC value, and when there is no UTC value either this returns null and the
-// caller declines rather than guesses.
-function graphTime(local, utc, tz, allDay) {
-  if (tz && local) return { dateTime: naive(local, allDay), timeZone: tz };
-  if (utc) return { dateTime: naive(utc, allDay), timeZone: "UTC" };
-  if (allDay && local) return { dateTime: naive(local, true), timeZone: tz || "UTC" };
-  return null;
-}
-
 function attendeeOut(a) {
   if (!a) return null;
   var email = str(a.email);
@@ -428,158 +258,6 @@ function attendeeOut(a) {
     emailAddress: { address: email, name: str(a.name) || undefined },
     type: type,
   };
-}
-
-// Date arithmetic on a naive "YYYY-MM-DD", zone-free by construction.
-function dateParts(s) {
-  var m = typeof s === "string" ? /^(\d{4})-(\d{2})-(\d{2})/.exec(s) : null;
-  return m ? { y: Number(m[1]), m: Number(m[2]), d: Number(m[3]) } : null;
-}
-
-// RFC 5545 `UNTIL=20261231T210000Z` -> Graph's `endDate: "2026-12-31"`.
-//
-// THIS IS THE EXACT INVERSE OF `graphUntil` IN THE ADAPTER, and the two must
-// stay inverses. Graph's endDate is a date in the series' OWN zone while UNTIL
-// is an instant, so the adapter pads by 12 hours to cover every offset; reading
-// it back therefore has to subtract the same 12 hours before taking the date, or
-// an evening series round-trips one day later every time it is written — adding
-// an occurrence per save, forever. Subtracting also does the right thing for a
-// foreign RRULE that wrote a naive `T235959Z`: 12h back is 11:59 on the same
-// day.
-var UNTIL_PAD_MS = 12 * 3600000;
-
-function untilToEndDate(until) {
-  var m = /^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})Z?)?$/.exec(until || "");
-  if (!m) return null;
-  var at = new Date(
-    Date.UTC(
-      Number(m[1]),
-      Number(m[2]) - 1,
-      Number(m[3]),
-      Number(m[4] || 0),
-      Number(m[5] || 0),
-      Number(m[6] || 0)
-    ) - UNTIL_PAD_MS
-  );
-  if (isNaN(at.getTime())) return null;
-  return (
-    String(at.getUTCFullYear()) +
-    "-" +
-    (at.getUTCMonth() + 1 < 10 ? "0" : "") +
-    (at.getUTCMonth() + 1) +
-    "-" +
-    (at.getUTCDate() < 10 ? "0" : "") +
-    at.getUTCDate()
-  );
-}
-
-function parseRrule(lines) {
-  if (!Array.isArray(lines)) return null;
-  for (var i = 0; i < lines.length; i++) {
-    var line = typeof lines[i] === "string" ? lines[i] : "";
-    if (line.indexOf("RRULE") !== 0) continue;
-    var body = line.slice(line.indexOf(":") + 1);
-    var out = {};
-    var parts = body.split(";");
-    for (var k = 0; k < parts.length; k++) {
-      var eq = parts[k].indexOf("=");
-      if (eq === -1) continue;
-      out[parts[k].slice(0, eq).toUpperCase()] = parts[k].slice(eq + 1);
-    }
-    return out.FREQ ? out : null;
-  }
-  return null;
-}
-
-function bydayNames(byday) {
-  var out = [];
-  var list = (byday || "").split(",");
-  for (var i = 0; i < list.length; i++) {
-    // Strip an ordinal prefix (`2FR`, `-1SU`): Graph carries that as `index`,
-    // and BYSETPOS is where this mapper reads it from.
-    var code = list[i].replace(/^[+-]?\d+/, "").toUpperCase();
-    var name = GRAPH_DAY_NAME[code];
-    if (name && out.indexOf(name) === -1) out.push(name);
-  }
-  return out;
-}
-
-// RFC 5545 -> Graph patternedRecurrence.
-//
-// Graph's pattern vocabulary is strictly narrower than RRULE's, so a rule it
-// cannot express returns null and the caller drops `recurrence` from the payload
-// rather than sending an approximation — a "close enough" pattern would silently
-// reschedule a real series. EXDATE/RDATE lines are likewise not carried: Graph
-// has no such field on a master and models the same thing as exception events,
-// which are their own nodes.
-function graphRecurrence(lines, startDate, tz) {
-  var r = parseRrule(lines);
-  if (!r || !startDate) return null;
-  var d = dateParts(startDate);
-  if (!d) return null;
-  var freq = String(r.FREQ).toUpperCase();
-  var interval = Number(r.INTERVAL || 1) || 1;
-  var days = bydayNames(r.BYDAY);
-  var setpos = r.BYSETPOS !== undefined ? GRAPH_INDEX_NAME[String(Number(r.BYSETPOS))] : null;
-  var monthDay = r.BYMONTHDAY ? Number(String(r.BYMONTHDAY).split(",")[0]) : null;
-  var month = r.BYMONTH ? Number(String(r.BYMONTH).split(",")[0]) : null;
-  // Weekday of the series start, needed when a WEEKLY rule omits BYDAY. Naive
-  // date read as UTC: a calendar weekday does not depend on the zone.
-  var startDow = DOW_BY_INDEX[new Date(Date.UTC(d.y, d.m - 1, d.d)).getUTCDay()];
-
-  var pattern = null;
-  if (freq === "DAILY") {
-    pattern = { type: "daily", interval: interval };
-  } else if (freq === "WEEKLY") {
-    pattern = {
-      type: "weekly",
-      interval: interval,
-      daysOfWeek: days.length ? days : [startDow],
-    };
-    var wkst = GRAPH_DAY_NAME[String(r.WKST || "").toUpperCase()];
-    if (wkst) pattern.firstDayOfWeek = wkst;
-  } else if (freq === "MONTHLY") {
-    if (days.length && setpos) {
-      pattern = { type: "relativeMonthly", interval: interval, daysOfWeek: days, index: setpos };
-    } else {
-      pattern = { type: "absoluteMonthly", interval: interval, dayOfMonth: monthDay || d.d };
-    }
-  } else if (freq === "YEARLY") {
-    if (days.length && setpos) {
-      pattern = {
-        type: "relativeYearly",
-        interval: interval,
-        daysOfWeek: days,
-        index: setpos,
-        month: month || d.m,
-      };
-    } else {
-      pattern = {
-        type: "absoluteYearly",
-        interval: interval,
-        dayOfMonth: monthDay || d.d,
-        month: month || d.m,
-      };
-    }
-  } else {
-    // HOURLY / MINUTELY / SECONDLY have no Graph equivalent at all.
-    return null;
-  }
-
-  var range = { type: "noEnd", startDate: startDate };
-  if (r.COUNT) {
-    range = {
-      type: "numbered",
-      startDate: startDate,
-      numberOfOccurrences: Number(r.COUNT),
-    };
-  } else if (r.UNTIL) {
-    var endDate = untilToEndDate(r.UNTIL);
-    if (endDate) range = { type: "endDate", startDate: startDate, endDate: endDate };
-  }
-  if (tz) range.recurrenceTimeZone = tz;
-
-  return { pattern: pattern, range: range };
 }
 
 function toExternal(node, mount, fields, intent) {
@@ -645,7 +323,7 @@ function toExternal(node, mount, fields, intent) {
       // field it had ASKED to send — `start_local` included — because
       // `__pushed_state` is stamped from the node's own values and never checked
       // against what the payload actually carried. So rescheduling an event
-      // whose Windows timezone is missing from `WINDOWS_TO_IANA` moved the time
+      // whose Windows timezone is missing from time.js's `WINDOWS_TO_IANA` moved the time
       // in RaisinDB, never moved it in Outlook, and recorded it as pushed. The
       // two then diverge permanently and invisibly: nothing re-nominates the
       // node, so it says 14:00 while Outlook says 10:00, forever.

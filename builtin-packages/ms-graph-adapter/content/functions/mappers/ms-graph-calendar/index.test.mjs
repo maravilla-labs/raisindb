@@ -1,14 +1,18 @@
 // Run with: node --test builtin-packages/ms-graph-adapter/content/functions/mappers/ms-graph-calendar/
 //
-// index.js is loaded the way the engine loads it — a bare script whose entry
-// point is the global `handler` — so there is nothing to import.
+// The mapper is a MODULE: index.js imports ./time.js and ./recurrence.js, and
+// the engine resolves those siblings from the function node's own files. So it
+// is imported here, exactly as the adapter's own suite imports its modules.
+// `new Function(src)` — what this file used to do — cannot evaluate an import
+// statement at all. It is NOT the only reader of this file: the google-calendar
+// mapper's suite loads this same index.js for its cross-provider convergence
+// tests, so it has to import it too or those two tests die as an async
+// SyntaxError that node reports after the run.
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFileSync } from 'node:fs';
 
-const src = readFileSync(new URL('./index.js', import.meta.url), 'utf8');
-const handler = new Function(`${src}\nreturn handler;`)();
+import { handler } from './index.js';
 
 const mount = { mount_id: 'm1', mount_path: '/cal', remote_root: null, sync_config: {} };
 

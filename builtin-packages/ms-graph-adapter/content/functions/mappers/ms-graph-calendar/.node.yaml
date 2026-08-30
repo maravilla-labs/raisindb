@@ -6,15 +6,22 @@ properties:
     raisin:Event v2 — the provider-neutral shape the Google Calendar mapper also
     emits: UTC + local + IANA timezone, RFC 5545 recurrence lines, object
     attendees, and status / show_as / my_response split apart instead of Graph's
-    single conflated string. Bidirectional dispatch on input.operation, but
-    to_external is null and mapper_capabilities reports to_external:false — the
-    adapter is read-only for calendars. Pure and side-effect-free: called once per
-    external item in the sync hot loop; performs no I/O.
+    single conflated string. Bidirectional dispatch on input.operation:
+    to_external emits Graph-shaped event JSON for a mirror calendar mount and
+    mapper_capabilities reports to_external:true. Three files — index.js holds
+    the dispatch and the two field-by-field translations, while the two mappings
+    that must stay EXACT INVERSES live one per file (time.js: naive wall clock +
+    Windows zone <-> UTC/local/IANA; recurrence.js: patternedRecurrence <->
+    RRULE), so a rule taught to one direction is taught beside the other. Pure
+    and side-effect-free: called once per external item in the sync hot loop;
+    performs no I/O.
   language: javascript
   entry_file: index.js:handler
   execution_mode: Async
   enabled: true
-  version: 2
+  # 3: the recurrence and time translations moved into sibling modules, one
+  #    file per relationship, so the two directions of each cannot drift apart.
+  version: 3
   resource_limits:
     timeout_ms: 5000
     max_memory_bytes: 16777216
