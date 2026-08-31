@@ -75,7 +75,20 @@ pub enum ScopeFilterMode {
 /// One workspace-scoped search, with enough context to explain a short result.
 #[derive(Debug)]
 pub struct ScopedSearch {
-    /// Matches, nearest first.
+    /// Matches, NON-DECREASING BY DISTANCE — nearest first.
+    ///
+    /// This ordering is part of the contract, not an accident of the current
+    /// implementation, because `search_documents_adaptive`'s `threshold_cut`
+    /// early exit depends on it: once the distance filter has cut one
+    /// candidate, it concludes that every candidate a larger draw could add is
+    /// farther and stops escalating. Return these unordered and that exit
+    /// silently truncates correct answers — no error, just missing rows.
+    ///
+    /// All three paths below preserve it (usearch orders its own matches,
+    /// `hydrate` walks them in order, and `post_filtered` only retains and
+    /// truncates). `search_scoped_returns_distance_ordered_candidates` asserts
+    /// it for each of them, and a `debug_assert!` in the adaptive loop checks
+    /// every draw at run time.
     pub results: Vec<SearchResult>,
 
     /// How the workspace restriction was applied.

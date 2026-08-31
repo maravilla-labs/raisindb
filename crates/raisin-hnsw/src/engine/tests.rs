@@ -985,6 +985,463 @@ fn test_the_post_filter_fallback_still_starves_and_says_so() {
 }
 
 // ============================================================================
+// The chunk collapse: `k` must mean k DOCUMENTS, at any chunk count.
+// ============================================================================
+
+/// A unit vector very close to the `(1, 1, ..., 1)` direction.
+///
+/// `tilt` walks it a little off that direction, monotonically, so a larger tilt
+/// is a larger cosine distance from `crowding_query()`. Everything this fixture
+/// builds sits FAR inside `DEFAULT_MAX_DISTANCE`, which matters: a candidate cut
+/// by the distance threshold ends the adaptive draw on purpose, so a fixture
+/// that accidentally straddled the cutoff would test the early exit instead of
+/// the escalation.
+fn near_unit(tilt: f32) -> Vec<f32> {
+    let raw: Vec<f32> = (0..128)
+        .map(|i| 1.0 + tilt * 0.0002 * (i as f32 + 1.0))
+        .collect();
+    let mag = raw.iter().map(|x| x * x).sum::<f32>().sqrt();
+    raw.iter().map(|x| x / mag).collect()
+}
+
+fn crowding_query() -> Vec<f32> {
+    near_unit(0.0)
+}
+
+/// How many chunks the verbose document is split into.
+///
+/// Deliberately far more than `CHUNK_COLLAPSE_HEADROOM * K`, and more than any
+/// plausible bump of that constant: at `K = 3` this defeats a headroom of 2, 4
+/// and 8 alike. That is the point of the test — a constant bump cannot pass it.
+const CROWDING_CHUNKS: usize = 24;
+
+/// An index where ONE document's chunks are all nearer the query than any other
+/// document, so a fixed over-draw collapses to a single row.
+fn crowding_index() -> (Arc<HnswIndexingEngine>, TempDir) {
+    let (engine, temp_dir) = create_test_engine();
+
+    // The verbose document: `CROWDING_CHUNKS` entries, all nearest.
+    for chunk in 0..CROWDING_CHUNKS {
+        engine
+            .add_embedding(
+                "t",
+                "r",
+                "main",
+                &p(),
+                "ws1",
+                &format!("verbose#{}", chunk),
+                HLC::new(10 + chunk as u64, 0),
+                near_unit(chunk as f32 * 0.01),
+            )
+            .unwrap();
+    }
+
+    // The documents it crowds out, each a single unchunked entry, all farther
+    // than every verbose chunk but still well inside the distance threshold.
+    for (i, name) in ["alpha", "beta", "gamma"].iter().enumerate() {
+        engine
+            .add_embedding(
+                "t",
+                "r",
+                "main",
+                &p(),
+                "ws1",
+                name,
+                HLC::new(100 + i as u64, 0),
+                near_unit(1.0 + i as f32 * 0.5),
+            )
+            .unwrap();
+    }
+
+    (engine, temp_dir)
+}
+
+/// The fixture is only adversarial while the verbose document out-chunks the
+/// FIRST draw. If someone ever "fixes" the crowding by raising
+/// `CHUNK_COLLAPSE_HEADROOM`, this fails and says why — rather than letting the
+/// tests below start passing for the wrong reason.
+#[test]
+fn the_crowding_fixture_out_chunks_any_first_draw() {
+    const K: usize = 3;
+    assert!(
+        CROWDING_CHUNKS > K * super::search::CHUNK_COLLAPSE_HEADROOM,
+        "fixture is no longer adversarial: the verbose document has {} chunks but the \
+         first draw is already {} — a single fetch would collapse to enough documents \
+         and the escalation below would never be exercised. This test exists because a \
+         BIGGER CONSTANT is not the fix; if the constant grew, grow CROWDING_CHUNKS too.",
+        CROWDING_CHUNKS,
+        K * super::search::CHUNK_COLLAPSE_HEADROOM,
+    );
+}
+
+/// The case no fixed headroom can satisfy.
+///
+/// A document with 24 chunks defeats a `k * 2` draw, a `k * 4` draw and a
+/// `k * 8` draw at `LIMIT 3` — every one of them collapses to ONE document.
+/// Only escalating the draw until the COLLAPSED count reaches `k` returns three
+/// documents, which is what `LIMIT 3` means.
+#[test]
+fn a_document_with_many_chunks_does_not_crowd_out_the_others() {
+    const K: usize = 3;
+    let (engine, _temp_dir) = crowding_index();
+
+    let results = engine
+        .search(
+            "t",
+            "r",
+            "main",
+            &p(),
+            &["ws1".to_string()],
+            &crowding_query(),
+            K,
+        )
+        .unwrap();
+
+    let ids: Vec<&str> = results.iter().map(|r| r.node_id.as_str()).collect();
+
+    assert_eq!(
+        ids.iter().filter(|id| **id == "verbose").count(),
+        1,
+        "a {}-chunk document must occupy exactly ONE slot, got {:?}",
+        CROWDING_CHUNKS,
+        ids
+    );
+    assert_eq!(
+        ids.len(),
+        K,
+        "LIMIT {} must still yield {} documents, got {:?}",
+        K,
+        K,
+        ids
+    );
+
+    let mut distinct = ids.clone();
+    distinct.sort();
+    distinct.dedup();
+    assert_eq!(
+        distinct.len(),
+        K,
+        "every slot must be a DIFFERENT document, got {:?}",
+        ids
+    );
+    assert!(ids.contains(&"alpha"), "alpha was crowded out: {:?}", ids);
+    assert!(ids.contains(&"beta"), "beta was crowded out: {:?}", ids);
+}
+
+/// The mirrored path. `search_chunks` in Documents mode shares the one adaptive
+/// draw, so it must answer identically — and in Chunks mode it must NOT
+/// collapse, because that mode asks for chunk rows.
+#[test]
+fn search_chunks_collapses_in_documents_mode_and_not_in_chunks_mode() {
+    const K: usize = 3;
+    let (engine, _temp_dir) = crowding_index();
+
+    let docs = engine
+        .search_chunks(
+            "t",
+            "r",
+            "main",
+            &p(),
+            &SearchRequest::new(crowding_query(), K)
+                .with_mode(SearchMode::Documents)
+                .with_workspace("ws1".to_string()),
+        )
+        .unwrap();
+    let doc_ids: Vec<&str> = docs.iter().map(|r| r.source_id.as_str()).collect();
+    assert_eq!(
+        doc_ids.len(),
+        K,
+        "Documents mode drifted from `search`: got {:?}",
+        doc_ids
+    );
+    assert_eq!(
+        doc_ids.iter().filter(|id| **id == "verbose").count(),
+        1,
+        "Documents mode failed to collapse the chunked document: {:?}",
+        doc_ids
+    );
+
+    // Chunks mode wants chunk rows: all K of these are legitimately the same
+    // document, and it must NOT escalate looking for distinct documents.
+    let chunks = engine
+        .search_chunks(
+            "t",
+            "r",
+            "main",
+            &p(),
+            &SearchRequest::new(crowding_query(), K)
+                .with_mode(SearchMode::Chunks)
+                .with_workspace("ws1".to_string()),
+        )
+        .unwrap();
+    assert_eq!(
+        chunks.len(),
+        K,
+        "Chunks mode returned {} of {}",
+        chunks.len(),
+        K
+    );
+    assert!(
+        chunks.iter().all(|c| c.source_id == "verbose"),
+        "Chunks mode returned rows from another document: {:?}",
+        chunks
+            .iter()
+            .map(|c| c.node_id.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// The escalation must stop as soon as the distance filter bites — ON THE DRAW
+/// WHERE IT BITES, not eventually.
+///
+/// Candidates arrive distance-ascending, so once anything has been cut every
+/// further candidate is strictly farther and would be cut too. Without that
+/// early exit a query whose neighbourhood is genuinely beyond the threshold
+/// escalates towards `MAX_FETCH_K` on EVERY call — a correctness fix turned
+/// into a latency bug.
+///
+/// # Two things this test has to get right, and previously got wrong
+///
+/// 1. **The cutoff goes INSIDE the crowded group.** With it between the verbose
+///    chunks and alpha/beta/gamma, the first draw of `K * CHUNK_COLLAPSE_HEADROOM`
+///    (six) sees only verbose chunks, cuts nothing, and escalates — 6, 12, 24,
+///    48 — until the draw outgrows the 27-vector index and `exhausted` fires
+///    ALONGSIDE `threshold_cut`. The measured exit was `escalations = 3`: the
+///    early exit was never what ended the loop. Placing the cutoff between the
+///    3rd and 4th nearest VERBOSE chunk makes the very first draw straddle it,
+///    so `threshold_cut` is the only exit that can fire.
+/// 2. **Assert on the WORK, not the rows.** Both paths return the same single
+///    document, so no assertion over the results can tell them apart; the old
+///    five-second wall-clock alarm was passed trivially by a six-draw walk over
+///    27 vectors. `search_with_threshold_stats` exposes the escalation count and
+///    the exit flags, and those are what is asserted here. Delete the
+///    `threshold_cut` condition from `search_documents_adaptive` and this test
+///    goes red on `escalations`.
+#[test]
+fn a_threshold_cut_stops_the_escalation_instead_of_grinding_to_the_cap() {
+    const K: usize = 3;
+    // What `search_documents_adaptive` draws before any escalation.
+    const FIRST_DRAW: usize = K * super::search::CHUNK_COLLAPSE_HEADROOM;
+    // Where the cutoff goes: after this many verbose chunks.
+    const ADMITTED: usize = 3;
+
+    let (engine, _temp_dir) = crowding_index();
+
+    // Per-CHUNK distances. `search` would collapse them to one row per document
+    // and hide the very spread the cutoff has to land inside — which is how the
+    // old cutoff ended up outside the crowded group.
+    let chunks = engine
+        .search_chunks(
+            "t",
+            "r",
+            "main",
+            &p(),
+            &SearchRequest::new(crowding_query(), 40)
+                .with_mode(SearchMode::Chunks)
+                .with_workspace("ws1".to_string()),
+        )
+        .unwrap();
+    let verbose: Vec<f32> = chunks
+        .iter()
+        .filter(|c| c.source_id == "verbose")
+        .map(|c| c.distance)
+        .collect();
+
+    assert!(
+        verbose.len() >= FIRST_DRAW,
+        "the first draw of {} must be filled by verbose chunks alone, but only {} are \
+         retrievable; the fixture no longer crowds",
+        FIRST_DRAW,
+        verbose.len()
+    );
+    assert!(
+        ADMITTED < FIRST_DRAW,
+        "the cutoff must fall INSIDE the first draw or nothing is cut on it"
+    );
+    assert!(
+        verbose.windows(2).all(|w| w[0] <= w[1]),
+        "verbose chunk distances are not ascending, so an index into them is not a \
+         distance rank: {:?}",
+        verbose
+    );
+
+    // Between the 3rd and 4th nearest verbose chunk: the first draw of six
+    // straddles it, so `filtered_out > 0` on draw ZERO.
+    let cutoff = (verbose[ADMITTED - 1] + verbose[ADMITTED]) / 2.0;
+
+    let fetched = engine
+        .search_with_threshold_stats(
+            "t",
+            "r",
+            "main",
+            &p(),
+            &["ws1".to_string()],
+            &crowding_query(),
+            K,
+            Some(cutoff),
+        )
+        .unwrap();
+
+    assert_eq!(
+        fetched.documents.len(),
+        1,
+        "only verbose chunks are inside the cutoff, and they collapse to ONE document, \
+         got {:?}",
+        fetched
+            .documents
+            .iter()
+            .map(|r| r.node_id.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(fetched.documents[0].node_id, "verbose");
+
+    // THE ASSERTION THAT CATCHES A DELETED EARLY EXIT. `LIMIT 3` was not
+    // satisfied (one document), the draw was not short (6 of 27), and the cap
+    // is nowhere near — so with `threshold_cut` gone the loop escalates
+    // 6 -> 12 -> 24 -> 48 and exits `exhausted` at `escalations = 3`.
+    assert_eq!(
+        fetched.escalations, 0,
+        "the threshold cut must end the loop on the FIRST draw; it escalated {} times, \
+         which means the early exit is gone and the loop ran to another exit ({:?})",
+        fetched.escalations, fetched.exit
+    );
+    assert_eq!(
+        fetched.exit,
+        super::search::FetchExit {
+            enough: false,
+            exhausted: false,
+            threshold_cut: true,
+            capped: false,
+        },
+        "threshold_cut must be the exit that fired, and must fire ALONE — an exit shared \
+         with `exhausted` is the bug this test was rewritten to catch, because then \
+         deleting threshold_cut changes nothing observable"
+    );
+}
+
+/// The premise the `threshold_cut` early exit rests on: `search_scoped` returns
+/// candidates NON-DECREASING BY DISTANCE.
+///
+/// The early exit reasons "the filter cut one, so everything later is farther
+/// and would be cut too". That is true only under this ordering. Nothing in the
+/// crate asserted it, and if a future post-filter or re-rank step returned rows
+/// out of order the exit would truncate correct answers SILENTLY — no error, no
+/// log line, just missing rows.
+///
+/// All three paths are covered, and the POST-FILTER one is the point: it is the
+/// path most likely to reorder, because it filters after the walk. It is called
+/// directly rather than through the `RAISIN_HNSW_DISABLE_FILTERED_SEARCH`
+/// escape hatch, which is a process-wide `OnceLock` and would not be
+/// deterministic under a parallel test runner.
+#[test]
+fn search_scoped_returns_distance_ordered_candidates() {
+    const K: usize = 10;
+    let (engine, _temp_dir) = crowding_index();
+
+    let index_arc = engine.get_or_load_index("t", "r", "main", &p()).unwrap();
+    let index = index_arc.read().unwrap();
+
+    fn assert_ordered(label: &str, scoped: &crate::index::ScopedSearch, expect: usize) {
+        assert_eq!(
+            scoped.results.len(),
+            expect,
+            "{}: got {} candidates, expected {} — a path returning too few proves nothing \
+             about its ordering",
+            label,
+            scoped.results.len(),
+            expect
+        );
+        let distances: Vec<f32> = scoped.results.iter().map(|r| r.distance).collect();
+        assert!(
+            distances.windows(2).all(|w| w[0] <= w[1]),
+            "{}: candidates came back OUT OF DISTANCE ORDER: {:?}. The threshold_cut early \
+             exit in search_documents_adaptive assumes this ordering and silently drops \
+             correct answers without it — fix the ordering, or remove the early exit.",
+            label,
+            distances
+        );
+    }
+
+    // 1. The index-side filtered walk — the normal path.
+    let index_side = index
+        .search_scoped(&crowding_query(), K, &["ws1".to_string()])
+        .unwrap();
+    assert_eq!(index_side.mode, crate::index::ScopeFilterMode::IndexSide);
+    assert_ordered("index-side filtered walk", &index_side, K);
+
+    // 2. The post-filter fallback — filters AFTER the walk, so it is the one
+    //    that could reorder.
+    let in_scope = index.vectors_in_workspaces(&["ws1".to_string()]);
+    let post = index
+        .post_filtered(&crowding_query(), K, &["ws1".to_string()], in_scope)
+        .unwrap();
+    assert_eq!(post.mode, crate::index::ScopeFilterMode::PostFilter);
+    assert_ordered("post-filter fallback", &post, K);
+
+    // 3. The unrestricted walk — an empty scope means "every workspace".
+    let unrestricted = index.search_scoped(&crowding_query(), K, &[]).unwrap();
+    assert_eq!(
+        unrestricted.mode,
+        crate::index::ScopeFilterMode::Unrestricted
+    );
+    assert_ordered("unrestricted walk", &unrestricted, K);
+}
+
+/// The work bound exists and is finite.
+///
+/// A pathological index — ONE document, chunked past every draw size — must not
+/// walk forever looking for a second document that does not exist. It escalates
+/// at most `MAX_FETCH_ESCALATIONS` times, and here it also hits `exhausted`
+/// first, so it returns the one document it has.
+#[test]
+fn a_single_chunked_document_terminates_instead_of_escalating_forever() {
+    let (engine, _temp_dir) = create_test_engine();
+
+    for chunk in 0..40u64 {
+        engine
+            .add_embedding(
+                "t",
+                "r",
+                "main",
+                &p(),
+                "ws1",
+                &format!("only#{}", chunk),
+                HLC::new(chunk, 0),
+                near_unit(chunk as f32 * 0.01),
+            )
+            .unwrap();
+    }
+
+    assert!(
+        super::search::MAX_FETCH_ESCALATIONS > 0,
+        "the draw never grows"
+    );
+
+    let results = engine
+        .search(
+            "t",
+            "r",
+            "main",
+            &p(),
+            &["ws1".to_string()],
+            &crowding_query(),
+            5,
+        )
+        .unwrap();
+
+    assert_eq!(
+        results.len(),
+        1,
+        "the index holds ONE document; a search for 5 must return it once, got {:?}",
+        results
+            .iter()
+            .map(|r| r.node_id.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(results[0].node_id, "only");
+}
+
+// ============================================================================
 // Partitioning, the lazy layout migration, and the memory budget.
 // ============================================================================
 
@@ -1514,4 +1971,204 @@ fn purging_one_partition_leaves_the_others_alone() {
 
     engine.purge_branch("t", "r", "main").unwrap();
     assert!(engine.list_partitions("t", "r", "main").unwrap().is_empty());
+}
+
+// ============================================================================
+// The diagnostic dump is bounded — in level AND in volume.
+// ============================================================================
+
+/// What one query emitted, counted per level.
+#[derive(Default)]
+struct LogCounts {
+    /// Events at INFO or above.
+    info_and_above: std::sync::atomic::AtomicUsize,
+    /// Per-candidate dump lines (`  [n] entry=...`), at ANY level.
+    candidate_lines: std::sync::atomic::AtomicUsize,
+    /// Per-candidate dump lines that were emitted at INFO or above.
+    candidate_lines_at_info: std::sync::atomic::AtomicUsize,
+    /// The "N further candidates elided" summary.
+    elision_lines: std::sync::atomic::AtomicUsize,
+}
+
+impl LogCounts {
+    fn get(counter: &std::sync::atomic::AtomicUsize) -> usize {
+        counter.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// A `tracing` subscriber that counts events instead of printing them.
+///
+/// Hand-rolled on `tracing` alone: `tracing-subscriber` is not a dependency of
+/// this crate, and adding one so a test can count log lines is a poor trade in
+/// a workspace whose test binaries are already a disk-space problem.
+///
+/// Installed with `tracing::subscriber::with_default`, which is THREAD-LOCAL —
+/// a global default would be process-wide, settable once, and would make this
+/// test order-dependent under the parallel runner.
+struct CountingSubscriber {
+    counts: std::sync::Arc<LogCounts>,
+    /// The level an operator has turned on. Events below it are not delivered,
+    /// exactly as a real subscriber would filter them.
+    max_level: tracing::Level,
+}
+
+struct MessageVisitor(String);
+
+impl tracing::field::Visit for MessageVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            use std::fmt::Write;
+            let _ = write!(self.0, "{:?}", value);
+        }
+    }
+}
+
+impl tracing::Subscriber for CountingSubscriber {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        *metadata.level() <= self.max_level
+    }
+
+    fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        use std::sync::atomic::Ordering::Relaxed;
+
+        let at_info = *event.metadata().level() <= tracing::Level::INFO;
+        if at_info {
+            self.counts.info_and_above.fetch_add(1, Relaxed);
+        }
+
+        let mut visitor = MessageVisitor(String::new());
+        event.record(&mut visitor);
+        let message = visitor.0;
+
+        if message.contains("entry=") {
+            self.counts.candidate_lines.fetch_add(1, Relaxed);
+            if at_info {
+                self.counts.candidate_lines_at_info.fetch_add(1, Relaxed);
+            }
+        }
+        if message.contains("further candidates elided") {
+            self.counts.elision_lines.fetch_add(1, Relaxed);
+        }
+    }
+
+    fn enter(&self, _span: &tracing::span::Id) {}
+
+    fn exit(&self, _span: &tracing::span::Id) {}
+}
+
+/// How many chunks the log-volume fixture holds.
+///
+/// Larger than the largest draw the search below makes, so the final draw is
+/// big enough for the cap to bite and for the old behaviour to be loud.
+const DUMP_FIXTURE_CHUNKS: usize = 200;
+
+/// Run one document search against a 200-chunk fixture and count what it logged.
+fn counted_search(max_level: tracing::Level) -> std::sync::Arc<LogCounts> {
+    let (engine, _temp_dir) = create_test_engine();
+
+    for chunk in 0..DUMP_FIXTURE_CHUNKS {
+        engine
+            .add_embedding(
+                "t",
+                "r",
+                "main",
+                &p(),
+                "ws1",
+                &format!("verbose#{}", chunk),
+                HLC::new(chunk as u64, 0),
+                near_unit(chunk as f32 * 0.001),
+            )
+            .unwrap();
+    }
+
+    let counts = std::sync::Arc::new(LogCounts::default());
+    let subscriber = CountingSubscriber {
+        counts: std::sync::Arc::clone(&counts),
+        max_level,
+    };
+
+    tracing::subscriber::with_default(subscriber, || {
+        engine
+            .search(
+                "t",
+                "r",
+                "main",
+                &p(),
+                &["ws1".to_string()],
+                &crowding_query(),
+                5,
+            )
+            .unwrap();
+    });
+
+    counts
+}
+
+/// The raw-candidate dump must not reach an operator's INFO log, and must not
+/// run away even at DEBUG.
+///
+/// This is a REGRESSION test for a real regression. The dump is one line per
+/// candidate of the final draw; while the draw was a flat
+/// `k * CHUNK_COLLAPSE_HEADROOM` that was ten lines for a `LIMIT 5`, and the
+/// adaptive escalation silently turned it into up to `MAX_FETCH_K` — measured
+/// at 201 INFO lines for ONE `LIMIT 5` query over this 200-chunk fixture,
+/// worst case 2000, on a hot path.
+///
+/// Two separate properties, and the test would fail if either were undone:
+/// * LEVEL — nothing per-candidate at INFO. It is an operator diagnostic, not
+///   an event. (The SHORTFALL warning is the event, and keeps its levels; this
+///   test does not touch it.)
+/// * VOLUME — capped at `CANDIDATE_DUMP_LIMIT` even when DEBUG is on, plus one
+///   line saying how much was elided. A level alone does not fix volume: an
+///   operator who turns debug on to investigate one slow query would otherwise
+///   be handed 2000 lines per query, which is how a diagnostic becomes an
+///   outage.
+#[test]
+fn the_candidate_dump_is_bounded_in_level_and_in_volume() {
+    let at_info = counted_search(tracing::Level::INFO);
+    assert_eq!(
+        LogCounts::get(&at_info.candidate_lines_at_info),
+        0,
+        "the per-candidate dump is back at INFO: {} lines for ONE query. It scales with \
+         the adaptive draw (up to MAX_FETCH_K), so this is a log-volume incident waiting \
+         on a busy tenant.",
+        LogCounts::get(&at_info.candidate_lines_at_info)
+    );
+    // The genuine per-query events still get through, so this is not "logging
+    // was turned off".
+    assert!(
+        LogCounts::get(&at_info.info_and_above) > 0,
+        "one query emitted NOTHING at INFO; the per-query summary line is gone too"
+    );
+    assert!(
+        LogCounts::get(&at_info.info_and_above) <= 4,
+        "one query emitted {} INFO events; the dump is bounded but something else is now \
+         per-candidate",
+        LogCounts::get(&at_info.info_and_above)
+    );
+
+    let at_debug = counted_search(tracing::Level::DEBUG);
+    let dumped = LogCounts::get(&at_debug.candidate_lines);
+    assert_eq!(
+        dumped,
+        super::search::CANDIDATE_DUMP_LIMIT,
+        "the dump printed {} candidate lines; it must stop at CANDIDATE_DUMP_LIMIT ({}) \
+         and summarise the rest, or DEBUG becomes the same incident at a different level",
+        dumped,
+        super::search::CANDIDATE_DUMP_LIMIT
+    );
+    assert_eq!(
+        LogCounts::get(&at_debug.elision_lines),
+        1,
+        "the cap bit but nothing said so; a truncated dump that does not report its own \
+         truncation reads as 'the index only held 20 candidates'"
+    );
 }
