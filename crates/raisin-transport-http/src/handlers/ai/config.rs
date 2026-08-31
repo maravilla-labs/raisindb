@@ -136,10 +136,142 @@ pub async fn set_ai_config(
         config.providers.len()
     );
 
+    mirror_embedding_settings(&state, tenant_id, &config);
+
     Ok(Json(SuccessResponse {
         success: true,
         message: format!("AI configuration saved for tenant {}", tenant_id),
     }))
+}
+
+/// Project the AI config's `embedding_settings` onto the tenant's
+/// `TenantEmbeddingConfig`, which is the row every read path actually consults.
+///
+/// There are two stores. `TenantAIConfig.embedding_settings` is what the routed
+/// admin-console page (`TenantAiSettings.tsx`) writes; `cf::TENANT_EMBEDDING_CONFIG`
+/// is what the SQL catalog reads for `embedding_dimensions()`, what the HNSW spec
+/// resolver reads for the index width, metric and quantization, and what the
+/// embedding job reads to pick a provider. Nothing joined them, so a tenant could
+/// configure embeddings in the UI, see them enabled, and get
+/// *"EMBEDDING() function requires embeddings to be enabled"* from every query --
+/// a config that is stored, displayed, and invisible to the only code that needs it.
+///
+/// Mirroring here rather than teaching the read path a fallback keeps ONE row
+/// authoritative: a fallback would mean two documents that disagree, and the
+/// embedder identity (provider, model, width) is hashed into the key of every
+/// vector already written -- the wrong one wins silently and re-partitions the
+/// index.
+///
+/// The projection is deliberately partial. `distance_metric`, `quantization`,
+/// `base_url`, `default_max_distance` and the legacy API key have no counterpart
+/// in `EmbeddingSettings`, so the stored row's values are carried forward rather
+/// than reset to defaults -- resetting `quantization` alone would make the existing
+/// graph unloadable.
+///
+/// A mirror failure is logged, not returned: the AI config write has already
+/// committed, and answering 500 to a save that succeeded would send the operator
+/// back to re-save a form that is already correct.
+fn mirror_embedding_settings(state: &AppState, tenant_id: &str, config: &TenantAIConfig) {
+    use raisin_embeddings::TenantEmbeddingConfigStore;
+
+    let Some(settings) = config.embedding_settings.as_ref() else {
+        return;
+    };
+
+    let Some(rocksdb_storage) = state.rocksdb_storage.as_ref() else {
+        tracing::warn!(
+            tenant_id = %tenant_id,
+            "AI config saved with embedding settings, but there is no RocksDB storage to \
+             mirror them into - vector search will not see this configuration"
+        );
+        return;
+    };
+
+    let repo = rocksdb_storage.tenant_embedding_config_repository();
+
+    let mut target = match repo.get_config(tenant_id) {
+        Ok(Some(existing)) => existing,
+        Ok(None) => raisin_embeddings::config::TenantEmbeddingConfig::new(tenant_id.to_string()),
+        Err(e) => {
+            tracing::error!(
+                tenant_id = %tenant_id,
+                error = %e,
+                "Could not read the embedding config to mirror the saved AI settings into it"
+            );
+            return;
+        }
+    };
+
+    target.enabled = settings.enabled;
+    target.dimensions = settings.dimensions;
+    target.include_name = settings.include_name;
+    target.include_path = settings.include_path;
+    target.max_embeddings_per_repo = settings.max_embeddings_per_repo;
+    target.chunking = settings.chunking.clone();
+    if settings.default_max_distance.is_some() {
+        target.default_max_distance = settings.default_max_distance;
+    }
+    // Parsed against the canonical enums rather than re-spelled here, and a
+    // value that does not parse is refused rather than defaulted: defaulting
+    // `quantization` would silently rebuild the graph at a different scalar
+    // width from the one the operator picked.
+    if let Some(metric) = settings.distance_metric.as_deref() {
+        match serde_json::from_value(serde_json::Value::String(metric.to_string())) {
+            Ok(parsed) => target.distance_metric = parsed,
+            Err(e) => tracing::warn!(
+                tenant_id = %tenant_id,
+                metric = %metric,
+                error = %e,
+                "Ignoring an unrecognised embedding distance metric; the stored one stands"
+            ),
+        }
+    }
+    if let Some(quantization) = settings.quantization.as_deref() {
+        match serde_json::from_value(serde_json::Value::String(quantization.to_string())) {
+            Ok(parsed) => target.quantization = parsed,
+            Err(e) => tracing::warn!(
+                tenant_id = %tenant_id,
+                quantization = %quantization,
+                error = %e,
+                "Ignoring an unrecognised embedding quantization; the stored one stands"
+            ),
+        }
+    }
+    // Only overwrite the refs when the payload names one. A save that omits the
+    // provider must not unbind an embedder whose hash is already in the keys of
+    // every vector the tenant has written.
+    if settings.ai_provider_ref.is_some() {
+        target.ai_provider_ref = settings.ai_provider_ref.clone();
+    }
+    if settings.ai_model_ref.is_some() {
+        target.ai_model_ref = settings.ai_model_ref.clone();
+    }
+    if let Some(model) = settings.ai_model_ref.as_deref() {
+        // The legacy `model` field is what `ResolvedEmbeddingProvider::embedder_id`
+        // falls back to, and `TenantEmbeddingConfig::new` leaves it saying
+        // `text-embedding-3-small`. Keeping it in step costs nothing and stops a
+        // legacy-mode read from labelling this tenant's vectors as OpenAI's.
+        target.model = model.to_string();
+    }
+
+    if let Err(e) = repo.set_config(&target) {
+        tracing::error!(
+            tenant_id = %tenant_id,
+            error = %e,
+            "Saved the AI config but failed to mirror its embedding settings - vector search \
+             will keep using the previous configuration"
+        );
+        return;
+    }
+
+    tracing::info!(
+        tenant_id = %tenant_id,
+        enabled = target.enabled,
+        dimensions = target.dimensions,
+        provider = ?target.ai_provider_ref,
+        model = ?target.ai_model_ref,
+        "Mirrored the AI config's embedding settings into the tenant embedding config"
+    );
 }
 
 /// Reads the stored config, folds the request into it and writes the result back.

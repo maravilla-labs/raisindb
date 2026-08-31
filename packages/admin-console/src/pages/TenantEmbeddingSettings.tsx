@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useParams } from 'react-router-dom'
+import { useAuth } from '../contexts/AuthContext'
 import { Sparkles, Key, Eye, EyeOff, Settings, CheckCircle, XCircle, Loader2, Info, ChevronDown, ChevronRight, AlertCircle, SlidersHorizontal } from 'lucide-react'
 import GlassCard from '../components/GlassCard'
 import ConfirmDialog from '../components/ConfirmDialog'
@@ -101,7 +102,16 @@ function ProviderCard({ entry, selected, onSelect }: ProviderCardProps) {
 
 export default function TenantEmbeddingSettings() {
   const toast = useToast()
-  const { tenant = 'default' } = useParams<{ tenant: string }>()
+  // The SIGNED-IN tenant, with the route param only as an explicit override.
+  //
+  // This page is not currently routed, but it read `useParams({ tenant = 'default' })`
+  // and no route that could reach it carries a `:tenant` segment -- so wiring it up
+  // would have it read and write the config of whichever tenant is called `default`.
+  // A silent default for an identity is how a whole feature ends up configured into
+  // a void.
+  const { tenantId } = useAuth()
+  const { tenant: tenantParam } = useParams<{ tenant: string }>()
+  const tenant = tenantParam || tenantId
 
   // State
   const [config, setConfig] = useState<ConfigResponse | null>(null)
