@@ -15,6 +15,7 @@ use axum::{
 use raisin_ai::{
     config::{AIModelConfig, AIProvider, AIUseCase},
     crypto::ApiKeyEncryptor,
+    model_classifier::{classify, ClassificationContext},
     provider::AIProviderTrait,
     providers::{
         AnthropicProvider, AzureOpenAIProvider, BedrockProvider, GeminiProvider, GroqProvider,
@@ -118,34 +119,33 @@ pub async fn list_all_models(
             };
 
             // Update provider config with fetched models
+            // Capability and width are decided in ONE place, shared with the
+            // test-connection handler: `raisin_ai::model_classifier`. An
+            // embedding model whose width the gateway did not publish comes
+            // back with no embedding use case, so the console cannot offer it
+            // — a guessed width is hashed into the embedder identity and
+            // cannot be corrected without re-embedding the tenant.
+            //
+            // This rewrites `provider_config.models` wholesale but MUST NOT
+            // touch `TenantEmbeddingConfig.dimensions`: that is the width
+            // already hashed into every vector the tenant owns.
+            let provider_slug = provider_config.slug.clone();
+            let ctx = ClassificationContext {
+                tenant_id: Some(&tenant_id),
+                provider_slug: Some(&provider_slug),
+            };
             provider_config.models = fetched_models
                 .into_iter()
                 .map(|m| {
-                    // Infer use cases from capabilities
-                    let mut use_cases = Vec::new();
-                    if m.capabilities.chat {
-                        use_cases.push(AIUseCase::Chat);
-                        use_cases.push(AIUseCase::Completion);
-                    }
-                    if m.capabilities.embeddings {
-                        use_cases.push(AIUseCase::Embedding);
-                    }
-                    if m.capabilities.tools {
-                        use_cases.push(AIUseCase::Agent);
-                    }
-                    // Default to chat if nothing detected
-                    if use_cases.is_empty() {
-                        use_cases.push(AIUseCase::Chat);
-                    }
-
+                    let classified = classify(&m, ctx);
                     AIModelConfig {
                         model_id: m.id.clone(),
                         display_name: m.name.clone(),
-                        use_cases,
+                        use_cases: classified.use_cases,
                         default_temperature: 0.7,
                         default_max_tokens: m.max_output_tokens.unwrap_or(4096),
                         is_default: false,
-                        metadata: m.metadata,
+                        metadata: classified.metadata,
                     }
                 })
                 .collect();

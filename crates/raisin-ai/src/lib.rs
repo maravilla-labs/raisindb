@@ -79,6 +79,7 @@ pub mod config;
 pub mod crypto;
 pub mod huggingface;
 pub mod model_cache;
+pub mod model_classifier;
 pub mod pdf;
 pub mod provider;
 pub mod providers;

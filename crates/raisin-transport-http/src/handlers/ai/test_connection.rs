@@ -12,9 +12,9 @@ use axum::{
 };
 
 use raisin_ai::{
-    config::{AIModelConfig, AIProvider, AIUseCase},
+    config::{AIModelConfig, AIProvider},
     crypto::ApiKeyEncryptor,
-    model_cache::ModelCapabilities,
+    model_classifier::{classify, ClassificationContext},
     provider::AIProviderTrait,
     providers::{
         AnthropicProvider, AzureOpenAIProvider, BedrockProvider, GeminiProvider, GroqProvider,
@@ -123,17 +123,29 @@ pub async fn test_provider_connection(
 
     match models_result {
         Ok(fetched_models) => {
-            // Convert ModelInfo to AIModelConfig
+            // Convert ModelInfo to AIModelConfig. This handler OVERWRITES the
+            // provider's stored model list, exactly like the `/ai/models`
+            // refresh does, so it must classify identically — hence the shared
+            // `raisin_ai::model_classifier` rather than a second local mapping
+            // (this one used to omit `Completion` and the chat fallback, and
+            // would have let a widthless embedding model through).
+            let ctx = ClassificationContext {
+                tenant_id: Some(&tenant_id_str),
+                provider_slug: Some(&slug),
+            };
             let model_configs: Vec<AIModelConfig> = fetched_models
                 .into_iter()
-                .map(|m| AIModelConfig {
-                    model_id: m.id,
-                    display_name: m.name,
-                    use_cases: convert_capabilities_to_use_cases(&m.capabilities),
-                    default_temperature: 0.7,
-                    default_max_tokens: 4096,
-                    is_default: false,
-                    metadata: m.metadata,
+                .map(|m| {
+                    let classified = classify(&m, ctx);
+                    AIModelConfig {
+                        model_id: m.id,
+                        display_name: m.name,
+                        use_cases: classified.use_cases,
+                        default_temperature: 0.7,
+                        default_max_tokens: 4096,
+                        is_default: false,
+                        metadata: classified.metadata,
+                    }
                 })
                 .collect();
 
@@ -270,17 +282,7 @@ async fn call_provider_list_models(
     }
 }
 
-/// Convert model capabilities to AI use cases.
-fn convert_capabilities_to_use_cases(caps: &ModelCapabilities) -> Vec<AIUseCase> {
-    let mut use_cases = vec![];
-    if caps.chat {
-        use_cases.push(AIUseCase::Chat);
-    }
-    if caps.embeddings {
-        use_cases.push(AIUseCase::Embedding);
-    }
-    if caps.tools {
-        use_cases.push(AIUseCase::Agent);
-    }
-    use_cases
-}
+// The capability → use-case mapping that used to live here is gone: it is now
+// `raisin_ai::model_classifier::classify`, shared with the `/ai/models`
+// refresh handler. Do not reintroduce a local copy — the two drifted, and a
+// fail-closed rule with two implementations fails open on one of them.

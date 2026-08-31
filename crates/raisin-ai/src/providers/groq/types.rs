@@ -136,7 +136,21 @@ pub(super) struct GroqModelsResponse {
     pub data: Vec<GroqModel>,
 }
 
-/// Groq model object
+/// Groq model object.
+///
+/// This client also serves `AIProvider::Custom` — any OpenAI-shaped gateway —
+/// so it carries the two extension keys such a gateway may publish alongside
+/// OpenAI's four standard ones:
+///
+/// - `kind`: `"chat"` | `"embedding"`. An OPEN set to us: an unrecognised
+///   value is an unknown, never an error.
+/// - `dimensions`: the embedding output width, present iff `kind ==
+///   "embedding"`.
+///
+/// Both are `Option` + `#[serde(default)]`, and this struct must never gain
+/// `deny_unknown_fields` — that attribute is what turns an additive change on
+/// either side of the wire into an outage. Real Groq publishes neither key, so
+/// `AIProvider::Groq` behaviour is unchanged.
 #[derive(Debug, Deserialize)]
 pub(super) struct GroqModel {
     pub id: String,
@@ -146,6 +160,13 @@ pub(super) struct GroqModel {
     pub owned_by: String,
     #[serde(default)]
     pub active: Option<bool>,
+    /// Gateway extension: what the model is for.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Gateway extension: embedding output width. Hashed into the embedder
+    /// identity downstream, so it is never guessed when absent.
+    #[serde(default)]
+    pub dimensions: Option<u64>,
 }
 
 // --- Streaming types (OpenAI-compatible SSE format) ---

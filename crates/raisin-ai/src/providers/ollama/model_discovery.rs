@@ -122,14 +122,25 @@ impl OllamaProvider {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        // Extract embedding dimensions if available
+        // Extract embedding dimensions if available.
+        //
+        // The key is namespaced by architecture, and the list of architectures
+        // is open — so after the three we know, fall back to ANY
+        // `*.embedding_length` key. Without that fallback a model on a fourth
+        // architecture is detected as an embedder but publishes no width, and
+        // the classifier now (correctly) refuses to offer a widthless embedder
+        // rather than letting a guess be hashed into the embedder identity.
         let embedding_length = show
             .and_then(|s| s.model_info.as_ref())
             .and_then(|m| {
-                // Try various architecture prefixes for embedding_length
                 m.get("bert.embedding_length")
                     .or_else(|| m.get("nomic-bert.embedding_length"))
                     .or_else(|| m.get("xlm-roberta.embedding_length"))
+                    .or_else(|| {
+                        m.iter()
+                            .find(|(k, _)| k.ends_with(".embedding_length"))
+                            .map(|(_, v)| v)
+                    })
             })
             .and_then(|v| v.as_u64());
 

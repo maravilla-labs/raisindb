@@ -123,10 +123,17 @@ impl GroqProvider {
     ///
     /// Tool-call support is inferred per model via [`groq_model_supports_tools`];
     /// every Groq model is treated as chat-capable so it stays listed.
+    ///
+    /// This client also serves `AIProvider::Custom`, i.e. any OpenAI-shaped
+    /// gateway. Where such a gateway declares `kind`/`dimensions`, that
+    /// declaration OVERRIDES the name-based guesses below via
+    /// [`crate::model_classifier::apply_declared_kind`] — the gateway knows
+    /// what it serves and this client cannot. Real Groq publishes neither key,
+    /// so its models come out exactly as before.
     fn convert_groq_model(&self, model: GroqModel) -> ModelInfo {
-        let capabilities = ModelCapabilities {
+        let mut capabilities = ModelCapabilities {
             chat: true,
-            embeddings: false, // Groq doesn't provide embedding models
+            embeddings: false, // Groq itself provides no embedding models
             vision: false,     // Groq doesn't support vision yet
             tools: groq_model_supports_tools(&model.id),
             streaming: true,
@@ -144,14 +151,24 @@ impl GroqProvider {
             8192 // Default context window
         };
 
+        let mut metadata = serde_json::json!({
+            "owned_by": model.owned_by,
+            "created": model.created,
+            "active": model.active.unwrap_or(true),
+        });
+
+        crate::model_classifier::apply_declared_kind(
+            &model.id,
+            model.kind.as_deref(),
+            model.dimensions,
+            &mut capabilities,
+            &mut metadata,
+        );
+
         ModelInfo::new(model.id.clone(), model.id)
             .with_capabilities(capabilities)
             .with_context_window(context_window)
-            .with_metadata(serde_json::json!({
-                "owned_by": model.owned_by,
-                "created": model.created,
-                "active": model.active.unwrap_or(true),
-            }))
+            .with_metadata(metadata)
     }
 
     /// Validates the requested chat model.

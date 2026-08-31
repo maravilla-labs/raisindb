@@ -131,6 +131,8 @@ fn test_model_conversion() {
         created: 1234567890,
         owned_by: "Meta".to_string(),
         active: Some(true),
+        kind: None,
+        dimensions: None,
     };
 
     let model_info = provider.convert_groq_model(llama_model);
@@ -148,6 +150,8 @@ fn test_model_conversion() {
         created: 1234567890,
         owned_by: "Mistral".to_string(),
         active: Some(true),
+        kind: None,
+        dimensions: None,
     };
 
     let model_info = provider.convert_groq_model(mixtral_model);
@@ -807,6 +811,109 @@ mod forced_tool_recovery {
             seen.lock().unwrap().len(),
             1,
             "an unrelated error was retried"
+        );
+    }
+}
+
+/// This client also serves `AIProvider::Custom` — every OpenAI-shaped gateway.
+/// These cover the two extension keys such a gateway publishes (`kind` and
+/// `dimensions`), end to end from the wire bytes to the use cases a tenant's
+/// config would offer.
+mod gateway_model_metadata {
+    use super::*;
+    use crate::config::AIUseCase;
+    use crate::model_classifier::{
+        classify, ClassificationContext, METADATA_EMBEDDING_LENGTH,
+        METADATA_EMBEDDING_UNAVAILABLE_REASON, METADATA_KIND,
+    };
+
+    fn parse(body: &str) -> GroqModelsResponse {
+        serde_json::from_str(body).expect("gateway listing must parse")
+    }
+
+    fn convert(body: &str) -> ModelInfo {
+        let provider = GroqProvider::new("test-key");
+        provider.convert_groq_model(parse(body).data.into_iter().next().unwrap())
+    }
+
+    const REAL_GROQ: &str = r#"{"data":[
+        {"id":"llama-3.3-70b-versatile","created":1,"owned_by":"Meta","active":true}]}"#;
+
+    #[test]
+    fn a_listing_without_the_extension_keys_still_parses() {
+        // Real Groq, and any gateway predating the contract.
+        let parsed = parse(REAL_GROQ);
+        assert_eq!(parsed.data.len(), 1);
+        assert!(parsed.data[0].kind.is_none());
+        assert!(parsed.data[0].dimensions.is_none());
+    }
+
+    #[test]
+    fn unknown_keys_never_fail_the_listing() {
+        // No struct on this hop may gain `deny_unknown_fields`: that attribute
+        // is what turns an additive change on the gateway into an outage.
+        let parsed = parse(
+            r#"{"object":"list","data":[{"id":"maravilla/balanced","object":"model","created":0,
+                "owned_by":"maravilla","tier":"standard","kind":"chat",
+                "something_invented_next_year":{"a":1}}]}"#,
+        );
+        assert_eq!(parsed.data[0].kind.as_deref(), Some("chat"));
+    }
+
+    #[test]
+    fn an_embedding_alias_arrives_with_its_width_and_is_offered() {
+        let info = convert(
+            r#"{"data":[{"id":"maravilla/embed-multilingual","object":"model","created":0,
+                "owned_by":"maravilla","tier":"standard","kind":"embedding","dimensions":3584}]}"#,
+        );
+
+        // The gateway's declaration overrides this client's chat-by-default guess.
+        assert!(info.capabilities.embeddings);
+        assert!(!info.capabilities.chat);
+        assert!(!info.capabilities.tools);
+
+        let out = classify(&info, ClassificationContext::default());
+        assert_eq!(out.use_cases, vec![AIUseCase::Embedding]);
+        let meta = out.metadata.expect("metadata");
+        assert_eq!(meta[METADATA_EMBEDDING_LENGTH], serde_json::json!(3584));
+        assert_eq!(meta[METADATA_KIND], serde_json::json!("embedding"));
+    }
+
+    #[test]
+    fn an_embedding_alias_without_a_width_is_listed_but_unusable() {
+        let info = convert(
+            r#"{"data":[{"id":"maravilla/embed-broken","object":"model","created":0,
+                "owned_by":"maravilla","kind":"embedding"}]}"#,
+        );
+
+        assert!(!info.capabilities.embeddings);
+        let out = classify(&info, ClassificationContext::default());
+        assert!(
+            out.use_cases.is_empty(),
+            "a width we cannot know must not be guessed into the embedder identity"
+        );
+        let meta = out.metadata.expect("metadata");
+        assert!(meta.get(METADATA_EMBEDDING_LENGTH).is_none());
+        assert!(meta.get(METADATA_EMBEDDING_UNAVAILABLE_REASON).is_some());
+        // Still listed, so an operator can see why rather than hunting a
+        // model that simply does not appear.
+        assert_eq!(info.id, "maravilla/embed-broken");
+    }
+
+    #[test]
+    fn a_real_groq_model_is_unchanged() {
+        let info = convert(REAL_GROQ);
+
+        assert!(info.capabilities.chat);
+        assert!(!info.capabilities.embeddings);
+        assert!(info.capabilities.tools);
+        assert!(
+            info.metadata.as_ref().unwrap().get(METADATA_KIND).is_none(),
+            "nothing is invented for a provider that publishes no kind"
+        );
+        assert_eq!(
+            classify(&info, ClassificationContext::default()).use_cases,
+            vec![AIUseCase::Chat, AIUseCase::Completion, AIUseCase::Agent]
         );
     }
 }
