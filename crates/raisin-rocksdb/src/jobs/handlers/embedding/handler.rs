@@ -514,8 +514,14 @@ impl EmbeddingJobHandler {
                 vectors
             }
             None => {
+                // `generate_embeddings_for_all`, not `..._batch`: a chunked
+                // document routinely exceeds the endpoint's per-request input
+                // limit, and the raw batch call sends the whole set in one go.
+                // That is a 400, not a slow request — the job fails, retries and
+                // fails forever, so the document's vectors are never written
+                // while the default spec's single filename vector is.
                 let mut generated = if chunk_texts.len() > 1 {
-                    provider.generate_embeddings_batch(&chunk_texts).await?
+                    provider.generate_embeddings_for_all(&chunk_texts).await?
                 } else {
                     vec![provider.generate_embedding(&chunk_texts[0]).await?]
                 };

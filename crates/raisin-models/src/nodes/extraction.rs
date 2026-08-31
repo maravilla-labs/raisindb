@@ -73,6 +73,9 @@
 //! the FULL length, so a truncated artifact announces itself rather than
 //! looking like a short document.
 
+use lazy_static::lazy_static;
+use regex::Regex;
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::nodes::properties::PropertyValue;
@@ -243,7 +246,19 @@ impl ExtractionArtifact {
     /// status record is bookkeeping about the binary, not content, and losing
     /// it is what made a skip invisible in the first place.
     pub fn apply(&self, properties: &mut HashMap<String, PropertyValue>, store_text: bool) {
-        let full_chars = self.text.chars().count() as i64;
+        // Strip embedded binaries BEFORE measuring or storing. An extractor that
+        // renders a PDF to markdown inlines every figure as a `data:` URI, and
+        // the payload is the overwhelming majority of the result: one 40-page
+        // deck arrived as 208,492 characters of which the prose was a fraction.
+        //
+        // That is not merely wasteful. It eats the inline budget, so real text
+        // is truncated away in favour of image bytes; it destroys chunking,
+        // because a base64 blob is a single unsplittable "word" and the
+        // recursive splitter backs off around it and emits fragments like `---`
+        // and `![` as chunks of their own; and what does get embedded is a
+        // vector of base64 noise, which matches nothing in particular.
+        let text = strip_data_uris(&self.text);
+        let full_chars = text.chars().count() as i64;
 
         properties.insert(
             EXTRACT_STATUS_PROP.to_string(),
@@ -284,15 +299,31 @@ impl ExtractionArtifact {
         if store_text && self.status == ExtractStatus::Ok {
             properties.insert(
                 EXTRACTED_TEXT_PROP.to_string(),
-                PropertyValue::String(truncate_on_char_boundary(
-                    &self.text,
-                    MAX_INLINE_EXTRACT_BYTES,
-                )),
+                PropertyValue::String(truncate_on_char_boundary(&text, MAX_INLINE_EXTRACT_BYTES)),
             );
         } else {
             properties.remove(EXTRACTED_TEXT_PROP);
         }
     }
+}
+
+/// Replace the payload of every `data:` URI with nothing, keeping surrounding
+/// text intact.
+///
+/// Matches `data:<mime>;base64,<payload>` and drops the whole run, so markdown
+/// like `![Image 1 from page 1](data:image/jpeg;base64,/9j/4AAQ...)` becomes
+/// `![Image 1 from page 1]()` — the alt text survives, because "Image 1 from
+/// page 1" is the only part of a figure that carries meaning for retrieval.
+///
+/// The payload class is deliberately standard base64 only (`A-Za-z0-9+/=`) and
+/// excludes whitespace: a real data URI never contains any, and admitting it
+/// would let the match run past the URI and swallow the prose after it.
+pub fn strip_data_uris(text: &str) -> Cow<'_, str> {
+    lazy_static! {
+        static ref DATA_URI: Regex =
+            Regex::new(r"data:[^;,)\s]*;base64,[A-Za-z0-9+/=]+").expect("valid data-URI regex");
+    }
+    DATA_URI.replace_all(text, "")
 }
 
 /// Every property key the extraction artifact owns.
@@ -471,5 +502,95 @@ mod tests {
                 "{key} is not in the shield list"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod data_uri_tests {
+    use super::*;
+
+    /// The shape that actually arrived from production: a PDF rendered to
+    /// markdown with every figure inlined as base64.
+    #[test]
+    fn a_figure_keeps_its_caption_and_loses_its_payload() {
+        let text = "# Wunderframe\n\n\
+                    ![Image 1 from page 1](data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEAYABgAAD)\n\n\
+                    Revolutionizing event ticketing.";
+        let out = strip_data_uris(text);
+        assert_eq!(
+            out,
+            "# Wunderframe\n\n![Image 1 from page 1]()\n\nRevolutionizing event ticketing."
+        );
+    }
+
+    #[test]
+    fn every_occurrence_goes_not_just_the_first() {
+        let text = "a(data:image/png;base64,AAAA)b(data:image/gif;base64,BBBB)c";
+        assert_eq!(strip_data_uris(text), "a()b()c");
+    }
+
+    /// The hazard in the payload character class: admitting whitespace would let
+    /// the match run past the URI and eat the document.
+    #[test]
+    fn prose_after_a_payload_survives() {
+        let text = "![x](data:image/png;base64,AAAA) The quick brown fox jumps over it.";
+        assert_eq!(
+            strip_data_uris(text),
+            "![x]() The quick brown fox jumps over it."
+        );
+    }
+
+    #[test]
+    fn text_without_data_uris_is_untouched_and_not_reallocated() {
+        let text = "Ordinary prose mentioning base64 and data: in passing.";
+        let out = strip_data_uris(text);
+        assert_eq!(out, text);
+        assert!(matches!(out, Cow::Borrowed(_)), "no needless allocation");
+    }
+
+    /// The end-to-end property: what gets STORED, and what `__extract_chars`
+    /// reports, are both the stripped text — otherwise the character count
+    /// describes bytes nobody can search and the inline budget is spent on
+    /// image data instead of prose.
+    #[test]
+    fn the_stored_artifact_and_its_char_count_exclude_the_payload() {
+        let payload = "A".repeat(50_000);
+        let artifact = ExtractionArtifact {
+            text: format!("Real prose here.\n\n![fig](data:image/png;base64,{payload})"),
+            status: ExtractStatus::Ok,
+            source: "core-pdf".to_string(),
+            fingerprint: "fp".to_string(),
+            detail: None,
+        };
+
+        let mut props = HashMap::new();
+        artifact.apply(&mut props, true);
+
+        let stored = match props.get(EXTRACTED_TEXT_PROP) {
+            Some(PropertyValue::String(s)) => s.clone(),
+            other => panic!("expected stored text, got {other:?}"),
+        };
+        assert!(
+            !stored.contains("AAAA"),
+            "the base64 payload must not be stored"
+        );
+        assert!(
+            stored.contains("Real prose here."),
+            "the prose must survive"
+        );
+
+        let chars = match props.get(EXTRACT_CHARS_PROP) {
+            Some(PropertyValue::Integer(n)) => *n,
+            other => panic!("expected a char count, got {other:?}"),
+        };
+        assert_eq!(
+            chars,
+            stored.chars().count() as i64,
+            "__extract_chars must describe the text that was actually stored"
+        );
+        assert!(
+            chars < 1_000,
+            "50 KB of base64 must not be counted: {chars}"
+        );
     }
 }

@@ -7,6 +7,17 @@ use async_trait::async_trait;
 use raisin_error::{Error, Result};
 use serde::{Deserialize, Serialize};
 
+/// How many inputs one embedding request may carry when the provider has not
+/// said otherwise.
+///
+/// Deliberately conservative. The cap belongs to whoever RUNS the endpoint, not
+/// to the API dialect: an OpenAI-compatible gateway serving a local model
+/// rejected a 1112-input request with
+/// `"The input list must have less than 100 items"`, and OpenAI's own limit is
+/// different again. 64 clears every limit we have seen and costs only a few
+/// extra round trips on a long document.
+pub const DEFAULT_MAX_BATCH_SIZE: usize = 64;
+
 /// Trait for embedding generation providers
 #[async_trait]
 pub trait EmbeddingProvider: Send + Sync {
@@ -14,11 +25,58 @@ pub trait EmbeddingProvider: Send + Sync {
     async fn generate_embedding(&self, text: &str) -> Result<Vec<f32>>;
 
     /// Generate embeddings for multiple texts in a single batch
+    ///
+    /// This is the RAW request — it sends whatever it is given in one call, so
+    /// the caller is responsible for staying under the endpoint's input limit.
+    /// Prefer [`Self::generate_embeddings_for_all`], which does that for you.
     async fn generate_embeddings_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         // Default implementation: call generate_embedding for each text
         let mut embeddings = Vec::with_capacity(texts.len());
         for text in texts {
             embeddings.push(self.generate_embedding(text).await?);
+        }
+        Ok(embeddings)
+    }
+
+    /// The most inputs one request to this provider may carry.
+    fn max_batch_size(&self) -> usize {
+        DEFAULT_MAX_BATCH_SIZE
+    }
+
+    /// Embed arbitrarily many texts, in requests the provider will accept.
+    ///
+    /// **This is what callers should use.** A chunked document routinely
+    /// produces more inputs than any endpoint accepts in one call — a 208 KB
+    /// PDF split at 256 tokens is over a thousand — and sending them whole is
+    /// not a slow request, it is a 400 that fails the job, retries, and fails
+    /// forever. That is what left every document-content vector unwritten while
+    /// the filename vector alone was indexed, so search matched titles and
+    /// nothing else.
+    ///
+    /// Splitting lives HERE, once, rather than in each provider's request
+    /// builder: four copies of the same loop is how two of them end up
+    /// disagreeing about the limit.
+    async fn generate_embeddings_for_all(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let cap = self.max_batch_size().max(1);
+        if texts.len() <= cap {
+            return self.generate_embeddings_batch(texts).await;
+        }
+
+        let mut embeddings = Vec::with_capacity(texts.len());
+        for window in texts.chunks(cap) {
+            let batch = self.generate_embeddings_batch(window).await?;
+            // A short batch would silently shift every later vector onto the
+            // wrong chunk — a corpus that returns confident, wrong matches with
+            // nothing logged. Refuse instead.
+            if batch.len() != window.len() {
+                return Err(Error::Backend(format!(
+                    "Embedding provider returned {} vectors for a batch of {} inputs; \
+                     refusing to misalign vectors with their chunks",
+                    batch.len(),
+                    window.len()
+                )));
+            }
+            embeddings.extend(batch);
         }
         Ok(embeddings)
     }
@@ -885,5 +943,125 @@ mod tests {
             Err(e) => assert!(e.to_string().contains("candle")),
             Ok(_) => panic!("Expected error for HuggingFace provider"),
         }
+    }
+}
+
+/// A long document must actually reach the embedder.
+///
+/// The 2026-09-01 production failure: a 208 KB PDF chunked at 256 tokens
+/// produced 1112 inputs, all sent in one request, and the gateway rejected
+/// anything over 100. Every attempt returned 400, the job retried forever, and
+/// not one document-content vector was ever written — while the default spec's
+/// single filename vector indexed fine, so search matched titles and looked
+/// merely bad rather than broken.
+#[cfg(test)]
+mod batching_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Records the size of every request it is asked to make, and refuses one
+    /// larger than the limit — the way the real gateway does.
+    struct CountingProvider {
+        limit: usize,
+        batches: Mutex<Vec<usize>>,
+    }
+
+    #[async_trait]
+    impl EmbeddingProvider for CountingProvider {
+        async fn generate_embedding(&self, _text: &str) -> Result<Vec<f32>> {
+            Ok(vec![0.0; 4])
+        }
+
+        async fn generate_embeddings_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            if texts.len() > self.limit {
+                return Err(Error::Backend(format!(
+                    "The input list must have less than {} items",
+                    self.limit
+                )));
+            }
+            self.batches.lock().unwrap().push(texts.len());
+            Ok(texts.iter().map(|_| vec![0.0; 4]).collect())
+        }
+
+        fn max_batch_size(&self) -> usize {
+            self.limit
+        }
+
+        fn dimensions(&self) -> usize {
+            4
+        }
+    }
+
+    fn texts(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("chunk {i}")).collect()
+    }
+
+    #[tokio::test]
+    async fn a_document_larger_than_one_request_still_embeds() {
+        let provider = CountingProvider {
+            limit: 64,
+            batches: Mutex::new(Vec::new()),
+        };
+
+        let out = provider
+            .generate_embeddings_for_all(&texts(1112))
+            .await
+            .expect("a 1112-chunk document must embed, not 400");
+
+        assert_eq!(out.len(), 1112, "one vector per chunk, none dropped");
+        let batches = provider.batches.lock().unwrap().clone();
+        assert_eq!(batches.len(), 18, "1112 inputs at 64 per request");
+        assert!(
+            batches.iter().all(|n| *n <= 64),
+            "no request may exceed the provider's limit: {batches:?}"
+        );
+        assert_eq!(batches.iter().sum::<usize>(), 1112);
+    }
+
+    #[tokio::test]
+    async fn a_short_document_still_goes_in_one_request() {
+        let provider = CountingProvider {
+            limit: 64,
+            batches: Mutex::new(Vec::new()),
+        };
+        provider
+            .generate_embeddings_for_all(&texts(10))
+            .await
+            .unwrap();
+        assert_eq!(*provider.batches.lock().unwrap(), vec![10]);
+    }
+
+    /// A provider that returns fewer vectors than it was given inputs would
+    /// shift every later vector onto the wrong chunk — confident, wrong matches
+    /// with nothing logged. It must fail loudly instead.
+    #[tokio::test]
+    async fn a_short_batch_is_refused_rather_than_misaligned() {
+        struct ShortProvider;
+
+        #[async_trait]
+        impl EmbeddingProvider for ShortProvider {
+            async fn generate_embedding(&self, _text: &str) -> Result<Vec<f32>> {
+                Ok(vec![0.0; 4])
+            }
+            async fn generate_embeddings_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+                // One short, every time.
+                Ok(texts.iter().skip(1).map(|_| vec![0.0; 4]).collect())
+            }
+            fn max_batch_size(&self) -> usize {
+                8
+            }
+            fn dimensions(&self) -> usize {
+                4
+            }
+        }
+
+        let err = ShortProvider
+            .generate_embeddings_for_all(&texts(20))
+            .await
+            .expect_err("a short batch must be an error, not a silent misalignment");
+        assert!(
+            err.to_string().contains("misalign"),
+            "the error must name the hazard, got: {err}"
+        );
     }
 }
