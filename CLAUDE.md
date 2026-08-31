@@ -688,6 +688,43 @@ Consequences of running these on every node, all intended:
   and HNSW snapshots lag ~60s (`raisin-hnsw/src/engine/lifecycle.rs`), so a write
   followed immediately by a restart legitimately reports a mismatch.
 
+## The Tantivy writer is owned by the engine and never dropped per operation
+
+`IndexWriter::drop` calls `SegmentUpdater::kill()`, which makes every merge that
+writer had in flight fail with "Segment updater killed" and throws its output
+away. So a writer opened and dropped around each operation adds a segment on
+every commit and destroys the merge meant to absorb it: segments only ever
+accumulate, and each subsequent commit re-schedules merging over a bigger set.
+That ran away in production to 753 segments for 128k documents with ~2.7 cores
+permanently inside `IndexMerger::write` — and a restart cured it only until the
+next write reached that index.
+
+- **`with_writer` is the ONE write path** (single node, delete, batch), and the
+  slot it takes owns a LIVE `IndexWriter`. Do not reintroduce a
+  `get_writer()`-per-call, and do not drop the writer at the end.
+- **The slot map lives beside the moka index cache, not inside `CachedIndex`.**
+  An entry can be evicted while a caller still holds its `Arc`, and two live
+  writers on one directory is exactly the non-blocking `LockBusy` the slot
+  exists to prevent. `invalidate_cached_index` clears both, because every
+  caller of it goes on to delete or replace the directory.
+- **One indexing thread.** `Index::writer(budget)` divides the budget across up
+  to eight threads and each flushes its OWN segment, multiplying the segment
+  count of every commit. Merging is the bottleneck, not indexing.
+- **Anything that needs its own writer is now `DirectoryLockBusy`** against a
+  live index — that is why `optimize` merges through the shared writer and
+  `purge` closes it first. A throwaway writer would also need
+  `wait_merging_threads()` to survive its own `Drop`.
+- **A branch copy must not be a plain recursive copy.** Merges land on the
+  segment updater's own threads, so a copy can pick up a `meta.json` naming
+  segments that were garbage-collected before it reached them, and copying in
+  place leaves a half-written index visible at the branch's path meanwhile.
+  `snapshot_index_dir` stages into a sibling directory, proves it opens and
+  reads, and publishes with one rename.
+
+Regression tests: `tantivy_engine::indexing_impl::tests::{single_node_commits_do_not_accumulate_segments,
+branch_copy_of_a_live_index_is_readable}`, plus `tests/all/index_node_durability.rs`
+for the exclusion side.
+
 ## Search: one engine, three doors, and what each side counts
 
 `HYBRID_SEARCH`, `FULLTEXT_SEARCH` and `KNN` are ONE implementation
