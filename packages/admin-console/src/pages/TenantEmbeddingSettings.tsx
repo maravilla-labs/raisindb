@@ -246,8 +246,16 @@ export default function TenantEmbeddingSettings() {
         quantization,
       }
 
-      const result = await embeddingsApi.setConfig(tenant, request)
-      setConfig(result)
+      // The POST answers `SuccessResponse` ({ success, message }), NOT the saved
+      // config — the client's `post<ConfigResponse>` is a claim about the server, not
+      // a check of one, so TypeScript cannot catch the mismatch. Feeding that reply
+      // into `setConfig` replaced the form's state with an object having no
+      // `ai_provider_ref`, `ai_model_ref` or `dimensions`, so a SUCCESSFUL save
+      // redrew as "Select a provider..." with the width back at its 384 default.
+      // The settings were stored correctly the whole time; only the form forgot them.
+      // Re-read instead, which also picks up anything the server normalised.
+      await embeddingsApi.setConfig(tenant, request)
+      setConfig(await embeddingsApi.getConfig(tenant))
       setApiKey('') // Clear API key input after save
       setHasChanges(false)
       setTestResult(null) // Clear test results

@@ -77,8 +77,15 @@ export const embeddingsApi = {
   /**
    * POST /api/tenants/{tenant}/embeddings/config
    */
+  // Answers `{ success, message }`, NOT the saved config. Typed accordingly: the
+  // previous `post<ConfigResponse>` was a claim the server does not honour, and a
+  // caller that trusted it replaced its state with an object missing every field.
+  // Call `getConfig` after saving if you need the stored document back.
   setConfig: (tenant: string, request: SetConfigRequest) =>
-    api.post<ConfigResponse>(`/api/tenants/${tenant}/embeddings/config`, request),
+    api.post<{ success: boolean; message?: string }>(
+      `/api/tenants/${tenant}/embeddings/config`,
+      request,
+    ),
 
   /**
    * POST /api/tenants/{tenant}/embeddings/config/test
