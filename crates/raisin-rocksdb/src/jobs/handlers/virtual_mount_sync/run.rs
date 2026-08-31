@@ -362,6 +362,7 @@ impl VirtualMountSyncHandler {
             deleted = counts.deleted,
             stamped = counts.stamped,
             failed = counts.failed,
+            retained_excluded = counts.retained_excluded,
             "virtual mount sync finished"
         );
 

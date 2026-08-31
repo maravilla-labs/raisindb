@@ -73,70 +73,25 @@ pub struct TestConnectionRequest {
 }
 
 /// The `capabilities` object cached on the integration node and echoed back to
-/// the UI. Field-for-field mirror of the sync engine's `Capabilities`
-/// (`raisin-rocksdb` … `virtual_mount_sync::adapter`); duplicated here because
-/// that crate is an optional dependency and does not re-export the type at its
-/// crate root. Every field defaults conservatively.
+/// the UI — the SAME type the sync engine writes, not a copy of it.
 ///
-/// The mirror is load-bearing: both structs serialize into the ONE
-/// `capabilities` property on the `raisin:Integration` node, so whichever wrote
-/// last wins field-for-field. Adding a field here without adding it to the
-/// engine's struct (or the reverse) silently strips it on the next write.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Capabilities {
-    #[serde(default)]
-    pub can_read: bool,
-    #[serde(default)]
-    pub can_write: bool,
-    #[serde(default)]
-    pub can_create_folders: bool,
-    #[serde(default)]
-    pub supports_changes: bool,
-    #[serde(default)]
-    pub supports_webhooks: bool,
-    #[serde(default)]
-    pub supports_search: bool,
-    #[serde(default)]
-    pub supports_push: bool,
-    /// Adapter implements the optional `browse` operation (§2.10). Affects only
-    /// the admin UI: false keeps the mount editor's free-text id inputs.
-    #[serde(default)]
-    pub supports_browse: bool,
-    #[serde(default)]
-    pub default_ttl: Option<u64>,
-    #[serde(default)]
-    pub max_file_size: Option<i64>,
-
-    // ---- write path (§3.3 of docs/reference/virtual-node-adapters.md) ----
-    // Mirrors the engine struct exactly; all optional, all read-only-by-default.
-    /// Adapter implements `create`.
-    #[serde(default)]
-    pub can_create: bool,
-    /// Adapter implements `update`.
-    #[serde(default)]
-    pub can_update: bool,
-    /// Adapter implements `delete`.
-    #[serde(default)]
-    pub can_delete: bool,
-    /// Adapter implements `submit` (issue a command, e.g. send a mail).
-    #[serde(default)]
-    pub can_submit: bool,
-    /// The `state_only` allow-list of writable node properties.
-    #[serde(default)]
-    pub mutable_fields: Vec<String>,
-    /// `"detach" | "trash" | "purge"` — recommended default for a local delete.
-    #[serde(default)]
-    pub default_delete_policy: Option<String>,
-    /// `"push" | "detach" | "reject"` — recommended default for a local move.
-    #[serde(default)]
-    pub default_move_policy: Option<String>,
-    /// `delete` can soft-delete rather than purge.
-    #[serde(default)]
-    pub supports_trash: bool,
-    /// `submit` can forward a provider idempotency key.
-    #[serde(default)]
-    pub supports_idempotency_key: bool,
-}
+/// It used to be a hand-maintained "field-for-field mirror" of the engine's
+/// struct, kept here because `raisin-rocksdb` is an optional dependency. It had
+/// drifted by three fields (`accepts_content`, `move_fields`,
+/// `submit_unavailable_reason`), and because both structs serialize into the
+/// ONE `capabilities` property on the `raisin:Integration` node, the drift was
+/// destructive in both directions: the probe deserialized the adapter's answer
+/// into the stripped struct, so `submit_unavailable_reason` never reached the
+/// Test-connection panel and an operator could not learn WHICH cause made an
+/// outbox non-submittable; and every test click cached the stripped blob, which
+/// the next sync's changed-check then rewrote, minting an extra replicated
+/// integration-node revision per click.
+///
+/// The fix is one declaration, in `raisin-models` — which both crates already
+/// depend on — rather than a parity test over two, because a test reports drift
+/// and a single type cannot drift. Same reasoning, same module, as
+/// `build_credential`.
+pub use raisin_models::nodes::integrations::Capabilities;
 
 /// The bounded `list` probe result. Names only — never URLs.
 #[derive(Debug, Serialize)]

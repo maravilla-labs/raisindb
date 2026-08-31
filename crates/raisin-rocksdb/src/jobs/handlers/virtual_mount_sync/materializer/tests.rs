@@ -238,6 +238,7 @@ fn stamp_op(ext: &str, etag: Option<&str>) -> BatchOp {
         pushed_state: None,
         merged: None,
         adopt: false,
+        rekey: None,
         node_bytes: 0,
     }
 }
@@ -259,6 +260,7 @@ fn a_stamp_is_charged_the_whole_node_it_rewrites() {
         pushed_state: None,
         merged: None,
         adopt: false,
+        rekey: None,
         node_bytes: 30_000,
     };
     assert!(estimate_op_bytes(&stamp) > 30_000);

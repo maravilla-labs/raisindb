@@ -7,13 +7,18 @@ properties:
     `submit` hands to raisin.email.send — the tenant's configured SMTP/relay
     provider, because IMAP itself cannot send. Write-direction only: `to_node`
     returns null, because an outbox imports nothing. Only `action: send` is
-    mapped; reply/reply_all/forward are declined, since threading them needs
-    In-Reply-To/References headers the email API does not accept.
+    mapped; reply/reply_all/forward are passed through unmapped so the adapter's
+    `submit` refuses them by name, since threading them needs In-Reply-To/
+    References headers the email API does not accept.
   language: javascript
   entry_file: index.js:handler
   execution_mode: Async
   enabled: true
-  version: 1
+  # 2: reply/reply_all/forward are no longer declined with a null. A null made
+  #    the ENGINE settle the command with its own generic "not finished being
+  #    authored, or already sent" text; the action now reaches `submit`, which
+  #    refuses it with the real reason (the missing In-Reply-To/References).
+  version: 2
   resource_limits:
     timeout_ms: 5000
     max_memory_bytes: 16777216
@@ -31,4 +36,4 @@ properties:
         description: Read-only mount snapshot { mount_id, mount_path, sync_config }
   output_schema:
     type: object
-    description: "{ payload: { action: 'send', body: { to, cc?, bcc?, subject, text, html? } } } or null when not sendable"
+    description: "{ payload: { action: 'send', body: { to, cc?, bcc?, subject, text, html? } } }; { payload: { action, body: null } } for an action only the adapter can refuse; or null when not sendable"

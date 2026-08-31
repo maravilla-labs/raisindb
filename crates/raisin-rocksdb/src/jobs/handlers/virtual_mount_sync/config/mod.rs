@@ -19,7 +19,9 @@ pub use items::{
     MappedItem, MappedNode, CHILD_ID_SEP,
 };
 pub use mount::{MountConfig, SyncConfig, WriteConfig};
-pub use paths::{parse_iso_epoch, passes_filters, resolve_path_template};
+pub use paths::{
+    excluded, mount_relative, parse_iso_epoch, passes_filters, resolve_path_template, PathFilter,
+};
 pub use props::build_properties;
 pub(crate) use props::{parse_object, parse_object_checked};
 pub use run::SyncRun;

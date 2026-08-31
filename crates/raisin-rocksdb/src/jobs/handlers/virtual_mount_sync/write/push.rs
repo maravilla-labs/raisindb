@@ -300,35 +300,130 @@ pub(super) async fn push_one(
         return Ok(Pushed::Gone);
     }
 
+    // 6b. An update may report a NEW external id, and for a key-addressed store
+    //     it must be able to: on S3 the key IS the object's identity, so an
+    //     update that renames is an identity change and the adapter has no other
+    //     way to say so. Ignoring it left the node pointing at an id the provider
+    //     no longer has — the next reconcile pruned it and re-imported the same
+    //     object as a fresh node, losing its id, its history and any local edit
+    //     still pending on it.
+    //
+    //     An EMPTY string is refused rather than obeyed. A node whose
+    //     `__external_id` is empty is invisible to the index and, to the delete
+    //     rails, not mount-owned at all; an adapter that returns `""` has a bug,
+    //     and acting on it would turn that bug into orphaned data.
+    let reported_id = result.get("external_id").and_then(|v| v.as_str());
+    let rekey_to = match reported_id {
+        Some("") => {
+            tracing::warn!(
+                mount_id = %ctx.scope.mount_id,
+                external_id = %candidate.external_id,
+                node_id = %node.id,
+                "the adapter's update answer carried an EMPTY external_id; ignoring it. \
+                 That is an adapter bug — an update that did not change the object's \
+                 identity must omit the field, not blank it."
+            );
+            None
+        }
+        // A re-key is an id that differs from the one the node HOLDS and from
+        // the one this call was ADDRESSED to. An adapter echoing back the id it
+        // was given is saying "unchanged", whoever chose it — including a
+        // mapper that addressed the object by some other form through
+        // `to_external`'s `external_id`. Only an id the engine did not supply
+        // is news.
+        Some(id) if id != candidate.external_id && id != item_id => Some(id.to_string()),
+        _ => None,
+    };
+    //     A re-key must not land on an id ANOTHER node already holds. On a
+    //     key-addressed store, writing to an existing key is a legal OVERWRITE,
+    //     so a rename onto an occupied key is reachable — and taking it would
+    //     leave two nodes carrying one `__external_id`. `SyncIndex::from_nodes`
+    //     keys `by_external` by that id, so the next run would see only one of
+    //     them: the other could never again be matched by a delta, reported as
+    //     seen, or reconciled away. A duplicate no run can clear.
+    //
+    //     Refusing is the right ANSWER and not merely the safe one. The
+    //     destination object is already mirrored by that other node, and the
+    //     source key really is gone, so leaving this node under its old id lets
+    //     the ordinary reconcile prune it exactly as it prunes any object that
+    //     disappeared from the provider.
+    let rekey_to = match rekey_to {
+        Some(new_id) => match batcher.node_id_for_external(&new_id) {
+            Some(other) if other != node.id => {
+                tracing::warn!(
+                    mount_id = %ctx.scope.mount_id,
+                    node_id = %node.id,
+                    other_node_id = %other,
+                    from = %candidate.external_id,
+                    to = %new_id,
+                    "the provider reported a new external id that another node in this \
+                     mount already holds; NOT re-keying. Two nodes with one external id \
+                     are indistinguishable to the index, so one of them would become \
+                     permanently unreachable. This node is left under its old id for \
+                     reconcile to resolve."
+                );
+                None
+            }
+            _ => Some(new_id),
+        },
+        None => None,
+    };
+
     // 7. Stamp back, as the sync actor, in the run's own batch.
     let new_etag = result
         .get("etag")
         .and_then(|v| v.as_str())
         .map(str::to_string)
         .or(stored_etag);
+    // The stamp REPLACES `__pushed_state` wholesale, and this push carried only
+    // the diverged subset — so the new map must merge the just-sent values OVER
+    // the existing baseline. Stamping the subset alone would drop every
+    // converged field's baseline, making them all "diverged" again next drain: a
+    // perpetual re-push, and for a presence-side-effect field like `attendees`
+    // the exact invite spam the diverged-subset push exists to prevent.
+    let pushed = pushed_map(
+        view.pushed.as_ref(),
+        &view.watched,
+        push_fields,
+        // Only when this push actually carried the bytes. Recording the identity
+        // of content the provider was never given would make `content_diverges`
+        // answer false forever and drop the upload silently — the same class of
+        // lie the null-result guard above exists to prevent.
+        accepts_content.then(|| view.content.clone()).flatten(),
+    );
+    if let Some(new_id) = rekey_to {
+        // Loud on purpose. Changing which remote object a node IS is not
+        // something to do quietly: it moves the node out from under one id and
+        // under another for the delete rails, the index and every later delta,
+        // and if the adapter is wrong about it the damage is silent until a
+        // reconcile prunes something.
+        tracing::warn!(
+            mount_id = %ctx.scope.mount_id,
+            node_id = %node.id,
+            path = %node.path,
+            from = %candidate.external_id,
+            to = %new_id,
+            "the provider reported a NEW external id for this object (a rename on a \
+             key-addressed store); re-keying the node and its index entry"
+        );
+        batcher
+            .stage_rekey(
+                &node.id,
+                &candidate.external_id,
+                &new_id,
+                new_etag,
+                Some(pushed),
+                node_bytes,
+            )
+            .await?;
+        return Ok(Pushed::Sent);
+    }
     batcher
         .stage_stamp(
             &node.id,
             &candidate.external_id,
             new_etag,
-            // The stamp REPLACES `__pushed_state` wholesale, and this push
-            // carried only the diverged subset — so the new map must merge the
-            // just-sent values OVER the existing baseline. Stamping the subset
-            // alone would drop every converged field's baseline, making them
-            // all "diverged" again next drain: a perpetual re-push, and for a
-            // presence-side-effect field like `attendees` the exact invite
-            // spam the diverged-subset push exists to prevent.
-            Some(pushed_map(
-                view.pushed.as_ref(),
-                &view.watched,
-                push_fields,
-                // Only when this push actually carried the bytes. Recording the
-                // identity of content the provider was never given would make
-                // `content_diverges` answer false forever and drop the upload
-                // silently — the same class of lie the null-result guard above
-                // exists to prevent.
-                accepts_content.then(|| view.content.clone()).flatten(),
-            )),
+            Some(pushed),
             // Not a merge: an ordinary push writes no node properties, only the
             // engine's own metadata.
             None,

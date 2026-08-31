@@ -1,12 +1,13 @@
 name: google-calendar-adapter
-version: 1.2.0
+version: 1.3.0
 title: Google Calendar Adapter (Experimental)
 description: >
   Experimental virtual-node adapter for Google Calendar. Mount a calendar into a
   workspace path and RaisinDB keeps its events in sync as raisin:Event nodes.
-  Ships the Calendar v3 adapter function, a default mapping function, and a
-  pre-configured (disabled) raisin:Integration template you complete with your
-  own Google OAuth client in the admin console. Preview feature — validate
+  Ships the Calendar v3 adapter function, a default mapping function, an outbox
+  mapping function for RSVP commands, and a pre-configured (disabled)
+  raisin:Integration template you complete with your own Google OAuth client in
+  the admin console. Preview feature — validate
   against your own account before relying on it in production.
 author: RaisinDB Team
 license: BSL-1.1
@@ -32,6 +33,7 @@ provides:
   functions:
     - /functions/adapters/google-calendar
     - /functions/mappers/google-calendar-default
+    - /functions/mappers/google-calendar-outbox
   # Pre-configured integration template (disabled until credentials are supplied).
   content:
     - raisin:system/connectors/google-calendar
@@ -50,6 +52,10 @@ sync:
         - "**"
       mode: merge
     - root: /mappers/google-calendar-default
+      include:
+        - "**"
+      mode: merge
+    - root: /mappers/google-calendar-outbox
       include:
         - "**"
       mode: merge

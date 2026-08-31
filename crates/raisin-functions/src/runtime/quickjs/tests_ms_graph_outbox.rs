@@ -12,16 +12,33 @@
 //! REFUSES to translate. A mapper that guesses on this path sends someone an
 //! email.
 
+use super::tests_ms_graph_adapter::function_files;
 use super::*;
 use crate::api::MockFunctionApi;
 use serde_json::{json, Value};
 
+fn mapper_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../builtin-packages/ms-graph-adapter/content/functions/mappers/ms-graph-outbox")
+}
+
 fn mapper_source() -> String {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
-        "../../builtin-packages/ms-graph-adapter/content/functions/mappers/ms-graph-outbox/index.js",
-    );
+    let path = mapper_dir().join("index.js");
     std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read mapper at {}: {e}", path.display()))
+}
+
+/// The mapper's sibling MODULES, read from disk exactly as `adapter_files`
+/// does. See `function_files` for where that stops short of the engine's
+/// `load_sibling_files`, and why the gap can only ever hide files from the
+/// test rather than invent them.
+///
+/// This harness used to pass `HashMap::new()`, which supplied LESS than
+/// production: an `import` the engine resolves fine failed here and nowhere
+/// else, so the harness silently forbade ever splitting a mapper into more
+/// than one file. An empty map stays legitimate for a single-file mapper.
+fn mapper_files() -> HashMap<String, String> {
+    function_files(&mapper_dir())
 }
 
 /// A mapper is pure and I/O-free, so it gets no scripted HTTP at all — and if it
@@ -38,7 +55,7 @@ async fn call_mapper(input: Value) -> (Option<Value>, Vec<Value>) {
             context,
             &metadata,
             api.clone() as Arc<dyn crate::api::FunctionApi>,
-            HashMap::new(),
+            mapper_files(),
         )
         .await
         .expect("runtime execute");

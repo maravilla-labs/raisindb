@@ -7,7 +7,9 @@ properties:
     get_content, get_changes, update, subscribe, renew, unsubscribe) into Graph
     REST calls. The mount's sync_config.resource selects the surface ("mail" ->
     mailFolders/messages, "calendar" -> calendars/events + calendarView, "files" ->
-    drive items + delta). `principal` selects WHOSE mailbox/calendar (blank = the
+    drive items + delta). For "mail", sync_config.folder_scope ("folder", the
+    default, or "tree") decides whether the mount is one folder or that folder
+    and every folder beneath it. `principal` selects WHOSE mailbox/calendar (blank = the
     connected account, an address = a shared mailbox), and for "files"
     `drive_scope` picks OneDrive or a SharePoint document library. Writes are
     declared PER RESOURCE: CALENDAR is a full mirror (create/update/delete) plus
@@ -27,7 +29,24 @@ properties:
   # 2: the drive WRITE path (create/update/delete + finalize_upload).
   # 3: drive delta items carry their FOLDER PATH, so a webhook-delivered file
   #    lands where the full walk would have put it instead of at the mount root.
-  version: 7
+  # 8: mail `folder_scope: tree` — a mail mount can span a folder SUBTREE. The
+  #    walk recurses child folders; the delta holds one folder-scoped delta link
+  #    per folder inside the single opaque cursor (Graph has no mailbox-wide
+  #    /messages/delta); the folder chain is folded into each message's etag,
+  #    because can_skip_unmapped returns before rel_path is read; and an
+  #    @removed is never a delete in tree mode, because Graph sends the same
+  #    shape for a MOVE OUT of the folder.
+  # 9: the tree mount's three standing costs. The FOLDER MAP is cached in the
+  #    cursor and rebuilt only when the rotation closes a round or a chain
+  #    lookup misses — it used to be rebuilt on every poll, ~2,000 childFolders
+  #    requests per round on a 100-folder mount against a 10,000-per-10-minutes
+  #    ceiling. The cursor stores the delta TOKEN rather than the whole link,
+  #    since $select is reconstructible from the cursor identity. The rotation
+  #    resume point is a folder ID, not an index into a sorted list. And the
+  #    delta now emits the FOLDER ITEM for a new or renamed folder, so the
+  #    folder node relocates with its messages instead of being stranded beside
+  #    an ancestor the engine invented and can never prune.
+  version: 9
   resource_limits:
     timeout_ms: 120000
     max_memory_bytes: 67108864
@@ -74,7 +93,8 @@ properties:
           sync_config, api_config, config }. `config` is the resolved merge
           (api_config < connector < connection < sync_config) and is what the
           adapter reads; sync_config is the fallback for an older engine.
-          Keys: resource (mail | calendar | files), principal (blank = the
+          Keys: resource (mail | calendar | files), folder_scope (mail only:
+          folder | tree) with max_folders bounding a tree, principal (blank = the
           connected account, else a mailbox/UPN — this is how a SHARED MAILBOX
           is selected), drive_scope (me | user | site) with site_id/drive_id for
           a SharePoint library, include_body, and window { days_ahead,

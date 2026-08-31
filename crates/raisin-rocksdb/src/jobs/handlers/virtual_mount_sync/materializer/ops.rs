@@ -72,6 +72,31 @@ pub enum BatchOp {
         /// carried: it comes from the scope, so an adopt cannot name a mount
         /// other than the one whose drain is running.
         adopt: bool,
+        /// Set when this stamp RE-KEYS the node: the provider answered the
+        /// update with an external id different from the one the engine sent,
+        /// and this is the id the node had before. `external_id` above is the
+        /// new one.
+        ///
+        /// For a key-addressed store the key IS the identity — an S3 rename is
+        /// a copy to a new key — so an update that renames leaves the engine
+        /// holding an id that resolves to nothing. Every later run would then
+        /// re-import the object as a new node and reconcile the old one away,
+        /// losing its history and its local edits.
+        ///
+        /// A typed field rather than "just stamp the new id", because a re-key
+        /// is not a metadata amendment: it rewrites `__external_id`, the
+        /// property the delete rails and the whole index read as the node's
+        /// provider identity. Carrying the PREVIOUS id lets the index drop its
+        /// old entry in the same batch, so the rest of the run looks the node
+        /// up under the id it now has.
+        ///
+        /// SUBORDINATE nodes are not carried along: a child's external id
+        /// embeds its parent's (see `child_external_id`), so re-keying a parent
+        /// that has children would strand them under the old prefix. No adapter
+        /// both emits children and re-keys — the child shape is mail
+        /// attachments, the re-key shape is key-addressed blob stores — so this
+        /// is a documented limit rather than a partial implementation.
+        rekey: Option<String>,
         /// Serialized size of the node being stamped, measured by the drain
         /// from the node it already read (see [`estimate_node_bytes`]).
         ///
@@ -147,6 +172,14 @@ pub struct BatchStats {
     /// caught by the failure budget, and an unbounded list would put a whole
     /// mailbox into mount state.
     pub failed_ids: Vec<String>,
+    /// Mount-owned nodes the full reconcile deliberately did NOT delete because
+    /// their path is excluded by the mount's filters.
+    ///
+    /// Reported rather than merely skipped: adding an `exclude` pattern to a
+    /// live mount leaves already-synced nodes behind, unmanaged, and an operator
+    /// cannot otherwise tell that from "the mount deleted them" or from "the
+    /// pattern did nothing". Never a `failed` — nothing was rejected.
+    pub retained_excluded: usize,
 }
 
 /// How many rejected ids one batch carries. Past this the failure is systemic,
@@ -173,6 +206,7 @@ impl BatchStats {
         self.deleted += other.deleted;
         self.stamped += other.stamped;
         self.failed += other.failed;
+        self.retained_excluded += other.retained_excluded;
         if self.first_error.is_none() {
             self.first_error = other.first_error;
         }

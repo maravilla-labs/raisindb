@@ -28,8 +28,12 @@ pub async fn run_with(
     batcher: &mut SyncBatcher<'_>,
 ) -> std::result::Result<(), AdapterError> {
     let max = ctx.mount.sync_config.max_items_per_sync;
-    let include = &ctx.mount.sync_config.include_patterns;
-    let exclude = &ctx.mount.sync_config.exclude_patterns;
+    // Compiled once for the whole delta pass, not once per change; see
+    // `PathFilter` for the (d+1)*p-compilations-per-item cost this replaces.
+    let filter = super::PathFilter::new(
+        &ctx.mount.sync_config.include_patterns,
+        &ctx.mount.sync_config.exclude_patterns,
+    );
     let mut token = state.last_sync_token.clone();
     let mut processed: u64 = 0;
     // Items actually staged, as opposed to returned by the provider. The two
@@ -90,7 +94,7 @@ pub async fn run_with(
             // present unchanged. Counting returned items instead of written ones
             // is how "0 written / 1200 skipped" and "1200 imported" ended up on
             // the same screen.
-            if stage_change(ctx, batcher, change, include, exclude).await? {
+            if stage_change(ctx, batcher, change, &filter).await? {
                 materialized += 1;
             }
             processed += 1;
@@ -280,8 +284,7 @@ async fn stage_change(
     ctx: &SyncCtx<'_>,
     batcher: &mut SyncBatcher<'_>,
     change: &super::config::Change,
-    include: &[String],
-    exclude: &[String],
+    filter: &super::PathFilter,
 ) -> std::result::Result<bool, AdapterError> {
     if change.kind == "deleted" {
         batcher.stage_delete(&change.item.external_id).await?;
@@ -310,7 +313,21 @@ async fn stage_change(
             change.item.external_id
         )));
     }
-    if !super::passes_filters(&rel_path, include, exclude) {
+    // Tested against the WHOLE path, and the filter walks its ancestor
+    // segments — so `Archive/x.pdf` is excluded by `exclude: ["Archive"]` here
+    // exactly as the full walk excludes it by never descending. The delta used
+    // to test the LEAF only, so an excluded folder's contents synced anyway on
+    // whichever pass happened to be a delta.
+    //
+    // The symmetry reaches only as far as `rel_path` does. When a change page
+    // carries no `relative_path` and no `path_template` resolves, `rel_path` is
+    // the item's bare NAME (see above): there are no ancestor segments to test,
+    // so a folder-name exclude cannot bind here however it is written. That is a
+    // limit of what the adapter told us rather than of this filter — an adapter
+    // whose items live in folders must report a path-bearing `relative_path`
+    // from `get_changes`, as google-drive and ms-graph do, or the item will also
+    // be MATERIALIZED flat at the mount root.
+    if !filter.passes(&rel_path) {
         return Ok(false);
     }
     // The delta path has no reconcile, so the staged child ids have nothing to

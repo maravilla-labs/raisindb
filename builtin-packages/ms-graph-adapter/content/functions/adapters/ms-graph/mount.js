@@ -121,8 +121,53 @@ export function includeBody(mount) {
 // $select for one mail request, widened when the mount opted into bodies.
 // Kept as a function rather than a second constant so the flag is read at every
 // call site and the delta and list paths cannot disagree about it.
+//
+// TREE MODE ADDS `parentFolderId`, AND ONLY TREE MODE.
+//
+// It is the field the delta path resolves a message's folder from — the delta
+// page is flat, and without it a message arriving from a webhook has no way to
+// say which folder it is in, which is the exact shape of the drive bug
+// `paths.js` documents.
+//
+// Not added unconditionally, deliberately. `mailSelect` is part of the cursor
+// IDENTITY (`cursorIdentity`), so widening it for every mail mount would fire
+// `cursor_invalid` on every mail mount in the fleet and force a full re-walk of
+// every mailbox for a field folder mode never reads. Tree mode changes the
+// identity anyway (`scope=tree`), so it pays a resync it was going to pay.
 export function mailSelect(mount) {
-  return includeBody(mount) ? MAIL_SELECT + ",body" : MAIL_SELECT;
+  var sel = MAIL_SELECT;
+  if (isMailTree(mount)) sel = sel + ",parentFolderId";
+  return includeBody(mount) ? sel + ",body" : sel;
+}
+
+// ---- mail folder scope ----------------------------------------------------
+
+// Does this mail mount span the folder's SUBTREE, or only the folder itself?
+//
+// `sync_config.folder_scope`: "tree" or "folder" (the default). Only the exact
+// string "tree" opts in — an absent, blank or misspelled value keeps today's
+// behaviour byte for byte, which is what stops a typo silently re-shaping a
+// live mailbox mount and re-importing it under new paths.
+export function folderScope(mount) {
+  return configValue(mount, "folder_scope") === "tree" ? "tree" : "folder";
+}
+
+// The one test the mail paths branch on. A `files` or `calendar` mount is never
+// a mail tree however its config is spelled.
+export function isMailTree(mount) {
+  return resourceOf(mount) === "mail" && folderScope(mount) === "tree";
+}
+
+// How many folders one tree mount may span (`sync_config.max_folders`).
+//
+// A CEILING THAT THROWS, never a truncation. A truncated folder set is a
+// PARTIAL `seen` set for the full walk, and `reconcile_deletes` would then
+// prune every message in the folders that fell off the end — real content
+// deleted because a listing was too big. `config_error` stops the mount and
+// says so instead.
+export function maxFolders(mount) {
+  var v = Number(configValue(mount, "max_folders"));
+  return isFinite(v) && v > 0 ? Math.floor(v) : 100;
 }
 
 // Event fields the mapper actually reads, plus the recurrence discriminators.

@@ -22,9 +22,23 @@ export function opGetChanges(credential, mount, params) {
       CAL +
       "/calendars/" +
       enc(calId) +
-      // Must match the incremental request below in every parameter that
-      // Google considers part of the sync identity — singleEvents above all.
-      "/events?maxResults=2500" +
+      // PARAMETER IDENTITY. Google documents the sync contract as "each list
+      // request should use the same set of query parameters, including the
+      // initial request", and names the only exemptions in the events.list
+      // reference: iCalUID, orderBy, privateExtendedProperty, q,
+      // sharedExtendedProperty, timeMin, timeMax, updatedMin. `showDeleted` is
+      // NOT one of them, so it has to be here too — the delta below sends it,
+      // and the same reference says a syncToken request may not set it to false
+      // at all.
+      //
+      // This was the singleEvents trap a second time (see the 400 branch below):
+      // a baseline minted WITHOUT showDeleted and a delta sent WITH it are two
+      // different sync identities, so the delta either silently drops the
+      // cancellations this whole file exists to carry, or is rejected with a
+      // 400 — which the branch below turns into `cursor_invalid`, whereupon the
+      // next run mints another mismatched baseline and the mount never gets an
+      // incremental feed at all.
+      "/events?showDeleted=true&maxResults=2500" +
       "&timeMin=" +
       enc(win.timeMin) +
       "&timeMax=" +

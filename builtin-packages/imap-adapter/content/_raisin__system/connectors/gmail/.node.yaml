@@ -28,6 +28,116 @@ properties:
        shown on the mount** in this console.
     3. On the mount's `sync_config`, set `pubsub_topic`, a `pubsub_verify_token`,
        and `mode: hybrid`. Absent a topic, the mount stays poll-only.
+  # THE DELETE GUARD, MADE REAL.
+  #
+  # `sync_config.reconcile_deletes` (engine default TRUE) exists because of this
+  # adapter: `list` enumerates MAILBOXES, never messages, so a forced FULL run
+  # produces a `seen` set holding mailbox ids only. It is non-empty, so the
+  # engine's empty-reconcile guard does not fire, and reconcile then prunes EVERY
+  # message node on the mount. They do not come back — the delta baseline that
+  # follows the walk discards its items and resumes at the highest UID already
+  # seen. Until this bundle existed the flag was inert: it protected only an
+  # operator who had read the README and hand-edited a mount. Now "Add bundle"
+  # ships it off, so the default is safe rather than documented.
+  #
+  # `'off'` is QUOTED: serde_yaml is YAML 1.1, where a bare `off` is boolean
+  # false, and both `writeback` and `mode` are Strings.
+  mount_bundles:
+    - id: gmail-mailbox
+      title: Gmail mailbox
+      description: >-
+        An inbox that agents work, and an outbox that sends. In tree mode
+        [Gmail]/All Mail, Trash and Spam are skipped by their SPECIAL-USE
+        attributes — All Mail re-lists every message in the account and would
+        otherwise import the whole mailbox a second time under a second path. The inbox is
+        EPHEMERAL by design — messages expire after a day and are re-fetched, so
+        the mount is a live queue rather than an archive; IMAP has no CONDSTORE
+        or EXPUNGE feed here, so nothing else can retire a message that is gone
+        from the server. The outbox does not send over IMAP (the protocol has no
+        submission verb) but through the tenant's configured email provider.
+      default_workspace: workplace
+      default_root: /gmail
+      prompts:
+        - key: mailbox
+          title: Mailbox
+          # `text`, not `remote`: this adapter declares no `browse` operation, so
+          # there is nothing for a picker to call.
+          type: text
+          help: >-
+            The IMAP folder to sync, e.g. INBOX or INBOX/Projects. Leave empty
+            for the connection's default.
+          applies_to: [inbox]
+          target: sync_config.mailbox
+        - key: folder_scope
+          title: Folder scope
+          type: select
+          options: [folder, tree]
+          help: >-
+            folder = this mailbox only. tree = it and every mailbox beneath it —
+            and the cost is one IMAP login PER MAILBOX per poll, because every
+            binding call opens its own TCP+TLS+LOGIN (Gmail allows 15 concurrent
+            connections per account). Tree mode also uses a different message id
+            space, so switching a live mount to it re-imports the mailbox once.
+          applies_to: [inbox]
+          target: sync_config.folder_scope
+        - key: email_provider
+          title: Sending provider
+          type: text
+          help: >-
+            Name of the configured tenant email sender the outbox posts through.
+            Leave empty for the tenant default. The mount reports can_submit
+            false until one resolves.
+          applies_to: [outbox]
+          target: sync_config.email_provider
+      mounts:
+        - key: inbox
+          title: Inbox
+          subpath: inbox
+          default: true
+          remote_root: INBOX
+          node_types: [raisin:Mail, raisin:Folder, raisin:Asset]
+          mapping_function: /mappers/imap-default
+          sync_config:
+            mode: poll
+            # 300s is the floor for this deployment, not a tuning knob. Tighter
+            # polling gets the account rate-limited.
+            interval_seconds: 300
+            ephemeral: true
+            ttl_seconds: 86400
+            # THE POINT OF THIS BUNDLE. See the comment above: with this true, a
+            # single forced full resync deletes every message node on the mount.
+            reconcile_deletes: false
+          # Read-only. Writing FLAGS back (UID STORE) is what would make this a
+          # state_only mount, and that needs a Rust binding this adapter has not
+          # got — so the mode is not offered rather than declared and refused at
+          # drain time.
+          write_config: { writeback: 'off', mode: 'off' }
+        - key: outbox
+          title: Outbox
+          subpath: outbox
+          # Materialises nothing: the outbox mapper's `to_node` returns null.
+          # The node type is what a COMPOSER creates here, listed so the console
+          # checks it against the target workspace's allowed_node_types —
+          # otherwise the first queued mail is rejected on insert.
+          node_types: [raisin:OutboundMail]
+          mapping_function: /mappers/imap-outbox
+          # Daily, and that is not a latency setting: a queued command drains
+          # immediately through the engine's capture path, so the interval only
+          # governs the read walk this mount does not want.
+          sync_config:
+            mode: poll
+            interval_seconds: 86400
+            # Same reason as the inbox. The stale filter exempts command nodes,
+            # so this is belt and braces — but a mount whose walk cannot
+            # enumerate its own content should say so, not rely on an exemption
+            # that is about something else.
+            reconcile_deletes: false
+          # `submit`, not `mirror`: sending is a command, not a mirrored object.
+          # Creating the node does nothing — setting `status: queued` sends it.
+          write_config:
+            writeback: 'off'
+            mode: submit
+            command_node_types: [raisin:OutboundMail]
   # Shares the generic IMAP adapter — Gmail is reached as a standard IMAP server.
   adapter_function: /adapters/imap
   # Disabled until an operator completes the OAuth flow and connects a Google

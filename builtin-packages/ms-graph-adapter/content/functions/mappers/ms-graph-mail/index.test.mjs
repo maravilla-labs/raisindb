@@ -262,3 +262,83 @@ test('the read flag and importance travel together when both diverged', () => {
   })
   assert.deepEqual(out.payload, { isRead: true, importance: 'normal' })
 })
+
+test('a mail FOLDER maps to raisin:Folder, not to a subjectless raisin:Mail', () => {
+  // Only a `folder_scope: tree` mount emits these, and both halves of it do:
+  // the walk's `childFolderItems` and the delta's `reconcileEntries`. Without
+  // this branch every Outlook folder materialized as a raisin:Mail with no
+  // subject and no date sitting where a folder belonged — which is why the
+  // delta half was previously withheld, at the cost of the engine inventing an
+  // un-prunable ancestor folder beside the real, stranded one.
+  const out = handler({
+    operation: 'to_node',
+    mount,
+    external_item: {
+      external_id: 'F-ACME',
+      name: 'Acme-Corp',
+      is_folder: true,
+      parent_id: 'F-PROJ',
+      etag: 'mailfolder-1|p=Projects/Acme-Corp',
+      metadata: {
+        is_folder: true,
+        display_name: 'Acme/Corp',
+        total_item_count: 12,
+        is_hidden: false,
+        folder_path: 'Projects/Acme-Corp',
+      },
+    },
+  })
+
+  assert.equal(out.node_type, 'raisin:Folder')
+  // The SANITIZED segment, never display_name: a folder an Outlook user is
+  // entitled to call "R&D/Legal" would otherwise become two path segments, and
+  // one called ".." would walk out of the mount.
+  assert.equal(out.name, 'Acme-Corp')
+  assert.equal(out.properties.title, 'Acme/Corp', 'the human spelling stays displayable')
+  assert.equal(out.properties.folder_path, 'Projects/Acme-Corp')
+  assert.equal(out.properties.parent_id, 'F-PROJ')
+  assert.equal(out.properties.total_item_count, 12)
+  assert.equal(out.properties.is_hidden, false)
+  assert.equal(out.children, undefined, 'a folder has no attachment children')
+})
+
+test('a folder whose display name sanitized to its id still names itself safely', () => {
+  const out = handler({
+    operation: 'to_node',
+    mount,
+    external_item: {
+      external_id: 'F-DOTS',
+      name: 'F-DOTS',
+      is_folder: true,
+      metadata: { is_folder: true, display_name: '..', folder_path: 'F-DOTS' },
+    },
+  })
+  assert.equal(out.node_type, 'raisin:Folder')
+  assert.equal(out.name, 'F-DOTS')
+  assert.equal(out.properties.title, '..', 'displayable, but never load-bearing')
+})
+
+test('a message is still a raisin:Mail, and is_folder:false changes nothing', () => {
+  // The branch is gated on `is_folder === true`, so no existing item can fall
+  // into it — including one whose metadata carries the key with a falsy value.
+  const out = map({ subject: 'hi', is_folder: false })
+  assert.equal(out.node_type, 'raisin:Mail')
+})
+
+test('a tree mount labels each message with ITS folder, not the mount root', () => {
+  // `folder` is a Property-indexed column. A `folder_scope: tree` mount spans N
+  // folders while `mount.remote_root` is one constant, so before this every
+  // message in the subtree was indexed as "inbox" and no query could separate
+  // an Inbox message from an Archive one — while `items.js` documented this
+  // line as the reader of the `folder_path` it was already sending.
+  const nested = map({ subject: 'hi', folder_path: 'Projects/Acme-Corp' })
+  assert.equal(nested.properties.folder, 'Projects/Acme-Corp')
+
+  // The mount ROOT is the empty chain, which is a location and not "unknown":
+  // it keeps the label folder mode would have given it.
+  const atRoot = map({ subject: 'hi', folder_path: '' })
+  assert.equal(atRoot.properties.folder, 'inbox')
+
+  // Folder mode sends no folder_path at all, and is unchanged.
+  assert.equal(map({ subject: 'hi' }).properties.folder, 'inbox')
+})

@@ -44,12 +44,18 @@ export function eventUrl(mount, eventId) {
 // `auth_expired`, which sends the operator to reconnect the account — and
 // reconnecting with the same read-only consent cannot fix a missing write scope.
 // A wrong diagnosis costs more here than the failure did.
+// The text no longer says the connector "requests read-only scopes by default":
+// the shipped template lists calendar.events alongside calendar.readonly, and an
+// operator told to ADD a scope that is already there stops reading at the first
+// false sentence. What actually produces this 403 is the second half — a grant
+// older than the scope, which only fresh consent widens.
 export var WRITE_SCOPE_HINT =
-  "This is almost certainly a missing WRITE scope, not a stale token: the " +
-  "connector requests read-only Calendar scopes by default. Add " +
-  "https://www.googleapis.com/auth/calendar.events to the Google connector's " +
-  "OAuth scopes in the console and RECONNECT each account — Google only issues " +
-  "a widened scope on fresh consent.";
+  "This is almost certainly a missing WRITE scope, not a stale token. Check that " +
+  "https://www.googleapis.com/auth/calendar.events is on the LIVE " +
+  "raisin:Integration node under /integrations (the shipped connector template " +
+  "lists it, an integration created before it was added does not) and on the " +
+  "Google Cloud consent screen, then RECONNECT each account — Google only issues " +
+  "a widened scope on fresh consent, never on refresh.";
 
 // Every status a WRITE diagnoses differently from a read, in ONE place, so the
 // three operations cannot drift on what a 403 or a 412 means.

@@ -1,5 +1,5 @@
 name: imap-adapter
-version: 1.4.0
+version: 1.7.0
 title: IMAP Mailbox Adapter
 description: >
   Virtual-node adapter for IMAP mailboxes. Mount an inbox into a workspace path

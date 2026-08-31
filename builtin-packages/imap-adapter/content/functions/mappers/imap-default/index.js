@@ -65,10 +65,20 @@ function handler(input) {
     reply_to: header(headers, "reply-to"),
     date: meta.date || item.modified_at || null,
     // IMAP has no notion of an outgoing copy at the protocol level, so the one
-    // timestamp it gives is the message's own Date header. It is the received
-    // time for anything in an incoming folder; `sent_at` is left to a header.
+    // timestamp it gives is the message's own Date header, and all three
+    // columns come from it.
+    //
+    // NOT `header(headers, "date")`, which is what this line used to read. The
+    // adapter now normalises the Date header into `meta.date` (RFC 3339 UTC,
+    // fixed width) and keeps the RAW RFC 2822 header — `"Wed, 2 Sep 2026
+    // 09:00:00 +0200"` — verbatim in `headers.date`, on purpose, so nothing is
+    // lost. Writing that raw string here would put a WEEKDAY-leading value into
+    // a column raisin_mail.yaml declares as ISO 8601 and indexes as a Property:
+    // it sorts by weekday name, and it is a second wire shape for a field the
+    // ms-graph mapper fills with ISO. The raw header is still one hop away, in
+    // `provider_metadata.headers.date`.
     received_at: meta.date || null,
-    sent_at: header(headers, "date"),
+    sent_at: meta.date || null,
     snippet: meta.snippet || null,
     message_id: meta.message_id || null,
     // The header pair is what reconstructs a thread across providers, and IMAP
@@ -82,7 +92,12 @@ function handler(input) {
     is_draft: flags.indexOf("draft") !== -1,
     has_attachments: Array.isArray(meta.attachments) && meta.attachments.length > 0,
     size: item.size_bytes != null ? item.size_bytes : null,
-    folder: mount.remote_root || meta.mailbox || null,
+    // folder_path FIRST, and only it is new. A tree mount spans N mailboxes, so
+    // mount.remote_root — a mount-level constant — would label every message in
+    // the tree with the mount root. It is empty for a message in the root
+    // mailbox and absent in folder mode, both of which fall through to exactly
+    // the value this line produced before, so no existing mount re-writes.
+    folder: meta.folder_path || mount.remote_root || meta.mailbox || null,
     provider: "imap",
     mime_type: item.mime_type || "message/rfc822",
     // Provider-specific passthrough is preserved verbatim.

@@ -169,7 +169,9 @@ pub struct MessageSummary {
     pub to: String,
     /// Subject line.
     pub subject: String,
-    /// Raw date header string.
+    /// Canonical send time: RFC 3339 in UTC (`2026-09-02T07:00:00Z`), fixed
+    /// width so it sorts and pages lexically. Empty when the header is absent
+    /// or unparsable. The raw header string is preserved in `headers.date`.
     pub date: String,
     /// Short body preview. Empty for `fetch_since` (headers-only); populated by
     /// `fetch_message`.
@@ -219,7 +221,9 @@ pub struct MessageDetail {
     pub to: String,
     /// Subject line.
     pub subject: String,
-    /// Raw date header string.
+    /// Canonical send time: RFC 3339 in UTC (`2026-09-02T07:00:00Z`), fixed
+    /// width so it sorts and pages lexically. Empty when the header is absent
+    /// or unparsable. The raw header string is preserved in `headers.date`.
     pub date: String,
     /// Plain-text body, if present.
     pub text: String,

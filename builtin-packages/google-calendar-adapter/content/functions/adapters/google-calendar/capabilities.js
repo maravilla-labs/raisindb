@@ -6,22 +6,35 @@
 //! What this adapter declares it can do. Read by the engine once per run to
 //! resolve a mount's write mode.
 
+// The unused `opCreate/opDelete/opUpdate` import that used to sit here was
+// removed. It read as link-time proof that the three operations exist — which
+// is exactly what a reader wants from a capabilities file and exactly what an
+// import does NOT provide; the dispatch table in index.js is the only thing
+// that connects a declaration to an implementation.
 import { WATCH_TTL_SECONDS } from "./http.js";
-import { opCreate, opDelete, opUpdate } from "./write.js";
 
 export function opCapabilities() {
   return {
     can_read: true,
     // The full MIRROR surface: create, update and delete are all implemented
-    // (`opCreate` / `opUpdate` / `opDelete`). `can_submit` is deliberately
-    // ABSENT — an RSVP through Google is a PATCH of the caller's own attendee
-    // row rather than a distinct action endpoint, and declaring a command
-    // surface with no implementation behind it is how an outbox mount resolves
-    // to a mode that throws at drain time.
+    // (`write.js`), and dispatched by index.js.
     can_write: true,
     can_create: true,
     can_update: true,
     can_delete: true,
+    // The COMMAND surface: an RSVP against a raisin:CalendarAction on a
+    // `submit` mount, implemented in submit.js and paired with the
+    // google-calendar-outbox mapper.
+    //
+    // This was absent for as long as there was no implementation, and that was
+    // the right call: a capability with nothing behind it makes a mount resolve
+    // as capable and then throw at drain time, with a command already claimed.
+    // It is declared here in the same change that adds submit.js, never before.
+    //
+    // Google has no idempotency header for events.patch, so
+    // `supports_idempotency_key` stays absent (false): at-most-once rests
+    // entirely on the engine's durable claim.
+    can_submit: true,
     // NODE property names, not Google's. The engine intersects this with the
     // mount's `write_config.mutable_fields` and hands the survivors to the
     // MAPPER as `fields`; the Google spelling is the mapper's business.
@@ -55,6 +68,10 @@ export function opCapabilities() {
     can_create_folders: false,
     supports_changes: true,
     supports_search: false,
+    // calendarList discovery (browse.js). Without it the console falls back to
+    // manual entry and an operator has to hand-type a calendar id for anything
+    // but `primary`. Needs no scope the read path does not already hold.
+    supports_browse: true,
     supports_push: true,
     // ONE declaration. This object used to carry supports_webhooks twice with
     // contradicting values; JS last-wins made the effective answer `true`, so

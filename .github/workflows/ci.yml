@@ -35,3 +35,39 @@ jobs:
           toolchain: 1.94.1
           components: rustfmt
       - run: cargo fmt --all -- --check
+
+  adapters:
+    name: Adapter suites
+    runs-on: ubuntu-latest
+    # The builtin adapters are JavaScript, so nothing in the Rust jobs runs them
+    # — and until this step existed, nothing anywhere did. google-calendar's
+    # adapter suite sat DEAD for months behind a loader that threw before the
+    # first assertion (`new Function` cannot evaluate an ES module), reporting a
+    # failure nobody was watching for. A test that no job runs is documentation
+    # with a misleading file extension.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # `find -exec` with a failing command sets the exit status only with `+`
+      # batching on some shells, so the loop reports per-file and fails the job
+      # explicitly. Printing each file is the point: a suite that vanishes from
+      # the list is the failure this step exists to catch, and a silent pass over
+      # zero files would look identical to success.
+      - name: Run every builtin adapter suite
+        run: |
+          set -uo pipefail
+          status=0
+          count=0
+          while IFS= read -r f; do
+            count=$((count + 1))
+            echo "── $f"
+            node --test "$f" || status=1
+          done < <(find builtin-packages -name '*.test.mjs' | sort)
+          echo "ran $count suite(s)"
+          if [ "$count" -eq 0 ]; then
+            echo "no adapter suites found — the glob is wrong, which is worse than a red test" >&2
+            exit 1
+          fi
+          exit $status

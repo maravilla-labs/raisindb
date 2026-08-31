@@ -1201,6 +1201,102 @@ async fn full_reconcile_refuses_to_empty_the_mount_on_a_zero_item_listing() {
     );
 }
 
+/// A mount whose `list` is not authoritative for its own content must survive a
+/// forced full run with its nodes intact.
+///
+/// The IMAP incident: `opList` returns MAILBOXES only — messages arrive through
+/// `get_changes` — so a full walk's `seen` holds folder ids and nothing else. It
+/// is NOT empty, so the zero-item guard above never fires, and nothing else in
+/// the run is truncated, resumed or stopped. Every message node was staged for
+/// delete, and the delta path (`fetchSince` the highest uid) never brought them
+/// back. `sync_config.reconcile_deletes: false` is how a mount states this.
+#[tokio::test(flavor = "multi_thread")]
+async fn reconcile_deletes_off_keeps_nodes_the_walk_cannot_enumerate() {
+    let env = setup().await;
+    let mount = mk_mount(SyncConfig {
+        reconcile_deletes: false,
+        ..SyncConfig::default()
+    });
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+
+    // A node the listing will not mention — a message under a mailbox.
+    let virt = VirtualMeta {
+        mount_id: MOUNT_ID.to_string(),
+        external_id: "MSG-1".to_string(),
+        etag: Some("v1".to_string()),
+        synced_at: Utc::now().to_rfc3339(),
+    };
+    let mapped = super::default_mapping(
+        &serde_json::from_value(ext_item("MSG-1", "msg-1", false, "v1")).unwrap(),
+    );
+    let mut index = mat.load_index(&scope()).await.unwrap();
+    upsert_one(&mat, &scope(), &mut index, "msg-1", mapped, virt).await;
+
+    // The walk enumerates containers only, so `seen` is non-empty but excludes
+    // the message: exactly the shape that made the guard above miss.
+    let mock = MockAdapter::default();
+    mock.set_list(
+        "root",
+        json!({ "items": [ext_item("INBOX", "INBOX", true, "v1")] }),
+    );
+    let mut state = MountState::default();
+    super::full::run(&ctx(&env, &mount, &mock, &mat), &mut state)
+        .await
+        .unwrap();
+
+    let ids: Vec<String> = list_virtual(&mat, &scope())
+        .await
+        .into_iter()
+        .map(|n| n.external_id)
+        .collect();
+    assert!(
+        ids.iter().any(|i| i == "MSG-1"),
+        "reconcile_deletes: false must not prune nodes the walk cannot enumerate; got {ids:?}"
+    );
+}
+
+/// The converse: the default is ON, because for a provider whose `list` IS the
+/// whole truth a remote delete must still propagate.
+#[tokio::test(flavor = "multi_thread")]
+async fn reconcile_deletes_on_by_default_still_prunes_what_is_gone_upstream() {
+    let env = setup().await;
+    let mount = mk_mount(SyncConfig::default());
+    assert!(mount.sync_config.reconcile_deletes, "default must be on");
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+
+    let virt = VirtualMeta {
+        mount_id: MOUNT_ID.to_string(),
+        external_id: "GONE".to_string(),
+        etag: Some("v1".to_string()),
+        synced_at: Utc::now().to_rfc3339(),
+    };
+    let mapped = super::default_mapping(
+        &serde_json::from_value(ext_item("GONE", "gone", false, "v1")).unwrap(),
+    );
+    let mut index = mat.load_index(&scope()).await.unwrap();
+    upsert_one(&mat, &scope(), &mut index, "gone", mapped, virt).await;
+
+    let mock = MockAdapter::default();
+    mock.set_list(
+        "root",
+        json!({ "items": [ext_item("A", "a", false, "v1")] }),
+    );
+    let mut state = MountState::default();
+    super::full::run(&ctx(&env, &mount, &mock, &mat), &mut state)
+        .await
+        .unwrap();
+
+    let ids: Vec<String> = list_virtual(&mat, &scope())
+        .await
+        .into_iter()
+        .map(|n| n.external_id)
+        .collect();
+    assert!(
+        !ids.iter().any(|i| i == "GONE"),
+        "a node the authoritative walk did not see must be pruned; got {ids:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn full_reconcile_never_deletes_non_virtual_nodes() {
     let env = setup().await;
@@ -3905,3 +4001,9 @@ mod write_submit_tests;
 
 #[path = "registry_tests.rs"]
 mod registry_tests;
+
+#[path = "filter_symmetry_tests.rs"]
+mod filter_symmetry_tests;
+
+#[path = "write_rekey_tests.rs"]
+mod write_rekey_tests;

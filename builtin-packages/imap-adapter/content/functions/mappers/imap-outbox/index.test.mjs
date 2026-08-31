@@ -126,13 +126,23 @@ test('an explicit text body is never overwritten by the HTML rendering', () => {
 
 // ---- declining -------------------------------------------------------------
 
-test('only `send` is mapped; reply and forward are declined, not approximated', () => {
+test('only `send` is mapped; reply and forward pass through for the adapter to refuse', () => {
   // Threading them needs In-Reply-To/References on the outgoing message, and the
   // email API accepts no headers. A "reply" that is really a fresh message with
   // a Re: subject breaks the recipient's thread silently.
-  for (const action of ['reply', 'reply_all', 'forward', 'rsvp', '']) {
-    assert.equal(out({ ...SENDABLE, action }), null, action)
+  //
+  // The action is passed through UNMAPPED rather than declined with a null.
+  // map_command runs before the adapter is ever reached, so a null made the
+  // engine settle the command with its OWN generic text ("... either it is not
+  // finished being authored, or it has already been sent and must not be sent
+  // again") — telling an author who queued a reply that their command was
+  // unfinished or a duplicate, both wrong. opSubmit throws a config_error naming
+  // the missing headers, and the engine settles terminally with THAT text.
+  for (const action of ['reply', 'reply_all', 'forward', 'rsvp']) {
+    assert.deepEqual(out({ ...SENDABLE, action }), { payload: { action, body: null } }, action)
   }
+  // No action at all stays a null: there is nothing for the adapter to name.
+  assert.equal(out({ ...SENDABLE, action: '' }), null)
   assert.equal(out({ to: ['a@x.test'], subject: 'x', body_text: 'y' }), null)
 })
 

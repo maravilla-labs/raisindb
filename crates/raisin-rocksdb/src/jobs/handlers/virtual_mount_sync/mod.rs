@@ -50,10 +50,10 @@ pub use content::{ContentFetch, ContentTarget};
 // connection-test handler cannot drift apart.
 pub use batch::SyncBatcher;
 pub use config::{
-    child_external_id, default_mapping, passes_filters, Change, ChangesPage, ConnectedAccount,
-    DrainSummary, ExternalItem, IntegrationConfig, ListPage, MappedChild, MappedItem, MappedNode,
-    MountConfig, MountState, SyncConfig, SyncRun, WriteConfig, CHILD_ID_SEP, MAX_RUN_HISTORY,
-    SYNC_ACTOR, SYSTEM_WORKSPACE,
+    child_external_id, default_mapping, excluded, mount_relative, passes_filters, Change,
+    ChangesPage, ConnectedAccount, DrainSummary, ExternalItem, IntegrationConfig, ListPage,
+    MappedChild, MappedItem, MappedNode, MountConfig, MountState, PathFilter, SyncConfig, SyncRun,
+    WriteConfig, CHILD_ID_SEP, MAX_RUN_HISTORY, SYNC_ACTOR, SYSTEM_WORKSPACE,
 };
 pub use materializer::{
     BatchOp, BatchStats, MountScope, NodeMaterializer, RocksDbMaterializer, SyncIndex, VirtualMeta,

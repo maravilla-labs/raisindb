@@ -52,6 +52,7 @@ impl VirtualMountSyncHandler {
         run.deleted = counts.deleted as u64;
         run.stamped = counts.stamped as u64;
         run.failed = counts.failed as u64;
+        run.retained_excluded = counts.retained_excluded as u64;
         // The drain's own counters do not come through the batcher — a push is a
         // provider call, not a node write — so they arrive on the state the drain
         // already had a mutable borrow of. Absent on a mount that never drained.

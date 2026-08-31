@@ -154,6 +154,7 @@ impl RocksDbMaterializer {
                 pushed_state,
                 merged,
                 adopt,
+                rekey,
                 node_bytes: _,
             } => {
                 return self
@@ -168,6 +169,7 @@ impl RocksDbMaterializer {
                         pushed_state.as_ref(),
                         merged.as_ref(),
                         *adopt,
+                        rekey.as_deref(),
                     )
                     .await;
             }

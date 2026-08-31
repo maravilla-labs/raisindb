@@ -77,6 +77,40 @@ pub struct SyncConfig {
     /// where that must propagate.
     #[serde(default)]
     pub allow_empty_reconcile: bool,
+    /// Whether a full walk may DELETE mount-owned nodes it did not see.
+    ///
+    /// On by default, because for a file-shaped provider the walk is the whole
+    /// truth: `list` enumerates everything, so "not seen" does mean "gone
+    /// upstream", and without this a rename or a remote delete would leave the
+    /// node behind forever.
+    ///
+    /// Turn it OFF for a mount whose `list` is NOT authoritative for its own
+    /// content. IMAP is the case that forced this: its `opList` returns
+    /// MAILBOXES only, by design — messages arrive through `get_changes` — so
+    /// after a full walk `seen` holds folder ids and nothing else. It is not
+    /// empty, so the empty-reconcile guard above does not fire; the walk is not
+    /// truncated, resumed or stopped on an ordinary forced run; and the stale
+    /// filter exempts only commands. Every message node was therefore staged
+    /// for delete, and they did not come back: `get_changes` is `fetchSince`
+    /// the highest uid already seen, so the next delta returns only NEW mail.
+    /// One click of the console's "full" button — or a remap, or the
+    /// CursorInvalid fallback — emptied the mailbox tree.
+    ///
+    /// This is a MOUNT setting rather than an adapter capability because it is
+    /// a statement about this mount's layout, and the engine must be able to
+    /// act on it without domain knowledge of what the provider's `list` covers.
+    ///
+    /// THE TRADE, stated plainly so nobody sets this expecting a free win: with
+    /// it off, NOTHING on the walk path ever prunes this mount again. Upstream
+    /// deletions can then only arrive through the delta path — and for the very
+    /// adapter that forced this field they do not, because IMAP's
+    /// `opGetChanges` emits `type: "created"` items only. So a message deleted
+    /// in the mailbox stays in the tree until `ephemeral` / `ttl_seconds` ages
+    /// it out, which is why the documented IMAP mount layout is a cache. Losing
+    /// deletions of already-deleted mail is still far cheaper than deleting
+    /// every live message on one click of the console's "full" button.
+    #[serde(default = "default_reconcile_deletes")]
+    pub reconcile_deletes: bool,
     /// Node types this mount treats as FOLDERS, beyond the engine's own
     /// `raisin:Folder`.
     ///
@@ -98,6 +132,10 @@ pub struct SyncConfig {
     /// rejection message.
     #[serde(default = "default_max_item_failures")]
     pub max_item_failures: usize,
+}
+
+fn default_reconcile_deletes() -> bool {
+    true
 }
 
 fn default_max_item_failures() -> usize {
@@ -135,6 +173,7 @@ impl Default for SyncConfig {
             path_template: String::new(),
             folder_node_types: Vec::new(),
             allow_empty_reconcile: false,
+            reconcile_deletes: default_reconcile_deletes(),
             max_item_failures: default_max_item_failures(),
         }
     }

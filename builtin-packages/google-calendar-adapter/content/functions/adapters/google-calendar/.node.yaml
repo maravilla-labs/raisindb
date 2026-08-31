@@ -3,24 +3,34 @@ properties:
   title: Google Calendar Adapter (Experimental)
   description: >
     Experimental virtual-node adapter for Google Calendar (Calendar v3).
-    Translates the normalized adapter operations (capabilities, list, get,
-    get_content, get_changes, create, update, delete, subscribe, renew,
-    unsubscribe) into Google Calendar REST calls. Invoked directly by the sync
+    Translates the normalized adapter operations (capabilities, browse, list,
+    get, get_content, get_changes, create, update, delete, submit, subscribe,
+    renew, unsubscribe) into Google Calendar REST calls. Invoked directly by the sync
     engine with a decrypted access token; owns no token-refresh logic. Supports
     push via events.watch channels (notifications are pure invalidation
     signals). WRITES are a full mirror (create/update/delete) with two provider
     caveats: Google has no trash for events, so a delete is irreversible
     (supports_trash:false, default policy `detach`); and Google mails every
     attendee on a write, so every request sends sendUpdates=none unless the
-    mount sets sync_config.send_updates. A write needs the
-    auth/calendar.events scope, which the connector template does NOT request by
-    default — add it and re-consent per account. Experimental — validate against
-    your own account first.
+    mount sets sync_config.send_updates. `submit` is an RSVP against a
+    raisin:CalendarAction on a separate submit mount; Google has no RSVP
+    endpoint, so it is a read-modify-write of the event's attendee array, and it
+    sends sendUpdates=all by default because telling the organizer IS the RSVP.
+    `browse` lists the account's calendarList so an operator picks a calendar
+    instead of typing an id. SCOPES: auth/calendar.readonly covers reading and
+    browsing; every write AND the RSVP need auth/calendar.events, which the
+    connector template DOES ship — but Google only issues a widened scope on
+    fresh consent, so an account connected before it was added must be
+    reconnected. Experimental — validate against your own account first.
   language: javascript
   entry_file: index.js:handler
   execution_mode: Async
   enabled: true
-  version: 1
+  # BUMP ON EVERY JS CHANGE. The engine runs the copy installed in the repo, so
+  # an install that sees an unchanged version is a no-op and the new code never
+  # executes. v2: submit.js (RSVP) + browse.js (calendarList) + the syncToken
+  # baseline parameter-identity fix in changes.js.
+  version: 2
   resource_limits:
     timeout_ms: 180000
     max_memory_bytes: 67108864
@@ -45,8 +55,8 @@ properties:
       operation:
         type: string
         description: >-
-          One of capabilities, list, get, get_content, get_changes, subscribe,
-          renew, unsubscribe
+          One of capabilities, browse, list, get, get_content, get_changes,
+          create, update, delete, submit, subscribe, renew, unsubscribe
       params:
         type: object
         description: Operation-specific arguments

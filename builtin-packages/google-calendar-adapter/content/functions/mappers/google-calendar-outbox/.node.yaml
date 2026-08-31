@@ -1,0 +1,36 @@
+node_type: raisin:Function
+properties:
+  title: Google Calendar Outbox Mapper
+  description: >
+    Mapping function for a Google Calendar OUTBOX mount (write_config.mode:
+    submit). Translates a raisin:CalendarAction command node into the RSVP the
+    adapter's `submit` issues — an intent-shaped { action, body } payload plus
+    the event's provider id, deliberately NOT a Google attendees array (that can
+    only be built from the event the adapter reads, and a partial one would
+    delete every other guest). Write-direction only: `to_node` returns null,
+    because an outbox imports nothing. Any node type other than
+    raisin:CalendarAction returns null — this package ships no mail adapter, so
+    there is no second command surface behind it.
+  language: javascript
+  entry_file: index.js:handler
+  execution_mode: Async
+  enabled: true
+  version: 1
+  resource_limits:
+    timeout_ms: 5000
+    max_memory_bytes: 16777216
+  input_schema:
+    type: object
+    properties:
+      operation:
+        type: string
+        description: "to_external | mapper_capabilities | to_node"
+      node:
+        type: object
+        description: The raisin:CalendarAction command node to translate outward
+      mount:
+        type: object
+        description: Read-only mount snapshot { mount_id, mount_path, sync_config }
+  output_schema:
+    type: object
+    description: "{ payload: { action, body }, external_id } or null when not sendable"

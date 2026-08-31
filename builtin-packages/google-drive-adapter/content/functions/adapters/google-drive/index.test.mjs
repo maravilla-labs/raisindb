@@ -207,6 +207,91 @@ test('a whole-My-Drive mount resolves the "root" alias before walking parents', 
   assert.equal(out.items[0].relative_path, 'x.txt')
 })
 
+// ---- get_changes: a dead cursor must be SAYABLE ----------------------------
+
+/** A Drive error body, in the `error.errors[0].reason` shape the adapter reads. */
+const driveError = (status, reason, message) => ({
+  status,
+  headers: {},
+  body: { error: { code: status, message: message || reason, errors: [{ reason }] } },
+})
+
+test('an unusable changes pageToken is cursor_invalid, not a transient error', () => {
+  // Left as a plain Error the engine's AdapterError::classify files it Transient
+  // and is_retryable() is true, so the SAME dead cursor is re-sent on every
+  // drain forever: the mount imports nothing and the only signal is a repeating
+  // transient error, because nothing ever asks for a full reconcile.
+  for (const resp of [
+    driveError(400, 'invalidPageToken', 'Invalid Value'),
+    driveError(400, 'invalid', 'Invalid Value'),
+    driveError(404, 'notFound'),
+  ]) {
+    const { handler } = stub([resp])
+    assert.throws(
+      () =>
+        handler({
+          operation: 'get_changes',
+          credential: CREDENTIAL,
+          mount: MOUNT,
+          params: { since_token: 'dead' },
+        }),
+      (err) => {
+        assert.equal(err.code, 'cursor_invalid', `${resp.status} ${JSON.stringify(resp.body)}`)
+        assert.match(err.message, /pageToken/)
+        return true
+      }
+    )
+  }
+})
+
+test('a 400 that is NOT about the cursor stays a plain error', () => {
+  // Only the token reasons re-baseline. A malformed request reported as
+  // cursor_invalid would throw the cursor away and force a pointless full
+  // reconcile on every drain.
+  //
+  // `invalid` IS one of the token reasons on this call, deliberately: Drive
+  // answers a rejected pageToken with the bare reason `invalid` and the message
+  // "Invalid Value", and the pageToken is the ONLY variable in this request URL
+  // (the fields selection, the page size and the shared-drive flags are all
+  // literals). So `invalid` here can only be about the token — but it is NOT a
+  // generally safe reading of a Drive 400, and it stops being true the moment
+  // this URL gains a caller-supplied parameter. `badRequest` is the reason that
+  // must stay plain, which is what this asserts.
+  const { handler } = stub([
+    driveError(400, 'badRequest', 'The parents field cannot contain duplicates'),
+  ])
+  assert.throws(
+    () =>
+      handler({
+        operation: 'get_changes',
+        credential: CREDENTIAL,
+        mount: MOUNT,
+        params: { since_token: 't1' },
+      }),
+    (err) => {
+      assert.equal(err.code, undefined)
+      assert.match(err.message, /parents field cannot contain duplicates/)
+      return true
+    }
+  )
+})
+
+test('a 401 on the changes page is still auth_expired, not cursor_invalid', () => {
+  // The raw-status widening is scoped to 400/404; every other status must keep
+  // going through the single mapping point in http.js.
+  const { handler } = stub([driveError(401, 'authError')])
+  assert.throws(
+    () =>
+      handler({
+        operation: 'get_changes',
+        credential: CREDENTIAL,
+        mount: MOUNT,
+        params: { since_token: 't1' },
+      }),
+    (err) => err.code === 'auth_expired'
+  )
+})
+
 // ---- create: the parameters the ENGINE actually sends ----------------------
 
 test('a folder create uses the mapper mime type and the NODE\'s parent folder', () => {
