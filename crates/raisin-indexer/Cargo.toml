@@ -28,3 +28,4 @@ moka = { version = "0.12", features = ["sync"] }
 # Used by tests/all/language_analysis.rs to fabricate a pre-v3 on-disk index and
 # prove the schema-version migration is an either/or, not a half-migration.
 tantivy = "0.25.0"
+tempfile = { workspace = true }

@@ -11,11 +11,28 @@ use tantivy::{Index, IndexWriter, ReloadPolicy};
 
 use super::language::register_analyzers;
 use super::schema::{build_schema, schema_fields, SCHEMA_VERSION};
-use super::types::{CachedIndex, TantivyIndexingEngine};
+use super::types::{CachedIndex, TantivyIndexingEngine, WriterSlot};
 
 /// Sidecar file (next to Tantivy's `meta.json`) recording the schema version the
 /// on-disk index was built with, so version mismatches can trigger a rebuild.
 const SCHEMA_VERSION_FILE: &str = "raisin_schema_version";
+
+/// Weight charged to the index cache per entry, against the byte-denominated
+/// `cache_size` the engine is constructed with.
+///
+/// A cache entry is a set of handles — Tantivy mmaps the segment files — so the
+/// previous 30 MB-per-entry figure measured nothing while capping a 512 MB
+/// cache at seventeen indexes, against twenty-three in production. Evicting an
+/// entry costs a re-open on the next query, so routine eviction is pure waste.
+/// 1 MB per handle makes the existing knob a pressure valve instead.
+const CACHE_ENTRY_WEIGHT: u32 = 1024 * 1024;
+
+/// Upper bound on live writers, each of which costs one indexing thread and an
+/// open directory lock. Past this, [`TantivyIndexingEngine::with_writer`] drops
+/// the least recently used idle ones. Comfortably above the number of indexes
+/// a single deployment serves; the cap exists for the pathological case of a
+/// repo that forks branches without bound.
+const MAX_LIVE_WRITERS: usize = 64;
 
 fn read_schema_version(index_path: &std::path::Path) -> Option<u32> {
     std::fs::read_to_string(index_path.join(SCHEMA_VERSION_FILE))
@@ -38,7 +55,7 @@ impl TantivyIndexingEngine {
             .map_err(|e| Error::storage(format!("Failed to create index base path: {}", e)))?;
 
         let index_cache = Cache::builder()
-            .weigher(|_key: &String, _index: &Arc<CachedIndex>| -> u32 { 30 * 1024 * 1024 })
+            .weigher(|_key: &String, _index: &Arc<CachedIndex>| -> u32 { CACHE_ENTRY_WEIGHT })
             .max_capacity(cache_size as u64)
             .eviction_listener(|key, _value, cause| {
                 tracing::info!(
@@ -52,7 +69,7 @@ impl TantivyIndexingEngine {
         Ok(Self {
             base_path,
             index_cache,
-            writer_slots: Mutex::new(HashMap::new()),
+            writers: Mutex::new(HashMap::new()),
         })
     }
 
@@ -138,16 +155,27 @@ impl TantivyIndexingEngine {
         Ok(cached)
     }
 
-    fn get_writer(index: &Index) -> Result<IndexWriter> {
+    /// Construct the one long-lived writer for an index directory.
+    ///
+    /// One indexing thread, deliberately. `Index::writer(budget)` divides the
+    /// budget across up to eight threads and each thread flushes its OWN
+    /// segment, so a multi-threaded writer multiplies the segment count of
+    /// every commit — the opposite of what this index needs, since merging is
+    /// the bottleneck here and indexing is not. It also keeps the thread count
+    /// sane now that a writer lives for as long as the engine serves the index.
+    fn new_writer(index: &Index) -> Result<IndexWriter> {
+        // Tantivy's per-thread floor is `MEMORY_BUDGET_NUM_BYTES_MIN` (15 MB);
+        // below it, writer construction is an `InvalidArgument`. The arena
+        // fills as documents arrive and is released at each commit, so this is
+        // a ceiling rather than a resident cost.
         const WRITER_HEAP_SIZE: usize = 50_000_000;
         index
-            .writer(WRITER_HEAP_SIZE)
+            .writer_with_num_threads(1, WRITER_HEAP_SIZE)
             .map_err(|e| Error::storage(format!("Failed to create index writer: {}", e)))
     }
 
-    /// The ONE writer lifecycle for this engine: take the index's writer slot,
-    /// open a single `IndexWriter`, run `f`, commit, drop the writer, release
-    /// the slot — in that order.
+    /// The ONE writer lifecycle for this engine: take the index's writer, run
+    /// `f`, commit — and leave the writer open.
     ///
     /// Every write path (single node, delete, batch) goes through here. That is
     /// deliberate:
@@ -157,36 +185,30 @@ impl TantivyIndexingEngine {
     ///   `LockBusy` rather than waiting. Two concurrent indexing jobs on the
     ///   same (tenant, repo, branch) therefore used to make one of them fail
     ///   outright — and a failed single-node job leaves that node missing from
-    ///   search until someone rebuilds. Queueing on the slot turns a lost
+    ///   search until someone rebuilds. Queueing on the writer turns a lost
     ///   document into a few milliseconds of waiting.
-    /// * **The writer is dropped BEFORE the slot is released.** Tantivy frees
-    ///   the on-disk directory lock only when the `IndexWriter` is dropped, so
-    ///   releasing the slot first would hand the next caller a lock that is not
-    ///   actually free yet.
-    /// * **One commit, always.** Returning early on error rolls back instead of
-    ///   dropping a writer with pending operations.
+    /// * **The writer is NOT dropped afterwards.** `IndexWriter::drop` kills the
+    ///   segment updater, so a writer that dies at the end of every operation
+    ///   cancels the merge its own commit just scheduled. See `WriterSlot` for
+    ///   what that cost in production. This is the whole reason the writer is
+    ///   owned by the engine rather than by this function.
+    /// * **One commit, always.** Returning early on error rolls back rather
+    ///   than leaving pending operations for the next caller to commit.
     pub(crate) fn with_writer<T>(
         &self,
         index_key: &str,
         index: &Index,
         f: impl FnOnce(&mut IndexWriter) -> Result<T>,
     ) -> Result<T> {
-        let slot = {
-            let mut slots = self
-                .writer_slots
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            Arc::clone(
-                slots
-                    .entry(index_key.to_string())
-                    .or_insert_with(|| Arc::new(Mutex::new(()))),
-            )
-        };
+        let slot = self.writer_slot(index_key, index)?;
+        slot.touch();
+
         // A panic inside a previous writer must not permanently wedge this
         // index: recover the guard rather than propagating the poison.
-        let _slot_guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-
-        let mut writer = Self::get_writer(index)?;
+        let mut writer = slot
+            .writer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let outcome = f(&mut writer).and_then(|value| {
             writer
@@ -197,15 +219,117 @@ impl TantivyIndexingEngine {
 
         if outcome.is_err() {
             // Best-effort: leave no half-applied operations behind for the next
-            // writer on this directory.
+            // caller on this writer.
             let _ = writer.rollback();
         }
 
-        // Explicit: the writer must die while we still hold the slot, or the
-        // next caller races tantivy's directory lock.
-        drop(writer);
-
         outcome
+    }
+
+    /// Get this index's writer slot, opening the writer on first use.
+    fn writer_slot(&self, index_key: &str, index: &Index) -> Result<Arc<WriterSlot>> {
+        let mut writers = self
+            .writers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        if let Some(slot) = writers.get(index_key) {
+            return Ok(Arc::clone(slot));
+        }
+
+        let slot = Arc::new(WriterSlot {
+            writer: Mutex::new(Self::new_writer(index)?),
+            last_used_ms: std::sync::atomic::AtomicI64::new(chrono::Utc::now().timestamp_millis()),
+        });
+        writers.insert(index_key.to_string(), Arc::clone(&slot));
+
+        Self::prune_writers(&mut writers, index_key);
+
+        Ok(slot)
+    }
+
+    /// Drop the least recently used idle writers once the map exceeds
+    /// `MAX_LIVE_WRITERS`.
+    ///
+    /// Only entries nobody else holds an `Arc` to are eligible: removing one
+    /// that is still in use would leave its writer alive — and its directory
+    /// lock held — while the next caller tried to open a second one, turning a
+    /// bookkeeping decision into a `LockBusy`. Dropping the last `Arc` here
+    /// does kill whatever merges that writer had in flight, which is why the
+    /// cap is a backstop for unbounded branch growth and not a routine size.
+    fn prune_writers(writers: &mut HashMap<String, Arc<WriterSlot>>, keep: &str) {
+        if writers.len() <= MAX_LIVE_WRITERS {
+            return;
+        }
+
+        let mut idle: Vec<(String, i64)> = writers
+            .iter()
+            .filter(|(key, slot)| key.as_str() != keep && Arc::strong_count(slot) == 1)
+            .map(|(key, slot)| {
+                (
+                    key.clone(),
+                    slot.last_used_ms.load(std::sync::atomic::Ordering::Relaxed),
+                )
+            })
+            .collect();
+        idle.sort_by_key(|(_, last_used)| *last_used);
+
+        for (key, _) in idle {
+            if writers.len() <= MAX_LIVE_WRITERS {
+                break;
+            }
+            writers.remove(&key);
+            tracing::debug!(index = %key, "Closed idle Tantivy writer to stay under the cap");
+        }
+    }
+
+    /// Merge every segment of one index into a single segment.
+    ///
+    /// Goes through the shared writer rather than opening its own: Tantivy's
+    /// writer lock is exclusive, so a second writer on a live index fails with
+    /// `DirectoryLockBusy`, and a throwaway writer would have to
+    /// `wait_merging_threads()` to keep its own merge from being killed on drop
+    /// — precisely the trap this design removes.
+    ///
+    /// Holding the writer for the duration means indexing on this index waits
+    /// rather than racing the merge. Returns `(segments_before, segments_after)`.
+    pub fn optimize(&self, tenant_id: &str, repo_id: &str, branch: &str) -> Result<(usize, usize)> {
+        let cached = self.get_or_create_index(tenant_id, repo_id, branch)?;
+
+        let segment_ids = cached
+            .index
+            .searchable_segment_ids()
+            .map_err(|e| Error::storage(format!("Failed to list segments: {}", e)))?;
+        let before = segment_ids.len();
+        if before <= 1 {
+            return Ok((before, before));
+        }
+
+        let index_key = Self::index_key(tenant_id, repo_id, branch);
+        self.with_writer(&index_key, &cached.index, |writer| {
+            writer
+                .merge(&segment_ids)
+                .wait()
+                .map_err(|e| Error::storage(format!("Merge failed: {}", e)))?;
+            Ok(())
+        })?;
+
+        let after = cached
+            .index
+            .searchable_segment_ids()
+            .map_err(|e| Error::storage(format!("Failed to list segments: {}", e)))?
+            .len();
+
+        tracing::info!(
+            tenant_id,
+            repo_id,
+            branch,
+            segments_before = before,
+            segments_after = after,
+            "Optimized fulltext index"
+        );
+
+        Ok((before, after))
     }
 
     /// Drop the cached `Index` + `IndexReader` for a given key.
@@ -216,9 +340,28 @@ impl TantivyIndexingEngine {
     /// must additionally hold the `IndexLockManager` lock to prevent
     /// other code from racing back in via `get_or_create_index`.
     pub fn invalidate_cached_index(&self, tenant_id: &str, repo_id: &str, branch: &str) {
-        let cache_key = format!("{}/{}/{}", tenant_id, repo_id, branch);
+        let cache_key = Self::index_key(tenant_id, repo_id, branch);
         self.index_cache.invalidate(&cache_key);
         self.index_cache.run_pending_tasks();
+
+        // Close the writer too. Every caller of this is about to delete or
+        // replace the directory, and a writer left open would hold the
+        // directory lock and go on writing merge output into a tree that is
+        // being removed underneath it.
+        let removed = self
+            .writers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&cache_key);
+        if let Some(slot) = removed {
+            if Arc::strong_count(&slot) > 1 {
+                tracing::warn!(
+                    index = %cache_key,
+                    "Closed a Tantivy writer that another operation still holds; \
+                     it will release the directory lock when that finishes"
+                );
+            }
+        }
     }
 
     /// Read-only access to the on-disk root for this engine. Needed

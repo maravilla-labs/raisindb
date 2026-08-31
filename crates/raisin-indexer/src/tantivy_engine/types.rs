@@ -7,25 +7,63 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tantivy::schema::Field;
-use tantivy::{Index, IndexReader};
+use tantivy::{Index, IndexReader, IndexWriter};
 
 /// Tantivy-based indexing engine implementing branch-aware, multi-language full-text search.
 pub struct TantivyIndexingEngine {
     pub(crate) base_path: PathBuf,
     pub(crate) index_cache: Cache<String, Arc<CachedIndex>>,
-    /// One writer slot per index directory (`tenant/repo/branch`).
+    /// THE writer for each index directory (`tenant/repo/branch`), held for as
+    /// long as the engine keeps serving that index.
     ///
-    /// Tantivy takes an EXCLUSIVE, non-blocking lock on the index directory for
-    /// the lifetime of an `IndexWriter`; a second `Index::writer()` while one is
-    /// alive fails immediately with `LockBusy`. Every write path here opens a
-    /// short-lived writer, so two concurrent indexing operations on the same
-    /// (tenant, repo, branch) used to make one of them fail — and a failed
-    /// per-node indexing job means that node is simply absent from search.
+    /// Two separate reasons this is one shared, long-lived writer rather than
+    /// one opened per operation.
     ///
-    /// Serializing here, in the engine, is what makes that impossible for EVERY
-    /// caller. Callers must not be trusted to bring their own lock: the guarantee
-    /// belongs to the thing that owns the directory.
-    pub(crate) writer_slots: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// **Exclusion.** Tantivy takes an EXCLUSIVE, non-blocking lock on the
+    /// index directory for the lifetime of an `IndexWriter`; a second
+    /// `Index::writer()` while one is alive fails immediately with `LockBusy`.
+    /// Two concurrent indexing operations on the same index therefore used to
+    /// make one of them fail — and a failed per-node job means that node is
+    /// simply absent from search. Serializing here, in the thing that owns the
+    /// directory, is what makes that impossible for EVERY caller.
+    ///
+    /// **Merges.** `IndexWriter::drop` calls `SegmentUpdater::kill()`, which
+    /// makes every merge that writer had in flight fail with "Segment updater
+    /// killed" and discards its output. A writer opened and dropped per
+    /// operation therefore adds a segment on every commit and destroys the
+    /// merge meant to absorb it, so segments only ever accumulate and each
+    /// subsequent commit re-schedules merging over a bigger set. In production
+    /// that ran away to 753 segments for 128k documents, with ~2.7 cores
+    /// permanently inside `IndexMerger::write`. Keeping the writer alive is
+    /// what lets those merges finish.
+    ///
+    /// Deliberately NOT stored on `CachedIndex`: that entry can be evicted
+    /// under cache pressure while a caller still holds an `Arc` to it, which
+    /// would leave two writers contending for one directory. This map outlives
+    /// the cache, and `invalidate_cached_index` clears both together.
+    pub(crate) writers: Mutex<HashMap<String, Arc<WriterSlot>>>,
+}
+
+/// One index's writer, plus when it was last used.
+///
+/// The timestamp exists only so [`TantivyIndexingEngine::with_writer`] can cap
+/// the map: every live slot costs an indexing thread and holds a directory
+/// lock, and a repo that forks branches would otherwise accumulate one per
+/// branch it ever touched, forever.
+pub(crate) struct WriterSlot {
+    pub(crate) writer: Mutex<IndexWriter>,
+    /// Unix milliseconds. Written under no lock; only ever read to pick
+    /// eviction victims, where being a few milliseconds stale is harmless.
+    pub(crate) last_used_ms: std::sync::atomic::AtomicI64,
+}
+
+impl WriterSlot {
+    pub(crate) fn touch(&self) {
+        self.last_used_ms.store(
+            chrono::Utc::now().timestamp_millis(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
 }
 
 /// Cached index with Index, IndexReader, and the field handles resolved from the

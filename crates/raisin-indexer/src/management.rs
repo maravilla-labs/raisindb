@@ -21,7 +21,6 @@ use tantivy::Index;
 /// Management operations for Tantivy full-text indexes
 pub struct TantivyManagement {
     base_path: PathBuf,
-    #[allow(dead_code)]
     engine: Arc<TantivyIndexingEngine>,
 }
 
@@ -186,55 +185,23 @@ impl TantivyManagement {
             return Err(Error::NotFound("Index not found".to_string()));
         }
 
-        let index = Index::open_in_dir(&index_path)
-            .map_err(|e| Error::storage(format!("Failed to open index: {}", e)))?;
-
-        // Get size before optimization
         let bytes_before = Self::get_directory_size(&index_path)?;
-
-        // Get segment count before optimization
-        let segment_ids_before = index
-            .searchable_segment_ids()
-            .map_err(|e| Error::storage(format!("Failed to get segments: {}", e)))?;
-
         let start = std::time::Instant::now();
 
-        // Create writer with generous buffer for merge operations
-        let mut writer: tantivy::IndexWriter = index
-            .writer(128_000_000)
-            .map_err(|e| Error::storage(format!("Failed to create writer: {}", e)))?;
+        // Delegate to the engine so the merge runs on the index's own shared
+        // writer. Opening a second writer here fails with `DirectoryLockBusy`
+        // against a live index, and a throwaway writer would need
+        // `wait_merging_threads()` to stop `Drop` from killing the merge it
+        // just started.
+        let (segments_before, segments_after) = self.engine.optimize(tenant, repo, branch)?;
 
-        // Merge all segments into one
-        writer
-            .merge(&segment_ids_before)
-            .wait()
-            .map_err(|e| Error::storage(format!("Merge failed: {}", e)))?;
-
-        // Commit changes
-        writer
-            .commit()
-            .map_err(|e| Error::storage(format!("Commit failed: {}", e)))?;
-
-        // Wait for background merge threads to complete
-        writer
-            .wait_merging_threads()
-            .map_err(|e| Error::storage(format!("Wait failed: {}", e)))?;
-
-        // Get size after optimization
         let bytes_after = Self::get_directory_size(&index_path)?;
-
-        // Get segment count after optimization
-        let segment_ids_after = index
-            .searchable_segment_ids()
-            .map_err(|e| Error::storage(format!("Failed to get segments: {}", e)))?;
 
         Ok(OptimizeStats {
             bytes_before,
             bytes_after,
             duration_ms: start.elapsed().as_millis() as u64,
-            segments_merged: segment_ids_before
-                .len()
-                .saturating_sub(segment_ids_after.len()) as u32,
+            segments_merged: segments_before.saturating_sub(segments_after) as u32,
         })
     }
 
@@ -249,6 +216,11 @@ impl TantivyManagement {
     /// * `branch` - Branch name
     pub async fn purge_index(&self, tenant: &str, repo: &str, branch: &str) -> Result<()> {
         let index_path = self.base_path.join(tenant).join(repo).join(branch);
+
+        // Close the cached handles and the writer first — the writer holds the
+        // directory lock and its merge threads would otherwise go on writing
+        // into a tree that is being deleted.
+        self.engine.invalidate_cached_index(tenant, repo, branch);
 
         if index_path.exists() {
             std::fs::remove_dir_all(&index_path)
