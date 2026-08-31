@@ -7,10 +7,12 @@
 mod batch;
 mod error_counter;
 mod handler;
+mod maintenance;
 mod plan;
 
 pub use error_counter::{
     ErrorCounterKey, FulltextErrorCounter, FulltextErrorKind, FulltextErrorStats,
 };
 pub use handler::FulltextJobHandler;
+pub use maintenance::{FULLTEXT_MODE_RECONCILE, META_FULLTEXT_MODE};
 pub(crate) use plan::{collect_element_types, resolve_index_plan, IndexPlanCache};

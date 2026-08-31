@@ -211,6 +211,11 @@ pub use jobs::handlers::scheduled_invocation::{
     FlowStartCallback, ScheduledInvocationHandler, META_ACTOR, META_EXTERNAL_KEY, META_INPUT,
     META_SCHEDULED_FOR, META_TARGET_PATH,
 };
+
+// Same reason for the fulltext maintenance jobs: the transport writes the
+// JobContext that the worker's handler reads, so both sides must spell the
+// rebuild-vs-reconcile discriminator identically.
+pub use jobs::handlers::fulltext::{FULLTEXT_MODE_RECONCILE, META_FULLTEXT_MODE};
 pub use storage::{RestoreStats, RocksDBStorage};
 pub use transaction::RocksDBTransaction;
 

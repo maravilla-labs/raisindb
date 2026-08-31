@@ -465,6 +465,14 @@ impl JobType {
             JobType::IndexRebuild => 600,
             JobType::IndexVerify => 600,
             JobType::FulltextRebuild => 600,
+            JobType::FulltextVerify => 600,
+            JobType::FulltextPurge => 600,
+            // The documented mitigation for a Tantivy merge storm, and the one
+            // that runs when the index is at its worst: force-merging hundreds
+            // of segments over a multi-GB index is minutes of work, not the
+            // catch-all 300s. Under-budgeting it here would have the watchdog
+            // abort the very operation an operator started to end an incident.
+            JobType::FulltextOptimize => 1800,
             JobType::VectorRebuild => 600,
             // A full-workspace spatial backfill pages through every node; it
             // checkpoints its resume cursor so a timeout resumes rather than

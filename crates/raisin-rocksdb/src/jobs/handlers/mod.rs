@@ -333,6 +333,15 @@ impl JobHandlerRegistry {
                 .handle_batch_index(job, context)
                 .await
                 .map(|_| None),
+            // Operator-triggered maintenance. These run HERE rather than in a
+            // detached task in the HTTP layer, so the worker that owns the job
+            // also owns its terminal status — the split used to leave the job
+            // contextless and marked `Failed: Job context not found` while the
+            // detached task was succeeding.
+            JobType::FulltextVerify
+            | JobType::FulltextRebuild
+            | JobType::FulltextOptimize
+            | JobType::FulltextPurge => self.fulltext.handle_maintenance(job, context).await,
             JobType::EmbeddingGenerate { .. } => self
                 .embedding
                 .handle_generate(job, context)
