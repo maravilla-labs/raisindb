@@ -23,10 +23,19 @@ icon: inbox
 # `response_condition`) before resuming the flow once. That correlation lives on
 # the task nodes themselves — undeclared, a strict type drops it silently and
 # every member's answer would resume the flow independently. Bump forces resync.
-version: 6
+# v7: made the task TITLE and DESCRIPTION actually searchable. `title` has
+# carried `index: [Fulltext]` since v1, but the TYPE-LEVEL gate was
+# `index_types: [Property]`, and `IndexingPolicy::should_index_node` consults
+# that gate first — so the per-field flag was inert and no inbox task was ever
+# in the fulltext index. Finding a task by what it says is the whole point of an
+# inbox. Fulltext ONLY, deliberately no `Vector`: a group `human_task` mints one
+# task per member per step, so tasks are the highest-volume node here, and an
+# embedding job per task buys little over lexical search on a short title.
+# Bump forces the resync so existing repositories pick the gate up.
+version: 7
 strict: true
 indexable: true
-index_types: [Property]
+index_types: [Property, Fulltext]
 properties:
   - name: task_type
     type: String
@@ -51,6 +60,7 @@ properties:
     required: false
     title: Description
     description: Detailed description of the task
+    index: [Fulltext]
 
   # Optional: a standalone task (raisin.tasks.create) has no owning flow, so
   # neither this Reference nor step_id can be required. The flow human_task

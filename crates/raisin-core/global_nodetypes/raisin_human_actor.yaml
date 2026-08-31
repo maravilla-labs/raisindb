@@ -1,10 +1,15 @@
 name: raisin:HumanActor
 description: Human participant in workflows with availability and SLA configuration
 icon: user
-version: 1
+# v2: fulltext for the inherited `display_name` only. A subtype's own
+# `index_types` REPLACES the parent's, so this has to be restated here.
+# Deliberately NOT `email` (an address is an identifier, and raisin:User already
+# carries the searchable copy), NOT `role`, and no `Vector` anywhere — a
+# participant record is a name, not prose.
+version: 2
 extends: raisin:Actor
 indexable: true
-index_types: [Property]
+index_types: [Property, Fulltext]
 properties:
   # Inherited from raisin:Actor: actor_id, display_name, capabilities, inbox_path, state, current_task_ref, supervisor_ref, metadata
   - name: user_ref

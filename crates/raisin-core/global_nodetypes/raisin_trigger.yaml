@@ -1,10 +1,19 @@
 name: raisin:Trigger
 description: Trigger definition that specifies when a flow should execute (event type, schedule, or HTTP endpoint)
 icon: zap
-version: 1
+# v2: opened the type-level gate for the already-flagged `title`, and gave
+# `description` the same flag — a trigger is found by what it fires on.
+# Fulltext only, no `Vector`: a trigger description is a one-line wiring note
+# ("fires on order created"), not prose worth embedding.
+#
+# `webhook_id` is EXPLICITLY not indexed. It is the unguessable component of the
+# public webhook URL, i.e. a bearer credential; fulltext-indexing it would make
+# it discoverable through search, and the fulltext index is filtered per NODE,
+# not per field.
+version: 2
 strict: false
 indexable: true
-index_types: [Property]
+index_types: [Property, Fulltext]
 properties:
   - name: title
     type: String
@@ -18,6 +27,7 @@ properties:
     required: false
     title: Description
     description: Human-readable description of the trigger
+    index: [Fulltext]
 
   - name: trigger_type
     type: String

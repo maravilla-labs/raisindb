@@ -1,10 +1,20 @@
 name: raisin:Flow
 description: Visual workflow container for triggers and function execution
 icon: workflow
-version: 1
+# v2: `title` + `description` become searchable. `title` carried
+# `index: [Fulltext]` from v1 but `index_types: [Property]` gated the type out
+# before any field flag was read. "The flow that sends the refund email" is
+# exactly how an author looks for one, so `description` also takes `Vector` —
+# it is the one field holding the author's intent in prose. Flows are few and
+# edited rarely, so the embedding cost is negligible; `Vector` is inert until an
+# embedder is configured.
+#
+# `workflow_data` is NOT indexed: it is the step graph — ids, refs and inline
+# scripts. It is the code, and code in a lexical index is noise.
+version: 2
 strict: true
 indexable: true
-index_types: [Property]
+index_types: [Property, Fulltext, Vector]
 properties:
   - name: title
     type: String
@@ -26,6 +36,7 @@ properties:
     required: false
     title: Description
     description: Human-readable description of the workflow
+    index: [Fulltext, Vector]
 
   - name: enabled
     type: Boolean

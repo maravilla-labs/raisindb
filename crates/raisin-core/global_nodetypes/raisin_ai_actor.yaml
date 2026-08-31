@@ -1,10 +1,15 @@
 name: raisin:AIActor
 description: AI-powered actor with model configuration for workflow participation
 icon: bot
-version: 1
+# v2: fulltext for the inherited `display_name` only (a subtype's own
+# `index_types` replaces the parent's, so it is restated here).
+# `system_prompt` stays UNINDEXED on purpose: it is configuration, often long,
+# and putting model instructions into a shared lexical index is bulk noise
+# around the few words anyone would search for.
+version: 2
 extends: raisin:Actor
 indexable: true
-index_types: [Property]
+index_types: [Property, Fulltext]
 properties:
   # Inherited from raisin:Actor: actor_id, display_name, capabilities, inbox_path, state, current_task_ref, supervisor_ref, metadata
   - name: system_prompt

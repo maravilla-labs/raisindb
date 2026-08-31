@@ -1,10 +1,25 @@
 name: raisin:Function
 description: Serverless function definition for RaisinDB
 icon: function-square
-version: 2
+# v3: `title` + `description` become searchable. `title` was already flagged
+# `index: [Fulltext]`, but `index_types: [Property]` gated the whole type out,
+# so the flag did nothing. "Which function charges the card?" is a real question
+# an author asks against a workspace of a few hundred functions.
+#
+# WHAT IS NOT INDEXED: the CODE. A function's source lives in child
+# raisin:Asset/Resource nodes, not in a String property here, and it stays that
+# way — a lexical index full of `const`/`await`/`return` buries the handful of
+# words the author meant. `network_policy`, `secret_policy`, `email_policy` and
+# `mcp_proxy` are Objects and carry allowed URLs, secret names and connection
+# paths; none of them is display text and none is indexed.
+#
+# `description` also takes `Vector`: it is authored intent prose, and functions
+# are written once and edited rarely, so an embedding per revision is cheap.
+# `Vector` is inert until an embedder is configured.
+version: 3
 strict: true
 indexable: true
-index_types: [Property]
+index_types: [Property, Fulltext, Vector]
 properties:
   - name: title
     type: String
@@ -26,6 +41,7 @@ properties:
     required: false
     title: Description
     description: Human-readable description of what the function does
+    index: [Fulltext, Vector]
 
   - name: language
     type: String

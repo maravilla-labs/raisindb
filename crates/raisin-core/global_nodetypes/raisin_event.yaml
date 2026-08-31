@@ -31,10 +31,10 @@ icon: calendar
 # bump, but classifies the `start`/`end`/`organizer` removals as BREAKING, so
 # under the default NonBreaking policy it records them pending for an explicit
 # admin apply rather than writing them.
-version: 2
+version: 3
 strict: true
 indexable: true
-index_types: [Property]
+index_types: [Property, Fulltext, Vector]
 mixins:
   - raisin:VirtualNode
 
@@ -43,7 +43,7 @@ properties:
   - name: title
     type: String
     required: true
-    index: [Property]
+    index: [Property, Fulltext, Vector]
     meta:
       label: Title
       description: Graph `subject` / Google `summary`. Falls back to "(untitled event)".
@@ -225,6 +225,7 @@ properties:
   - name: organizer_name
     type: String
     required: false
+    index: [Fulltext]
     meta:
       label: Organizer Name
       description: Display name, when the provider supplies one.
@@ -255,6 +256,7 @@ properties:
   - name: location
     type: String
     required: false
+    index: [Property, Fulltext]
     meta:
       label: Location
       description: Display name only. Graph `location.displayName`, Google `location`.
@@ -289,6 +291,7 @@ properties:
   - name: description_html
     type: String
     required: false
+    index: [Fulltext]
     meta:
       label: Description (HTML)
       description: >-
@@ -300,6 +303,7 @@ properties:
   - name: description_text
     type: String
     required: false
+    index: [Fulltext, Vector]
     meta:
       label: Description (text)
       description: Plain-text body. Same `include_body` opt-in as description_html.

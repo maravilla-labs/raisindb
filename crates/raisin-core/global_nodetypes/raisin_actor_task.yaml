@@ -1,9 +1,15 @@
 name: raisin:ActorTask
 description: Task assigned to an actor (AI or Human) within a workflow
 icon: clipboard-check
-version: 3
+# v4: opened the TYPE-LEVEL fulltext gate. `title` and `description` have both
+# carried `index: [Fulltext]` for three versions, but `index_types: [Property]`
+# meant `IndexingPolicy::should_index_node` refused the type before any field
+# flag was read — the same inert-flag trap fixed on raisin:InboxTask, which this
+# type mirrors. Fulltext only: an actor task is a high-volume work item, not
+# prose worth embedding.
+version: 4
 indexable: true
-index_types: [Property]
+index_types: [Property, Fulltext]
 properties:
   - name: task_type
     type: String

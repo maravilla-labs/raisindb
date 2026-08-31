@@ -1,10 +1,21 @@
 name: raisin:Actor
 description: Base type for all workflow participants (AI and Human actors)
 icon: user-circle
-version: 1
+# v2: opened the TYPE-LEVEL fulltext gate so `display_name` — flagged
+# `index: [Fulltext]` since v1 — is actually indexed. `should_index_node`
+# consults `index_types` BEFORE any per-field flag, so the flag was inert.
+# ONLY the display name is fulltext: an actor's `actor_id`, `inbox_path`,
+# `current_task_ref` and `supervisor_ref` are identifiers, and an identifier in
+# a fulltext index is noise.
+#
+# NOTE for the subtypes: `index_types` is REPLACED, not merged, by a child that
+# declares its own (node_type_resolver/resolution.rs step 6), so raisin:HumanActor
+# and raisin:AIActor each needed the same widening — bumping only this base
+# would have left both of them unindexed.
+version: 2
 abstract: true
 indexable: true
-index_types: [Property]
+index_types: [Property, Fulltext]
 properties:
   - name: actor_id
     type: String
