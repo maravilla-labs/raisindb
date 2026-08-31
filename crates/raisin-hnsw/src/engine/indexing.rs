@@ -18,8 +18,21 @@ use crate::partition::PartitionId;
 use raisin_error::Result;
 use raisin_hlc::HLC;
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 use super::{HnswIndexingEngine, IndexKey};
+
+/// How long one index mutation may hold the write guard before it is worth
+/// a log line.
+///
+/// Every reader — every KNN, every `HYBRID_SEARCH`, every Studio search —
+/// queues behind this guard, so a mutation that does not return makes the
+/// server look dead while the host looks idle. That is exactly how the
+/// 2026-08 usearch tombstone wedge presented: one thread at 100% of a core
+/// inside `index_dense_gt::remove`, 25 minutes of silence in the log, and
+/// nothing anywhere naming the index as the culprit. An HNSW insert is
+/// milliseconds; seconds means something is wrong, whatever the cause.
+const WRITE_GUARD_WARN_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl HnswIndexingEngine {
     /// Add an embedding to one partition's index.
@@ -50,6 +63,7 @@ impl HnswIndexingEngine {
 
         // Add to index (workspace_id is now stored as metadata)
         {
+            let started = Instant::now();
             let mut index = index_arc.write().unwrap();
             index.add(
                 node_id.to_string(),
@@ -57,6 +71,7 @@ impl HnswIndexingEngine {
                 revision,
                 embedding,
             )?;
+            warn_on_slow_guard(started, "add", node_id, partition);
         }
 
         let key = IndexKey::new(tenant_id, repo_id, branch, partition);
@@ -105,8 +120,10 @@ impl HnswIndexingEngine {
 
         // Remove from index
         {
+            let started = Instant::now();
             let mut index = index_arc.write().unwrap();
             index.remove(node_id)?;
+            warn_on_slow_guard(started, "remove", node_id, partition);
         }
 
         let key = IndexKey::new(tenant_id, repo_id, branch, partition);
@@ -293,5 +310,23 @@ impl HnswIndexingEngine {
         );
 
         Ok(())
+    }
+}
+
+/// Log a mutation that held the index write guard long enough to starve readers.
+///
+/// Measured from BEFORE the guard is acquired, so it reports the whole stall a
+/// reader would see — contention included — not just the time inside usearch.
+fn warn_on_slow_guard(started: Instant, op: &str, node_id: &str, partition: &PartitionId) {
+    let elapsed = started.elapsed();
+    if elapsed >= WRITE_GUARD_WARN_AFTER {
+        tracing::warn!(
+            op = %op,
+            node_id = %node_id,
+            partition = %partition,
+            elapsed_ms = elapsed.as_millis() as u64,
+            "HNSW write guard held for a long time — vector searches on this \
+             partition are blocked for the duration"
+        );
     }
 }

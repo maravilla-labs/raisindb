@@ -185,6 +185,40 @@ impl Env {
             .expect("the tenant's embedding config must resolve to a partition")
     }
 
+    /// Re-write the node with IDENTICAL properties.
+    ///
+    /// A new revision, unchanged embeddable content — which is exactly what a
+    /// virtual-mount sync produces every 15-20 seconds, and what
+    /// `is_already_current` (pinned to `context.revision`) can never match.
+    async fn touch(&mut self) {
+        let node = self
+            .storage
+            .nodes()
+            .get(StorageScope::new(TENANT, REPO, BRANCH, WS), NODE, None)
+            .await
+            .expect("get node")
+            .expect("node exists");
+
+        self.storage
+            .nodes()
+            .update(
+                StorageScope::new(TENANT, REPO, BRANCH, WS),
+                node,
+                Default::default(),
+            )
+            .await
+            .expect("update node");
+
+        self.revision = self
+            .storage
+            .branches()
+            .get_branch(TENANT, REPO, BRANCH)
+            .await
+            .expect("get branch")
+            .expect("branch exists")
+            .head;
+    }
+
     /// Run the embedding job exactly as the worker pool would.
     async fn run_job(&self) {
         let handler = raisin_rocksdb::EmbeddingJobHandler::new(
@@ -396,5 +430,74 @@ async fn a_chunking_change_re_embeds_and_leaves_no_orphans_while_a_re_run_writes
         third,
         env.rows(),
         "the new configuration is now the steady state and must also be a no-op"
+    );
+}
+
+/// A revision bump with unchanged content must not touch the HNSW index.
+///
+/// # What this covers that the steady-state case above does not
+///
+/// `is_already_current` is pinned to `context.revision`, so it matches only a
+/// re-run at the SAME revision. A rewrite of the node — a publish, a save that
+/// touched nothing embeddable, or a virtual-mount sync — mints a new revision
+/// and always misses it. The job then correctly skips the provider call via
+/// `carry_forward_vectors`, but it used to go on to run the full per-chunk
+/// index loop anyway: one `remove` plus one `add` of the same id, per revision.
+///
+/// That was not merely wasteful. Every `HnswIndex::add` minted a fresh usearch
+/// key, and on usearch < 2.26 an erased key left a tombstone that the rehash
+/// could never reclaim, because the rehash trigger counted only LIVE entries —
+/// which, for a node being updated in place, never moves. Once every slot in
+/// the key table was populated, `remove`'s probe had no empty slot to terminate
+/// on and spun forever, pegging a core and starving every reader of the index
+/// behind the write guard. A mount syncing every ~15-20s reached that in about
+/// 85 minutes.
+///
+/// So this asserts the property that keeps the churn at zero: an unchanged
+/// re-embed writes the revision's ROWS and leaves the index alone.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a local Ollama on 127.0.0.1:11434 with nomic-embed-text"]
+async fn a_revision_bump_with_unchanged_content_leaves_the_index_alone() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("info,raisin_rocksdb=debug")
+        .try_init();
+    let mut env = Env::new().await;
+
+    env.configure(Some(ChunkingConfig {
+        chunk_size: 40,
+        overlap: OverlapConfig::Tokens(8),
+        ..ChunkingConfig::default()
+    }));
+    env.run_job().await;
+
+    let chunks = env.rows().len();
+    assert!(chunks > 2, "expected a multi-chunk body, got {chunks}");
+    let expected_ids = raisin_hnsw::chunk_id_set(NODE, None, chunks);
+    assert_eq!(
+        env.indexed_ids(chunks + 8),
+        expected_ids,
+        "the first run indexes every chunk"
+    );
+
+    // A new revision, identical content — the vmount case.
+    for _ in 0..3 {
+        env.touch().await;
+        env.run_job().await;
+    }
+
+    // The ROWS are written at each new revision: they are revision-keyed and a
+    // later REBUILD reads them, so skipping them would lose history.
+    assert_eq!(
+        env.rows().len(),
+        chunks,
+        "each revision gets its own complete set of chunk rows"
+    );
+
+    // The INDEX is untouched, and still complete. Both halves matter: an index
+    // that lost ids would be worse than the churn it replaced.
+    assert_eq!(
+        env.indexed_ids(chunks + 8),
+        expected_ids,
+        "every chunk is still resident after three unchanged re-embeds"
     );
 }

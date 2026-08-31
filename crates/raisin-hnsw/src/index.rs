@@ -377,16 +377,44 @@ impl HnswIndex {
             )));
         }
 
-        // If node exists, remove old entry first
-        if let Some(&old_key) = self.node_to_key.get(&node_id) {
-            self.index.remove(old_key).map_err(|e| {
-                raisin_error::Error::storage(format!("Failed to remove old vector: {}", e))
-            })?;
-            self.remove_meta(old_key);
-        }
-
-        let key = self.next_key;
-        self.next_key += 1;
+        // If the node exists, remove the old entry first — and REUSE ITS KEY.
+        //
+        // The key choice is not cosmetic; it is what keeps this loop bounded.
+        // usearch's `slot_lookup_` marks an erased slot `deleted` but leaves its
+        // `populated` bit set, and the only thing that ever clears `populated`
+        // is the rehash in `try_reserve`, which is gated on the LIVE entry
+        // count. Under update churn that count stays flat, so tombstones are
+        // never reclaimed. Minting a fresh key on every update hands each cycle
+        // a fresh home bucket, so the populated set grows monotonically until
+        // every slot is populated — at which point a probe has no empty slot to
+        // terminate on. On usearch 2.24 that made `remove` spin FOREVER
+        // (`equal_iterator_gt::operator++` had no bound), pegging a core and
+        // starving every reader of `index_arc` behind the write guard.
+        //
+        // Reusing the key keeps the probe on the same chain, where
+        // `try_emplace` finds the slot just tombstoned and clears its `deleted`
+        // bit — the populated set does not grow, so the table cannot saturate.
+        //
+        // usearch >= 2.26 also fixes this from its own side (tombstone
+        // accounting in the rehash trigger, plus a bounded probe), and that is
+        // the real fix: a plain `remove` with no matching re-add still leaves a
+        // tombstone this cannot reclaim. Keep both.
+        let key = match self.node_to_key.get(&node_id) {
+            Some(&old_key) => {
+                // Must precede the add: the index is `multi: false`, so usearch
+                // rejects a key it already holds.
+                self.index.remove(old_key).map_err(|e| {
+                    raisin_error::Error::storage(format!("Failed to remove old vector: {}", e))
+                })?;
+                self.remove_meta(old_key);
+                old_key
+            }
+            None => {
+                let key = self.next_key;
+                self.next_key += 1;
+                key
+            }
+        };
 
         // Reserve capacity if needed (usearch needs space before add)
         let current_cap = self.index.capacity();
@@ -1336,5 +1364,251 @@ mod tests {
         assert!(scoped.results.is_empty());
         assert_eq!(scoped.in_scope_total, 0);
         assert_eq!(scoped.mode, ScopeFilterMode::IndexSide);
+    }
+}
+
+/// Regression tests for the 2026-08 production wedge: one thread pegged at 100%
+/// of a core forever inside `unum::usearch::index_dense_gt::remove`, with every
+/// vector search starved behind the `index_arc` write guard.
+#[cfg(test)]
+mod tombstone_churn_tests {
+    use super::*;
+
+    /// Update churn must not wedge the DEPENDENCY.
+    ///
+    /// This drives a raw `usearch::Index` with MONOTONICALLY INCREASING keys on
+    /// purpose. `HnswIndex::add` no longer produces that pattern — it reuses the
+    /// key — so a test written against `HnswIndex` would pass against a usearch
+    /// that still has the bug and would catch nothing. This one reproduces what
+    /// production actually did before the key-reuse fix, and so it is the test
+    /// that pins the dependency upgrade.
+    ///
+    /// On usearch 2.24 this HANGS rather than fails: once every slot in
+    /// `slot_lookup_` is populated (live or tombstoned), `equal_iterator_gt`'s
+    /// unbounded probe can never terminate. There is no way to assert our way
+    /// out of that from inside the process — a panic cannot unwind a C++ spin —
+    /// so the harness timeout is the assertion. Do not "fix" a hang here by
+    /// shrinking the loop: the iteration count must stay well clear of
+    /// `capacity_slots * ln(capacity_slots)`, which for the minimum 64-slot
+    /// table is only ~266 cycles.
+    #[test]
+    fn dependency_survives_update_churn_past_table_saturation() {
+        let options = usearch::IndexOptions {
+            dimensions: 8,
+            metric: usearch::MetricKind::Cos,
+            quantization: usearch::ScalarKind::F32,
+            connectivity: 0,
+            expansion_add: 0,
+            expansion_search: 0,
+            multi: false,
+        };
+        let index = usearch::Index::new(&options).expect("usearch index");
+        // Deliberately tiny. The table bottoms out at 64 slots, which is the
+        // fastest possible march to saturation and exactly the shape of the
+        // production partition that wedged (it held ONE document).
+        index.reserve(16).expect("reserve");
+
+        let vector = vec![0.25f32; 8];
+        let mut key = 0u64;
+        index.add(key, &vector).expect("first add");
+
+        for _ in 0..5_000 {
+            index.remove(key).expect("remove");
+            key += 1;
+            if index.size() >= index.capacity() {
+                index.reserve((index.capacity() + 1).max(16)).expect("grow");
+            }
+            index.add(key, &vector).expect("add");
+        }
+
+        assert_eq!(index.size(), 1, "one live vector throughout");
+
+        // A probe for a key that is NOT present has to terminate too. On a
+        // saturated 2.24 table this is the other way in: `equal_range` finds no
+        // empty slot to stop at either.
+        index
+            .remove(u64::MAX)
+            .expect("removing an absent key must return");
+    }
+
+    /// An update must reuse the node's existing key rather than minting a new
+    /// one. This is what keeps the probe on one chain so `try_emplace` reclaims
+    /// the tombstone it just made; see the comment in `HnswIndex::add`.
+    #[test]
+    fn update_reuses_the_existing_key() {
+        let mut index = HnswIndex::new(8);
+        let v1 = create_churn_vector(1.0);
+        let v2 = create_churn_vector(2.0);
+
+        index
+            .add("n1".into(), "ws".into(), HLC::new(1, 0), v1)
+            .unwrap();
+        let first_key = index.node_to_key()["n1"];
+        assert_eq!(index.next_key(), 1);
+
+        for revision in 2..50u64 {
+            index
+                .add("n1".into(), "ws".into(), HLC::new(revision, 0), v2.clone())
+                .unwrap();
+        }
+
+        assert_eq!(
+            index.node_to_key()["n1"],
+            first_key,
+            "an update must reuse the key"
+        );
+        assert_eq!(
+            index.next_key(),
+            1,
+            "an update must not mint a new key — that is what saturates the table"
+        );
+        assert_eq!(index.len(), 1);
+        assert_eq!(
+            index.key_to_meta().len(),
+            1,
+            "no orphaned metadata left behind"
+        );
+    }
+
+    /// Moving a node between workspaces on update must not leave a phantom
+    /// count behind. `workspace_counts` is the bookkeeping most likely to break
+    /// under a future edit to the key-selection branch.
+    #[test]
+    fn update_across_workspaces_leaves_no_phantom_count() {
+        let mut index = HnswIndex::new(8);
+        index
+            .add(
+                "n1".into(),
+                "ws_a".into(),
+                HLC::new(1, 0),
+                create_churn_vector(1.0),
+            )
+            .unwrap();
+        index
+            .add(
+                "n1".into(),
+                "ws_b".into(),
+                HLC::new(2, 0),
+                create_churn_vector(2.0),
+            )
+            .unwrap();
+
+        assert_eq!(index.len(), 1);
+        assert_eq!(
+            index.workspace_counts.get("ws_a"),
+            None,
+            "the vacated workspace must be dropped, not left at zero"
+        );
+        assert_eq!(index.workspace_counts.get("ws_b"), Some(&1));
+    }
+
+    /// Delete-then-readd churn, which key reuse does NOT protect against: a
+    /// plain `remove` with no matching re-add leaves a tombstone that only a
+    /// fixed usearch reclaims. This is the case that specifically covers the
+    /// dependency upgrade.
+    #[test]
+    fn delete_then_readd_churn_does_not_wedge() {
+        let mut index = HnswIndex::new(8);
+        let vector = create_churn_vector(1.0);
+
+        for revision in 1..2_000u64 {
+            index
+                .add(
+                    "n1".into(),
+                    "ws".into(),
+                    HLC::new(revision, 0),
+                    vector.clone(),
+                )
+                .unwrap();
+            index.remove("n1").unwrap();
+        }
+
+        assert_eq!(index.len(), 0);
+    }
+
+    fn create_churn_vector(seed: f32) -> Vec<f32> {
+        (0..8).map(|i| (i as f32 + seed) / 8.0).collect()
+    }
+}
+
+/// Cross-version on-disk compatibility, driven manually across two builds.
+///
+/// A `.hnsw` written by one usearch release must still load — and mmap-view —
+/// under the next, or a dependency bump silently turns every persisted vector
+/// index into a cold one. The headers say it is compatible (same magic, and the
+/// load path gates only on `version_major`, which is 2 in both), but that is an
+/// argument, not evidence.
+///
+/// Run it by hand, once, across the version being upgraded from and to:
+///
+/// ```text
+/// RAISIN_HNSW_FIXTURE=/tmp/compat.hnsw \
+///   cargo test -p raisin-hnsw --lib write_fixture_for_cross_version_load -- --ignored
+/// # ...switch the usearch version in Cargo.toml, then:
+/// RAISIN_HNSW_FIXTURE=/tmp/compat.hnsw \
+///   cargo test -p raisin-hnsw --lib read_fixture_written_by_another_usearch -- --ignored
+/// ```
+#[cfg(test)]
+mod ondisk_compat_tests {
+    use super::*;
+
+    fn fixture_path() -> std::path::PathBuf {
+        std::env::var("RAISIN_HNSW_FIXTURE")
+            .expect("set RAISIN_HNSW_FIXTURE to the fixture path")
+            .into()
+    }
+
+    fn compat_vector(seed: f32) -> Vec<f32> {
+        (0..16).map(|i| (i as f32 + seed) / 16.0).collect()
+    }
+
+    #[test]
+    #[ignore = "half of a manual two-build cross-version check"]
+    fn write_fixture_for_cross_version_load() {
+        let mut index = HnswIndex::new(16);
+        for n in 0..12u64 {
+            index
+                .add(
+                    format!("node{n}"),
+                    "ws".into(),
+                    HLC::new(n + 1, 0),
+                    compat_vector(n as f32),
+                )
+                .unwrap();
+        }
+        index.save_to_file(fixture_path()).unwrap();
+
+        let top = index.search(&compat_vector(3.0), 3).unwrap();
+        println!(
+            "WROTE len={} top={:?}",
+            index.len(),
+            top.iter().map(|r| r.node_id.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    #[ignore = "half of a manual two-build cross-version check"]
+    fn read_fixture_written_by_another_usearch() {
+        let path = fixture_path();
+
+        // Both paths matter: the engine mmap-VIEWS on a cache miss and only
+        // promotes to a full load on the first mutation, so a format break
+        // could hide in either one.
+        let loaded = HnswIndex::load_from_file(&path).expect("load");
+        let viewed = HnswIndex::view_from_file(&path).expect("view");
+
+        assert_eq!(loaded.len(), 12, "every node survived the round trip");
+        assert_eq!(viewed.len(), 12);
+
+        let from_loaded = loaded.search(&compat_vector(3.0), 3).unwrap();
+        let from_viewed = viewed.search(&compat_vector(3.0), 3).unwrap();
+        let ids = |rs: &[SearchResult]| rs.iter().map(|r| r.node_id.clone()).collect::<Vec<_>>();
+
+        assert_eq!(ids(&from_loaded), ids(&from_viewed), "load and view agree");
+        assert_eq!(
+            from_loaded[0].node_id, "node3",
+            "the nearest neighbour is still the nearest neighbour"
+        );
+        println!("READ len={} top={:?}", loaded.len(), ids(&from_loaded));
     }
 }

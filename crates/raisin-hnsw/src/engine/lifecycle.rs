@@ -52,8 +52,23 @@ impl HnswIndexingEngine {
             if let Some(index_arc) = self.index_cache.get(&key) {
                 let path = key.index_path(self.base_path());
 
-                // Save to disk
-                let index_guard = index_arc.read().unwrap();
+                // Save to disk.
+                //
+                // A BOUNDED wait: one partition whose write guard is stuck must
+                // not take the whole snapshot pass with it. Blocking here also
+                // blocks `shutdown()`, which is how a wedged index turned an
+                // ordinary restart into one that needed SIGKILL. Leave the index
+                // in the dirty set so the next pass retries it.
+                let Some(index_guard) = super::read_guard_bounded(&index_arc) else {
+                    error_count += 1;
+                    tracing::warn!(
+                        index = %key,
+                        "Skipped snapshot: the index write guard is held. Vector searches on \
+                         this partition are blocked, and its unsaved vectors stay unsaved \
+                         until the guard is released."
+                    );
+                    continue;
+                };
                 match index_guard.save_to_file(&path) {
                     Ok(()) => {
                         saved_count += 1;

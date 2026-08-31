@@ -460,7 +460,25 @@ impl HnswIndexingEngine {
         partition: &PartitionId,
     ) -> Result<IndexStats> {
         let index_arc = self.get_or_load_index(tenant_id, repo_id, branch, partition)?;
-        let index = index_arc.read().unwrap();
+
+        // A BOUNDED wait, not `read().unwrap()`.
+        //
+        // This is the diagnostic an operator reaches for when vector search has
+        // gone quiet, and it used to queue behind the same write guard that had
+        // gone quiet — so `SHOW VECTOR INDEX HEALTH` hung exactly when it was
+        // needed, and the one tool that could have named the stuck partition
+        // became another symptom of it. Reporting the partition as unavailable
+        // is strictly more informative than not reporting at all: the caller
+        // renders an `Err` as a `status: error` row and keeps going, so the
+        // other partitions still answer.
+        let index = read_guard_bounded(&index_arc).ok_or_else(|| {
+            raisin_error::Error::storage(format!(
+                "vector index for partition {partition} is busy: its write guard has been \
+                 held for over {}s, so every search on this partition is blocked. A mutation \
+                 that does not return is the signature of an index-level stall.",
+                STATS_GUARD_WAIT.as_secs(),
+            ))
+        })?;
 
         Ok(IndexStats {
             count: index.len(),
@@ -571,6 +589,32 @@ pub(crate) fn migrate_legacy_layout(base: &Path, key: &IndexKey) {
         to = %new_index.display(),
         "Moved a pre-partition HNSW index into its partition (rename only, no vectors re-encoded)"
     );
+}
+
+/// How long a read-only diagnostic will wait for the index guard before it
+/// reports the partition as busy rather than blocking with it.
+const STATS_GUARD_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Acquire a read guard, or give up.
+///
+/// `std::sync::RwLock` has no timed acquire, so this polls `try_read`. A
+/// poisoned lock returns `None` too — a panic inside a mutation leaves the
+/// index unusable, and a diagnostic that panics in sympathy tells the operator
+/// nothing they could not already see.
+fn read_guard_bounded<T>(lock: &RwLock<T>) -> Option<std::sync::RwLockReadGuard<'_, T>> {
+    let deadline = std::time::Instant::now() + STATS_GUARD_WAIT;
+    loop {
+        match lock.try_read() {
+            Ok(guard) => return Some(guard),
+            Err(std::sync::TryLockError::Poisoned(_)) => return None,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if std::time::Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+        }
+    }
 }
 
 /// Index statistics.

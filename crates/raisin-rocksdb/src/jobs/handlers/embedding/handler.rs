@@ -410,19 +410,15 @@ impl EmbeddingJobHandler {
             return Ok(());
         }
 
-        // Remove old chunks from HNSW before adding new ones (handles re-embedding)
-        self.remove_old_chunks_from_hnsw(
-            &source_id,
-            context,
-            &embedder_hash,
-            kind_char,
-            &partition,
-            &live_ids,
-        )
-        .await?;
-
         let embedding_storage =
             crate::repositories::RocksDBEmbeddingStorage::new(self.storage.db().clone());
+
+        // What is indexed under this source but is no longer live. COMPUTED
+        // here, APPLIED below — the unchanged-content fast path needs to know
+        // whether anything must be evicted before it can decide to skip, and
+        // asking that question must not itself perform the eviction.
+        let stale =
+            self.stale_chunk_ids(&source_id, context, &embedder_hash, kind_char, &live_ids)?;
 
         // CARRY FORWARD: the same inputs at an EARLIER revision.
         //
@@ -452,6 +448,59 @@ impl EmbeddingJobHandler {
             )
         };
 
+        // STEADY STATE: a revision bump whose embeddable content did not change.
+        //
+        // `is_already_current` is pinned to `context.revision`, so a rewrite of
+        // the node always misses it and lands here instead. `carry_forward`
+        // already spares the provider call — but the per-chunk index loop below
+        // still ran, doing one remove + one add of the same id per revision.
+        // That was pure churn, and on usearch < 2.26 it was the churn that
+        // saturated the key table and wedged the index: a vmount syncing every
+        // ~15-20s got there in about 85 minutes.
+        //
+        // The row write below is NOT skipped — rows are revision-keyed and the
+        // new row is genuinely needed, and a later REBUILD reads them. Only the
+        // index mutation is skipped, and only when all four hold:
+        //
+        //   1. not forced — an operator asking for a re-embed always gets one;
+        //   2. the vectors carried forward, i.e. every chunk's newest row is
+        //      current for this spec hash and chunk count, so what we would
+        //      write is byte-identical to what is already there;
+        //   3. nothing is stale — a non-empty set means the chunking changed
+        //      and ids must be evicted, which the skip would never do;
+        //   4. every live id is actually resident in the index right now, which
+        //      is what covers the snapshot lag (see `all_chunks_resident`).
+        //
+        // Anything less than all four takes the full path. Failing open here
+        // costs one redundant index write; failing closed would cost a silently
+        // stale index, which nobody notices until a search comes back short.
+        //
+        // Residual, and it is the same one the `is_already_current` fast path
+        // already carries: a crash BETWEEN the row write and the index write
+        // leaves a row whose vector is resident but stale. Condition 4 catches a
+        // MISSING vector, not a stale one. This does not widen that window, it
+        // just makes it reachable more often.
+        let skip_index_write = !force
+            && carried.is_some()
+            && stale.is_empty()
+            && self
+                .all_chunks_resident(context, &partition, &live_ids)
+                .await?;
+
+        if skip_index_write {
+            tracing::debug!(
+                node_id = %node_id,
+                spec = %spec.unwrap_or("(default)"),
+                total_chunks = total_chunks,
+                "Content unchanged and every chunk already resident — writing the revision's \
+                 rows but leaving the HNSW index alone"
+            );
+        } else {
+            self.remove_stale_chunks_from_hnsw(&source_id, context, &partition, &stale)
+                .await?;
+        }
+
+        let carried_forward = carried.is_some();
         let chunk_texts: Vec<String> = chunks.iter().map(|(content, _)| content.clone()).collect();
         let embeddings = match carried {
             Some(vectors) => {
@@ -530,38 +579,51 @@ impl EmbeddingJobHandler {
             )?;
 
             // Add to HNSW index (use spawn_blocking as HNSW operations are sync)
-            let engine_clone = Arc::clone(&self.hnsw_engine);
-            let index_id = chunk_id.clone();
-            let tenant_id = context.tenant_id.clone();
-            let repo_id = context.repo_id.clone();
-            let branch = context.branch.clone();
-            let workspace_id = context.workspace_id.clone();
-            let revision = context.revision;
-            let partition_clone = partition.clone();
+            if !skip_index_write {
+                let engine_clone = Arc::clone(&self.hnsw_engine);
+                let index_id = chunk_id.clone();
+                let tenant_id = context.tenant_id.clone();
+                let repo_id = context.repo_id.clone();
+                let branch = context.branch.clone();
+                let workspace_id = context.workspace_id.clone();
+                let revision = context.revision;
+                let partition_clone = partition.clone();
 
-            tokio::task::spawn_blocking(move || {
-                engine_clone.add_embedding(
-                    &tenant_id,
-                    &repo_id,
-                    &branch,
-                    &partition_clone,
-                    &workspace_id,
-                    &index_id,
-                    revision,
-                    embedding,
-                )
-            })
-            .await
-            .map_err(|e| Error::storage(format!("Blocking task failed: {}", e)))??;
+                tokio::task::spawn_blocking(move || {
+                    engine_clone.add_embedding(
+                        &tenant_id,
+                        &repo_id,
+                        &branch,
+                        &partition_clone,
+                        &workspace_id,
+                        &index_id,
+                        revision,
+                        embedding,
+                    )
+                })
+                .await
+                .map_err(|e| Error::storage(format!("Blocking task failed: {}", e)))??;
+            }
         }
 
-        tracing::debug!(
-            node_id = %node_id,
-            spec = %spec.unwrap_or("(default)"),
-            total_chunks = total_chunks,
-            "Added {} chunk(s) to HNSW index",
-            total_chunks
-        );
+        // ONE line per job when the index was actually mutated, at info.
+        //
+        // The only indexing signal here used to be `debug!`, which is why 25
+        // minutes of a wedged production index produced a completely silent log.
+        // Under the skip above a real mutation is rare — content changes only —
+        // so this stays quiet in the steady state rather than one line per node
+        // per sync tick.
+        if !skip_index_write {
+            tracing::info!(
+                node_id = %node_id,
+                spec = %spec.unwrap_or("(default)"),
+                total_chunks = total_chunks,
+                evicted = stale.len(),
+                source = if carried_forward { "carried" } else { "generated" },
+                "Wrote {} chunk(s) to the HNSW index",
+                total_chunks
+            );
+        }
 
         // Orphan sweep, AFTER the new rows are in: re-chunking into fewer pieces
         // leaves the surplus high-index rows of THIS revision behind, and they
@@ -715,6 +777,25 @@ impl EmbeddingJobHandler {
             return Ok(false);
         }
 
+        self.all_chunks_resident(context, partition, live_ids).await
+    }
+
+    /// Is every live chunk id actually IN the index right now?
+    ///
+    /// The rows in `cf::EMBEDDINGS` and the vectors in the HNSW index are two
+    /// separate stores, and the index snapshots lag (~60s). A restart can
+    /// therefore leave the row present and the vector gone, so any fast path
+    /// that decides "nothing to do" from the rows alone would make that node
+    /// permanently unsearchable until a full `REBUILD VECTOR INDEX`. This is the
+    /// check that stops it, and it is deliberately ONE implementation shared by
+    /// both fast paths — a second copy is how the two would drift into
+    /// disagreeing about what "already indexed" means.
+    async fn all_chunks_resident(
+        &self,
+        context: &JobContext,
+        partition: &raisin_hnsw::PartitionId,
+        live_ids: &std::collections::HashSet<String>,
+    ) -> Result<bool> {
         let engine = Arc::clone(&self.hnsw_engine);
         let tenant_id = context.tenant_id.clone();
         let repo_id = context.repo_id.clone();
@@ -722,7 +803,7 @@ impl EmbeddingJobHandler {
         let ids: Vec<String> = live_ids.iter().cloned().collect();
         let partition = partition.clone();
 
-        let indexed = tokio::task::spawn_blocking(move || -> Result<bool> {
+        tokio::task::spawn_blocking(move || -> Result<bool> {
             for id in &ids {
                 if !engine.contains_embedding(&tenant_id, &repo_id, &branch, &partition, id)? {
                     return Ok(false);
@@ -731,9 +812,7 @@ impl EmbeddingJobHandler {
             Ok(true)
         })
         .await
-        .map_err(|e| Error::storage(format!("Blocking task failed: {}", e)))??;
-
-        Ok(indexed)
+        .map_err(|e| Error::storage(format!("Blocking task failed: {}", e)))?
     }
 
     /// Handle embedding deletion job
@@ -928,6 +1007,25 @@ impl EmbeddingJobHandler {
         partition: &raisin_hnsw::PartitionId,
         live_ids: &std::collections::HashSet<String>,
     ) -> Result<()> {
+        let stale = self.stale_chunk_ids(source_id, context, embedder_hash, kind_char, live_ids)?;
+        self.remove_stale_chunks_from_hnsw(source_id, context, partition, &stale)
+            .await
+    }
+
+    /// Which chunk ids are indexed under this source but are no longer live.
+    ///
+    /// Split out from the removal so a caller can ask "is there anything to
+    /// evict?" WITHOUT evicting. That question is one of the preconditions for
+    /// skipping the index write entirely on an unchanged re-embed: a non-empty
+    /// answer means the chunking changed, and the full path must run.
+    fn stale_chunk_ids(
+        &self,
+        source_id: &str,
+        context: &JobContext,
+        embedder_hash: &str,
+        kind_char: char,
+        live_ids: &std::collections::HashSet<String>,
+    ) -> Result<Vec<String>> {
         let embedding_storage =
             crate::repositories::RocksDBEmbeddingStorage::new(self.storage.db().clone());
 
@@ -968,11 +1066,20 @@ impl EmbeddingJobHandler {
         }
         candidates.sort();
         candidates.dedup();
-        let stale: Vec<String> = candidates
+        Ok(candidates
             .into_iter()
             .filter(|id| !live_ids.contains(id))
-            .collect();
+            .collect())
+    }
 
+    /// Evict the ids `stale_chunk_ids` identified.
+    async fn remove_stale_chunks_from_hnsw(
+        &self,
+        source_id: &str,
+        context: &JobContext,
+        partition: &raisin_hnsw::PartitionId,
+        stale: &[String],
+    ) -> Result<()> {
         if stale.is_empty() {
             return Ok(());
         }
@@ -981,7 +1088,7 @@ impl EmbeddingJobHandler {
         let tenant_id = context.tenant_id.clone();
         let repo_id = context.repo_id.clone();
         let branch = context.branch.clone();
-        let to_remove = stale.clone();
+        let to_remove = stale.to_vec();
         let partition = partition.clone();
 
         tokio::task::spawn_blocking(move || -> Result<()> {

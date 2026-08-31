@@ -5392,6 +5392,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
 
 [[package]]
+name = "numkong"
+version = "7.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32abf4fad33e67bc129973bf953f076803bd33f393ac17589cb05afb5b3b8420"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "objc2-core-foundation"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10223,12 +10232,13 @@ checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 
 [[package]]
 name = "usearch"
-version = "2.24.0"
+version = "2.26.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09657b7d3d88992d7475be6f345d3cb3b388d13c152dbd4742e0b955e3a2b632"
+checksum = "884002b91c545f43b67e9eadbef70834502ad14c32df1ce8d72bdb56ab7d8be3"
 dependencies = [
  "cxx",
  "cxx-build",
+ "numkong",
 ]
 
 [[package]]
