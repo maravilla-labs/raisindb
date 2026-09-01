@@ -82,6 +82,10 @@ pub(super) async fn process_pdf(
         page_count: result.page_count,
         used_ocr,
         source: if used_ocr { "core-pdf-ocr" } else { "core-pdf" },
+        // The PDF pipeline reports no per-page score, and absent must not be
+        // conflated with zero — see `EXTRACT_CONFIDENCE_PROP`.
+        confidence: None,
+        detail: None,
     })
 }
 
@@ -103,12 +107,28 @@ pub(super) async fn process_pdf(
 /// A provider that is genuinely absent (no `ocr` feature, no libtesseract) is a
 /// different matter and DOES return an error, so it lands as `failed` and is
 /// retried once the binary can actually do the work.
-pub(super) async fn process_image_ocr(data: &[u8]) -> Result<TextExtractionOutput> {
+///
+/// # The policy lives here, the measurement lives in the provider
+///
+/// `options` carries the operator's language list and per-word floor. The
+/// provider applies the floor while parsing — per-word scores exist only there —
+/// but the VALUE is the caller's, resolved from the processing rule at enqueue
+/// time. Neither half decides alone.
+pub(super) async fn process_image_ocr(
+    data: &[u8],
+    options: &AssetProcessingOptions,
+) -> Result<TextExtractionOutput> {
     use raisin_ai::pdf::ocr::{get_default_ocr_provider, OcrOptions};
 
     let provider = get_default_ocr_provider();
-    let text = provider
-        .ocr_image(data, &OcrOptions::default())
+    let ocr_options = OcrOptions {
+        languages: options.ocr_languages.clone(),
+        min_word_confidence: options.ocr_min_word_confidence,
+        ..Default::default()
+    };
+
+    let result = provider
+        .ocr_image_detailed(data, &ocr_options)
         .await
         .map_err(|e| Error::Backend(format!("Image OCR failed ({}): {}", provider.name(), e)))?;
 
@@ -116,12 +136,33 @@ pub(super) async fn process_image_ocr(data: &[u8]) -> Result<TextExtractionOutpu
     // that holds nothing. Normalising here means "did we find text?" is one
     // `is_empty()` for every reader, rather than each one inventing its own
     // idea of blank.
-    let text = text.trim().to_string();
+    let text = result.text.trim().to_string();
+
+    // When the floor rejected everything, say so in terms an operator can act
+    // on. `__extract_status` will be `empty`, which is truthful but says nothing
+    // about WHY — and "this photo has no text" and "this scan was too poor to
+    // read" want different responses.
+    let detail = match (
+        text.is_empty(),
+        options.ocr_min_word_confidence,
+        result.confidence,
+    ) {
+        // `mean`, not `best`: when nothing survives the filter the provider
+        // reports the average over every word it detected. Calling that the
+        // best score would overstate the image — an operator reading "best 31"
+        // would conclude no word beat 31, which is not what was measured.
+        (true, Some(floor), Some(mean)) if mean < f32::from(floor) => Some(format!(
+            "OCR kept no word at or above confidence {floor} (mean {mean:.0})"
+        )),
+        _ => None,
+    };
 
     Ok(TextExtractionOutput {
         page_count: 1,
         used_ocr: true,
         source: "core-image-ocr",
+        confidence: result.confidence,
+        detail,
         text,
     })
 }
@@ -171,7 +212,7 @@ pub(crate) async fn process_extractable(
 ) -> Option<Result<TextExtractionOutput>> {
     match mime_type.as_deref() {
         Some("application/pdf") => Some(process_pdf(data, options).await),
-        Some(m) if m.starts_with("image/") => Some(process_image_ocr(data).await),
+        Some(m) if m.starts_with("image/") => Some(process_image_ocr(data, options).await),
         _ => None,
     }
 }

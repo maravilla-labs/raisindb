@@ -354,6 +354,14 @@ pub async fn create_rule(
         ));
     }
 
+    // Refused at the edit, where a person can read the reason — an OCR language
+    // list is a MEMORY commitment (each ~10 MB resident, asset jobs concurrent),
+    // so a bad one discovered later shows up as a worker dying, not as an error
+    // anyone can trace back to this rule.
+    req.settings
+        .validate_ocr()
+        .map_err(ApiError::validation_failed)?;
+
     let rule = ProcessingRule {
         id: id.clone(),
         name: req.name,
@@ -418,6 +426,9 @@ pub async fn update_rule(
         rule.matcher = RuleMatcher::from(matcher);
     }
     if let Some(settings) = req.settings {
+        settings
+            .validate_ocr()
+            .map_err(ApiError::validation_failed)?;
         rule.settings = settings;
     }
 

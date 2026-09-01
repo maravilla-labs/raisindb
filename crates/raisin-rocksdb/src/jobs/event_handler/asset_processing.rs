@@ -113,6 +113,60 @@ impl UnifiedJobEventHandler {
         asset_helpers::extract_mime_type(node)
     }
 
+    /// Fill unset OCR settings from the tenant's configured defaults.
+    ///
+    /// This is the "Rule setting > Tenant default > System default" order that
+    /// `ProcessingDefaults` has documented since it was written and that nothing
+    /// implemented: this function is reached per asset event and never loaded a
+    /// tenant config at all, so a tenant-level setting was persisted, shown, and
+    /// ignored.
+    ///
+    /// # Why the short-circuit is not an optimisation
+    ///
+    /// The read is skipped entirely when the rule already answers both
+    /// questions, because this runs on every asset event and an unconditional
+    /// config read would put a storage round-trip on that path for the common
+    /// case where it can change nothing. The same guard, for the same reason, is
+    /// documented on the embedding provider's AI-config read.
+    ///
+    /// A missing or unreadable tenant config is NOT an error — it means "no
+    /// tenant defaults", which is the overwhelmingly common case and must not
+    /// fail an upload.
+    async fn apply_tenant_ocr_defaults(
+        &self,
+        mut settings: raisin_ai::ProcessingSettings,
+        tenant_id: &str,
+    ) -> raisin_ai::ProcessingSettings {
+        if settings.ocr_languages.is_some() && settings.ocr_min_word_confidence.is_some() {
+            return settings;
+        }
+
+        use raisin_ai::storage::TenantAIConfigStore;
+        match self
+            .storage
+            .tenant_ai_config_repository()
+            .get_config(tenant_id)
+            .await
+        {
+            Ok(config) => {
+                if let Some(defaults) = &config.processing_defaults {
+                    defaults.apply_ocr_defaults(&mut settings);
+                }
+            }
+            // A tenant with no AI config is the common case, not a fault: it
+            // simply has no defaults to contribute.
+            Err(raisin_ai::storage::StorageError::NotFound(_)) => {}
+            Err(e) => {
+                tracing::debug!(
+                    tenant_id = %tenant_id,
+                    error = %e,
+                    "Could not read tenant AI config for OCR defaults; using rule settings alone"
+                );
+            }
+        }
+        settings
+    }
+
     /// Build asset processing options by ROUTING the node's mimetype to a set
     /// of tasks, then projecting that task list onto the options this job
     /// understands.
@@ -190,6 +244,10 @@ impl UnifiedJobEventHandler {
             }
             _ => raisin_ai::ProcessingSettings::default(),
         };
+
+        let settings = self
+            .apply_tenant_ocr_defaults(settings, &context.tenant_id)
+            .await;
 
         let requested = settings.effective_tasks(mime_type.as_deref());
         // Against what this process can ACTUALLY do, not against `|_| false`.
@@ -303,6 +361,16 @@ impl UnifiedJobEventHandler {
             trigger_embedding: settings.trigger_embedding.unwrap_or(true),
             content_hash,
             embedding_model: settings.embedding_model.clone(),
+            ocr_languages: settings.ocr_languages.clone().unwrap_or_default(),
+            // Defaulted HERE rather than left as `None`, because `None` reaches
+            // the extractor as "keep every word" — so an unconfigured server
+            // would store the noise this filter exists to remove. A rule that
+            // genuinely wants everything says `0`.
+            ocr_min_word_confidence: Some(
+                settings
+                    .ocr_min_word_confidence
+                    .unwrap_or(raisin_ai::rules::DEFAULT_OCR_MIN_WORD_CONFIDENCE),
+            ),
         }
     }
 }

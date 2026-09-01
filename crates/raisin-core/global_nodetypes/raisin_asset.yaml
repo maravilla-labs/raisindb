@@ -245,6 +245,21 @@ properties:
         the stored `__extracted_text` means the artifact is truncated.
         Engine-owned.
 
+  - name: __extract_confidence
+    type: Number
+    required: false
+    index: [Property]
+    meta:
+      label: Extraction confidence
+      description: >-
+        How sure the extractor was, 0-100, for extractors that measure it —
+        today only OCR. ABSENT means "not measured", never "measured as zero":
+        a PDF read as native text has no score to give, so a
+        `__extract_confidence < 70` sweep finds the doubtful scans without
+        collecting every PDF on the way. Property-indexed and deliberately not
+        Fulltext or Vector — a number you filter on, never a search term.
+        Engine-owned.
+
   # The loop-breaker. Extraction WRITES the node, and that write emits
   # `node:updated`, which is the same event that enqueues asset processing — so
   # without a fingerprint to compare against, one upload extracts forever.

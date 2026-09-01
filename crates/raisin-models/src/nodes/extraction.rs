@@ -107,6 +107,17 @@ pub const EXTRACT_DETAIL_PROP: &str = "__extract_detail";
 /// than the stored text means the artifact is truncated.
 pub const EXTRACT_CHARS_PROP: &str = "__extract_chars";
 
+/// How sure the extractor was, 0-100, for extractors that measure it.
+///
+/// Only OCR does today. It is what turns a threshold from a guess into a query —
+/// *"show me everything we kept below 70"* is one SQL statement, and tuning the
+/// filter without it means redeploying to learn anything.
+///
+/// **Absent means "not measured", never "measured as zero".** A PDF read as
+/// native text has no score to give, so it stores none; a `< 70` sweep must not
+/// collect every PDF on the way to finding the doubtful scans.
+pub const EXTRACT_CONFIDENCE_PROP: &str = "__extract_confidence";
+
 /// Generation of the extraction pipeline.
 ///
 /// Bump this when a change makes text this pipeline already produced WRONG — a
@@ -214,6 +225,10 @@ pub struct ExtractionArtifact {
     pub detail: Option<String>,
     /// The binary this artifact was made from.
     pub fingerprint: String,
+    /// Extractor confidence 0-100, for extractors that measure one.
+    /// `None` is "not measured" and is written as an ABSENT property, not zero —
+    /// see [`EXTRACT_CONFIDENCE_PROP`].
+    pub confidence: Option<f32>,
 }
 
 impl ExtractionArtifact {
@@ -225,6 +240,7 @@ impl ExtractionArtifact {
             source: "none".to_string(),
             detail: Some(detail.into()),
             fingerprint,
+            confidence: None,
         }
     }
 
@@ -240,6 +256,7 @@ impl ExtractionArtifact {
             source: source.into(),
             detail: Some(detail.into()),
             fingerprint,
+            confidence: None,
         }
     }
 
@@ -265,6 +282,7 @@ impl ExtractionArtifact {
                 format!("awaiting {}", awaiting.join(", "))
             }),
             fingerprint,
+            confidence: None,
         }
     }
 
@@ -286,7 +304,22 @@ impl ExtractionArtifact {
             source: source.into(),
             detail: None,
             fingerprint,
+            confidence: None,
         }
+    }
+
+    /// Record how sure the extractor was, and why that mattered.
+    ///
+    /// Both travel together on purpose. A bare 31 says nothing to whoever finds
+    /// it later; `detail` is where the artifact explains what the number caused
+    /// — "OCR kept no word above 50 (best 31)" — so the record is legible
+    /// without the reader knowing the pipeline.
+    pub fn with_confidence(mut self, confidence: Option<f32>, detail: Option<String>) -> Self {
+        self.confidence = confidence;
+        if let Some(d) = detail {
+            self.detail = Some(d);
+        }
+        self
     }
 
     /// Write the artifact onto a property map, replacing any previous one.
@@ -330,6 +363,21 @@ impl ExtractionArtifact {
             EXTRACT_CHARS_PROP.to_string(),
             PropertyValue::Integer(full_chars),
         );
+
+        // Absent when not measured, and REMOVED rather than left behind — a
+        // stale 95 from a previous OCR sitting beside a fresh native-text
+        // extraction would be read as this run's score.
+        match self.confidence {
+            Some(c) => {
+                properties.insert(
+                    EXTRACT_CONFIDENCE_PROP.to_string(),
+                    PropertyValue::Float(c as f64),
+                );
+            }
+            None => {
+                properties.remove(EXTRACT_CONFIDENCE_PROP);
+            }
+        }
 
         match &self.detail {
             Some(d) => {
@@ -390,6 +438,7 @@ pub const EXTRACTION_ARTIFACT_KEYS: &[&str] = &[
     EXTRACT_FINGERPRINT_PROP,
     EXTRACT_DETAIL_PROP,
     EXTRACT_CHARS_PROP,
+    EXTRACT_CONFIDENCE_PROP,
 ];
 
 /// Is `key` part of the extraction artifact?
@@ -546,12 +595,46 @@ mod tests {
         let mut props = HashMap::new();
         ExtractionArtifact::unsupported(fp(), "x").apply(&mut props, true);
         ExtractionArtifact::extracted(fp(), "core-pdf", "text".into()).apply(&mut props, true);
+        // Every OPTIONAL property too, or a key only some artifacts write can
+        // slip past this check — `__extract_confidence` is written by exactly
+        // one path and would otherwise never appear here.
+        ExtractionArtifact::extracted(fp(), "core-image-ocr", "text".into())
+            .with_confidence(Some(91.0), Some("why".into()))
+            .apply(&mut props, true);
         for key in props.keys() {
             assert!(
                 is_extraction_artifact_key(key),
                 "{key} is not in the shield list"
             );
         }
+    }
+
+    /// Not measured and measured-as-terrible are different facts, and only one
+    /// of them should answer a `__extract_confidence < 70` sweep.
+    #[test]
+    fn an_unmeasured_confidence_is_absent_not_zero() {
+        let mut props = HashMap::new();
+        ExtractionArtifact::extracted(fp(), "core-pdf", "native text".into())
+            .apply(&mut props, true);
+        assert!(
+            !props.contains_key(EXTRACT_CONFIDENCE_PROP),
+            "a PDF read as native text has no score to report"
+        );
+
+        // And a stale score never outlives the run that produced it.
+        ExtractionArtifact::extracted(fp(), "core-image-ocr", "t".into())
+            .with_confidence(Some(31.0), None)
+            .apply(&mut props, true);
+        assert_eq!(
+            props.get(EXTRACT_CONFIDENCE_PROP),
+            Some(&PropertyValue::Float(31.0))
+        );
+        ExtractionArtifact::extracted(fp(), "core-pdf", "t".into()).apply(&mut props, true);
+        assert!(
+            !props.contains_key(EXTRACT_CONFIDENCE_PROP),
+            "a re-extraction that measures nothing must clear the old score, \
+             or the 31 is read as this run's"
+        );
     }
 }
 
@@ -611,6 +694,7 @@ mod data_uri_tests {
             source: "core-pdf".to_string(),
             fingerprint: "fp".to_string(),
             detail: None,
+            confidence: None,
         };
 
         let mut props = HashMap::new();

@@ -342,6 +342,15 @@ where
             branch.clone(),
         )),
 
+        // Re-extraction - clears the shielded artifact so the ordinary
+        // node:updated path reads the binary again.
+        asset_reextract: Some(assets::create_asset_reextract::<_, B>(
+            deps.storage.clone(),
+            tenant_id.clone(),
+            repo_id.clone(),
+            branch.clone(),
+        )),
+
         // PDF processing - storage-key based processing (no base64 overhead)
         pdf_process_from_storage: Some(resources::create_pdf_process_from_storage(
             deps.binary_storage.clone(),

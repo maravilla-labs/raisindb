@@ -257,6 +257,29 @@ pub trait FunctionApi: Send + Sync {
         ))
     }
 
+    /// Clear an asset's extraction record so the pipeline reads it again.
+    ///
+    /// # Why this needs a server primitive at all
+    ///
+    /// Re-running extraction means re-opening the enqueue gate, which compares
+    /// the stored `__extract_fingerprint` against the binary. That property is
+    /// SHIELDED (`is_shielded_property_key`): the write path preserves it
+    /// against every actor but the extractor, precisely so a client cannot
+    /// claim a binary was read when it was not. So a function cannot clear it
+    /// by writing the node — the write silently keeps the old value and the
+    /// gate stays shut.
+    ///
+    /// Clearing it here, as the extraction actor, lets the ordinary
+    /// `node:updated` path re-enqueue exactly as a fresh upload would.
+    ///
+    /// Default: not configured, so a build without the callback says so rather
+    /// than reporting a success that changed nothing.
+    async fn asset_reextract(&self, _workspace: &str, _node_ref: &str) -> Result<Value> {
+        Err(raisin_error::Error::Validation(
+            "Asset re-extraction is not configured on this server".to_string(),
+        ))
+    }
+
     // ========== Task Operations ==========
 
     /// Create a human task in a user's inbox (fire-and-forget)

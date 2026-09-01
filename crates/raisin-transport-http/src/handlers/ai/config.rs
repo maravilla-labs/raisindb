@@ -59,6 +59,7 @@ pub async fn get_ai_config(
                 tenant_id: config.tenant_id,
                 providers,
                 embedding_settings: config.embedding_settings,
+                processing_defaults: config.processing_defaults,
             }))
         }
         Err(raisin_ai::storage::StorageError::NotFound(_)) => {
@@ -67,6 +68,7 @@ pub async fn get_ai_config(
                 tenant_id: tenant_id.to_string(),
                 providers: Vec::new(),
                 embedding_settings: None,
+                processing_defaults: None,
             }))
         }
         Err(e) => {
@@ -322,8 +324,7 @@ async fn merge_and_store(
         tenant_id: tenant_id.to_string(),
         providers,
         // Both of these merge the same way the providers do: whatever is stored
-        // survives a save that does not mention them. `processing_defaults` is not
-        // part of this request body at all; `embedding_settings` is, but omitting it
+        // survives a save that does not mention them. `embedding_settings` omitted
         // is what every pre-slug client does, and honouring that as a delete drops
         // `dimensions` — which is hashed into the embedder identity and baked into
         // the key of every vector the tenant has already written.
@@ -331,7 +332,14 @@ async fn merge_and_store(
             .embedding_settings
             .clone()
             .or_else(|| stored.as_ref().and_then(|c| c.embedding_settings.clone())),
-        processing_defaults: stored.as_ref().and_then(|c| c.processing_defaults.clone()),
+        // `processing_defaults` used to be unconditionally carried over from
+        // storage, because it was not in the request body at all — so the tenant
+        // OCR defaults were unreachable through the only endpoint that writes
+        // this record. Same absent-keeps-stored rule as above.
+        processing_defaults: req
+            .processing_defaults
+            .clone()
+            .or_else(|| stored.as_ref().and_then(|c| c.processing_defaults.clone())),
     };
 
     store.set_config(&config).await.map_err(|e| {

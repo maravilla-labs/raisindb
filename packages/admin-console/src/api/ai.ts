@@ -134,11 +134,38 @@ export interface ProviderSummary {
   model_count: number
 }
 
+/**
+ * Tenant-wide asset processing defaults.
+ *
+ * These sit UNDER any per-repository processing rule: a rule that names its own
+ * value wins, and these fill the gaps. Setting them here means a tenant says
+ * "we work in German" once instead of on every rule in every repository.
+ */
+export interface ProcessingDefaults {
+  caption_model?: string
+  embedding_model?: string
+  generate_image_caption?: boolean
+  generate_image_embedding?: boolean
+  extract_pdf_text?: boolean
+  /**
+   * TESSERACT language codes (eng, deu, fra) — NOT ISO 639-1 (en, de), which
+   * name no traineddata and fail to initialise.
+   *
+   * All listed languages are read in a single pass, so a mixed-language page
+   * needs no detection. Each costs roughly 10 MB of resident model, so this is
+   * a short list; the server refuses more than eight.
+   */
+  ocr_languages?: string[]
+  /** Drop OCR words scored below this (0-100). Server default is 50. */
+  ocr_min_word_confidence?: number
+}
+
 // AI Config response from backend (GET)
 export interface AIConfigResponse {
   tenant_id: string
   providers: ProviderConfigResponse[]
   embedding_settings?: EmbeddingSettings
+  processing_defaults?: ProcessingDefaults
 }
 
 // Backward compatibility alias
@@ -182,6 +209,8 @@ export interface ProviderConfigRequest {
 export interface UpdateAIConfigRequest {
   providers: ProviderConfigRequest[]
   embedding_settings?: EmbeddingSettings
+  /** Omitted keeps whatever is stored — it is never cleared by absence. */
+  processing_defaults?: ProcessingDefaults
 }
 
 // Success response from PUT

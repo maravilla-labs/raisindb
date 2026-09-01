@@ -201,11 +201,14 @@ impl AssetProcessingHandler {
             if options.extract_pdf_text {
                 match process_extractable(&mime_type, data, &options).await {
                     Some(Ok(pdf_result)) => {
-                        artifact = Some(ExtractionArtifact::extracted(
-                            fingerprint.clone(),
-                            pdf_result.source,
-                            pdf_result.text.clone(),
-                        ));
+                        artifact = Some(
+                            ExtractionArtifact::extracted(
+                                fingerprint.clone(),
+                                pdf_result.source,
+                                pdf_result.text.clone(),
+                            )
+                            .with_confidence(pdf_result.confidence, pdf_result.detail.clone()),
+                        );
                         result.extracted_text = Some(pdf_result.text);
                         result.pdf_page_count = Some(pdf_result.page_count);
                         result.used_ocr = pdf_result.used_ocr;
@@ -215,6 +218,7 @@ impl AssetProcessingHandler {
                             node_id = %node_id,
                             page_count = pdf_result.page_count,
                             used_ocr = pdf_result.used_ocr,
+                            confidence = ?pdf_result.confidence,
                             text_length = result.extracted_text.as_ref().map(|t| t.len()).unwrap_or(0),
                             "Text extraction complete"
                         );

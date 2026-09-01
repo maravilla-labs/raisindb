@@ -83,6 +83,87 @@ pub struct ProcessingSettings {
     /// Maximum text length to store (for extracted text).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub max_stored_text_length: Option<usize>,
+
+    /// Languages OCR should recognise, as **Tesseract** codes (`eng`, `deu`),
+    /// not ISO 639-1 (`en`, `de`) — see [`crate::pdf::ocr::OcrOptions`].
+    ///
+    /// Tesseract reads all of them in ONE pass, so a mixed-language page needs
+    /// no detection stage. The cost is memory: each language is roughly 10 MB
+    /// resident and ~0.06s per image, and asking for all 112 installed measured
+    /// 1.18 GB and 4.5s — which several concurrent asset jobs cannot afford.
+    /// That is why this is a short list per rule and not "everything".
+    ///
+    /// A deployment spanning borders expresses it as ordinary narrower rules:
+    /// a `Path` matcher on `/drives/uk/**` selecting `["eng"]` ahead of a
+    /// broader `image/*` rule selecting the local set.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub ocr_languages: Option<Vec<String>>,
+
+    /// Drop OCR words scored below this (0-100). `None` keeps everything.
+    ///
+    /// Tesseract scores each word, and on a photograph the gap is stark: a real
+    /// sign read 81-95 while two tokens invented from texture read 27. A page
+    /// average cannot express that, which is why the filter is per word.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub ocr_min_word_confidence: Option<u8>,
+}
+
+/// Per-word confidence floor applied when a rule does not name one.
+///
+/// Measured: a clean document scores 94-96 per word, while the tokens an engine
+/// invents from photographic texture score below 30. 50 sits in the empty space
+/// between, so it discards noise without touching a legible scan. A rule wanting
+/// no filtering at all says `0` explicitly.
+pub const DEFAULT_OCR_MIN_WORD_CONFIDENCE: u8 = 50;
+
+/// The most languages one rule may ask for.
+///
+/// Not a taste limit — a memory one. Each traineddata is ~10 MB resident and
+/// asset jobs run concurrently, so an unbounded list lets one rule edit OOM the
+/// worker for every tenant on the box. Eight covers any realistic document mix.
+pub const MAX_OCR_LANGUAGES: usize = 8;
+
+impl ProcessingSettings {
+    /// Check the OCR settings are ones Tesseract can actually be given.
+    ///
+    /// Called on write rather than on read: a rule that would OOM the asset
+    /// worker should be refused by the person editing it, who can see the error,
+    /// not discovered later by a background job that can only log.
+    pub fn validate_ocr(&self) -> Result<(), String> {
+        // Checked FIRST: the language early-return below must not skip it, or a
+        // rule setting only a confidence goes unvalidated.
+        if let Some(c) = self.ocr_min_word_confidence {
+            if c > 100 {
+                return Err(format!("ocr_min_word_confidence is 0-100, got {c}"));
+            }
+        }
+
+        let Some(langs) = &self.ocr_languages else {
+            return Ok(());
+        };
+        if langs.is_empty() {
+            return Err("ocr_languages is empty; omit it to use the default".to_string());
+        }
+        if langs.len() > MAX_OCR_LANGUAGES {
+            return Err(format!(
+                "{} OCR languages requested, at most {MAX_OCR_LANGUAGES} are allowed: \
+                 each costs about 10 MB of resident model and asset jobs run concurrently",
+                langs.len()
+            ));
+        }
+        // Shape only — the installed set differs per machine, so membership is
+        // not knowable here. This catches the ISO 639-1 slip (`de` for `deu`),
+        // which is the mistake the old doc comment actively encouraged.
+        for l in langs {
+            if l.len() < 3 || !l.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                return Err(format!(
+                    "'{l}' is not a Tesseract language code. They are three or more \
+                     alphanumerics (eng, deu, chi_sim), not ISO 639-1 (en, de)"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Helper enum for backward compatibility with boolean chunking config
@@ -226,6 +307,13 @@ impl ProcessingSettings {
             trigger_embedding: other.trigger_embedding.or(self.trigger_embedding),
             store_extracted_text: other.store_extracted_text.or(self.store_extracted_text),
             max_stored_text_length: other.max_stored_text_length.or(self.max_stored_text_length),
+            ocr_languages: other
+                .ocr_languages
+                .clone()
+                .or_else(|| self.ocr_languages.clone()),
+            ocr_min_word_confidence: other
+                .ocr_min_word_confidence
+                .or(self.ocr_min_word_confidence),
         }
     }
 }
@@ -361,6 +449,75 @@ mod tests {
         assert!(ProcessingSettings::default()
             .effective_tasks(Some("video/mp4"))
             .is_empty());
+    }
+
+    #[test]
+    #[test]
+    fn merge_carries_the_ocr_settings_both_ways() {
+        // `merge` builds an exhaustive struct literal with no `..`, so a field
+        // missing from it is a compile error rather than a silent drop. This
+        // pins the PRECEDENCE instead: `other` wins, `self` fills the gaps.
+        let base = ProcessingSettings {
+            ocr_languages: Some(vec!["deu".into(), "eng".into()]),
+            ocr_min_word_confidence: Some(50),
+            ..Default::default()
+        };
+        let over = ProcessingSettings {
+            ocr_languages: Some(vec!["fra".into()]),
+            ..Default::default()
+        };
+
+        let merged = base.merge(&over);
+        assert_eq!(merged.ocr_languages, Some(vec!["fra".to_string()]));
+        assert_eq!(
+            merged.ocr_min_word_confidence,
+            Some(50),
+            "a field the override does not mention must survive from the base"
+        );
+    }
+
+    #[test]
+    fn the_language_list_is_validated_before_it_can_starve_the_box() {
+        let ok = ProcessingSettings {
+            ocr_languages: Some(vec!["deu".into(), "eng".into(), "chi_sim".into()]),
+            ..Default::default()
+        };
+        assert!(ok.validate_ocr().is_ok());
+
+        // Absent is fine — it means "use the default".
+        assert!(ProcessingSettings::default().validate_ocr().is_ok());
+
+        // The ISO 639-1 slip the old OcrOptions doc actively encouraged. It
+        // would otherwise reach Tesseract and fail there, per image, in a log.
+        let iso = ProcessingSettings {
+            ocr_languages: Some(vec!["de".into()]),
+            ..Default::default()
+        };
+        let err = iso.validate_ocr().expect_err("'de' names no traineddata");
+        assert!(
+            err.contains("ISO 639-1"),
+            "the error must name the mistake: {err}"
+        );
+
+        // The memory guard: 112 languages measured 1.18 GB, and asset jobs run
+        // concurrently.
+        let many = ProcessingSettings {
+            ocr_languages: Some((0..20).map(|i| format!("la{i:02}")).collect()),
+            ..Default::default()
+        };
+        assert!(many.validate_ocr().is_err());
+
+        // A confidence on its own must still be checked — the language
+        // early-return used to skip it, which let 200 through as a threshold no
+        // word can ever meet, silently discarding every result.
+        let only_conf = ProcessingSettings {
+            ocr_min_word_confidence: Some(200),
+            ..Default::default()
+        };
+        assert!(
+            only_conf.validate_ocr().is_err(),
+            "a rule with no languages but a nonsense threshold must not validate"
+        );
     }
 
     #[test]

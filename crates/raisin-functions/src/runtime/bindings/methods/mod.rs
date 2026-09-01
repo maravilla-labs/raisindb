@@ -26,6 +26,7 @@ pub mod integrations;
 pub mod locks;
 pub mod nodes;
 pub mod notify;
+pub mod ocr;
 pub mod pdf;
 pub mod platform;
 pub mod resources;
@@ -63,6 +64,7 @@ pub fn build_registry() -> BindingsRegistry {
 
     // Resource operations
     methods.extend(resources::methods());
+    methods.extend(ocr::methods());
     methods.extend(pdf::methods());
     // Extraction writeback — text produced by a plugin task above this layer.
     methods.extend(assets::methods());
@@ -246,6 +248,7 @@ mod tests {
             "pdf_process_from_storage",
             // Asset operations (1)
             "asset_set_extraction",
+            "asset_reextract",
             // Tasks (1)
             "task_create",
             // Functions (1)

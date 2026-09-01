@@ -134,6 +134,17 @@ pub struct AssetProcessingOptions {
     /// Model ID for image embeddings
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding_model: Option<String>,
+    /// Languages OCR should recognise, as Tesseract codes (`eng`, `deu`).
+    ///
+    /// Empty means "the extractor's own default". Resolved at ENQUEUE time from
+    /// the rule and tenant config, like every other field here, so the running
+    /// job carries the settings that applied when it was queued rather than
+    /// re-reading config that may have changed underneath it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ocr_languages: Vec<String>,
+    /// Drop OCR words scored below this (0-100). `None` keeps everything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ocr_min_word_confidence: Option<u8>,
 }
 
 fn default_true() -> bool {

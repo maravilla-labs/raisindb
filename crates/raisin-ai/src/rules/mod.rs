@@ -42,7 +42,9 @@ pub use capabilities::{
     CapabilityProbe,
 };
 pub use matcher::{mime_matches, RuleMatchContext, RuleMatcher};
-pub use settings::{is_text_bearing, ProcessingSettings};
+pub use settings::{
+    is_text_bearing, ProcessingSettings, DEFAULT_OCR_MIN_WORD_CONFIDENCE, MAX_OCR_LANGUAGES,
+};
 pub use tasks::{
     is_valid_task_slug, lookup_task, plan_tasks, BlockedReason, BlockedTask, PipelinePlan,
     PlannedTask, TaskProvider, TaskSpec, KNOWN_TASKS,

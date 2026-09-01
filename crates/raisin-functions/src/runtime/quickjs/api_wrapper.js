@@ -1034,6 +1034,30 @@ globalThis.raisin = {
             return r;
         },
     },
+    ocr: {
+        // Read the text out of an image. Takes ANY image format, not just PDF
+        // pages — this is the same primitive as `raisin.pdf.ocr`, which keeps
+        // working; it simply lives under a name you would think to look for.
+        //
+        // options: { languages: ["deu","eng"], dpi: 300, minWordConfidence: 50 }
+        //   `languages` are TESSERACT codes (eng, deu), not ISO 639-1 (en, de).
+        //   All listed are loaded in one pass, so a mixed-language page needs no
+        //   detection — but each costs ~10 MB resident, so name a few.
+        //   `minWordConfidence` drops words scored below it: on a photograph the
+        //   real text scores 80-95 while glyphs invented from texture score
+        //   below 30, and no page average separates those.
+        //
+        // Returns { text, confidence, languages, available }; `confidence` is
+        // null when unmeasured, never 0.
+        // Unavailable OCR is DATA ({ available: false, reason }), not a throw.
+        image: (base64Data, options) => {
+            const r = __call('ocr_image', [base64Data, options || {}]);
+            if (__isErr(r)) {
+                throw new Error(r.message);
+            }
+            return r;
+        },
+    },
     pdf: {
         // Extract text from PDF - base64Data is the PDF content
         // Returns { text, pages, isScanned, pageCount }
@@ -1052,11 +1076,27 @@ globalThis.raisin = {
             }
             return r;
         },
-        // OCR - Extract text from image using Tesseract
-        // base64Data: base64-encoded image (PNG, JPEG, TIFF, etc.)
-        // options: { languages: ["eng"], preserveLayout: false }
-        // Returns { text, available }. When OCR is unavailable the result is
-        // DATA ({ text: "", available: false, error }), not a thrown error.
+        // OCR - Extract text from image using Tesseract.
+        //
+        // Works on ANY image (PNG, JPEG, TIFF, BMP, WebP, GIF), not only pages
+        // of a PDF — it lives under `pdf` for historical reasons. Prefer
+        // `raisin.ocr.image(...)`, which is the same call under an honest name.
+        //
+        // base64Data: base64-encoded image
+        // options: { languages: ["eng"], dpi: 300, minWordConfidence: 50,
+        //            preserveLayout: false }
+        //   languages are TESSERACT codes (eng, deu), not ISO 639-1 (en, de),
+        //   and every one listed is loaded — each costs ~10 MB and ~0.06s.
+        //   minWordConfidence drops words the engine scored below it, which is
+        //   how a photograph yields its sign text instead of noise invented
+        //   from texture.
+        //
+        // Returns { text, confidence, languages, available }. `confidence` is
+        // 0-100 or null when unmeasured — null rather than 0, so a caller
+        // thresholding cannot mistake "not measured" for "hopeless".
+        //
+        // When OCR is unavailable the result is DATA
+        // ({ text: "", available: false, reason }), not a thrown error.
         ocr: (base64Data, options) => {
             const r = __call('pdf_ocr', [base64Data, options || {}]);
             if (__isErr(r)) {
@@ -1100,6 +1140,27 @@ globalThis.raisin = {
             const r = __call('asset_set_extraction', [workspace, nodeRef, String(text || ''), options || {}]);
             if (r && r.error) {
                 throw new Error('Extraction writeback failed: ' + (r.message || r.error));
+            }
+            return r;
+        },
+        // Ask the pipeline to read this asset's binary again.
+        //
+        // Clearing `__extracted_text` yourself does NOT work: the extraction
+        // properties are engine-owned and the write path preserves them against
+        // function code, so the write succeeds and changes nothing. More subtly,
+        // the enqueue gate compares `__extract_fingerprint` to the binary — so
+        // even touching the node re-runs nothing while that stamp still matches.
+        //
+        // This clears the whole artifact as the extraction actor; the ordinary
+        // node:updated path then does exactly what it does for a new upload.
+        // Use it after changing an OCR language or a processing rule.
+        //
+        // nodeRef: node id, or an absolute path ("/assets/scan.png")
+        // Returns { queued: true, node, previous_status }
+        reextract: async (workspace, nodeRef) => {
+            const r = __call('asset_reextract', [workspace, nodeRef]);
+            if (r && r.error) {
+                throw new Error('Re-extraction failed: ' + (r.message || r.error));
             }
             return r;
         }

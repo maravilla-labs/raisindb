@@ -27,6 +27,13 @@ pub struct SetConfigRequest {
     /// the lot, so an accidental `null` must not be able to do it either.
     #[serde(default)]
     pub embedding_settings: Option<EmbeddingSettings>,
+
+    /// Tenant-wide asset processing defaults (OCR languages, confidence floor).
+    ///
+    /// Absent keeps what is stored, exactly like `embedding_settings` — a client
+    /// written before this field existed must not clear it by omission.
+    #[serde(default)]
+    pub processing_defaults: Option<raisin_ai::config::ProcessingDefaults>,
 }
 
 /// A field of a MERGE payload: absent, explicitly cleared, or set.
@@ -123,6 +130,10 @@ pub struct ConfigResponse {
     pub providers: Vec<ProviderConfigResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub embedding_settings: Option<EmbeddingSettings>,
+    /// Tenant-wide asset processing defaults. Was never returned before, so the
+    /// console could not render a value it was perfectly able to store.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub processing_defaults: Option<raisin_ai::config::ProcessingDefaults>,
 }
 
 /// Provider configuration in response (API key presence only).

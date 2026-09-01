@@ -203,6 +203,19 @@ pub type AssetSetExtractionCallback = Arc<
         + Sync,
 >;
 
+/// Clear an asset's extraction artifact so the pipeline reads the binary again.
+///
+/// - `workspace`
+/// - `node_ref`: node id or path
+pub type AssetReextractCallback = Arc<
+    dyn Fn(
+            String, // workspace
+            String, // node id or path
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send>>
+        + Send
+        + Sync,
+>;
+
 pub type PdfProcessFromStorageCallback = Arc<
     dyn Fn(
             String, // storage_key

@@ -366,6 +366,11 @@ impl FunctionApi for MockFunctionApi {
         }))
     }
 
+    async fn asset_reextract(&self, workspace: &str, node_ref: &str) -> Result<Value> {
+        tracing::info!(workspace = %workspace, node_ref = %node_ref, "Mock asset_reextract");
+        Ok(serde_json::json!({ "queued": true, "node": node_ref }))
+    }
+
     async fn pdf_process_from_storage(&self, storage_key: &str, options: Value) -> Result<Value> {
         tracing::info!(storage_key = %storage_key, options = ?options, "Mock pdf_process_from_storage");
         Ok(serde_json::json!({

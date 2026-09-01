@@ -184,7 +184,7 @@ fn get_page_count_impl(base64_data: &str) -> i64 {
 }
 
 /// OCR a base64-encoded image via the default provider (Tesseract).
-async fn ocr_impl(base64_data: &str, options: Value) -> Value {
+pub(super) async fn ocr_impl(base64_data: &str, options: Value) -> Value {
     use base64::Engine;
     use raisin_ai::pdf::{get_default_ocr_provider, OcrOptions};
 
@@ -206,15 +206,27 @@ async fn ocr_impl(base64_data: &str, options: Value) -> Value {
             .get("preserveLayout")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
+        min_word_confidence: options
+            .get("minWordConfidence")
+            .and_then(|v| v.as_u64())
+            .map(|v| v.min(100) as u8),
     };
 
     let provider = get_default_ocr_provider();
     if !provider.is_available().await {
         // Availability is DATA, not an error: callers branch on `available`.
+        //
+        // The key is `reason`, NOT `error`, and that is load-bearing. The
+        // Starlark wrapper is generated code that raises on any result dict
+        // carrying a truthy `error` (`runtime/starlark/setup_code.rs`), so
+        // spelling it `error` made "OCR is not installed" a THROWN EXCEPTION in
+        // Starlark while remaining ordinary data in JavaScript — the same call,
+        // two behaviours, decided by which runtime the tenant happened to pick.
         return serde_json::json!({
             "text": "",
             "available": false,
-            "error": "OCR is not available. Tesseract may not be installed."
+            "confidence": Value::Null,
+            "reason": "OCR is not available. Tesseract may not be installed."
         });
     }
 
@@ -226,9 +238,17 @@ async fn ocr_impl(base64_data: &str, options: Value) -> Value {
         }
     };
 
-    match provider.ocr_image(&image_bytes, &ocr_options).await {
-        Ok(text) => serde_json::json!({
-            "text": text,
+    match provider
+        .ocr_image_detailed(&image_bytes, &ocr_options)
+        .await
+    {
+        Ok(page) => serde_json::json!({
+            "text": page.text,
+            // How sure the engine was, 0-100, or null when it does not measure.
+            // Null rather than 0 so a caller thresholding on it cannot mistake
+            // "not measured" for "measured and hopeless".
+            "confidence": page.confidence,
+            "languages": ocr_options.languages,
             "available": true
         }),
         Err(e) => {

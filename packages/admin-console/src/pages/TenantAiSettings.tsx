@@ -35,6 +35,7 @@ import {
   ProviderConfigResponse,
   UpdateAIConfigRequest,
   EmbeddingSettings,
+  ProcessingDefaults,
   SplitterType,
   DistanceMetric,
   QuantizationType,
@@ -652,6 +653,10 @@ export default function TenantAiSettings() {
   })
   const [showAdvancedHnsw, setShowAdvancedHnsw] = useState(false)
 
+  // Tenant-wide processing defaults. These sit UNDER any per-repository
+  // processing rule — a rule naming its own value wins and these fill the gaps.
+  const [processingDefaults, setProcessingDefaults] = useState<ProcessingDefaults>({})
+
   // Load configuration on mount (and when tenant changes — bootstrap
   // settles before the first protected route renders, but re-loading on
   // tenant change keeps the panel honest if the value updates later).
@@ -710,7 +715,7 @@ export default function TenantAiSettings() {
       hnswChanged
 
     setHasChanges(hasProviderChanges || hasEmbeddingChanges)
-  }, [config, drafts, embeddingSettings])
+  }, [config, drafts, embeddingSettings, processingDefaults])
 
   const loadConfig = async () => {
     try {
@@ -722,6 +727,7 @@ export default function TenantAiSettings() {
       if (data.embedding_settings) {
         setEmbeddingSettings(data.embedding_settings)
       }
+      setProcessingDefaults(data.processing_defaults ?? {})
     } catch (error) {
       console.error('Failed to load config:', error)
       toast.error('Failed to load configuration', error instanceof ApiError ? error.message : 'Unknown error')
@@ -745,6 +751,7 @@ export default function TenantAiSettings() {
       const request: UpdateAIConfigRequest = {
         providers,
         embedding_settings: embeddingSettings,
+        processing_defaults: processingDefaults,
       }
 
       await aiApi.updateConfig(TENANT_ID, request)
@@ -1510,6 +1517,75 @@ export default function TenantAiSettings() {
               </div>
             </div>
           )}
+        </div>
+      </GlassCard>
+
+      {/* Asset processing defaults — tenant-wide, under every rule */}
+      <GlassCard>
+        <div className="mb-4">
+          <h2 className="text-lg font-semibold text-white">Asset Processing Defaults</h2>
+          <p className="text-sm text-gray-400 mt-1">
+            Applied when a repository's processing rule does not set its own value.
+            A rule always wins over these.
+          </p>
+        </div>
+
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-300 mb-1">
+              OCR languages
+            </label>
+            <input
+              type="text"
+              value={(processingDefaults.ocr_languages ?? []).join(', ')}
+              onChange={(e) => {
+                const list = e.target.value
+                  .split(',')
+                  .map((v) => v.trim())
+                  .filter(Boolean)
+                setProcessingDefaults({
+                  ...processingDefaults,
+                  // Empty means "not configured", which is not the same as an
+                  // empty list — the server rejects the latter.
+                  ocr_languages: list.length ? list : undefined,
+                })
+              }}
+              placeholder="deu, eng, fra, ita"
+              className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-400"
+            />
+            <p className="text-xs text-gray-500 mt-1">
+              Tesseract codes (<code>deu</code>, <code>eng</code>), not <code>de</code>/<code>en</code>.
+              All are read in one pass, so a mixed-language page needs no detection —
+              but each costs about 10&nbsp;MB of memory, and at most eight are allowed.
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-300 mb-1">
+              Minimum OCR word confidence
+            </label>
+            <input
+              type="number"
+              min={0}
+              max={100}
+              value={processingDefaults.ocr_min_word_confidence ?? ''}
+              onChange={(e) => {
+                const v = e.target.value
+                setProcessingDefaults({
+                  ...processingDefaults,
+                  ocr_min_word_confidence: v === '' ? undefined : Math.min(100, parseInt(v) || 0),
+                })
+              }}
+              placeholder="50"
+              className="w-32 px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-400"
+            />
+            <p className="text-xs text-gray-500 mt-1">
+              Words the engine scores below this are discarded. On a photograph the real
+              text scores 80–95 while shapes mistaken for letters score below 30, so 50
+              (the default) removes noise without touching a legible scan. Set 0 to keep
+              everything.
+            </p>
+          </div>
         </div>
       </GlassCard>
 

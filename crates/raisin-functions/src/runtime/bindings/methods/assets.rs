@@ -59,5 +59,28 @@ pub fn methods() -> Vec<ApiMethodDescriptor> {
                 })
             },
         },
+        // assets.reextract(workspace, nodeRef)
+        ApiMethodDescriptor {
+            internal_name: "asset_reextract",
+            js_name: "reextract",
+            py_name: "reextract",
+            category: "assets",
+            args: vec![
+                ArgSpec::new("workspace", ArgType::String),
+                ArgSpec::new("nodeRef", ArgType::String),
+            ],
+            return_type: ReturnType::Json,
+            invoker: |api: Arc<dyn FunctionApi>,
+                      args: Vec<Value>|
+             -> BoxFuture<'static, Result<InvokeResult>> {
+                Box::pin(async move {
+                    let mut parser = ArgParser::new(&args);
+                    let workspace = parser.string()?;
+                    let node_ref = parser.string()?;
+                    let result = api.asset_reextract(&workspace, &node_ref).await?;
+                    Ok(InvokeResult::Json(result))
+                })
+            },
+        },
     ]
 }

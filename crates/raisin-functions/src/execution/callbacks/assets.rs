@@ -58,7 +58,7 @@ use raisin_storage::transactional::TransactionalStorage;
 use raisin_storage::Storage;
 use serde_json::{json, Value};
 
-use crate::api::AssetSetExtractionCallback;
+use crate::api::{AssetReextractCallback, AssetSetExtractionCallback};
 
 /// The `source` recorded when the caller does not name one.
 ///
@@ -171,4 +171,87 @@ where
             })
         },
     )
+}
+
+/// Create the `raisin.assets.reextract` callback.
+///
+/// `(workspace, nodeIdOrPath) -> { queued, node, previous_status }`
+///
+/// # It clears a property rather than enqueueing a job
+///
+/// The asset pipeline is driven by `node:updated`, gated on the stored
+/// `__extract_fingerprint` matching the binary. Removing the artifact re-opens
+/// that gate, and the ordinary event path then does exactly what it does for a
+/// fresh upload — same rule matching, same task planning, same handler. Calling
+/// the enqueue path directly from here would be a second way in, which is how
+/// the two drift.
+///
+/// It must run as [`EXTRACTION_ACTOR`] for the same reason the writeback does:
+/// the write-path shield PRESERVES `__extract_*` against every other actor, so
+/// the same code as `system` would report success and change nothing.
+pub fn create_asset_reextract<S, B>(
+    storage: Arc<S>,
+    tenant_id: String,
+    repo_id: String,
+    branch: String,
+) -> AssetReextractCallback
+where
+    S: Storage + TransactionalStorage + 'static,
+    B: BinaryStorage + 'static,
+{
+    Arc::new(move |workspace: String, node_ref: String| {
+        let storage = storage.clone();
+        let tenant_id = tenant_id.clone();
+        let repo_id = repo_id.clone();
+        let branch = branch.clone();
+
+        Box::pin(async move {
+            let svc: NodeService<S> = NodeService::new_with_context(
+                storage,
+                tenant_id,
+                repo_id,
+                branch,
+                workspace.clone(),
+            )
+            .with_auth(raisin_models::auth::AuthContext::system_as(
+                raisin_models::nodes::EXTRACTION_ACTOR,
+            ));
+
+            let node: Option<raisin_models::nodes::Node> = if node_ref.starts_with('/') {
+                svc.get_by_path(&node_ref).await?
+            } else {
+                svc.get(&node_ref).await?
+            };
+            let mut node = node.ok_or_else(|| {
+                Error::NotFound(format!("Asset not found for re-extraction: {node_ref}"))
+            })?;
+
+            let previous = raisin_models::nodes::extract_status(&node.properties)
+                .map(|s| s.as_str().to_string());
+
+            // The WHOLE artifact, not just the fingerprint. Leaving the old
+            // status and text behind would advertise a result that no longer
+            // describes anything: the node would read `ok` with stale text
+            // while the pipeline was midway through producing new text, and if
+            // extraction then failed the stale text would remain as the answer.
+            for key in raisin_models::nodes::EXTRACTION_ARTIFACT_KEYS {
+                node.properties.remove(*key);
+            }
+
+            svc.update_node(node).await?;
+
+            tracing::info!(
+                workspace = %workspace,
+                node_ref = %node_ref,
+                previous_status = ?previous,
+                "Extraction artifact cleared; re-extraction follows from node:updated"
+            );
+
+            Ok(json!({
+                "queued": true,
+                "node": node_ref,
+                "previous_status": previous,
+            }))
+        })
+    })
 }

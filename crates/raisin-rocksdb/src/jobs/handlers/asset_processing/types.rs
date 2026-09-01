@@ -59,4 +59,11 @@ pub(super) struct TextExtractionOutput {
     pub used_ocr: bool,
     /// Recorded verbatim as `__extract_source`.
     pub source: &'static str,
+    /// Extractor confidence 0-100, for extractors that measure one.
+    /// `None` is "not measured" and must stay distinguishable from zero.
+    pub confidence: Option<f32>,
+    /// Why this outcome, when the outcome alone does not explain itself —
+    /// notably an empty result caused by the confidence floor rather than by
+    /// the image holding no text.
+    pub detail: Option<String>,
 }
