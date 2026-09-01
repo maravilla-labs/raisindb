@@ -112,6 +112,26 @@ pub(crate) async fn handle_asset_command_internal(
         .await?
         .ok_or_else(|| ApiError::not_found("Node not found"))?;
 
+    // A mounted file whose bytes are not held right now is NOT a missing
+    // property — it is a cache miss on a file that still exists at the provider.
+    //
+    // A mount syncs metadata only, and a cached copy expires once nothing needs
+    // it, so this is the ordinary steady state for a synced drive rather than an
+    // error. Filling it here is what makes reading a mounted asset work exactly
+    // like reading a local one: same URL, same caller, no new API. Doing it in
+    // the client instead would mean every reader — the console, an SDK, a
+    // browser following a signed link — had to know that virtual mounts exist.
+    //
+    // Only for the file itself: a missing `thumbnail` is a derived artifact that
+    // was never made, and no fetch can conjure it.
+    let node = if prop_name == "file" && !node.properties.contains_key(prop_name) {
+        hydrate_mounted_asset(&state, tenant_id, repo, branch, ws, &node)
+            .await
+            .unwrap_or(node)
+    } else {
+        node
+    };
+
     // Get the requested property
     let file_prop = node.properties.get(prop_name).ok_or_else(|| {
         ApiError::not_found(format!("Node does not have a '{}' property", prop_name))
@@ -322,4 +342,71 @@ pub(crate) async fn sign_asset_url_internal(
         .unwrap_or_else(|| "unknown".to_string());
 
     Ok(Json(SignAssetResponse { url, expires_at }))
+}
+
+/// Fetch a mount-owned asset's bytes on demand, and return the node that now
+/// carries them.
+///
+/// `None` when there was nothing to do or nothing could be done — the caller
+/// keeps the node it had and reports the ordinary "no such property", because a
+/// provider being unreachable should read as a missing file rather than as a
+/// server fault.
+///
+/// The fetch also re-stamps `__content_cached_at`, so READING a file extends its
+/// lease: something being looked at is the best evidence it should stay warm.
+#[cfg(feature = "storage-rocksdb")]
+async fn hydrate_mounted_asset(
+    state: &AppState,
+    tenant_id: &str,
+    repo: &str,
+    branch: &str,
+    ws: &str,
+    node: &raisin_models::nodes::Node,
+) -> Option<raisin_models::nodes::Node> {
+    if !raisin_models::nodes::is_fetchable_mount_content(&node.properties) {
+        return None;
+    }
+
+    let rocksdb = state.rocksdb_storage()?;
+    let mounts = rocksdb.virtual_mount_sync_handler()?;
+
+    // The mount's config lives on the repo's config branch, which is NOT the
+    // branch the asset was materialized on. Passing one for the other resolves
+    // no mount at all.
+    let config_branch = crate::handlers::integrations::config_branch(state, tenant_id, repo).await;
+
+    let fetched = mounts
+        .fetch_content(
+            raisin_rocksdb::ContentTarget {
+                tenant: tenant_id,
+                repo,
+                config_branch: &config_branch,
+                branch,
+                workspace: ws,
+                node_id: &node.id,
+            },
+            false,
+        )
+        .await;
+
+    if let Err(e) = fetched {
+        tracing::warn!(
+            node_id = %node.id, error = %e,
+            "Could not fetch mounted content for a signed asset read"
+        );
+        return None;
+    }
+
+    // Re-read: the fetch wrote the `file` onto the stored node.
+    state
+        .storage()
+        .nodes()
+        .get_by_path(
+            StorageScope::new(tenant_id, repo, branch, ws),
+            &node.path,
+            None,
+        )
+        .await
+        .ok()
+        .flatten()
 }
