@@ -421,8 +421,17 @@ export function opGetContent(credential, mount, params) {
     var meta = graphFetch(
       credential,
       "GET",
-      GRAPH + driveBase(mount) + "/items/" + enc(params.item_id) +
-        "?$select=id,name,size,file,@microsoft.graph.downloadUrl",
+      // NO `$select`, and that is the whole reason this works.
+      //
+      // `@microsoft.graph.downloadUrl` is an instance ANNOTATION, not a
+      // property. Ask for it in `$select` and Graph answers with the selected
+      // properties and no annotation — a 200 with everything except the one
+      // field this call exists to read. The listing side (`items.js`) has
+      // always read the same annotation off an unselected response and gets it
+      // every time, which is how a synced node ends up carrying a
+      // `download_url` while this call reported "no download URL" for the same
+      // item, in the same drive, on the same credential.
+      GRAPH + driveBase(mount) + "/items/" + enc(params.item_id),
       { context: "get_content(file)", rawStatusOk: true }
     );
     if (meta.status === 404) return null;
