@@ -8,7 +8,7 @@
 
 import { coded, enc } from "./common.js";
 import { GRAPH, graphFetch, raiseForStatus } from "./http.js";
-import { calendarSupportsDelta, driveContainer, eventSelect, folderScope, isMailTree, mailFolderId, mailSelect, outlookHeaders, principal, resourceOf, useImmutableIds, windowBounds, windowConfig } from "./mount.js";
+import { calendarSupportsDelta, driveContainer, eventSelect, folderScope, isMailTree, mailFolderId, mailPageSize, mailSelect, outlookHeaders, principal, resourceOf, useImmutableIds, windowBounds, windowConfig } from "./mount.js";
 import { enrichAttachments } from "./mail.js";
 import { toExternalItem } from "./items.js";
 import { buildFolderMap, mailFolderItem, mailRelativeChain } from "./mail-folders.js";
@@ -61,10 +61,29 @@ export function initialDeltaUrl(mount, resource, baselineOnly) {
 // (learn.microsoft.com message-delta). That single fact is why a tree mount
 // needs one link per folder rather than one link, and it is not a limitation
 // this adapter can design around.
+//
+// `$top` IS SENT, and it is the same bound the walk uses. Without one Graph
+// picks the page size, which is how the delta feed inherited the very failure
+// the walk was bounded for: with `include_body` on, a page Graph considered
+// reasonable is a stack of whole HTML documents, and the adapter runs out of
+// memory decoding it. The walk's bound is per-response, so the delta needs the
+// identical per-response bound — see `mailPageSize`.
+//
+// No `params` here on purpose. A delta URL is minted once and then replayed
+// from a stored link; there is no per-run item budget to honour at mint time
+// (the engine pages the feed until `max_items_per_sync` itself), so the ceiling
+// alone is the whole answer.
+//
+// `$top` is NOT part of `cursorIdentity` below, and must not be: Graph freezes
+// it into an existing link exactly as it freezes `$select`, so this bound
+// reaches a mount only when its link is next reminted. Adding it to the
+// identity would force an immediate resync of every mail mount in the fleet for
+// a change that costs nothing to wait for.
 export function mailFolderDeltaUrl(mount, folderId, baselineOnly) {
   return (
     GRAPH + principal(mount) + "/mailFolders/" + enc(folderId) +
     "/messages/delta?$select=" + enc(mailSelect(mount)) +
+    "&$top=" + mailPageSize(mount, null) +
     (baselineOnly ? "&$deltatoken=latest" : "")
   );
 }

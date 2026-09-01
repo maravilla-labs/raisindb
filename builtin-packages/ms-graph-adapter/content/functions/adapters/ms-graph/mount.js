@@ -346,6 +346,49 @@ export function pageSize(params) {
     : 100;
 }
 
+// ---- the mail page bound --------------------------------------------------
+
+// How many MESSAGES one Graph request may return. NOT the same number as
+// `params.limit`, and conflating the two is what took a production mailbox down.
+//
+// `params.limit` is the ENGINE'S ITEM BUDGET for the whole run
+// (`sync_config.max_items_per_sync`, default 500): how many items it is willing
+// to stage before it stops, saves its cursor and comes back. `$top` is how much
+// JSON has to fit in this adapter's heap AT ONCE — 64 MB
+// (`.node.yaml resource_limits.max_memory_bytes`), and as little as half that
+// when the QuickJS pool hands over a runtime that already retained memory.
+//
+// Passing the budget through as the page size meant asking Graph for 500
+// messages in one response. With `include_body` on that is 500 whole HTML
+// documents, which the host buffers, parses into a `serde_json::Value` and then
+// materializes again as QuickJS objects — the adapter died with
+// `out of memory at graphFetch` before it ever saw the page, the engine
+// classified the OOM as transient, and the identical request was retried
+// forever while the import sat frozen at the item count of the last page that
+// did fit.
+//
+// So the page is bounded HERE, by what the response weighs rather than by what
+// the run wants, and the run's budget is honoured by taking whichever is
+// smaller. Paying more requests for pages that fit is the only trade available:
+// a page that does not fit is not slower, it never arrives.
+//
+// The two ceilings differ by an order of magnitude because the payloads do.
+// Lean `$select` is a few KB per message; `body` is an unbounded HTML document,
+// and a single newsletter can be larger than the entire lean page.
+export var MAIL_PAGE = 200;
+export var MAIL_BODY_PAGE = 20;
+
+// `sync_config.page_size` overrides the ceiling for a mailbox whose messages are
+// unusually large (or unusually small). It is a CEILING, not a floor: the run's
+// own budget still wins when it is smaller, so raising this can never make the
+// engine stage more items than it asked for.
+export function mailPageSize(mount, params) {
+  var cap = includeBody(mount) ? MAIL_BODY_PAGE : MAIL_PAGE;
+  var override = Number(configValue(mount, "page_size"));
+  if (isFinite(override) && override > 0) cap = Math.min(Math.floor(override), 999);
+  return Math.min(pageSize(params), cap);
+}
+
 // The CONFIGURED calendar window, in days. Separated from `windowBounds` because
 // the two are used for opposite purposes: the bounds are relative to `now` and
 // therefore change on every call, while the config is stable and is what a

@@ -24,7 +24,7 @@ import assert from 'node:assert/strict'
 import { opList, opGetContent } from './read.js'
 import { opGetChanges } from './changes.js'
 import { raiseForStatus } from './http.js'
-import { outlookHeaders, useImmutableIds } from './mount.js'
+import { MAIL_BODY_PAGE, MAIL_PAGE, outlookHeaders, useImmutableIds } from './mount.js'
 import { opCreate, opDelete, opUpdate } from './write.js'
 import { opFinalizeUpload, SIMPLE_PUT_MAX, UPLOAD_CHUNK_SIZE } from './drive-upload.js'
 import { opCapabilities } from './capabilities.js'
@@ -2090,4 +2090,104 @@ test('a page cursor that wears our prefix but does not parse is never FETCHED as
   // It restarts this folder's listing rather than resuming a page it cannot
   // read; re-reading a page is idempotent through the etag skip-write.
   assert.deepEqual(page.items.map((i) => i.external_id).sort(), ['F-ACME', 'M-PROJ'])
+})
+
+// ---- the mail page bound --------------------------------------------------
+//
+// `max_items_per_sync` (500) was handed to Graph as `$top`. The engine's ITEM
+// BUDGET FOR A RUN and the SIZE OF ONE RESPONSE are different quantities, and
+// with `include_body` on the difference is fatal: one request asked for 500
+// whole HTML documents, which the host buffers, parses into a serde_json::Value
+// and materializes again as QuickJS objects inside a 64 MB heap. The adapter
+// died with `out of memory at graphFetch` before it ever saw the page; the
+// engine reads an OOM as transient and retried the identical request forever,
+// and a non-zero failure counter disables the back-to-back backfill, so the
+// import froze at the item count of the last page that happened to fit.
+
+function topOf(url) {
+  const m = /[?&]\$?(?:%24)?top=(\d+)/.exec(url)
+  return m ? Number(m[1]) : null
+}
+
+test('a mail page is bounded by what the RESPONSE weighs, not by the run budget', () => {
+  for (const limit of [1, 100, 5000]) {
+    const lean = stubHttp([{ body: { value: [] } }])
+    opList(CREDENTIAL, mailMount(), { limit })
+    assert.equal(
+      topOf(lean[0].url),
+      Math.min(limit, MAIL_PAGE),
+      `lean $select at limit=${limit}: the run budget may only ever LOWER the page`
+    )
+
+    const heavy = stubHttp([{ body: { value: [] } }])
+    opList(CREDENTIAL, mailMount({ sync_config: { resource: 'mail', include_body: true } }), { limit })
+    assert.equal(
+      topOf(heavy[0].url),
+      Math.min(limit, MAIL_BODY_PAGE),
+      `include_body at limit=${limit}: a body is an unbounded HTML document, ` +
+        'so the page has to be an order of magnitude smaller'
+    )
+  }
+})
+
+test('the mail TREE walk pays the same bound as the flat listing', () => {
+  // The tree walk has its own listing shape (`mailTreeList`), so it is its own
+  // call site and would otherwise keep passing the budget through untouched —
+  // and it is the path that meets the oversized page FIRST, because it issues a
+  // list call per folder rather than one for the whole mount.
+  const mount = treeMount({
+    sync_config: { resource: 'mail', folder_scope: 'tree', include_body: true },
+  })
+  const calls = stubRouter(mailboxRouter(FIXTURE))
+  opList(CREDENTIAL, mount, { folder_id: 'F-PROJ', limit: 500 })
+  const listing = calls.find((c) => c.url.includes('/messages'))
+  assert.equal(topOf(listing.url), MAIL_BODY_PAGE)
+})
+
+test('the mail delta sends a $top rather than letting Graph choose the page', () => {
+  // Without one Graph picks, and a page Graph considers reasonable is — with
+  // bodies — the same stack of HTML documents that killed the walk. The delta
+  // is what runs once the backfill finishes, so an unbounded feed just moves
+  // the failure a few hours later.
+  const mount = mailMount({ sync_config: { resource: 'mail', include_body: true } })
+  const calls = stubHttp([{ body: { value: [], '@odata.deltaLink': 'https://graph/d?$deltatoken=T' } }])
+  opGetChanges(CREDENTIAL, mount, {})
+  assert.equal(topOf(calls[0].url), MAIL_BODY_PAGE)
+})
+
+test('sync_config.page_size lowers the ceiling but never raises it past the budget', () => {
+  const mount = mailMount({ sync_config: { resource: 'mail', page_size: 7 } })
+  const calls = stubHttp([{ body: { value: [] } }])
+  opList(CREDENTIAL, mount, { limit: 500 })
+  assert.equal(topOf(calls[0].url), 7)
+
+  // A ceiling, not a floor: the run's own budget still wins when it is smaller,
+  // so raising this can never make the engine stage more than it asked for.
+  const roomy = mailMount({ sync_config: { resource: 'mail', page_size: 900 } })
+  const small = stubHttp([{ body: { value: [] } }])
+  opList(CREDENTIAL, roomy, { limit: 3 })
+  assert.equal(topOf(small[0].url), 3)
+})
+
+test('a page cursor from the PREVIOUS version is retired, not fetched as a url', () => {
+  // Bounding `$top` does nothing for a mount already part-way through a
+  // listing: Graph freezes the page size into the `nextLink` that minted it, so
+  // a stored cursor keeps re-fetching the oversized page and keeps running out
+  // of memory. Versioning the cursor is what unwedges it — but only if the
+  // guard matches the FAMILY prefix. Matched against the CURRENT version alone,
+  // a well-formed v1 blob stops looking like one of ours, falls through as the
+  // raw URL and is handed to graphFetch verbatim.
+  const mount = treeMount()
+  const calls = stubRouter(mailboxRouter(FIXTURE))
+  const page = opList(CREDENTIAL, mount, {
+    folder_id: 'F-PROJ',
+    cursor: 'rsn-mailpage-1:' + JSON.stringify({ u: 'https://graph/next', r: 'F-INBOX', p: 'Projects' }),
+    limit: 500,
+  })
+  for (const c of calls) {
+    assert.match(c.url, /^https:\/\/graph\.microsoft\.com\//, `fetched a non-url: ${c.url}`)
+  }
+  // Restarted under the new bound rather than resumed under the old one.
+  assert.deepEqual(page.items.map((i) => i.external_id).sort(), ['F-ACME', 'M-PROJ'])
+  assert.equal(topOf(calls.find((c) => c.url.includes('/messages')).url), MAIL_PAGE)
 })

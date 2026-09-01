@@ -9,7 +9,7 @@
 
 import { coded, enc } from "./common.js";
 import { GRAPH, graphFetch, raiseForStatus } from "./http.js";
-import { INSTANCE_PAGE, calendarId, driveBase, driveContainer, eventSelect, isMailTree, mailFolderId, mailSelect, outlookHeaders, pageSize, principal, resourceOf, windowBounds } from "./mount.js";
+import { INSTANCE_PAGE, calendarId, driveBase, driveContainer, eventSelect, isMailTree, mailFolderId, mailPageSize, mailSelect, outlookHeaders, pageSize, principal, resourceOf, windowBounds } from "./mount.js";
 import { enrichAttachments } from "./mail.js";
 import { toExternalItem } from "./items.js";
 import { calendarChanges } from "./changes.js";
@@ -42,9 +42,12 @@ export function opList(credential, mount, params) {
       : driveContainer(mount);
     url = GRAPH + container + "/children?$top=" + pageSize(params);
   } else {
+    // `mailPageSize`, not `pageSize`: a mail page is bounded by what the
+    // response weighs, not by the run's item budget. See mount.js.
     url =
       GRAPH + principal(mount) + "/mailFolders/" + enc(mailFolderId(mount)) +
-      "/messages?$top=" + pageSize(params) + "&$select=" + enc(mailSelect(mount));
+      "/messages?$top=" + mailPageSize(mount, params) +
+      "&$select=" + enc(mailSelect(mount));
   }
   var resp = graphFetch(credential, "GET", url, {
     context: "list",
@@ -98,7 +101,28 @@ export function opList(credential, mount, params) {
 //
 // A bare URL is still accepted, so a cursor persisted by the previous shape
 // resumes instead of erroring.
-var PAGE_CURSOR_PREFIX = "rsn-mailpage-1:";
+//
+// VERSIONED, and the version is what retires a cursor whose Graph link carries
+// a page size this adapter can no longer afford. A `nextLink` freezes `$top` at
+// the value that minted it, so bounding the page (mount.js `mailPageSize`) does
+// NOTHING for a mount already part-way through a listing: it would keep
+// re-fetching the same oversized page and keep running out of memory. Bumping
+// the version makes every stored v1 cursor unreadable, which drops it to "no
+// cursor" below and restarts that folder's listing at page 1 under the new
+// bound. Idempotent, and it needs no operator to reset anything.
+//
+//   1 → 2  the mail page is bounded independently of `max_items_per_sync`
+var PAGE_CURSOR_PREFIX = "rsn-mailpage-2:";
+
+// EVERY version of this cursor, including the ones this build cannot read.
+//
+// The guard below has to recognise a RETIRED cursor as one of ours, not just a
+// current one — a v1 blob is still not a URL, and matching only
+// `PAGE_CURSOR_PREFIX` would let it fall through and be fetched as one, which
+// is the exact failure the guard exists to prevent. Testing the family means a
+// version bump retires a cursor safely instead of aiming a request at a
+// nonsense host.
+var PAGE_CURSOR_FAMILY = "rsn-mailpage-";
 
 function wrapPageCursor(url, rootId, chain) {
   return PAGE_CURSOR_PREFIX + JSON.stringify({ u: url, r: rootId, p: chain });
@@ -127,13 +151,16 @@ function mailTreeList(credential, mount, params) {
   // A cursor that WEARS OUR PREFIX but does not unwrap is not a Graph link, and
   // it must never be fetched as one. `params.cursor` doubles as the raw URL
   // below (a bare link persisted by the previous cursor shape still resumes),
-  // so a truncated or malformed `rsn-mailpage-1:` blob would otherwise be
-  // handed to graphFetch verbatim and issue a request to a nonsense host.
+  // so a truncated, malformed or RETIRED `rsn-mailpage-*:` blob would otherwise
+  // be handed to graphFetch verbatim and issue a request to a nonsense host.
   // Dropped to "no cursor" instead: this folder's listing restarts from page 1,
   // which costs a re-read of pages that are idempotent through the etag skip.
+  //
+  // Matched on the FAMILY prefix, so an older version is caught here too — see
+  // PAGE_CURSOR_FAMILY.
   var pageCursor =
     typeof params.cursor === "string" &&
-    params.cursor.indexOf(PAGE_CURSOR_PREFIX) === 0 &&
+    params.cursor.indexOf(PAGE_CURSOR_FAMILY) === 0 &&
     !resumed
       ? null
       : params.cursor;
@@ -179,7 +206,8 @@ function mailTreeList(credential, mount, params) {
   var url =
     (resumed ? resumed.u : pageCursor) ||
     GRAPH + principal(mount) + "/mailFolders/" + enc(container) +
-      "/messages?$top=" + pageSize(params) + "&$select=" + enc(mailSelect(mount));
+      "/messages?$top=" + mailPageSize(mount, params) +
+      "&$select=" + enc(mailSelect(mount));
   var resp = graphFetch(credential, "GET", url, {
     context: "list:mail_tree",
     headers: outlookHeaders(mount),
