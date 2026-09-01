@@ -126,7 +126,16 @@ impl ProcessingSettings {
             // permanently-blocked entry in the plan of every image upload on
             // every server — noise that says nothing, on the most common path
             // there is. A tenant that wants it says so explicitly.
-            tasks: Some(vec!["image_embedding".to_string()]),
+            //
+            // `extract_text` (OCR) IS here, and it has to be spelled out: an
+            // explicit `tasks` list wins over the mime defaults in
+            // `effective_tasks`, so widening those alone would have left the
+            // built-in image rule — the one nearly every image actually
+            // matches — silently opted out of the feature.
+            tasks: Some(vec![
+                "extract_text".to_string(),
+                "image_embedding".to_string(),
+            ]),
             generate_image_embedding: Some(true),
             ..Default::default()
         }
@@ -179,7 +188,15 @@ impl ProcessingSettings {
         let is_extractable = mime_type.map(is_text_bearing).unwrap_or(false);
 
         let mut tasks = Vec::new();
-        if is_extractable {
+        // An image is text-bearing too, just not in the MIME sense: OCR reads
+        // the scanned invoice, the whiteboard photo and the screenshot of an
+        // error message, none of which the index could otherwise see past the
+        // filename. `is_text_bearing` stays honest about MIME semantics and the
+        // OR happens here, where the question is "what should be attempted".
+        //
+        // Most images yield nothing, which the handler records as `ok` with
+        // zero characters — durable, cheap to skip, never retried.
+        if is_extractable || is_image {
             tasks.push("extract_text".to_string());
         }
         if self.generate_image_embedding.unwrap_or(is_image) {
@@ -289,14 +306,18 @@ mod tests {
             s.effective_tasks(Some("application/pdf")),
             vec!["extract_text"]
         );
-        // `image_embedding` and NOTHING ELSE. An image used to derive
-        // `image_caption` and `image_keywords` here too, which meant every
-        // image upload on every server planned two tasks that no code in
-        // this process has ever performed. That is how the dead captioning
-        // surface stayed invisible: the plan said yes.
+        // `extract_text` (OCR) and `image_embedding` — and still NOT
+        // `image_caption` / `image_keywords`. An image used to derive those two
+        // here as well, which meant every image upload on every server planned
+        // two tasks that no code in this process has ever performed. That is
+        // how the dead captioning surface stayed invisible: the plan said yes.
+        //
+        // OCR is different in kind: `process_image_ocr` really does run, and
+        // the text it finds is what makes a scanned invoice findable by its
+        // contents rather than by its filename.
         assert_eq!(
             s.effective_tasks(Some("image/png")),
-            vec!["image_embedding"]
+            vec!["extract_text", "image_embedding"]
         );
         // A DOCUMENT is asked for text even when this build cannot read it.
         //
@@ -320,6 +341,29 @@ mod tests {
     }
 
     #[test]
+    fn an_image_is_asked_for_text_even_though_its_mime_is_not_text_bearing() {
+        // The two questions are separate and both answers are correct:
+        // `is_text_bearing` describes the MIME type, where an image carries no
+        // text; `effective_tasks` describes what should be ATTEMPTED, where OCR
+        // is exactly the thing that reads a screenshot or a scanned page.
+        assert!(!is_text_bearing("image/png"));
+
+        let planned = ProcessingSettings::default().effective_tasks(Some("image/png"));
+        assert!(
+            planned.contains(&"extract_text".to_string()),
+            "an image must plan OCR, or a scanned document is findable only by \
+             its filename; got {planned:?}"
+        );
+
+        // And it must not have widened anything else on the way past: a format
+        // nothing can read still plans nothing, which is what keeps
+        // `__extract_status = 'unsupported'` meaningful.
+        assert!(ProcessingSettings::default()
+            .effective_tasks(Some("video/mp4"))
+            .is_empty());
+    }
+
+    #[test]
     fn a_node_with_no_bytes_gets_no_binary_tasks() {
         assert!(ProcessingSettings::default()
             .effective_tasks(None)
@@ -335,7 +379,7 @@ mod tests {
         let s = ProcessingSettings::image();
         assert_eq!(
             s.effective_tasks(Some("image/png")),
-            vec!["image_embedding"]
+            vec!["extract_text", "image_embedding"]
         );
         assert!(crate::rules::mime_matches("image/*", "image/png"));
     }
@@ -411,8 +455,9 @@ mod tests {
         assert_eq!(s.store_extracted_text, Some(true));
         assert_eq!(
             s.effective_tasks(Some("image/png")),
-            vec!["image_embedding"],
-            "and the dead keys must not resurrect a task nothing runs"
+            vec!["extract_text", "image_embedding"],
+            "OCR and the embedding, but the dead captioning keys must not \
+             resurrect a task nothing runs"
         );
     }
 

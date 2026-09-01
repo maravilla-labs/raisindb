@@ -191,10 +191,12 @@ fn the_shipped_default_image_rule_now_matches_an_actual_upload() {
     );
     assert_eq!(
         rule.settings.effective_tasks(Some("image/png")),
-        vec!["image_embedding"],
-        "`image_caption` is no longer a shipped default: it is a product-layer \
-         task, so listing it here would put a permanently-blocked entry in the \
-         plan of every image upload on every server"
+        vec!["extract_text", "image_embedding"],
+        "OCR and the CLIP embedding are both shipped defaults for an image — \
+         the text in a screenshot or a scanned page is otherwise findable only \
+         by filename. `image_caption` is NOT: it is a product-layer task, so \
+         listing it here would put a permanently-blocked entry in the plan of \
+         every image upload on every server"
     );
 }
 

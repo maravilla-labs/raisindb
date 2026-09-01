@@ -13,7 +13,7 @@ use raisin_error::{Error, Result};
 use raisin_models::nodes::Node;
 use raisin_storage::jobs::{AssetProcessingOptions, PdfExtractionStrategy};
 
-use super::types::PdfProcessingOutput;
+use super::types::TextExtractionOutput;
 
 /// Extract the content hash of the binary from node properties.
 ///
@@ -51,7 +51,7 @@ pub(crate) fn extract_storage_key(node: &Node) -> Result<String> {
 pub(super) async fn process_pdf(
     data: &[u8],
     options: &AssetProcessingOptions,
-) -> Result<PdfProcessingOutput> {
+) -> Result<TextExtractionOutput> {
     use raisin_ai::pdf::{PdfProcessingOptions, PdfProcessor, PdfStrategy};
 
     let strategy = match options.pdf_strategy {
@@ -72,13 +72,57 @@ pub(super) async fn process_pdf(
         .await
         .map_err(|e| Error::Backend(format!("PDF processing failed: {}", e)))?;
 
-    Ok(PdfProcessingOutput {
+    let used_ocr = matches!(
+        result.method_used,
+        raisin_ai::pdf::ExtractionMethod::Ocr | raisin_ai::pdf::ExtractionMethod::Hybrid
+    );
+
+    Ok(TextExtractionOutput {
         text: result.text,
         page_count: result.page_count,
-        used_ocr: matches!(
-            result.method_used,
-            raisin_ai::pdf::ExtractionMethod::Ocr | raisin_ai::pdf::ExtractionMethod::Hybrid
-        ),
+        used_ocr,
+        source: if used_ocr { "core-pdf-ocr" } else { "core-pdf" },
+    })
+}
+
+/// OCR an image into text.
+///
+/// Reaches for the shared provider rather than constructing Tesseract here, so
+/// a deployment that swaps in a cloud OCR backend changes one factory and both
+/// the PDF fallback and this path follow.
+///
+/// # An empty result is a result
+///
+/// Most images hold no text, and that is the expected outcome rather than a
+/// fault. It returns `Ok("")`, which the caller records as an ordinary
+/// extraction with zero characters — durable, and never retried. Reporting it
+/// as an error would put every holiday photo into the retry population; hiding
+/// it entirely would leave the asset indistinguishable from one that was never
+/// looked at.
+///
+/// A provider that is genuinely absent (no `ocr` feature, no libtesseract) is a
+/// different matter and DOES return an error, so it lands as `failed` and is
+/// retried once the binary can actually do the work.
+pub(super) async fn process_image_ocr(data: &[u8]) -> Result<TextExtractionOutput> {
+    use raisin_ai::pdf::ocr::{get_default_ocr_provider, OcrOptions};
+
+    let provider = get_default_ocr_provider();
+    let text = provider
+        .ocr_image(data, &OcrOptions::default())
+        .await
+        .map_err(|e| Error::Backend(format!("Image OCR failed ({}): {}", provider.name(), e)))?;
+
+    // Tesseract is generous with blank lines and stray whitespace on an image
+    // that holds nothing. Normalising here means "did we find text?" is one
+    // `is_empty()` for every reader, rather than each one inventing its own
+    // idea of blank.
+    let text = text.trim().to_string();
+
+    Ok(TextExtractionOutput {
+        page_count: 1,
+        used_ocr: true,
+        source: "core-image-ocr",
+        text,
     })
 }
 
@@ -101,7 +145,18 @@ pub(super) async fn process_pdf(
 /// extractor behind them; until then they are deliberately absent rather than
 /// present-and-silent.
 pub(crate) fn is_extractable_mime(mime_type: &Option<String>) -> bool {
-    matches!(mime_type.as_deref(), Some("application/pdf"))
+    match mime_type.as_deref() {
+        Some("application/pdf") => true,
+        // Every image, via OCR. A photo of a whiteboard, a scanned invoice and
+        // a screenshot of an error message all carry text that is otherwise
+        // unfindable — the filename is the only thing the index ever saw.
+        //
+        // An image that turns out to hold no text is a NORMAL result, not a
+        // failure: it records `ok` with zero characters, which is durable and
+        // stops the asset being reconsidered on every sweep.
+        Some(m) => m.starts_with("image/"),
+        None => false,
+    }
 }
 
 /// Extract text from a supported binary, dispatching on mime type.
@@ -113,9 +168,10 @@ pub(crate) async fn process_extractable(
     mime_type: &Option<String>,
     data: &[u8],
     options: &AssetProcessingOptions,
-) -> Option<Result<PdfProcessingOutput>> {
+) -> Option<Result<TextExtractionOutput>> {
     match mime_type.as_deref() {
         Some("application/pdf") => Some(process_pdf(data, options).await),
+        Some(m) if m.starts_with("image/") => Some(process_image_ocr(data).await),
         _ => None,
     }
 }

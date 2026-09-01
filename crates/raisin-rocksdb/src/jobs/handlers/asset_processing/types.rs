@@ -46,9 +46,17 @@ pub struct AssetProcessingResult {
     pub image_embedding: Option<Vec<f32>>,
 }
 
-/// Output from PDF processing
-pub(super) struct PdfProcessingOutput {
+/// Output from a native text extraction — a PDF, or OCR over an image.
+///
+/// `source` is decided HERE, by the branch that did the work, rather than
+/// inferred at the call site from `used_ocr`. The two are not the same
+/// question: an image is always OCR, a PDF is OCR only sometimes, and a call
+/// site reconstructing the label from a boolean got `core-pdf-ocr` for a PNG.
+/// One producer, one label.
+pub(super) struct TextExtractionOutput {
     pub text: String,
     pub page_count: usize,
     pub used_ocr: bool,
+    /// Recorded verbatim as `__extract_source`.
+    pub source: &'static str,
 }

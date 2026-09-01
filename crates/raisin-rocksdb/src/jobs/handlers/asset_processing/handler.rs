@@ -201,14 +201,9 @@ impl AssetProcessingHandler {
             if options.extract_pdf_text {
                 match process_extractable(&mime_type, data, &options).await {
                     Some(Ok(pdf_result)) => {
-                        let source = if pdf_result.used_ocr {
-                            "core-pdf-ocr"
-                        } else {
-                            "core-pdf"
-                        };
                         artifact = Some(ExtractionArtifact::extracted(
                             fingerprint.clone(),
-                            source,
+                            pdf_result.source,
                             pdf_result.text.clone(),
                         ));
                         result.extracted_text = Some(pdf_result.text);
@@ -228,9 +223,17 @@ impl AssetProcessingHandler {
                         // A retryable failure, recorded as one. It must NOT read
                         // as `unsupported`, or a backfill looking for
                         // newly-readable formats would sweep it up forever.
+                        // The source is the EXTRACTOR that failed, and it is
+                        // not always the PDF one now that images OCR through
+                        // the same dispatch. A failure filed under the wrong
+                        // extractor sends the next reader to the wrong code.
                         artifact = Some(ExtractionArtifact::failed(
                             fingerprint.clone(),
-                            "core-pdf",
+                            if is_image_mime(&mime_type) {
+                                "core-image-ocr"
+                            } else {
+                                "core-pdf"
+                            },
                             e.to_string(),
                         ));
                         tracing::error!(

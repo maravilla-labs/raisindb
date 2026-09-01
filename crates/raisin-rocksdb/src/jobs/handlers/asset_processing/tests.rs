@@ -1,6 +1,6 @@
 //! Tests for asset processing helpers and types
 
-use super::helpers::{extract_mime_type, extract_storage_key, is_image_mime};
+use super::helpers::{extract_mime_type, extract_storage_key, is_extractable_mime, is_image_mime};
 use super::types::AssetProcessingResult;
 use chrono::Utc;
 use raisin_models::nodes::properties::value::Resource;
@@ -22,6 +22,37 @@ fn test_resource(metadata: Option<HashMap<String, PropertyValue>>) -> Resource {
         created_at: Utc::now().into(),
         updated_at: Utc::now().into(),
     }
+}
+
+#[test]
+fn every_image_is_extractable_because_ocr_reads_it() {
+    // The vocabulary and the dispatch must agree. A mime listed here with no
+    // branch in `process_extractable` is the specific failure this pairing was
+    // built to prevent: the job reports success and stores nothing.
+    for mime in [
+        "image/png",
+        "image/jpeg",
+        "image/webp",
+        "image/gif",
+        "image/tiff",
+    ] {
+        assert!(
+            is_extractable_mime(&Some(mime.to_string())),
+            "{mime} must be OCR-able, or a scanned document is findable only \
+             by its filename"
+        );
+    }
+
+    assert!(is_extractable_mime(&Some("application/pdf".to_string())));
+
+    // Still deliberately absent: nothing in THIS binary reads them, and
+    // claiming otherwise would report a silent success instead of the
+    // `unsupported` record a backfill needs.
+    assert!(!is_extractable_mime(&Some("video/mp4".to_string())));
+    assert!(!is_extractable_mime(&Some(
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document".to_string()
+    )));
+    assert!(!is_extractable_mime(&None));
 }
 
 #[test]
