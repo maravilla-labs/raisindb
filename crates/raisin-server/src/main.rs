@@ -551,6 +551,18 @@ async fn main() {
                 secret_store: storage.secret_store().ok(),
                 identity_repo: Some(Arc::new(storage.identity_repository())),
                 schema_stats_cache: Some(schema_stats_cache.clone()),
+                // What lets a function read a mounted asset's bytes when the
+                // local cache has expired.
+                //
+                // A closure, because the sync engine is built by
+                // `init_job_system` further down and published on the storage.
+                // Reading it at CALL time is what makes that ordering
+                // irrelevant; capturing the handle here would capture `None`
+                // forever and mounted content would silently never load.
+                mount_content: Some({
+                    let storage = storage.clone();
+                    Arc::new(move || storage.virtual_mount_sync_handler())
+                }),
             });
 
             let execution_callbacks = ExecutionProvider::create_callbacks_with_deps(

@@ -61,6 +61,13 @@ pub(crate) fn build_function_api(
     // Create ExecutionDependencies from AppState
     let deps = Arc::new(ExecutionDependencies {
         storage: state.storage.clone(),
+        // Mounted assets: reading one's bytes must work here too, or
+        // `getBinary()` succeeds in a job and fails over HTTP/WS for the same
+        // asset. Resolved at call time — see ExecutionDependencies.
+        mount_content: Some({
+            let s = state.storage.clone();
+            std::sync::Arc::new(move || s.virtual_mount_sync_handler())
+        }),
         binary_storage: state.bin.clone(),
         indexing_engine: state.indexing_engine.clone(),
         hnsw_engine: state.hnsw_engine.clone(),

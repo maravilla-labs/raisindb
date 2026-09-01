@@ -50,6 +50,7 @@ pub struct RaisinFunctionApiCallbacks {
     /// Store an extraction artifact produced by a plugin task above this layer.
     pub asset_set_extraction: Option<AssetSetExtractionCallback>,
     pub asset_reextract: Option<AssetReextractCallback>,
+    pub asset_ensure_content: Option<AssetEnsureContentCallback>,
     pub task_create: Option<TaskCreateCallback>,
     pub task_update: Option<TaskUpdateCallback>,
     pub task_complete: Option<TaskCompleteCallback>,
@@ -246,6 +247,12 @@ impl RaisinFunctionApiCallbacks {
     /// Set the re-extraction callback.
     pub fn with_asset_reextract(mut self, callback: AssetReextractCallback) -> Self {
         self.asset_reextract = Some(callback);
+        self
+    }
+
+    /// Set the mount-content fetch callback.
+    pub fn with_asset_ensure_content(mut self, callback: AssetEnsureContentCallback) -> Self {
+        self.asset_ensure_content = Some(callback);
         self
     }
 

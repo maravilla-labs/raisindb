@@ -82,5 +82,31 @@ pub fn methods() -> Vec<ApiMethodDescriptor> {
                 })
             },
         },
+        // assets.ensureContent(workspace, nodeRef)
+        //
+        // Called by the Resource wrapper, not by function authors: it is what
+        // makes `getBinary()` work on a mounted asset whose cache has expired.
+        ApiMethodDescriptor {
+            internal_name: "asset_ensure_content",
+            js_name: "ensureContent",
+            py_name: "ensure_content",
+            category: "assets",
+            args: vec![
+                ArgSpec::new("workspace", ArgType::String),
+                ArgSpec::new("nodeRef", ArgType::String),
+            ],
+            return_type: ReturnType::Json,
+            invoker: |api: Arc<dyn FunctionApi>,
+                      args: Vec<Value>|
+             -> BoxFuture<'static, Result<InvokeResult>> {
+                Box::pin(async move {
+                    let mut parser = ArgParser::new(&args);
+                    let workspace = parser.string()?;
+                    let node_ref = parser.string()?;
+                    let result = api.asset_ensure_content(&workspace, &node_ref).await?;
+                    Ok(InvokeResult::Json(result))
+                })
+            },
+        },
     ]
 }

@@ -53,6 +53,11 @@ pub fn shared_http_client() -> reqwest::Client {
 /// # Type Parameters
 /// - `S`: Storage implementation (e.g., `RocksDBStorage`)
 /// - `B`: Binary storage implementation (e.g., `FilesystemBinaryStorage`)
+/// Late-bound access to the virtual-mount sync engine. See
+/// [`ExecutionDependencies::mount_content`] for why this is a resolver.
+pub type MountContentResolver =
+    Arc<dyn Fn() -> Option<Arc<raisin_rocksdb::VirtualMountSyncHandler>> + Send + Sync>;
+
 pub struct ExecutionDependencies<S, B>
 where
     S: Storage + TransactionalStorage + 'static,
@@ -107,6 +112,19 @@ where
     /// grant — every call is gated by the function's `IdentityPolicy`, which
     /// denies by default.
     pub identity_repo: Option<Arc<raisin_rocksdb::repositories::IdentityRepository>>,
+
+    /// Resolves the virtual-mount sync engine, for fetching a mounted asset's
+    /// bytes when a function reads them and the local cache is empty.
+    ///
+    /// A RESOLVER and not the handler itself, because of construction order:
+    /// these dependencies are assembled before `init_job_system`, which is what
+    /// builds the sync engine and publishes it. Capturing the handle here would
+    /// capture `None` permanently, and mounted content would never load — a
+    /// silent, permanent failure of the kind that looks like a missing file.
+    ///
+    /// Returning `None` at call time is the honest "no sync engine on this
+    /// deployment", which the fetch reports as such.
+    pub mount_content: Option<MountContentResolver>,
 
     /// Schema statistics cache for SQL planner selectivity estimation.
     ///

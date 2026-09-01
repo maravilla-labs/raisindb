@@ -86,6 +86,40 @@ pub enum ContentFetch {
 }
 
 impl VirtualMountSyncHandler {
+    /// Fetch a mount-owned asset's bytes, resolving the mount's config branch.
+    ///
+    /// The one entry point a caller outside this module should use. [`Self::fetch_content`]
+    /// takes a [`ContentTarget`] carrying TWO branches that must not be the same
+    /// value — `branch` addresses the materialized node, `config_branch` is
+    /// where the mount and integration nodes live — and passing one for the
+    /// other resolves no mount at all, silently. Every caller was resolving that
+    /// itself, and one of them (the integrations HTTP layer) hardcodes `main`,
+    /// which is wrong on a repo whose default branch is not `main`.
+    ///
+    /// Here it is resolved the way the sync engine resolves it, once.
+    pub async fn fetch_node_content(
+        &self,
+        tenant: &str,
+        repo: &str,
+        branch: &str,
+        workspace: &str,
+        node_id: &str,
+    ) -> Result<ContentFetch> {
+        let config_branch = super::check::config_branch(&self.storage, tenant, repo).await;
+        self.fetch_content(
+            ContentTarget {
+                tenant,
+                repo,
+                config_branch: &config_branch,
+                branch,
+                workspace,
+                node_id,
+            },
+            false,
+        )
+        .await
+    }
+
     /// Fetch the bytes behind one mount-owned `raisin:Asset` and store them.
     ///
     /// `force` re-fetches a node that already carries a `file`; the default is to

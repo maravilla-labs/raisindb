@@ -249,6 +249,7 @@ mod tests {
             // Asset operations (1)
             "asset_set_extraction",
             "asset_reextract",
+            "asset_ensure_content",
             // Tasks (1)
             "task_create",
             // Functions (1)

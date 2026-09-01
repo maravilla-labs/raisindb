@@ -280,6 +280,23 @@ pub trait FunctionApi: Send + Sync {
         ))
     }
 
+    /// Ensure a mount-owned asset's bytes are held locally, fetching if not.
+    ///
+    /// A virtual mount syncs metadata only and a cached copy expires once
+    /// nothing needs it, so a healthy mounted document routinely has no `file`.
+    /// This is what makes `resource.getBinary()` work on one anyway — it is
+    /// called by the wrapper when the property is missing, NOT by function
+    /// authors, so reading a mounted asset stays identical to reading a local
+    /// one.
+    ///
+    /// Idempotent and cheap when the bytes are already there: the engine
+    /// answers `already_present` without calling the provider.
+    async fn asset_ensure_content(&self, _workspace: &str, _node_ref: &str) -> Result<Value> {
+        Err(raisin_error::Error::Validation(
+            "Mount content fetch is not configured on this server".to_string(),
+        ))
+    }
+
     // ========== Task Operations ==========
 
     /// Create a human task in a user's inbox (fire-and-forget)

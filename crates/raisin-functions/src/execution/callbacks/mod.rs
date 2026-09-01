@@ -351,6 +351,16 @@ where
             branch.clone(),
         )),
 
+        // Mount content - what makes `getBinary()` work on a mounted asset whose
+        // cached bytes have expired.
+        asset_ensure_content: Some(assets::create_asset_ensure_content::<_, B>(
+            deps.mount_content.clone(),
+            deps.storage.clone(),
+            tenant_id.clone(),
+            repo_id.clone(),
+            branch.clone(),
+        )),
+
         // PDF processing - storage-key based processing (no base64 overhead)
         pdf_process_from_storage: Some(resources::create_pdf_process_from_storage(
             deps.binary_storage.clone(),

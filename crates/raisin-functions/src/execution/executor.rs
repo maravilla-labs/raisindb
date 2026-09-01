@@ -222,6 +222,9 @@ where
         secret_store: deps.secret_store.clone(),
         identity_repo: deps.identity_repo.clone(),
         schema_stats_cache: deps.schema_stats_cache.clone(),
+        // No sync engine on this path; a mounted asset's bytes report as
+        // unavailable rather than as a missing file.
+        mount_content: None,
     });
 
     // Check if function requires admin escalation (from function metadata)

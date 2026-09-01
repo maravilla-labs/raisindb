@@ -106,6 +106,25 @@ impl RaisinFunctionApi {
         callback(workspace.to_string(), node_ref.to_string()).await
     }
 
+    /// Ensure a mount-owned asset's bytes are local. See the trait method.
+    pub(crate) async fn impl_asset_ensure_content(
+        &self,
+        workspace: &str,
+        node_ref: &str,
+    ) -> Result<Value> {
+        let callback = self
+            .callbacks
+            .asset_ensure_content
+            .as_ref()
+            .ok_or_else(|| {
+                raisin_error::Error::Validation(
+                    "Mount content fetch callback not configured".to_string(),
+                )
+            })?;
+
+        callback(workspace.to_string(), node_ref.to_string()).await
+    }
+
     pub(crate) async fn impl_pdf_process_from_storage(
         &self,
         storage_key: &str,

@@ -372,6 +372,12 @@ where
                 // Build API via canonical create_production_callbacks
                 let deps = Arc::new(raisin_functions::execution::ExecutionDependencies {
                     storage: ws_state.storage.clone(),
+                    // This path is generic over the storage backend, so it cannot reach
+                    // the RocksDB-specific sync engine. A function invoked here that reads
+                    // a mounted asset's expired bytes is told the fetch is unavailable
+                    // rather than seeing a missing file. The paths that matter for that —
+                    // background jobs and HTTP invoke — do supply it.
+                    mount_content: None,
                     binary_storage: ws_state.bin.clone(),
                     indexing_engine: ws_state.indexing_engine.clone(),
                     hnsw_engine: ws_state.hnsw_engine.clone(),

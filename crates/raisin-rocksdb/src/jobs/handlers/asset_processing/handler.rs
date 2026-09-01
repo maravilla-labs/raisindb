@@ -646,34 +646,19 @@ impl AssetProcessingHandler {
             return node;
         };
 
-        // The two branches are NOT the same value: `branch` addresses the
-        // materialized asset, `config_branch` is where the mount and integration
-        // nodes live. Passing the target branch for both resolves no mount.
-        //
-        // Resolved the way the sync engine resolves it, NOT hardcoded to `main`.
-        // That constant is what the integrations HTTP layer uses, and its own
-        // comment records the consequence: on a repo whose default branch is not
-        // `main` the two disagree and the engine finds no mount, returning a
-        // silent success. `config_branch` is `pub(crate)` for exactly this
-        // reason — so there is one answer to "which branch is a mount's config
-        // on".
-        let config_branch = crate::jobs::handlers::virtual_mount_sync::check::config_branch(
-            &self.storage,
-            &context.tenant_id,
-            &context.repo_id,
-        )
-        .await;
-
-        let target = crate::ContentTarget {
-            tenant: &context.tenant_id,
-            repo: &context.repo_id,
-            config_branch: &config_branch,
-            branch: &context.branch,
-            workspace: &context.workspace_id,
-            node_id,
-        };
-
-        match mounts.fetch_content(target, false).await {
+        // One entry point, which resolves the mount's config branch the way the
+        // sync engine does — see `fetch_node_content` for why a caller must not
+        // assemble that target itself.
+        match mounts
+            .fetch_node_content(
+                &context.tenant_id,
+                &context.repo_id,
+                &context.branch,
+                &context.workspace_id,
+                node_id,
+            )
+            .await
+        {
             Ok(fetched) => {
                 tracing::info!(
                     job_id = %job.id, node_id = %node_id, ?fetched,

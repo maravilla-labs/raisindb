@@ -268,9 +268,34 @@ function wrapNode(nodeData, workspace) {
         },
 
         // Get a Resource object from a property path (e.g., "./file" or "file")
+        //
+        // A MOUNTED asset whose cached bytes have expired has no `file` property
+        // at all — a virtual mount syncs metadata only and the local copy is a
+        // cache with a TTL. Returning null there would make every function that
+        // reads bytes (thumbnails, Office conversion) work or fail depending on
+        // whether the cache happened to be warm, which is not a distinction a
+        // function author can see or act on.
+        //
+        // So the bytes are fetched, here, and reading a mounted asset stays
+        // identical to reading a local one. Only for `file`: a missing
+        // `thumbnail` is a derived artifact that was never made, and no fetch
+        // can conjure one.
         getResource(propertyPath) {
             const path = propertyPath.startsWith('./') ? propertyPath.slice(2) : propertyPath;
-            const resourceData = this.properties?.[path];
+            let resourceData = this.properties?.[path];
+
+            if (!resourceData && path === 'file' && this.properties?.__virtual === true) {
+                const fetched = __call('asset_ensure_content', [workspace, this.path]);
+                if (__isErr(fetched)) {
+                    throw new Error('Could not fetch mounted content: ' + fetched.message);
+                }
+                // Re-read: the fetch wrote `file` onto the stored node.
+                const fresh = __call('nodes_get', [workspace, this.path]);
+                if (!__isErr(fresh)) {
+                    resourceData = fresh?.properties?.[path];
+                }
+            }
+
             if (!resourceData) return null;
             return new Resource(resourceData, {
                 workspace,

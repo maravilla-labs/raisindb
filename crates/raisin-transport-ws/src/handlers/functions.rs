@@ -366,6 +366,12 @@ mod inner {
         // Build ExecutionDependencies
         let deps = Arc::new(ExecutionDependencies {
             storage: state.storage.clone(),
+            // This path is generic over the storage backend, so it cannot reach
+            // the RocksDB-specific sync engine. A function invoked here that reads
+            // a mounted asset's expired bytes is told the fetch is unavailable
+            // rather than seeing a missing file. The paths that matter for that —
+            // background jobs and HTTP invoke — do supply it.
+            mount_content: None,
             binary_storage: state.bin.clone(),
             indexing_engine: state.indexing_engine.clone(),
             hnsw_engine: state.hnsw_engine.clone(),

@@ -58,7 +58,7 @@ use raisin_storage::transactional::TransactionalStorage;
 use raisin_storage::Storage;
 use serde_json::{json, Value};
 
-use crate::api::{AssetReextractCallback, AssetSetExtractionCallback};
+use crate::api::{AssetEnsureContentCallback, AssetReextractCallback, AssetSetExtractionCallback};
 
 /// The `source` recorded when the caller does not name one.
 ///
@@ -251,6 +251,88 @@ where
                 "queued": true,
                 "node": node_ref,
                 "previous_status": previous,
+            }))
+        })
+    })
+}
+
+/// Create the callback behind `resource.getBinary()` on a mounted asset.
+///
+/// # Why this exists rather than a binding function authors call
+///
+/// A mount's files live at the provider and the local copy is a cache that
+/// expires, so a healthy mounted document routinely has no `file` property. Left
+/// alone, `node.getResource('file')` returns null and every function that reads
+/// bytes — thumbnail rendering, Office conversion — fails intermittently
+/// depending on whether the cache happened to be warm. That is exactly the
+/// symptom this was written for: the same click working, then not.
+///
+/// The wrapper calls this when the property is missing, so reading a mounted
+/// asset is the same code as reading a local one. Making it a public binding
+/// instead would push "is this asset mounted?" into every function that touches
+/// bytes, which is the knowledge the engine exists to hold.
+///
+/// `mounts` is `None` on a deployment with no sync engine; the fetch then says
+/// so, rather than the caller seeing a bare missing property.
+pub fn create_asset_ensure_content<S, B>(
+    mounts: Option<crate::execution::types::MountContentResolver>,
+    storage: Arc<S>,
+    tenant_id: String,
+    repo_id: String,
+    branch: String,
+) -> AssetEnsureContentCallback
+where
+    S: Storage + TransactionalStorage + 'static,
+    B: BinaryStorage + 'static,
+{
+    Arc::new(move |workspace: String, node_ref: String| {
+        let mounts = mounts.clone();
+        let storage = storage.clone();
+        let tenant_id = tenant_id.clone();
+        let repo_id = repo_id.clone();
+        let branch = branch.clone();
+
+        Box::pin(async move {
+            // Resolved HERE, not captured: the sync engine is built after these
+            // callbacks are assembled.
+            let Some(mounts) = mounts.as_ref().and_then(|resolve| resolve()) else {
+                return Err(Error::Validation(
+                    "the virtual-mount sync engine is not running; mounted content \
+                     cannot be fetched"
+                        .to_string(),
+                ));
+            };
+
+            // Addressed by node ID, and a caller may hold either spelling — a
+            // trigger is handed whichever the event carried.
+            let svc: NodeService<S> = NodeService::new_with_context(
+                storage,
+                tenant_id.clone(),
+                repo_id.clone(),
+                branch.clone(),
+                workspace.clone(),
+            )
+            .with_auth(raisin_models::auth::AuthContext::system_as(
+                raisin_models::nodes::EXTRACTION_ACTOR,
+            ));
+
+            let node: Option<raisin_models::nodes::Node> = if node_ref.starts_with('/') {
+                svc.get_by_path(&node_ref).await?
+            } else {
+                svc.get(&node_ref).await?
+            };
+            let node =
+                node.ok_or_else(|| Error::NotFound(format!("Asset not found: {node_ref}")))?;
+
+            let fetched = mounts
+                .fetch_node_content(&tenant_id, &repo_id, &branch, &workspace, &node.id)
+                .await?;
+
+            Ok(json!({
+                "status": match fetched {
+                    raisin_rocksdb::ContentFetch::AlreadyPresent => "already_present",
+                    raisin_rocksdb::ContentFetch::Stored { .. } => "stored",
+                },
             }))
         })
     })

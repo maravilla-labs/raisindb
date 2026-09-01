@@ -216,6 +216,19 @@ pub type AssetReextractCallback = Arc<
         + Sync,
 >;
 
+/// Fetch a mount-owned asset's bytes so a function can read them.
+///
+/// - `workspace`
+/// - `node_ref`: node id or path
+pub type AssetEnsureContentCallback = Arc<
+    dyn Fn(
+            String, // workspace
+            String, // node id or path
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send>>
+        + Send
+        + Sync,
+>;
+
 pub type PdfProcessFromStorageCallback = Arc<
     dyn Fn(
             String, // storage_key

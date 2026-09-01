@@ -33,6 +33,7 @@ pub use callbacks::{
     AIGetDefaultModelCallback,
     AIListModelsCallback,
     AIListProvidersCallback,
+    AssetEnsureContentCallback,
     AssetReextractCallback,
     AssetSetExtractionCallback,
     BranchCompareCallback,
