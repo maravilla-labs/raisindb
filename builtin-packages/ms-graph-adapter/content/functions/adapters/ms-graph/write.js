@@ -97,7 +97,11 @@ export function opUpdate(credential, mount, params) {
   // and no extra request is spent; `receiptOrReadBack` only re-reads when the
   // response yields no etag (a bodiless 2xx from a proxy, or a future Graph
   // behavior change).
-  return receiptOrReadBack(credential, mount, resp, params.item_id);
+  //
+  // `params.etag` is handed on so a tree-mode mail receipt can carry the folder
+  // chain the next walk will compute. Without it the stamped etag is bare, every
+  // following run mismatches this write and reseeds the node from remote.
+  return receiptOrReadBack(credential, mount, resp, params.item_id, params.etag);
 }
 
 // ---- create (calendar mirror) ---------------------------------------------

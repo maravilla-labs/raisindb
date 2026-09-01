@@ -28,7 +28,7 @@ import { MAIL_BODY_PAGE, MAIL_PAGE, outlookHeaders, useImmutableIds } from './mo
 import { opCreate, opDelete, opUpdate } from './write.js'
 import { opFinalizeUpload, SIMPLE_PUT_MAX, UPLOAD_CHUNK_SIZE } from './drive-upload.js'
 import { opCapabilities } from './capabilities.js'
-import { toExternalItem } from './items.js'
+import { etagFolderPath, providerEtag, toExternalItem, withFolderPath } from './items.js'
 
 // ---- host stub -------------------------------------------------------------
 
@@ -2190,4 +2190,93 @@ test('a page cursor from the PREVIOUS version is retired, not fetched as a url',
   // Restarted under the new bound rather than resumed under the old one.
   assert.deepEqual(page.items.map((i) => i.external_id).sort(), ['F-ACME', 'M-PROJ'])
   assert.equal(topOf(calls.find((c) => c.url.includes('/messages')).url), MAIL_PAGE)
+})
+
+// ---- the composed tree-mode etag ------------------------------------------
+//
+// A tree-mode mail node's `__etag` is `provider|p=<folder chain>` — two values
+// in one string, and both halves have a consumer that wants only its own. Each
+// of the two failures below is one consumer taking the wrong half.
+
+test('a tree-mode write sends Graph the PROVIDER etag, never the composed one', () => {
+  // The composed value starts `W/"` like any other, so ETAG_SHAPE passed it
+  // through and Graph was handed a change key with a folder path glued on. It
+  // answers `The change key is invalid.` — a 400, so config_error, so TERMINAL:
+  // a read/unread flip on a tree-mounted message could never be pushed, and the
+  // edit sat pending forever while the standoff retried a request that could not
+  // succeed. One production mount burned an edit every ~9 minutes on this.
+  const mount = treeMount({ sync_config: { resource: 'mail', folder_scope: 'tree' } })
+  const stored = toExternalItem(msg('MSG-T', 'F-ACME'), 'mail', mount, 'Projects/Acme').etag
+  assert.match(stored, /\|p=Projects\/Acme$/, 'the fixture must actually be composed')
+
+  const calls = stubHttp([{ body: { id: 'MSG-T', '@odata.etag': 'W/"AFTER"' } }])
+  opUpdate(CREDENTIAL, mount, { item_id: 'MSG-T', payload: { isRead: true }, etag: stored })
+
+  const sent = calls[0].request.headers['If-Match']
+  assert.equal(sent, 'W/"MSG-T-1"')
+  assert.doesNotMatch(sent, /\|p=/, 'a folder path in a change key is a hard 400 from Graph')
+})
+
+test('a tree-mode receipt carries the folder chain the next walk will compute', () => {
+  // Neither receipt source can produce a composed etag on its own: the PATCH
+  // response carries the bare @odata.etag, and the read-back goes through
+  // toExternalItem with no folderPath. So the mount stamped a BARE etag while
+  // its next walk computed `provider|p=chain` — mismatching its own write every
+  // run, rebuilding the node and reseeding __pushed_state from remote. That
+  // reverts edits SILENTLY; there is no error anywhere to notice.
+  const mount = treeMount({ sync_config: { resource: 'mail', folder_scope: 'tree' } })
+  const after = { id: 'MSG-T', '@odata.etag': 'W/"AFTER"', lastModifiedDateTime: '2026-08-12T11:00:00Z' }
+
+  stubHttp([{ body: after }])
+  const receipt = opUpdate(CREDENTIAL, mount, {
+    item_id: 'MSG-T',
+    payload: { isRead: true },
+    etag: 'W/"BEFORE"|p=Projects/Acme',
+  })
+  assert.equal(
+    receipt.etag,
+    toExternalItem(after, 'mail', mount, 'Projects/Acme').etag,
+    'the receipt must be byte-identical to what the walk computes for this folder'
+  )
+
+  // The read-after-write branch has to agree with the PATCH branch, or the
+  // bodiless-response path reintroduces exactly the same mismatch.
+  stubHttp([{ status: 200, body: {} }, { body: after }])
+  const readBack = opUpdate(CREDENTIAL, mount, {
+    item_id: 'MSG-T',
+    payload: { isRead: true },
+    etag: 'W/"BEFORE"|p=Projects/Acme',
+  })
+  assert.equal(readBack.etag, toExternalItem(after, 'mail', mount, 'Projects/Acme').etag)
+})
+
+test('folder mode, calendar and drive are untouched by any of this', () => {
+  // The composition is tree-mail only. A bare prior etag must yield a bare
+  // receipt and a bare If-Match, or this fix would rewrite every other mount.
+  const after = { id: 'MSG-F', '@odata.etag': 'W/"AFTER"' }
+  const calls = stubHttp([{ body: after }])
+  const receipt = opUpdate(CREDENTIAL, mailMount(), {
+    item_id: 'MSG-F',
+    payload: { isRead: true },
+    etag: 'W/"BEFORE"',
+  })
+  assert.equal(calls[0].request.headers['If-Match'], 'W/"BEFORE"')
+  assert.equal(receipt.etag, toExternalItem(after, 'mail', mailMount()).etag)
+  assert.doesNotMatch(String(receipt.etag), /\|p=/)
+})
+
+test('composing an already-composed etag cannot double the suffix', () => {
+  // `withFolderPath` is applied on the read path AND on the receipt, so it has
+  // to be idempotent — otherwise a receipt built from an already-composed value
+  // grows a second `|p=` and mismatches forever.
+  assert.equal(withFolderPath('W/"E"|p=A/B', 'A/B'), 'W/"E"|p=A/B')
+  assert.equal(providerEtag('W/"E"|p=A/B'), 'W/"E"')
+  assert.equal(providerEtag('W/"E"'), 'W/"E"')
+  assert.equal(etagFolderPath('W/"E"|p=A/B'), 'A/B')
+  assert.equal(etagFolderPath('W/"E"'), null)
+  // A folder at the mount ROOT composes an EMPTY chain, which must survive the
+  // round trip as "" and not collapse to null — otherwise the root folder's
+  // messages stamp a bare etag and mismatch the walk.
+  assert.equal(withFolderPath('W/"E"', ''), 'W/"E"|p=')
+  assert.equal(etagFolderPath('W/"E"|p='), '')
 })

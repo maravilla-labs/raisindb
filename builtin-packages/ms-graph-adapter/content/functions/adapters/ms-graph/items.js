@@ -8,6 +8,49 @@
 import { mailMeta } from "./mail.js";
 import { calendarMeta } from "./calendar.js";
 
+// ---- the composed mail-tree etag ------------------------------------------
+//
+// A tree-mode mail node's `__etag` is NOT the provider's etag. It is the
+// provider etag with the message's folder chain appended, because
+// `can_skip_unmapped` compares etags and returns before `rel_path` is read (see
+// `toExternalItem` below for why that is necessary).
+//
+// That makes the value TWO things at once, and every consumer has to know which
+// half it wants. `ifMatch` wanted the provider half and got the whole string:
+// `W/"CQAAABYA..."|p=Projects/Acme` still starts with `W/"`, so the shape test
+// passed and Graph was sent a change key with a folder path glued to it. It
+// answered `The change key is invalid.` — a 400, therefore `config_error`,
+// therefore terminal — so a read/unread flip on a tree-mounted message could
+// never be pushed and the edit stayed pending forever, retrying a request that
+// could not succeed. Folder mode was untouched, which is exactly why this
+// surfaced only once the first tree mount went live.
+//
+// So the composition gets a NAME and a matching decomposition, and the two live
+// beside each other rather than as a `+` in one file and an assumption in
+// another.
+export var ETAG_PATH_SEP = "|p=";
+
+// The PROVIDER's etag: what Graph minted, safe to hand back to Graph.
+export function providerEtag(etag) {
+  if (typeof etag !== "string") return etag;
+  var at = etag.indexOf(ETAG_PATH_SEP);
+  return at === -1 ? etag : etag.slice(0, at);
+}
+
+// The folder chain folded into a composed etag, or null for a bare one.
+export function etagFolderPath(etag) {
+  if (typeof etag !== "string") return null;
+  var at = etag.indexOf(ETAG_PATH_SEP);
+  return at === -1 ? null : etag.slice(at + ETAG_PATH_SEP.length);
+}
+
+// The stored form: provider etag + folder chain. Idempotent, so re-composing an
+// already-composed value cannot double the suffix.
+export function withFolderPath(etag, folderPath) {
+  if (!etag || typeof folderPath !== "string") return etag;
+  return providerEtag(etag) + ETAG_PATH_SEP + folderPath;
+}
+
 // A driveItem's facets, resolved through `remoteItem` when it has one.
 //
 // An item added with "Add to my OneDrive" — a shared folder or file living in
@@ -123,7 +166,10 @@ export function toExternalItem(v, resource, mount, folderPath) {
       //
       // Folder mode keeps the bare provider etag, so no existing mount
       // re-writes a single node because this exists.
-      if (item.etag) item.etag = item.etag + "|p=" + folderPath;
+      //
+      // Composed through `withFolderPath` rather than by `+`, so the write path
+      // has a named inverse to reach for — see ETAG_PATH_SEP above.
+      item.etag = withFolderPath(item.etag, folderPath);
       item.metadata.folder_id = v.parentFolderId || null;
       // What the MAPPER reads for raisin:Mail's `folder`, instead of
       // `mount.remote_root` — a mount-level constant that is simply wrong once

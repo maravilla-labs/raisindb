@@ -18,6 +18,7 @@ import { coded } from "./common.js";
 import { raiseForStatus } from "./http.js";
 import { outlookHeaders } from "./mount.js";
 import { opGet } from "./read.js";
+import { etagFolderPath, providerEtag, withFolderPath } from "./items.js";
 
 // An etag TOKEN looks like `W/"CQAAABYAAAA..."` or `"abc"`. A stored `__etag`
 // does NOT always: `toExternalItem` falls back to `lastModifiedDateTime` when
@@ -147,10 +148,22 @@ export function diagnoseWrite(resp, context, resource) {
 export var WRITE_STATUSES = [400, 403, 404, 409, 412];
 
 // The etag header, sent only when the stored value has the shape of one.
+//
+// `providerEtag` FIRST, and the order is the whole point. A tree-mode mail
+// node's stored etag is the provider's with `|p=<folder chain>` appended, and
+// that composed string still passes ETAG_SHAPE — it starts `W/"` like any
+// other. So the shape test alone happily sent Graph a change key with a folder
+// path on the end, which Graph rejects as `The change key is invalid.`: a 400,
+// classified terminal, so the edit could never be pushed at all.
+//
+// Stripping is a no-op for every other surface — drive and calendar never
+// compose — so this is done once here rather than at each of the five callers,
+// where the one that was forgotten would fail exactly this way again.
 export function ifMatch(etag, mount) {
   var headers = { "Content-Type": "application/json" };
-  if (typeof etag === "string" && ETAG_SHAPE.test(etag)) {
-    headers["If-Match"] = etag;
+  var bare = providerEtag(etag);
+  if (typeof bare === "string" && ETAG_SHAPE.test(bare)) {
+    headers["If-Match"] = bare;
   }
   // The write MUST address the same id space the read paths listed with, or
   // every PATCH against an immutable id 404s (and vice versa). `mount` is
@@ -195,11 +208,29 @@ export function writeReceipt(resp, fallbackId) {
 // computes. A read-back that finds nothing means the item changed ids between
 // the write and the read; the delta feed re-imports it under the new id, and the
 // bodiless receipt is the best remaining answer.
-export function receiptOrReadBack(credential, mount, resp, itemId) {
+//
+// `priorEtag` IS THE STORED ETAG THIS WRITE WAS ISSUED AGAINST, and passing it
+// is what keeps a tree-mode mail write from reverting itself.
+//
+// Neither source of a receipt can produce a composed etag on its own: Graph's
+// PATCH response carries the bare `@odata.etag`, and the `opGet` read-back goes
+// through `toExternalItem` with no `folderPath`. So a tree mount stamped a BARE
+// etag while its next walk computed `provider|p=chain` — a guaranteed mismatch,
+// every time, which is precisely the "run following this push rebuilds the node
+// and reseeds __pushed_state from remote" clobber described above. It reverts
+// edits silently instead of failing, so nothing in the logs names it.
+//
+// The chain is read off `priorEtag` rather than resolved from the provider: a
+// mail update is `state_only` (isRead, flag, categories) and cannot move the
+// message, so the folder it was in before the PATCH is the folder it is in
+// after — and that costs no request. A bare `priorEtag` (folder mode, calendar,
+// drive) yields a null path and `withFolderPath` returns the etag untouched.
+export function receiptOrReadBack(credential, mount, resp, itemId, priorEtag) {
+  var path = etagFolderPath(priorEtag);
   var receipt = writeReceipt(resp, itemId);
   if (!receipt.etag) {
     var item = opGet(credential, mount, { item_id: receipt.external_id || itemId });
-    if (item) return { external_id: item.external_id, etag: item.etag };
+    if (item) receipt = { external_id: item.external_id, etag: item.etag };
   }
-  return receipt;
+  return { external_id: receipt.external_id, etag: withFolderPath(receipt.etag, path) };
 }

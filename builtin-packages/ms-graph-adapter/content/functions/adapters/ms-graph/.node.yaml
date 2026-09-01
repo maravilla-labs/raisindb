@@ -56,7 +56,17 @@ properties:
   #    delta feed sends the same `$top` instead of letting Graph choose, and the
   #    page cursor is versioned so a stored link with the old `$top` is retired
   #    rather than re-fetched.
-  version: 10
+  # 11: a tree-mode mail node's etag is `provider|p=<folder chain>`, and the
+  #    write path treated it as a provider etag. The composed value still starts
+  #    `W/"`, so ETAG_SHAPE passed it and Graph got a change key with a folder
+  #    path glued on — `The change key is invalid.`, a 400, therefore terminal,
+  #    so a read/unread flip on a tree-mounted message could never be pushed and
+  #    the edit stayed pending forever. `ifMatch` now strips. The receipt
+  #    re-composes for the same reason in reverse: both receipt sources yield a
+  #    BARE etag, so a tree mount stamped one the next walk was guaranteed to
+  #    mismatch, rebuilding the node and reseeding __pushed_state from remote —
+  #    reverting edits with nothing in the logs to say so.
+  version: 11
   resource_limits:
     timeout_ms: 120000
     max_memory_bytes: 67108864
