@@ -576,7 +576,7 @@ impl AssetProcessingHandler {
         };
 
         crate::jobs::handlers::virtual_mount_sync::MountConfig::from_node(&mount_node)
-            .map(|m| m.sync_config.ephemeral)
+            .map(|m| m.sync_config.cache_content)
             .unwrap_or(false)
     }
 
@@ -617,13 +617,18 @@ impl AssetProcessingHandler {
         // The mount must OPT IN. Fetching is how a synced drive becomes
         // searchable, but it also means pulling someone else's storage onto
         // this box — and a mount can be far larger than this deployment wants
-        // to hold. `sync_config.ephemeral` is the operator saying "cache what
-        // you need"; without it a mount stays metadata-only exactly as before.
+        // to hold. `sync_config.cache_content` is the operator saying "you may
+        // hold copies"; without it a mount stays metadata-only exactly as
+        // before.
+        //
+        // NOT `ephemeral`, which is a different policy on a different subject:
+        // it deletes the NODES of an expired mailbox. Gating bytes on it would
+        // mean enabling a cache also started deleting the tenant's documents.
         if !self.mount_allows_hydration(&node, context).await {
             tracing::debug!(
                 job_id = %job.id, node_id = %node_id,
                 "Not fetching mounted content: the mount does not allow caching \
-                 (set sync_config.ephemeral to enable indexing of its files)"
+                 (set sync_config.cache_content to enable indexing of its files)"
             );
             return node;
         }
