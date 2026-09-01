@@ -197,8 +197,20 @@ properties:
       label: Extractor
       description: >-
         Which extractor produced the text: core-pdf, core-pdf-ocr,
-        plugin-libreoffice, none. Free-form, so an out-of-tree plugin can name
-        itself. Engine-owned.
+        core-image-ocr, plugin-libreoffice, none. Free-form, so an out-of-tree
+        plugin can name itself. Engine-owned.
+
+        Property-indexed and NOT fulltext or vector indexed, deliberately. It is
+        a low-cardinality label, so exact match is the only query anyone wants:
+
+          SELECT path FROM 'assets'
+           WHERE properties->>'__extract_source'::String = 'core-image-ocr'
+
+        Fulltext would put that label into the lexical leg, where every OCR'd
+        asset would carry it as a token competing with real prose; a vector of
+        it would be metadata noise in a semantic space, and the two search legs
+        must cover the same corpus or reciprocal-rank fusion silently biases
+        toward whichever leg sees more.
 
   - name: __extract_version
     type: Number
