@@ -107,6 +107,12 @@ pub struct VirtualMountSyncHandler {
     /// a deployment without it still syncs metadata in both directions, and
     /// only a content-carrying push fails, with a reason that says so.
     binary_retrieval: Option<crate::jobs::handlers::package_install::BinaryRetrievalCallback>,
+    /// How a cached mount file is DELETED once its TTL passes.
+    ///
+    /// Optional like its siblings: without it the content TTL still clears the
+    /// node's `file`, and only the object is left behind — a disk cost, not a
+    /// correctness one, and visible in the log.
+    binary_delete: Option<crate::jobs::handlers::package_install::BinaryDeleteCallback>,
     /// Per-process identity, used to build the lease owner string.
     instance_id: String,
 }
@@ -127,6 +133,7 @@ impl VirtualMountSyncHandler {
             materializer,
             lock_manager,
             binary_store: None,
+            binary_delete: None,
             binary_retrieval: None,
             instance_id: nanoid::nanoid!(8),
         }
@@ -157,6 +164,15 @@ impl VirtualMountSyncHandler {
         callback: crate::jobs::handlers::package_install::BinaryRetrievalCallback,
     ) -> Self {
         self.binary_retrieval = Some(callback);
+        self
+    }
+
+    /// Wire the deletion the content TTL drops expired cached files through.
+    pub fn with_binary_delete(
+        mut self,
+        callback: crate::jobs::handlers::package_install::BinaryDeleteCallback,
+    ) -> Self {
+        self.binary_delete = Some(callback);
         self
     }
 

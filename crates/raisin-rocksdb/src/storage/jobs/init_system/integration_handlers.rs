@@ -42,12 +42,16 @@ pub fn create_integration_token_refresh_handler(
 /// file node being pushed to a provider. When `None`, a content-carrying push
 /// fails with that as its reason rather than silently sending metadata only —
 /// a file created at the provider with no bytes is worse than one not created.
+/// `binary_delete` is what the content TTL frees expired cached files through.
+/// When `None` the TTL still clears the node's `file`, and only the object is
+/// left behind — a disk cost that says so in the log, not a correctness one.
 pub fn create_virtual_mount_sync_handler(
     storage: Arc<RocksDBStorage>,
     function_executor: Option<FunctionExecutorCallback>,
     lock_manager: Option<LockManagerHandle>,
     binary_storage: Option<&BinaryStorageCallback>,
     binary_retrieval: Option<&BinaryRetrievalCallback>,
+    binary_delete: Option<&crate::jobs::handlers::BinaryDeleteCallback>,
 ) -> Arc<VirtualMountSyncHandler> {
     let invoker: Option<AdapterInvokerHandle> = function_executor
         .map(|cb| Arc::new(FunctionAdapterInvoker::new(cb)) as AdapterInvokerHandle);
@@ -57,6 +61,9 @@ pub fn create_virtual_mount_sync_handler(
     }
     if let Some(callback) = binary_retrieval {
         handler = handler.with_binary_retrieval(callback.clone());
+    }
+    if let Some(callback) = binary_delete {
+        handler = handler.with_binary_delete(callback.clone());
     }
     Arc::new(handler)
 }

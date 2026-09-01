@@ -696,6 +696,7 @@ async fn main() {
 
             let binary_storage_callback =
                 startup::jobs::create_binary_storage_callback(bin.clone());
+            let binary_delete_callback = startup::jobs::create_binary_delete_callback(bin.clone());
 
             // Binary upload callback is inlined here (not in startup/jobs.rs) because
             // put_stream's generic `S: Stream + 'a` lifetime bound requires the closure
@@ -758,6 +759,7 @@ async fn main() {
                     scheduled_trigger_finder,
                     execution_callbacks.binary_retrieval,
                     Some(binary_storage_callback),
+                    Some(binary_delete_callback),
                     Some(binary_upload_callback),
                     Some(flow_callbacks.node_loader),
                     Some(flow_callbacks.node_saver),

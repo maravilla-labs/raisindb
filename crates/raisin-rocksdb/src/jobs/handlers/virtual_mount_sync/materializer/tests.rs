@@ -184,6 +184,7 @@ fn recording_a_write_also_marks_its_ancestor_folders_occupied() {
         external_id: "ext-a".to_string(),
         etag: Some("v1".to_string()),
         synced_secs: None,
+        content_cached_secs: None,
         pushed_state: None,
         write_view: None,
     });

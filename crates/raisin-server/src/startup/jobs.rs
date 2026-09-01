@@ -38,6 +38,26 @@ pub fn create_binary_storage_callback<B: BinaryStorage + 'static>(
     )
 }
 
+/// Create the binary DELETE callback.
+///
+/// The counterpart of [`create_binary_storage_callback`], for the one thing that
+/// gives bytes back: a virtual mount's cached file, which is a copy of something
+/// the provider still holds. Without it the content TTL would clear the node's
+/// `file` and leave the object on disk forever.
+#[cfg(feature = "storage-rocksdb")]
+pub fn create_binary_delete_callback<B: BinaryStorage + 'static>(
+    bin: Arc<B>,
+) -> raisin_rocksdb::BinaryDeleteCallback {
+    Arc::new(move |storage_key: String| {
+        let bin = bin.clone();
+        Box::pin(async move {
+            bin.delete(&storage_key)
+                .await
+                .map_err(|e| raisin_error::Error::storage(e.to_string()))
+        })
+    })
+}
+
 /// Create node creator callback for AI tool calls.
 #[cfg(feature = "storage-rocksdb")]
 pub fn create_node_creator_callback(

@@ -63,6 +63,9 @@ impl RocksDBStorage {
         scheduled_trigger_finder: Option<ScheduledTriggerFinderCallback>,
         binary_retrieval: Option<BinaryRetrievalCallback>,
         binary_storage: Option<BinaryStorageCallback>,
+        // How a virtual mount's expired cached file is freed. See
+        // `create_virtual_mount_sync_handler`.
+        binary_delete: Option<crate::jobs::handlers::BinaryDeleteCallback>,
         binary_upload: Option<BinaryUploadCallback>,
         flow_node_loader: Option<FlowNodeLoaderCallback>,
         flow_node_saver: Option<FlowNodeSaverCallback>,
@@ -261,6 +264,7 @@ impl RocksDBStorage {
             lock_manager,
             binary_storage.as_ref(),
             binary_retrieval.as_ref(),
+            binary_delete.as_ref(),
         );
 
         // Published to the storage so the on-demand attachment fetch can reach

@@ -86,8 +86,9 @@ pub use oplog_compaction::OpLogCompactionHandler;
 pub use package_create_from_selection::PackageCreateFromSelectionHandler;
 pub use package_export::PackageExportHandler;
 pub use package_install::{
-    BinaryRetrievalCallback, BinaryStorageCallback, DryRunActionCounts, DryRunLogEntry,
-    DryRunResult, DryRunSummary, InstallMode as PackageInstallMode, PackageInstallHandler,
+    BinaryDeleteCallback, BinaryRetrievalCallback, BinaryStorageCallback, DryRunActionCounts,
+    DryRunLogEntry, DryRunResult, DryRunSummary, InstallMode as PackageInstallMode,
+    PackageInstallHandler,
 };
 pub use package_process::PackageProcessHandler;
 pub use property_index::PropertyIndexJobHandler;

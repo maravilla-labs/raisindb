@@ -35,7 +35,9 @@ VirtualMountSync{ mount_id, mode }   (mod.rs::run_sync)
    │  2. resolve adapter path (mount override → integration default)
    │  3. build_credential: decrypt tokens_encrypted, STRIP refresh_token
    │  4. acquire per-mount lease lock (if locks configured) → fencing token
-   │  5. ephemeral TTL cleanup (ephemeral.rs) up front
+   │  5. ephemeral TTL cleanup (ephemeral.rs) up front — deletes NODES
+   │  5b. content TTL cleanup (content/evict.rs) — deletes cached BYTES,
+   │      keeps the node and everything derived from it
    │  6. full::run (first sync / mode=full / no token) OR delta::run
    ▼
 adapter invocation                   (adapter.rs::FunctionAdapterInvoker)
@@ -297,6 +299,32 @@ code. New adapters should do the same.
 
 The sync loop **never invokes the adapter's `capabilities` operation** — grep the
 engine and you will find zero call sites. The flags the engine actually needs at
+
+## Two expiries, on two subjects
+
+`sync_config` carries two TTLs and they are not variations of each other:
+
+| setting | expires | survivor |
+|---|---|---|
+| `ephemeral` + `ttl_seconds` | the NODE | nothing — the item is deleted |
+| `cache_content` + `content_ttl_seconds` | the cached BYTES | the node, its extracted text, embedding and thumbnail |
+
+A mount's files live at the provider, so our copy of the bytes is a CACHE:
+filled by `content/mod.rs::fetch_content` when something needs them (extraction,
+a thumbnail, a preview) and emptied by `content/evict.rs` once the TTL passes.
+That is what lets a synced drive be searchable without being mirrored.
+
+**`cache_content` is also what permits fetching at all.** Off — the default — a
+mount stays metadata-only, and its files are findable by name alone.
+
+**Eviction skips a node with no `__etag`.** A mounted asset is identified by
+`mount|{external_id}|{etag}` (`raisin-models/.../asset.rs`), and when the
+provider supplies no etag that falls back to the local content hash, storage key
+and size — all of which eviction changes. Dropping such a node's bytes would
+change its identity, re-open the extraction gate, re-download and re-extract it,
+and evict it again, forever. All four bundled adapters supply an etag; a moved
+node or an IMAP send receipt does not.
+
 sync time (`supports_changes`, the ephemeral TTL) are read from the mount's loaded
 config (`config.rs`), not re-fetched per run. This keeps the hot path free of an
 extra adapter round-trip.

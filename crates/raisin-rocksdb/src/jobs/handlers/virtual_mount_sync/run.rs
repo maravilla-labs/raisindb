@@ -1,5 +1,6 @@
 //! `run_sync`: one mount sync run, from guards through phases to finalize.
 
+use super::content::DEFAULT_CONTENT_TTL_SECONDS;
 use super::*;
 
 impl VirtualMountSyncHandler {
@@ -218,10 +219,39 @@ impl VirtualMountSyncHandler {
             }
         };
 
-        // Ephemeral TTL cleanup up front.
+        // Ephemeral TTL cleanup up front. Deletes NODES.
         if mount.sync_config.ephemeral {
             if let Some(ttl) = mount.sync_config.ttl_seconds {
                 let _ = ephemeral::cleanup_expired(&mut batcher, ttl, Utc::now().timestamp()).await;
+            }
+        }
+
+        // Content TTL. Deletes cached BYTES and keeps the node, which is a
+        // different subject from the block above — a mount routinely wants one
+        // without the other, and conflating them would mean enabling a cache
+        // also deleted the tenant's documents.
+        //
+        // Absent `content_ttl_seconds` means the DEFAULT, not "never": enabling
+        // the cache must not be able to silently mirror a drive. Keeping bytes
+        // indefinitely is a deliberate `null`.
+        if mount.sync_config.cache_content {
+            let ttl = mount
+                .sync_config
+                .content_ttl_seconds
+                .unwrap_or(DEFAULT_CONTENT_TTL_SECONDS);
+            let now = Utc::now().timestamp();
+            // Selected from the index the run already loaded, and collected
+            // before the eviction touches storage — the same two-pass shape the
+            // node TTL uses, for the same borrow reason.
+            let candidates = content::expired_content(
+                batcher
+                    .virtual_nodes_iter()
+                    .map(|n| (n.id.as_str(), n.content_cached_secs, n.etag.is_some())),
+                ttl,
+                now,
+            );
+            if !candidates.is_empty() {
+                let _ = self.evict_expired_content(&ctx, candidates).await;
             }
         }
 

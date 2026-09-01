@@ -97,6 +97,7 @@ mod tests {
             is_command: false,
             etag: None,
             synced_secs: None,
+            content_cached_secs: None,
             // No `pushed` at all, so every watched field counts as diverged —
             // i.e. this node WOULD be a candidate if nothing filtered it.
             write_view: Some(Box::new(WriteView {

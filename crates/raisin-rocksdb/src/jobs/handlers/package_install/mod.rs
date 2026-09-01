@@ -60,7 +60,7 @@ pub use self::manifest::{
     AllowedNodeTypesPatch, PackageDependency, PackageManifest, PackageProvides, WorkspacePatch,
 };
 pub use self::types::{
-    AppliedHashRecorder, BinaryRetrievalCallback, BinaryStorageCallback,
+    AppliedHashRecorder, BinaryDeleteCallback, BinaryRetrievalCallback, BinaryStorageCallback,
     BinaryStorageFromPathCallback, DryRunActionCounts, DryRunLogEntry, DryRunResult, DryRunSummary,
     InstallMode, PackageInstallResult,
 };

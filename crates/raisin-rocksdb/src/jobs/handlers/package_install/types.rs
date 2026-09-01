@@ -248,6 +248,26 @@ pub type BinaryRetrievalCallback = Arc<
         + Sync,
 >;
 
+/// Callback type for binary DELETION.
+///
+/// The counterpart of [`BinaryStorageCallback`], for the one case that has to
+/// give bytes back: a virtual mount's cached file, which is a copy of something
+/// the provider still holds. Without it, dropping the cache would clear the
+/// node's `file` and leave the object on disk forever — which is the whole
+/// problem the cache TTL exists to solve.
+///
+/// Best-effort by contract: a delete that fails leaves an orphaned object, and
+/// that is strictly better than failing the sync that was tidying up.
+///
+/// Arguments: (storage_key)
+pub type BinaryDeleteCallback = Arc<
+    dyn Fn(
+            String, // storage_key
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// Callback type for binary storage (writing)
 ///
 /// This callback is provided by the transport layer which has access to BinaryStorage.

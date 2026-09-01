@@ -29,7 +29,30 @@ use super::{
 };
 
 mod decode;
+mod evict;
 mod fetch_url;
+
+pub(super) use evict::expired_content;
+
+/// When a mount-owned asset's bytes were last fetched, RFC 3339.
+///
+/// The clock the CONTENT ttl measures, deliberately not `__synced_at`: that one
+/// times the node, and a node outlives many copies of its bytes. Presence also
+/// means "this node currently holds cached bytes", which is what the sweep
+/// enumerates on.
+pub(crate) const CONTENT_CACHED_AT_PROP: &str = "__content_cached_at";
+
+/// How long a cached copy survives when the mount names no `content_ttl_seconds`.
+///
+/// Thirty minutes: long enough that the jobs which follow one another — extract,
+/// thumbnail, embed — all still find the bytes, and that someone browsing does
+/// not pay a provider round-trip per click. Short enough that a large drive does
+/// not accumulate.
+///
+/// A DEFAULT rather than "keep forever", because the failure modes are not
+/// symmetric: expiring too eagerly costs a re-download, while never expiring
+/// mirrors somebody's OneDrive onto this disk.
+pub(crate) const DEFAULT_CONTENT_TTL_SECONDS: u64 = 30 * 60;
 
 pub(super) use decode::{content_hash, decode_content, split_external_id};
 
@@ -270,6 +293,16 @@ impl VirtualMountSyncHandler {
         // sync write and the TTL cleanup measures staleness by it.
         node.properties.insert(
             "__synced_at".to_string(),
+            PropertyValue::String(Utc::now().to_rfc3339()),
+        );
+
+        // When this cache was filled — the clock the content TTL measures.
+        //
+        // Separate from `__synced_at`, which the NODE ttl uses: the two expire
+        // different things and a node routinely outlives many copies of its
+        // bytes. Refreshed on every fetch, so a re-read extends the lease.
+        node.properties.insert(
+            CONTENT_CACHED_AT_PROP.to_string(),
             PropertyValue::String(Utc::now().to_rfc3339()),
         );
 

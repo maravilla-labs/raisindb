@@ -118,8 +118,35 @@ properties:
         interval_seconds: 300,
         include_patterns: [], exclude_patterns: [],
         ephemeral: false, ttl_seconds: null, max_items_per_sync: 500,
-        batch_size: 1000, batch_max_bytes: 4194304
+        batch_size: 1000, batch_max_bytes: 4194304,
+        cache_content: false, content_ttl_seconds: null
       }
+
+      TWO different expiries, on two different subjects. Confusing them is a
+      data-loss mistake, so they are named apart:
+
+        ephemeral + ttl_seconds        expire the NODE.  The whole synced item
+                                       is deleted from the workspace after the
+                                       TTL. The mailbox pattern, where old mail
+                                       is not kept forever.
+
+        cache_content +                expire the BYTES. The node stays, and so
+        content_ttl_seconds            do its extracted text, embedding and
+                                       thumbnail; only the cached copy of the
+                                       file is dropped, and it is fetched again
+                                       from the provider when next needed.
+
+      cache_content is also the switch that allows fetching a mount's files AT
+      ALL. Off (the default), the mount stays metadata-only: its files are
+      findable by name but carry no extracted text, thumbnail or embedding.
+      On, the indexing pipeline may pull a file down — which means holding a
+      copy of someone else's storage, so a mount larger than this deployment
+      can hold should leave it off or pair it with a short TTL.
+
+      content_ttl_seconds absent means 30 MINUTES, not "never": enabling the
+      cache must not be able to mirror a drive by omission. Keeping bytes
+      indefinitely — reasonable for a small published folder — is an explicit
+      null.
 
       batch_size / batch_max_bytes bound how many items share one transaction
       during an import. A batch commits as ONE revision, so this is what turns a

@@ -99,6 +99,9 @@ impl<'a> SyncBatcher<'a> {
                 is_command: false,
                 etag,
                 synced_secs: None,
+                // Not known for a freshly built ref; the next run's index load
+                // reads the stamp back from storage.
+                content_cached_secs: None,
                 write_view: None,
                 pushed_state: None,
             },

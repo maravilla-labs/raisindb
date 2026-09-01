@@ -51,7 +51,18 @@ pub(crate) fn node_str_prop(node: &Node, key: &str) -> Option<String> {
 /// Read `__synced_at` as unix epoch seconds. The storage layer may coerce an
 /// ISO string into a `Date`, so accept both.
 pub(super) fn node_synced_secs(node: &Node) -> Option<i64> {
-    match node.properties.get("__synced_at")? {
+    node_time_secs(node, "__synced_at")
+}
+
+/// A stored timestamp property as unix epoch seconds.
+///
+/// Tolerates both representations a timestamp can be stored as — an RFC 3339
+/// `String` and a `Date` — because both occur: the sync writes strings, while a
+/// value that has been through a typed round-trip comes back as a `Date`. One
+/// reader for every such property, so a second caller cannot handle only one of
+/// the two shapes and silently treat the other as absent.
+pub(super) fn node_time_secs(node: &Node, key: &str) -> Option<i64> {
+    match node.properties.get(key)? {
         PropertyValue::String(s) => chrono::DateTime::parse_from_rfc3339(s)
             .ok()
             .map(|d| d.timestamp()),

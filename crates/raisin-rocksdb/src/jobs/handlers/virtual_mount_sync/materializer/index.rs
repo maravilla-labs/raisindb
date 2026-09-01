@@ -8,7 +8,8 @@ use raisin_models::nodes::Node;
 use std::collections::HashMap;
 
 use super::node_paths::{
-    ancestor_paths, node_external_id, node_mount_id, node_str_prop, node_synced_secs, under,
+    ancestor_paths, node_external_id, node_mount_id, node_str_prop, node_synced_secs,
+    node_time_secs, under,
 };
 use super::write_view::{carried_pushed_state, write_view_of, WriteView};
 
@@ -108,6 +109,13 @@ pub struct VirtualNodeRef {
     /// `__synced_at` as unix epoch seconds (used by ephemeral TTL cleanup).
     /// Tolerates both `String` (ISO 8601) and `Date` stored representations.
     pub synced_secs: Option<i64>,
+    /// `__content_cached_at` as unix epoch seconds — when this node's cached
+    /// file bytes were last fetched, used by the CONTENT ttl.
+    ///
+    /// `Some` also means the node currently holds bytes, which is what the
+    /// content sweep enumerates on: the stamp is written by the same commit
+    /// that stores the file and cleared by the one that drops it.
+    pub content_cached_secs: Option<i64>,
     /// Present only when the mount watches fields (see
     /// [`MountScope::watched_fields`]), and boxed so a read-only mount's index
     /// entry grows by one pointer rather than by two maps per node.
@@ -234,6 +242,10 @@ impl SyncIndex {
                         is_command,
                         etag,
                         synced_secs: node_synced_secs(&node),
+                        content_cached_secs: node_time_secs(
+                            &node,
+                            super::super::content::CONTENT_CACHED_AT_PROP,
+                        ),
                         pushed_state: carried_pushed_state(&node, &write_view),
                         write_view,
                     },
@@ -290,6 +302,7 @@ impl SyncIndex {
                 // Unset on purpose: the TTL cleanup reads `__synced_at` from the
                 // stored node, and this run has not written one yet.
                 synced_secs: None,
+                content_cached_secs: None,
                 write_view: None,
                 pushed_state: None,
             },

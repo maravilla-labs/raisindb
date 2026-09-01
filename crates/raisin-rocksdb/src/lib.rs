@@ -92,6 +92,7 @@ pub use jobs::{
     // Integration token-refresh dedup-key derivation (periodic driver)
     token_refresh_dedup_key,
     // Package installation callback types
+    BinaryDeleteCallback,
     BinaryRetrievalCallback,
     BinaryStorageCallback,
     BinaryUploadCallback,

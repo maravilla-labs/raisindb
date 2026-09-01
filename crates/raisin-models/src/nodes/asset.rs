@@ -254,3 +254,96 @@ fn mount_fingerprint(properties: &HashMap<String, PropertyValue>) -> Option<Stri
     }
     Some(format!("v1:mount|{external}|{etag}"))
 }
+
+#[cfg(test)]
+mod mount_identity_tests {
+    use super::*;
+    use crate::nodes::Node;
+
+    fn mounted(with_bytes: bool) -> Node {
+        let mut properties: HashMap<String, PropertyValue> = HashMap::new();
+        properties.insert("__virtual".to_string(), PropertyValue::Boolean(true));
+        properties.insert(
+            "__external_id".to_string(),
+            PropertyValue::String("01ZPBM7CG3DSI7HHND2FGK3NTSTNQOMFOG".to_string()),
+        );
+        properties.insert(
+            "__etag".to_string(),
+            PropertyValue::String("\"{F3911CDB-A39D-4CD1},1\"".to_string()),
+        );
+        properties.insert("file_size".to_string(), PropertyValue::Integer(119_763));
+
+        if with_bytes {
+            let mut meta = HashMap::new();
+            meta.insert(
+                "storage_key".to_string(),
+                PropertyValue::String("tenant/2026/08/31/abc.pdf".to_string()),
+            );
+            properties.insert(
+                "file".to_string(),
+                PropertyValue::Object({
+                    let mut o = HashMap::new();
+                    o.insert(
+                        "metadata".to_string(),
+                        PropertyValue::Object(meta.into_iter().collect()),
+                    );
+                    o
+                }),
+            );
+            properties.insert(
+                "content_hash".to_string(),
+                PropertyValue::String("deadbeef".to_string()),
+            );
+        }
+
+        Node {
+            id: "n1".to_string(),
+            properties,
+            ..Default::default()
+        }
+    }
+
+    /// THE property the whole content cache rests on.
+    ///
+    /// Bytes are a cache of the provider's file, so dropping them must not
+    /// change what the asset IS. If it did, the extraction gate would re-open
+    /// on every eviction and the pipeline would re-download and re-extract the
+    /// same unchanged file forever — at the provider's expense.
+    #[test]
+    fn evicting_the_cache_does_not_change_a_mounted_assets_identity() {
+        let cached = asset_fingerprint(&mounted(true));
+        let evicted = asset_fingerprint(&mounted(false));
+        assert_eq!(
+            cached, evicted,
+            "the fingerprint must come from the PROVIDER (etag), not from our copy"
+        );
+        assert!(cached.starts_with("v1:mount|"), "got {cached}");
+    }
+
+    /// The fallback, and why eviction refuses to touch such a node.
+    #[test]
+    fn without_an_etag_identity_falls_back_to_the_local_copy() {
+        let mut with_bytes = mounted(true);
+        let mut without = mounted(false);
+        with_bytes.properties.remove("__etag");
+        without.properties.remove("__etag");
+
+        let a = asset_fingerprint(&with_bytes);
+        let b = asset_fingerprint(&without);
+        assert!(!a.starts_with("v1:mount|"));
+        assert_ne!(
+            a, b,
+            "no etag means identity tracks the local bytes, so evicting would \
+             re-open the extraction gate — which is exactly why the sweep skips \
+             a node with no etag"
+        );
+    }
+
+    /// An ordinary uploaded asset is unaffected by any of this.
+    #[test]
+    fn a_local_asset_still_uses_the_local_triple() {
+        let mut node = mounted(true);
+        node.properties.remove("__virtual");
+        assert!(!asset_fingerprint(&node).starts_with("v1:mount|"));
+    }
+}

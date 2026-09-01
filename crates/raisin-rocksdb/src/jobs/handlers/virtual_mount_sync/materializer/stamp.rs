@@ -173,6 +173,9 @@ impl RocksDbMaterializer {
             synced_secs: chrono::DateTime::parse_from_rfc3339(synced_at)
                 .ok()
                 .map(|d| d.timestamp()),
+            // Not known for a freshly built ref; the next run's index load
+            // reads the stamp back from storage.
+            content_cached_secs: None,
             pushed_state: carried_pushed_state(&node, &write_view),
             write_view,
         }));
