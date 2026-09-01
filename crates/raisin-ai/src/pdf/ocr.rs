@@ -46,13 +46,6 @@ pub struct OcrPageResult {
     pub page_index: usize,
 }
 
-/// Default DPI asserted when the caller does not say.
-///
-/// Tesseract logs `Invalid resolution 0 dpi. Using 70 instead` for an image
-/// whose metadata carries none — and 70 sizes its glyph models for a screenshot
-/// rather than a scan. 300 is the resolution the models were trained around.
-pub const DEFAULT_OCR_DPI: u32 = 300;
-
 /// Options for OCR processing.
 #[derive(Debug, Clone, Default)]
 pub struct OcrOptions {
@@ -68,7 +61,18 @@ pub struct OcrOptions {
     /// installed at once measured 1.18 GB and 4.5s, which is why callers are
     /// expected to name a handful rather than everything.
     pub languages: Vec<String>,
-    /// DPI to assert for the image. Defaults to [`DEFAULT_OCR_DPI`].
+    /// DPI to assert for the image. `None` — the default — lets Tesseract
+    /// estimate it, which is almost always the right answer.
+    ///
+    /// MEASURED, because the opposite is tempting: Tesseract logs
+    /// `Invalid resolution 0 dpi. Using 70 instead` for an image whose metadata
+    /// carries none, which reads like something to fix. It is not. That warning
+    /// is about the file's METADATA; Tesseract separately estimates the real
+    /// resolution from the image ("Estimating resolution as 448" for a 4032x3024
+    /// photo) and uses that. Asserting 300 overrides the estimate, tells the
+    /// layout analyser the glyphs are a physical size they are not, and it then
+    /// discards them: the same photo went from reading a sign's text correctly
+    /// to returning NOTHING. Set this only for a source whose true DPI you know.
     pub dpi: Option<u32>,
     /// Whether to preserve layout/formatting.
     pub preserve_layout: bool,
@@ -386,7 +390,7 @@ impl OcrProvider for TesseractOcrProvider {
         let temp_file = Self::write_temp_image(image_data)?;
         let image_path = temp_file.path().to_string_lossy().to_string();
 
-        let dpi = options.dpi.unwrap_or(DEFAULT_OCR_DPI);
+        let dpi = options.dpi;
         let min_conf = options.min_word_confidence;
 
         // Run OCR in a blocking task since tesseract is synchronous
@@ -401,12 +405,14 @@ impl OcrProvider for TesseractOcrProvider {
                 ))
             })?;
 
-            // Assert a resolution. Without one Tesseract warns `Invalid
-            // resolution 0 dpi. Using 70 instead` and sizes its glyph models for
-            // a screenshot, which reads a scan badly.
-            tess = tess
-                .set_variable("user_defined_dpi", &dpi.to_string())
-                .map_err(|e| OcrError::ModelError(format!("Failed to set DPI: {}", e)))?;
+            // Only when the CALLER knows the resolution. Left unset, Tesseract
+            // estimates it from the image, and its estimate beats any constant
+            // we could pick — see `OcrOptions::dpi` for the measurement.
+            if let Some(dpi) = dpi {
+                tess = tess
+                    .set_variable("user_defined_dpi", &dpi.to_string())
+                    .map_err(|e| OcrError::ModelError(format!("Failed to set DPI: {}", e)))?;
+            }
 
             // Set image
             tess = tess
