@@ -8,11 +8,11 @@
 //! ## Why this exists
 //!
 //! Core's binary handling is much narrower than the estate assumes. The whole
-//! text-extraction vocabulary is one mimetype — `is_extractable_mime` in
-//! `raisin-rocksdb/src/jobs/handlers/asset_processing/helpers.rs` matches
-//! `application/pdf` and nothing else — while Word, PowerPoint, Excel, video
-//! and audio are handled only by an out-of-tree plugin that exists on the
-//! Studio installation. That is a deliberate split, not a gap: LibreOffice,
+//! text-extraction vocabulary is `application/pdf` plus `image/*` via OCR —
+//! `is_extractable_mime` in
+//! `raisin-rocksdb/src/jobs/handlers/asset_processing/helpers.rs` — while
+//! Word, PowerPoint, Excel, video and audio are handled only by an out-of-tree
+//! plugin that exists on the Studio installation. That is a deliberate split, not a gap: LibreOffice,
 //! ffmpeg, ImageMagick and headless Chrome must not live inside the raisindb
 //! process.
 //!
@@ -32,11 +32,13 @@
 //!   `features = ["pdf", "pdf-markdown", "ocr"]` unconditionally
 //!   (`crates/raisin-functions/Cargo.toml`), surfaced as `raisin.pdf.*`
 //!   (`runtime/quickjs/api_wrapper.js`) and `resource.processDocument()`.
-//! * **PDF asset job** — the deprecated `AssetProcessing` handler, whose
-//!   dispatch is `is_extractable_mime` → `application/pdf` only.
+//! * **PDF and image asset job** — the deprecated `AssetProcessing` handler,
+//!   whose dispatch is `is_extractable_mime` → `application/pdf` and
+//!   `image/*` (the latter through Tesseract, see `process_image_ocr`).
 //! * **Image embedding + OCR** — CLIP via candle and tesseract in the same
-//!   asset handler (`is_image_mime` + `generate_image_embedding`). Captioning
-//!   is compiled in but explicitly disabled (`log_deprecated_captioning_warning`).
+//!   asset handler (`is_image_mime` + `generate_image_embedding`), and OCR text
+//!   from `process_image_ocr` landing in `__extracted_text`. Captioning is
+//!   compiled in but explicitly disabled (`log_deprecated_captioning_warning`).
 //! * **Office, video, audio** — no code at all. Grepping the workspace for
 //!   `docx|pptx|xlsx|officedocument|odt|libreoffice` returns only virtual-mount
 //!   test fixtures.

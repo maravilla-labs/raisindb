@@ -7,10 +7,10 @@
 //!
 //! # Why a primitive exists at all
 //!
-//! Core's extraction vocabulary is one mimetype. `is_extractable_mime` matches
-//! `application/pdf` and nothing else, because the readers for Word,
-//! PowerPoint and Excel are LibreOffice, which must not live inside the
-//! raisindb process. Those formats are converted by a media plugin, called from
+//! Core's extraction vocabulary is narrow: `is_extractable_mime` matches
+//! `application/pdf` and `image/*` (OCR) and nothing else, because the readers
+//! for Word, PowerPoint and Excel are LibreOffice, which must not live inside
+//! the raisindb process. Those formats are converted by a media plugin, called from
 //! a function — the only layer that can reach a plugin.
 //!
 //! So the text exists in JavaScript and has to reach a node property. A
