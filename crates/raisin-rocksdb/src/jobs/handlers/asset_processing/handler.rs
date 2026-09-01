@@ -182,10 +182,15 @@ impl AssetProcessingHandler {
             .await?
             .ok_or_else(|| Error::NotFound(format!("Node not found: {}", node_id)))?;
 
-        let mime_type = extract_mime_type(&node);
-
         // Get binary data if we have a callback
-        let binary_data = self.retrieve_binary_data(job, &node_id, &node).await;
+        // May HYDRATE a mount-owned asset that has no bytes yet, replacing
+        // `node` with the copy that carries the stored file — the fingerprint
+        // and mimetype below must come from the hydrated node, not the stub.
+        let (node, binary_data) = self
+            .retrieve_binary_data(job, &node_id, node, context)
+            .await;
+
+        let mime_type = extract_mime_type(&node);
 
         // THE EXTRACTION OUTCOME, produced for every path through this block —
         // including the ones that produce no text. `None` here means "nobody
@@ -454,15 +459,48 @@ impl AssetProcessingHandler {
     }
 
     /// Retrieve binary data from storage using the callback
+    /// The asset's bytes, fetching them from the mount first when they are not
+    /// stored yet.
+    ///
+    /// # Why hydration lives HERE
+    ///
+    /// A virtual mount syncs METADATA ONLY, so a mounted document arrives with
+    /// no `file` at all. Every consumer of an asset's bytes starts from the
+    /// storage key, so all of them failed identically on such a node — nothing
+    /// was extracted, no thumbnail was made, and the file was findable only by
+    /// its name. It was not broken; the bytes had simply never been asked for.
+    ///
+    /// This is the job that WANTS the bytes, and the only place that knows the
+    /// processing plan, so it is where the decision to spend a download belongs.
+    /// Doing it lazily in a viewer instead would index a document only once a
+    /// human opened it, which is backwards for search.
+    ///
+    /// Returns the node it actually read, which is the HYDRATED one when a fetch
+    /// happened: the fingerprint stamped by the caller has to describe the bytes
+    /// that were read, and the stub's fingerprint describes nothing.
     async fn retrieve_binary_data(
         &self,
         job: &JobInfo,
         node_id: &str,
-        node: &raisin_models::nodes::Node,
-    ) -> Option<Vec<u8>> {
-        let callback = self.binary_callback.as_ref()?;
+        node: raisin_models::nodes::Node,
+        context: &JobContext,
+    ) -> (raisin_models::nodes::Node, Option<Vec<u8>>) {
+        let Some(callback) = self.binary_callback.as_ref() else {
+            return (node, None);
+        };
 
-        match extract_storage_key(node) {
+        // No stored bytes? It may simply never have been fetched. Always hands
+        // a node back — the original when nothing could be done — so the caller
+        // still records a durable outcome for it.
+        let node = match extract_storage_key(&node) {
+            Ok(_) => node,
+            Err(_) => {
+                self.hydrate_mounted_content(job, node_id, node, context)
+                    .await
+            }
+        };
+
+        let data = match extract_storage_key(&node) {
             Ok(storage_key) => match callback(storage_key.clone()).await {
                 Ok(data) => {
                     tracing::debug!(
@@ -484,10 +522,135 @@ impl AssetProcessingHandler {
             Err(e) => {
                 tracing::debug!(
                     job_id = %job.id, node_id = %node_id, error = %e,
-                    "No storage key found in node"
+                    "No storage key; nothing to read"
                 );
                 None
             }
+        };
+
+        (node, data)
+    }
+
+    /// Largest mounted file this will pull down to index.
+    ///
+    /// A bound, not a tuning knob: hydration exists so a synced drive can be
+    /// SEARCHED, and past a certain size a file is not a document any more. It
+    /// is checked against the size the provider already reported, so an
+    /// oversized file costs no download at all — only the metadata we already
+    /// hold.
+    const MAX_HYDRATE_BYTES: u64 = 64 * 1024 * 1024;
+
+    /// Fetch a mount-owned asset's bytes so it can be indexed.
+    ///
+    /// Returns the hydrated node, or the one it was given when nothing could be
+    /// done — a caller must still be able to record an outcome.
+    ///
+    /// # What it deliberately does NOT do
+    ///
+    /// It does not fetch everything on the mount. The job only exists for an
+    /// asset whose processing rules planned work for it, so the mimetype filter
+    /// has already been applied by the time we get here: a drive full of video
+    /// stays metadata-only, and its documents get read. The size cap is the
+    /// second half of that bound.
+    async fn hydrate_mounted_content(
+        &self,
+        job: &JobInfo,
+        node_id: &str,
+        node: raisin_models::nodes::Node,
+        context: &JobContext,
+    ) -> raisin_models::nodes::Node {
+        if !raisin_models::nodes::is_fetchable_mount_content(&node.properties) {
+            return node;
+        }
+
+        if let Some(size) = raisin_models::nodes::asset_reported_size(&node.properties) {
+            if size > Self::MAX_HYDRATE_BYTES {
+                tracing::info!(
+                    job_id = %job.id, node_id = %node_id, size,
+                    limit = Self::MAX_HYDRATE_BYTES,
+                    "Not fetching mounted content: larger than the indexing limit"
+                );
+                return node;
+            }
+        }
+
+        // Absent when the sync engine is not running in this process. That is a
+        // deployment fact rather than a fault of this asset, so it is logged and
+        // the asset is left alone rather than recorded as unreadable.
+        let Some(mounts) = self.storage.virtual_mount_sync_handler() else {
+            tracing::debug!(
+                job_id = %job.id, node_id = %node_id,
+                "Mounted content not fetched: the virtual-mount sync engine is not running"
+            );
+            return node;
+        };
+
+        // The two branches are NOT the same value: `branch` addresses the
+        // materialized asset, `config_branch` is where the mount and integration
+        // nodes live. Passing the target branch for both resolves no mount.
+        //
+        // Resolved the way the sync engine resolves it, NOT hardcoded to `main`.
+        // That constant is what the integrations HTTP layer uses, and its own
+        // comment records the consequence: on a repo whose default branch is not
+        // `main` the two disagree and the engine finds no mount, returning a
+        // silent success. `config_branch` is `pub(crate)` for exactly this
+        // reason — so there is one answer to "which branch is a mount's config
+        // on".
+        let config_branch = crate::jobs::handlers::virtual_mount_sync::check::config_branch(
+            &self.storage,
+            &context.tenant_id,
+            &context.repo_id,
+        )
+        .await;
+
+        let target = crate::ContentTarget {
+            tenant: &context.tenant_id,
+            repo: &context.repo_id,
+            config_branch: &config_branch,
+            branch: &context.branch,
+            workspace: &context.workspace_id,
+            node_id,
+        };
+
+        match mounts.fetch_content(target, false).await {
+            Ok(fetched) => {
+                tracing::info!(
+                    job_id = %job.id, node_id = %node_id, ?fetched,
+                    "Fetched mounted content so the asset can be indexed"
+                );
+            }
+            Err(e) => {
+                // Not fatal. The asset keeps no `file`, the caller records the
+                // outcome it would have anyway, and the next sync or an explicit
+                // retry can try again.
+                tracing::warn!(
+                    job_id = %job.id, node_id = %node_id, error = %e,
+                    "Could not fetch mounted content"
+                );
+                return node;
+            }
+        }
+
+        // Re-read: `fetch_content` wrote the `file` onto the stored node, and
+        // everything downstream — the fingerprint especially — must describe the
+        // bytes that were actually fetched.
+        match self
+            .storage
+            .nodes()
+            .get(
+                StorageScope::new(
+                    &context.tenant_id,
+                    &context.repo_id,
+                    &context.branch,
+                    &context.workspace_id,
+                ),
+                node_id,
+                None,
+            )
+            .await
+        {
+            Ok(Some(fresh)) => fresh,
+            _ => node,
         }
     }
 

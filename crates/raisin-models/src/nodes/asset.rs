@@ -178,3 +178,42 @@ pub fn asset_fingerprint(node: &Node) -> String {
     };
     format!("v1:{hash}|{key}|{size}")
 }
+
+/// Whether this asset's bytes live on a virtual mount and can still be fetched.
+///
+/// A mount's sync writes METADATA ONLY — a `raisin:Asset` per remote file with
+/// its name, mimetype and size, and no bytes — because downloading a whole
+/// drive during a sync would multiply an import by every document in it. So
+/// `file == null` on a mount-owned asset means "not fetched yet", NOT "broken"
+/// or "not ready", and the two must not be confused: the first is repairable by
+/// asking the provider, the second is not.
+///
+/// `__external_id` is what makes it repairable — it is the provider's own
+/// identifier for the file, and without it there is nothing to ask for.
+pub fn is_fetchable_mount_content(properties: &HashMap<String, PropertyValue>) -> bool {
+    let mounted = matches!(
+        properties.get("__virtual"),
+        Some(PropertyValue::Boolean(true))
+    );
+    let identified = matches!(
+        properties.get("__external_id"),
+        Some(PropertyValue::String(id)) if !id.is_empty()
+    );
+    mounted && identified
+}
+
+/// The size the PROVIDER reports for a mount-owned asset, before any fetch.
+///
+/// Read from the sync's own metadata (`size`, or `file_size` once hydrated), so
+/// a decision about whether the bytes are worth downloading can be made without
+/// downloading them.
+pub fn asset_reported_size(properties: &HashMap<String, PropertyValue>) -> Option<u64> {
+    for key in ["size", "file_size"] {
+        match properties.get(key) {
+            Some(PropertyValue::Integer(n)) if *n >= 0 => return Some(*n as u64),
+            Some(PropertyValue::Float(f)) if *f >= 0.0 => return Some(*f as u64),
+            _ => {}
+        }
+    }
+    None
+}

@@ -39,7 +39,10 @@ pub use audit_log::*;
 // Re-export the asset accessors. ONE implementation of "what is this binary",
 // read by the enqueue gate, the extraction job and the delegated writeback —
 // see `asset` for why a second one is a re-extraction loop.
-pub use asset::{asset_content_hash, asset_fingerprint, asset_mime_type, asset_storage_key};
+pub use asset::{
+    asset_content_hash, asset_fingerprint, asset_mime_type, asset_reported_size, asset_storage_key,
+    is_fetchable_mount_content,
+};
 
 // Re-export the extraction artifact vocabulary
 pub use extraction::{

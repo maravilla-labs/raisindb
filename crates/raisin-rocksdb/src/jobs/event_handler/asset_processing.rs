@@ -43,7 +43,15 @@ impl UnifiedJobEventHandler {
         // Check if file property exists and has storage_key (file is ready)
         let has_storage_key = self.extract_storage_key(node).is_some();
 
-        if !has_storage_key {
+        // A mount-owned asset with no `file` is not "not ready" — it is NOT
+        // FETCHED YET, which is a different thing and the normal steady state
+        // for a virtual mount. Sync deliberately writes metadata only, so
+        // gating on a storage key here meant a synced drive could never be
+        // indexed at all: no job, no extraction, no thumbnail, no search. The
+        // job hydrates it (see `hydrate_mounted_content`), which is where the
+        // decision about whether the bytes are worth fetching belongs, because
+        // that is where the processing plan is known.
+        if !has_storage_key && !raisin_models::nodes::is_fetchable_mount_content(&node.properties) {
             tracing::debug!(
                 node_id = %node.id,
                 "Skipping asset processing: no storage_key (file not ready)"
