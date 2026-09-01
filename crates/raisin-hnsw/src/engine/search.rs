@@ -75,6 +75,33 @@ pub(super) const CANDIDATE_DUMP_LIMIT: usize = 20;
 /// times for one logical query (see `search_documents_adaptive`) and the
 /// post-filter warning must not be shouted once per escalation. Callers draw as
 /// often as they need and log exactly once, for the final draw.
+/// Draw the k nearest CHUNKS, without collapsing them to documents.
+///
+/// The document draw escalates because a collapse can turn many chunks into few
+/// documents and it still owes the caller `k` of them. Nothing collapses here,
+/// so one draw of exactly `k` is right and over-drawing would only fetch rows
+/// the truncate throws away.
+///
+/// Row-level security is NOT applied here — it is applied above, per node, by
+/// the emit loop. A caller that needs headroom for it must ask for more.
+fn draw_chunks(
+    index: &HnswIndex,
+    query: &[f32],
+    k: usize,
+    workspaces: &[String],
+    partition: &PartitionId,
+    max_distance: f32,
+) -> Result<Vec<SearchResult>> {
+    let fetch_k = k.min(MAX_FETCH_K);
+    let scoped = fetch_scoped(index, query, fetch_k, workspaces)?;
+    log_fetch_shortfall(&scoped, fetch_k, workspaces, partition);
+
+    let mut results = scoped.results;
+    results.retain(|r| r.distance < max_distance);
+    results.truncate(k);
+    Ok(results)
+}
+
 fn fetch_scoped(
     index: &HnswIndex,
     query: &[f32],
@@ -446,6 +473,41 @@ impl HnswIndexingEngine {
         )
     }
 
+    /// The k nearest CHUNKS, NOT collapsed to one row per document.
+    ///
+    /// Same arguments and same threshold semantics as
+    /// [`Self::search_with_threshold`]; the difference is only that several
+    /// results may share a `node_id`, each being a different passage of that
+    /// document. That is what `granularity => 'chunk'` needs and what a RAG
+    /// caller filling a context window wants.
+    ///
+    /// Returns `SearchResult` rather than `ChunkSearchResult` deliberately: the
+    /// latter drops `spec` and flattens `total_chunks` to 1, and the caller
+    /// needs the spec to address the chunk's stored row.
+    #[allow(clippy::too_many_arguments)]
+    pub fn search_chunks_with_threshold(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        partition: &PartitionId,
+        workspaces: &[String],
+        query: &[f32],
+        k: usize,
+        max_distance: Option<f32>,
+    ) -> Result<Vec<SearchResult>> {
+        let index_arc = self.get_or_load_index(tenant_id, repo_id, branch, partition)?;
+        let index = index_arc.read().unwrap();
+        draw_chunks(
+            &index,
+            query,
+            k,
+            workspaces,
+            partition,
+            max_distance.unwrap_or(DEFAULT_MAX_DISTANCE),
+        )
+    }
+
     /// Search for nearest neighbors with an optional distance threshold override.
     ///
     /// If `max_distance` is `None`, uses the default threshold (0.6 for cosine).
@@ -578,24 +640,14 @@ impl HnswIndexingEngine {
         // workspace restriction costs nothing extra now that it is applied
         // inside the walk.
         let final_results = match request.mode {
-            SearchMode::Chunks => {
-                // Chunks mode wants CHUNK rows, so there is nothing to collapse
-                // and nothing to escalate against: one draw of exactly `k`.
-                // Over-drawing here would only fetch rows the truncate discards.
-                let fetch_k = request.k.min(MAX_FETCH_K);
-                let scoped = fetch_scoped(
-                    &index,
-                    &request.query_vector,
-                    fetch_k,
-                    &request.workspace_filters,
-                )?;
-                log_fetch_shortfall(&scoped, fetch_k, &request.workspace_filters, partition);
-
-                let mut results = scoped.results;
-                results.retain(|r| r.distance < max_distance);
-                results.truncate(request.k);
-                results
-            }
+            SearchMode::Chunks => draw_chunks(
+                &index,
+                &request.query_vector,
+                request.k,
+                &request.workspace_filters,
+                partition,
+                max_distance,
+            )?,
             SearchMode::Documents => {
                 // The SAME adaptive draw as `search_with_threshold`, including
                 // its short-result accounting and its escalation. These two are

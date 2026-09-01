@@ -273,9 +273,10 @@ pub fn property_value_to_text(value: &PropertyValue) -> Option<String> {
 
 /// Hash text for detecting changes
 pub fn hash_text(text: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    text.hash(&mut hasher);
-    hasher.finish()
+    // Delegates rather than reimplements: the search path recomputes this hash
+    // to verify a chunk span still slices the passage that was embedded, so the
+    // two must be the same function, not merely the same today.
+    raisin_embeddings::hash_chunk_text(text)
 }
 
 #[cfg(test)]

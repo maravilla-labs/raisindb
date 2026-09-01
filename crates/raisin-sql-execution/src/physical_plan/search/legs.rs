@@ -19,6 +19,7 @@ use raisin_storage::IndexingEngine;
 use crate::physical_plan::executor::ExecutionError;
 
 use super::args::EmbeddingKindFilter;
+use super::args::Granularity;
 use super::scope::WorkspaceSet;
 
 /// Where a leg runs, minus the query itself.
@@ -82,13 +83,17 @@ pub fn run_vector_leg(
     query_vector: &[f32],
     k: usize,
     max_distance: f32,
+    granularity: Granularity,
 ) -> Result<Vec<SearchResult>, ExecutionError> {
     // Empty slice = no filter. `WorkspaceSet::Empty` never reaches here; the
     // emit loop returns zero rows without touching either engine.
     let workspaces: Vec<String> = scope.as_filter().map(|w| w.to_vec()).unwrap_or_default();
 
-    engine
-        .search_with_threshold(
+    // The ONE difference between the two granularities down here: whether the
+    // engine collapses a document's chunks before returning them. Everything
+    // above — fusion, RLS, the residual, the emit loop — is shared.
+    let drawn = if granularity.is_chunk() {
+        engine.search_chunks_with_threshold(
             &ctx.tenant_id,
             &ctx.repo_id,
             &ctx.branch,
@@ -98,13 +103,26 @@ pub fn run_vector_leg(
             k,
             Some(max_distance),
         )
-        .map_err(|e| {
-            ExecutionError::Backend(format!(
-                "vector leg over partition {partition} failed: {e}. The result would \
+    } else {
+        engine.search_with_threshold(
+            &ctx.tenant_id,
+            &ctx.repo_id,
+            &ctx.branch,
+            partition,
+            &workspaces,
+            query_vector,
+            k,
+            Some(max_distance),
+        )
+    };
+
+    drawn.map_err(|e| {
+        ExecutionError::Backend(format!(
+            "vector leg over partition {partition} failed: {e}. The result would \
                  have been a full-text search reported as a hybrid one, so the \
                  statement fails instead."
-            ))
-        })
+        ))
+    })
 }
 
 /// Which vector partitions the `kind =>` selector resolves to.

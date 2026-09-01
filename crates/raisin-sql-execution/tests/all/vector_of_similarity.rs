@@ -199,6 +199,7 @@ fn store_vector(
         generated_at: chrono::Utc::now(),
         text_hash: 0,
         spec_hash: Some(1),
+        chunk_span: None,
         model: "fixture-model".to_string(),
         provider: raisin_embeddings::EmbeddingProvider::OpenAI,
     };

@@ -67,6 +67,15 @@ impl HttpSearchProvider {
             SearchMode::Vector => (0.0, 1.0),
         };
 
+        let granularity = match query.granularity.as_deref() {
+            Some(raw) => raisin_sql_execution::physical_plan::search::args::Granularity::parse(
+                raw,
+                "search_nodes",
+            )
+            .map_err(|e| McpError::protocol(e.to_string()))?,
+            None => raisin_sql_execution::physical_plan::search::args::Granularity::default(),
+        };
+
         let args = SearchArgs::from_api(
             SearchFunction::Hybrid,
             QueryInput::Text(query.query.clone()),
@@ -81,6 +90,7 @@ impl HttpSearchProvider {
             // to search documents; folding an image tower in silently would
             // change what every existing agent's `search_nodes` returns.
             EmbeddingKindFilter::default(),
+            granularity,
         )
         .map_err(|e| McpError::protocol(e.to_string()))?;
 
@@ -123,6 +133,14 @@ impl HttpSearchProvider {
                 score: number(row, "score").unwrap_or(0.0) as f32,
                 path: text(row, "path"),
                 node_type: text(row, "node_type"),
+                // Already produced by the shared emit loop; this surface used
+                // to discard all four, which made `search_nodes` unable to
+                // answer the one question a RAG agent asks — what did the
+                // matching passage SAY?
+                chunk_index: number(row, "chunk_index").map(|v| v as i64),
+                chunk_text: text(row, "chunk_text"),
+                chunk_text_source: text(row, "chunk_text_source"),
+                vector_distance: number(row, "vector_distance").map(|v| v as f32),
             })
             .collect())
     }

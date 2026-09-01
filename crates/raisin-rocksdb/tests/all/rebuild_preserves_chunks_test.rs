@@ -74,6 +74,7 @@ fn data(source_id: &str, chunk_index: usize, total_chunks: usize, seed: usize) -
         generated_at: chrono::Utc::now(),
         text_hash: seed as u64,
         spec_hash: Some(1),
+        chunk_span: None,
         model: "test-model".to_string(),
         provider: EmbeddingProvider::Ollama,
     }

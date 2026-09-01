@@ -193,6 +193,7 @@ fn embedding(source_id: &str, vector: Vec<f32>) -> EmbeddingData {
         generated_at: Utc::now(),
         text_hash: 42,
         spec_hash: Some(42),
+        chunk_span: None,
         model: "tiny".to_string(),
         provider: EmbeddingProvider::Ollama,
     }

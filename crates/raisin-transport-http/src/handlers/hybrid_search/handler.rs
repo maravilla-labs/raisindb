@@ -68,6 +68,20 @@ pub async fn hybrid_search(
         );
     }
 
+    let granularity = match raisin_sql_execution::physical_plan::search::args::Granularity::parse(
+        &params.granularity,
+        "hybrid search",
+    ) {
+        Ok(g) => g,
+        Err(e) => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    };
+
     let kind = match EmbeddingKindFilter::parse(&params.kind, "hybrid search") {
         Ok(kind) => kind,
         Err(e) => {
@@ -90,6 +104,7 @@ pub async fn hybrid_search(
         vector_weight,
         None,
         kind,
+        granularity,
     ) {
         Ok(args) => args,
         Err(e) => {
@@ -159,6 +174,18 @@ fn row_to_result(row: &raisin_sql_execution::Row) -> HybridSearchResult {
         fulltext_rank: number(row, "fulltext_rank").map(|v| v as usize),
         vector_distance: number(row, "vector_distance").map(|v| v as f32),
         revision: number(row, "revision").unwrap_or(0.0) as i64,
+        chunk_index: number(row, "chunk_index").map(|v| v as i64),
+        // The passage, and how confident we are that it IS the passage. Both
+        // were already produced by the shared emit loop and discarded here.
+        chunk_text: opt_text(row, "chunk_text"),
+        chunk_text_source: text(row, "chunk_text_source"),
+    }
+}
+
+fn opt_text(row: &raisin_sql_execution::Row, name: &str) -> Option<String> {
+    match column(row, name) {
+        Some(PropertyValue::String(s)) => Some(s.clone()),
+        _ => None,
     }
 }
 

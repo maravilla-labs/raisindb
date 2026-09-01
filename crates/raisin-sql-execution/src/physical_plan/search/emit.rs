@@ -33,6 +33,7 @@ use raisin_storage::{NodeRepository, Storage, StorageScope};
 use crate::physical_plan::executor::{ExecutionContext, ExecutionError, Row, RowStream};
 
 use super::args::{parse_search_args, QueryInput, SearchArgs, SearchFunction};
+use super::chunk_text;
 use super::fusion::{fuse, FusedHit, HitKey, LegId, LegResult, VectorDetail, VectorDetails};
 use super::legs::{
     embed_query, resolve_vector_partitions, run_fulltext_leg, run_vector_leg, shape_type_pushdown,
@@ -252,7 +253,13 @@ pub async fn plan_resolved<S: Storage + 'static>(
 /// those callers is pure waste. `limit` is validated `1..=1000` at parse time,
 /// so this cannot exceed `SEARCH_LEG_CAP`.
 fn leg_k(args: &SearchArgs, scope: &WorkspaceSet, residual: Option<&TypedExpr>) -> usize {
-    let filtered = !(matches!(scope, WorkspaceSet::All) && residual.is_none());
+    // Chunk granularity always takes the wide draw. The narrow one exists only
+    // because a document-collapsed draw needs a little headroom for the
+    // collapse; chunk rows CLUSTER instead — three passages of one document can
+    // take three of ten slots — so `limit * 2` would routinely come back short
+    // of `limit` distinct rows.
+    let filtered =
+        args.granularity.is_chunk() || !(matches!(scope, WorkspaceSet::All) && residual.is_none());
     if filtered {
         (args.limit * SEARCH_OVERFETCH).min(SEARCH_LEG_CAP)
     } else {
@@ -415,6 +422,7 @@ pub async fn execute_parsed<S: Storage + 'static>(
     let limit = parsed.limit;
     let language = parsed.language.clone();
     let max_distance = parsed.max_distance;
+    let granularity = parsed.granularity;
     let fulltext_weight = parsed.fulltext_weight;
     let vector_weight = parsed.vector_weight;
     let query = parsed.query.clone();
@@ -593,6 +601,7 @@ pub async fn execute_parsed<S: Storage + 'static>(
                         vector,
                         k,
                         max_distance,
+                        granularity,
                     )?;
                     let leg_id = LegId::Vector {
                         kind: partition.kind_char().unwrap_or('?'),
@@ -601,14 +610,27 @@ pub async fn execute_parsed<S: Storage + 'static>(
                     let mut ordered = Vec::with_capacity(results.len());
                     for result in &results {
                         let key = (result.workspace_id.clone(), result.node_id.clone());
-                        details.insert(
-                            (leg_id.clone(), key.clone()),
-                            VectorDetail {
+                        // PUSH, not insert: a node whose second chunk also
+                        // matched used to overwrite the first. The leg returns
+                        // them distance-ascending, so `[0]` stays the best and
+                        // node mode is unchanged; chunk mode reads the rest.
+                        details
+                            .entry((leg_id.clone(), key.clone()))
+                            .or_default()
+                            .push(VectorDetail {
                                 distance: result.distance,
                                 chunk_index: result.chunk_index,
-                            },
-                        );
-                        ordered.push(key);
+                                // Needed to address this chunk's stored row:
+                                // the `cf::EMBEDDINGS` key uses the NAMESPACED
+                                // source id, `{node}#{spec}` for a named spec.
+                                spec: result.spec.clone(),
+                            });
+                        // `ordered` is the leg's RANKING, one entry per node —
+                        // a second chunk of a node already ranked must not add
+                        // a second rank position.
+                        if !ordered.contains(&key) {
+                            ordered.push(key);
+                        }
                     }
                     legs.push(LegResult {
                         leg: leg_id,
@@ -700,22 +722,83 @@ pub async fn execute_parsed<S: Storage + 'static>(
                     }
                 };
 
-                let row = build_row(&table_name, &hit, &node);
+                // ONE node visit, ONE permission decision, N rows.
+                //
+                // Node granularity emits the best chunk; chunk granularity
+                // emits every chunk of this node the leg returned, in distance
+                // order. The fan-out is HERE rather than upstream because the
+                // RLS verdict is a property of the NODE: deciding it once and
+                // emitting from that decision is what keeps `decided` a
+                // node-keyed map and stops the second chunk of a node from
+                // being suppressed as an already-decided duplicate.
+                let fanned: Vec<Option<usize>> = if granularity.is_chunk() {
+                    if hit.chunks.is_empty() {
+                        // A lexical-only hit has no chunk at all. It is still a
+                        // legitimate result -- dropping it would silently make
+                        // `granularity => 'chunk'` a vector-only search.
+                        vec![None]
+                    } else {
+                        hit.chunks.iter().map(|c| Some(c.chunk_index)).collect()
+                    }
+                } else {
+                    vec![None]
+                };
 
-                // The SAME loop. An RLS drop and a residual-predicate drop are
-                // the same phenomenon -- a candidate that did not survive -- and
-                // two loops over them would be this codebase's signature bug.
-                if !residual_matches(&residual_conjuncts, &row) {
-                    counters.dropped_residual += 1;
-                    decided.insert(hit.key.clone(), false);
-                    continue;
+                let mut kept_any = false;
+                for chunk_choice in fanned {
+                    if emitted >= limit {
+                        break;
+                    }
+
+                    // The hit as seen from ONE chunk. Node granularity leaves it
+                    // exactly as fused.
+                    let hit_view = match chunk_choice {
+                        Some(idx) => hit.viewed_from_chunk(idx),
+                        None => hit.clone(),
+                    };
+
+                    // Resolve the chunk's text BEFORE building the row, so
+                    // `WHERE chunk_text LIKE ...` works through the residual
+                    // pass below like any other column. The node is already
+                    // fetched and already RLS-filtered, so the document text
+                    // costs no extra read; only the chunk's stored span does,
+                    // and that is one point lookup per EMITTED row.
+                    let chunk_text = match &embedding_storage {
+                        Some(store) => chunk_text::resolve(
+                            &**store,
+                            &tenant_id,
+                            &repo_id,
+                            &branch,
+                            &hit_view,
+                            &node,
+                        ),
+                        None => chunk_text::ResolvedChunkText::unavailable(),
+                    };
+
+                    let row = build_row(&table_name, &hit_view, &node, &chunk_text);
+
+                    // The SAME loop. An RLS drop and a residual-predicate drop
+                    // are the same phenomenon -- a candidate that did not
+                    // survive -- and two loops over them would be this
+                    // codebase's signature bug.
+                    if !residual_matches(&residual_conjuncts, &row) {
+                        counters.dropped_residual += 1;
+                        continue;
+                    }
+
+                    kept_any = true;
+                    emitted += 1;
+                    counters.emitted = emitted;
+                    yield row;
                 }
 
-                decided.insert(hit.key.clone(), true);
-                emitted_keys.insert(hit.key.clone());
-                emitted += 1;
-                counters.emitted = emitted;
-                yield row;
+                // The node's verdict is recorded once, from whether ANY of its
+                // rows survived: a node whose every chunk failed the residual
+                // is a node that did not survive.
+                decided.insert(hit.key.clone(), kept_any);
+                if kept_any {
+                    emitted_keys.insert(hit.key.clone());
+                }
             }
 
             if emitted >= limit {
@@ -814,7 +897,12 @@ fn residual_matches(conjuncts: &[TypedExpr], row: &Row) -> bool {
 }
 
 /// The unified column set, in the fixed order the table definitions declare.
-fn build_row(table_name: &str, hit: &FusedHit, node: &Node) -> Row {
+fn build_row(
+    table_name: &str,
+    hit: &FusedHit,
+    node: &Node,
+    chunk_text: &chunk_text::ResolvedChunkText,
+) -> Row {
     let mut columns: IndexMap<String, PropertyValue> = IndexMap::new();
     let mut put = |name: &str, value: PropertyValue| {
         columns.insert(format!("{table_name}.{name}"), value);
@@ -866,6 +954,22 @@ fn build_row(table_name: &str, hit: &FusedHit, node: &Node) -> Row {
     // Post-RLS: the field filter of the permission that granted access has
     // already been applied to this bag by `rls_filter_search_hit`.
     put("properties", PropertyValue::Object(node.properties.clone()));
+
+    // The passage that answered, and how confident we are that it IS the
+    // passage. See `chunk_text` -- 'excerpt' means the caller is holding a
+    // 200-character preview, not the chunk.
+    put(
+        "chunk_text",
+        chunk_text
+            .text
+            .clone()
+            .map(PropertyValue::String)
+            .unwrap_or(PropertyValue::Null),
+    );
+    put(
+        "chunk_text_source",
+        PropertyValue::String(chunk_text.source.as_str().to_string()),
+    );
 
     Row { columns }
 }
