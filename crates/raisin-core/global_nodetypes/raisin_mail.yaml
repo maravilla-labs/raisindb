@@ -24,14 +24,25 @@ icon: mail
 # `new_version > existing_version`. The `body` / `body_type` removal is a
 # BREAKING change to the content-hash resync, so under the default NonBreaking
 # policy it is recorded pending for an explicit admin apply.
-version: 2
+#
+# BUMPED 2 -> 3 to add the Vector leg. Purely additive -- no property is removed
+# or retyped -- so the content-hash resync classifies it NonBreaking and it
+# propagates to existing repositories without an admin apply. It does NOT
+# retroactively embed anything: index_types decides what future writes produce,
+# and mail already synced has no vector until it is rewritten or re-embedded.
+version: 3
 
 # Global, not shipped inside one adapter package, because BOTH the Graph and the
 # IMAP connectors map onto it. A copy per package is the mirrored-definition
 # drift this codebase keeps getting bitten by: the two would diverge on a field
 # name, and a `GROUP BY conversation_id` would silently cover only one provider.
 indexable: true
-index_types: [Property, Fulltext]
+# Vector added alongside Fulltext so mail is reachable by MEANING and not only by
+# word -- and, more to the point, so it is reachable in a language other than the
+# one it was written in, which is the whole reason a multilingual embedder is
+# configured. The two legs are fused by rank in HYBRID_SEARCH, so a mailbox that
+# had only the lexical leg was contributing to fusion at half strength.
+index_types: [Property, Fulltext, Vector]
 
 # NOT strict, deliberately. A mail mapper carries provider-specific keys through
 # `provider_metadata` and the engine stamps reserved `__` properties on top; the
@@ -45,7 +56,7 @@ properties:
   - name: subject
     type: String
     required: false
-    index: [Fulltext]
+    index: [Fulltext, Vector]
     meta:
       label: Subject
 
@@ -68,15 +79,21 @@ properties:
   - name: body_text
     type: String
     required: false
-    index: [Fulltext]
+    index: [Fulltext, Vector]
     meta:
       label: Body (text)
       description: Plain-text body. The quoting source for a reply.
 
+  # Vector, despite overlapping the head of `body_text`, because the overlap is
+  # the cheap case and its absence is the expensive one: a body is populated only
+  # when the mount sets `sync_config.include_body`, so a link-only mailbox -- the
+  # default -- would otherwise embed the subject line and nothing else. Where a
+  # body IS present the duplication costs a little redundancy inside one chunk,
+  # which fusion is insensitive to.
   - name: snippet
     type: String
     required: false
-    index: [Fulltext]
+    index: [Fulltext, Vector]
     meta:
       label: Snippet
       description: Short preview. Always present; a body is not.

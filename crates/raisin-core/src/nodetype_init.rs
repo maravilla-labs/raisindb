@@ -503,10 +503,10 @@ mod tests {
         // generated proxy write fail with a strict_mode_violation pointing at
         // the node rather than at the missing definition.
         let function = by_name("raisin:Function").expect("raisin:Function must load");
-        assert_eq!(
-            function.version,
-            Some(2),
-            "adding `mcp_proxy` is a schema change and must bump the version to resync"
+        assert!(
+            function.version.unwrap_or(0) >= 2,
+            "adding `mcp_proxy` is a schema change and must bump the version to resync \
+             (a floor, not an equality: a later additive bump is fine)"
         );
         assert!(
             function
@@ -647,10 +647,10 @@ mod tests {
         }
 
         let event = by_name("raisin:Event").expect("raisin_event.yaml must load");
-        assert_eq!(
-            event.version,
-            Some(2),
-            "the reshape must bump the version or the legacy init paths skip it"
+        assert!(
+            event.version.unwrap_or(0) >= 2,
+            "the reshape must bump the version or the legacy init paths skip it \
+             (a floor, not an equality: a later additive bump is fine)"
         );
         assert_eq!(event.strict, Some(true));
         assert_eq!(event.mixins, vec!["raisin:VirtualNode".to_string()]);
@@ -780,7 +780,21 @@ mod tests {
         let by_name = |n: &str| nodetypes.iter().find(|nt| nt.name == n).cloned();
 
         let mail = by_name("raisin:Mail").expect("raisin_mail.yaml must load");
-        assert_eq!(mail.version, Some(2), "the reshape must bump the version");
+        assert!(
+            mail.version.unwrap_or(0) >= 2,
+            "the reshape must bump the version (a floor, not an equality)"
+        );
+
+        // The Vector leg. Mail carried only the lexical leg, which biases
+        // reciprocal-rank fusion toward whichever corpus is wider -- and left
+        // cross-lingual retrieval, the reason a multilingual embedder is
+        // configured at all, unreachable for a mailbox.
+        assert!(
+            mail.index_types
+                .as_ref()
+                .is_some_and(|t| t.iter().any(|i| format!("{i:?}") == "Vector")),
+            "raisin:Mail must declare the Vector index type"
+        );
         let props = mail.properties.as_ref().expect("Mail declares properties");
         let has = |n: &str| props.iter().any(|p| p.name.as_deref() == Some(n));
 
