@@ -21,8 +21,22 @@
 //! mixins/                 # Mixin definitions (reusable property sets)
 //! nodetypes/              # Node type definitions
 //! workspaces/             # Workspace configurations
+//! processing-rules/       # Asset-processing rules (which uploads get which tasks)
 //! content/                # Content to install (nodes, assets)
 //! ```
+//!
+//! `processing-rules/*.yaml` holds one rule or a list of them, and exists so an
+//! application's handling of uploaded binaries can travel with the application.
+//! Without it a package could ship the nodetype for its documents, the workspace
+//! they live in and the trigger that captions them — and then need a human to
+//! retype four rules into an admin console, or the uploads would sit unindexed
+//! with nothing saying why.
+//!
+//! Rules are repo CONFIG, not content, so they follow `workspaces/` rather than
+//! `content/`. One difference from workspaces: `skip` mode leaves an existing
+//! rule id completely alone instead of merging into it. A rule's matcher and
+//! task list are one decision, and half a package's rule combined with half an
+//! operator's is a third rule neither wrote.
 
 mod browser;
 pub mod dependency_graph;

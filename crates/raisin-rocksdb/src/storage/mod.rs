@@ -95,6 +95,7 @@ pub struct RocksDBStorage {
     pub(crate) archetypes: ArchetypeRepositoryImpl,
     pub(crate) element_types: ElementTypeRepositoryImpl,
     pub(crate) workspaces: WorkspaceRepositoryImpl,
+    pub(crate) processing_rules: ProcessingRulesRepositoryImpl,
     pub(crate) registry: RegistryRepositoryImpl,
     pub(crate) property_index: PropertyIndexRepositoryImpl,
     pub(crate) reference_index: ReferenceIndexRepositoryImpl,
@@ -173,6 +174,7 @@ impl Storage for RocksDBStorage {
     type Archetypes = ArchetypeRepositoryImpl;
     type ElementTypes = ElementTypeRepositoryImpl;
     type Workspaces = WorkspaceRepositoryImpl;
+    type ProcessingRules = ProcessingRulesRepositoryImpl;
     type Registry = RegistryRepositoryImpl;
     type PropertyIndex = PropertyIndexRepositoryImpl;
     type ReferenceIndex = ReferenceIndexRepositoryImpl;
@@ -207,6 +209,10 @@ impl Storage for RocksDBStorage {
 
     fn workspaces(&self) -> &Self::Workspaces {
         &self.workspaces
+    }
+
+    fn processing_rules(&self) -> &Self::ProcessingRules {
+        &self.processing_rules
     }
 
     fn registry(&self) -> &Self::Registry {

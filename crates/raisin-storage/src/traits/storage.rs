@@ -19,6 +19,7 @@ use crate::repository::{
 };
 use crate::scope::{BranchScope, StorageScope};
 use crate::spatial::SpatialIndexRepository;
+use crate::traits::processing_rules::ProcessingRulesRepository;
 use crate::translations::TranslationRepository;
 use raisin_hlc::HLC;
 
@@ -52,6 +53,16 @@ pub trait Storage: Send + Sync {
     type Archetypes: ArchetypeRepository;
     type ElementTypes: ElementTypeRepository;
     type Workspaces: WorkspaceRepository;
+    /// Per-repository asset-processing rules — the routing table that decides
+    /// which uploaded binaries get which tasks.
+    ///
+    /// Part of the trait rather than a concrete-backend accessor because engine
+    /// code that is generic over `S` has to reach it: the package installer
+    /// seeds rules from `processing-rules/*.yaml`, and it is generic. (Contrast
+    /// the audit-log repository, which is deliberately NOT here — `raisin-storage`
+    /// has no dependency on `raisin-audit`, while the rules trait already lives
+    /// in this crate.)
+    type ProcessingRules: ProcessingRulesRepository;
     type Registry: RegistryRepository;
     type PropertyIndex: PropertyIndexRepository;
     type ReferenceIndex: ReferenceIndexRepository;
@@ -73,6 +84,7 @@ pub trait Storage: Send + Sync {
     fn archetypes(&self) -> &Self::Archetypes;
     fn element_types(&self) -> &Self::ElementTypes;
     fn workspaces(&self) -> &Self::Workspaces;
+    fn processing_rules(&self) -> &Self::ProcessingRules;
     fn registry(&self) -> &Self::Registry;
     fn property_index(&self) -> &Self::PropertyIndex;
     fn reference_index(&self) -> &Self::ReferenceIndex;

@@ -1,0 +1,180 @@
+// SPDX-License-Identifier: BSL-1.1
+//
+// RaisinDB - Git-like hierarchical multi model database
+// Copyright (C) 2019-2025 SOLUTAS GmbH, Switzerland
+
+//! What a binary asset IS, read from its node properties.
+//!
+//! # Why these live here and not next to the job that uses them
+//!
+//! They were `pub(crate)` helpers of the asset-processing job in
+//! `raisin-rocksdb`, and the module comment there already recorded why they had
+//! been consolidated once: the enqueue gate and the processor had each carried
+//! their own narrower spelling, so an asset whose mime type sat in
+//! `contentType` was invisible to one and visible to the other.
+//!
+//! A THIRD caller has now appeared, and it cannot reach a `pub(crate)` item.
+//! [`ExtractionArtifact`](super::extraction::ExtractionArtifact) can be written
+//! by a plugin task running in the function layer — LibreOffice converting a
+//! `.docx` to markdown, which no code in this process can do — and that
+//! writeback has to stamp the SAME [`asset_fingerprint`] the job would have.
+//!
+//! The fingerprint is the loop-breaker: the enqueue gate skips a node whose
+//! stamp matches its binary. A writeback that computed the stamp even slightly
+//! differently would never match, so every write-back would re-enqueue
+//! extraction, which would hand off again, which would write back again —
+//! an unbounded loop minting a node revision, a fulltext reindex and an
+//! embedding call each time round. Re-deriving it at a second site is the
+//! failure mode; there is one implementation and everything calls it.
+
+use std::collections::HashMap;
+
+use crate::nodes::properties::PropertyValue;
+use crate::nodes::Node;
+
+/// Read a `PropertyValue` as a string, or `None`.
+fn as_str(pv: &PropertyValue) -> Option<String> {
+    match pv {
+        PropertyValue::String(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// Extract the content hash of the binary from node properties.
+///
+/// Looked for in the `file` Resource/Object metadata, then as a top-level
+/// `content_hash` property (which `raisin:Asset` declares and the package
+/// installer and the on-demand attachment fetch both set).
+pub fn asset_content_hash(properties: &HashMap<String, PropertyValue>) -> Option<String> {
+    if let Some(PropertyValue::Resource(res)) = properties.get("file") {
+        if let Some(h) = res
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("content_hash"))
+            .and_then(as_str)
+        {
+            return Some(h);
+        }
+    }
+    if let Some(PropertyValue::Object(obj)) = properties.get("file") {
+        if let Some(PropertyValue::Object(meta)) = obj.get("metadata") {
+            if let Some(h) = meta.get("content_hash").and_then(as_str) {
+                return Some(h);
+            }
+        }
+        if let Some(h) = obj.get("content_hash").and_then(as_str) {
+            return Some(h);
+        }
+    }
+    properties.get("content_hash").and_then(as_str)
+}
+
+/// Extract the storage key of the binary from node properties.
+///
+/// `None` rather than an error: a node with no key is an asset whose file is
+/// not ready, which every caller treats as "nothing to do yet" rather than as a
+/// failure.
+pub fn asset_storage_key(properties: &HashMap<String, PropertyValue>) -> Option<String> {
+    // Standard upload format (Resource type).
+    if let Some(PropertyValue::Resource(resource)) = properties.get("file") {
+        if let Some(ref metadata) = resource.metadata {
+            if let Some(PropertyValue::String(key)) = metadata.get("storage_key") {
+                return Some(key.clone());
+            }
+            if let Some(PropertyValue::String(key)) = metadata.get("storageKey") {
+                return Some(key.clone());
+            }
+        }
+    }
+
+    // Legacy Object format.
+    if let Some(PropertyValue::Object(obj)) = properties.get("file") {
+        if let Some(PropertyValue::String(key)) = obj.get("storage_key") {
+            return Some(key.clone());
+        }
+        if let Some(PropertyValue::String(key)) = obj.get("storageKey") {
+            return Some(key.clone());
+        }
+        if let Some(PropertyValue::Object(metadata)) = obj.get("metadata") {
+            if let Some(PropertyValue::String(key)) = metadata.get("storage_key") {
+                return Some(key.clone());
+            }
+        }
+    }
+
+    // Package format.
+    if let Some(PropertyValue::Resource(resource)) = properties.get("resource") {
+        if let Some(ref metadata) = resource.metadata {
+            if let Some(PropertyValue::String(key)) = metadata.get("storage_key") {
+                return Some(key.clone());
+            }
+        }
+    }
+
+    None
+}
+
+/// Extract the mime type of the binary from node properties.
+pub fn asset_mime_type(properties: &HashMap<String, PropertyValue>) -> Option<String> {
+    if let Some(PropertyValue::Resource(resource)) = properties.get("file") {
+        if let Some(ref mime) = resource.mime_type {
+            return Some(mime.clone());
+        }
+        if let Some(ref metadata) = resource.metadata {
+            if let Some(PropertyValue::String(mime)) = metadata.get("mime_type") {
+                return Some(mime.clone());
+            }
+            if let Some(PropertyValue::String(mime)) = metadata.get("mimeType") {
+                return Some(mime.clone());
+            }
+        }
+    }
+
+    if let Some(PropertyValue::Object(obj)) = properties.get("file") {
+        if let Some(PropertyValue::String(mime)) = obj.get("mime_type") {
+            return Some(mime.clone());
+        }
+        if let Some(PropertyValue::String(mime)) = obj.get("mimeType") {
+            return Some(mime.clone());
+        }
+    }
+
+    if let Some(PropertyValue::String(ct)) = properties.get("contentType") {
+        return Some(ct.clone());
+    }
+
+    if let Some(PropertyValue::String(mt)) = properties.get("mimeType") {
+        return Some(mt.clone());
+    }
+
+    None
+}
+
+/// Identify the BINARY an extraction result was produced from.
+///
+/// Extraction terminates in a node property, and writing a node property emits
+/// `node:updated` — which is the very event that enqueues asset processing. So
+/// the write-back would re-trigger the job, which would write again, forever.
+/// The job (and any delegated task writing back through the function layer)
+/// stamps this fingerprint alongside the text, and the enqueue gate skips a node
+/// whose stamp already matches. One upload therefore extracts exactly once, and
+/// REPLACING the file (new content hash, new storage key, or new size) changes
+/// the fingerprint and re-extracts.
+///
+/// A revision counter or `updated_by` would not do: replication delivers node
+/// revisions written by another node's system actor, and a mount sync stamps its
+/// own. Only "which bytes was this text made from" answers the question that is
+/// actually being asked.
+///
+/// The `v1:` prefix is the extractor generation. Bump it to force every asset to
+/// be re-extracted after a change that makes old output wrong.
+pub fn asset_fingerprint(node: &Node) -> String {
+    let hash = asset_content_hash(&node.properties).unwrap_or_else(|| "-".to_string());
+    let key = asset_storage_key(&node.properties).unwrap_or_else(|| "-".to_string());
+    let size = match node.properties.get("file_size") {
+        Some(PropertyValue::Integer(n)) => n.to_string(),
+        Some(PropertyValue::Float(f)) => f.to_string(),
+        _ => "-".to_string(),
+    };
+    format!("v1:{hash}|{key}|{size}")
+}

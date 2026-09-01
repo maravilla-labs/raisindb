@@ -160,6 +160,14 @@ pub use rules::{
     is_valid_task_slug, lookup_task, plan_tasks, BlockedReason, BlockedTask, PipelinePlan,
     PlannedTask, TaskProvider, TaskSpec, KNOWN_TASKS,
 };
+// What this process can actually perform, injected from `main.rs` after
+// plugins load. `plan_tasks_here` is the form engine code should use; a
+// hard-coded predicate is a second answer to the same question. See
+// `rules::capabilities`.
+pub use rules::{
+    capability_available, capability_probe_installed, install_capability_probe, plan_tasks_here,
+    CapabilityProbe,
+};
 
 // Candle-based local AI inference (requires "candle" feature)
 #[cfg(feature = "candle")]

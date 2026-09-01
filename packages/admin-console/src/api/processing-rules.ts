@@ -18,8 +18,68 @@ export type RuleMatcher =
 /** PDF processing strategy */
 export type PdfStrategy = 'auto' | 'native_only' | 'ocr_only' | 'force_ocr'
 
+/** Who performs a task. Mirrors `raisin_ai::rules::tasks::TaskProvider`. */
+export type TaskProviderKind = 'native' | 'function' | 'plugin'
+
+/** One entry in the task catalogue, with availability on THIS server. */
+export interface TaskCatalogEntry {
+  slug: string
+  summary: string
+  provider: TaskProviderKind
+  /** For `plugin`: the method that must be loaded (e.g. media.doc.toMarkdown). */
+  method?: string
+  /** For `function`: one line naming what should do it instead. */
+  how?: string
+  /**
+   * Whether this server can run it right now. Server-computed — the console
+   * cannot see the plugin registry, and a second availability table here would
+   * drift from the one the asset job plans with.
+   */
+  available: boolean
+}
+
+export interface TaskCatalogResponse {
+  tasks: TaskCatalogEntry[]
+  /** False = no probe installed at startup; every `available` is a default. */
+  capability_probe_installed: boolean
+}
+
+/** Why a configured task will not run here. */
+export type BlockedReason =
+  | { reason: 'malformed_slug' }
+  | { reason: 'handled_above'; how: string }
+  | { reason: 'plugin_missing'; method: string }
+  | { reason: 'unknown' }
+
+export interface PlannedTask {
+  slug: string
+  /** null for a native task; the plugin method otherwise. */
+  via?: string | null
+}
+
+export interface BlockedTask {
+  slug: string
+  blocked: BlockedReason
+}
+
+/** What a matched rule will ACTUALLY do on this server. */
+export interface PipelinePlan {
+  runnable: PlannedTask[]
+  blocked: BlockedTask[]
+}
+
 /** Processing settings for a rule */
 export interface ProcessingSettings {
+  /**
+   * The tasks to run, in order. THIS is the routing table's action half.
+   *
+   * `undefined` means "not configured" and is NOT the same as `[]`: an absent
+   * list falls back to deriving tasks from the legacy booleans below plus the
+   * mimetype defaults, while `[]` explicitly means "match these nodes and do
+   * nothing" — a real configuration for an opt-out rule ordered ahead of a
+   * broad one.
+   */
+  tasks?: string[]
   /** Chunking configuration override */
   chunking?: ChunkingSettings
   /** PDF processing strategy */
@@ -95,6 +155,10 @@ export interface TestRuleMatchResponse {
   matched: boolean
   matched_rule?: ProcessingRule
   rules_evaluated: number
+  /** What the rule ASKS for, before capabilities are consulted. */
+  effective_tasks: string[]
+  /** What will actually happen on this server. */
+  plan: PipelinePlan
 }
 
 /** Generic success response */
@@ -161,6 +225,15 @@ export const processingRulesApi = {
     api.put<SuccessResponse>(
       `/api/repository/${encodeURIComponent(repo)}/ai/rules/reorder`,
       { rule_ids: ruleIds }
+    ),
+
+  /**
+   * GET /api/repository/{repo}/ai/rules/tasks
+   * The task vocabulary, with per-task availability on this server.
+   */
+  listTasks: (repo: string) =>
+    api.get<TaskCatalogResponse>(
+      `/api/repository/${encodeURIComponent(repo)}/ai/rules/tasks`
     ),
 
   /**

@@ -10,7 +10,8 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-//! Schema installation: node types, archetypes, element types, workspaces, patches
+//! Schema installation: node types, archetypes, element types, workspaces,
+//! processing rules, patches
 
 use raisin_error::{Error, Result};
 use raisin_models::nodes::types::element::element_type::ElementType;
@@ -20,8 +21,8 @@ use raisin_storage::jobs::JobId;
 use raisin_storage::scope::{BranchScope, RepoScope};
 use raisin_storage::transactional::TransactionalStorage;
 use raisin_storage::{
-    ArchetypeRepository, CommitMetadata, ElementTypeRepository, NodeTypeRepository, Storage,
-    WorkspaceRepository,
+    ArchetypeRepository, CommitMetadata, ElementTypeRepository, NodeTypeRepository,
+    ProcessingRulesRepository, Storage, WorkspaceRepository,
 };
 use std::io::{Cursor, Read};
 use zip::ZipArchive;
@@ -331,6 +332,153 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             );
 
             stats.element_types_installed += 1;
+        }
+
+        Ok(())
+    }
+
+    /// Install asset-processing rules from the `processing-rules/` directory.
+    ///
+    /// # Why a package may carry these at all
+    ///
+    /// A processing rule is the routing table for uploaded binaries: which
+    /// nodes get which tasks (`extract_text`, `doc_to_markdown`, a thumbnail).
+    /// It lived only in the admin console, per repo, which made it the one part
+    /// of an application's behaviour that could not travel with the
+    /// application. A package could ship the nodetype for its documents, the
+    /// workspace they live in, the trigger that captions them — and then
+    /// require a human to open a console and retype four rules, or the uploads
+    /// would sit unindexed with nothing saying why.
+    ///
+    /// Rules are repo config, not content, so this follows
+    /// [`Self::install_workspaces`] exactly rather than the content path: same
+    /// directory convention, same `Skip`/`Force` semantics, same repository
+    /// upsert.
+    ///
+    /// # Skip mode does NOT merge, and that is the difference from workspaces
+    ///
+    /// A workspace merges `allowed_node_types` additively in `Skip` mode
+    /// because adding a permitted type cannot break anything already there. A
+    /// rule cannot be merged that way: its `tasks` list and its `matcher` are
+    /// one decision, and half a package's rule combined with half an
+    /// operator's is a third rule neither of them wrote. So an existing id is
+    /// left completely alone.
+    ///
+    /// That asymmetry is the point. An operator who narrowed a rule on their
+    /// box — turned OCR off because it was too slow, pointed a matcher at one
+    /// path — must not have it silently restored by the next `deploy --install`.
+    /// `Force` overwrites, which is what a package author asks for explicitly.
+    pub(super) async fn install_processing_rules(
+        &self,
+        archive: &mut ZipArchive<Cursor<&Vec<u8>>>,
+        tenant_id: &str,
+        repo_id: &str,
+        job_id: &JobId,
+        install_mode: InstallMode,
+        stats: &mut InstallStats,
+    ) -> Result<()> {
+        // Collected synchronously first: a ZipFile is not Send, so it cannot be
+        // held across the awaits below. Same shape as every sibling here.
+        let mut rules_to_install: Vec<raisin_ai::ProcessingRule> = Vec::new();
+
+        for i in 0..archive.len() {
+            let mut file = archive
+                .by_index(i)
+                .map_err(|e| Error::storage(format!("Failed to read ZIP entry: {}", e)))?;
+
+            let name = file.name().to_string();
+
+            if name.starts_with("processing-rules/")
+                && (name.ends_with(".yaml") || name.ends_with(".yml"))
+                && !file.is_dir()
+            {
+                let mut content = String::new();
+                file.read_to_string(&mut content).map_err(|e| {
+                    Error::storage(format!("Failed to read processing rule {}: {}", name, e))
+                })?;
+
+                // One file may hold a single rule or a list, because a package
+                // usually wants a handful that only make sense together (pdf,
+                // office, image) and splitting them across files hides the
+                // ORDER, which is load-bearing: matching is first-match-wins.
+                let parsed: Vec<raisin_ai::ProcessingRule> = if content
+                    .trim_start()
+                    .starts_with('-')
+                {
+                    serde_yaml::from_str(&content).map_err(|e| {
+                        Error::Validation(format!("Invalid processing rules YAML in {name}: {e}"))
+                    })?
+                } else {
+                    vec![serde_yaml::from_str(&content).map_err(|e| {
+                        Error::Validation(format!("Invalid processing rule YAML in {name}: {e}"))
+                    })?]
+                };
+
+                for mut rule in parsed {
+                    // An id is what `Skip` mode compares and what a later
+                    // update targets, so an anonymous rule would install a
+                    // duplicate on every deploy. Derive a stable one from the
+                    // file name rather than minting a random id.
+                    if rule.id.trim().is_empty() {
+                        let stem = name
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or(&name)
+                            .trim_end_matches(".yaml")
+                            .trim_end_matches(".yml");
+                        rule.id = stem.to_string();
+                    }
+                    if rule.name.trim().is_empty() {
+                        rule.name = rule.id.clone();
+                    }
+                    rules_to_install.push(rule);
+                }
+            }
+        }
+
+        if rules_to_install.is_empty() {
+            return Ok(());
+        }
+
+        let rules_repo = self.storage.processing_rules();
+        let scope = RepoScope::new(tenant_id, repo_id);
+
+        // Read-modify-write of ONE serialized set, so the whole batch is
+        // resolved against a single snapshot and written once. Calling a
+        // per-rule upsert in a loop would re-read and re-write the set for
+        // every file.
+        let mut set = rules_repo.get_rules(scope).await?.unwrap_or_default();
+
+        for rule in rules_to_install {
+            let rule_id = rule.id.clone();
+            let exists = set.get_rule(&rule_id).is_some();
+
+            if exists && install_mode == InstallMode::Skip {
+                tracing::debug!(
+                    job_id = %job_id,
+                    rule_id = %rule_id,
+                    "Processing rule already exists, leaving the operator's version alone (keep mode)"
+                );
+                stats.processing_rules_skipped += 1;
+                continue;
+            }
+
+            if exists {
+                set.remove_rule(&rule_id);
+            }
+            set.add_rule(rule);
+
+            tracing::info!(
+                job_id = %job_id,
+                rule_id = %rule_id,
+                overwritten = exists,
+                "Installed processing rule from package"
+            );
+            stats.processing_rules_installed += 1;
+        }
+
+        if stats.processing_rules_installed > 0 {
+            rules_repo.set_rules(scope, &set).await?;
         }
 
         Ok(())

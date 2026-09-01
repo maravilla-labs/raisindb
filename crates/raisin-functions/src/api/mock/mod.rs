@@ -347,6 +347,25 @@ impl FunctionApi for MockFunctionApi {
         ))
     }
 
+    async fn asset_set_extraction(
+        &self,
+        workspace: &str,
+        node_ref: &str,
+        text: &str,
+        options: Value,
+    ) -> Result<Value> {
+        tracing::info!(
+            workspace = %workspace, node_ref = %node_ref, chars = text.chars().count(),
+            options = ?options, "Mock asset_set_extraction"
+        );
+        Ok(serde_json::json!({
+            "status": if text.trim().is_empty() { "empty" } else { "ok" },
+            "source": options.get("source").and_then(|v| v.as_str()).unwrap_or("plugin"),
+            "chars": text.chars().count(),
+            "stored": !text.trim().is_empty(),
+        }))
+    }
+
     async fn pdf_process_from_storage(&self, storage_key: &str, options: Value) -> Result<Value> {
         tracing::info!(storage_key = %storage_key, options = ?options, "Mock pdf_process_from_storage");
         Ok(serde_json::json!({

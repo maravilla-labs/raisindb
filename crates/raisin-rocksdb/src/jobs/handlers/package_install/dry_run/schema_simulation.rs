@@ -12,7 +12,8 @@ use raisin_models::workspace::Workspace;
 use raisin_storage::scope::{BranchScope, RepoScope};
 use raisin_storage::transactional::TransactionalStorage;
 use raisin_storage::{
-    ArchetypeRepository, ElementTypeRepository, NodeTypeRepository, Storage, WorkspaceRepository,
+    ArchetypeRepository, ElementTypeRepository, NodeTypeRepository, ProcessingRulesRepository,
+    Storage, WorkspaceRepository,
 };
 use std::io::{Cursor, Read};
 use zip::ZipArchive;
@@ -296,6 +297,109 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                 level: action.to_string(),
                 category: "element_type".to_string(),
                 path: type_name,
+                message,
+                action: action.to_string(),
+                policy: None,
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Dry run simulation for asset-processing rules.
+    ///
+    /// Mirrors [`super::super::install_schema`]'s installer, including the
+    /// single-or-list YAML shape and the filename-derived id. A dry run that
+    /// parsed the file differently from the install would report an action that
+    /// is not the one taken — worse than no preview, because it is believed.
+    pub(in crate::jobs::handlers::package_install) async fn dry_run_processing_rules(
+        &self,
+        zip_data: &[u8],
+        tenant_id: &str,
+        repo_id: &str,
+        install_mode: InstallMode,
+        logs: &mut Vec<DryRunLogEntry>,
+        counts: &mut DryRunActionCounts,
+    ) -> Result<()> {
+        let rule_ids: Vec<String> = {
+            let cursor = Cursor::new(zip_data);
+            let mut archive = ZipArchive::new(cursor)
+                .map_err(|e| Error::Validation(format!("Invalid ZIP file: {}", e)))?;
+
+            let mut items = Vec::new();
+            for i in 0..archive.len() {
+                let mut file = archive
+                    .by_index(i)
+                    .map_err(|e| Error::storage(format!("Failed to read ZIP entry: {}", e)))?;
+
+                let name = file.name().to_string();
+
+                if name.starts_with("processing-rules/")
+                    && (name.ends_with(".yaml") || name.ends_with(".yml"))
+                    && !file.is_dir()
+                {
+                    let mut content = String::new();
+                    file.read_to_string(&mut content).map_err(|e| {
+                        Error::storage(format!("Failed to read processing rule {}: {}", name, e))
+                    })?;
+
+                    let parsed: Vec<raisin_ai::ProcessingRule> =
+                        if content.trim_start().starts_with('-') {
+                            serde_yaml::from_str(&content).map_err(|e| {
+                                Error::Validation(format!(
+                                    "Invalid processing rules YAML in {name}: {e}"
+                                ))
+                            })?
+                        } else {
+                            vec![serde_yaml::from_str(&content).map_err(|e| {
+                                Error::Validation(format!(
+                                    "Invalid processing rule YAML in {name}: {e}"
+                                ))
+                            })?]
+                        };
+
+                    for rule in parsed {
+                        if rule.id.trim().is_empty() {
+                            let stem = name
+                                .rsplit('/')
+                                .next()
+                                .unwrap_or(&name)
+                                .trim_end_matches(".yaml")
+                                .trim_end_matches(".yml");
+                            items.push(stem.to_string());
+                        } else {
+                            items.push(rule.id.clone());
+                        }
+                    }
+                }
+            }
+            items
+        };
+
+        if rule_ids.is_empty() {
+            return Ok(());
+        }
+
+        let existing = self
+            .storage
+            .processing_rules()
+            .get_rules(RepoScope::new(tenant_id, repo_id))
+            .await?
+            .unwrap_or_default();
+
+        for rule_id in rule_ids {
+            let (action, message) = Self::dry_run_action(
+                existing.get_rule(&rule_id).is_some(),
+                install_mode,
+                "Processing rule",
+                &rule_id,
+                counts,
+            );
+
+            logs.push(DryRunLogEntry {
+                level: action.to_string(),
+                category: "processing_rule".to_string(),
+                path: rule_id,
                 message,
                 action: action.to_string(),
                 policy: None,

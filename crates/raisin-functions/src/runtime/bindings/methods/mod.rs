@@ -10,6 +10,7 @@
 
 pub mod admin;
 pub mod ai;
+pub mod assets;
 pub mod branches;
 pub mod context;
 pub mod crypto;
@@ -63,6 +64,8 @@ pub fn build_registry() -> BindingsRegistry {
     // Resource operations
     methods.extend(resources::methods());
     methods.extend(pdf::methods());
+    // Extraction writeback — text produced by a plugin task above this layer.
+    methods.extend(assets::methods());
 
     // Date/time operations
     methods.extend(date::methods());
@@ -241,6 +244,8 @@ mod tests {
             "node_add_resource",
             // PDF (1)
             "pdf_process_from_storage",
+            // Asset operations (1)
+            "asset_set_extraction",
             // Tasks (1)
             "task_create",
             // Functions (1)

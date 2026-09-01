@@ -14,7 +14,22 @@ pub enum RuleMatcher {
     All,
 
     /// Matches nodes of a specific type (e.g., "raisin:Asset").
-    NodeType(String),
+    ///
+    /// A STRUCT variant, and it must stay one. Serde's internally-tagged
+    /// representation (`#[serde(tag = "type")]`, above) cannot encode a newtype
+    /// variant wrapping a string: it needs the payload to be a map so the tag
+    /// can be added to it. As a newtype this variant could not be serialized AT
+    /// ALL — and because the whole `ProcessingRuleSet` is persisted as one
+    /// msgpack blob, a single `node_type` rule made saving fail for every other
+    /// rule in the repository too, with a storage error and no hint at the
+    /// cause. It also made a rule unwritable from a package's YAML.
+    ///
+    /// No migration was needed when this changed, for the same reason it was a
+    /// bug: nothing in this shape was ever successfully written.
+    NodeType {
+        /// The node type to match, e.g. `raisin:Asset`.
+        node_type: String,
+    },
 
     /// Matches nodes at paths matching a glob pattern.
     Path {
@@ -60,7 +75,7 @@ impl RuleMatcher {
         match self {
             RuleMatcher::All => true,
 
-            RuleMatcher::NodeType(node_type) => {
+            RuleMatcher::NodeType { node_type } => {
                 context.node_type.as_deref() == Some(node_type.as_str())
             }
 
@@ -218,6 +233,25 @@ pub fn mime_matches(pattern: &str, actual: &str) -> bool {
             .split('/')
             .next()
             .is_some_and(|t| t.eq_ignore_ascii_case(family));
+    }
+
+    // SUBTYPE PREFIX form: `application/vnd.openxmlformats-officedocument.*`.
+    //
+    // Without this, the natural way to write an Office rule matched NOTHING.
+    // The family form above only understands a wildcard on the whole subtype,
+    // so a trailing `*` anywhere else fell through to the exact comparison and
+    // silently never fired — a rule that saves, displays, and does nothing.
+    //
+    // It matters most for exactly the formats that need it: the OOXML types are
+    // 60+ characters, differ between Word, Excel and PowerPoint only near the
+    // end, and each has a legacy `application/ms*` sibling. Requiring them
+    // spelled out in full is asking for a typo that produces no error.
+    //
+    // Anchored as a plain prefix, not a glob: a `*` in the middle would need a
+    // matcher, and the family and prefix forms together already cover every
+    // mimetype grouping that exists in practice.
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        return actual.len() >= prefix.len() && actual[..prefix.len()].eq_ignore_ascii_case(prefix);
     }
 
     pattern.eq_ignore_ascii_case(actual)

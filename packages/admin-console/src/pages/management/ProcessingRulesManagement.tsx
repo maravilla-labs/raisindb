@@ -17,6 +17,10 @@ import {
   X,
   AlertCircle,
   Sparkles,
+  Cpu,
+  Puzzle,
+  ArrowUpRight,
+  Ban,
 } from 'lucide-react'
 import GlassCard from '../../components/GlassCard'
 import { ToastContainer, useToast } from '../../components/Toast'
@@ -28,8 +32,15 @@ import {
   CreateRuleRequest,
   UpdateRuleRequest,
   TestRuleMatchRequest,
+  TestRuleMatchResponse,
+  TaskCatalogEntry,
+  PipelinePlan,
+  BlockedTask,
 } from '../../api/processing-rules'
 import { ApiError } from '../../api/client'
+import { pluginsApi, PluginsResponse } from '../../api/plugins'
+import { sqlApi } from '../../api/sql'
+import { workspacesApi } from '../../api/workspaces'
 
 interface ProcessingRulesManagementProps {
   repo: string
@@ -55,6 +66,372 @@ function formatMatcher(matcher: RuleMatcher): string {
     default:
       return 'Unknown'
   }
+}
+
+/**
+ * One line explaining why a configured task will not run HERE.
+ *
+ * Each reason is a DIFFERENT fix, and collapsing them into "unavailable" is
+ * what sent operators to the wrong place: `plugin_missing` is a deployment
+ * problem on this box, `handled_above` is a rule aimed one layer down and
+ * needs a trigger function, `unknown`/`malformed_slug` are the rule itself.
+ */
+function explainBlocked(blocked: BlockedTask['blocked']): string {
+  switch (blocked.reason) {
+    case 'plugin_missing':
+      return `no plugin on this server provides ${blocked.method}`
+    case 'handled_above':
+      return `handled above the engine — ${blocked.how}`
+    case 'malformed_slug':
+      return 'not a valid task slug (a-z, 0-9, _)'
+    case 'unknown':
+      return 'no provider on this server claims this slug'
+    default:
+      return 'unavailable'
+  }
+}
+
+function providerIcon(provider: TaskCatalogEntry['provider']) {
+  switch (provider) {
+    case 'native':
+      return <Cpu className="w-3.5 h-3.5 text-green-400" />
+    case 'plugin':
+      return <Puzzle className="w-3.5 h-3.5 text-blue-400" />
+    case 'function':
+      return <ArrowUpRight className="w-3.5 h-3.5 text-amber-400" />
+  }
+}
+
+/**
+ * What a rule will ACTUALLY do on this server.
+ *
+ * A rule is portable configuration; a plan is that configuration resolved
+ * against one box's loaded plugins, and the two are routinely different. Before
+ * this view the difference was invisible — a rule asking for docx conversion
+ * looked identical on a server that could do it and one that could not.
+ */
+function PipelinePlanView({ plan }: { plan: PipelinePlan }) {
+  const nothing = plan.runnable.length === 0 && plan.blocked.length === 0
+  return (
+    <div className="space-y-2">
+      {nothing && (
+        <p className="text-gray-400 text-sm">
+          No tasks configured — this rule matches, and nothing happens.
+        </p>
+      )}
+      {plan.runnable.length > 0 && (
+        <div>
+          <p className="text-xs uppercase tracking-wide text-gray-500 mb-1">
+            Will run here
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {plan.runnable.map((t) => (
+              <span
+                key={t.slug}
+                title={t.via ? `via plugin method ${t.via}` : 'performed by this server'}
+                className="inline-flex items-center gap-1.5 px-2 py-0.5 bg-green-500/10 border border-green-500/30 text-green-300 text-xs rounded"
+              >
+                {t.via ? (
+                  <Puzzle className="w-3 h-3" />
+                ) : (
+                  <Cpu className="w-3 h-3" />
+                )}
+                {t.slug}
+                {t.via && <span className="text-green-500/70">via {t.via}</span>}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+      {plan.blocked.length > 0 && (
+        <div>
+          <p className="text-xs uppercase tracking-wide text-gray-500 mb-1">
+            Configured but will NOT run here
+          </p>
+          <div className="space-y-1">
+            {plan.blocked.map((t) => (
+              <div
+                key={t.slug}
+                className="flex items-start gap-2 px-2 py-1 bg-amber-500/10 border border-amber-500/30 rounded text-xs"
+              >
+                <Ban className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
+                <span className="text-amber-200 font-medium">{t.slug}</span>
+                <span className="text-amber-300/70">{explainBlocked(t.blocked)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * What this BOX can do — loaded plugins, refused plugin files, resolved kinds.
+ *
+ * The panel exists for the `rejected` list. A plugin the loader refuses (an ABI
+ * bump above all) leaves a server that boots perfectly and has silently lost
+ * `raisin.media.*` for every tenant; the only previous signal was one WARN line
+ * at startup that no deploy asserts on and nobody reads weeks later when a
+ * customer's search comes back empty.
+ */
+function CapabilitiesPanel() {
+  const [data, setData] = useState<PluginsResponse | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    pluginsApi
+      .list()
+      .then((res) => !cancelled && setData(res))
+      .catch((e) => !cancelled && setError(e instanceof Error ? e.message : String(e)))
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  if (error) {
+    return (
+      <GlassCard>
+        <p className="text-gray-400 text-sm">
+          Server capabilities unavailable: {error}
+        </p>
+      </GlassCard>
+    )
+  }
+  if (!data) return null
+
+  return (
+    <GlassCard>
+      <div className="flex items-center gap-2 mb-3">
+        <Puzzle className="w-4 h-4 text-blue-400" />
+        <h3 className="text-white font-medium">Server capabilities</h3>
+        <span className="text-gray-500 text-xs">
+          process-wide · changes only on restart
+        </span>
+      </div>
+
+      {/* The alarm, first and loudest. */}
+      {data.rejected.length > 0 && (
+        <div className="mb-3 px-3 py-2 bg-red-500/10 border border-red-500/40 rounded">
+          <div className="flex items-center gap-2 mb-1">
+            <AlertCircle className="w-4 h-4 text-red-400" />
+            <span className="text-red-300 text-sm font-medium">
+              {data.rejected.length} plugin file
+              {data.rejected.length === 1 ? '' : 's'} REFUSED at startup
+            </span>
+          </div>
+          <p className="text-red-300/70 text-xs mb-2">
+            This server is running without them. Every binding they provided is
+            soft-failing for every tenant.
+          </p>
+          {data.rejected.map((r) => (
+            <div key={r.path} className="text-xs text-red-200/80 font-mono">
+              {r.path} — {r.reason}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {!data.capability_probe_installed && (
+        <div className="mb-3 flex items-start gap-2 px-3 py-2 bg-amber-500/10 border border-amber-500/30 rounded text-xs text-amber-200">
+          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+          <span>
+            No capability probe was installed at startup, so the task planner
+            answers &quot;no&quot; to every plugin task by default rather than by
+            observation. Plugin-backed tasks will never be planned on this
+            server, whatever is loaded.
+          </span>
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
+        {data.capabilities.map((row) => (
+          <div
+            key={row.kind}
+            title={row.mime_types.join(', ')}
+            className={`px-2 py-1.5 rounded border text-xs ${
+              row.provider === 'unsupported'
+                ? 'bg-red-500/10 border-red-500/30 text-red-300'
+                : row.provider === 'plugin'
+                ? 'bg-blue-500/10 border-blue-500/30 text-blue-300'
+                : 'bg-green-500/10 border-green-500/30 text-green-300'
+            }`}
+          >
+            <div className="font-medium">{row.kind}</div>
+            <div className="opacity-70">
+              {row.provider === 'plugin'
+                ? `plugin (${row.plugin})`
+                : row.provider === 'core'
+                ? `core — ${row.how}`
+                : 'UNSUPPORTED'}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {data.plugins.length === 0 ? (
+        <p className="text-gray-400 text-xs">
+          No plugins loaded. Only core capabilities are available — PDF text and
+          image embedding.
+        </p>
+      ) : (
+        <div className="space-y-1">
+          {data.plugins.map((p) => (
+            <div key={p.name} className="text-xs">
+              <span className="text-white font-medium">{p.name}</span>
+              <span className="text-gray-500"> — {p.methods.length} methods</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </GlassCard>
+  )
+}
+
+/** The five extraction outcomes, with the ones that need action called out. */
+const EXTRACT_STATUS_META: Record<
+  string,
+  { label: string; tone: string; note?: string }
+> = {
+  ok: { label: 'ok', tone: 'bg-green-500/10 border-green-500/30 text-green-300' },
+  empty: {
+    label: 'empty',
+    tone: 'bg-gray-500/10 border-gray-500/30 text-gray-300',
+    note: 'read, and genuinely holds no text',
+  },
+  delegated: {
+    label: 'delegated',
+    tone: 'bg-amber-500/10 border-amber-500/40 text-amber-300',
+    note: 'handed to a plugin task that never wrote back — a trigger or media job failed',
+  },
+  unsupported: {
+    label: 'unsupported',
+    tone: 'bg-orange-500/10 border-orange-500/30 text-orange-300',
+    note: 'nothing on this server can read these bytes — deploy the plugin',
+  },
+  failed: {
+    label: 'failed',
+    tone: 'bg-red-500/10 border-red-500/30 text-red-300',
+    note: 'an extractor claimed it and errored — retryable',
+  },
+}
+
+/**
+ * Extraction outcomes across a workspace's assets.
+ *
+ * `delegated` and `unsupported` are DIFFERENT alarms and are deliberately not
+ * merged: unsupported means the capability is missing (deploy the plugin);
+ * delegated means the capability is present and our side dropped the handover.
+ * Sending an operator to the wrong one of those wastes the whole investigation.
+ */
+function AssetHealthPanel({ repo }: { repo: string }) {
+  const [workspaces, setWorkspaces] = useState<string[]>([])
+  const [workspace, setWorkspace] = useState('')
+  const [counts, setCounts] = useState<Record<string, number> | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    workspacesApi
+      .list(repo)
+      .then((items) => {
+        if (cancelled) return
+        const names = items.map((w) => w.name)
+        setWorkspaces(names)
+        setWorkspace((cur) => cur || names.find((n) => n === 'assets') || names[0] || '')
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [repo])
+
+  const load = useCallback(async () => {
+    if (!workspace) return
+    setLoading(true)
+    setError(null)
+    try {
+      // The cast form: a verbatim row-level filter, correct regardless of which
+      // compound indexes this workspace happens to have built.
+      const res = await sqlApi.executeQuery(
+        repo,
+        `SELECT properties->>'__extract_status'::String AS status, COUNT(*) AS n
+           FROM '${workspace}'
+          WHERE node_type = 'raisin:Asset'
+          GROUP BY properties->>'__extract_status'::String`
+      )
+      const next: Record<string, number> = {}
+      for (const row of res.rows) {
+        const key = (row.status ?? 'none') as string
+        next[key] = Number(row.n ?? 0)
+      }
+      setCounts(next)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setLoading(false)
+    }
+  }, [repo, workspace])
+
+  return (
+    <GlassCard>
+      <div className="flex items-center gap-2 mb-3 flex-wrap">
+        <FileType className="w-4 h-4 text-purple-400" />
+        <h3 className="text-white font-medium">Asset extraction health</h3>
+        <div className="flex-1" />
+        <select
+          value={workspace}
+          onChange={(e) => setWorkspace(e.target.value)}
+          className="px-2 py-1 bg-white/5 border border-white/10 rounded text-white text-sm"
+        >
+          {workspaces.map((w) => (
+            <option key={w} value={w} className="bg-gray-900">
+              {w}
+            </option>
+          ))}
+        </select>
+        <button
+          onClick={load}
+          disabled={loading || !workspace}
+          className="px-3 py-1 bg-purple-500/20 border border-purple-500/30 text-purple-200 text-sm rounded hover:bg-purple-500/30 disabled:opacity-50 flex items-center gap-2"
+        >
+          {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+          Check
+        </button>
+      </div>
+
+      {error && <p className="text-red-300 text-xs">{error}</p>}
+
+      {counts && (
+        <div className="space-y-1.5">
+          {Object.entries(counts)
+            .sort((a, b) => b[1] - a[1])
+            .map(([status, n]) => {
+              const meta = EXTRACT_STATUS_META[status]
+              return (
+                <div
+                  key={status}
+                  className={`flex items-start gap-3 px-3 py-1.5 rounded border text-xs ${
+                    meta?.tone ?? 'bg-white/5 border-white/10 text-gray-300'
+                  }`}
+                >
+                  <span className="font-mono font-medium w-24 shrink-0">
+                    {meta?.label ?? (status === 'none' ? 'not processed' : status)}
+                  </span>
+                  <span className="font-medium w-12 shrink-0">{n}</span>
+                  {meta?.note && <span className="opacity-70">{meta.note}</span>}
+                </div>
+              )
+            })}
+          {Object.keys(counts).length === 0 && (
+            <p className="text-gray-400 text-xs">No assets in this workspace.</p>
+          )}
+        </div>
+      )}
+    </GlassCard>
+  )
 }
 
 function formatPdfStrategy(strategy: ProcessingSettings['pdf_strategy']): string {
@@ -107,12 +484,13 @@ export default function ProcessingRulesManagement({ repo }: ProcessingRulesManag
     mime_type: '',
     workspace: '',
   })
-  const [testResult, setTestResult] = useState<{
-    matched: boolean
-    matched_rule?: ProcessingRule
-    rules_evaluated: number
-  } | null>(null)
+  const [testResult, setTestResult] = useState<TestRuleMatchResponse | null>(null)
   const [testing, setTesting] = useState(false)
+  // The task vocabulary WITH this server's availability. Fetched rather than
+  // hard-coded: the console cannot see the plugin registry, and a second
+  // availability table here would drift from the one the asset job plans with.
+  const [catalog, setCatalog] = useState<TaskCatalogEntry[]>([])
+  const [probeInstalled, setProbeInstalled] = useState(true)
 
   // Load rules
   const loadRules = useCallback(async () => {
@@ -133,6 +511,26 @@ export default function ProcessingRulesManagement({ repo }: ProcessingRulesManag
   useEffect(() => {
     loadRules()
   }, [loadRules])
+
+  // The catalogue is process-wide and cannot change without a server restart
+  // (the plugin directory is scanned once, before any function runs), so one
+  // fetch per mount is enough. A failure leaves the picker empty rather than
+  // guessing — offering a task this server cannot run is the exact confusion
+  // this endpoint was added to remove.
+  useEffect(() => {
+    let cancelled = false
+    processingRulesApi
+      .listTasks(repo)
+      .then((res) => {
+        if (cancelled) return
+        setCatalog(res.tasks)
+        setProbeInstalled(res.capability_probe_installed)
+      })
+      .catch((error) => console.error('Failed to load task catalogue:', error))
+    return () => {
+      cancelled = true
+    }
+  }, [repo])
 
   // Handle drag and drop
   const handleDragStart = (index: number) => {
@@ -385,12 +783,30 @@ export default function ProcessingRulesManagement({ repo }: ProcessingRulesManag
               </div>
             )}
           </div>
+
+          {/*
+            THE ANSWER THE TEST PANEL EXISTS FOR. "Which rule matched" was only
+            half of it — the other half is what that rule DOES on this
+            particular server, which depends on the plugins this process
+            loaded. A rule asking for docx conversion looks identical whether
+            the media plugin is present or not; only the plan tells them apart.
+          */}
+          {testResult?.matched && (
+            <div className="mt-4 pt-4 border-t border-white/10">
+              <h4 className="text-white text-sm font-medium mb-2">
+                What happens on this server
+              </h4>
+              <PipelinePlanView plan={testResult.plan} />
+            </div>
+          )}
         </GlassCard>
       )}
 
       {/* Create/Edit Rule Form */}
       {(isCreating || editingRule) && (
         <RuleEditor
+          catalog={catalog}
+          probeInstalled={probeInstalled}
           rule={editingRule}
           onSave={(request) => {
             if (editingRule) {
@@ -406,6 +822,15 @@ export default function ProcessingRulesManagement({ repo }: ProcessingRulesManag
           saving={saving}
         />
       )}
+
+      {/*
+        What this box can do, and what it has already done to the assets on it.
+        Placed with the rules because they are the two halves of the same
+        question: a rule is portable configuration, and these say what that
+        configuration means HERE.
+      */}
+      <CapabilitiesPanel />
+      <AssetHealthPanel repo={repo} />
 
       {/* Rules List */}
       <div className="space-y-2">
@@ -466,6 +891,42 @@ export default function ProcessingRulesManagement({ repo }: ProcessingRulesManag
 
                 {/* Settings Summary */}
                 <div className="flex items-center gap-2">
+                  {/*
+                    The task list is the rule's ACTION half, so it leads. The
+                    badges after it are legacy booleans, still shown because
+                    rules written before `tasks` existed carry only those and
+                    fall back to them.
+                  */}
+                  {rule.settings.tasks?.length === 0 && (
+                    <span
+                      title="Matches these nodes and deliberately does nothing — an opt-out rule ordered ahead of a broader one."
+                      className="px-2 py-0.5 bg-gray-500/20 border border-gray-500/30 text-gray-400 text-xs rounded"
+                    >
+                      No tasks
+                    </span>
+                  )}
+                  {rule.settings.tasks?.map((slug) => {
+                    const entry = catalog.find((t) => t.slug === slug)
+                    const ok = entry?.available ?? false
+                    return (
+                      <span
+                        key={slug}
+                        title={
+                          entry
+                            ? `${entry.summary}${ok ? '' : ' — NOT available on this server'}`
+                            : 'Unknown slug on this server'
+                        }
+                        className={`inline-flex items-center gap-1 px-2 py-0.5 border text-xs rounded ${
+                          ok
+                            ? 'bg-green-500/20 border-green-500/30 text-green-300'
+                            : 'bg-amber-500/20 border-amber-500/30 text-amber-300'
+                        }`}
+                      >
+                        {!ok && <Ban className="w-3 h-3" />}
+                        {slug}
+                      </span>
+                    )
+                  })}
                   {rule.settings.generate_image_embedding && (
                     <span className="px-2 py-0.5 bg-blue-500/20 border border-blue-500/30 text-blue-300 text-xs rounded">
                       Image Embed
@@ -528,9 +989,20 @@ interface RuleEditorProps {
   onSave: (request: CreateRuleRequest | UpdateRuleRequest) => void
   onCancel: () => void
   saving: boolean
+  /** The task vocabulary with this server's availability, from the API. */
+  catalog: TaskCatalogEntry[]
+  /** False = no capability probe installed; availability is a default. */
+  probeInstalled: boolean
 }
 
-function RuleEditor({ rule, onSave, onCancel, saving }: RuleEditorProps) {
+function RuleEditor({
+  rule,
+  onSave,
+  onCancel,
+  saving,
+  catalog,
+  probeInstalled,
+}: RuleEditorProps) {
   const [name, setName] = useState(rule?.name || '')
   const [matcherType, setMatcherType] = useState<RuleMatcher['type']>(rule?.matcher?.type || 'all')
   const [matcherValue, setMatcherValue] = useState('')
@@ -720,6 +1192,134 @@ function RuleEditor({ rule, onSave, onCancel, saving }: RuleEditorProps) {
 
           {expanded && (
             <div className="space-y-4 pl-6">
+              {/*
+                TASKS — the action half of the routing table, and the first
+                thing an operator should see. The matcher above says WHICH
+                nodes; this says WHAT HAPPENS to them.
+              */}
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-sm font-medium text-gray-300">
+                    Tasks
+                  </label>
+                  {settings.tasks !== undefined && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const next = { ...settings }
+                        delete next.tasks
+                        setSettings(next)
+                      }}
+                      className="text-xs text-gray-400 hover:text-white"
+                    >
+                      Reset to defaults
+                    </button>
+                  )}
+                </div>
+                <p className="text-gray-400 text-xs mb-2">
+                  {settings.tasks === undefined ? (
+                    <>
+                      Not configured — tasks are derived from the settings below
+                      and the file&apos;s MIME type. Tick one to take control.
+                    </>
+                  ) : settings.tasks.length === 0 ? (
+                    <>
+                      Explicitly empty: this rule matches and does{' '}
+                      <strong>nothing</strong>. Useful as an opt-out ordered
+                      ahead of a broader rule.
+                    </>
+                  ) : (
+                    <>Runs in the order listed.</>
+                  )}
+                </p>
+
+                {!probeInstalled && (
+                  <div className="flex items-start gap-2 px-3 py-2 mb-2 bg-amber-500/10 border border-amber-500/30 rounded text-xs text-amber-200">
+                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                    <span>
+                      This server did not install a capability probe at startup,
+                      so availability below is a default rather than an
+                      observation. Plugin-backed tasks will not be planned.
+                    </span>
+                  </div>
+                )}
+
+                <div className="space-y-1">
+                  {catalog.map((task) => {
+                    const selected = settings.tasks?.includes(task.slug) ?? false
+                    return (
+                      <label
+                        key={task.slug}
+                        className={`flex items-start gap-3 px-3 py-2 rounded-lg border cursor-pointer transition-colors ${
+                          selected
+                            ? 'bg-purple-500/10 border-purple-500/40'
+                            : 'bg-white/5 border-white/10 hover:border-white/20'
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selected}
+                          onChange={(e) => {
+                            // An unset list means "not configured"; the first
+                            // tick has to materialise it as an explicit array,
+                            // or the legacy fallback keeps winning and the
+                            // checkbox appears to do nothing.
+                            const current = settings.tasks ?? []
+                            setSettings({
+                              ...settings,
+                              tasks: e.target.checked
+                                ? [...current, task.slug]
+                                : current.filter((t) => t !== task.slug),
+                            })
+                          }}
+                          className="w-4 h-4 mt-0.5 rounded border-white/20 bg-white/5 text-purple-500"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            {providerIcon(task.provider)}
+                            <span className="text-white text-sm font-medium">
+                              {task.slug}
+                            </span>
+                            {/*
+                              Availability is shown whether or not the task is
+                              ticked. An operator needs to know BEFORE ticking
+                              that this box cannot do it — that is the whole
+                              reason the catalogue is served rather than
+                              hard-coded here.
+                            */}
+                            {!task.available && (
+                              <span className="px-1.5 py-0.5 bg-amber-500/20 border border-amber-500/30 text-amber-300 text-[10px] rounded">
+                                {task.provider === 'function'
+                                  ? 'NEEDS A TRIGGER'
+                                  : 'NOT ON THIS SERVER'}
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-gray-400 text-xs mt-0.5">
+                            {task.summary}
+                          </p>
+                          {!task.available && task.method && (
+                            <p className="text-amber-400/70 text-xs mt-0.5">
+                              needs plugin method {task.method}
+                            </p>
+                          )}
+                          {task.provider === 'function' && task.how && (
+                            <p className="text-amber-400/70 text-xs mt-0.5">
+                              {task.how}
+                            </p>
+                          )}
+                        </div>
+                      </label>
+                    )
+                  })}
+                  {catalog.length === 0 && (
+                    <p className="text-gray-500 text-xs">
+                      Task catalogue unavailable — check the server connection.
+                    </p>
+                  )}
+                </div>
+              </div>
+
               {/* Image Embedding */}
               <label className="flex items-center gap-3 cursor-pointer">
                 <input

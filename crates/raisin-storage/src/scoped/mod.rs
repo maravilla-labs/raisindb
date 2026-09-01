@@ -63,6 +63,7 @@ impl<S: Storage> Storage for ScopedStorage<S> {
     type Nodes = S::Nodes;
     type NodeTypes = S::NodeTypes;
     type Workspaces = S::Workspaces;
+    type ProcessingRules = S::ProcessingRules;
     type Registry = S::Registry;
     type PropertyIndex = S::PropertyIndex;
     type ReferenceIndex = S::ReferenceIndex;
@@ -78,6 +79,10 @@ impl<S: Storage> Storage for ScopedStorage<S> {
 
     fn workspaces(&self) -> &Self::Workspaces {
         self.inner.workspaces()
+    }
+
+    fn processing_rules(&self) -> &Self::ProcessingRules {
+        self.inner.processing_rules()
     }
 
     fn registry(&self) -> &Self::Registry {

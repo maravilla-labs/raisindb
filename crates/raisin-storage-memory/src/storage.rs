@@ -254,6 +254,7 @@ pub struct InMemoryStorage {
     pub(crate) fulltext_job_store: NoopFullTextJobStore,
     pub(crate) spatial_index: InMemorySpatialIndexRepo,
     pub(crate) compound_index: InMemoryCompoundIndexRepo,
+    pub(crate) processing_rules: InMemoryProcessingRulesRepo,
 }
 
 impl Default for InMemoryStorage {
@@ -284,6 +285,7 @@ impl Default for InMemoryStorage {
             fulltext_job_store: NoopFullTextJobStore,
             spatial_index: InMemorySpatialIndexRepo,
             compound_index: InMemoryCompoundIndexRepo,
+            processing_rules: InMemoryProcessingRulesRepo::default(),
         }
     }
 }
@@ -295,6 +297,7 @@ impl Storage for InMemoryStorage {
     type Archetypes = InMemoryArchetypeRepo;
     type ElementTypes = InMemoryElementTypeRepo;
     type Workspaces = InMemoryWorkspaceRepo;
+    type ProcessingRules = InMemoryProcessingRulesRepo;
     type Registry = InMemoryRegistryRepo;
     type PropertyIndex = InMemoryPropertyIndexRepo;
     type ReferenceIndex = InMemoryReferenceIndexRepo;
@@ -325,6 +328,9 @@ impl Storage for InMemoryStorage {
     }
     fn workspaces(&self) -> &Self::Workspaces {
         &self.workspaces
+    }
+    fn processing_rules(&self) -> &Self::ProcessingRules {
+        &self.processing_rules
     }
     fn registry(&self) -> &Self::Registry {
         &self.registry
@@ -439,5 +445,119 @@ impl TransactionalStorage for InMemoryStorage {
     async fn begin_context(&self) -> Result<Box<dyn TransactionalContext>> {
         let tx = InMemoryTx::new(self.nodes.nodes.clone());
         Ok(Box::new(tx) as Box<dyn TransactionalContext>)
+    }
+}
+
+/// In-memory asset-processing rules.
+///
+/// A real store, not a stub returning `None`: the trait is small (one
+/// `ProcessingRuleSet` per repo) and a `None`-returning implementation would
+/// make every rule silently vanish in tests that use this backend — the same
+/// class of "configured and does nothing" failure the rules system exists to
+/// surface. This backend is deprecated for production use; keeping this honest
+/// costs a mutex and a map.
+#[derive(Default, Clone)]
+pub struct InMemoryProcessingRulesRepo {
+    // `Arc` so a cloned `InMemoryStorage` shares one rule set rather than
+    // forking a private copy — a clone that silently diverged would make a rule
+    // written through one handle invisible through another.
+    rules: std::sync::Arc<
+        std::sync::Mutex<std::collections::HashMap<String, raisin_ai::ProcessingRuleSet>>,
+    >,
+}
+
+impl InMemoryProcessingRulesRepo {
+    fn key(scope: raisin_storage::scope::RepoScope<'_>) -> String {
+        format!("{}\u{0}{}", scope.tenant_id, scope.repo_id)
+    }
+}
+
+impl raisin_storage::ProcessingRulesRepository for InMemoryProcessingRulesRepo {
+    async fn get_rules(
+        &self,
+        scope: raisin_storage::scope::RepoScope<'_>,
+    ) -> raisin_error::Result<Option<raisin_ai::ProcessingRuleSet>> {
+        Ok(self
+            .rules
+            .lock()
+            .expect("processing rules mutex poisoned")
+            .get(&Self::key(scope))
+            .cloned())
+    }
+
+    async fn set_rules(
+        &self,
+        scope: raisin_storage::scope::RepoScope<'_>,
+        rules: &raisin_ai::ProcessingRuleSet,
+    ) -> raisin_error::Result<()> {
+        self.rules
+            .lock()
+            .expect("processing rules mutex poisoned")
+            .insert(Self::key(scope), rules.clone());
+        Ok(())
+    }
+
+    async fn delete_rules(
+        &self,
+        scope: raisin_storage::scope::RepoScope<'_>,
+    ) -> raisin_error::Result<()> {
+        self.rules
+            .lock()
+            .expect("processing rules mutex poisoned")
+            .remove(&Self::key(scope));
+        Ok(())
+    }
+
+    // The single-rule operations are defined in terms of the set, so
+    // first-match-wins ORDER stays owned by `ProcessingRuleSet` (which re-sorts
+    // on every mutation) rather than being re-derived here. Two orderings of
+    // the same rules is a different pipeline, silently.
+    async fn get_rule(
+        &self,
+        scope: raisin_storage::scope::RepoScope<'_>,
+        rule_id: &str,
+    ) -> raisin_error::Result<Option<raisin_ai::ProcessingRule>> {
+        Ok(self
+            .rules
+            .lock()
+            .expect("processing rules mutex poisoned")
+            .get(&Self::key(scope))
+            .and_then(|set: &raisin_ai::ProcessingRuleSet| set.get_rule(rule_id).cloned()))
+    }
+
+    async fn upsert_rule(
+        &self,
+        scope: raisin_storage::scope::RepoScope<'_>,
+        rule: &raisin_ai::ProcessingRule,
+    ) -> raisin_error::Result<()> {
+        let mut guard = self.rules.lock().expect("processing rules mutex poisoned");
+        let set = guard.entry(Self::key(scope)).or_default();
+        set.remove_rule(&rule.id);
+        set.add_rule(rule.clone());
+        Ok(())
+    }
+
+    async fn delete_rule(
+        &self,
+        scope: raisin_storage::scope::RepoScope<'_>,
+        rule_id: &str,
+    ) -> raisin_error::Result<()> {
+        let mut guard = self.rules.lock().expect("processing rules mutex poisoned");
+        if let Some(set) = guard.get_mut(&Self::key(scope)) {
+            set.remove_rule(rule_id);
+        }
+        Ok(())
+    }
+
+    async fn reorder_rules(
+        &self,
+        scope: raisin_storage::scope::RepoScope<'_>,
+        rule_ids: &[String],
+    ) -> raisin_error::Result<()> {
+        let mut guard = self.rules.lock().expect("processing rules mutex poisoned");
+        if let Some(set) = guard.get_mut(&Self::key(scope)) {
+            set.reorder(rule_ids);
+        }
+        Ok(())
     }
 }

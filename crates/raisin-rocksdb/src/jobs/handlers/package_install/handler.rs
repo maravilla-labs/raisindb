@@ -346,6 +346,28 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         )
         .await?;
 
+        // Phase 2b: Install asset-processing rules (60%)
+        //
+        // After workspaces, because a rule may name one in its matcher, and
+        // before content, so an asset installed by this very package is already
+        // matched by the rule that should process it. The other order leaves a
+        // package's own seed documents permanently unindexed — nothing
+        // re-evaluates a rule against assets that arrived before it.
+        self.report_progress(&job.id, 0.58, "Installing processing rules")
+            .await;
+        let cursor = Cursor::new(&zip_data);
+        let mut archive = ZipArchive::new(cursor)
+            .map_err(|e| Error::Validation(format!("Invalid ZIP file: {}", e)))?;
+        self.install_processing_rules(
+            &mut archive,
+            &context.tenant_id,
+            &context.repo_id,
+            &job.id,
+            install_mode,
+            &mut stats,
+        )
+        .await?;
+
         // Phase 3: Apply workspace patches (60-70%)
         self.report_progress(&job.id, 0.6, "Applying workspace patches")
             .await;
@@ -448,6 +470,8 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             node_types_skipped = stats.node_types_skipped,
             workspaces = stats.workspaces_installed,
             workspaces_skipped = stats.workspaces_skipped,
+            processing_rules = stats.processing_rules_installed,
+            processing_rules_skipped = stats.processing_rules_skipped,
             patches = stats.patches_applied,
             content_nodes = stats.content_nodes_created,
             content_nodes_skipped = stats.content_nodes_skipped,

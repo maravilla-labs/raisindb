@@ -47,6 +47,8 @@ pub struct RaisinFunctionApiCallbacks {
     pub ai_get_default_model: Option<AIGetDefaultModelCallback>,
     pub resource_get_binary: Option<ResourceGetBinaryCallback>,
     pub pdf_process_from_storage: Option<PdfProcessFromStorageCallback>,
+    /// Store an extraction artifact produced by a plugin task above this layer.
+    pub asset_set_extraction: Option<AssetSetExtractionCallback>,
     pub task_create: Option<TaskCreateCallback>,
     pub task_update: Option<TaskUpdateCallback>,
     pub task_complete: Option<TaskCompleteCallback>,
@@ -231,6 +233,12 @@ impl RaisinFunctionApiCallbacks {
 
     pub fn with_resource_get_binary(mut self, callback: ResourceGetBinaryCallback) -> Self {
         self.resource_get_binary = Some(callback);
+        self
+    }
+
+    /// Set the extraction-writeback callback.
+    pub fn with_asset_set_extraction(mut self, callback: AssetSetExtractionCallback) -> Self {
+        self.asset_set_extraction = Some(callback);
         self
     }
 

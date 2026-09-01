@@ -1076,6 +1076,34 @@ globalThis.raisin = {
             return r;
         }
     },
+    assets: {
+        // Store text extracted by a task that runs ABOVE the engine — a .docx
+        // converted to markdown by raisin.media.doc.toMarkdown, say. Core reads
+        // PDFs and nothing else, so this is how every other format's text
+        // reaches the index.
+        //
+        // Writing __extracted_text directly does NOT work and is not an
+        // oversight: the extraction properties are engine-owned and the write
+        // path refuses them to function code. This is the door.
+        //
+        // Pass ONLY the text. The binary fingerprint is stamped server-side —
+        // a second producer of it would never match the extraction gate, so
+        // every writeback would re-trigger extraction, forever. Chunking and
+        // embedding are not yours either: they follow from the node write, on
+        // the same path and under the same idempotence guard as core's own PDF
+        // text.
+        //
+        // nodeRef: node id, or an absolute path ("/documents/report.docx")
+        // options: { source?: "plugin-libreoffice", store?: true }
+        // Returns { status: "ok"|"empty", source, chars, stored }
+        setExtractedText: async (workspace, nodeRef, text, options) => {
+            const r = __call('asset_set_extraction', [workspace, nodeRef, String(text || ''), options || {}]);
+            if (r && r.error) {
+                throw new Error('Extraction writeback failed: ' + (r.message || r.error));
+            }
+            return r;
+        }
+    },
     // Admin escalation - returns a new raisin object with admin context
     // Requires requiresAdmin: true in function metadata
     asAdmin: function() {

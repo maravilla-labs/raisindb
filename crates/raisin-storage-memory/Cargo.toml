@@ -14,6 +14,9 @@ serde = { workspace = true }
 raisin-error = { path = "../raisin-error" }
 raisin-models = { path = "../raisin-models" }
 raisin-storage = { path = "../raisin-storage" }
+# For `ProcessingRuleSet`, which the `Storage` trait now exposes. Already a
+# transitive dep via raisin-storage, so this adds no compilation.
+raisin-ai = { path = "../raisin-ai" }
 raisin-context = { path = "../raisin-context" }
 raisin-events = { path = "../raisin-events" }
 chrono = { workspace = true }

@@ -232,6 +232,31 @@ pub trait FunctionApi: Send + Sync {
     /// Process a PDF file from storage (storage-key based, no base64 overhead)
     async fn pdf_process_from_storage(&self, storage_key: &str, options: Value) -> Result<Value>;
 
+    /// Store an EXTRACTION ARTIFACT for text produced above this process.
+    ///
+    /// The landing place for a format core cannot read — a `.docx` converted to
+    /// markdown by a media plugin. The extraction properties are engine-owned,
+    /// so a function cannot write them directly; this is the sanctioned door,
+    /// and it is narrow on purpose: it takes the text and nothing else that
+    /// core already knows. The fingerprint is computed server-side (a second
+    /// producer of it is a re-extraction loop) and chunking is left to the
+    /// ordinary `node:updated` indexing path (a second chunker would have to
+    /// reproduce the index id grammar).
+    ///
+    /// Default: not configured. A build without the callback says so rather
+    /// than reporting a success that stored nothing.
+    async fn asset_set_extraction(
+        &self,
+        _workspace: &str,
+        _node_ref: &str,
+        _text: &str,
+        _options: Value,
+    ) -> Result<Value> {
+        Err(raisin_error::Error::Validation(
+            "Asset extraction writeback is not configured on this server".to_string(),
+        ))
+    }
+
     // ========== Task Operations ==========
 
     /// Create a human task in a user's inbox (fire-and-forget)

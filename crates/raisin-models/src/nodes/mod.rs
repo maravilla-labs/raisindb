@@ -10,6 +10,7 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+pub mod asset;
 pub mod audit_log;
 pub mod extraction;
 pub mod integrations;
@@ -34,6 +35,11 @@ pub mod properties;
 
 // Re-export audit_log module
 pub use audit_log::*;
+
+// Re-export the asset accessors. ONE implementation of "what is this binary",
+// read by the enqueue gate, the extraction job and the delegated writeback —
+// see `asset` for why a second one is a re-extraction loop.
+pub use asset::{asset_content_hash, asset_fingerprint, asset_mime_type, asset_storage_key};
 
 // Re-export the extraction artifact vocabulary
 pub use extraction::{

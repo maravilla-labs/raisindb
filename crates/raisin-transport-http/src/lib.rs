@@ -65,6 +65,7 @@ mod handlers {
     #[cfg(feature = "storage-rocksdb")]
     pub mod oauth_as;
     pub mod packages;
+    pub mod plugins;
     #[cfg(feature = "storage-rocksdb")]
     pub mod processing_rules;
     #[cfg(feature = "storage-rocksdb")]

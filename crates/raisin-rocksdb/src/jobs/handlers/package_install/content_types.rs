@@ -38,6 +38,8 @@ pub(super) struct InstallStats {
     pub element_types_skipped: usize,
     pub workspaces_installed: usize,
     pub workspaces_skipped: usize,
+    pub processing_rules_installed: usize,
+    pub processing_rules_skipped: usize,
     pub patches_applied: usize,
     pub content_nodes_created: usize,
     pub content_nodes_skipped: usize,

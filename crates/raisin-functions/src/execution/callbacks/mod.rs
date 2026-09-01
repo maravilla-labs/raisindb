@@ -17,6 +17,7 @@
 //! into its own submodule for maintainability.
 
 pub mod ai;
+pub mod assets;
 pub mod branches;
 pub mod events;
 pub mod flows;
@@ -331,6 +332,15 @@ where
         tx_list_children: Some(transaction::create_tx_list_children(tx_store.clone())),
         tx_move: Some(transaction::create_tx_move(tx_store.clone())),
         tx_update_property: Some(transaction::create_tx_update_property(tx_store.clone())),
+
+        // Extraction writeback - the landing place for text produced by a
+        // plugin task in the function layer, for the formats core cannot read.
+        asset_set_extraction: Some(assets::create_asset_set_extraction::<_, B>(
+            deps.storage.clone(),
+            tenant_id.clone(),
+            repo_id.clone(),
+            branch.clone(),
+        )),
 
         // PDF processing - storage-key based processing (no base64 overhead)
         pdf_process_from_storage: Some(resources::create_pdf_process_from_storage(

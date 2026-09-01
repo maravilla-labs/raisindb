@@ -83,6 +83,32 @@ async fn main() {
         tracing::info!(plugin_dir = %plugin_dir, "scanning for function plugins");
         raisin_functions::load_plugins_from_dir(&plugin_dir);
 
+        // Tell the layers BELOW the plugin registry what this process can do.
+        //
+        // `raisin-ai` owns the task planner and `raisin-rocksdb` owns the asset
+        // job, and both sit under `raisin-functions` — Cargo rejects the cycle,
+        // so neither can ask `plugin_method_available` directly. The enqueue
+        // path therefore planned against a hard-coded "no plugins", which made
+        // every delegated task report `plugin_missing` on the one kind of
+        // server that could actually perform it. Installing the probe here is
+        // the same inversion as `configure_mcp_client` and
+        // `configure_platform_hooks` below: one policy, installed once,
+        // process-wide.
+        //
+        // Deliberately installed even when no plugin loaded. The probe then
+        // answers false for everything, which is what the hard-coded predicate
+        // did — but `capability_probe_installed()` can now distinguish "nothing
+        // can run here" from "nobody has said yet".
+        if !raisin_ai::install_capability_probe(std::sync::Arc::new(
+            raisin_functions::plugin::plugin_method_available,
+        )) {
+            tracing::warn!(
+                "capability probe was already installed; keeping the first one. \
+                 Two answers to \"what can this server do\" is the drift the \
+                 registry exists to prevent"
+            );
+        }
+
         // Say on BOOT what this server can actually do with a binary asset —
         // "docx: plugin OK (maravilla-media)", "pdf: core", "mp4: UNSUPPORTED" —
         // and name every plugin file the loader refused and why. A rejected

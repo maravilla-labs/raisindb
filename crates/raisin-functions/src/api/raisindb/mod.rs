@@ -366,6 +366,17 @@ impl FunctionApi for RaisinFunctionApi {
             .await
     }
 
+    async fn asset_set_extraction(
+        &self,
+        workspace: &str,
+        node_ref: &str,
+        text: &str,
+        options: Value,
+    ) -> Result<Value> {
+        self.impl_asset_set_extraction(workspace, node_ref, text, options)
+            .await
+    }
+
     async fn pdf_process_from_storage(&self, storage_key: &str, options: Value) -> Result<Value> {
         self.impl_pdf_process_from_storage(storage_key, options)
             .await

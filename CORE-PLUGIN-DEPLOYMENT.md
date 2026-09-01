@@ -172,6 +172,88 @@ that is built once per process. Invalidation is process restart, and nothing
 else. That is a feature: no TTL, no refresh path, no window where two isolates
 disagree.
 
+### 2.3a The routing table now plans against the real capability set
+
+§2.3 is the contract a pipeline WRITES by hand. The routing table (processing
+rules) expresses the same thing as configuration, and until now it could not:
+the enqueue path planned with `raisin_ai::plan_tasks(&requested, |_| false)` —
+a hard-coded "this server has no plugins". The consequence was the worst
+possible shape of the §2.4 failure. On a box where the media plugin WAS loaded,
+a rule naming `doc_to_markdown` was reported `blocked: plugin_missing` and the
+asset recorded `unsupported`. The capability existed, the configuration named
+it, and the plan said no.
+
+The predicate now arrives from above:
+
+```rust
+// main.rs, immediately after load_plugins_from_dir
+raisin_ai::install_capability_probe(Arc::new(
+    raisin_functions::plugin::plugin_method_available,
+));
+```
+
+`raisin-ai` owns the planner and `raisin-rocksdb` owns the asset job; both sit
+BELOW `raisin-functions`, which owns the registry, and Cargo rejects the cycle.
+So the answer is injected once, process-wide, exactly as `configure_mcp_client`
+and `configure_platform_hooks` are. Engine code calls
+`raisin_ai::plan_tasks_here`; a second hard-coded predicate anywhere
+reintroduces the bug verbatim.
+
+The probe is installed even when nothing loaded, so
+`capability_probe_installed()` separates "nothing can run here" from "nobody has
+said yet" — the same distinction §2.4 insists on for assets.
+
+### 2.3b `delegated` is the third state, and the writeback is how it ends
+
+Splitting the plan by capability creates a task that WILL run and will not run
+HERE. The asset job partitions `plan.runnable` on `via`: native tasks stay in
+`tasks`, plugin tasks go to `delegated_tasks`. A text-bearing delegated task
+records `__extract_status = 'delegated'`, naming what it waits for:
+
+```sql
+SELECT path, __extract_detail FROM 'assets'
+ WHERE properties->>'__extract_status'::String = 'delegated'
+```
+
+That is a DIFFERENT investigation from `unsupported` and must not be merged with
+it. `unsupported` means no code here can ever read these bytes, and it is what
+the format backfill sweeps up when a plugin gains the format. `delegated` means
+the plugin is loaded and has the work; sweeping it would re-run a conversion
+that is running or already done. A row parked on `delegated` is a Studio-side
+failure — the media job died, the trigger never fired.
+
+The state ends when the converter writes back:
+
+```js
+const md = await pollUntilDone(raisin.media.doc.toMarkdown(storageKey, {}));
+await raisin.assets.setExtractedText(ws, nodeId, md.text, {
+  source: 'plugin-libreoffice',
+});
+// __extract_status -> 'ok'; chunking and embedding follow from node:updated
+```
+
+Three things that primitive deliberately does NOT take, each for a specific
+failure:
+
+* **The fingerprint.** Stamped server-side from the node as it stands
+  (`raisin_models::nodes::asset_fingerprint`). A stamp minted on the JS side
+  that disagreed by a byte would never match the enqueue gate, so every
+  writeback would re-enqueue extraction, which would delegate again, which would
+  write back again — unbounded, minting a node revision, a fulltext reindex and
+  an embedding call per turn.
+* **The chunking.** The node write emits `node:updated` and the ordinary
+  indexing path takes it, under the spec hash that makes a steady-state run
+  write nothing. A chunker in JS would have to reproduce the
+  `{node}#doc#{chunk}` index id grammar, and an index holding ids the live path
+  never produces is a search that finds nothing and reports no fault.
+* **A way to write the property directly.** The extraction properties are
+  engine-owned and the write path refuses them to function code. This primitive
+  is the door, and it is narrow so the shield stays shut for everything else.
+
+Note the symmetry that makes the seam safe: core's own PDF path is
+`pdf_oxide`'s `to_markdown` per page. Both sides produce MARKDOWN, and
+everything after the writeback is one implementation.
+
 ### 2.4 The hard rule, and the trace it requires
 
 > **A missing plugin must never silently drop a document from the index.**
@@ -414,7 +496,7 @@ everything else at INFO, so a log-level alert catches a gap. Rejections are
 *recorded* in the registry, not merely logged — that is what makes them
 queryable by the endpoint below.
 
-### 5.1 `GET /api/management/plugins` — designed, not built
+### 5.1 `GET /api/admin/management/plugins` — BUILT
 
 The natural consumer of the same data, for the ansible assertion in §4.2:
 
@@ -430,17 +512,22 @@ The natural consumer of the same data, for the ansible assertion in §4.2:
 }
 ```
 
-Everything it needs is already exported: `plugin_manifest()`,
-`rejected_plugins()`, `capability_report()` — all `Serialize`, all in
-`raisin-functions`, which `raisin-transport-http` already depends on
-unconditionally (`crates/raisin-transport-http/Cargo.toml:63`). The handler is
-~30 lines in `handlers/management/global.rs` plus one route in
-`routes/management.rs`. It is not built here only because compiling
-`raisin-transport-http` needed more disk headroom than this machine had
-(4.8 GB free at the end of the session). **It should not report
-configured-ness by echoing tokens** — a boolean "configured" per plugin, from a
-future ABI addition that lets a plugin declare its config keys, is the right
-shape.
+Built as `handlers/plugins.rs`, routed in `routes/admin.rs`. It reads
+`plugin_manifest()`, `registered_plugin_methods()`, `rejected_plugins()` and
+`capability_report()` — the same registry the dispatcher reads, so the report
+cannot disagree with what a call will do — plus
+`raisin_ai::capability_probe_installed()`, which separates "no plugins loaded"
+from "the probe was never installed". Those two produce an identical plan and
+have completely different fixes.
+
+The admin console renders it beside the processing rules (Capabilities panel),
+because a rule is portable configuration and this is what that configuration
+means on THIS box. The refused-plugin list is rendered first and loudest: it is
+the failure the endpoint exists for.
+
+**It does not report configured-ness by echoing tokens** — a boolean
+"configured" per plugin, from a future ABI addition that lets a plugin declare
+its config keys, remains the right shape and is still not built.
 
 ---
 

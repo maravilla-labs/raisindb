@@ -78,6 +78,9 @@ aws-smithy-types = { version = "1", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
+# A package's processing-rules/*.yaml is written by hand, so the YAML shape is
+# part of the contract and is asserted through the real parser (rules/yaml_tests).
+serde_yaml = "0.9"
 # Same encoder RocksDB persists tenant AI configs with — the back-compat slug
 # default has to be exercised through the real path, not only serde_json.
 rmp-serde = { workspace = true }

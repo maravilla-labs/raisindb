@@ -28,12 +28,19 @@
 //! };
 //! ```
 
+pub mod capabilities;
 mod matcher;
 mod settings;
 pub mod tasks;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod yaml_tests;
 
+pub use capabilities::{
+    capability_available, capability_probe_installed, install_capability_probe, plan_tasks_here,
+    CapabilityProbe,
+};
 pub use matcher::{mime_matches, RuleMatchContext, RuleMatcher};
 pub use settings::{is_text_bearing, ProcessingSettings};
 pub use tasks::{
@@ -212,7 +219,9 @@ impl ProcessingRuleSet {
                 .with_order(20)
                 .with_matcher(RuleMatcher::Combined {
                     matchers: vec![
-                        RuleMatcher::NodeType("raisin:Asset".to_string()),
+                        RuleMatcher::NodeType {
+                            node_type: "raisin:Asset".to_string(),
+                        },
                         // `image/*`, not `image/png`: the shipped default has to
                         // cover every image subtype, including ones postdating
                         // this table (`image/avif`). This used to read `"image/"`

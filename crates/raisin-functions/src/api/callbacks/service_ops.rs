@@ -175,6 +175,34 @@ pub type AIGetDefaultModelCallback = Arc<
 ///   }
 /// }
 /// ```
+/// Callback to store an EXTRACTION ARTIFACT produced above this process.
+///
+/// The landing place for text that core cannot produce itself — a `.docx`
+/// converted to markdown by a media plugin, called from a trigger function.
+/// Writing it as an ordinary property is not an option: the extraction
+/// properties are engine-owned and the write-path shield refuses them to tenant
+/// code, which is the whole reason this primitive exists.
+///
+/// Deliberately takes no fingerprint (computed server-side; a second producer
+/// of the stamp is a re-extraction loop) and does no chunking (the node write
+/// emits `node:updated` and the ordinary indexing path takes it from there).
+///
+/// # Arguments
+/// - `workspace`: workspace holding the asset
+/// - `node_ref`: node id, or an absolute path (leading `/`)
+/// - `text`: the extracted text
+/// - `options`: `{ source?: string, store?: boolean }`
+pub type AssetSetExtractionCallback = Arc<
+    dyn Fn(
+            String, // workspace
+            String, // node id or path
+            String, // text
+            Value,  // options
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send>>
+        + Send
+        + Sync,
+>;
+
 pub type PdfProcessFromStorageCallback = Arc<
     dyn Fn(
             String, // storage_key

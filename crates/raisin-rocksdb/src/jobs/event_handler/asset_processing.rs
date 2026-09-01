@@ -192,7 +192,30 @@ impl UnifiedJobEventHandler {
         };
 
         let requested = settings.effective_tasks(mime_type.as_deref());
-        let plan = raisin_ai::plan_tasks(&requested, |_| false);
+        // Against what this process can ACTUALLY do, not against `|_| false`.
+        //
+        // The hard-coded `false` was honest for a stock build and wrong for one
+        // that had loaded a plugin: `plan_tasks` reported every delegated task
+        // `plugin_missing` on a server that could perform it, so a `.docx` rule
+        // was permanently dead however the operator configured it. The probe is
+        // installed process-wide from `main.rs` after plugins load — see
+        // `raisin_ai::rules::capabilities` for why it has to arrive from above.
+        let plan = raisin_ai::plan_tasks_here(&requested);
+
+        // `runnable` now means "will run", not "will run HERE". Split it: this
+        // job performs the native half itself, and the delegated half belongs
+        // to the function layer, which is the only place a plugin can be
+        // called from. Collapsing the two is how a delegated task would end up
+        // silently expected of a job that cannot do it.
+        let (native, delegated): (Vec<_>, Vec<_>) =
+            plan.runnable.iter().partition(|t| t.via.is_none());
+        let delegated_tasks: Vec<String> = delegated
+            .iter()
+            .map(|t| match &t.via {
+                Some(method) => format!("{} ({})", t.slug, method),
+                None => t.slug.clone(),
+            })
+            .collect();
 
         // A task an operator configured that cannot run HERE is worth a line.
         // The silence this replaces is the reported symptom: uploading a .docx
@@ -213,13 +236,16 @@ impl UnifiedJobEventHandler {
         // boolean is what made a skipped `.docx` invisible: the handler was
         // told nobody had asked, so it wrote no record at all. See
         // `AssetProcessingOptions::extract_text_requested`.
+        //
+        // A text task that is DELEGATED is a third answer and must not fold
+        // into either: the routing table asked for text, this binary cannot
+        // produce it, and yet `unsupported` would be a lie — the plugin that
+        // can is loaded and has been handed the job. Recording it as
+        // unsupported would also make the format-backfill sweep re-extract
+        // assets whose conversion is running or already done.
+        let text_delegated = delegated.iter().any(|t| is_text_bearing_task(&t.slug));
         let text_requested = plan.will_run("extract_text")
-            || plan.blocked.iter().any(|b| {
-                matches!(
-                    b.slug.as_str(),
-                    "extract_text" | "doc_to_markdown" | "doc_to_pdf" | "image_ocr"
-                )
-            });
+            || plan.blocked.iter().any(|b| is_text_bearing_task(&b.slug));
 
         // Carried into the job so the durable artifact can NAME the reason,
         // rather than recording a bare "unsupported" an operator has to
@@ -256,9 +282,14 @@ impl UnifiedJobEventHandler {
             extract_pdf_text: plan.will_run("extract_text")
                 && asset_helpers::is_extractable_mime(&mime_type),
             extract_text_requested: text_requested,
+            text_delegated,
             blocked_tasks,
+            delegated_tasks,
             generate_image_embedding: plan.will_run("image_embedding"),
-            tasks: plan.runnable.iter().map(|t| t.slug.clone()).collect(),
+            // The NATIVE half only. This field is what the handler dispatches
+            // from; listing a plugin task here would tell it to perform work it
+            // has no way to reach.
+            tasks: native.iter().map(|t| t.slug.clone()).collect(),
             pdf_strategy: settings
                 .pdf_strategy
                 .map(|s| match s {
@@ -274,4 +305,17 @@ impl UnifiedJobEventHandler {
             embedding_model: settings.embedding_model.clone(),
         }
     }
+}
+
+/// Task slugs whose OUTPUT is text for the extraction artifact.
+///
+/// One list, read by both the "was text asked for" and the "is text delegated"
+/// questions. They used to be one inline `matches!` answering only the first;
+/// a second copy for the second question is precisely the mirrored predicate
+/// that drifts.
+fn is_text_bearing_task(slug: &str) -> bool {
+    matches!(
+        slug,
+        "extract_text" | "doc_to_markdown" | "doc_to_pdf" | "image_ocr"
+    )
 }

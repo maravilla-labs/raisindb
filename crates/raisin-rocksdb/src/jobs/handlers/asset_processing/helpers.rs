@@ -10,162 +10,41 @@
 //! what an asset IS, so there is one set of accessors and both call it.
 
 use raisin_error::{Error, Result};
-use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
 use raisin_storage::jobs::{AssetProcessingOptions, PdfExtractionStrategy};
 
 use super::types::PdfProcessingOutput;
 
-/// Read a `PropertyValue` as a string, or `None`.
-fn as_str(pv: &PropertyValue) -> Option<String> {
-    match pv {
-        PropertyValue::String(s) => Some(s.clone()),
-        _ => None,
-    }
-}
-
 /// Extract the content hash of the binary from node properties.
 ///
-/// Looked for in the `file` Resource/Object metadata, then as a top-level
-/// `content_hash` property (which `raisin:Asset` declares and the package
-/// installer and the on-demand attachment fetch both set).
+/// Delegates to [`raisin_models::nodes::asset_content_hash`] — the accessors
+/// moved down to `raisin-models` when a THIRD caller appeared that could not
+/// reach a `pub(crate)` item: a delegated plugin task writing its extraction
+/// result back through the function layer. See that module for why a second
+/// implementation of the fingerprint is a re-extraction loop.
 pub(crate) fn extract_content_hash(node: &Node) -> Option<String> {
-    if let Some(PropertyValue::Resource(res)) = node.properties.get("file") {
-        if let Some(h) = res
-            .metadata
-            .as_ref()
-            .and_then(|m| m.get("content_hash"))
-            .and_then(as_str)
-        {
-            return Some(h);
-        }
-    }
-    if let Some(PropertyValue::Object(obj)) = node.properties.get("file") {
-        if let Some(PropertyValue::Object(meta)) = obj.get("metadata") {
-            if let Some(h) = meta.get("content_hash").and_then(as_str) {
-                return Some(h);
-            }
-        }
-        if let Some(h) = obj.get("content_hash").and_then(as_str) {
-            return Some(h);
-        }
-    }
-    node.properties.get("content_hash").and_then(as_str)
+    raisin_models::nodes::asset_content_hash(&node.properties)
 }
 
-/// Identify the BINARY an extraction result was produced from.
-///
-/// # Why this exists
-///
-/// Extraction terminates in a node property, and writing a node property emits
-/// `node:updated` — which is the very event that enqueues asset processing. So
-/// the write-back would re-trigger the job, which would write again, forever.
-/// The job stamps this fingerprint alongside the text, and the enqueue gate
-/// (`should_process_asset`) skips a node whose stamp already matches. One
-/// upload therefore extracts exactly once, and REPLACING the file (new content
-/// hash, new storage key, or new size) changes the fingerprint and re-extracts.
-///
-/// A revision counter or `updated_by` would not do: replication delivers node
-/// revisions written by another node's system actor, and a mount sync stamps
-/// its own. Only "which bytes was this text made from" answers the question
-/// that is actually being asked.
-///
-/// The `v1:` prefix is the extractor generation. Bump it to force every asset
-/// to be re-extracted after a change that makes old output wrong.
+/// Identify the BINARY an extraction result was produced from. See
+/// [`raisin_models::nodes::asset_fingerprint`].
 pub(crate) fn asset_fingerprint(node: &Node) -> String {
-    let hash = extract_content_hash(node).unwrap_or_else(|| "-".to_string());
-    let key = extract_storage_key(node).unwrap_or_else(|_| "-".to_string());
-    let size = match node.properties.get("file_size") {
-        Some(PropertyValue::Integer(n)) => n.to_string(),
-        Some(PropertyValue::Float(f)) => f.to_string(),
-        _ => "-".to_string(),
-    };
-    format!("v1:{hash}|{key}|{size}")
+    raisin_models::nodes::asset_fingerprint(node)
 }
 
-/// Extract the mime type from node properties
+/// Extract the mime type from node properties.
 pub(crate) fn extract_mime_type(node: &Node) -> Option<String> {
-    // Try file property first (raisin:Asset pattern with Resource type)
-    if let Some(PropertyValue::Resource(resource)) = node.properties.get("file") {
-        if let Some(ref mime) = resource.mime_type {
-            return Some(mime.clone());
-        }
-        if let Some(ref metadata) = resource.metadata {
-            if let Some(PropertyValue::String(mime)) = metadata.get("mime_type") {
-                return Some(mime.clone());
-            }
-            if let Some(PropertyValue::String(mime)) = metadata.get("mimeType") {
-                return Some(mime.clone());
-            }
-        }
-    }
-
-    // Try file property as Object (legacy format)
-    if let Some(PropertyValue::Object(obj)) = node.properties.get("file") {
-        if let Some(PropertyValue::String(mime)) = obj.get("mime_type") {
-            return Some(mime.clone());
-        }
-        if let Some(PropertyValue::String(mime)) = obj.get("mimeType") {
-            return Some(mime.clone());
-        }
-    }
-
-    // Try contentType property
-    if let Some(PropertyValue::String(ct)) = node.properties.get("contentType") {
-        return Some(ct.clone());
-    }
-
-    // Try mimeType property
-    if let Some(PropertyValue::String(mt)) = node.properties.get("mimeType") {
-        return Some(mt.clone());
-    }
-
-    None
+    raisin_models::nodes::asset_mime_type(&node.properties)
 }
 
-/// Extract the storage key from node properties
+/// Extract the storage key from node properties.
+///
+/// Keeps the `Result` shape its callers were written against: the shared
+/// accessor answers `None` for "the file is not ready", and this is the one
+/// call site that wants that as an error.
 pub(crate) fn extract_storage_key(node: &Node) -> Result<String> {
-    // Try file property with storage_key (standard upload format with Resource type)
-    if let Some(PropertyValue::Resource(resource)) = node.properties.get("file") {
-        if let Some(ref metadata) = resource.metadata {
-            if let Some(PropertyValue::String(key)) = metadata.get("storage_key") {
-                return Ok(key.clone());
-            }
-            if let Some(PropertyValue::String(key)) = metadata.get("storageKey") {
-                return Ok(key.clone());
-            }
-        }
-    }
-
-    // Try file property as Object (legacy format)
-    if let Some(PropertyValue::Object(obj)) = node.properties.get("file") {
-        if let Some(PropertyValue::String(key)) = obj.get("storage_key") {
-            return Ok(key.clone());
-        }
-        if let Some(PropertyValue::String(key)) = obj.get("storageKey") {
-            return Ok(key.clone());
-        }
-        // Check nested metadata
-        if let Some(PropertyValue::Object(metadata)) = obj.get("metadata") {
-            if let Some(PropertyValue::String(key)) = metadata.get("storage_key") {
-                return Ok(key.clone());
-            }
-        }
-    }
-
-    // Try resource property (package format)
-    if let Some(PropertyValue::Resource(resource)) = node.properties.get("resource") {
-        if let Some(ref metadata) = resource.metadata {
-            if let Some(PropertyValue::String(key)) = metadata.get("storage_key") {
-                return Ok(key.clone());
-            }
-        }
-    }
-
-    Err(Error::Validation(format!(
-        "No storage key found for node: {}",
-        node.id
-    )))
+    raisin_models::nodes::asset_storage_key(&node.properties)
+        .ok_or_else(|| Error::Validation(format!("No storage key found for node: {}", node.id)))
 }
 
 /// Process a PDF file and extract text

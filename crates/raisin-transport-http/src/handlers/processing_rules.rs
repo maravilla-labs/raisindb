@@ -59,7 +59,7 @@ impl From<RuleMatcher> for RuleMatcherResponse {
     fn from(matcher: RuleMatcher) -> Self {
         match matcher {
             RuleMatcher::All => RuleMatcherResponse::All,
-            RuleMatcher::NodeType(node_type) => RuleMatcherResponse::NodeType { node_type },
+            RuleMatcher::NodeType { node_type } => RuleMatcherResponse::NodeType { node_type },
             RuleMatcher::Path { pattern } => RuleMatcherResponse::Path { pattern },
             RuleMatcher::MimeType { mime_type } => RuleMatcherResponse::MimeType { mime_type },
             RuleMatcher::Workspace { workspace } => RuleMatcherResponse::Workspace { workspace },
@@ -78,7 +78,7 @@ impl From<RuleMatcherResponse> for RuleMatcher {
     fn from(matcher: RuleMatcherResponse) -> Self {
         match matcher {
             RuleMatcherResponse::All => RuleMatcher::All,
-            RuleMatcherResponse::NodeType { node_type } => RuleMatcher::NodeType(node_type),
+            RuleMatcherResponse::NodeType { node_type } => RuleMatcher::NodeType { node_type },
             RuleMatcherResponse::Path { pattern } => RuleMatcher::Path { pattern },
             RuleMatcherResponse::MimeType { mime_type } => RuleMatcher::MimeType { mime_type },
             RuleMatcherResponse::Workspace { workspace } => RuleMatcher::Workspace { workspace },
@@ -176,6 +176,55 @@ pub struct TestRuleMatchResponse {
     pub matched_rule: Option<ProcessingRuleResponse>,
     /// All rules that were evaluated
     pub rules_evaluated: usize,
+    /// The task list the matched rule asks for, after the legacy-boolean
+    /// fallback and the mimetype defaults are applied.
+    ///
+    /// What the rule WANTS, before this server's capabilities are consulted —
+    /// so a reader can see the difference between "the rule asks for nothing"
+    /// and "the rule asks for something this box cannot do".
+    pub effective_tasks: Vec<String>,
+    /// What will ACTUALLY happen on this server: `runnable` with the plugin
+    /// method that will service each task, `blocked` with the reason.
+    ///
+    /// This is the answer to "what happens when I upload a .docx HERE", and it
+    /// is why the endpoint exists. A rule is portable configuration; a plan is
+    /// that configuration resolved against one box's loaded plugins, and the
+    /// two are routinely different in a way nothing previously surfaced.
+    pub plan: raisin_ai::PipelinePlan,
+}
+
+/// One entry in the task catalogue the console's task picker renders.
+#[derive(Debug, Serialize)]
+pub struct TaskCatalogEntry {
+    /// The slug written in a rule's `tasks` array.
+    pub slug: &'static str,
+    /// One line an operator reads next to the checkbox.
+    pub summary: &'static str,
+    /// `native` | `function` | `plugin` — who performs it.
+    pub provider: &'static str,
+    /// For `plugin`, the method that must be available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub method: Option<&'static str>,
+    /// For `function`, one line naming what should do it instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub how: Option<&'static str>,
+    /// Whether this task can run on THIS server right now.
+    ///
+    /// The point of shipping the catalogue rather than hard-coding it in the
+    /// console: a picker that offered `doc_to_markdown` identically on a box
+    /// with and without the media plugin would let an operator configure
+    /// something that silently does nothing.
+    pub available: bool,
+}
+
+/// Response for the task catalogue.
+#[derive(Debug, Serialize)]
+pub struct TaskCatalogResponse {
+    pub tasks: Vec<TaskCatalogEntry>,
+    /// False when no capability probe was installed at startup, in which case
+    /// every `available` below is a default rather than an answer. Distinct
+    /// from "a probe is installed and reports nothing", which is a real result.
+    pub capability_probe_installed: bool,
 }
 
 /// Generic success response
@@ -503,9 +552,57 @@ pub async fn test_rule_match(
     // Find first matching rule (first-match-wins)
     let matched_rule = rules.find_matching_rule(&context);
 
+    // Resolved against what this process can actually do, via the probe
+    // `main.rs` installs after loading plugins. Computing it here rather than
+    // in the console is what keeps ONE answer to "can this server do it": the
+    // console cannot see the plugin registry, and a second table in TypeScript
+    // would drift from the one the asset job plans with.
+    let effective_tasks = matched_rule
+        .map(|r| r.settings.effective_tasks(context.mime_type.as_deref()))
+        .unwrap_or_default();
+    let plan = raisin_ai::plan_tasks_here(&effective_tasks);
+
     Ok(Json(TestRuleMatchResponse {
         matched: matched_rule.is_some(),
         matched_rule: matched_rule.map(|r| ProcessingRuleResponse::from(r.clone())),
         rules_evaluated: rules.rules.len(),
+        effective_tasks,
+        plan,
+    }))
+}
+
+/// The task vocabulary, with per-task availability on THIS server.
+///
+/// GET /api/repository/{repo}/ai/rules/tasks
+///
+/// Repo-scoped for routing symmetry with the rest of the rules API; the answer
+/// is process-wide, because plugins are loaded per process and not per repo.
+#[axum::debug_handler]
+pub async fn list_tasks() -> Result<Json<TaskCatalogResponse>, ApiError> {
+    let tasks = raisin_ai::KNOWN_TASKS
+        .iter()
+        .map(|spec| {
+            let (provider, method, how) = match spec.provider {
+                raisin_ai::TaskProvider::Native => ("native", None, None),
+                raisin_ai::TaskProvider::Function { how } => ("function", None, Some(how)),
+                raisin_ai::TaskProvider::Plugin { method } => ("plugin", Some(method), None),
+            };
+            TaskCatalogEntry {
+                slug: spec.slug,
+                summary: spec.summary,
+                provider,
+                method,
+                how,
+                // Availability comes from the same planner the asset job uses,
+                // so a task shown as available here is one that will actually
+                // be planned there.
+                available: raisin_ai::plan_tasks_here(&[spec.slug.to_string()]).will_run(spec.slug),
+            }
+        })
+        .collect();
+
+    Ok(Json(TaskCatalogResponse {
+        tasks,
+        capability_probe_installed: raisin_ai::capability_probe_installed(),
     }))
 }

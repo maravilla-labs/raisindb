@@ -114,6 +114,13 @@ pub(crate) fn admin_routes(state: &AppState) -> Router<AppState> {
             "/api/repository/{repo}/ai/rules/test",
             post(crate::handlers::processing_rules::test_rule_match),
         )
+        // The task vocabulary WITH this server's availability per task. Placed
+        // above the `{rule_id}` route: axum would otherwise be free to read
+        // `tasks` as a rule id.
+        .route(
+            "/api/repository/{repo}/ai/rules/tasks",
+            get(crate::handlers::processing_rules::list_tasks),
+        )
         .route(
             "/api/repository/{repo}/ai/rules/{rule_id}",
             get(crate::handlers::processing_rules::get_rule)
@@ -153,6 +160,13 @@ pub(crate) fn admin_routes(state: &AppState) -> Router<AppState> {
         // ----------------------------------------------------------------
         // Management API - Database Level (repository-specific indexes)
         // ----------------------------------------------------------------
+        // What this box can DO with a binary — loaded plugins, REFUSED plugin
+        // files, and the resolved per-media-kind table. A rejected plugin
+        // otherwise leaves a green server with no `raisin.media.*`.
+        .route(
+            "/api/admin/management/plugins",
+            get(crate::handlers::plugins::list_plugins),
+        )
         .route(
             "/api/admin/management/database/{tenant}/{repo}/fulltext/verify",
             post(crate::handlers::management::verify_fulltext_index),

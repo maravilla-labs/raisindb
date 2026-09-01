@@ -211,6 +211,10 @@ impl RocksDBStorage {
             archetypes: (*archetype_repo_arc).clone(),
             element_types: (*element_type_repo_arc).clone(),
             workspaces,
+            // Rules are now part of the `Storage` trait, so engine code that is
+            // generic over the backend (the package installer, above all) can
+            // reach them. Cheap to hold: it is a handle over the same `db`.
+            processing_rules: ProcessingRulesRepositoryImpl::new(db.clone()),
             registry: RegistryRepositoryImpl::new_with_capture(
                 db.clone(),
                 event_bus.clone(),

@@ -47,7 +47,9 @@ fn test_glob_match_question() {
 
 #[test]
 fn test_rule_matcher_node_type() {
-    let matcher = RuleMatcher::NodeType("raisin:Asset".to_string());
+    let matcher = RuleMatcher::NodeType {
+        node_type: "raisin:Asset".to_string(),
+    };
     let context = RuleMatchContext::new().with_node_type("raisin:Asset");
     assert!(matcher.matches(&context));
 
@@ -59,7 +61,9 @@ fn test_rule_matcher_node_type() {
 fn test_rule_matcher_combined() {
     let matcher = RuleMatcher::Combined {
         matchers: vec![
-            RuleMatcher::NodeType("raisin:Asset".to_string()),
+            RuleMatcher::NodeType {
+                node_type: "raisin:Asset".to_string(),
+            },
             RuleMatcher::Path {
                 pattern: "/docs/**".to_string(),
             },
@@ -256,4 +260,64 @@ fn an_office_document_is_asked_for_text_even_where_nothing_can_read_it() {
         rule.settings.effective_tasks(ctx.mime_type.as_deref()),
         vec!["extract_text"]
     );
+}
+
+/// The two-tier design in one assertion: the SAME rule, planned twice.
+///
+/// A stock server has no plugin and must say so by name; a Studio server that
+/// loaded the media plugin must run the very same configuration. Before the
+/// capability probe existed, the enqueue path planned against a hard-coded
+/// `|_| false`, so only the first column was reachable and a `.docx` rule was
+/// dead on every server there is.
+#[test]
+fn one_rule_plans_differently_on_a_stock_and_a_plugin_server() {
+    use crate::rules::tasks::{plan_tasks, BlockedReason};
+
+    let tasks = vec!["doc_to_markdown".to_string()];
+
+    let stock = plan_tasks(&tasks, |_| false);
+    assert!(stock.runnable.is_empty());
+    assert_eq!(
+        stock.blocked[0].blocked,
+        BlockedReason::PluginMissing {
+            method: "media.doc.toMarkdown".to_string()
+        }
+    );
+
+    let studio = plan_tasks(&tasks, |m| m == "media.doc.toMarkdown");
+    assert!(studio.blocked.is_empty());
+    assert_eq!(studio.runnable[0].slug, "doc_to_markdown");
+    // `via` is what the asset job partitions on to decide it cannot perform
+    // this itself. A plugin task that reported `via: None` would be handed to a
+    // process with no way to reach a plugin.
+    assert_eq!(
+        studio.runnable[0].via.as_deref(),
+        Some("media.doc.toMarkdown")
+    );
+}
+
+/// A native task keeps `via: None` even on a server full of plugins, because
+/// that is the flag the job splits on.
+#[test]
+fn a_native_task_is_never_reported_as_delegated() {
+    use crate::rules::tasks::plan_tasks;
+
+    let plan = plan_tasks(&["extract_text".to_string()], |_| true);
+    assert_eq!(plan.runnable[0].slug, "extract_text");
+    assert!(plan.runnable[0].via.is_none());
+}
+
+/// Captioning stays aimed at the product layer no matter what is loaded. A
+/// plugin cannot claim it by accident: it is `Function`, not `Plugin`, so
+/// `is_available` is never consulted for it.
+#[test]
+fn a_caption_task_is_handled_above_even_with_every_plugin_present() {
+    use crate::rules::tasks::{plan_tasks, BlockedReason};
+
+    let plan = plan_tasks(&["image_caption".to_string()], |_| true);
+    assert!(plan.runnable.is_empty());
+    assert!(matches!(
+        plan.blocked[0].blocked,
+        BlockedReason::HandledAbove { .. }
+    ));
 }

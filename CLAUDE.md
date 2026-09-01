@@ -827,6 +827,79 @@ gets its own named embedding (spec `doc`, ids `{node}#doc#{chunk}`) rather than
 being concatenated onto a filename, because one vector over a 40-page contract
 plus its title matches neither query well.
 
+### The two-tier asset pipeline: one routing table, two kinds of provider
+
+A processing rule says WHICH nodes (`RuleMatcher`, including a mimetype family)
+and WHAT HAPPENS to them (`ProcessingSettings.tasks`, an OPEN list of slugs —
+shape validated, membership never). `raisin-ai/src/rules/tasks.rs` classifies
+each slug by who provides it, and that classification is the whole two-tier
+design:
+
+| provider | examples | runs where |
+|---|---|---|
+| `Native` | `extract_text`, `image_embedding` | this binary |
+| `Plugin { method }` | `doc_to_markdown` → `media.doc.toMarkdown`, `image_resize`, `doc_thumbnail`, `video_thumbnail` | whichever process loaded a plugin servicing that method |
+| `Function { how }` | `image_caption`, `image_keywords` | a trigger function; model + prompt are product policy |
+
+**Public core names the plugin methods as STRINGS and depends on nothing.** A
+stock server reports them `blocked: plugin_missing` and says so by name; a
+Studio server with the media plugin loaded runs the same rules. Core never
+learns what Studio is. Do not "simplify" a plugin slug into a native one.
+
+- **`plan_tasks_here` is the only production planner.** Availability arrives
+  from ABOVE — plugins register in `raisin-functions`, which depends on
+  `raisin-rocksdb`, which depends on `raisin-ai`, and Cargo rejects the cycle —
+  so `main.rs` installs a process-wide probe after loading plugins
+  (`raisin_ai::install_capability_probe`, the same inversion as
+  `configure_mcp_client`). The enqueue path used to pass `|_| false`, which made
+  every delegated task report `plugin_missing` on the one kind of server that
+  could actually perform it: a `.docx` rule was dead however it was configured.
+  A second hard-coded predicate reintroduces that exactly.
+- **"Will run" is not "will run HERE".** The asset job splits `plan.runnable`
+  on `via`: `tasks` carries the native half it performs itself, `delegated_tasks`
+  the plugin half it cannot reach. Collapsing them tells a job to do work it has
+  no way to do.
+- **`ExtractStatus::Delegated` is the third state, and it is not
+  `Unsupported`.** `Unsupported` means nothing here can EVER read these bytes
+  and a backfill sweeps it up when a plugin gains the format. `Delegated` means
+  the plugin is already loaded and has the work. Recording a handover as
+  unsupported both lies and enrols the asset in a sweep that re-runs a
+  conversion that is already running. An asset parked on `delegated` is a
+  Studio-side failure — a different investigation, and one SQL query.
+
+### The extraction WRITEBACK is the seam, and it is markdown-in
+
+Core reads `application/pdf` and nothing else (`is_extractable_mime`), because
+LibreOffice must not live in this process. Note what core's PDF path actually
+produces: `pdf_oxide`'s `to_markdown` per page. So both sides of the seam speak
+the same thing — core makes markdown from a PDF, the plugin makes markdown from
+a `.docx` — and `raisin.assets.setExtractedText` is where the plugin's half
+lands. What follows is identical for both.
+
+- **The primitive exists because the shield is right.** The extraction
+  properties are engine-owned; the write path refuses them to function code.
+  Opening the shield to tenant code, or letting Studio keep its own chunking
+  path, were the alternatives. `execution/callbacks/assets.rs` writes as
+  `EXTRACTION_ACTOR` through `NodeService` — NOT the repository, which is silent
+  and would store text that never gets indexed.
+- **It takes the text and nothing core already knows.** The FINGERPRINT is
+  computed server-side from the node as it stands
+  (`raisin_models::nodes::asset_fingerprint`, moved down from the job's
+  `pub(crate)` helpers for exactly this third caller). A stamp produced on the
+  JS side that disagreed by one byte would never match the enqueue gate, so
+  every writeback would re-enqueue extraction, which would hand off again —
+  unbounded, minting a node revision, a fulltext reindex and an embedding call
+  each turn.
+- **Chunking and embedding are NOT delegated, ever.** The node write emits
+  `node:updated` and the ordinary path takes it from there, under the spec hash
+  that makes a steady-state run write nothing. A chunker in JS would have to
+  reproduce the `{node}#doc#{chunk}` id grammar; an index built with ids the
+  live path never produces is a search that finds nothing and reports no fault.
+- **Thumbnails are Studio's permanently, and that is not a gap.** Core carries
+  no rasterizer at all — `pdf-extract` (text), `pdf_oxide` (page→markdown),
+  `tesseract` (OCRs an image you hand it). Nothing turns a page into a PNG, and
+  pdfium/mupdf/ffmpeg are exactly what the plugin boundary exists to keep out.
+
 ## Code Conventions
 
 - Use `{ workspace = true }` for common dependencies

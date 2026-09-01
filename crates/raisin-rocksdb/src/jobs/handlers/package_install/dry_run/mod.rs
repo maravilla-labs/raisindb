@@ -112,6 +112,17 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         )
         .await?;
 
+        // Simulate processing rules
+        self.dry_run_processing_rules(
+            &zip_data_owned,
+            tenant_id,
+            repo_id,
+            install_mode,
+            &mut logs,
+            &mut summary.processing_rules,
+        )
+        .await?;
+
         // Simulate content nodes
         self.dry_run_content_nodes(
             &zip_data_owned,

@@ -250,6 +250,22 @@ impl AssetProcessingHandler {
                         );
                     }
                 }
+            } else if options.text_delegated {
+                // Text is coming, from a layer this job cannot reach. Not
+                // `unsupported`: the plugin that reads this format is loaded
+                // and has been handed the work, so claiming the bytes are
+                // unreadable would both be false and enrol the asset in the
+                // backfill that sweeps up formats a plugin has newly gained.
+                artifact = Some(ExtractionArtifact::delegated(
+                    fingerprint.clone(),
+                    &options.delegated_tasks,
+                ));
+                tracing::info!(
+                    job_id = %job.id, node_id = %node_id, mime_type = ?mime_type,
+                    delegated = ?options.delegated_tasks,
+                    "Text extraction is delegated to a plugin task above the job layer; \
+                     recording __extract_status = 'delegated'"
+                );
             } else if options.extract_text_requested {
                 // THE CASE THIS WHOLE ARTIFACT EXISTS FOR. The routing table
                 // asked for text and this process cannot produce it — a `.docx`
@@ -275,7 +291,7 @@ impl AssetProcessingHandler {
                 self.process_image_embedding(job, &node_id, data, &mut result)
                     .await;
             }
-        } else if options.extract_text_requested {
+        } else if options.extract_text_requested || options.text_delegated {
             // Asked for text and the bytes could not be read at all. Retryable,
             // so `failed` and not `unsupported` — a better extractor would not
             // help here.

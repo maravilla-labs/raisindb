@@ -139,6 +139,29 @@ pub enum ExtractStatus {
     /// looking for newly-supported formats must NOT confuse it with
     /// `Unsupported`.
     Failed,
+    /// TEXT IS EXPECTED, AND IT DOES NOT COME FROM THIS PROCESS.
+    ///
+    /// The routing table asked for a task that a loaded plugin services —
+    /// `doc_to_markdown` via `media.doc.toMarkdown`, say — and the plugin lives
+    /// above the job layer, so the asset job cannot perform it and must not
+    /// pretend the format is unreadable.
+    ///
+    /// Distinct from `Unsupported` in the direction that matters: `Unsupported`
+    /// means nothing here can EVER read these bytes, and a backfill sweeps it up
+    /// when a plugin gains the format. `Delegated` means the plugin is already
+    /// here and the work has been handed to it, so sweeping it into a
+    /// re-extract would re-run a conversion that is either running or already
+    /// done. It is also the query that finds a handover that never landed:
+    ///
+    /// ```sql
+    /// SELECT path, __extract_detail FROM 'assets'
+    ///  WHERE properties->>'__extract_status'::String = 'delegated'
+    /// ```
+    ///
+    /// An asset stuck here is a Studio-side failure (the media job died, the
+    /// trigger never fired), which is a different investigation from a missing
+    /// plugin — and before this variant the two were the same row.
+    Delegated,
 }
 
 impl ExtractStatus {
@@ -150,6 +173,7 @@ impl ExtractStatus {
             ExtractStatus::Empty => "empty",
             ExtractStatus::Unsupported => "unsupported",
             ExtractStatus::Failed => "failed",
+            ExtractStatus::Delegated => "delegated",
         }
     }
 
@@ -162,6 +186,7 @@ impl ExtractStatus {
             "empty" => Some(ExtractStatus::Empty),
             "unsupported" => Some(ExtractStatus::Unsupported),
             "failed" => Some(ExtractStatus::Failed),
+            "delegated" => Some(ExtractStatus::Delegated),
             _ => None,
         }
     }
@@ -214,6 +239,31 @@ impl ExtractionArtifact {
             text: String::new(),
             source: source.into(),
             detail: Some(detail.into()),
+            fingerprint,
+        }
+    }
+
+    /// An artifact recording that the text will be produced ABOVE this layer.
+    ///
+    /// `awaiting` names the tasks that were handed off, so the stored detail
+    /// reads `awaiting doc_to_markdown (media.doc.toMarkdown)` rather than a
+    /// bare status somebody has to correlate with a log line.
+    ///
+    /// It stamps the fingerprint like every other artifact, which is what stops
+    /// the handover from re-enqueueing itself: the enqueue gate skips a node
+    /// whose stamp matches, so the asset job runs ONCE and the delegated task
+    /// is dispatched once. Replacing the file changes the fingerprint and hands
+    /// off again.
+    pub fn delegated(fingerprint: String, awaiting: &[String]) -> Self {
+        Self {
+            status: ExtractStatus::Delegated,
+            text: String::new(),
+            source: "delegated".to_string(),
+            detail: Some(if awaiting.is_empty() {
+                "awaiting a task performed above the job layer".to_string()
+            } else {
+                format!("awaiting {}", awaiting.join(", "))
+            }),
             fingerprint,
         }
     }

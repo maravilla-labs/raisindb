@@ -65,6 +65,22 @@ pub struct AssetProcessingOptions {
     #[serde(default)]
     pub extract_text_requested: bool,
 
+    /// The routing table asked for text and a task that a LOADED PLUGIN
+    /// services was handed the job.
+    ///
+    /// The third answer that `extract_text_requested` alone could not give.
+    /// That flag means "asked for, from this binary"; a delegated task is asked
+    /// for and answerable, just not here — a `.docx` on a Studio server with the
+    /// media plugin loaded. Recording it as unsupported would claim the format
+    /// is unreadable while the converter that reads it is running, and would
+    /// put the asset in the backfill sweep that looks for formats a plugin has
+    /// newly gained.
+    ///
+    /// Defaults to false, so a job persisted by an older binary keeps the
+    /// two-state behaviour it was enqueued under.
+    #[serde(default)]
+    pub text_delegated: bool,
+
     /// Task slugs the routing table asked for that CANNOT run in this process —
     /// typically a media-plugin transform on a server with no such plugin.
     ///
@@ -74,6 +90,16 @@ pub struct AssetProcessingOptions {
     /// that an operator has to correlate with a log line from hours earlier.
     #[serde(default)]
     pub blocked_tasks: Vec<String>,
+
+    /// Task slugs that WILL run, but not in this process — each rendered
+    /// `slug (plugin.method)`.
+    ///
+    /// Carried so the durable artifact can name what it is waiting for. An
+    /// asset parked on `__extract_status = 'delegated'` is then a specific
+    /// question ("the media job for this never came back") rather than the same
+    /// row as an asset nothing can read.
+    #[serde(default)]
+    pub delegated_tasks: Vec<String>,
     /// Generate image embeddings using CLIP
     #[serde(default)]
     pub generate_image_embedding: bool,

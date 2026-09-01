@@ -347,6 +347,7 @@ pub struct DryRunSummary {
     pub archetypes: DryRunActionCounts,
     pub element_types: DryRunActionCounts,
     pub workspaces: DryRunActionCounts,
+    pub processing_rules: DryRunActionCounts,
     pub content_nodes: DryRunActionCounts,
     pub binary_files: DryRunActionCounts,
     pub package_assets: DryRunActionCounts,
