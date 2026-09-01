@@ -569,7 +569,9 @@ impl AssetProcessingHandler {
             &context.tenant_id,
             &context.repo_id,
             &config_branch,
-            "raisin:system",
+            // The constant, not a second spelling of it. Two literals for one
+            // workspace is how one of them gets changed and the other does not.
+            crate::jobs::handlers::virtual_mount_sync::SYSTEM_WORKSPACE,
         );
         let Ok(Some(mount_node)) = self.storage.nodes().get(scope, mount_id, None).await else {
             return false;
