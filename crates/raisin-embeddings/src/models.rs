@@ -113,6 +113,94 @@ pub struct EmbeddingData {
     #[deprecated(note = "Use embedder_id.provider instead")]
     #[serde(default = "default_provider")]
     pub provider: EmbeddingProvider,
+
+    /// Byte range of this chunk in the text it was made from — and `None`
+    /// unless that text is a DURABLE artifact that can be sliced again.
+    ///
+    /// This is what lets a RAG caller get the passage back rather than a
+    /// 200-character preview: slice `__extracted_text` at `[start, end)`.
+    ///
+    /// **Only the `doc` spec may set this.** That spec embeds
+    /// `__extracted_text` verbatim, so the range indexes a string stored on the
+    /// node. The DEFAULT spec's text is synthesized by
+    /// `extract_embeddable_content` and kept nowhere, so a span recorded there
+    /// would index a string that no longer exists — and slicing
+    /// `__extracted_text` by it would return plausible text from the wrong
+    /// place, with no error anywhere. `None` is the honest answer; readers fall
+    /// back to `chunk_content` and say that they did.
+    ///
+    /// `None` on every row written before this field existed. Those rows are
+    /// still current — the span is not an input to the vectors and does not
+    /// enter the spec hash — so they are NOT re-embedded; they simply take the
+    /// excerpt fallback until their node is next written.
+    // No `skip_serializing_if`, for the reason given above `spec_hash`.
+    #[serde(default)]
+    pub chunk_span: Option<ChunkSpan>,
+}
+
+/// Hash one chunk's text — the value stored as [`EmbeddingData::text_hash`].
+///
+/// ONE implementation, because it is a value that gets COMPARED across
+/// subsystems: the embedding job writes it, and the search path recomputes it
+/// over the text it sliced out of the document to prove the slice is still the
+/// passage that was embedded. Two hashers that agree today and drift tomorrow
+/// would not error — every span would simply look stale and the exact-text path
+/// would silently turn itself off, degrading every RAG answer to a 200-character
+/// preview with nothing to explain it.
+///
+/// Note the hash is `DefaultHasher`, whose algorithm std does not guarantee
+/// across Rust releases. That is tolerable precisely because the comparison
+/// fails SAFE — a mismatch falls back to the excerpt and says so in
+/// `chunk_text_source` — but it means a toolchain bump can quietly move every
+/// row to the fallback until the rows are rewritten.
+pub fn hash_chunk_text(text: &str) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// A half-open byte range `[start, end)` into the text a chunk was cut from.
+///
+/// One `Option<ChunkSpan>` rather than two `Option<u32>`s: independent options
+/// can disagree — "start present, end absent" — and then every reader has to
+/// invent a meaning for it. One option is one decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChunkSpan {
+    /// Byte offset where the chunk starts.
+    pub start: u32,
+    /// Byte offset one past the chunk's last byte.
+    pub end: u32,
+}
+
+impl ChunkSpan {
+    /// Build a span, returning `None` if it could not be represented.
+    ///
+    /// A document past `u32::MAX` bytes cannot be addressed here — but
+    /// `__extracted_text` is capped at 256 KB, so this is unreachable in
+    /// practice and returning `None` degrades to the excerpt rather than
+    /// truncating an offset into a wrong one.
+    pub fn new(start: usize, end: usize) -> Option<Self> {
+        if end < start {
+            return None;
+        }
+        Some(Self {
+            start: u32::try_from(start).ok()?,
+            end: u32::try_from(end).ok()?,
+        })
+    }
+
+    /// Slice `text` by this span, or `None` if the range does not land on char
+    /// boundaries or runs past the end.
+    ///
+    /// Uses `get`, never indexing: the stored text may have been truncated at
+    /// `MAX_INLINE_EXTRACT_BYTES` since the span was written, and a panic in a
+    /// query path is not an acceptable way to discover that.
+    pub fn slice<'t>(&self, text: &'t str) -> Option<&'t str> {
+        text.get(self.start as usize..self.end as usize)
+    }
 }
 
 // Default values for legacy fields during deserialization
@@ -297,6 +385,7 @@ mod tests {
             generated_at: Utc::now(),
             text_hash: 12345,
             spec_hash: Some(12345),
+            chunk_span: None,
             model: "test-model".to_string(),
             provider: EmbeddingProvider::OpenAI,
         };
@@ -376,6 +465,7 @@ mod tests {
             generated_at: Utc::now(),
             text_hash: 1,
             spec_hash: Some(99),
+            chunk_span: None,
             model: "bge-m3".to_string(),
             provider: EmbeddingProvider::Ollama,
         };
@@ -441,6 +531,7 @@ mod tests {
             generated_at: Utc::now(),
             text_hash: 12345,
             spec_hash: Some(12345),
+            chunk_span: None,
             model: "text-embedding-3-small".to_string(),
             provider: EmbeddingProvider::OpenAI,
         };
@@ -449,5 +540,94 @@ mod tests {
 
         // 1536 * 4 bytes + ~128 bytes metadata = ~6272 bytes
         assert!(size >= 6000 && size <= 7000, "Size was {}", size);
+    }
+}
+
+/// The chunk span must be additive on disk, and must never mis-slice.
+#[cfg(test)]
+mod chunk_span_tests {
+    use super::*;
+
+    /// Every row written before `chunk_span` existed must still load, with the
+    /// field absent rather than the read failing. The stored format is
+    /// `to_vec_named` (a map), which is what makes the field additive — the
+    /// same property `spec_hash` relies on.
+    #[test]
+    fn a_row_written_before_chunk_span_existed_still_loads() {
+        // A map with every field EXCEPT `chunk_span`, exactly as an older
+        // binary would have written it.
+        let legacy = serde_json::json!({
+            "vector": [0.1f32, 0.2],
+            "embedder_id": EmbedderId::new("ollama", "bge-m3", 2),
+            "embedding_kind": EmbeddingKind::Text,
+            "source_id": "n#doc#3",
+            "chunk_index": 3,
+            "total_chunks": 9,
+            "chunk_content": "a preview",
+            "generated_at": Utc::now(),
+            "text_hash": 7u64,
+            "spec_hash": 11u64,
+            "model": "bge-m3",
+            "provider": EmbeddingProvider::Ollama,
+        });
+        let bytes = rmp_serde::to_vec_named(&legacy).expect("encode legacy row");
+        let data: EmbeddingData = rmp_serde::from_slice(&bytes).expect("legacy row must load");
+
+        assert_eq!(data.chunk_span, None, "absent means absent, not garbage");
+        assert_eq!(data.chunk_index, 3, "the other fields still land correctly");
+        assert_eq!(data.spec_hash, Some(11));
+    }
+
+    #[test]
+    fn a_span_round_trips_through_the_stored_encoding() {
+        #[allow(deprecated)]
+        let data = EmbeddingData {
+            vector: vec![0.1],
+            embedder_id: EmbedderId::new("ollama", "bge-m3", 1),
+            embedding_kind: EmbeddingKind::Text,
+            source_id: "n#doc#0".to_string(),
+            chunk_index: 0,
+            total_chunks: 1,
+            chunk_content: None,
+            generated_at: Utc::now(),
+            text_hash: 1,
+            spec_hash: Some(99),
+            chunk_span: ChunkSpan::new(12, 40),
+            model: "bge-m3".to_string(),
+            provider: EmbeddingProvider::Ollama,
+        };
+
+        let bytes = rmp_serde::to_vec_named(&data).expect("encode");
+        let back: EmbeddingData = rmp_serde::from_slice(&bytes).expect("decode");
+        assert_eq!(back.chunk_span, Some(ChunkSpan { start: 12, end: 40 }));
+    }
+
+    #[test]
+    fn a_span_slices_exactly_the_text_it_describes() {
+        let text = "The quick brown fox jumps over the lazy dog.";
+        let span = ChunkSpan::new(4, 19).unwrap();
+        assert_eq!(span.slice(text), Some("quick brown fox"));
+    }
+
+    /// The stored text may have been truncated at `MAX_INLINE_EXTRACT_BYTES`
+    /// since the span was written. Slicing must return `None`, not panic — a
+    /// panic in a query path is not an acceptable way to discover truncation.
+    #[test]
+    fn a_span_past_the_end_returns_none_rather_than_panicking() {
+        let text = "short";
+        assert_eq!(ChunkSpan::new(2, 500).unwrap().slice(text), None);
+    }
+
+    /// A range that lands mid-codepoint must also decline rather than panic.
+    #[test]
+    fn a_span_off_a_char_boundary_returns_none() {
+        let text = "Grüße";
+        // 'ü' is two bytes at 2..4; 3 is inside it.
+        assert_eq!(ChunkSpan::new(0, 3).unwrap().slice(text), None);
+    }
+
+    #[test]
+    fn an_inverted_range_is_refused_at_construction() {
+        assert_eq!(ChunkSpan::new(40, 12), None);
     }
 }

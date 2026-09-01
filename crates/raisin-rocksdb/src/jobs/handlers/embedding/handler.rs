@@ -310,8 +310,31 @@ impl EmbeddingJobHandler {
             "About to generate embedding for this text"
         );
 
+        // Whether a byte range into `text` is worth recording.
+        //
+        // ONLY the `doc` spec. That spec embeds `__extracted_text` verbatim
+        // (see `embedding_tasks`), so a range indexes a string that is stored on
+        // the node and can be sliced again at query time. The DEFAULT spec's
+        // text is synthesized by `extract_embeddable_content` and kept nowhere,
+        // so a span recorded there would later be applied to
+        // `__extracted_text` — a DIFFERENT string — and would return plausible
+        // text from the wrong part of the document, with no error anywhere.
+        let spans_are_durable = spec == Some(EXTRACTED_TEXT_SPEC);
+
+        let span_of = |start: usize, end: usize| -> Option<raisin_embeddings::ChunkSpan> {
+            if spans_are_durable {
+                raisin_embeddings::ChunkSpan::new(start, end)
+            } else {
+                None
+            }
+        };
+
+        // The whole text as one chunk: the range is trivially the whole string.
+        let whole = |text: &String| vec![(text.clone(), 0usize, span_of(0, text.len()))];
+
         // Split text into chunks if chunking is configured
-        let chunks: Vec<(String, usize)> = if let Some(chunking_config) = chunking {
+        type Chunk = (String, usize, Option<raisin_embeddings::ChunkSpan>);
+        let chunks: Vec<Chunk> = if let Some(chunking_config) = chunking {
             match raisin_ai::chunking::TextChunker::chunk_text(text, chunking_config) {
                 Ok(text_chunks) if text_chunks.len() > 1 => {
                     tracing::info!(
@@ -323,21 +346,24 @@ impl EmbeddingJobHandler {
                     );
                     text_chunks
                         .into_iter()
-                        .map(|c| (c.content, c.index))
+                        .map(|c| {
+                            let span = span_of(c.start_offset, c.end_offset);
+                            (c.content, c.index, span)
+                        })
                         .collect()
                 }
-                Ok(_) => vec![(text.clone(), 0)],
+                Ok(_) => whole(text),
                 Err(e) => {
                     tracing::warn!(
                         node_id = %node_id,
                         error = %e,
                         "Chunking failed, falling back to single embedding"
                     );
-                    vec![(text.clone(), 0)]
+                    whole(text)
                 }
             }
         } else {
-            vec![(text.clone(), 0)]
+            whole(text)
         };
 
         let total_chunks = chunks.len();
@@ -501,7 +527,10 @@ impl EmbeddingJobHandler {
         }
 
         let carried_forward = carried.is_some();
-        let chunk_texts: Vec<String> = chunks.iter().map(|(content, _)| content.clone()).collect();
+        let chunk_texts: Vec<String> = chunks
+            .iter()
+            .map(|(content, _, _)| content.clone())
+            .collect();
         let embeddings = match carried {
             Some(vectors) => {
                 tracing::info!(
@@ -542,7 +571,9 @@ impl EmbeddingJobHandler {
         };
 
         // Store each chunk and add to HNSW
-        for ((chunk_content, chunk_index), embedding) in chunks.iter().zip(embeddings.into_iter()) {
+        for ((chunk_content, chunk_index, chunk_span), embedding) in
+            chunks.iter().zip(embeddings.into_iter())
+        {
             // ONE derivation of the chunk id, shared with the orphan sweep and
             // the HNSW cleanup. A `format!` here and a second one there is
             // exactly how a chunk becomes unreachable by the code meant to
@@ -569,6 +600,10 @@ impl EmbeddingJobHandler {
                 // the product of the same inputs — that is what lets a single
                 // read of the first chunk decide the whole spec.
                 spec_hash: Some(spec_hash),
+                // The byte range this chunk occupies in the text it was cut
+                // from — `None` for the default spec, whose text is not
+                // stored and therefore cannot be sliced again.
+                chunk_span: *chunk_span,
                 // Legacy fields (deprecated)
                 model: config.model.clone(),
                 provider: config.provider.clone(),

@@ -187,6 +187,21 @@ impl<'a> AnalyzerContext<'a> {
                 ColumnDef::nullable("created_at", DataType::Text),
                 ColumnDef::nullable("updated_at", DataType::Text),
                 ColumnDef::simple("properties", DataType::JsonB),
+                // APPENDED, deliberately, rather than placed next to
+                // `chunk_index` where they read better: the order above is
+                // contractual for positional `SELECT *` consumers, and
+                // inserting would shift five columns. Do not tidy these into
+                // place.
+                //
+                // The text of the chunk that answered — what a RAG caller
+                // needs. NULL when none is available.
+                ColumnDef::nullable("chunk_text", DataType::Text),
+                // Where that text came from: 'exact' (the chunk, sliced from
+                // the document by its stored span and verified), 'excerpt' (the
+                // stored 200-character preview) or 'unavailable'. Reported so a
+                // caller can tell a short chunk from a truncated one — a silent
+                // stub is a confidently wrong RAG answer.
+                ColumnDef::simple("chunk_text_source", DataType::Text),
             ],
             primary_key: vec![],
             indexes: vec![],

@@ -90,26 +90,47 @@ impl TextChunker {
 
         let overlap = config.overlap_tokens();
 
-        // Create chunks based on splitter type and tokenizer availability
-        let chunk_strings = if let Some(ref tokenizer_id) = config.tokenizer_id {
+        // Create chunks based on splitter type and tokenizer availability.
+        //
+        // NOTE: `config.splitter_type` is deliberately NOT consulted here. Both
+        // paths below use `text_splitter`, which is recursive regardless, so the
+        // setting currently changes the spec hash and nothing else. Making it
+        // take effect would move every split and therefore every `spec_hash`,
+        // re-embedding every document in the fleet — that needs its own
+        // decision, not a silent fix wedged into an offset change.
+        let chunk_spans = if let Some(ref tokenizer_id) = config.tokenizer_id {
             Self::chunk_with_tiktoken(text, config.chunk_size, overlap, tokenizer_id)?
         } else {
             Self::chunk_char_based(text, config.chunk_size, overlap)?
         };
 
-        // Convert to TextChunk with metadata
-        let mut current_offset = 0;
-        let chunks: Vec<TextChunk> = chunk_strings
+        // Offsets come FROM THE SPLITTER, which already knows them.
+        //
+        // This used to re-find each chunk in the source with
+        // `text[current_offset..].find(&content)`, advancing `current_offset` by
+        // one byte per chunk. Three things were wrong with that, and the first
+        // is a crash:
+        //
+        //   1. `text[current_offset..]` PANICS when `current_offset` is not a
+        //      char boundary — and it was `previous_start + 1`, which is a
+        //      non-boundary whenever a chunk starts with a multi-byte character.
+        //      Any accented word at a chunk boundary took the embedding job down.
+        //   2. A one-byte-per-chunk search window means repeated text — a running
+        //      header, boilerplate, a repeated heading — resolves to an EARLIER
+        //      occurrence, so the offsets point at the wrong passage.
+        //   3. A missed `find` (the splitter trims chunk edges in some
+        //      configurations) silently fell back to an offset that does not
+        //      correspond to the content at all.
+        //
+        // `text_splitter::chunks()` is literally
+        // `chunk_indices(text).map(|(_, t)| t)`, so the byte offsets were being
+        // computed by the splitter, thrown away, and then reconstructed badly.
+        // Taking them directly is exact, total, and less code.
+        let chunks: Vec<TextChunk> = chunk_spans
             .into_iter()
             .enumerate()
-            .map(|(index, content)| {
-                let start_offset = text[current_offset..]
-                    .find(&content)
-                    .map(|pos| current_offset + pos)
-                    .unwrap_or(current_offset);
-
+            .map(|(index, (start_offset, content))| {
                 let end_offset = start_offset + content.len();
-                current_offset = start_offset + 1; // Move forward for next search
 
                 let token_count = if config.tokenizer_id.is_some() {
                     // Estimate based on actual tokenizer if we have one
@@ -133,13 +154,16 @@ impl TextChunker {
     }
 
     /// Chunk text using tiktoken-based tokenizer for accurate token counting.
+    ///
+    /// Returns `(byte offset into `text`, chunk)` pairs — see the note in
+    /// [`Self::chunk_text`] on why the offset comes from the splitter.
     #[cfg(feature = "tiktoken-rs")]
     fn chunk_with_tiktoken(
         text: &str,
         chunk_size: usize,
         overlap: usize,
         tokenizer_id: &str,
-    ) -> Result<Vec<String>, ChunkingError> {
+    ) -> Result<Vec<(usize, String)>, ChunkingError> {
         use tiktoken_rs::get_bpe_from_model;
 
         // Load the tokenizer
@@ -163,8 +187,11 @@ impl TextChunker {
         // Create splitter
         let splitter = TextSplitter::new(chunk_config.with_sizer(sizer));
 
-        // Split and collect chunks
-        let chunks: Vec<String> = splitter.chunks(text).map(|s| s.to_string()).collect();
+        // Split and collect chunks WITH their byte offsets.
+        let chunks: Vec<(usize, String)> = splitter
+            .chunk_indices(text)
+            .map(|(start, s)| (start, s.to_string()))
+            .collect();
 
         Ok(chunks)
     }
@@ -176,7 +203,7 @@ impl TextChunker {
         chunk_size: usize,
         overlap: usize,
         _tokenizer_id: &str,
-    ) -> Result<Vec<String>, ChunkingError> {
+    ) -> Result<Vec<(usize, String)>, ChunkingError> {
         tracing::warn!(
             "Tiktoken requested but feature not enabled, falling back to character-based chunking"
         );
@@ -184,11 +211,14 @@ impl TextChunker {
     }
 
     /// Chunk text using character-based counting (fallback when no tokenizer specified).
+    ///
+    /// Returns `(byte offset into `text`, chunk)` pairs — see the note in
+    /// [`Self::chunk_text`] on why the offset comes from the splitter.
     fn chunk_char_based(
         text: &str,
         chunk_size: usize,
         overlap: usize,
-    ) -> Result<Vec<String>, ChunkingError> {
+    ) -> Result<Vec<(usize, String)>, ChunkingError> {
         use text_splitter::Characters;
 
         // Create a ChunkConfig with the specified size and overlap
@@ -204,8 +234,11 @@ impl TextChunker {
         // Create splitter
         let splitter = TextSplitter::new(chunk_config_with_sizer);
 
-        // Split and collect chunks
-        let chunks: Vec<String> = splitter.chunks(text).map(|s| s.to_string()).collect();
+        // Split and collect chunks WITH their byte offsets.
+        let chunks: Vec<(usize, String)> = splitter
+            .chunk_indices(text)
+            .map(|(start, s)| (start, s.to_string()))
+            .collect();
 
         Ok(chunks)
     }
@@ -395,5 +428,124 @@ mod tests {
         // Should be roughly len/4
         let expected = text.len() / 4;
         assert!(estimate >= expected / 2 && estimate <= expected * 2);
+    }
+}
+
+/// Chunk offsets must be exact, and must not crash.
+///
+/// The offsets used to be reconstructed by re-finding each chunk in the source
+/// with a one-byte-per-chunk search window. Both cases below defeated that:
+/// a multi-byte character at a chunk boundary made the slice panic, and
+/// repeated text resolved to an earlier occurrence.
+#[cfg(test)]
+mod offset_tests {
+    use super::*;
+    use crate::config::{ChunkingConfig, OverlapConfig, SplitterType};
+
+    fn config(chunk_size: usize) -> ChunkingConfig {
+        ChunkingConfig {
+            chunk_size,
+            overlap: OverlapConfig::Tokens(0),
+            splitter: SplitterType::Recursive,
+            tokenizer_id: None,
+        }
+    }
+
+    /// Every chunk's offsets must slice back to exactly that chunk. This is the
+    /// property the whole chunk-retrieval feature rests on.
+    fn assert_offsets_round_trip(text: &str, chunks: &[TextChunk]) {
+        for chunk in chunks {
+            assert!(
+                chunk.end_offset <= text.len(),
+                "chunk {} ends past the text ({} > {})",
+                chunk.index,
+                chunk.end_offset,
+                text.len()
+            );
+            assert!(
+                text.is_char_boundary(chunk.start_offset)
+                    && text.is_char_boundary(chunk.end_offset),
+                "chunk {} offsets {}..{} are not char boundaries",
+                chunk.index,
+                chunk.start_offset,
+                chunk.end_offset
+            );
+            assert_eq!(
+                &text[chunk.start_offset..chunk.end_offset],
+                chunk.content,
+                "chunk {} does not slice back to itself",
+                chunk.index
+            );
+        }
+    }
+
+    /// Multi-byte characters at chunk boundaries. The old implementation
+    /// PANICKED here: it sliced `text[previous_start + 1..]`, which is not a
+    /// char boundary when a chunk starts with a multi-byte character.
+    #[test]
+    fn multibyte_text_does_not_panic_and_offsets_are_exact() {
+        let text = "Schönheit größer Übermaß. Käse mit Grüßen und Straße.                     Ärger über Öl. Führung möglich. Prüfung dafür.";
+        let chunks = TextChunker::chunk_text(text, &config(20)).expect("chunking must succeed");
+        assert!(!chunks.is_empty());
+        assert_offsets_round_trip(text, &chunks);
+    }
+
+    /// Emoji are 4-byte, which is the harshest boundary case.
+    #[test]
+    fn astral_plane_characters_are_handled() {
+        let text = "🚀 launch sequence 🚀 second stage 🚀 orbit reached 🚀 done";
+        let chunks = TextChunker::chunk_text(text, &config(12)).expect("chunking must succeed");
+        assert_offsets_round_trip(text, &chunks);
+    }
+
+    /// Repeated text — a running header, boilerplate, a repeated heading. The
+    /// old search window advanced one byte per chunk, so a later chunk whose
+    /// text also appears earlier resolved to the EARLIER occurrence and the
+    /// offsets pointed at the wrong passage.
+    #[test]
+    fn repeated_passages_resolve_to_their_own_occurrence() {
+        let header = "CONFIDENTIAL DRAFT";
+        let text = format!(
+            "{header}\n\nAlpha section body text.\n\n             {header}\n\nBeta section body text.\n\n             {header}\n\nGamma section body text."
+        );
+
+        let chunks = TextChunker::chunk_text(&text, &config(30)).expect("chunking must succeed");
+        assert_offsets_round_trip(&text, &chunks);
+
+        // Offsets must be non-decreasing: a chunk may not start before the one
+        // before it, which is exactly what re-finding repeated text produced.
+        for pair in chunks.windows(2) {
+            assert!(
+                pair[1].start_offset >= pair[0].start_offset,
+                "chunk {} starts at {}, before chunk {} at {} — a repeated \
+                 passage resolved to an earlier occurrence",
+                pair[1].index,
+                pair[1].start_offset,
+                pair[0].index,
+                pair[0].start_offset
+            );
+        }
+    }
+
+    /// With overlap configured, consecutive chunks SHARE source bytes. Anything
+    /// stitching neighbours must merge ranges rather than concatenate text, or
+    /// it duplicates the overlap.
+    #[test]
+    fn overlapping_chunks_share_source_ranges() {
+        let cfg = ChunkingConfig {
+            chunk_size: 40,
+            overlap: OverlapConfig::Tokens(10),
+            splitter: SplitterType::Recursive,
+            tokenizer_id: None,
+        };
+        let text = "one two three four five six seven eight nine ten eleven twelve \
+                    thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty";
+        let chunks = TextChunker::chunk_text(text, &cfg).expect("chunking must succeed");
+        assert_offsets_round_trip(text, &chunks);
+        assert!(
+            chunks.len() > 1,
+            "expected several chunks, got {}",
+            chunks.len()
+        );
     }
 }

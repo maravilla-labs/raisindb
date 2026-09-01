@@ -65,7 +65,7 @@ pub mod storage;
 pub use config::{EmbeddingProvider, TenantEmbeddingConfig};
 pub use crypto::{ApiKeyEncryptor, CryptoError};
 pub use embedding_storage::{EmbeddingJobStore, EmbeddingStorage, StoredIndexEntry};
-pub use models::{EmbeddingData, EmbeddingJob, EmbeddingJobKind};
+pub use models::{hash_chunk_text, ChunkSpan, EmbeddingData, EmbeddingJob, EmbeddingJobKind};
 pub use provider::{
     create_provider, create_provider_full, create_provider_with_url,
     EmbeddingProvider as EmbeddingProviderTrait, OllamaProvider, OpenAIProvider, VoyageProvider,

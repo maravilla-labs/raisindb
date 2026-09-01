@@ -77,6 +77,18 @@ impl LegId {
         }
     }
 
+    /// The partition token, for a vector leg.
+    ///
+    /// Needed to address a hit's stored chunk row: the `cf::EMBEDDINGS` key
+    /// carries the embedder hash and the kind, and both are halves of this
+    /// token (`PartitionId::parse`).
+    pub fn partition_token(&self) -> Option<&str> {
+        match self {
+            LegId::Vector { partition, .. } => Some(partition.as_str()),
+            LegId::Fulltext => None,
+        }
+    }
+
     /// A short label for `EXPLAIN` and the operator log.
     pub fn label(&self) -> String {
         match self {
@@ -115,10 +127,18 @@ impl LegResult {
 /// Per-hit detail from a vector leg: a measurement, not a score.
 ///
 /// Kept OUT of [`LegResult`] so that fusion cannot read it. See the module docs.
-#[derive(Debug, Clone, Copy)]
+// Not `Copy`: `spec` is an owned `String`. The detail is read by reference out
+// of the `VectorDetails` map, so nothing needed the copy.
+#[derive(Debug, Clone)]
 pub struct VectorDetail {
     pub distance: f32,
     pub chunk_index: usize,
+    /// Which NAMED spec produced this vector, `None` for the default spec.
+    ///
+    /// Carried because the `cf::EMBEDDINGS` row is addressed by the NAMESPACED
+    /// source id (`{node}` default, `{node}#{spec}` named), so a reader that
+    /// wants this chunk's text cannot find the row without it.
+    pub spec: Option<String>,
 }
 
 /// Vector detail keyed by `(leg, hit)`.
@@ -126,7 +146,15 @@ pub struct VectorDetail {
 /// Keyed by leg as well as hit because the same node can be returned by two
 /// partitions with two unrelated distances, and collapsing them would silently
 /// report one space's measurement under the other's.
-pub type VectorDetails = HashMap<(LegId, HitKey), VectorDetail>;
+/// ALL of a hit's chunks in that leg, distance-ascending — not just the best.
+///
+/// This was one `VectorDetail`, and a node whose second chunk also matched
+/// OVERWROTE the first. In node mode the difference was invisible (the best is
+/// taken, and the leg returns them in distance order), but the information was
+/// being thrown away at the point it arrived, so chunk granularity could not be
+/// expressed at all. Node mode now takes `[0]` and is bit-identical; chunk mode
+/// reads the rest.
+pub type VectorDetails = HashMap<(LegId, HitKey), Vec<VectorDetail>>;
 
 /// One fused candidate.
 #[derive(Debug, Clone)]
@@ -141,9 +169,48 @@ pub struct FusedHit {
     pub chunk_index: Option<usize>,
     /// The kind character of the best-RANKED vector leg, if any.
     pub embedding_kind: Option<char>,
+    /// The named spec of the best-RANKED vector leg, `None` for the default
+    /// spec or when no vector leg matched.
+    pub spec: Option<String>,
+    /// The partition token of the best-RANKED vector leg, if any. With
+    /// [`Self::spec`] and [`Self::chunk_index`] this addresses the stored row
+    /// that carries the chunk's text.
+    pub partition: Option<String>,
+    /// EVERY chunk of this node the best-ranked vector leg returned,
+    /// distance-ascending.
+    ///
+    /// Node granularity ignores this and reports [`Self::chunk_index`], the
+    /// first of them. Chunk granularity fans one hit out into one row per
+    /// entry — which is why the fan-out happens HERE, after fusion, rather than
+    /// by making the fusion key chunk-aware: the full-text leg reports nodes,
+    /// so a chunk-keyed hit could never fuse a lexical match with a vector
+    /// match of the same document, and RRF would quietly become two disjoint
+    /// rank lists.
+    pub chunks: Vec<VectorDetail>,
 }
 
 impl FusedHit {
+    /// This hit as seen from ONE of its chunks.
+    ///
+    /// `score` and the ranks are untouched: they are the NODE's, and a document
+    /// does not become more relevant because it is being reported one passage
+    /// at a time. Only the per-chunk measurements move — the distance, the
+    /// index and the spec — so each emitted row describes the passage it
+    /// carries while the ordering between documents stays exactly what fusion
+    /// decided.
+    ///
+    /// An index that is not among this hit's chunks leaves it unchanged rather
+    /// than inventing a measurement.
+    pub fn viewed_from_chunk(&self, chunk_index: usize) -> Self {
+        let mut view = self.clone();
+        if let Some(detail) = self.chunks.iter().find(|c| c.chunk_index == chunk_index) {
+            view.vector_distance = Some(detail.distance);
+            view.chunk_index = Some(detail.chunk_index);
+            view.spec = detail.spec.clone();
+        }
+        view
+    }
+
     /// The lexical rank, or `None` when the full-text leg did not return this
     /// hit -- which includes the leg not having run at all.
     pub fn fulltext_rank(&self) -> Option<usize> {
@@ -222,17 +289,25 @@ pub fn fuse(legs: &[LegResult], details: &VectorDetails) -> Vec<FusedHit> {
                 .iter()
                 .filter(|(leg, _)| leg.is_vector())
                 .min_by_key(|(_, rank)| *rank);
-            let (vector_distance, chunk_index, embedding_kind) = match best_vector {
-                Some((leg, _)) => {
-                    let detail = details.get(&(leg.clone(), key.clone()));
-                    (
-                        detail.map(|d| d.distance),
-                        detail.map(|d| d.chunk_index),
-                        leg.kind_char(),
-                    )
-                }
-                None => (None, None, None),
-            };
+            let (vector_distance, chunk_index, embedding_kind, spec, partition, chunks) =
+                match best_vector {
+                    Some((leg, _)) => {
+                        let all = details.get(&(leg.clone(), key.clone()));
+                        // `[0]` is the best chunk: the leg returns them
+                        // distance-ascending. Node mode reports exactly this and
+                        // is unchanged.
+                        let best = all.and_then(|d| d.first());
+                        (
+                            best.map(|d| d.distance),
+                            best.map(|d| d.chunk_index),
+                            leg.kind_char(),
+                            best.and_then(|d| d.spec.clone()),
+                            leg.partition_token().map(str::to_string),
+                            all.cloned().unwrap_or_default(),
+                        )
+                    }
+                    None => (None, None, None, None, None, Vec::new()),
+                };
 
             FusedHit {
                 key,
@@ -241,6 +316,9 @@ pub fn fuse(legs: &[LegResult], details: &VectorDetails) -> Vec<FusedHit> {
                 vector_distance,
                 chunk_index,
                 embedding_kind,
+                spec,
+                partition,
+                chunks,
             }
         })
         .collect();
@@ -296,13 +374,11 @@ mod tests {
     }
 
     fn detail(details: &mut VectorDetails, leg: LegId, k: HitKey, distance: f32, chunk: usize) {
-        details.insert(
-            (leg, k),
-            VectorDetail {
-                distance,
-                chunk_index: chunk,
-            },
-        );
+        details.entry((leg, k)).or_default().push(VectorDetail {
+            distance,
+            chunk_index: chunk,
+            spec: None,
+        });
     }
 
     /// The two-leg default must stay numerically identical to what shipped, or
@@ -457,5 +533,84 @@ mod tests {
             ..full
         };
         assert!(short.exhausted());
+    }
+}
+
+/// Chunk granularity fans a fused hit out into one row per passage.
+#[cfg(test)]
+mod chunk_view_tests {
+    use super::*;
+
+    fn hit_with(chunks: Vec<VectorDetail>) -> FusedHit {
+        FusedHit {
+            key: ("ws".to_string(), "n1".to_string()),
+            score: 0.5,
+            ranks: vec![(
+                LegId::Vector {
+                    kind: 'T',
+                    partition: "p".to_string(),
+                },
+                1,
+            )],
+            vector_distance: chunks.first().map(|c| c.distance),
+            chunk_index: chunks.first().map(|c| c.chunk_index),
+            embedding_kind: Some('T'),
+            spec: chunks.first().and_then(|c| c.spec.clone()),
+            partition: Some("p".to_string()),
+            chunks,
+        }
+    }
+
+    fn detail(distance: f32, chunk_index: usize) -> VectorDetail {
+        VectorDetail {
+            distance,
+            chunk_index,
+            spec: Some("doc".to_string()),
+        }
+    }
+
+    /// Each row must carry ITS OWN chunk's distance and index, or every passage
+    /// of a document would be reported with the best one's numbers.
+    #[test]
+    fn each_view_reports_its_own_chunks_measurements() {
+        let hit = hit_with(vec![detail(0.11, 7), detail(0.22, 8), detail(0.33, 2)]);
+
+        let second = hit.viewed_from_chunk(8);
+        assert_eq!(second.chunk_index, Some(8));
+        assert_eq!(second.vector_distance, Some(0.22));
+
+        let third = hit.viewed_from_chunk(2);
+        assert_eq!(third.chunk_index, Some(2));
+        assert_eq!(third.vector_distance, Some(0.33));
+    }
+
+    /// The score is the NODE's. A document does not become more or less
+    /// relevant because it is being reported one passage at a time, and moving
+    /// the score per row would reorder documents against what fusion decided.
+    #[test]
+    fn the_node_score_and_ranks_are_untouched_by_the_view() {
+        let hit = hit_with(vec![detail(0.11, 7), detail(0.9, 8)]);
+        let view = hit.viewed_from_chunk(8);
+        assert_eq!(view.score, hit.score);
+        assert_eq!(view.ranks, hit.ranks);
+        assert_eq!(view.key, hit.key);
+    }
+
+    /// An index this hit does not have must not invent a measurement.
+    #[test]
+    fn an_unknown_chunk_leaves_the_hit_as_fused() {
+        let hit = hit_with(vec![detail(0.11, 7)]);
+        let view = hit.viewed_from_chunk(999);
+        assert_eq!(view.chunk_index, Some(7));
+        assert_eq!(view.vector_distance, Some(0.11));
+    }
+
+    /// Node mode must see exactly the first (best) chunk, so the one-to-many
+    /// change is invisible to it.
+    #[test]
+    fn the_fused_hit_still_reports_the_best_chunk_first() {
+        let hit = hit_with(vec![detail(0.11, 7), detail(0.22, 8)]);
+        assert_eq!(hit.chunk_index, Some(7));
+        assert_eq!(hit.vector_distance, Some(0.11));
     }
 }

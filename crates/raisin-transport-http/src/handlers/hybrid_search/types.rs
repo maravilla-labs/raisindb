@@ -48,6 +48,14 @@ pub struct HybridSearchQuery {
     /// second spelling here is how the two drift apart again.
     #[serde(default = "default_kind")]
     pub kind: String,
+
+    /// What one result is: `node` (default) or `chunk`.
+    ///
+    /// Same values and same default as the SQL `granularity =>` argument. With
+    /// `chunk`, `limit` counts PASSAGES and several results may share a
+    /// `node_id` — which is what a RAG caller filling a context window wants.
+    #[serde(default = "default_granularity")]
+    pub granularity: String,
 }
 
 fn default_kind() -> String {
@@ -103,6 +111,17 @@ pub struct HybridSearchResult {
 
     /// Node revision (its version counter), matching the SQL `revision` column.
     pub revision: i64,
+
+    /// Which chunk of the document answered. `None` when there was no vector
+    /// hit; `0` for a document that was never chunked.
+    pub chunk_index: Option<i64>,
+
+    /// The text of that chunk — the passage a RAG caller wants to quote.
+    pub chunk_text: Option<String>,
+
+    /// Where `chunk_text` came from: `exact`, `excerpt` or `unavailable`.
+    /// `excerpt` means a 200-character preview, NOT the whole passage.
+    pub chunk_text_source: String,
 }
 
 /// Hybrid search response.
@@ -122,4 +141,8 @@ pub struct HybridSearchResponse {
 
     /// Vector results count
     pub vector_count: usize,
+}
+
+fn default_granularity() -> String {
+    "node".to_string()
 }

@@ -34,6 +34,7 @@
 //! push-down" leaks archetype-only matches into `WHERE node_type = 'X'`.
 
 pub mod args;
+pub mod chunk_text;
 pub mod emit;
 pub mod fusion;
 pub mod legs;

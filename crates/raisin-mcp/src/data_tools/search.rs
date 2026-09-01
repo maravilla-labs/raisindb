@@ -99,6 +99,14 @@ impl Tool for SearchNodesTool {
             .and_then(Value::as_str)
             .map(str::to_string);
 
+        // `granularity => 'chunk'` makes `limit` count PASSAGES, so an agent
+        // can ask for eight passages and get several from one document — the
+        // shape a RAG context window wants. Absent means documents, as before.
+        let granularity = args
+            .get("granularity")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+
         let query = SearchQuery {
             workspace: workspace.into_owned(),
             branch: identity.branch.clone(),
@@ -106,6 +114,7 @@ impl Tool for SearchNodesTool {
             mode,
             node_type,
             limit,
+            granularity,
         };
 
         let hits = self.search.search(identity, query).await?;

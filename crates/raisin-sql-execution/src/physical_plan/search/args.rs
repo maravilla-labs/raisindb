@@ -78,13 +78,65 @@ impl SearchFunction {
                 "fulltext_weight",
                 "max_distance",
                 "kind",
+                "granularity",
             ],
             // No `kind`: FULLTEXT_SEARCH has no vector leg, so there is no
             // embedding space to select. Accepting it and ignoring it is how
             // the third positional came to mean nothing on this function.
             SearchFunction::Fulltext => &["workspaces", "limit", "language"],
-            SearchFunction::Knn => &["workspaces", "limit", "max_distance", "kind"],
+            SearchFunction::Knn => &["workspaces", "limit", "max_distance", "kind", "granularity"],
         }
+    }
+}
+
+/// What one returned ROW is.
+///
+/// `LIMIT k` means k of these, so this changes what the limit counts — which is
+/// why it is an ARGUMENT and not a `WHERE` clause. The universe a search draws
+/// from is stated in the call, the way `workspaces =>` and `kind =>` already
+/// are.
+///
+/// - [`Node`](Granularity::Node), the default: one row per document, carrying
+///   the best-matching chunk. `LIMIT 10` is ten documents. Every caller written
+///   before this argument existed gets exactly this, unchanged.
+/// - [`Chunk`](Granularity::Chunk): one row per PASSAGE, so several rows may
+///   share a `node_id`. `LIMIT 10` is ten passages, possibly all from one
+///   document — which is what a RAG chatbot filling a context window wants.
+///
+/// Defaulting to `Node` is not politeness, it is correctness: flipping the
+/// default would silently redefine `LIMIT 10` for every existing query, and a
+/// caller that asked for ten documents would start getting ten paragraphs of
+/// one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Granularity {
+    #[default]
+    Node,
+    Chunk,
+}
+
+impl Granularity {
+    pub fn parse(raw: &str, function: &str) -> Result<Self, ExecutionError> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "node" | "document" => Ok(Self::Node),
+            "chunk" | "passage" => Ok(Self::Chunk),
+            other => Err(ExecutionError::Validation(format!(
+                "{function}: granularity must be 'node' or 'chunk', got '{other}'. \
+                 'node' returns one row per document (LIMIT k = k documents); \
+                 'chunk' returns one row per passage, so several rows may share \
+                 a node (LIMIT k = k passages)."
+            ))),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Node => "node",
+            Self::Chunk => "chunk",
+        }
+    }
+
+    pub fn is_chunk(self) -> bool {
+        matches!(self, Self::Chunk)
     }
 }
 
@@ -209,6 +261,8 @@ pub struct SearchArgs {
     pub max_distance: f32,
     /// Which embedding space(s) the vector leg reads.
     pub kind: EmbeddingKindFilter,
+    /// What one row is: a document (default) or a passage.
+    pub granularity: Granularity,
 }
 
 impl SearchArgs {
@@ -246,6 +300,7 @@ impl SearchArgs {
         vector_weight: f64,
         max_distance: Option<f32>,
         kind: EmbeddingKindFilter,
+        granularity: Granularity,
     ) -> Result<Self, ExecutionError> {
         let name = function.name();
         if limit == 0 || limit > 1000 {
@@ -275,6 +330,7 @@ impl SearchArgs {
             vector_weight,
             max_distance: max_distance.unwrap_or(0.6),
             kind,
+            granularity,
         })
     }
 }
@@ -503,6 +559,11 @@ pub fn parse_search_args(
     };
 
     // ---- kind ---------------------------------------------------------------
+    let granularity = match get_named("granularity") {
+        Some(expr) => Granularity::parse(&expect_text(expr, name, "granularity")?, name)?,
+        None => Granularity::default(),
+    };
+
     let kind = match get_named("kind") {
         Some(expr) => EmbeddingKindFilter::parse(&expect_text(expr, name, "kind")?, name)?,
         None => EmbeddingKindFilter::default(),
@@ -519,6 +580,7 @@ pub fn parse_search_args(
         vector_weight,
         max_distance,
         kind,
+        granularity,
     })
 }
 
@@ -1102,5 +1164,51 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("node reference"), "{err}");
+    }
+}
+
+/// `granularity` decides what `LIMIT k` COUNTS, so its default is load-bearing.
+#[cfg(test)]
+mod granularity_tests {
+    use super::*;
+
+    #[test]
+    fn the_default_is_node_so_limit_keeps_meaning_documents() {
+        assert_eq!(Granularity::default(), Granularity::Node);
+        assert!(!Granularity::default().is_chunk());
+    }
+
+    #[test]
+    fn both_spellings_of_each_are_accepted() {
+        for raw in ["node", "NODE", " document ", "Document"] {
+            assert_eq!(Granularity::parse(raw, "KNN").unwrap(), Granularity::Node);
+        }
+        for raw in ["chunk", "CHUNK", " passage ", "Passage"] {
+            assert_eq!(Granularity::parse(raw, "KNN").unwrap(), Granularity::Chunk);
+        }
+    }
+
+    /// The error must say what the two values MEAN, because the difference is
+    /// what `LIMIT` counts and that is not guessable from the names alone.
+    #[test]
+    fn an_unknown_value_is_refused_and_explains_the_difference() {
+        let err = Granularity::parse("chunks", "KNN").unwrap_err().to_string();
+        assert!(err.contains("'chunks'"), "must quote what was given: {err}");
+        assert!(err.contains("k documents"), "must explain node: {err}");
+        assert!(err.contains("k passages"), "must explain chunk: {err}");
+    }
+
+    /// `FULLTEXT_SEARCH` has no vector leg, so it has no chunks. Accepting the
+    /// argument and ignoring it is precisely how the third positional came to
+    /// mean nothing on that function.
+    #[test]
+    fn fulltext_search_does_not_accept_granularity() {
+        assert!(!SearchFunction::Fulltext
+            .valid_named()
+            .contains(&"granularity"));
+        assert!(SearchFunction::Hybrid
+            .valid_named()
+            .contains(&"granularity"));
+        assert!(SearchFunction::Knn.valid_named().contains(&"granularity"));
     }
 }

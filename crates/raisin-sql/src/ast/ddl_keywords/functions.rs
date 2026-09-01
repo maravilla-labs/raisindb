@@ -89,16 +89,20 @@ pub(super) fn vector_function_keywords() -> Vec<KeywordInfo> {
             description: "Pure vector search: HYBRID_SEARCH with the full-text leg switched \
                  off, same columns (full-text ones NULL), same row-level security. \
                  Argument 1 is a text literal, EMBEDDING('<text>'), or a vector literal. \
-                 The workspace scope is REQUIRED."
+                 The workspace scope is REQUIRED. granularity => 'chunk' returns one row \
+                 per PASSAGE with its chunk_text, so LIMIT k means k passages and several \
+                 rows may share a node — the RAG form. The default 'node' returns one row \
+                 per document, so LIMIT k means k documents."
                 .into(),
             syntax: Some(
                 "KNN(query, limit, workspaces => '<scope>' [, max_distance => 0.9] \
-                 [, kind => 'text'|'image'|'all'])"
+                 [, kind => 'text'|'image'|'all'] [, granularity => 'node'|'chunk'])"
                     .into(),
             ),
             example: Some(
-                "SELECT * FROM KNN(EMBEDDING('search query'), 10, \
-                 workspaces => 'ALL READABLE')"
+                "SELECT path, chunk_index, chunk_text FROM \
+                 KNN('how does ticketing work', 8, workspaces => 'ALL READABLE', \
+                 granularity => 'chunk')"
                     .into(),
             ),
         },
@@ -112,13 +116,16 @@ pub(super) fn vector_function_keywords() -> Vec<KeywordInfo> {
                  recommended RAG form). Set fulltext_weight => 0 for a cross-lingual query \
                  whose lexical leg would only add noise, or vector_weight => 0 for keyword \
                  search without an embedding provider. Each hit reports its own workspace \
-                 in workspace_id."
+                 in workspace_id. granularity => 'chunk' returns one row per PASSAGE \
+                 with its chunk_text (LIMIT k = k passages, several may share a node); \
+                 the default 'node' returns one row per document."
                 .into(),
             syntax: Some(
                 "HYBRID_SEARCH(query, limit [, workspace], workspaces => '<scope>' \
                  [, language => 'en'] [, vector_weight => 1.0] \
                  [, fulltext_weight => 1.0] [, max_distance => 0.6] \
-                 [, kind => 'text'|'image'|'all'])"
+                 [, kind => 'text'|'image'|'all'] \
+                 [, granularity => 'node'|'chunk'])"
                     .into(),
             ),
             example: Some(

@@ -35,6 +35,7 @@ fn create_test_embedding() -> EmbeddingData {
         generated_at: Utc::now(),
         text_hash: 12345,
         spec_hash: Some(12345),
+        chunk_span: None,
         model: "test-model".to_string(),
         provider: EmbeddingProvider::OpenAI,
     }
@@ -92,6 +93,7 @@ fn test_revision_ordering() {
         generated_at: Utc::now(),
         text_hash: 12345,
         spec_hash: Some(12345),
+        chunk_span: None,
         model: "test-model".to_string(),
         provider: EmbeddingProvider::OpenAI,
     };
@@ -108,6 +110,7 @@ fn test_revision_ordering() {
         generated_at: Utc::now(),
         text_hash: 12345,
         spec_hash: Some(12345),
+        chunk_span: None,
         model: "test-model".to_string(),
         provider: EmbeddingProvider::OpenAI,
     };

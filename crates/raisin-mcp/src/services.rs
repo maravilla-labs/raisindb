@@ -99,6 +99,14 @@ pub struct SearchQuery {
     pub node_type: Option<String>,
     /// Maximum number of hits to return.
     pub limit: usize,
+    /// What one hit is: `node` (default) or `chunk`.
+    ///
+    /// With `chunk`, `limit` counts PASSAGES and several hits may share a
+    /// `node_id` — which is what an agent filling a context window wants. The
+    /// default keeps `limit` meaning documents, as every existing caller
+    /// expects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granularity: Option<String>,
 }
 
 /// A single search hit, normalized across engines.
@@ -116,6 +124,22 @@ pub struct SearchHit {
     /// Node type, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_type: Option<String>,
+    /// Which chunk of the document answered, when a vector leg matched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_index: Option<i64>,
+    /// The TEXT of that chunk — the passage an agent should quote or reason
+    /// over, rather than re-reading and re-chunking the document itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_text: Option<String>,
+    /// Where `chunk_text` came from: `exact` (the passage), `excerpt` (a
+    /// 200-character preview — NOT the whole passage) or `unavailable`. An
+    /// agent that treats an excerpt as the full passage will quote a truncated
+    /// source, so this is reported rather than left to be inferred.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_text_source: Option<String>,
+    /// Vector distance, when a vector leg matched. Lower is closer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector_distance: Option<f32>,
 }
 
 /// Lexical and semantic search over RaisinDB content.
