@@ -106,6 +106,15 @@ impl HttpSearchProvider {
         if let Some(ref hnsw) = self.state.hnsw_engine {
             engine = engine.with_hnsw_engine(hnsw.clone());
         }
+        // The chunk-text resolver reads the stored chunk row to slice the
+        // passage out of the document, so without this every hit reports
+        // `chunk_text_source: 'unavailable'` — the surface returns the columns
+        // and never any text. Wired here as well as in the SQL builder because
+        // these are two engine constructions, and only one of them had it.
+        engine = engine.with_embedding_storage(std::sync::Arc::new(
+            raisin_rocksdb::RocksDBEmbeddingStorage::new(self.state.storage.db().clone()),
+        ));
+
         if let Some(ref auth) = self.auth {
             engine = engine.with_auth(auth.clone());
         }

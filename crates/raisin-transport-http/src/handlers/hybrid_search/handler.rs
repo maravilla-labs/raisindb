@@ -128,6 +128,15 @@ pub async fn hybrid_search(
     if let Some(ref hnsw) = state.hnsw_engine {
         engine = engine.with_hnsw_engine(hnsw.clone());
     }
+    // The chunk-text resolver reads the stored chunk row to slice the passage
+    // out of the document, so without this every hit reports
+    // `chunk_text_source: 'unavailable'` — the endpoint returns the columns and
+    // never any text. Wired here as well as in the SQL builder because these
+    // are two engine constructions, and only one of them had it.
+    engine = engine.with_embedding_storage(std::sync::Arc::new(
+        raisin_rocksdb::RocksDBEmbeddingStorage::new(state.storage.db().clone()),
+    ));
+
     // Row-level security. Without this the endpoint answers with node names,
     // paths and types the caller may have no permission to read -- which is
     // precisely what it did before.
