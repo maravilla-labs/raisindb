@@ -401,10 +401,19 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                 // usually wants a handful that only make sense together (pdf,
                 // office, image) and splitting them across files hides the
                 // ORDER, which is load-bearing: matching is first-match-wins.
-                let parsed: Vec<raisin_ai::ProcessingRule> = if content
-                    .trim_start()
-                    .starts_with('-')
-                {
+                // Detect the shape from the first MEANINGFUL line, not the
+                // first character. `trim_start` removes whitespace but not
+                // comments, so a documented file — which is every file worth
+                // shipping, including this package's own — begins with `#`,
+                // took the single-rule branch, and failed with
+                // "invalid type: sequence, expected struct".
+                let looks_like_list = content
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty() && !line.starts_with('#'))
+                    .is_some_and(|line| line.starts_with('-'));
+
+                let parsed: Vec<raisin_ai::ProcessingRule> = if looks_like_list {
                     serde_yaml::from_str(&content).map_err(|e| {
                         Error::Validation(format!("Invalid processing rules YAML in {name}: {e}"))
                     })?
@@ -734,5 +743,52 @@ mod workspace_patch_tests {
                 .count(),
             1
         );
+    }
+}
+
+/// A processing-rules file is a LIST or a single rule, and the file that ships
+/// in the studio package is a list behind a header comment.
+#[cfg(test)]
+mod processing_rule_shape_tests {
+    /// The detection used to be `content.trim_start().starts_with('-')`, which
+    /// is false for any documented file: `trim_start` removes whitespace, not
+    /// comments. Every such file took the single-rule branch and failed with
+    /// "invalid type: sequence, expected struct" — so a package could not ship
+    /// a commented rules file at all.
+    fn looks_like_list(content: &str) -> bool {
+        content
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty() && !line.starts_with('#'))
+            .is_some_and(|line| line.starts_with('-'))
+    }
+
+    #[test]
+    fn a_list_behind_a_header_comment_is_still_a_list() {
+        let content = "# Asset-processing rules — the routing table.\n\
+                       #\n\
+                       # WHICH nodes get WHICH tasks.\n\
+                       \n\
+                       - id: studio-pdfs\n  order: 10\n";
+        assert!(looks_like_list(content));
+    }
+
+    #[test]
+    fn a_bare_list_is_a_list() {
+        assert!(looks_like_list("- id: one\n"));
+        assert!(looks_like_list("\n\n   - id: one\n"));
+    }
+
+    #[test]
+    fn a_single_rule_is_not_a_list_however_it_is_introduced() {
+        assert!(!looks_like_list("id: one\norder: 10\n"));
+        assert!(!looks_like_list("# a single rule\nid: one\n"));
+        assert!(!looks_like_list(""));
+    }
+
+    /// A `-` inside a comment must not make a single rule look like a list.
+    #[test]
+    fn a_dash_inside_a_comment_does_not_count() {
+        assert!(!looks_like_list("# - not a rule, just prose\nid: one\n"));
     }
 }
