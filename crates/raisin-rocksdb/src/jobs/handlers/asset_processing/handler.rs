@@ -540,6 +540,46 @@ impl AssetProcessingHandler {
     /// hold.
     const MAX_HYDRATE_BYTES: u64 = 64 * 1024 * 1024;
 
+    /// Does this asset's mount allow its bytes to be cached here?
+    ///
+    /// Reads the mount's own `sync_config.ephemeral`. A miss — no mount id, no
+    /// mount node, an unreadable config — answers NO, because the failure modes
+    /// are asymmetric: refusing to fetch leaves an asset unindexed and visibly
+    /// so, while fetching when the operator did not ask can mirror a drive onto
+    /// a disk that cannot hold it.
+    async fn mount_allows_hydration(
+        &self,
+        node: &raisin_models::nodes::Node,
+        context: &JobContext,
+    ) -> bool {
+        use raisin_models::nodes::properties::PropertyValue;
+
+        let Some(PropertyValue::String(mount_id)) = node.properties.get("__mount_id") else {
+            return false;
+        };
+
+        let config_branch = crate::jobs::handlers::virtual_mount_sync::check::config_branch(
+            &self.storage,
+            &context.tenant_id,
+            &context.repo_id,
+        )
+        .await;
+
+        let scope = StorageScope::new(
+            &context.tenant_id,
+            &context.repo_id,
+            &config_branch,
+            "raisin:system",
+        );
+        let Ok(Some(mount_node)) = self.storage.nodes().get(scope, mount_id, None).await else {
+            return false;
+        };
+
+        crate::jobs::handlers::virtual_mount_sync::MountConfig::from_node(&mount_node)
+            .map(|m| m.sync_config.ephemeral)
+            .unwrap_or(false)
+    }
+
     /// Fetch a mount-owned asset's bytes so it can be indexed.
     ///
     /// Returns the hydrated node, or the one it was given when nothing could be
@@ -572,6 +612,20 @@ impl AssetProcessingHandler {
                 );
                 return node;
             }
+        }
+
+        // The mount must OPT IN. Fetching is how a synced drive becomes
+        // searchable, but it also means pulling someone else's storage onto
+        // this box — and a mount can be far larger than this deployment wants
+        // to hold. `sync_config.ephemeral` is the operator saying "cache what
+        // you need"; without it a mount stays metadata-only exactly as before.
+        if !self.mount_allows_hydration(&node, context).await {
+            tracing::debug!(
+                job_id = %job.id, node_id = %node_id,
+                "Not fetching mounted content: the mount does not allow caching \
+                 (set sync_config.ephemeral to enable indexing of its files)"
+            );
+            return node;
         }
 
         // Absent when the sync engine is not running in this process. That is a

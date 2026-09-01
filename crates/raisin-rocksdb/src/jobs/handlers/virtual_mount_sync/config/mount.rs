@@ -28,8 +28,30 @@ pub struct SyncConfig {
     pub include_patterns: Vec<String>,
     #[serde(default)]
     pub exclude_patterns: Vec<String>,
+    /// Cache remote bytes only as long as they are needed.
+    ///
+    /// A mount syncs metadata only, and the bytes behind a file are fetched when
+    /// something needs them — to extract text, render a thumbnail or serve a
+    /// preview. `ephemeral` says what happens AFTERWARDS: the local copy is a
+    /// cache of a system of record that lives at the provider, so it can be
+    /// dropped and asked for again.
+    ///
+    /// **This is also the switch that allows automatic fetching at all.** Off,
+    /// a mount stays metadata-only exactly as before — which is the safe default
+    /// for a drive with more content than this deployment wants to hold. On, the
+    /// indexing pipeline may pull a file down, and the copy expires
+    /// [`Self::ttl_seconds`] after it was last needed.
+    ///
+    /// Deliberately opt-in per mount: a 2 TB drive and a small published folder
+    /// want opposite answers, and only the operator knows which is which.
     #[serde(default)]
     pub ephemeral: bool,
+    /// How long a cached copy survives after it was last needed, in seconds.
+    ///
+    /// Long enough that the jobs which follow one another — extract, thumbnail,
+    /// embed — all find the bytes still there, and that a person browsing does
+    /// not pay a provider round-trip per click. Short enough that a drive does
+    /// not accumulate. Only meaningful with [`Self::ephemeral`].
     #[serde(default)]
     pub ttl_seconds: Option<u64>,
     #[serde(default = "default_max_items")]

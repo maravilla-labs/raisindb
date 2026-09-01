@@ -169,6 +169,21 @@ pub fn asset_mime_type(properties: &HashMap<String, PropertyValue>) -> Option<St
 /// The `v1:` prefix is the extractor generation. Bump it to force every asset to
 /// be re-extracted after a change that makes old output wrong.
 pub fn asset_fingerprint(node: &Node) -> String {
+    // A MOUNTED asset is identified by the PROVIDER, not by our copy of it.
+    //
+    // The local triple below describes the cached bytes, which for a mount is a
+    // cache of someone else's system of record — so it answers the wrong
+    // question twice. Evicting the cache would change the fingerprint and
+    // re-open the processing gate, re-downloading and re-extracting a file that
+    // has not changed (and evicting again, forever). And a file EDITED in the
+    // provider whose size happened to stay the same would not change it at all,
+    // so the edit would never be re-read.
+    //
+    // The provider already answers both: `__etag` is its own version marker.
+    if let Some(fp) = mount_fingerprint(&node.properties) {
+        return fp;
+    }
+
     let hash = asset_content_hash(&node.properties).unwrap_or_else(|| "-".to_string());
     let key = asset_storage_key(&node.properties).unwrap_or_else(|| "-".to_string());
     let size = match node.properties.get("file_size") {
@@ -216,4 +231,26 @@ pub fn asset_reported_size(properties: &HashMap<String, PropertyValue>) -> Optio
         }
     }
     None
+}
+
+/// Identity of a mount-owned asset, from the provider's own metadata.
+///
+/// `None` for anything not mounted, or mounted without an etag — a provider
+/// that reports no version leaves us nothing better than the local copy, so the
+/// caller falls back to it rather than inventing a constant that would freeze
+/// the gate shut.
+fn mount_fingerprint(properties: &HashMap<String, PropertyValue>) -> Option<String> {
+    if !is_fetchable_mount_content(properties) {
+        return None;
+    }
+    let PropertyValue::String(external) = properties.get("__external_id")? else {
+        return None;
+    };
+    let PropertyValue::String(etag) = properties.get("__etag")? else {
+        return None;
+    };
+    if etag.is_empty() {
+        return None;
+    }
+    Some(format!("v1:mount|{external}|{etag}"))
 }
