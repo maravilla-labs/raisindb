@@ -10,7 +10,7 @@
 //! what an asset IS, so there is one set of accessors and both call it.
 
 use raisin_error::{Error, Result};
-use raisin_models::nodes::Node;
+use raisin_models::nodes::{Node, MAX_INLINE_EXTRACT_BYTES};
 use raisin_storage::jobs::{AssetProcessingOptions, PdfExtractionStrategy};
 
 use super::types::TextExtractionOutput;
@@ -195,8 +195,49 @@ pub(crate) fn is_extractable_mime(mime_type: &Option<String>) -> bool {
         // An image that turns out to hold no text is a NORMAL result, not a
         // failure: it records `ok` with zero characters, which is durable and
         // stops the asset being reconsidered on every sweep.
-        Some(m) => m.starts_with("image/"),
+        // Text that is ALREADY text. Reading a `.txt`, `.md` or `.csv` is a
+        // byte decode — same bytes, same output, no model and no page
+        // rasterizer — so it belongs in core by the same rule that keeps PDF
+        // and OCR here and captioning out.
+        //
+        // Before this, a text file planned `extract_text` (the routing table
+        // has always called `text/*` text-bearing) and then recorded
+        // `unsupported`, which reads as "nothing on this server can read these
+        // bytes". For a plain text file that is plainly false, and it left the
+        // most trivially indexable format in the system findable only by
+        // filename.
+        Some(m) => m.starts_with("image/") || m.starts_with("text/"),
         None => false,
+    }
+}
+
+/// Decode a text asset. Lossy on purpose.
+///
+/// The alternative is failing a whole document over one bad byte, which for an
+/// index is strictly worse than a replacement character: a CSV exported from a
+/// legacy system with a stray Latin-1 byte is still worth every other row.
+/// Truncation is by BYTES with a char-boundary walk, because slicing a UTF-8
+/// string mid-codepoint panics.
+fn process_text(data: &[u8]) -> TextExtractionOutput {
+    let mut text = String::from_utf8_lossy(data).into_owned();
+    let mut detail = None;
+    if text.len() > MAX_INLINE_EXTRACT_BYTES {
+        let mut cut = MAX_INLINE_EXTRACT_BYTES;
+        while cut > 0 && !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+        detail = Some(format!("truncated to {MAX_INLINE_EXTRACT_BYTES} bytes"));
+    }
+    TextExtractionOutput {
+        text,
+        page_count: 1,
+        used_ocr: false,
+        source: "text",
+        // Not measured rather than perfect: a decode has no confidence to
+        // report, and `None` must stay distinguishable from a measured zero.
+        confidence: None,
+        detail,
     }
 }
 
@@ -213,6 +254,7 @@ pub(crate) async fn process_extractable(
     match mime_type.as_deref() {
         Some("application/pdf") => Some(process_pdf(data, options).await),
         Some(m) if m.starts_with("image/") => Some(process_image_ocr(data, options).await),
+        Some(m) if m.starts_with("text/") => Some(Ok(process_text(data))),
         _ => None,
     }
 }
@@ -223,4 +265,43 @@ pub(crate) fn is_image_mime(mime_type: &Option<String>) -> bool {
         .as_ref()
         .map(|m| m.starts_with("image/"))
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod text_extraction_tests {
+    use super::*;
+
+    #[test]
+    fn a_text_file_is_extractable_and_reads_back_verbatim() {
+        assert!(is_extractable_mime(&Some("text/plain".into())));
+        assert!(is_extractable_mime(&Some("text/markdown".into())));
+        assert!(is_extractable_mime(&Some("text/csv".into())));
+
+        let out = process_text(b"hello\nworld");
+        assert_eq!(out.text, "hello\nworld");
+        assert_eq!(out.source, "text");
+        assert!(!out.used_ocr);
+        // A decode measures no confidence; `None` must not read as zero.
+        assert!(out.confidence.is_none());
+        assert!(out.detail.is_none());
+    }
+
+    /// One bad byte must not lose the other rows.
+    #[test]
+    fn invalid_utf8_degrades_rather_than_failing() {
+        let out = process_text(b"ok,\xffbad,rows");
+        assert!(out.text.contains("ok,"));
+        assert!(out.text.contains("rows"));
+    }
+
+    /// Truncation walks back to a char boundary; slicing mid-codepoint panics.
+    #[test]
+    fn oversized_text_truncates_on_a_char_boundary() {
+        let big = "é".repeat(MAX_INLINE_EXTRACT_BYTES);
+        let out = process_text(big.as_bytes());
+        assert!(out.text.len() <= MAX_INLINE_EXTRACT_BYTES);
+        assert!(out.detail.is_some());
+        // The real assertion: it is still valid UTF-8 and did not panic.
+        assert!(out.text.chars().all(|c| c == 'é'));
+    }
 }
