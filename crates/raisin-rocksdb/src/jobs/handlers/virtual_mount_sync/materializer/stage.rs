@@ -13,6 +13,44 @@ use std::collections::{HashMap, HashSet};
 /// a blob it never knew about; see the carry-forward in `stage_upsert`.
 const CONTENT_KEYS: &[&str] = &["file", "file_size", "content_hash"];
 
+/// Engine-DERIVED artifacts, produced from the bytes long after the upsert that
+/// created the node — and, like [`CONTENT_KEYS`], invisible to the mapper.
+///
+/// A remap rebuilds the property map from mapper output, so anything the mapper
+/// cannot name is erased. That silently destroyed real work: a measured remap of
+/// one OneDrive mount took the thumbnail count from 14 to 11, deleting renders
+/// that had cost a LibreOffice conversion each, and it would have taken the
+/// extraction artifacts with them had they been present.
+///
+/// The damage is worse than "recompute it": the extraction fingerprint is what
+/// tells the enqueue gate this binary was already read. Erase it and every
+/// remapped asset re-extracts and re-embeds — a provider bill and a CPU burst
+/// for output identical to what was just deleted. Losing the artifact is not a
+/// missing picture, it is an unbounded amount of repeated work.
+///
+/// Carried on the same terms as content: only when the mapper did not supply the
+/// key itself, so an adapter that genuinely owns one still wins.
+const DERIVED_KEYS: &[&str] = &[
+    // Rendered picture — a media-plugin job, attached by the poller.
+    "thumbnail",
+    // The extraction artifact. `__extract_fingerprint` is the load-bearing one;
+    // the rest describe the result and must not outlive it, so they travel
+    // together or not at all.
+    "__extracted_text",
+    "__extract_status",
+    "__extract_source",
+    "__extract_chars",
+    "__extract_detail",
+    "__extract_fingerprint",
+    "__extract_version",
+    "__extract_confidence",
+    // Why no thumbnail was queued. Same argument: it is a durable record of an
+    // outcome, and re-deriving it means re-running the thing that failed.
+    "__thumbnail_skipped",
+    "__thumbnail_skipped_detail",
+    "__thumbnail_skipped_at",
+];
+
 /// The submit lifecycle, which the ENGINE owns and the mapper never reports.
 ///
 /// A command node is both a command and a synced item, and an upsert rebuilds
@@ -342,6 +380,7 @@ impl RocksDbMaterializer {
         let wants_content_carry = matched_existing
             && CONTENT_KEYS
                 .iter()
+                .chain(DERIVED_KEYS.iter())
                 .any(|k| !mapped.properties.contains_key(*k));
 
         // At most ONE live read, shared by both. Both need the node as it stands
@@ -411,7 +450,7 @@ impl RocksDbMaterializer {
         // anyway, and one that did not never needed to lose them.
         let carried_content: Option<Map<String, Value>> = live.as_ref().and_then(|node| {
             let mut out: Option<Map<String, Value>> = None;
-            for key in CONTENT_KEYS {
+            for key in CONTENT_KEYS.iter().chain(DERIVED_KEYS.iter()) {
                 if base_props.contains_key(*key) {
                     continue;
                 }
