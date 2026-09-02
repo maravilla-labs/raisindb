@@ -194,3 +194,44 @@ of scope here and should stay so until there is a reason.
   and that every tenant makes progress.
 - Regression: with the breaker open, N revisions of a node produce N parked jobs
   and ZERO provider calls — the case that produced today's volume.
+
+---
+
+## Reading the activity node on a cluster
+
+`raisin:JobActivity` at `job_activity:/activity` is written by whichever process
+observed the work. Every write carries `origin` and `updated_at`, so a reader can
+always state exactly what it holds — "as of 14:03:07, process `node-2` saw this
+repo at active=3, not degraded". That is a correctly-labelled SAMPLE, never a
+claim about the cluster.
+
+Under last-writer-wins the two halves of the node behave differently, which is
+why a blanket "do not trust this on a cluster" would be wrong — it is stronger
+than the truth and would get the whole node ignored.
+
+**Rule 1 — `degraded` is cluster-safe. Read it as-is.** Derived indexing runs on
+every node (nothing indexed replicates), so an embedding job for a repo runs on
+all of them. During an outage they all park against the same upstream and all
+write `true`: they agree, and whichever wins the race is right. On recovery each
+clears as its own job succeeds, so the bit flaps briefly before settling `false`
+— self-correcting, and it errs toward showing the banner slightly too long
+rather than clearing it early.
+
+**Rule 2 — the counts are a LOWER BOUND, not a total.** `active`, `active_paths`
+and `tenant_pending` are one process's slice. A reader sees node A's 3, then node
+B's 0, then A's 2, with no way to distinguish "the work finished" from "a
+different node answered". Never conclude "idle" from `active == 0` alone on a
+clustered deployment; read it as "at least N, on the process named in `origin`".
+
+The consequence that would actually mislead: **`active: 0` from one node does not
+mean the cluster is idle.** A progress indicator that treats zero as "done"
+disappears while another node is still working. "The count went to zero" is the
+obvious trigger for dismissing such an indicator and is precisely the one that
+breaks here.
+
+On a single node — what runs today — both readings are exact. This is a caveat to
+write down before anyone runs it clustered, not a bug to fix now.
+
+Write volume: the 2s floor is per-process per-repo, so three nodes cost at most
+~1.5 writes/sec/repo at worst and zero when idle — the idle rule holds
+independently on each node, so a quiet cluster is as quiet as a quiet single one.
