@@ -82,6 +82,20 @@ impl JobActivityTracker {
         context: &JobContext,
     ) -> ActivityGuard {
         let key = (context.tenant_id.clone(), context.repo_id.clone());
+
+        // Engine work is dropped HERE, before it reaches the counters — not
+        // filtered at render time. Filtering later would leave `active` and the
+        // path list disagreeing, which is how "Processing 20" ends up over a
+        // list of two.
+        if !is_tenant_visible(&context.workspace_id) {
+            return ActivityGuard {
+                tracker: Arc::clone(self),
+                key,
+                job_id: job_id.clone(),
+                tracked: false,
+            };
+        }
+
         let entry = InFlight {
             workspace: context.workspace_id.clone(),
             node_id: subject_node_id(job_type).map(|s| s.to_string()),
@@ -99,6 +113,7 @@ impl JobActivityTracker {
             tracker: Arc::clone(self),
             key,
             job_id: job_id.clone(),
+            tracked: true,
         }
     }
 
@@ -223,10 +238,18 @@ pub struct ActivityGuard {
     tracker: Arc<JobActivityTracker>,
     key: ScopeKey,
     job_id: JobId,
+    /// False for engine work that was never counted. `finish` on an id that was
+    /// never inserted is harmless today, but a guard that silently relies on
+    /// that is one refactor away from decrementing something it never
+    /// incremented — the unbalanced counter this type exists to prevent.
+    tracked: bool,
 }
 
 impl Drop for ActivityGuard {
     fn drop(&mut self) {
+        if !self.tracked {
+            return;
+        }
         self.tracker.finish(&self.key, &self.job_id);
     }
 }
@@ -238,6 +261,44 @@ impl Drop for ActivityGuard {
 /// without contributing a path — reporting a path for it would be inventing
 /// one. Job types added later default to `None`, which degrades to "counted but
 /// unnamed" rather than to a wrong path.
+
+/// Workspaces whose work is ENGINE business, not the tenant's.
+///
+/// The surface answers "is MY content being processed". A package install
+/// re-indexes every function node it ships and a media job writes its own
+/// bookkeeping — both are real work, neither is anything a person put there or
+/// can act on. Surfaced, they drown the signal: one install showed "Processing
+/// 20 items / 431 waiting", every line a `/lib/studio/...` path, while the two
+/// assets the user actually uploaded were somewhere in the "and 12 more".
+///
+/// A DENYLIST rather than an allowlist on purpose. An allowlist would hide a
+/// tenant's own content the day they add a workspace — silence about their work
+/// is the failure this whole surface exists to prevent, whereas a new ENGINE
+/// workspace leaking in is visible noise someone will report. Fail toward
+/// showing too much, never toward showing nothing.
+const ENGINE_WORKSPACES: &[&str] = &[
+    // Package payload: functions, triggers, mappers. Reindexed wholesale on
+    // every install.
+    "functions",
+    // Roles, users, grants — rewritten by the same installs.
+    "raisin:access_control",
+    // Mount config, definition state, engine records.
+    "raisin:system",
+    // This surface's own node. Publishing would be a feedback display, though
+    // the node type is inert so no job is enqueued for it anyway.
+    "job_activity",
+    // Media job bookkeeping. The ASSET is the subject a person recognises; the
+    // job node beside it is an implementation detail with a nanoid for a name.
+    "media_jobs",
+    // Per-user editor session scratch.
+    "edit-sessions",
+];
+
+/// Is this work worth telling the tenant about?
+fn is_tenant_visible(workspace: &str) -> bool {
+    !ENGINE_WORKSPACES.contains(&workspace)
+}
+
 fn subject_node_id(job_type: &JobType) -> Option<&str> {
     match job_type {
         JobType::FulltextIndex { node_id, .. }
