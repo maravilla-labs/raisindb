@@ -57,12 +57,18 @@ impl ModelRegistry {
         std::fs::create_dir_all(&model_path)?;
 
         // Check if this is a quantized model
-        let (is_quantized, gguf_filename) = {
+        let (is_quantized, gguf_filename, tokenizer_repo) = {
             let models = self.models.read().await;
             models
                 .get(model_id)
-                .map(|m| (m.is_quantized, m.gguf_filename.clone()))
-                .unwrap_or((false, None))
+                .map(|m| {
+                    (
+                        m.is_quantized,
+                        m.gguf_filename.clone(),
+                        m.tokenizer_repo.clone(),
+                    )
+                })
+                .unwrap_or((false, None, None))
         };
 
         // Set up HuggingFace cache in our directory
@@ -77,6 +83,8 @@ impl ModelRegistry {
         if is_quantized {
             return self
                 .download_quantized_model(
+                    &api,
+                    tokenizer_repo,
                     model_id,
                     &repo,
                     gguf_filename,
@@ -95,6 +103,8 @@ impl ModelRegistry {
     #[cfg(feature = "huggingface")]
     async fn download_quantized_model(
         &self,
+        api: &hf_hub::api::tokio::Api,
+        tokenizer_repo: Option<String>,
         model_id: &str,
         repo: &hf_hub::api::tokio::ApiRepo,
         gguf_filename: Option<String>,
@@ -117,10 +127,48 @@ impl ModelRegistry {
             cb(0.8);
         }
 
-        // Download tokenizer
-        let tokenizer_result = repo.get("tokenizer.json").await;
-        if tokenizer_result.is_err() {
-            tracing::warn!(model_id = %model_id, "Tokenizer not found in quantized model repo");
+        /* THE TOKENIZER IS OFTEN IN A DIFFERENT REPO.
+         *
+         * A GGUF embeds its own tokenizer, so a GGUF-only repo has no reason to
+         * ship `tokenizer.json` — Qwen's is literally one file. A loader that
+         * needs the JSON therefore has to look in the base repo, and the model
+         * entry names it.
+         *
+         * The file is COPIED in beside the weights rather than left in the other
+         * repo's cache directory, so the model directory is self-contained and
+         * whatever loads it can find both files in one place. A failure here is
+         * fatal rather than a warning: a quantized model with no tokenizer
+         * downloads "successfully" and then fails at load time with a missing
+         * file, which is a much worse place to learn about it. */
+        let tokenizer_source = match &tokenizer_repo {
+            Some(other) => api.model(other.clone()).get("tokenizer.json").await,
+            None => repo.get("tokenizer.json").await,
+        };
+
+        match tokenizer_source {
+            Ok(src) => {
+                let dest = gguf_path
+                    .parent()
+                    .unwrap_or(model_path)
+                    .join("tokenizer.json");
+                if src != dest && !dest.exists() {
+                    // Copy, not symlink: hf-hub already stores blobs behind
+                    // symlinks, and a link to a link across cache entries breaks
+                    // the moment either is garbage-collected.
+                    if let Err(e) = std::fs::copy(&src, &dest) {
+                        tracing::warn!(model_id = %model_id, error = %e, "Could not place tokenizer beside the weights");
+                    }
+                }
+            }
+            Err(e) => {
+                return Err(ModelError::DownloadFailed(format!(
+                    "Tokenizer download failed for {} (from {}): {}. A quantized model without \
+                     tokenizer.json cannot be loaded.",
+                    model_id,
+                    tokenizer_repo.as_deref().unwrap_or(model_id),
+                    e
+                )));
+            }
         }
 
         if let Some(cb) = &progress_callback {

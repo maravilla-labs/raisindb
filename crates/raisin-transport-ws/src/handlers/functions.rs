@@ -376,7 +376,25 @@ mod inner {
             indexing_engine: state.indexing_engine.clone(),
             hnsw_engine: state.hnsw_engine.clone(),
             http_client: raisin_functions::shared_http_client(),
-            ai_config_store: None,
+            // WIRED, and it has to be: this is the path `invokeSync` takes from
+            // the browser SDK, so leaving it None meant NO function invoked over
+            // the WebSocket could use AI at all — `raisin.ai.completion` failed
+            // with "AI operations not configured" however well the tenant was
+            // set up, while the identical function invoked over HTTP or from a
+            // job worked. That asymmetry is invisible from the outside: the
+            // error names configuration, so it sends you to the admin console
+            // for a provider that is already there.
+            //
+            // Same shape as job_registry / secret_store below — the accessor
+            // lives on the concrete RocksDB storage, so it comes from the
+            // feature-gated handle rather than the generic one. A `match`
+            // rather than `.map()` so the concrete repository coerces to the
+            // trait object at the field, which is what lets this stay out of
+            // the crate's dependency list.
+            ai_config_store: match state.rocksdb_storage.as_ref() {
+                Some(s) => Some(Arc::new(s.tenant_ai_config_repository())),
+                None => None,
+            },
             // Same job-system deps as job-driven executions — keeps the callback
             // surface (functions.execute / flows.run / scheduler.*) uniform.
             // The accessors live on the concrete RocksDB storage, so wire them

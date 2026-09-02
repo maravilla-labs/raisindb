@@ -79,6 +79,32 @@ pub(super) fn default_models() -> Vec<ModelInfo> {
         .with_description("Quantized Moondream for faster CPU inference.")
         .quantized("model-q4_0.gguf"),
 
+        /* ── Local TEXT generation ──────────────────────────────────────
+         * The only model here that answers a prompt rather than looking at an
+         * image, and the reason it is worth shipping a default at all: `local:`
+         * is the one provider route that needs no tenant AI configuration, so
+         * this is what an installation can generate with on first boot, before
+         * anyone has pasted an API key.
+         *
+         * Q4_K_M at ~1.1 GB: small enough to sit beside everything else the
+         * server is doing, which a full-precision model of any size is not. */
+        ModelInfo::new(
+            "Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF",
+            "Qwen2.5-Coder 1.5B (Quantized)",
+            ModelType::TextGeneration,
+            vec![ModelCapability::TextGeneration],
+        )
+        .with_size(1_120_000_000)
+        .with_description(
+            "Instruction-tuned coder model for structured output. Runs in-process on \
+             Metal or CPU; needs no provider configuration.",
+        )
+        .quantized("qwen2.5-coder-1.5b-instruct-q4_k_m.gguf")
+        // The GGUF repo is ONE FILE — the weights. Without this the model
+        // downloads "successfully" and then fails to load with a missing
+        // tokenizer, which is the least actionable failure of the two.
+        .with_tokenizer_repo("Qwen/Qwen2.5-Coder-1.5B-Instruct"),
+
         // Text embedding models
         ModelInfo::new(
             "nomic-ai/nomic-embed-text-v1.5",

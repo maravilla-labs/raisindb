@@ -39,6 +39,9 @@ pub mod blip;
 pub mod moondream;
 
 #[cfg(feature = "candle")]
+pub mod qwen;
+
+#[cfg(feature = "candle")]
 mod device;
 
 #[cfg(feature = "candle")]
@@ -93,6 +96,9 @@ pub use moondream::{
     DESCRIPTION_PROMPT, KEYWORDS_PROMPT, MOONDREAM2_MODEL, MOONDREAM_IMAGE_SIZE,
     QUANTIZED_MOONDREAM_MODEL,
 };
+
+#[cfg(feature = "candle")]
+pub use qwen::{ChatTurn, QwenGenerator, QWEN_CODER_GGUF, QWEN_CODER_MODEL};
 
 #[cfg(feature = "candle")]
 pub use device::select_device;

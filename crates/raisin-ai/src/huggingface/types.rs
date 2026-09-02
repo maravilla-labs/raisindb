@@ -18,6 +18,8 @@ pub enum ModelType {
     Ocr,
     /// Whisper models for audio transcription
     Whisper,
+    /// Text generation (chat) models, e.g. Qwen2 GGUF
+    TextGeneration,
 }
 
 impl std::fmt::Display for ModelType {
@@ -29,6 +31,7 @@ impl std::fmt::Display for ModelType {
             ModelType::TextEmbedding => write!(f, "Text Embedding"),
             ModelType::Ocr => write!(f, "OCR"),
             ModelType::Whisper => write!(f, "Whisper"),
+            ModelType::TextGeneration => write!(f, "Text Generation"),
         }
     }
 }
@@ -47,6 +50,8 @@ pub enum ModelCapability {
     Ocr,
     /// Transcribe audio
     AudioTranscription,
+    /// Answer a text prompt
+    TextGeneration,
 }
 
 /// Download status for a model.
@@ -131,6 +136,16 @@ pub struct ModelInfo {
     /// GGUF filename for quantized models
     #[serde(default)]
     pub gguf_filename: Option<String>,
+
+    /// Repo to take `tokenizer.json` from, when it is not in this one.
+    ///
+    /// GGUF repos routinely ship ONLY the weights, because a GGUF embeds its
+    /// own tokenizer — which is no help to a loader that wants a
+    /// `tokenizer.json`. Qwen's GGUF repo is exactly that: one file. So the
+    /// tokenizer is fetched from the base (non-GGUF) repo and copied in beside
+    /// the weights, which keeps the model directory self-contained.
+    #[serde(default)]
+    pub tokenizer_repo: Option<String>,
 }
 
 impl ModelInfo {
@@ -155,6 +170,7 @@ impl ModelInfo {
             model_url,
             is_quantized: false,
             gguf_filename: None,
+            tokenizer_repo: None,
         }
     }
 
@@ -162,6 +178,12 @@ impl ModelInfo {
     pub fn quantized(mut self, gguf_filename: impl Into<String>) -> Self {
         self.is_quantized = true;
         self.gguf_filename = Some(gguf_filename.into());
+        self
+    }
+
+    /// Take `tokenizer.json` from a different repo than the weights.
+    pub fn with_tokenizer_repo(mut self, repo: impl Into<String>) -> Self {
+        self.tokenizer_repo = Some(repo.into());
         self
     }
 

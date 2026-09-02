@@ -26,7 +26,8 @@ use crate::types::Message;
 
 #[cfg(feature = "candle")]
 use crate::candle::{
-    select_device, BlipCaptioner, ClipEmbedder, MoondreamCaptioner, CLIP_EMBEDDING_DIM,
+    select_device, BlipCaptioner, ClipEmbedder, MoondreamCaptioner, QwenGenerator,
+    CLIP_EMBEDDING_DIM,
 };
 
 /// Local Candle provider for in-process AI inference.
@@ -52,6 +53,15 @@ pub struct LocalCandleProvider {
     /// Cached CLIP embedder
     #[cfg(feature = "candle")]
     clip: Mutex<Option<ClipEmbedder>>,
+
+    /// Cached Qwen text generator.
+    ///
+    /// ONE, behind a mutex, like the others — it owns a KV cache and generating
+    /// is `&mut self`, so requests serialize. That is the honest shape for a
+    /// single in-process model: a second concurrent generation would need a
+    /// second copy of the weights in memory.
+    #[cfg(feature = "candle")]
+    qwen: Mutex<Option<QwenGenerator>>,
 }
 
 impl LocalCandleProvider {
@@ -66,6 +76,8 @@ impl LocalCandleProvider {
             blip: Mutex::new(None),
             #[cfg(feature = "candle")]
             clip: Mutex::new(None),
+            #[cfg(feature = "candle")]
+            qwen: Mutex::new(None),
         }
     }
 
@@ -211,6 +223,52 @@ impl LocalCandleProvider {
         Ok(guard)
     }
 
+    /// Get or create the Qwen text generator.
+    ///
+    /// The model path handed in is whatever the registry returned, and that is
+    /// NOT one consistent shape: a fresh download returns the HuggingFace
+    /// snapshot directory, while an already-present model returns the local
+    /// model directory. So the two files are SEARCHED for rather than assumed —
+    /// which also means a model dropped in by hand works without matching
+    /// hf-hub's layout.
+    #[cfg(feature = "candle")]
+    pub(crate) fn get_qwen(
+        &self,
+        model_path: &PathBuf,
+    ) -> Result<std::sync::MutexGuard<'_, Option<QwenGenerator>>> {
+        let mut guard = self
+            .qwen
+            .lock()
+            .map_err(|e| ProviderError::Unknown(format!("Failed to lock Qwen mutex: {}", e)))?;
+
+        if guard.is_none() {
+            let gguf = find_file(model_path, |name| name.ends_with(".gguf")).ok_or_else(|| {
+                ProviderError::ProviderNotAvailable(format!(
+                    "No .gguf file under {:?}. The model is not downloaded.",
+                    model_path
+                ))
+            })?;
+            let tokenizer =
+                find_file(model_path, |name| name == "tokenizer.json").ok_or_else(|| {
+                    ProviderError::ProviderNotAvailable(format!(
+                        "No tokenizer.json under {:?}. The GGUF alone cannot tokenize.",
+                        model_path
+                    ))
+                })?;
+
+            let device = select_device(true)
+                .map_err(|e| ProviderError::ProviderNotAvailable(format!("Device error: {}", e)))?;
+
+            let generator = QwenGenerator::new(&gguf, &tokenizer, device).map_err(|e| {
+                ProviderError::ProviderNotAvailable(format!("Qwen load error: {}", e))
+            })?;
+
+            *guard = Some(generator);
+        }
+
+        Ok(guard)
+    }
+
     /// Get or create the CLIP embedder.
     #[cfg(feature = "candle")]
     pub(crate) fn get_clip(
@@ -284,4 +342,43 @@ pub fn clip_embedding_dim() -> usize {
 #[cfg(not(feature = "candle"))]
 pub fn clip_embedding_dim() -> usize {
     512 // Standard CLIP ViT-B/32 dimension
+}
+
+/// Find one file under `root`, searching a few levels down.
+///
+/// Shallow on purpose (3 levels): hf-hub nests a repo as
+/// `models--org--name/snapshots/<sha>/`, which is exactly three, and a deeper
+/// walk on a large models directory would cost more than it can ever find.
+#[cfg(feature = "candle")]
+fn find_file(root: &std::path::Path, matches: impl Fn(&str) -> bool + Copy) -> Option<PathBuf> {
+    fn walk(
+        dir: &std::path::Path,
+        depth: usize,
+        matches: &dyn Fn(&str) -> bool,
+    ) -> Option<PathBuf> {
+        if depth == 0 {
+            return None;
+        }
+        let entries = std::fs::read_dir(dir).ok()?;
+        let mut dirs = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if matches(name) {
+                    return Some(path);
+                }
+            }
+        }
+        // Files before directories, so a match beside the root wins over a
+        // deeper one — the snapshot a symlink points at, not a stale sibling.
+        for d in dirs {
+            if let Some(found) = walk(&d, depth - 1, matches) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    walk(root, 4, &matches)
 }

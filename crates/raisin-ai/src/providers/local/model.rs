@@ -13,6 +13,8 @@ pub enum LocalModel {
     BlipQuantized,
     /// CLIP embedder
     Clip,
+    /// Qwen2.5-Coder 1.5B Instruct — the local TEXT model.
+    Qwen25Coder,
 }
 
 impl LocalModel {
@@ -31,6 +33,9 @@ impl LocalModel {
             "blip" | "blip-large" => Some(LocalModel::Blip),
             "blip-quantized" | "blip-q4k" | "blip-gguf" => Some(LocalModel::BlipQuantized),
             "clip" | "clip-vit-b-32" => Some(LocalModel::Clip),
+            "qwen2.5-coder" | "qwen25-coder" | "qwen-coder" | "qwen" => {
+                Some(LocalModel::Qwen25Coder)
+            }
             _ => {
                 // Try fuzzy matching
                 if lower.contains("moondream") {
@@ -47,6 +52,8 @@ impl LocalModel {
                     } else {
                         Some(LocalModel::Blip)
                     }
+                } else if lower.contains("qwen") {
+                    Some(LocalModel::Qwen25Coder)
                 } else if lower.contains("clip") {
                     Some(LocalModel::Clip)
                 } else {
@@ -69,6 +76,7 @@ impl LocalModel {
             LocalModel::Blip => DEFAULT_BLIP_MODEL,
             LocalModel::BlipQuantized => QUANTIZED_BLIP_MODEL,
             LocalModel::Clip => crate::candle::clip::DEFAULT_CLIP_MODEL,
+            LocalModel::Qwen25Coder => crate::candle::QWEN_CODER_MODEL,
         }
     }
 
@@ -80,6 +88,7 @@ impl LocalModel {
             LocalModel::Blip => "blip",
             LocalModel::BlipQuantized => "blip-quantized",
             LocalModel::Clip => "clip",
+            LocalModel::Qwen25Coder => "qwen2.5-coder",
         }
     }
 
@@ -93,6 +102,15 @@ impl LocalModel {
                 | LocalModel::BlipQuantized
                 | LocalModel::Clip
         )
+    }
+
+    /// Whether this model answers a TEXT prompt rather than an image.
+    ///
+    /// The discriminator the provider branches on: every other local model
+    /// REQUIRES an image and fails without one, so a text request has to be
+    /// routed before that check rather than after it.
+    pub fn is_text(&self) -> bool {
+        matches!(self, LocalModel::Qwen25Coder)
     }
 
     /// Whether this model supports embeddings.

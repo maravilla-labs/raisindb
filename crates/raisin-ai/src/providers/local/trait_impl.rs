@@ -25,6 +25,16 @@ impl AIProviderTrait for LocalCandleProvider {
             ));
         }
 
+        /* TEXT FIRST, and it has to be before the image extraction below.
+         *
+         * Every other local model REQUIRES an image and errors without one, so
+         * a text request routed through that check fails with "No image found
+         * in messages" — which reads as a malformed request rather than as a
+         * model that simply answers prompts. */
+        if local_model.is_text() {
+            return self.complete_text(request, local_model).await;
+        }
+
         let (image_base64, _media_type) = Self::extract_image_from_messages(&request.messages)
             .ok_or_else(|| {
                 ProviderError::RequestFailed(
@@ -68,6 +78,9 @@ impl AIProviderTrait for LocalCandleProvider {
                 LocalModel::Clip => {
                     unreachable!("CLIP completion check happens above")
                 }
+                LocalModel::Qwen25Coder => {
+                    unreachable!("text models return via complete_text above")
+                }
             };
 
             Ok(CompletionResponse {
@@ -91,10 +104,17 @@ impl AIProviderTrait for LocalCandleProvider {
         "local"
     }
 
+    /// Still false: the text model generates in one blocking call rather than
+    /// yielding a stream, and claiming otherwise would make callers wait for a
+    /// `stream_complete` that falls back to this anyway.
     fn supports_streaming(&self) -> bool {
         false
     }
 
+    /// Qwen2.5-Instruct is trained for tool calls, but this provider does not
+    /// yet parse them out of the text, so the honest answer is no. Saying yes
+    /// would have agent code hand it tools and then read an empty tool_calls
+    /// array as "the model chose not to call one".
     fn supports_tools(&self) -> bool {
         false
     }
@@ -106,6 +126,7 @@ impl AIProviderTrait for LocalCandleProvider {
             "blip".to_string(),
             "blip-quantized".to_string(),
             "clip".to_string(),
+            "qwen2.5-coder".to_string(),
         ]
     }
 
@@ -201,6 +222,102 @@ impl AIProviderTrait for LocalCandleProvider {
         #[cfg(not(feature = "candle"))]
         {
             let _ = (text, local_model);
+            Err(ProviderError::ProviderNotAvailable(
+                "Candle feature not enabled. Rebuild with --features candle".to_string(),
+            ))
+        }
+    }
+}
+
+impl LocalCandleProvider {
+    /// Answer a TEXT prompt with the local Qwen model.
+    ///
+    /// Kept beside the vision path rather than inside it because almost nothing
+    /// is shared: no image decode, no captioner, and a different failure mode —
+    /// the vision models fail when an image is missing, this one fails when the
+    /// weights are.
+    async fn complete_text(
+        &self,
+        request: CompletionRequest,
+        local_model: LocalModel,
+    ) -> Result<CompletionResponse> {
+        // Downloads on first use (~1.1 GB) — the whole point of a local default
+        // is that nobody has to fetch it by hand first.
+        let _model_path = self.ensure_model_downloaded(local_model).await?;
+
+        #[cfg(feature = "candle")]
+        {
+            use crate::candle::ChatTurn;
+
+            /* `system` ON THE REQUEST IS A REAL TURN. The engine carries it as
+             * a field rather than as a message, and ChatML has no other place
+             * to put it, so dropping it here would silently discard every
+             * instruction a caller gave — the failure that looks like a model
+             * ignoring its prompt. */
+            let mut turns: Vec<ChatTurn<'_>> = Vec::new();
+            if let Some(system) = request.system.as_deref() {
+                if !system.trim().is_empty() {
+                    turns.push(ChatTurn {
+                        role: "system",
+                        content: system,
+                    });
+                }
+            }
+            /* ChatML names roles as bare strings, and `Role` has no Display —
+             * deliberately mapped here rather than derived, because `Tool` has
+             * no ChatML role of its own and folding it into `user` is a choice,
+             * not a formatting detail. */
+            let rendered: Vec<(&'static str, String)> = request
+                .messages
+                .iter()
+                .map(|m| {
+                    let role = match m.role {
+                        crate::types::Role::System => "system",
+                        crate::types::Role::Assistant => "assistant",
+                        crate::types::Role::User | crate::types::Role::Tool => "user",
+                    };
+                    (role, m.effective_text())
+                })
+                .filter(|(_, text): &(&str, String)| !text.trim().is_empty())
+                .collect();
+            for (role, text) in &rendered {
+                turns.push(ChatTurn {
+                    role,
+                    content: text.as_str(),
+                });
+            }
+
+            let prompt = crate::candle::QwenGenerator::build_prompt(&turns);
+            let max_tokens = request.max_tokens.unwrap_or(2048) as usize;
+            let temperature = request.temperature.map(|t| t as f64);
+
+            let text = {
+                let mut guard = self.get_qwen(&_model_path)?;
+                let generator = guard.as_mut().ok_or_else(|| {
+                    ProviderError::ProviderNotAvailable("Qwen not initialized".to_string())
+                })?;
+                // Fixed seed: a temperature of 0 is greedy and the seed is
+                // unused, and when a caller does ask for temperature they want
+                // variety across turns, not across restarts — a wandering
+                // default would make a failing prompt impossible to reproduce.
+                generator
+                    .generate(&prompt, max_tokens, temperature, 42)
+                    .map_err(|e| {
+                        ProviderError::RequestFailed(format!("Qwen inference failed: {}", e))
+                    })?
+            };
+
+            Ok(CompletionResponse {
+                message: Message::assistant(text),
+                model: request.model,
+                usage: None,
+                stop_reason: Some("stop".to_string()),
+            })
+        }
+
+        #[cfg(not(feature = "candle"))]
+        {
+            let _ = request;
             Err(ProviderError::ProviderNotAvailable(
                 "Candle feature not enabled. Rebuild with --features candle".to_string(),
             ))
