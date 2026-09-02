@@ -112,7 +112,21 @@ impl ModelRegistry {
         let mut models = self.models.write().await;
 
         for model in models.values_mut() {
-            let model_path = self.model_path(&model.model_id);
+            /* TWO LAYOUTS, BOTH REAL.
+             *
+             * `model_path()` is our own `<cache>/org--name`, but hf-hub writes
+             * `<cache>/models--org--name/snapshots/<sha>/` and a quantized model
+             * is downloaded THROUGH hf-hub. So a GGUF model that is fully on
+             * disk reported `not_downloaded` forever — and the UI offered a
+             * 1.1 GB download for a file already sitting there. Check both. */
+            let hub_path = self
+                .cache_dir
+                .join(format!("models--{}", model.model_id.replace('/', "--")));
+            let model_path = if self.model_path(&model.model_id).is_dir() {
+                self.model_path(&model.model_id)
+            } else {
+                hub_path
+            };
             if model_path.exists() && model_path.is_dir() {
                 // Check if there are files in the directory
                 if let Ok(entries) = std::fs::read_dir(&model_path) {

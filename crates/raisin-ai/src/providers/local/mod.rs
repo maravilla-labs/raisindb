@@ -53,16 +53,27 @@ pub struct LocalCandleProvider {
     /// Cached CLIP embedder
     #[cfg(feature = "candle")]
     clip: Mutex<Option<ClipEmbedder>>,
-
-    /// Cached Qwen text generator.
-    ///
-    /// ONE, behind a mutex, like the others — it owns a KV cache and generating
-    /// is `&mut self`, so requests serialize. That is the honest shape for a
-    /// single in-process model: a second concurrent generation would need a
-    /// second copy of the weights in memory.
-    #[cfg(feature = "candle")]
-    qwen: Mutex<Option<QwenGenerator>>,
 }
+
+/* THE TEXT MODEL IS CACHED PER PROCESS, NOT PER PROVIDER.
+ *
+ * `LocalCandleProvider` is constructed FRESH on every completion — the `local:`
+ * route builds one per call because it needs no tenant config to look up — so a
+ * cache held on `self` is empty every time and 1.1 GB of weights is read from
+ * disk for each request. Measured: that alone exceeded the client's 30s request
+ * timeout, i.e. the model was unusable rather than merely slow.
+ *
+ * A `static` keeps the weights resident for the life of the server, which is
+ * what makes the second prompt fast. One instance behind a mutex is also the
+ * honest shape: generating is `&mut self` because the model owns a KV cache, so
+ * requests serialize — a second concurrent generation would need a second copy
+ * of the weights in memory, which is exactly what a 1.1 GB model cannot afford.
+ *
+ * The vision models still cache per instance. Same latent problem, but they are
+ * reached through paths that reuse a provider, and changing them is not this
+ * change. */
+#[cfg(feature = "candle")]
+static QWEN: std::sync::OnceLock<Mutex<Option<QwenGenerator>>> = std::sync::OnceLock::new();
 
 impl LocalCandleProvider {
     /// Create a new local Candle provider.
@@ -76,8 +87,6 @@ impl LocalCandleProvider {
             blip: Mutex::new(None),
             #[cfg(feature = "candle")]
             clip: Mutex::new(None),
-            #[cfg(feature = "candle")]
-            qwen: Mutex::new(None),
         }
     }
 
@@ -235,9 +244,9 @@ impl LocalCandleProvider {
     pub(crate) fn get_qwen(
         &self,
         model_path: &PathBuf,
-    ) -> Result<std::sync::MutexGuard<'_, Option<QwenGenerator>>> {
-        let mut guard = self
-            .qwen
+    ) -> Result<std::sync::MutexGuard<'static, Option<QwenGenerator>>> {
+        let mut guard = QWEN
+            .get_or_init(|| Mutex::new(None))
             .lock()
             .map_err(|e| ProviderError::Unknown(format!("Failed to lock Qwen mutex: {}", e)))?;
 
