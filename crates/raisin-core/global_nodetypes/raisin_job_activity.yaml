@@ -29,16 +29,24 @@ strict: true
 indexable: true
 index_types: [Property]
 properties:
-  # DEGRADED is a boolean and stays a boolean. It says "background processing
-  # is impaired", and deliberately not which upstream, which key, or how many
-  # times — an ordinary tenant user reads this node, and upstream hostnames and
-  # host-wide failure counters are operator information. The operator surface
-  # is `/management/*`, which carries the detail.
+  # DEGRADED is a boolean and stays a boolean, and it is tied to THIS
+  # repository's own affected work — it is set when a job of this repo's PARKS
+  # against an upstream that is down, never merely because some breaker is open
+  # somewhere on the host. Breakers are shared across tenants; this bit is not.
+  #
+  # It deliberately carries no upstream identity, no consecutive-failure count
+  # and no probe/cooldown timer. A shared upstream's probe timer is a
+  # fingerprint of other tenants' traffic against it, and an ordinary tenant
+  # user reads this node. The operator surface `/management/*` carries the
+  # detail.
+  #
+  # Breakers are per PROCESS, so the honest reading is "on the node that
+  # answered" (see `origin`), not "everywhere". The name claims no more.
   - name: degraded
     type: Boolean
     required: true
     title: Degraded
-    description: Whether an upstream this repo's background work depends on is currently unavailable
+    description: Whether this repository has background work parked against an upstream that is currently down, as seen by the process in `origin`
     default: false
     index: [Property]
 
