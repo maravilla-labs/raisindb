@@ -121,9 +121,26 @@ pub const EXTRACT_CONFIDENCE_PROP: &str = "__extract_confidence";
 /// Generation of the extraction pipeline.
 ///
 /// Bump this when a change makes text this pipeline already produced WRONG — a
-/// better extractor, a fixed decoder. Every asset then re-extracts once, because
-/// the enqueue gate compares the stored version as well as the fingerprint.
-pub const EXTRACTION_ARTIFACT_VERSION: i64 = 1;
+/// better extractor, a fixed decoder — or when it makes work this pipeline
+/// SKIPPED now possible. Every asset then re-extracts once, because the enqueue
+/// gate compares the stored version as well as the fingerprint.
+///
+/// # 1 → 2
+///
+/// Three changes landed that a stored artifact hides, because the gate skips the
+/// whole job and the thumbnail is planned INSIDE that job — so a re-sync, a
+/// remap and a rule edit all leave the asset exactly as it was:
+///
+/// - core reads `text/*`, so every `.txt` / `.md` / `.csv` sitting on
+///   `unsupported` is now readable;
+/// - a synced file gets a mimetype derived from its name when the provider
+///   omits one, so Office documents match a rule for the first time;
+/// - the rules that plan `doc_thumbnail` are reachable, where a shadowing
+///   first-match rule had been answering for PDFs.
+///
+/// Cost is one re-extraction pass per asset per tenant, once. Embeddings are
+/// guarded by the spec hash, so unchanged text makes no provider call.
+pub const EXTRACTION_ARTIFACT_VERSION: i64 = 2;
 
 /// Largest text stored inline on the node, in bytes.
 ///
