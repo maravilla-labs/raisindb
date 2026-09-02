@@ -36,6 +36,7 @@ pub use callbacks::{
     AssetEnsureContentCallback,
     AssetReextractCallback,
     AssetSetExtractionCallback,
+    AssetSignedUrlCallback,
     BranchCompareCallback,
     BranchCopyNodesCallback,
     BranchDiffCallback,

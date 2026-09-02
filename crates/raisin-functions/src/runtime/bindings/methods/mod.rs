@@ -250,6 +250,7 @@ mod tests {
             "asset_set_extraction",
             "asset_reextract",
             "asset_ensure_content",
+            "asset_signed_url",
             // Tasks (1)
             "task_create",
             // Functions (1)

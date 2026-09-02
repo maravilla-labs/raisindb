@@ -59,6 +59,46 @@ pub fn signing_secret() -> Option<Vec<u8>> {
     }
 }
 
+/// Whether this process was started with `--dev-mode`.
+///
+/// Recorded once at startup rather than re-read from the environment, because
+/// the flag has a CLI spelling as well as `RAISIN_DEV_MODE`: an operator who
+/// passed `--dev-mode` sets no variable, so an environment read would answer
+/// `false` inside a process that is demonstrably in dev-mode.
+static DEV_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Record the process-wide dev-mode flag. Called once from server startup.
+///
+/// Same inversion as `configure_mcp_client` and `install_capability_probe`: the
+/// value is known at the top of the binary and needed several layers below it,
+/// where the dependency edge does not run.
+pub fn set_dev_mode(on: bool) {
+    DEV_MODE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether insecure defaults are permitted in this process.
+pub fn dev_mode() -> bool {
+    DEV_MODE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The asset signing key, substituting the dev key when that is allowed.
+///
+/// The dev fallback used to live only in the HTTP transport's `AppState`, which
+/// was fine while HTTP was the only signer. It no longer is: a function binding
+/// mints signed URLs too, and it sits below the transport. Two places applying
+/// the dev rule from different flags is exactly how a minter and a verifier end
+/// up on different keys — a URL that always answers 401 with nothing to read.
+///
+/// `None` means nothing usable is configured, and the caller must REFUSE.
+/// Signing with an empty or guessable key is worse than not signing.
+pub fn signing_secret_or_dev() -> Option<Vec<u8>> {
+    match signing_secret() {
+        Some(s) => Some(s),
+        None if dev_mode() => Some(DEV_SIGNING_SECRET.to_vec()),
+        None => None,
+    }
+}
+
 /// One unmet production requirement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecretProblem {

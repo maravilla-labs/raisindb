@@ -222,9 +222,18 @@ where
         secret_store: deps.secret_store.clone(),
         identity_repo: deps.identity_repo.clone(),
         schema_stats_cache: deps.schema_stats_cache.clone(),
-        // No sync engine on this path; a mounted asset's bytes report as
-        // unavailable rather than as a missing file.
-        mount_content: None,
+        // Carried, not dropped. This struct is REBUILT from the deps the caller
+        // handed us, so hard-coding `None` here discarded a resolver the caller
+        // had — and every field above is cloned from `deps` precisely because
+        // the caller's wiring is the answer.
+        //
+        // The symptom was specific and misleading: a trigger-run function
+        // calling `getResource('file')` on a mounted asset got "the
+        // virtual-mount sync engine is not running", on a server where it was
+        // running perfectly. The message described this process's wiring, not
+        // the deployment, and pointed the reader at the sync engine rather than
+        // at the line that threw its resolver away.
+        mount_content: deps.mount_content.clone(),
     });
 
     // Check if function requires admin escalation (from function metadata)

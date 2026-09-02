@@ -17,6 +17,7 @@
 //! into its own submodule for maintainability.
 
 pub mod ai;
+pub mod asset_signing;
 pub mod assets;
 pub mod branches;
 pub mod events;
@@ -350,6 +351,11 @@ where
             repo_id.clone(),
             branch.clone(),
         )),
+
+        // Signed URL - how a media service reads an asset's bytes WITHOUT them
+        // passing through the isolate as base64. RLS-gated through the shared
+        // QueryContext, so it grants no more than this caller can read.
+        asset_signed_url: Some(asset_signing::create_asset_signed_url(query_ctx.clone())),
 
         // Mount content - what makes `getBinary()` work on a mounted asset whose
         // cached bytes have expired.

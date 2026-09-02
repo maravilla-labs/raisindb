@@ -376,6 +376,37 @@ impl FunctionApi for MockFunctionApi {
         Ok(serde_json::json!({ "status": "already_present" }))
     }
 
+    async fn asset_signed_url(
+        &self,
+        workspace: &str,
+        node_ref: &str,
+        options: Value,
+    ) -> Result<Value> {
+        tracing::info!(
+            workspace = %workspace, node_ref = %node_ref, options = ?options,
+            "Mock asset_signed_url"
+        );
+        let command = options
+            .get("command")
+            .and_then(|v| v.as_str())
+            .unwrap_or("display");
+        let property = options
+            .get("property")
+            .and_then(|v| v.as_str())
+            .unwrap_or("file");
+        Ok(serde_json::json!({
+            "url": format!(
+                "https://mock.invalid/api/repository/repo/main/head/{workspace}{node_ref}\
+        /raisin:{command}?sig=mock&exp=0"
+            ),
+            "expiresAt": null,
+            "expiresIn": 300,
+            "command": command,
+            "property": property,
+            "path": node_ref,
+        }))
+    }
+
     async fn pdf_process_from_storage(&self, storage_key: &str, options: Value) -> Result<Value> {
         tracing::info!(storage_key = %storage_key, options = ?options, "Mock pdf_process_from_storage");
         Ok(serde_json::json!({

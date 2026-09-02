@@ -106,6 +106,21 @@ impl RaisinFunctionApi {
         callback(workspace.to_string(), node_ref.to_string()).await
     }
 
+    /// Mint a signed, absolute URL for an asset's bytes. See the trait method
+    /// for why a function cannot build one itself.
+    pub(crate) async fn impl_asset_signed_url(
+        &self,
+        workspace: &str,
+        node_ref: &str,
+        options: Value,
+    ) -> Result<Value> {
+        let callback = self.callbacks.asset_signed_url.as_ref().ok_or_else(|| {
+            raisin_error::Error::Validation("Signed asset URL callback not configured".to_string())
+        })?;
+
+        callback(workspace.to_string(), node_ref.to_string(), options).await
+    }
+
     /// Ensure a mount-owned asset's bytes are local. See the trait method.
     pub(crate) async fn impl_asset_ensure_content(
         &self,

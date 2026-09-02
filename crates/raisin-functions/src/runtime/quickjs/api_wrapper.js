@@ -1188,6 +1188,41 @@ globalThis.raisin = {
                 throw new Error('Re-extraction failed: ' + (r.message || r.error));
             }
             return r;
+        },
+        // Mint a signed, ABSOLUTE URL for this asset's bytes, to hand to a
+        // service that will fetch them itself.
+        //
+        // Use this instead of getBinary() + base64 whenever the bytes are only
+        // passing through. Reading a file into the isolate costs three copies
+        // of it — the buffer, the base64 expansion, the JS string — and a
+        // 1.5 MB video is enough to end the run with "out of memory". A URL is
+        // a few hundred bytes and the bytes stream server-side.
+        //
+        // You cannot build this URL yourself: raisin.http.fetch refuses
+        // loopback for every function, so it cannot reach this server's own
+        // sign endpoint. That refusal is deliberate; this binding is the door.
+        //
+        // The URL is a BEARER grant — whoever holds it reads the bytes with no
+        // login. It is minted under YOUR permissions (a node you cannot read
+        // throws "not found"), it expires, and it cannot be revoked before it
+        // does. Do not log it, and do not put it anywhere it outlives the
+        // fetch it was made for.
+        //
+        // nodeRef: node id, or an absolute path ("/media/clip.mp4")
+        // options: { command?: "display"|"download",   // default "display"
+        //            property?: "file",                // default "file"
+        //            expiresIn?: 300 }                 // seconds, clamped 1..3600
+        // Returns { url, expiresAt, expiresIn, command, property, path }
+        //
+        // Throws if the asset is not readable by you, has no such Resource
+        // property, or the server has no RAISINDB_BASE_URL / signing secret
+        // configured — never a relative or unsigned URL.
+        signedUrl: async (workspace, nodeRef, options) => {
+            const r = __call('asset_signed_url', [workspace, nodeRef, options || {}]);
+            if (r && r.error) {
+                throw new Error('Signed URL failed: ' + (r.message || r.error));
+            }
+            return r;
         }
     },
     // Admin escalation - returns a new raisin object with admin context

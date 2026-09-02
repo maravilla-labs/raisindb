@@ -1129,6 +1129,9 @@ mod tests {
         SetConfigRequest {
             providers,
             embedding_settings,
+            // These tests exercise the merge-on-save semantics for providers and
+            // embedding settings; a `None` here leaves the stored defaults alone.
+            processing_defaults: None,
         }
     }
 

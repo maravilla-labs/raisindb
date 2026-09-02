@@ -51,6 +51,9 @@ pub(crate) async fn handle_asset_command_internal(
     property_path: Option<&str>,
     sig: &str,
     exp: u64,
+    // The raw `Range` header, threaded down from the request. Without it a
+    // `<video>` served from here has a dead scrub bar — see `http_range`.
+    range_header: Option<&str>,
 ) -> Result<Response, ApiError> {
     // Validate command
     if command != "download" && command != "display" {
@@ -69,27 +72,19 @@ pub(crate) async fn handle_asset_command_internal(
     // Get property name - default to "file" if not specified
     let prop_name = property_path.unwrap_or("file");
 
-    // Create the full path for signature verification
-    // Include @property_path suffix if not "file" (for backward compatibility)
-    let full_path = if prop_name == "file" {
-        format!("{}/{}/head/{}{}", repo, branch, ws, node_path)
-    } else {
-        format!("{}/{}/head/{}{}@{}", repo, branch, ws, node_path, prop_name)
-    };
+    // The signed string comes from the SHARED composer, never rebuilt here: a
+    // verifier that spells the grammar itself is how a minter and a verifier
+    // drift into a permanent 401 that no log line can explain.
+    let full_path = raisin_core::signed_asset_path(repo, branch, ws, &node_path, prop_name);
 
     // Verify signature - include property_path in verification
     let signing_secret = state.get_signing_secret()?;
-    let prop_option = if prop_name == "file" {
-        None
-    } else {
-        property_path
-    };
     if !raisin_core::verify_asset_signature(
         &signing_secret,
         tenant_id,
         &full_path,
         command,
-        prop_option,
+        raisin_core::signature_property(prop_name),
         exp,
         sig,
     ) {
@@ -206,13 +201,58 @@ pub(crate) async fn handle_asset_command_internal(
         _ => "attachment".to_string(),
     };
 
-    Ok(Response::builder()
-        .status(StatusCode::OK)
+    // Range resolution happens HERE, at the end, against the bytes we actually
+    // hold — after the signature check and after the mount hydration above. A
+    // mounted asset whose cache had expired has been fetched by this point, so
+    // a range request over one is served like any other rather than refused,
+    // and the total below is the real entity size either way.
+    //
+    // The bytes are already fully in memory (`BinaryStorage::get` has no ranged
+    // read), so slicing is all a partial response can be today. `Bytes::slice`
+    // is a refcount bump, not a copy — the win here is protocol correctness,
+    // seeking, not reduced IO. A ranged storage read would be the follow-up.
+    let total = bytes.len() as u64;
+    let resolution = super::http_range::resolve(range_header, total);
+
+    // `Accept-Ranges` goes on EVERY outcome, including the plain 200. A browser
+    // decides whether seeking is possible from this header on its first probe;
+    // omit it there and the scrub bar stays dead even though ranges work.
+    let base = Response::builder()
         .header(header::CONTENT_TYPE, mime_type)
         .header(header::CONTENT_DISPOSITION, disposition)
         .header(header::CACHE_CONTROL, "private, max-age=300")
-        .body(Body::from(bytes))
-        .expect("valid response with valid headers"))
+        .header(header::ACCEPT_RANGES, "bytes");
+
+    let response = match resolution {
+        // A well-formed request for bytes that do not exist. 416 carries
+        // `bytes */total` so the client learns the real size and can re-ask,
+        // rather than being told 200 and keeping its wrong belief.
+        super::http_range::RangeResolution::Unsatisfiable => base
+            .status(StatusCode::RANGE_NOT_SATISFIABLE)
+            .header(header::CONTENT_RANGE, format!("bytes */{}", total))
+            .header(header::CONTENT_LENGTH, 0)
+            .body(Body::empty()),
+        super::http_range::RangeResolution::Satisfiable { start, end } => {
+            // Content-Length is the length of the PART, not of the file.
+            // Sending the whole size here makes the browser wait forever for
+            // bytes that are never coming.
+            let part = bytes.slice(start as usize..=end as usize);
+            let len = end - start + 1;
+            base.status(StatusCode::PARTIAL_CONTENT)
+                .header(
+                    header::CONTENT_RANGE,
+                    format!("bytes {}-{}/{}", start, end, total),
+                )
+                .header(header::CONTENT_LENGTH, len)
+                .body(Body::from(part))
+        }
+        super::http_range::RangeResolution::None => base
+            .status(StatusCode::OK)
+            .header(header::CONTENT_LENGTH, total)
+            .body(Body::from(bytes)),
+    };
+
+    Ok(response.expect("valid response with valid headers"))
 }
 
 /// Request body for signing an asset URL
@@ -318,40 +358,30 @@ pub(crate) async fn sign_asset_url_internal(
         .unwrap_or(0)
         + request.expires_in;
 
-    // Create the path to sign (includes full context)
-    // Include @property_path suffix only if not "file" (for backward compatibility)
-    let full_path = if property_path == "file" {
-        format!("{}/{}/head/{}{}", repo, branch, ws, node_path)
-    } else {
-        format!(
-            "{}/{}/head/{}{}@{}",
-            repo, branch, ws, node_path, property_path
-        )
-    };
-
-    // Sign the URL - include property_path in signature for security
+    // One composer for the path grammar, the signature and the URL — shared
+    // with the serve handler that verifies and with the
+    // `raisin.assets.signedUrl` function binding that mints for a media
+    // service. A second spelling of any of the three is an unexplainable 401.
+    //
+    // This surface keeps its historical behaviour of falling back to a
+    // ROOT-RELATIVE URL when no base is configured: its consumer is a browser
+    // that already has an origin. The function binding refuses instead, because
+    // its consumer is another process.
     let signing_secret = state.get_signing_secret()?;
-    let prop_option = if property_path == "file" {
-        None
-    } else {
-        Some(property_path)
-    };
-    let signature = raisin_core::sign_asset_url(
+    let base_url = raisin_core::configured_public_base_url();
+    let signed = raisin_core::build_signed_asset_url(
         &signing_secret,
         tenant_id,
-        &full_path,
+        repo,
+        branch,
+        ws,
+        &node_path,
+        property_path,
         &request.command,
-        prop_option,
         expires,
+        base_url.as_deref(),
     );
-
-    // Get base URL from environment or use relative path
-    let base_url = std::env::var("RAISINDB_BASE_URL").unwrap_or_default();
-
-    let url = format!(
-        "{}/api/repository/{}/raisin:{}?sig={}&exp={}",
-        base_url, full_path, request.command, signature, expires
-    );
+    let url = signed.url;
 
     let expires_at = chrono::DateTime::from_timestamp(expires as i64, 0)
         .map(|dt| dt.to_rfc3339())

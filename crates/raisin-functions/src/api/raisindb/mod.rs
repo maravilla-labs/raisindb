@@ -385,6 +385,16 @@ impl FunctionApi for RaisinFunctionApi {
         self.impl_asset_ensure_content(workspace, node_ref).await
     }
 
+    async fn asset_signed_url(
+        &self,
+        workspace: &str,
+        node_ref: &str,
+        options: Value,
+    ) -> Result<Value> {
+        self.impl_asset_signed_url(workspace, node_ref, options)
+            .await
+    }
+
     async fn pdf_process_from_storage(&self, storage_key: &str, options: Value) -> Result<Value> {
         self.impl_pdf_process_from_storage(storage_key, options)
             .await

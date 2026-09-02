@@ -74,8 +74,8 @@ mod test_support;
 
 pub use context::{SecretContext, V1Policy};
 pub use env_secrets::{
-    jwt_secret, production_secret_problems, signing_secret, SecretProblem, DEV_SIGNING_SECRET,
-    INSECURE_JWT_DEFAULT,
+    dev_mode, jwt_secret, production_secret_problems, set_dev_mode, signing_secret,
+    signing_secret_or_dev, SecretProblem, DEV_SIGNING_SECRET, INSECURE_JWT_DEFAULT,
 };
 pub use envelope::{Envelope, MAGIC, V1_MIN_LEN, V2_MIN_LEN};
 pub use error::{CryptoError, Result};

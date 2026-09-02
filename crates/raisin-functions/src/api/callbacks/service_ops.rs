@@ -216,6 +216,27 @@ pub type AssetReextractCallback = Arc<
         + Sync,
 >;
 
+/// Mint a signed, absolute URL for an asset's bytes.
+///
+/// The alternative — reading the bytes into the isolate and base64-ing them —
+/// holds three copies of the file in the JS heap and has already killed a
+/// production run on a 1.5 MB video. A URL lets the consumer stream them
+/// server-side.
+///
+/// - `workspace`
+/// - `node_ref`: node id or path
+/// - `options`: `{ command?: "display"|"download", property?: string,
+///   expiresIn?: number }`
+pub type AssetSignedUrlCallback = Arc<
+    dyn Fn(
+            String, // workspace
+            String, // node id or path
+            Value,  // options
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// Fetch a mount-owned asset's bytes so a function can read them.
 ///
 /// - `workspace`

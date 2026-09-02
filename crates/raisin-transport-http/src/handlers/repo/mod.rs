@@ -14,6 +14,7 @@ mod commands_versioning;
 mod get;
 mod get_listing;
 mod helpers;
+mod http_range;
 mod post;
 mod post_external;
 mod post_multipart;

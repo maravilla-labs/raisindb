@@ -280,6 +280,41 @@ pub trait FunctionApi: Send + Sync {
         ))
     }
 
+    /// Mint a signed, absolute URL for an asset's bytes.
+    ///
+    /// # Why the engine mints it
+    ///
+    /// The alternative is `getBinary()` plus base64, which holds the buffer,
+    /// its base64 expansion and the JS string in the isolate at once — three
+    /// copies of the file, and a 1.5 MB video was enough to end a production
+    /// run with `[JS] out of memory`. With a URL the bytes stream server-side
+    /// and never enter the isolate.
+    ///
+    /// A function cannot mint it itself: `raisin.http.fetch` refuses loopback
+    /// for every function, so it cannot call this server's own `raisin:sign`
+    /// endpoint, and relaxing that would open the address space for all tenant
+    /// code rather than for us.
+    ///
+    /// # What it grants
+    ///
+    /// A bearer grant on ONE asset property for a short window. RLS is applied
+    /// at mint time against the calling function's auth context, so it never
+    /// exceeds what that caller can already read; a node the caller cannot see
+    /// answers `NotFound`, identically to one that does not exist.
+    ///
+    /// Default: not configured, so a build without the callback says so rather
+    /// than returning a URL nobody signed.
+    async fn asset_signed_url(
+        &self,
+        _workspace: &str,
+        _node_ref: &str,
+        _options: Value,
+    ) -> Result<Value> {
+        Err(raisin_error::Error::Validation(
+            "Signed asset URLs are not configured on this server".to_string(),
+        ))
+    }
+
     /// Ensure a mount-owned asset's bytes are held locally, fetching if not.
     ///
     /// A virtual mount syncs metadata only and a cached copy expires once

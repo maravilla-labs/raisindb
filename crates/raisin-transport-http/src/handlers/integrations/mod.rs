@@ -230,7 +230,7 @@ pub(crate) fn resolve_redirect_uri(cfg: &Value, repo: &str) -> String {
 ///
 /// Split out so the resolution rules are testable without touching
 /// `RAISINDB_BASE_URL`: env vars are process-global, and several other handlers
-/// in this crate (`oauth_as::helpers`, `repo_sign`, `mcp`) read that same
+/// in this crate (`oauth_as::helpers`, `repo::assets`, `mcp`) read that same
 /// variable, so a test that set it raced their tests inside the shared test
 /// binary.
 fn resolve_redirect_uri_with_base(cfg: &Value, repo: &str, base: &str) -> String {

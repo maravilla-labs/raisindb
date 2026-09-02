@@ -40,6 +40,11 @@ pub mod utils;
 pub use utils::{
     json_value_to_property_value, sanitize_name, sign_asset_url, verify_asset_signature,
 };
+pub mod asset_urls;
+pub use asset_urls::{
+    build_signed_asset_url, configured_public_base_url, is_valid_asset_command, signature_property,
+    signed_asset_path, SignedAssetUrl, DEFAULT_ASSET_PROPERTY,
+};
 pub mod connection;
 pub mod replication;
 pub mod traits;

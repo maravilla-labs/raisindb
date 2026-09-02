@@ -123,6 +123,12 @@ async fn main() {
     // Dev-mode banner & production secret validation
     // ========================================================================
 
+    // Record it process-wide BEFORE anything can sign. `signing_secret_or_dev`
+    // is the one place the dev fallback is applied, and it reads this flag —
+    // the HTTP transport and the `raisin.assets.signedUrl` binding both mint
+    // asset URLs, and two different answers here would be two different keys.
+    raisin_crypto::set_dev_mode(server_config.dev_mode);
+
     if server_config.dev_mode {
         tracing::warn!("============================================================");
         tracing::warn!("  DEV-MODE ENABLED — insecure defaults are allowed.");

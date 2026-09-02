@@ -11,7 +11,7 @@
 use axum::{
     body::Body,
     extract::{Extension, Json, Path, Query, State},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
 use raisin_hlc::HLC;
@@ -244,6 +244,10 @@ pub async fn repo_get(
     State(state): State<AppState>,
     Path((repo, branch, ws, node_path)): Path<(String, String, String, String)>,
     auth: Option<Extension<AuthContext>>,
+    // Only the `Range` header is read, by the asset-serving branch below; the
+    // map is taken whole because axum has no single-header extractor and a
+    // typed one would still have to be re-parsed against the entity size.
+    headers: HeaderMap,
     Query(q): Query<RepoQuery>,
 ) -> Result<Response, ApiError> {
     let tenant_id = tenant_info.tenant_id.as_str();
@@ -265,6 +269,7 @@ pub async fn repo_get(
             property_path,
             sig,
             exp,
+            headers.get(header::RANGE).and_then(|v| v.to_str().ok()),
         )
         .await;
     }

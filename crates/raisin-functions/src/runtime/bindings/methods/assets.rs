@@ -82,6 +82,36 @@ pub fn methods() -> Vec<ApiMethodDescriptor> {
                 })
             },
         },
+        // assets.signedUrl(workspace, nodeRef, options)
+        //   -> { url, expiresAt, expiresIn, command, property, path }
+        //
+        // The point of it is what does NOT happen: the bytes never enter the
+        // isolate. `getBinary()` + base64 holds three copies of the file in the
+        // JS heap and killed a production run on a 1.5 MB video.
+        ApiMethodDescriptor {
+            internal_name: "asset_signed_url",
+            js_name: "signedUrl",
+            py_name: "signed_url",
+            category: "assets",
+            args: vec![
+                ArgSpec::new("workspace", ArgType::String),
+                ArgSpec::new("nodeRef", ArgType::String),
+                ArgSpec::new("options", ArgType::Json),
+            ],
+            return_type: ReturnType::Json,
+            invoker: |api: Arc<dyn FunctionApi>,
+                      args: Vec<Value>|
+             -> BoxFuture<'static, Result<InvokeResult>> {
+                Box::pin(async move {
+                    let mut parser = ArgParser::new(&args);
+                    let workspace = parser.string()?;
+                    let node_ref = parser.string()?;
+                    let options = parser.json()?;
+                    let result = api.asset_signed_url(&workspace, &node_ref, options).await?;
+                    Ok(InvokeResult::Json(result))
+                })
+            },
+        },
         // assets.ensureContent(workspace, nodeRef)
         //
         // Called by the Resource wrapper, not by function authors: it is what

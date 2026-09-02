@@ -413,15 +413,18 @@ impl AppState {
     /// In dev-mode, falls back to a hard-coded development key with a warning.
     /// In production mode, returns an error if not set.
     pub(crate) fn get_signing_secret(&self) -> raisin_error::Result<Vec<u8>> {
-        // Shared reader, so what the boot preflight accepts and what actually
-        // signs a URL cannot disagree; an empty value counts as unset.
-        match raisin_crypto::signing_secret() {
-            Some(s) => Ok(s),
-            None if self.dev_mode => {
-                tracing::warn!(
-                    "RAISINDB_SIGNING_SECRET not set — using insecure fallback (dev-mode)"
-                );
-                Ok(raisin_crypto::DEV_SIGNING_SECRET.to_vec())
+        // Shared reader INCLUDING the dev fallback, so what the boot preflight
+        // accepts, what this transport signs with, and what the
+        // `raisin.assets.signedUrl` binding signs with cannot disagree. An
+        // empty value counts as unset.
+        match raisin_crypto::signing_secret_or_dev() {
+            Some(s) => {
+                if raisin_crypto::signing_secret().is_none() {
+                    tracing::warn!(
+                        "RAISINDB_SIGNING_SECRET not set — using insecure fallback (dev-mode)"
+                    );
+                }
+                Ok(s)
             }
             None => Err(raisin_error::Error::Validation(
                 "RAISINDB_SIGNING_SECRET must be set. \
@@ -534,6 +537,14 @@ pub fn router_with_bin_and_audit(
     // private addresses.
     mcp_client_config: Option<raisin_mcp::client::McpClientConfig>,
 ) -> (Router, AppState) {
+    // A router built without going through `main.rs` (an embedded server, a
+    // test harness) still has to reach the same signing key as the function
+    // binding, which reads the process-wide flag. Recording it here as well is
+    // idempotent and keeps the two signers from diverging in those builds.
+    if dev_mode {
+        raisin_crypto::set_dev_mode(true);
+    }
+
     let connection = Arc::new(RaisinConnection::with_storage(storage.clone()));
 
     // Create upload processor registry with built-in processors

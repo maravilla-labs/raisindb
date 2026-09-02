@@ -317,11 +317,13 @@ pub(crate) fn hostname_of(authority: &str) -> String {
 }
 
 /// The configured canonical base URL, if `RAISINDB_BASE_URL` is set non-empty.
+///
+/// Delegates to `raisin-core` because the signed-URL builder lives there and
+/// needs the same answer: `raisin-functions` cannot depend on this transport,
+/// so a copy of the read would have been the sixth one this module exists to
+/// have removed.
 pub(crate) fn configured_base_url() -> Option<String> {
-    std::env::var("RAISINDB_BASE_URL")
-        .ok()
-        .map(|b| b.trim_end_matches('/').to_string())
-        .filter(|b| !b.is_empty())
+    raisin_core::configured_public_base_url()
 }
 
 /// Host suffixes trusted for every tenant (`RAISINDB_TRUSTED_HOST_SUFFIXES`,
