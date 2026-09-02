@@ -108,6 +108,31 @@ impl ModelRegistry {
     /// Refresh the download status for all models.
     ///
     /// Checks the cache directory to see which models are downloaded.
+    /// Where a model's files ACTUALLY are.
+    ///
+    /// `model_path` is where we would put them; this is where they are. The two
+    /// differ for anything fetched through hf-hub, which writes
+    /// `models--org--name/snapshots/<sha>/` while `download_model` has already
+    /// created the plain `org--name` directory and left it empty. Returning the
+    /// empty one is how a fully downloaded model reports "not downloaded" to
+    /// whatever tries to load it.
+    ///
+    /// Falls back to `model_path` when neither holds anything, so a caller
+    /// still gets a sensible path to name in an error.
+    pub fn resolved_model_path(&self, model_id: &str) -> PathBuf {
+        let own = self.model_path(model_id);
+        if Self::dir_has_files(&own) {
+            return own;
+        }
+        let hub = self
+            .cache_dir
+            .join(format!("models--{}", model_id.replace('/', "--")));
+        if Self::dir_has_files(&hub) {
+            return hub;
+        }
+        own
+    }
+
     /// Does this directory hold any file, at any depth?
     ///
     /// Recursive because hf-hub nests the actual files under
@@ -141,16 +166,9 @@ impl ModelRegistry {
              * is downloaded THROUGH hf-hub. So a GGUF model that is fully on
              * disk reported `not_downloaded` forever — and the UI offered a
              * 1.1 GB download for a file already sitting there. Check both. */
-            let hub_path = self
-                .cache_dir
-                .join(format!("models--{}", model.model_id.replace('/', "--")));
-            /* WHICHEVER HAS FILES, not whichever exists. `download_model`
-             * creates its own directory up front, so the plain path is present
-             * and EMPTY for every model fetched through hf-hub — testing
-             * existence alone picks the empty one and reports a fully
-             * downloaded model as missing. */
-            let own_path = self.model_path(&model.model_id);
-            let model_path = if Self::dir_has_files(&own_path) { own_path } else { hub_path };
+            /* WHICHEVER HAS FILES, not whichever exists — see
+             * `resolved_model_path`, which is the one rule for this. */
+            let model_path = self.resolved_model_path(&model.model_id);
             if model_path.exists() && model_path.is_dir() {
                 // Check if there are files in the directory
                 {

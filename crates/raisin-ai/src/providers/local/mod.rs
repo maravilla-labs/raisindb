@@ -131,7 +131,11 @@ impl LocalCandleProvider {
             })?;
 
             if registry.is_model_ready(hf_model_id).await {
-                return Ok(registry.model_path(hf_model_id));
+                // RESOLVED, not nominal: hf-hub writes into its own layout and
+                // `model_path` names ours, which for a quantized model is an
+                // empty directory the downloader created. Returning that is how
+                // a downloaded model fails to load with "not downloaded".
+                return Ok(registry.resolved_model_path(hf_model_id));
             }
 
             tracing::info!(
