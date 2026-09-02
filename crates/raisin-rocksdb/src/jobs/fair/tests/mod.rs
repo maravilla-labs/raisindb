@@ -16,6 +16,7 @@
 //! the scheduler itself are in [`bounds`].
 
 mod bounds;
+mod weights_api;
 
 use super::*;
 use raisin_storage::jobs::{JobCategory, JobId, JobPriority};

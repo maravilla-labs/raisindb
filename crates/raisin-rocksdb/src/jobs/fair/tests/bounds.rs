@@ -146,11 +146,13 @@ async fn concurrent_workers_serve_every_job_exactly_once() {
     assert_eq!(sched.pending_count(), 0);
 }
 
-/// The default the server ships with is equal weight for everyone, because
-/// there is no tier model to read. If a tier source is ever wired in, this test
-/// is the one that should change deliberately.
+/// A server nobody has configured gives every tenant the same turn.
+///
+/// Weights are opt-in per tenant (see `weights_api`); until an operator sets
+/// one, the resolver must answer the default, which makes the scheduler a pure
+/// fair-share round robin.
 #[test]
-fn the_shipped_weight_is_equal_for_every_tenant() {
+fn an_unconfigured_tenant_gets_equal_weight() {
     assert_eq!(tenant_weight("acme"), DEFAULT_TENANT_WEIGHT);
     assert_eq!(tenant_weight("other"), DEFAULT_TENANT_WEIGHT);
     assert_eq!(EqualWeights.weight_for("acme"), DEFAULT_TENANT_WEIGHT);

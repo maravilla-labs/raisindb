@@ -25,4 +25,6 @@ pub mod jobs;
 #[cfg(feature = "storage-rocksdb")]
 pub mod passwords;
 #[cfg(feature = "storage-rocksdb")]
+pub mod scheduling;
+#[cfg(feature = "storage-rocksdb")]
 pub mod tenants;

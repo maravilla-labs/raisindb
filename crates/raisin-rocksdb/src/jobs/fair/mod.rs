@@ -68,6 +68,7 @@
 mod drr;
 mod queue;
 mod scheduler;
+pub mod weight_store;
 pub mod weights;
 
 #[cfg(test)]
@@ -75,8 +76,10 @@ mod tests;
 
 pub use drr::TenantQueueStats;
 pub use scheduler::FairScheduler;
+pub use weight_store::{get_weight, install_persisted_weights, set_weight};
 pub use weights::{
-    tenant_weight, EqualWeights, StaticWeights, TenantWeights, DEFAULT_TENANT_WEIGHT,
+    scheduling_weights, tenant_weight, validate_weight, EqualWeights, SharedWeights, StaticWeights,
+    TenantWeights, WeightError, DEFAULT_TENANT_WEIGHT, MAX_TENANT_WEIGHT, MIN_TENANT_WEIGHT,
 };
 
 /// Bounds on how much may be queued, per tenant and in total.

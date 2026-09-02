@@ -81,6 +81,13 @@ pub use auth_service::{AdminClaims, AuthService};
 pub use checkpoint::{CheckpointManager, CheckpointMetadata, CheckpointReceiver};
 pub use config::{CompressionType, ReplicationPeerConfig, RocksDBConfig, TenantLimits};
 pub use hnsw_transfer::{HnswIndexManager, HnswIndexMetadata, HnswIndexReceiver};
+// Fair-share scheduling: the operator-set per-tenant weights. The server's
+// admin API reads and writes these; the schedulers read the live table.
+pub use jobs::fair::{
+    get_weight as get_tenant_scheduling_weight, install_persisted_weights, scheduling_weights,
+    set_weight as set_tenant_scheduling_weight, validate_weight, SharedWeights, WeightError,
+    DEFAULT_TENANT_WEIGHT, MAX_TENANT_WEIGHT, MIN_TENANT_WEIGHT,
+};
 pub use jobs::{
     create_trigger_matcher,
     cron_matches,

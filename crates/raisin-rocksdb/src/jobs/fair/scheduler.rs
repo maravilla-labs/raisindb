@@ -17,7 +17,7 @@
 //! across an `await`, and a job is in the queue BEFORE its permit exists.
 
 use super::drr::{DrrState, PushOutcome};
-use super::weights::{EqualWeights, TenantWeights};
+use super::weights::{scheduling_weights, TenantWeights};
 use super::{FairSchedulerStats, QueueLimits, TenantQueueStats, DEFAULT_MAX_QUEUED_PER_TENANT};
 use raisin_storage::jobs::{JobCategory, JobId, JobPriority};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -39,10 +39,15 @@ pub struct FairScheduler {
 }
 
 impl FairScheduler {
-    /// A scheduler with equal weights for every tenant — what the server runs
-    /// today, there being no tier model to read (see [`weights`]).
+    /// A scheduler reading the process-wide weight table — what the server
+    /// runs. Empty until an operator sets a weight, which is equal share for
+    /// everyone; see [`super::weights`] for why the table is a global.
     pub fn new(category: JobCategory) -> Self {
-        Self::with_weights(category, Arc::new(EqualWeights), QueueLimits::default())
+        Self::with_weights(
+            category,
+            scheduling_weights().clone(),
+            QueueLimits::default(),
+        )
     }
 
     pub fn with_weights(

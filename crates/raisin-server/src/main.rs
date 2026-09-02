@@ -461,6 +461,20 @@ async fn main() {
         if storage.config().background_jobs_enabled {
             tracing::info!("Initializing unified job system...");
 
+            // Load the operator-set per-tenant scheduling weights into the
+            // process-wide table BEFORE the pools exist, so the first job
+            // dispatched is already weighted. Without this a restart would
+            // flatten every tenant back to equal share — an operator's
+            // configuration undone with nothing logged and nothing to see.
+            // Best-effort: a read failure means equal share, which is the
+            // safe direction and is what an unconfigured server does anyway.
+            if let Err(e) = raisin_rocksdb::install_persisted_weights(storage.db()) {
+                tracing::warn!(
+                    error = %e,
+                    "Could not load tenant scheduling weights; every tenant gets equal share"
+                );
+            }
+
             // Propagate EMBEDDING_MASTER_KEY → RAISIN_MASTER_KEY for backward compatibility
             if std::env::var("RAISIN_MASTER_KEY").is_err() {
                 if let Ok(emk) = std::env::var("EMBEDDING_MASTER_KEY") {

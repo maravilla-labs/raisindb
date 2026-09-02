@@ -286,6 +286,16 @@ pub fn management_router(
         // param rather than `x-tenant-id`, because `ensure_tenant_middleware`
         // silently falls back to the "default" tenant when the header is
         // absent — too sharp an edge for a cross-tenant write.
+        // Fair-share scheduling weight. Superadmin because it is inherently
+        // cross-tenant: raising one tenant's share lowers every other tenant's.
+        // Path-scoped for the same reason as identity-users below — the
+        // `x-tenant-id` header falls back to "default", which would silently
+        // reweight the wrong tenant.
+        .route(
+            "/management/admin/tenants/{tenant_id}/scheduling",
+            axum::routing::put(admin::scheduling::set_tenant_scheduling)
+                .get(admin::scheduling::get_tenant_scheduling),
+        )
         .route(
             "/management/admin/tenants/{tenant_id}/identity-users",
             post(admin::identity_users::create_identity_user)
