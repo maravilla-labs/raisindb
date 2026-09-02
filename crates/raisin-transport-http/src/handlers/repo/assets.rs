@@ -279,19 +279,35 @@ pub(crate) async fn sign_asset_url_internal(
         .await?
         .ok_or_else(|| ApiError::not_found("Node not found"))?;
 
-    // Validate node has the requested property
-    let file_prop = node.properties.get(property_path).ok_or_else(|| {
-        ApiError::validation_failed(format!("Node does not have a '{}' property", property_path))
-    })?;
+    // Validate node has the requested property.
+    //
+    // A mount-owned asset whose cache is empty has NO `file` property, and that
+    // is a cache state rather than an absence: `serve_asset` fetches the bytes
+    // from the provider when the signed URL is read. Signing needs the node, the
+    // property name and RLS — never the bytes — so refusing here would reject
+    // the very request that fills the cache. Only `file` is admitted this way,
+    // because that is the property the fetch writes.
+    let missing_but_fetchable = property_path == "file"
+        && !node.properties.contains_key(property_path)
+        && raisin_models::nodes::is_fetchable_mount_content(&node.properties);
 
-    // Validate it's a Resource type
-    match file_prop {
-        raisin_models::nodes::properties::PropertyValue::Resource(_) => {}
-        _ => {
-            return Err(ApiError::validation_failed(format!(
-                "Node's '{}' property is not a Resource type",
+    if !missing_but_fetchable {
+        let file_prop = node.properties.get(property_path).ok_or_else(|| {
+            ApiError::validation_failed(format!(
+                "Node does not have a '{}' property",
                 property_path
-            )));
+            ))
+        })?;
+
+        // Validate it's a Resource type
+        match file_prop {
+            raisin_models::nodes::properties::PropertyValue::Resource(_) => {}
+            _ => {
+                return Err(ApiError::validation_failed(format!(
+                    "Node's '{}' property is not a Resource type",
+                    property_path
+                )));
+            }
         }
     }
 
