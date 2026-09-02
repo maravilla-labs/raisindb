@@ -61,9 +61,8 @@ image = { version = "0.25", optional = true }
 raisin-binary = { path = "../raisin-binary" }
 
 # Candle for local AI inference (CLIP, BLIP)
-candle-core = { version = "0.9", optional = true }
-candle-nn = { version = "0.9", optional = true }
-candle-transformers = { version = "0.9", optional = true }
+# candle lives in the per-target sections at the END of this file — Metal on
+# macOS, plain elsewhere. See the note there.
 tokenizers = { version = "0.21", optional = true }
 
 # OCR via Tesseract
@@ -87,3 +86,22 @@ rmp-serde = { workspace = true }
 tempfile = "3"
 image = "0.25"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# ── Candle, per target ──────────────────────────────────────────────────────
+# METAL ON macOS. Without the feature candle has no Metal kernels compiled in,
+# `Device::new_metal(0)` always fails, and `select_device(true)` falls back to
+# CPU SILENTLY — for a 1.5B text model that is the difference between a usable
+# local model and one that spends minutes on a single prompt. The vision models
+# never made it obvious, because each runs one small forward.
+#
+# These must be the LAST sections in the file: everything after a
+# `[target.…]` header belongs to it.
+[target.'cfg(target_os = "macos")'.dependencies]
+candle-core = { version = "0.9", optional = true, features = ["metal"] }
+candle-nn = { version = "0.9", optional = true, features = ["metal"] }
+candle-transformers = { version = "0.9", optional = true, features = ["metal"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+candle-core = { version = "0.9", optional = true }
+candle-nn = { version = "0.9", optional = true }
+candle-transformers = { version = "0.9", optional = true }
