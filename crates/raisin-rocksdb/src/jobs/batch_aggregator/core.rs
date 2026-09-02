@@ -333,7 +333,9 @@ impl BatchIndexAggregator {
 
         // Dispatch to priority queue
         let priority = job_type.default_priority();
-        self.dispatcher.dispatch(job_id.clone(), priority).await;
+        self.dispatcher
+            .dispatch(job_id.clone(), priority, &context.tenant_id)
+            .await;
 
         tracing::info!(
             job_id = %job_id,

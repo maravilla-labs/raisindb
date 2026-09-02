@@ -550,7 +550,10 @@ impl TriggerEvaluationHandler {
 
         // Dispatch to priority queue (non-blocking to prevent upload stalls)
         let priority = flow_instance_job.default_priority();
-        if !self.dispatcher.try_dispatch(job_id.clone(), priority) {
+        if !self
+            .dispatcher
+            .try_dispatch(job_id.clone(), priority, &context.tenant_id)
+        {
             tracing::warn!(
                 job_id = %job_id,
                 priority = %priority,
@@ -603,7 +606,10 @@ impl TriggerEvaluationHandler {
 
         // Dispatch to priority queue (non-blocking to prevent upload stalls)
         let priority = function_job_type.default_priority();
-        if !self.dispatcher.try_dispatch(job_id.clone(), priority) {
+        if !self
+            .dispatcher
+            .try_dispatch(job_id.clone(), priority, &context.tenant_id)
+        {
             tracing::warn!(
                 job_id = %job_id,
                 priority = %priority,

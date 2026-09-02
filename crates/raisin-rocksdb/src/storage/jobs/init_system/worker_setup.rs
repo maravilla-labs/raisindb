@@ -148,6 +148,7 @@ pub async fn restore_and_dispatch_jobs(
         if matches!(job.status, raisin_storage::jobs::JobStatus::Scheduled) {
             let priority = job.job_type.default_priority();
             let category = job.job_type.category();
+            let tenant = job.tenant.clone();
 
             // Honor future schedules (register_job_at / retry backoff):
             // delay dispatch instead of firing early after a restart.
@@ -156,11 +157,12 @@ pub async fn restore_and_dispatch_jobs(
                 if scheduled_at > now {
                     let dispatcher = dispatcher.clone();
                     let job_id = job.id.clone();
+                    let tenant = tenant.clone();
                     let delay = (scheduled_at - now).to_std().unwrap_or_default();
                     tokio::spawn(async move {
                         tokio::time::sleep(delay).await;
                         dispatcher
-                            .dispatch_categorized(job_id, priority, category)
+                            .dispatch_categorized(job_id, priority, category, &tenant)
                             .await;
                     });
                     dispatched_count += 1;
@@ -169,7 +171,7 @@ pub async fn restore_and_dispatch_jobs(
             }
 
             dispatcher
-                .dispatch_categorized(job.id.clone(), priority, category)
+                .dispatch_categorized(job.id.clone(), priority, category, &tenant)
                 .await;
             dispatched_count += 1;
         }

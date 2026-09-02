@@ -20,6 +20,7 @@ pub mod data_store;
 pub mod dispatcher;
 pub mod dispatching_monitor;
 pub mod event_handler;
+pub mod fair;
 pub mod flow_instance_lock;
 pub mod flow_scheduler;
 pub mod handlers;

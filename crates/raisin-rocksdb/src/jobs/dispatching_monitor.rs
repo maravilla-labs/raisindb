@@ -38,6 +38,7 @@ impl JobMonitor for DispatchingMonitor {
     async fn on_job_created(&self, job: &JobInfo) {
         let priority = job.job_type.default_priority();
         let category = job.job_type.category();
+        let tenant = job.tenant.clone();
 
         // Jobs registered with a future schedule (register_job_at) are
         // dispatched only once their time arrives. next_retry_at doubles
@@ -47,6 +48,7 @@ impl JobMonitor for DispatchingMonitor {
             if scheduled_at > now {
                 let dispatcher = self.dispatcher.clone();
                 let job_id = job.id.clone();
+                let tenant = tenant.clone();
                 let delay = (scheduled_at - now).to_std().unwrap_or_default();
 
                 tracing::debug!(
@@ -60,7 +62,7 @@ impl JobMonitor for DispatchingMonitor {
                 tokio::spawn(async move {
                     tokio::time::sleep(delay).await;
                     dispatcher
-                        .dispatch_categorized(job_id, priority, category)
+                        .dispatch_categorized(job_id, priority, category, &tenant)
                         .await;
                 });
                 return;
@@ -68,7 +70,7 @@ impl JobMonitor for DispatchingMonitor {
         }
 
         self.dispatcher
-            .dispatch_categorized(job.id.clone(), priority, category)
+            .dispatch_categorized(job.id.clone(), priority, category, &tenant)
             .await;
 
         tracing::debug!(
@@ -87,6 +89,7 @@ impl JobMonitor for DispatchingMonitor {
             let job_id = event.job_info.id.clone();
             let priority = event.job_info.job_type.default_priority();
             let category = event.job_info.job_type.category();
+            let tenant = event.job_info.tenant.clone();
 
             // Respect backoff delay if set
             if let Some(next_retry_at) = event.job_info.next_retry_at {
@@ -96,7 +99,7 @@ impl JobMonitor for DispatchingMonitor {
                     tokio::spawn(async move {
                         tokio::time::sleep(delay).await;
                         dispatcher
-                            .dispatch_categorized(job_id, priority, category)
+                            .dispatch_categorized(job_id, priority, category, &tenant)
                             .await;
                     });
 
@@ -113,7 +116,7 @@ impl JobMonitor for DispatchingMonitor {
 
             // No delay or already past — dispatch immediately
             self.dispatcher
-                .dispatch_categorized(job_id, priority, category)
+                .dispatch_categorized(job_id, priority, category, &tenant)
                 .await;
 
             tracing::debug!(

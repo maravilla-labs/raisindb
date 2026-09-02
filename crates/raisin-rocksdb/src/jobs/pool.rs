@@ -424,7 +424,7 @@ impl RocksDBWorkerPool {
             let priority = job.job_type.default_priority();
             let category = job.job_type.category();
             self.dispatcher
-                .dispatch_categorized(job.id, priority, category)
+                .dispatch_categorized(job.id, priority, category, &job.tenant)
                 .await;
         }
 

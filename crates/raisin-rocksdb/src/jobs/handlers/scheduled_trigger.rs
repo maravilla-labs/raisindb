@@ -233,7 +233,7 @@ impl ScheduledTriggerHandler {
             // Dispatch to priority queue
             let priority = function_job_type.default_priority();
             self.dispatcher
-                .dispatch(function_job_id.clone(), priority)
+                .dispatch(function_job_id.clone(), priority, &trigger_match.tenant_id)
                 .await;
 
             tracing::debug!(
