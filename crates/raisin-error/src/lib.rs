@@ -53,6 +53,42 @@ pub enum Error {
         cell: String,
         limit: usize,
     },
+    /// A call to an EXTERNAL provider failed, carrying WHOSE fault it was.
+    ///
+    /// Typed rather than a `Backend(String)` for the same reason
+    /// [`Error::SpatialBudgetExceeded`] is: it is a **routing signal**, not
+    /// merely a message. The embedding circuit breaker decides from it whether
+    /// to park every tenant's jobs, and a decision that large must not hang on
+    /// a provider happening to spell "API error 503" the way the classifier
+    /// greps for. `status` is `None` for a transport failure — connect refused,
+    /// TLS, timeout, DNS — which is an upstream fault with no HTTP response to
+    /// read a code from.
+    #[error("Upstream {upstream} failed ({}): {message}",
+            status.map(|s| s.to_string()).unwrap_or_else(|| "transport".to_string()))]
+    Upstream {
+        /// Human-readable upstream label, e.g. `"OpenAI"`. Not the breaker key.
+        upstream: String,
+        /// HTTP status if one was received; `None` for a transport failure.
+        status: Option<u16>,
+        message: String,
+    },
+    /// The circuit breaker for an upstream is OPEN, so the work was not
+    /// attempted at all.
+    ///
+    /// Not a failure of the job: nothing was tried, so nothing failed. The job
+    /// worker recognises it and PARKS the job — reschedules it at
+    /// `retry_after_secs` **without** incrementing the retry count — because
+    /// burning a retry on an attempt that never happened is how a fleet-wide
+    /// outage turns into a fleet-wide permanent failure.
+    #[error(
+        "Upstream '{upstream}' is unavailable (circuit breaker open); \
+             not attempted, retry in {retry_after_secs}s"
+    )]
+    UpstreamUnavailable {
+        /// The breaker key — the upstream's identity, not a tenant's.
+        upstream: String,
+        retry_after_secs: u64,
+    },
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -99,5 +135,50 @@ impl Error {
     /// Every other caller should treat it as an ordinary error.
     pub fn is_spatial_budget_exceeded(&self) -> bool {
         matches!(self, Self::SpatialBudgetExceeded { .. })
+    }
+
+    /// Is this an upstream's fault rather than ours?
+    ///
+    /// This is the predicate a circuit breaker counts, and the asymmetry is the
+    /// whole point of asking it:
+    ///
+    /// * **5xx and transport failures are the upstream's.** Every tenant
+    ///   pointed at that endpoint is affected, so learning it once and parking
+    ///   the rest is correct.
+    /// * **4xx is OURS.** A malformed request, a wrong model name, an expired
+    ///   API key — those are per-tenant configuration, and one tenant's bad key
+    ///   must never park every other tenant's jobs. That is not a hypothetical:
+    ///   the API key is resolved per tenant while the endpoint is shared.
+    ///
+    /// 429 is deliberately NOT counted, because the rule above is "no 4xx opens
+    /// the breaker" and a rule with one exception is a rule nobody remembers.
+    /// It is the one 4xx worth revisiting if rate-limit storms ever show up in
+    /// the way 503s did.
+    pub fn is_upstream_fault(&self) -> bool {
+        match self {
+            Self::Upstream { status: None, .. } => true,
+            Self::Upstream {
+                status: Some(code), ..
+            } => *code >= 500,
+            _ => false,
+        }
+    }
+
+    /// Was this work skipped because an upstream's breaker is open?
+    ///
+    /// The job worker asks this to PARK rather than retry. See
+    /// [`Error::UpstreamUnavailable`].
+    pub fn is_upstream_unavailable(&self) -> bool {
+        matches!(self, Self::UpstreamUnavailable { .. })
+    }
+
+    /// How long the caller should wait before re-attempting parked work.
+    pub fn upstream_retry_after(&self) -> Option<std::time::Duration> {
+        match self {
+            Self::UpstreamUnavailable {
+                retry_after_secs, ..
+            } => Some(std::time::Duration::from_secs(*retry_after_secs)),
+            _ => None,
+        }
     }
 }

@@ -1,0 +1,92 @@
+# Ambient background-job activity for ONE repository.
+#
+# There is exactly one node of this type per tenant per repo, overwritten in
+# place. It is a GAUGE, not a log: nothing here enumerates history, and no
+# property grows without bound.
+#
+# # `index_types: [Property]` is the loop guard, and it is load-bearing
+#
+# A node write emits `node:updated`, which is what enqueues fulltext indexing,
+# vector embedding, asset processing and trigger evaluation. A node that
+# describes job activity and then enqueues jobs is a feedback loop and an
+# amplifier — the 2026-09-02 incident produced 2,512 job events in five
+# minutes, and one node write each would have produced 2,512 node revisions
+# each enqueueing further work.
+#
+# `UnifiedJobEventHandler::handle_node_change` gates its fulltext arm on
+# `index_settings.fulltext` and its embedding arm on `index_settings.vector`,
+# and both come from `index_types` here (`event_handler/index_helpers.rs`).
+# Listing ONLY `Property` therefore makes this type inert for both — while
+# still leaving it queryable from SQL, which is the point of keeping Property.
+#
+# Do NOT add `Fulltext` or `Vector` to this list. Nothing here is worth
+# searching by word or by meaning, and adding either re-arms the loop.
+name: raisin:JobActivity
+description: Background-job activity for one repository — an ambient gauge, overwritten in place
+icon: activity
+version: 1
+strict: true
+indexable: true
+index_types: [Property]
+properties:
+  # DEGRADED is a boolean and stays a boolean. It says "background processing
+  # is impaired", and deliberately not which upstream, which key, or how many
+  # times — an ordinary tenant user reads this node, and upstream hostnames and
+  # host-wide failure counters are operator information. The operator surface
+  # is `/management/*`, which carries the detail.
+  - name: degraded
+    type: Boolean
+    required: true
+    title: Degraded
+    description: Whether an upstream this repo's background work depends on is currently unavailable
+    default: false
+    index: [Property]
+
+  - name: active
+    type: Number
+    required: true
+    title: Active
+    description: Job handlers executing for this repository right now, on the node that last wrote this record
+    default: 0
+    index: [Property]
+
+  # Tenant-wide (all repos), because that is the granularity the job registry
+  # maintains as an O(1) counter. Named so the difference from `active` is
+  # visible in the property name rather than only in a doc.
+  - name: tenant_pending
+    type: Number
+    required: false
+    title: Tenant Pending
+    description: Non-terminal jobs for this tenant across all its repositories, on the node that last wrote this record
+    default: 0
+    index: [Property]
+
+  # Capped at ACTIVE_PATHS_CAP entries, formatted `workspace:/path` — the same
+  # spelling `REFERENCES('workspace:/path')` uses, so a path here is directly
+  # comparable to one a query names. A capped list, never a log.
+  - name: active_paths
+    type: Array
+    required: false
+    title: Active Paths
+    description: Up to a handful of node paths currently being worked on, as `workspace:/path`
+
+  - name: updated_at
+    type: String
+    required: false
+    title: Updated At
+    description: RFC3339 timestamp of this snapshot
+
+  # Which process wrote this record. These counters are PER-PROCESS, so on a
+  # multi-node cluster the node is last-writer-wins and this says whose view
+  # won. See `jobs::activity` for why LWW rather than one node per cluster
+  # member.
+  - name: origin
+    type: String
+    required: false
+    title: Origin
+    description: Identifier of the server process whose view this snapshot is
+
+allowed_children: []
+versionable: false
+publishable: false
+auditable: false

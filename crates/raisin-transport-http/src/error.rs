@@ -454,6 +454,29 @@ impl From<raisin_error::Error> for ApiError {
                     budget.to_string(),
                 )
             }
+            // An external provider failed. 502 rather than 500: the request was
+            // fine and this server is fine — someone else's is not, and a
+            // caller can tell the difference and retry.
+            ref upstream @ raisin_error::Error::Upstream { .. } => {
+                tracing::error!("Upstream error: {}", upstream);
+                ApiError::new(
+                    StatusCode::BAD_GATEWAY,
+                    "UPSTREAM_ERROR",
+                    upstream.to_string(),
+                )
+            }
+            // The work was NOT attempted — an upstream's circuit breaker is
+            // open. 503 with `Retry-After`-shaped advice in the message, which
+            // is the honest description: try again later, nothing is broken
+            // here.
+            ref parked @ raisin_error::Error::UpstreamUnavailable { .. } => {
+                tracing::warn!("Upstream unavailable: {}", parked);
+                ApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "UPSTREAM_UNAVAILABLE",
+                    parked.to_string(),
+                )
+            }
             raisin_error::Error::Other(e) => {
                 tracing::error!("Unexpected error: {}", e);
                 ApiError::internal(e.to_string())

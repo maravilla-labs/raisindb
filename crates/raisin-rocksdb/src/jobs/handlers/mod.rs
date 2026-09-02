@@ -320,6 +320,22 @@ impl JobHandlerRegistry {
     ) -> Result<Option<serde_json::Value>> {
         use raisin_storage::JobType;
 
+        // Per-repository activity accounting, so a tenant can see that its
+        // background work is moving. ONE chokepoint rather than one call per
+        // handler: every job in the system passes through this match, so a
+        // handler added later is counted without anyone remembering to.
+        //
+        // The guard is RAII and held for the whole `match` below. A handler
+        // that returns early, returns `Err`, parks on an open circuit breaker
+        // or is aborted by the timeout watchdog still decrements — an
+        // unbalanced counter here would pin a tenant's progress surface at a
+        // permanent false "busy" that no later event ever clears.
+        let _activity = crate::jobs::activity::JobActivityTracker::global().track(
+            &job.id,
+            &job.job_type,
+            context,
+        );
+
         match &job.job_type {
             JobType::FulltextIndex { .. } => {
                 self.fulltext.handle_index(job, context).await.map(|_| None)

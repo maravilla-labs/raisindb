@@ -373,6 +373,10 @@ impl RocksDBStorage {
 
         worker_pool.start().await?;
 
+        // Publish the pool so the operator health endpoint can read per-category
+        // saturation. Weak inside, so this does not keep the pool alive.
+        self.set_worker_pool(&worker_pool);
+
         worker_setup::start_background_tasks(
             &self,
             self.clone(),

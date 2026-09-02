@@ -202,6 +202,37 @@ export interface JobQueueStats {
   categories?: CategoryQueueDepthStats[]
 }
 
+/**
+ * Job-system health: upstream circuit breakers plus per-category pool
+ * saturation. Answers "is anything stuck, and why" — the question the
+ * 2026-09-02 embedding outage took a host CPU graph to answer.
+ */
+export interface JobSystemHealth {
+  breakers: BreakerHealth[]
+  pools: CategoryPoolStats[]
+}
+
+export interface BreakerHealth {
+  /** The upstream this breaker guards, e.g. an embedding provider. */
+  key: string
+  state: 'closed' | 'open' | 'half_open'
+  consecutive_failures: number
+  last_error?: string | null
+  /** Seconds until a probe is allowed. Null unless the breaker is open. */
+  next_probe_in_secs?: number | null
+}
+
+export interface CategoryPoolStats {
+  category: string
+  active_handler_tasks: number
+  handler_permits_available: number
+  handler_permits_max: number
+  queue_depth_high: number
+  queue_depth_normal: number
+  queue_depth_low: number
+  dispatcher_workers: number
+}
+
 export interface HistoryBackfillResponse {
   indexed: number
   next_cursor?: string
@@ -400,6 +431,9 @@ export const managementApi = {
   // Job queue management endpoints
   getJobQueueStats: () =>
     api.get<ApiResponse<JobQueueStats>>('/management/jobs/stats'),
+
+  getJobSystemHealth: () =>
+    api.get<ApiResponse<JobSystemHealth>>('/management/jobs/health'),
 
   backfillJobHistory: (cursor?: string) =>
     api.post<ApiResponse<HistoryBackfillResponse>>(

@@ -175,6 +175,9 @@ pub fn management_router(
         )
         // Job queue management endpoints — also tenant-scoped via header.
         .route("/management/jobs/stats", get(jobs::get_job_queue_stats))
+        // Upstream breakers + pool saturation. Static segment, so it is matched
+        // ahead of `/management/jobs/{id}` — same as `stats` above.
+        .route("/management/jobs/health", get(jobs::get_job_system_health))
         .route("/management/jobs/purge-all", post(jobs::purge_all_jobs))
         .route(
             "/management/jobs/purge-orphaned",
@@ -471,6 +474,9 @@ where
         )
         // Job queue management endpoints — also tenant-scoped via header.
         .route("/management/jobs/stats", get(jobs::get_job_queue_stats))
+        // Upstream breakers + pool saturation. Static segment, so it is matched
+        // ahead of `/management/jobs/{id}` — same as `stats` above.
+        .route("/management/jobs/health", get(jobs::get_job_system_health))
         .route("/management/jobs/purge-all", post(jobs::purge_all_jobs))
         .route(
             "/management/jobs/purge-orphaned",

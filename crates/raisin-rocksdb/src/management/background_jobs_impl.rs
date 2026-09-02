@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use raisin_error::Result;
 use raisin_storage::{
     BackgroundJobs, BackgroundJobsInternal, CategoryQueueDepthStats, JobHandle, JobId,
-    JobQueueStats, PersistedStats, QueueDepthStats, WorkerStats,
+    JobQueueStats, JobSystemHealth, PersistedStats, QueueDepthStats, WorkerStats,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -418,6 +418,25 @@ impl BackgroundJobs for RocksDBStorage {
                 orphaned_entries: 0,
             },
             categories,
+        })
+    }
+
+    /// Upstream breaker state plus per-category pool saturation.
+    ///
+    /// Both halves are read from live process state — the breaker registry and
+    /// the pool's atomics — so this costs no storage reads and can be polled at
+    /// console refresh rates. Contrast `get_job_queue_stats`, which deliberately
+    /// refuses to count persisted history for the same reason.
+    async fn get_job_system_health(&self) -> Result<JobSystemHealth> {
+        let breakers = crate::jobs::CircuitBreakerRegistry::global()
+            .statuses()
+            .into_iter()
+            .map(super::job_health::breaker_health)
+            .collect();
+
+        Ok(JobSystemHealth {
+            breakers,
+            pools: self.worker_pool_stats(),
         })
     }
 

@@ -19,6 +19,7 @@
 
 // Trait implementations
 mod background_jobs_impl;
+mod job_health;
 mod management_ops;
 
 // Internal modules

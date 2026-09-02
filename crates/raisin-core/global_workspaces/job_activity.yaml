@@ -1,0 +1,33 @@
+# Background-job activity, one node per repository, readable by ordinary users.
+#
+# # Why a workspace of its own
+#
+# The alternative was an operator HTTP endpoint. Studio runs as an ORDINARY
+# tenant user: `/management/*` is operator-only, and widening it would expose
+# upstream hostnames and host-wide, cross-tenant pool counters to every tenant.
+# A node instead gets tenant isolation from the `{tenant}\0{repo}\0…` key
+# prefix and from per-repo permission resolution, and it gets realtime push
+# through the WebSocket node subscription Studio already holds — no polling, no
+# new endpoint, no new authorization surface. The precedent is Studio's own
+# `publish_state` workspace, which is the same shape: a small per-path state
+# record the SPA reads directly.
+#
+# # No `initial_structure`, deliberately
+#
+# The activity node is written at the workspace ROOT (`/activity`), so it needs
+# no parent to exist first. That matters: `resync_workspaces` creates a newly
+# added workspace record on EXISTING repositories, but it does not run
+# `create_workspace_initial_structure` for them (the `WorkspaceCreated`
+# structure handler is not subscribed). A design that needed a container folder
+# would therefore work on new repos and silently fail on every repo that
+# already exists.
+name: job_activity
+description: Ambient background-job activity for this repository — one record, overwritten in place
+allowed_node_types:
+  - raisin:JobActivity
+allowed_root_node_types:
+  - raisin:JobActivity
+depends_on: []
+config:
+  default_branch: main
+  node_type_pins: {}

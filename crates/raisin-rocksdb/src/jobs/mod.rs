@@ -12,7 +12,9 @@ pub const ORIGIN_AGENT_KEY: &str = "origin_agent";
 /// evaluation; read by `handlers/function_execution.rs`.
 pub const AUTH_CONTEXT_KEY: &str = "auth_context";
 
+pub mod activity;
 pub mod batch_aggregator;
+pub mod circuit_breaker;
 pub mod cleanup;
 pub mod data_store;
 pub mod dispatcher;
@@ -29,7 +31,9 @@ pub mod trigger_registry;
 pub mod watchdog;
 pub mod worker;
 
+pub use activity::{install_publisher as install_job_activity_publisher, JobActivityTracker};
 pub use batch_aggregator::{BatchAggregatorConfig, BatchIndexAggregator};
+pub use circuit_breaker::{BreakerPolicy, BreakerState, BreakerStatus, CircuitBreakerRegistry};
 pub use cleanup::JobCleanupTask;
 pub use data_store::JobDataStore;
 pub use dispatching_monitor::DispatchingMonitor;

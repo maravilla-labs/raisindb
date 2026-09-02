@@ -88,6 +88,30 @@ impl RocksDBStorage {
         lock.as_ref().map(|d| d.stats())
     }
 
+    /// Publish the worker pool (called after `init_job_system`).
+    ///
+    /// Takes a `Weak` so the storage does not keep the pool — and, through the
+    /// pool's own `Arc<RocksDBStorage>`, itself — alive forever.
+    pub fn set_worker_pool(&self, pool: &Arc<crate::jobs::RocksDBWorkerPool>) {
+        let mut lock = self.worker_pool.write().unwrap();
+        *lock = Some(Arc::downgrade(pool));
+    }
+
+    /// Per-category pool saturation, or an empty vec when no job system is
+    /// running here.
+    ///
+    /// Empty is the honest answer for an embedded or test storage, and it is
+    /// also what a reader gets after shutdown. Neither is an error: the
+    /// operator asked what the pools are doing, and the answer is "nothing,
+    /// there are none".
+    pub fn worker_pool_stats(&self) -> Vec<raisin_storage::jobs::CategoryPoolStats> {
+        let lock = self.worker_pool.read().unwrap();
+        lock.as_ref()
+            .and_then(|weak| weak.upgrade())
+            .map(|pool| pool.category_pool_stats())
+            .unwrap_or_default()
+    }
+
     /// Publish the virtual-mount sync engine (called after `init_job_system`).
     pub fn set_virtual_mount_sync_handler(
         &self,

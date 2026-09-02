@@ -136,6 +136,19 @@ pub struct RocksDBStorage {
     pub(crate) job_dispatcher:
         Arc<std::sync::RwLock<Option<Arc<crate::jobs::dispatcher::JobDispatcher>>>>,
 
+    // The worker pool (set after init_job_system), for the operator health
+    // endpoint's per-category saturation figures. The dispatcher slot above
+    // carries queue depth but knows nothing about permits or in-flight
+    // handlers, and "the queue is short" and "every permit is taken" are the
+    // two halves of the same question.
+    //
+    // WEAK on purpose: the pool holds an `Arc<RocksDBStorage>` to hand its
+    // workers, so a strong reference here would close a cycle and neither the
+    // pool nor the whole storage would ever drop. A dead weak pointer reads as
+    // "no pools", which is what a shut-down job system honestly is.
+    pub(crate) worker_pool:
+        Arc<std::sync::RwLock<Option<std::sync::Weak<crate::jobs::RocksDBWorkerPool>>>>,
+
     // The virtual-mount sync engine (set after init_job_system), so the
     // on-demand attachment fetch can reach it without going through the job
     // queue. Same slot pattern as `job_dispatcher`, and for the same reason: the

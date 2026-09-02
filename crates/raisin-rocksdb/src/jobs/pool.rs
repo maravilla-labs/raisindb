@@ -324,6 +324,41 @@ impl RocksDBWorkerPool {
         self.dispatcher.stats()
     }
 
+    /// Per-category saturation: permits, in-flight handlers and queue depth.
+    ///
+    /// Split out of [`WorkerPool::stats`] because the admin health endpoint
+    /// polls it. `stats()` also walks every job in the registry to count
+    /// completions and average durations — fine once, ruinous every few seconds
+    /// on a queue holding tens of thousands of entries. This half touches only
+    /// atomics and the dispatcher's channel lengths.
+    pub fn category_pool_stats(&self) -> Vec<raisin_storage::jobs::CategoryPoolStats> {
+        let dispatcher_stats = self.dispatcher.stats();
+        let mut out: Vec<raisin_storage::jobs::CategoryPoolStats> = self
+            .pools
+            .iter()
+            .map(|(&cat, pool)| {
+                let queue = dispatcher_stats
+                    .category_stats
+                    .get(&cat)
+                    .cloned()
+                    .unwrap_or_default();
+                raisin_storage::jobs::CategoryPoolStats {
+                    category: cat.to_string(),
+                    active_handler_tasks: pool.in_flight.get(),
+                    handler_permits_available: pool.handler_semaphore.available_permits(),
+                    handler_permits_max: pool.max_concurrent_handlers,
+                    queue_depth_high: queue.high_queue_len,
+                    queue_depth_normal: queue.normal_queue_len,
+                    queue_depth_low: queue.low_queue_len,
+                    dispatcher_workers: pool.num_workers,
+                }
+            })
+            .collect();
+        // Deterministic ordering, so a console row does not jump between polls.
+        out.sort_by(|a, b| a.category.cmp(&b.category));
+        out
+    }
+
     /// Get the total number of currently in-flight handler tasks (all pools)
     pub fn in_flight_count(&self) -> usize {
         self.pools.values().map(|p| p.in_flight.get()).sum()
@@ -489,6 +524,12 @@ impl WorkerPool for RocksDBWorkerPool {
         // Recover any pending jobs before starting workers
         self.recover_pending_jobs().await;
 
+        // Start publishing per-repository job activity as nodes. Here, because
+        // this is exactly the moment the process begins to HAVE job activity —
+        // and a process that never starts a pool (a test, an embedding of the
+        // crate) then counts nothing and writes nothing.
+        crate::jobs::activity::install_publisher(self.storage.clone(), self.job_registry.clone());
+
         tracing::info!(
             num_pools = self.pools.len(),
             "Starting RocksDB worker pool with category isolation"
@@ -570,31 +611,7 @@ impl WorkerPool for RocksDBWorkerPool {
             None
         };
 
-        // Build per-category stats
-        let dispatcher_stats = self.dispatcher.stats();
-        let mut category_stats = Vec::new();
-
-        for (&cat, pool) in &self.pools {
-            let cat_queue = dispatcher_stats
-                .category_stats
-                .get(&cat)
-                .cloned()
-                .unwrap_or_default();
-
-            category_stats.push(raisin_storage::jobs::CategoryPoolStats {
-                category: cat.to_string(),
-                active_handler_tasks: pool.in_flight.get(),
-                handler_permits_available: pool.handler_semaphore.available_permits(),
-                handler_permits_max: pool.max_concurrent_handlers,
-                queue_depth_high: cat_queue.high_queue_len,
-                queue_depth_normal: cat_queue.normal_queue_len,
-                queue_depth_low: cat_queue.low_queue_len,
-                dispatcher_workers: pool.num_workers,
-            });
-        }
-
-        // Sort by category name for deterministic ordering
-        category_stats.sort_by(|a, b| a.category.cmp(&b.category));
+        let category_stats = self.category_pool_stats();
 
         WorkerPoolStats {
             active_workers,

@@ -188,6 +188,21 @@ pub trait BackgroundJobs: Send + Sync {
         ))
     }
 
+    /// Job-system health for the operator console: upstream circuit breakers
+    /// and per-category pool saturation.
+    ///
+    /// Deliberately NOT tenant-scoped, and deliberately separate from
+    /// [`Self::get_job_queue_stats`]. A breaker is keyed by UPSTREAM and parks
+    /// every tenant's jobs at once, so there is no per-tenant answer to give;
+    /// and the pools are the process's, not a tenant's. What a tenant learns
+    /// here is that the machine is unwell, which is the point — the incident
+    /// this exists for was invisible from inside any one tenant's job list.
+    async fn get_job_system_health(&self) -> Result<JobSystemHealth> {
+        Err(raisin_error::Error::Validation(
+            "get_job_system_health not supported by this storage backend".to_string(),
+        ))
+    }
+
     /// Force-fail jobs that have been stuck in Running state for too long, for the given tenant.
     ///
     /// Returns (failed_count, list of job IDs that were force-failed).
@@ -223,6 +238,42 @@ pub trait BackgroundJobsInternal: Send + Sync {
 
     /// Restore pending jobs from persistent storage at startup.
     async fn restore_pending_jobs(&self) -> Result<()>;
+}
+
+/// The read model behind `GET /management/jobs/health`.
+///
+/// Answers one question: is anything stuck, and why. The breakers say why work
+/// is not being attempted; the pools say whether it is queued behind a full
+/// machine. Neither alone distinguishes "upstream is down" from "we are busy",
+/// which is exactly the confusion that cost an operator half an hour.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobSystemHealth {
+    /// One entry per upstream this process has touched, sorted by key.
+    pub breakers: Vec<BreakerHealth>,
+    /// One entry per category pool. Empty when the job system is not running
+    /// (an embedded or test storage) rather than absent, so a reader never has
+    /// to tell "no pools" from "field missing".
+    pub pools: Vec<crate::jobs::CategoryPoolStats>,
+}
+
+/// One upstream circuit breaker, as an operator sees it.
+///
+/// A projection of the job system's own breaker status rather than a re-export:
+/// the breaker lives above this crate, and its `Duration` and state enum are
+/// not a wire format. `next_probe_in_secs` is seconds because a console renders
+/// seconds, and a `Duration` serialises as a struct nobody wants to parse.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BreakerHealth {
+    /// The upstream this breaker guards (e.g. an embedding provider).
+    pub key: String,
+    /// `closed`, `open` or `half_open`.
+    pub state: String,
+    /// Consecutive upstream faults. Reset by any success.
+    pub consecutive_failures: u32,
+    /// Message of the most recent fault counted against this breaker.
+    pub last_error: Option<String>,
+    /// Seconds until a probe is allowed. `None` unless the breaker is open.
+    pub next_probe_in_secs: Option<u64>,
 }
 
 /// Statistics about the job queue system

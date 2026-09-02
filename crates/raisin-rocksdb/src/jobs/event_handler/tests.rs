@@ -423,3 +423,194 @@ async fn test_remote_node_change_still_enqueues_embedding_job() {
         "trigger evaluation must remain LOCAL-only for replicated events"
     );
 }
+
+/// THE LOOP GUARD. Writing the job-activity node must enqueue NO further work.
+///
+/// This is the single most important property of the whole activity mechanism.
+/// A node write emits `node:updated`, which is what enqueues fulltext indexing,
+/// vector embedding, asset processing and trigger evaluation — so a surface
+/// that reports on background jobs BY WRITING A NODE is a feedback loop and an
+/// amplifier unless every one of those arms is inert for it. The 2026-09-02
+/// incident produced 2,512 job events in five minutes; one node write each,
+/// each enqueueing more work, would have been a worse outage than the one this
+/// exists to prevent.
+///
+/// Two mechanisms close the loop, and this test covers both at once:
+///
+/// * the SHIPPED `raisin:JobActivity` definition declares
+///   `index_types: [Property]` — no `Fulltext`, no `Vector` — which closes
+///   `handle_node_change`'s fulltext and embedding arms. The definition is
+///   loaded from `raisin-core`'s embedded YAML rather than hand-written here,
+///   so editing that file to add `Fulltext` fails this test rather than
+///   silently re-arming the loop in production.
+/// * the write carries the `bookkeeping` marker, which closes trigger
+///   evaluation.
+///
+/// Embeddings are ENABLED for the tenant on purpose: the assertion has to prove
+/// the node type is the gate, not a disabled tenant config that could be turned
+/// on tomorrow.
+#[tokio::test]
+async fn activity_node_write_enqueues_no_indexing_jobs() {
+    use crate::jobs::activity::{ACTIVITY_NODE_TYPE, ACTIVITY_WORKSPACE};
+
+    let (_temp_dir, storage) = setup_test_storage();
+    let job_registry = Arc::new(JobRegistry::new());
+    let job_data_store = Arc::new(crate::jobs::JobDataStore::new(storage.db().clone()));
+    let dispatcher = create_test_dispatcher();
+    let handler = UnifiedJobEventHandler::new(
+        storage.clone(),
+        job_registry.clone(),
+        job_data_store,
+        dispatcher,
+        storage.processing_rules_repository(),
+    );
+
+    seed_activity_node(&storage).await;
+
+    let mut config = TenantEmbeddingConfig::new("tenant1".to_string());
+    config.enabled = true;
+    storage
+        .tenant_embedding_config_repository()
+        .set_config(&config)
+        .unwrap();
+
+    let mut metadata = std::collections::HashMap::new();
+    metadata.insert("bookkeeping".to_string(), serde_json::Value::Bool(true));
+
+    let node_event = NodeEvent {
+        tenant_id: "tenant1".to_string(),
+        repository_id: "repo1".to_string(),
+        workspace_id: ACTIVITY_WORKSPACE.to_string(),
+        branch: "main".to_string(),
+        revision: raisin_hlc::HLC::new(2, 0),
+        node_id: "job-activity".to_string(),
+        node_type: Some(ACTIVITY_NODE_TYPE.to_string()),
+        kind: NodeEventKind::Updated,
+        path: Some("/activity".to_string()),
+        metadata: Some(metadata),
+    };
+
+    assert!(
+        !UnifiedJobEventHandler::is_remote_event(&node_event),
+        "this must be a LOCAL event, or the local-only arms are skipped for the \
+         wrong reason and the test proves nothing"
+    );
+
+    handler.handle_node_change(&node_event).await.unwrap();
+
+    let jobs = job_registry.list_jobs().await;
+    let seen: Vec<String> = jobs.iter().map(|j| j.job_type.to_string()).collect();
+
+    assert!(
+        !jobs
+            .iter()
+            .any(|j| matches!(&j.job_type, JobType::FulltextIndex { .. })),
+        "the activity node must not be fulltext indexed. Jobs seen: {seen:?}"
+    );
+    assert!(
+        !jobs
+            .iter()
+            .any(|j| matches!(&j.job_type, JobType::EmbeddingGenerate { .. })),
+        "the activity node must not be embedded — this is the arm that would \
+         call a provider once per activity update. Jobs seen: {seen:?}"
+    );
+    assert!(
+        !jobs
+            .iter()
+            .any(|j| matches!(&j.job_type, JobType::TriggerEvaluation { .. })),
+        "the activity node must not fire triggers; a tenant trigger that writes \
+         a node would close the loop through user code. Jobs seen: {seen:?}"
+    );
+    assert!(
+        !jobs
+            .iter()
+            .any(|j| matches!(&j.job_type, JobType::AssetProcessing { .. })),
+        "the activity node must not be treated as an asset. Jobs seen: {seen:?}"
+    );
+    assert!(
+        jobs.is_empty(),
+        "writing the activity node must enqueue NOTHING AT ALL — a new arm added \
+         to handle_node_change that is not inert for this type re-arms the loop. \
+         Jobs seen: {seen:?}"
+    );
+}
+
+/// Seed the shipped `raisin:JobActivity` NodeType and one node of that type.
+///
+/// The NodeType comes from `raisin-core`'s embedded global definitions, not
+/// from a literal built here: a hand-written copy would keep passing after
+/// someone added `Fulltext` to the real YAML, which is exactly the regression
+/// this file exists to catch.
+async fn seed_activity_node(storage: &Arc<crate::RocksDBStorage>) {
+    use raisin_storage::{BranchRepository, NodeTypeRepository};
+
+    storage
+        .branches_impl()
+        .create_branch(
+            "tenant1", "repo1", "main", "Initial", None, None, false, false,
+        )
+        .await
+        .unwrap();
+
+    let node_type = raisin_core::nodetype_init::load_global_nodetypes()
+        .into_iter()
+        .find(|nt| nt.name == "raisin:JobActivity")
+        .expect("raisin:JobActivity must ship as a global NodeType");
+    assert_eq!(
+        node_type.index_types,
+        Some(vec![
+            raisin_models::nodes::properties::schema::IndexType::Property
+        ]),
+        "the shipped definition must index Property ONLY; adding Fulltext or \
+         Vector re-arms the write→event→job loop"
+    );
+    storage
+        .node_types()
+        .upsert(
+            raisin_storage::BranchScope::new("tenant1", "repo1", "main"),
+            node_type,
+            raisin_storage::CommitMetadata::system("seed job activity nodetype"),
+        )
+        .await
+        .unwrap();
+
+    let op = storage
+        .operation_capture()
+        .capture_create_node(
+            "tenant1".to_string(),
+            "repo1".to_string(),
+            "main".to_string(),
+            "job-activity".to_string(),
+            "activity".to_string(),
+            "raisin:JobActivity".to_string(),
+            None,
+            None,
+            "order1".to_string(),
+            serde_json::json!({"degraded": false, "active": 0}),
+            None,
+            Some("job_activity".to_string()),
+            "/activity".to_string(),
+            "job-activity".to_string(),
+        )
+        .await
+        .unwrap();
+
+    let revision = op
+        .revision
+        .unwrap_or_else(|| raisin_hlc::HLC::new(op.op_seq, 0));
+    let mut op_with_revision = op.clone();
+    op_with_revision.revision = Some(revision);
+
+    let applicator = crate::replication::OperationApplicator::new(
+        storage.db().clone(),
+        storage.event_bus().clone(),
+        Arc::new(storage.branches_impl().clone()),
+    );
+    applicator.apply_operation(&op_with_revision).await.unwrap();
+
+    storage
+        .branches_impl()
+        .update_head("tenant1", "repo1", "main", revision)
+        .await
+        .unwrap();
+}

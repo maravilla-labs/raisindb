@@ -247,6 +247,7 @@ impl RocksDBStorage {
             job_data_store: job_data_store.clone(),
             job_metadata_store: job_metadata_store.clone(),
             job_dispatcher: Arc::new(std::sync::RwLock::new(None)), // Set after init_job_system()
+            worker_pool: Arc::new(std::sync::RwLock::new(None)),    // Set after init_job_system()
             virtual_mount_sync: Arc::new(std::sync::RwLock::new(None)), // Set after init_job_system()
             index_lock_manager: Arc::new(crate::jobs::IndexLockManager::new()),
             fulltext_error_counter: crate::jobs::handlers::FulltextErrorCounter::new(),

@@ -99,6 +99,38 @@ pub trait EmbeddingProvider: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// Upstream failure reporting
+// ---------------------------------------------------------------------------
+//
+// Every provider below reports a failed call through these two constructors,
+// so a caller can ask WHOSE fault it was without parsing a message. That
+// question is not cosmetic: the embedding job's circuit breaker parks every
+// tenant's jobs on an upstream fault and must park none of them on ours, and
+// `Error::Backend("OpenAI API error 503: ...")` left it grepping for a wording
+// nobody would think to preserve. See `Error::is_upstream_fault`.
+
+/// The upstream answered, with a status that is not a success.
+fn upstream_status_error(upstream: &str, status: reqwest::StatusCode, message: String) -> Error {
+    Error::Upstream {
+        upstream: upstream.to_string(),
+        status: Some(status.as_u16()),
+        message,
+    }
+}
+
+/// The request never got an answer — connect refused, DNS, TLS, timeout.
+///
+/// `status: None` says exactly that, and it is unconditionally an upstream
+/// fault: there is no response to attribute to our request.
+fn upstream_transport_error(upstream: &str, err: &reqwest::Error) -> Error {
+    Error::Upstream {
+        upstream: upstream.to_string(),
+        status: None,
+        message: err.to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // OpenAI
 // ---------------------------------------------------------------------------
 
@@ -199,7 +231,7 @@ impl EmbeddingProvider for OpenAIProvider {
             .json(&request)
             .send()
             .await
-            .map_err(|e| Error::Backend(format!("OpenAI API request failed: {}", e)))?;
+            .map_err(|e| upstream_transport_error("OpenAI", &e))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -208,10 +240,7 @@ impl EmbeddingProvider for OpenAIProvider {
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
             let error_message = Self::extract_error_message(&error_text);
-            return Err(Error::Backend(format!(
-                "OpenAI API error {}: {}",
-                status, error_message
-            )));
+            return Err(upstream_status_error("OpenAI", status, error_message));
         }
 
         let response_data: OpenAIEmbeddingResponse = response
@@ -242,7 +271,7 @@ impl EmbeddingProvider for OpenAIProvider {
             .json(&request)
             .send()
             .await
-            .map_err(|e| Error::Backend(format!("OpenAI API request failed: {}", e)))?;
+            .map_err(|e| upstream_transport_error("OpenAI", &e))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -251,10 +280,7 @@ impl EmbeddingProvider for OpenAIProvider {
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
             let error_message = Self::extract_error_message(&error_text);
-            return Err(Error::Backend(format!(
-                "OpenAI API error {}: {}",
-                status, error_message
-            )));
+            return Err(upstream_status_error("OpenAI", status, error_message));
         }
 
         let response_data: OpenAIEmbeddingResponse = response
@@ -381,7 +407,7 @@ impl EmbeddingProvider for VoyageProvider {
             .json(&request)
             .send()
             .await
-            .map_err(|e| Error::Backend(format!("Voyage AI API request failed: {}", e)))?;
+            .map_err(|e| upstream_transport_error("Voyage AI", &e))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -390,10 +416,7 @@ impl EmbeddingProvider for VoyageProvider {
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
             let error_message = Self::extract_error_message(&error_text);
-            return Err(Error::Backend(format!(
-                "Voyage AI API error {}: {}",
-                status, error_message
-            )));
+            return Err(upstream_status_error("Voyage AI", status, error_message));
         }
 
         let response_data: VoyageEmbeddingResponse = response
@@ -424,7 +447,7 @@ impl EmbeddingProvider for VoyageProvider {
             .json(&request)
             .send()
             .await
-            .map_err(|e| Error::Backend(format!("Voyage AI API request failed: {}", e)))?;
+            .map_err(|e| upstream_transport_error("Voyage AI", &e))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -433,10 +456,7 @@ impl EmbeddingProvider for VoyageProvider {
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
             let error_message = Self::extract_error_message(&error_text);
-            return Err(Error::Backend(format!(
-                "Voyage AI API error {}: {}",
-                status, error_message
-            )));
+            return Err(upstream_status_error("Voyage AI", status, error_message));
         }
 
         let response_data: VoyageEmbeddingResponse = response
@@ -562,7 +582,7 @@ impl EmbeddingProvider for OllamaProvider {
             .json(&request)
             .send()
             .await
-            .map_err(|e| Error::Backend(format!("Ollama API request failed: {}", e)))?;
+            .map_err(|e| upstream_transport_error("Ollama", &e))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -571,10 +591,7 @@ impl EmbeddingProvider for OllamaProvider {
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
             let error_message = Self::extract_error_message(&error_text);
-            return Err(Error::Backend(format!(
-                "Ollama API error {}: {}",
-                status, error_message
-            )));
+            return Err(upstream_status_error("Ollama", status, error_message));
         }
 
         let response_data: OllamaEmbedResponse = response
@@ -606,7 +623,7 @@ impl EmbeddingProvider for OllamaProvider {
             .json(&request)
             .send()
             .await
-            .map_err(|e| Error::Backend(format!("Ollama API request failed: {}", e)))?;
+            .map_err(|e| upstream_transport_error("Ollama", &e))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -615,10 +632,7 @@ impl EmbeddingProvider for OllamaProvider {
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
             let error_message = Self::extract_error_message(&error_text);
-            return Err(Error::Backend(format!(
-                "Ollama API error {}: {}",
-                status, error_message
-            )));
+            return Err(upstream_status_error("Ollama", status, error_message));
         }
 
         let response_data: OllamaEmbedResponse = response

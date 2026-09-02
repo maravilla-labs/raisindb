@@ -7,5 +7,9 @@
 
 mod content_extraction;
 mod handler;
+mod upstream;
+
+#[cfg(test)]
+mod tests;
 
 pub use handler::{EmbeddingJobHandler, EXTRACTED_TEXT_SPEC};

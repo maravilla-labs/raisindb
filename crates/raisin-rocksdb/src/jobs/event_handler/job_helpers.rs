@@ -57,6 +57,23 @@ impl UnifiedJobEventHandler {
         // burst now produces cost a row write each and no provider call — while
         // the collapse they replace cost a permanently missing embedding.
         //
+        // # …and that cost argument holds only while the embedder is HEALTHY
+        //
+        // "A row write each and no provider call" assumes there is a prior good
+        // vector to carry forward. During an upstream outage there is not: the
+        // first run stores nothing, so every subsequent revision's run finds
+        // nothing to carry, calls the provider, and becomes a full retry cycle
+        // against a dead endpoint. The tradeoff is correct in the healthy case
+        // and silently INVERTS in exactly the case that hurts — 2026-09-02, 257
+        // re-opened assets, 2,512 attempts, 3 successes.
+        //
+        // The dedup key is deliberately NOT the fix for that (narrowing it
+        // brings back the permanently missing embedding above). The upstream
+        // circuit breaker is: with the breaker open, a fresh job PARKS before
+        // doing any work instead of attempting, so N revisions of a node
+        // produce N parked jobs and zero provider calls. See
+        // `crate::jobs::circuit_breaker`.
+        //
         // Only this job type is keyed on the revision. The others here are
         // either not revision-scoped or genuinely idempotent per node, and
         // widening the rule to them would multiply job volume for no

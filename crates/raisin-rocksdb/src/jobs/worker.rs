@@ -513,7 +513,43 @@ async fn execute_handler_task(
         Err(e) => {
             let error_msg = extract_clean_error_message(&e);
 
-            if job.retry_count < job.max_retries {
+            // PARK, don't retry: the handler declined to attempt the work at
+            // all because an upstream's circuit breaker is open.
+            //
+            // This is the job system's answer to the question the flow runtime
+            // answers with `FlowError::is_infrastructural` — an error about the
+            // DELIVERY of work rather than about the work must be redelivered,
+            // not counted against it. Retrying here would spend the job's whole
+            // budget (1 + 3 attempts, ~2 minutes) inside an outage that lasts
+            // longer, and turn a recoverable backlog into permanent failures
+            // across every tenant at once. Nothing was attempted, so nothing
+            // failed.
+            //
+            // The permit is already released by the time this runs, and the
+            // handler returned before doing any of the expensive work, so a
+            // parked job costs one config read and one decrypt — not a chunked
+            // document.
+            if e.is_upstream_unavailable() {
+                let retry_after = e
+                    .upstream_retry_after()
+                    .unwrap_or_else(|| std::time::Duration::from_secs(30));
+                tracing::info!(
+                    job_id = %job.id,
+                    job_type = %job.job_type,
+                    retry_count = job.retry_count,
+                    retry_after_secs = retry_after.as_secs(),
+                    reason = %error_msg,
+                    "Upstream unavailable, parking job without consuming a retry"
+                );
+                if let Err(park_err) = job_registry.park_job(&job.id, error_msg, retry_after).await
+                {
+                    tracing::warn!(
+                        job_id = %job.id,
+                        error = %park_err,
+                        "Failed to park job"
+                    );
+                }
+            } else if job.retry_count < job.max_retries {
                 tracing::warn!(
                     job_id = %job.id,
                     job_type = %job.job_type,

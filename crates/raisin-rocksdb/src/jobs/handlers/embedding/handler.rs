@@ -4,6 +4,8 @@
 //! embedding generation, deletion, and branch copy operations.
 
 use super::content_extraction::{extract_embeddable_content, hash_text};
+use super::upstream::upstream_key;
+use crate::jobs::circuit_breaker::CircuitBreakerRegistry;
 use crate::jobs::handlers::fulltext::IndexPlanCache;
 use crate::RocksDBStorage;
 use raisin_embeddings::config::TenantEmbeddingConfig;
@@ -51,6 +53,13 @@ pub struct EmbeddingJobHandler {
     /// Per-type vector indexing plan cache, shared across nodes for the handler's
     /// lifetime (resolved for `IndexType::Vector`; never collides with fulltext).
     plan_cache: Arc<IndexPlanCache>,
+    /// Upstream circuit breakers.
+    ///
+    /// Defaults to the PROCESS-WIDE registry, because the sharing is the whole
+    /// feature: a per-handler breaker would mean each population of jobs
+    /// rediscovering the same outage. Only tests substitute their own, via
+    /// [`EmbeddingJobHandler::with_breakers`].
+    breakers: Arc<CircuitBreakerRegistry>,
 }
 
 impl EmbeddingJobHandler {
@@ -65,7 +74,22 @@ impl EmbeddingJobHandler {
             hnsw_engine,
             master_key,
             plan_cache: Arc::new(IndexPlanCache::new()),
+            breakers: Arc::clone(CircuitBreakerRegistry::global()),
         }
+    }
+
+    /// Same handler, against a caller-supplied breaker registry.
+    ///
+    /// For tests, which must neither observe nor pollute the process-wide
+    /// registry — a breaker opened by one test would park the next one.
+    pub fn with_breakers(mut self, breakers: Arc<CircuitBreakerRegistry>) -> Self {
+        self.breakers = breakers;
+        self
+    }
+
+    /// The breakers this handler consults, for an admin surface to read.
+    pub fn breakers(&self) -> &Arc<CircuitBreakerRegistry> {
+        &self.breakers
     }
 
     /// Handle embedding generation job
@@ -121,6 +145,47 @@ impl EmbeddingJobHandler {
         let resolved = self
             .resolve_embedding_provider(&config, &context.tenant_id)
             .await?;
+
+        // ── THE BREAKER GATE ────────────────────────────────────────────────
+        //
+        // Everything below this line is expensive: fetching the node, resolving
+        // its index plan, reading the extraction artifact, resolving the
+        // chunking rules, and then TOKENIZING AND CHUNKING the text — which for
+        // a 40-page document is the bulk of a job's CPU. In the 2026-09-02
+        // incident all of that ran 2,512 times against an upstream that was
+        // returning 503, because the cheap failure happened LAST.
+        //
+        // So the gate is here, as early as it can possibly be: the resolution
+        // above is the first point at which the upstream's identity is known,
+        // and it costs a config read and one decrypt. It deliberately sits
+        // BEFORE `resolved.build()` too — the client is cheap to construct, but
+        // "before the expensive work" is a property that is easier to keep if
+        // nothing at all happens between knowing the key and asking.
+        //
+        // An `Err` here is `Error::UpstreamUnavailable`, which the job worker
+        // PARKS on rather than retries: nothing was attempted, so nothing
+        // failed, and burning a retry on an attempt that never happened is how
+        // an outage turns 257 recoverable jobs into 257 permanently failed
+        // ones.
+        let upstream = upstream_key(&resolved);
+        if let Err(parked) = self.breakers.admit(&upstream) {
+            // Tell this TENANT its work is paused, and tell only this tenant.
+            //
+            // The breaker is keyed by upstream and shared across every tenant
+            // on the box; the tenant-visible `degraded` bit is not. Tying it to
+            // the PARK rather than to "some breaker is open" is what keeps a
+            // tenant with nothing in flight — or one that does not embed at all
+            // — from seeing a banner claiming their processing is paused, which
+            // for them would be false. The park is the exact moment the claim
+            // becomes true.
+            //
+            // `upstream` is passed by value, not rebuilt: a key derived a
+            // second time could drift from the one actually dialled, and the
+            // node would then report healthy straight through an outage with no
+            // error anywhere.
+            crate::jobs::activity::JobActivityTracker::global().record_parked(context, &upstream);
+            return Err(parked);
+        }
 
         // Build the client from the resolution rather than from loose parts:
         // `base_url` and `dimensions` are both load-bearing for any endpoint
@@ -212,6 +277,7 @@ impl EmbeddingJobHandler {
                 &embedder_id,
                 chunking.as_ref(),
                 provider.as_ref(),
+                &upstream,
                 context,
             )
             .await?;
@@ -293,8 +359,17 @@ impl EmbeddingJobHandler {
         embedder_id: &raisin_ai::config::EmbedderId,
         chunking: Option<&raisin_ai::config::ChunkingConfig>,
         provider: &dyn raisin_embeddings::EmbeddingProviderTrait,
+        upstream: &str,
         context: &JobContext,
     ) -> Result<()> {
+        // A SECOND gate, and not a redundant one. `handle_generate` admits the
+        // job once; a node with two specs then chunks twice, and if the first
+        // spec's provider call was the one that tripped the breaker, the second
+        // must not go on to chunk a 40-page document for a call that will not
+        // be made. `check` is read-only — it never claims the half-open probe,
+        // so a job cannot lock itself out halfway through its own attempt.
+        self.breakers.check(upstream)?;
+
         let spec = task.spec;
         let text = &task.text;
 
@@ -549,10 +624,37 @@ impl EmbeddingJobHandler {
                 // That is a 400, not a slow request — the job fails, retries and
                 // fails forever, so the document's vectors are never written
                 // while the default spec's single filename vector is.
-                let mut generated = if chunk_texts.len() > 1 {
-                    provider.generate_embeddings_for_all(&chunk_texts).await?
+                //
+                // The breaker is told the OUTCOME here, and nowhere else. This
+                // is the only line in the job that actually talks to the
+                // upstream, so it is the only line that has evidence about the
+                // upstream's health — recording anywhere else would be
+                // recording a guess. Note that `record_failure` classifies via
+                // `Error::is_upstream_fault`, so a 4xx passes through it
+                // without opening anything.
+                let outcome = if chunk_texts.len() > 1 {
+                    provider.generate_embeddings_for_all(&chunk_texts).await
                 } else {
-                    vec![provider.generate_embedding(&chunk_texts[0]).await?]
+                    provider
+                        .generate_embedding(&chunk_texts[0])
+                        .await
+                        .map(|v| vec![v])
+                };
+                let mut generated = match outcome {
+                    Ok(vectors) => {
+                        self.breakers.record_success(upstream);
+                        // The tenant's work is moving again. Clearing on the
+                        // first success rather than waiting for the publisher's
+                        // periodic re-check is what makes the banner disappear
+                        // when the outage ends, not up to a tick later.
+                        crate::jobs::activity::JobActivityTracker::global()
+                            .record_upstream_ok(context, upstream);
+                        vectors
+                    }
+                    Err(e) => {
+                        self.breakers.record_failure(upstream, &e);
+                        return Err(e);
+                    }
                 };
                 for emb in &mut generated {
                     *emb = raisin_hnsw::normalize_vector(emb);

@@ -343,6 +343,32 @@ where
     }
 }
 
+/// Job-system health: upstream circuit breakers and per-category pool
+/// saturation.
+///
+/// Read-only, and deliberately not tenant-filtered — a breaker is keyed by
+/// upstream and parks every tenant at once, and the pools belong to the
+/// process. What the caller learns is that the machine is unwell, which is
+/// what the 2026-09-02 incident took a CPU graph to discover.
+///
+/// Sits on the same tenant-authenticated router as the rest of
+/// `/management/jobs/*`; there is nothing here to leak between tenants beyond
+/// an upstream's name and its own error text.
+pub async fn get_job_system_health<S>(
+    State(state): State<ManagementState<S>>,
+) -> Result<Json<ApiResponse<raisin_storage::JobSystemHealth>>, StatusCode>
+where
+    S: BackgroundJobs + Send + Sync,
+{
+    match state.storage.get_job_system_health().await {
+        Ok(health) => Ok(Json(ApiResponse::ok(health))),
+        Err(e) => {
+            tracing::error!("Failed to get job system health: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
 /// Purge all jobs from persistent storage for the request's tenant.
 pub async fn purge_all_jobs<S>(
     State(state): State<ManagementState<S>>,

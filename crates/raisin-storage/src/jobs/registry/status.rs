@@ -275,6 +275,105 @@ impl JobRegistry {
         handles.remove(job_id);
     }
 
+    /// PARK a job: reschedule it without counting an attempt.
+    ///
+    /// The distinction this exists to draw is the one the flow runtime draws
+    /// with `FlowError::is_infrastructural` — an error that describes the
+    /// DELIVERY of the work rather than the work itself must be redelivered,
+    /// not counted as a failure of the work. The job system had no equivalent:
+    /// every `Err` from a handler went through [`Self::schedule_retry`] and
+    /// incremented `retry_count`, so there was no way to say "this was never
+    /// attempted".
+    ///
+    /// That gap is what made an upstream outage destructive rather than merely
+    /// slow. With a dead embedding provider, each job burned its whole budget
+    /// (1 initial + 3 retries, `10s/30s/60s` apart) inside about two minutes
+    /// and was then `Failed` permanently — while the outage lasted for
+    /// minutes more. Parking instead means the work survives the outage and
+    /// runs when the upstream returns.
+    ///
+    /// # Deliberately unbounded
+    ///
+    /// A job can park indefinitely, because the alternative — a park budget —
+    /// is just a slower version of the same permanent failure, and the length
+    /// of an outage is not something the job can know. What bounds the queue
+    /// instead is the registry's existing capacity valve and sweep, and what
+    /// makes the state legible is the breaker's own status
+    /// (`CircuitBreakerRegistry::statuses`). A breaker that is open and
+    /// invisible is a silent stall, which is why §D of
+    /// `docs/plans/fair-job-scheduling.md` pairs this with an admin surface.
+    ///
+    /// `retry_after` normally comes from the breaker's next probe time, so the
+    /// parked fleet wakes just as the upstream is next tested rather than
+    /// polling it.
+    pub async fn park_job(
+        &self,
+        job_id: &JobId,
+        reason: String,
+        retry_after: std::time::Duration,
+    ) -> Result<()> {
+        let (job_info, old_status) = {
+            let mut jobs = self.jobs.write().await;
+
+            let Some(job) = jobs.get_mut(job_id) else {
+                return Err(RaisinError::NotFound(format!("Job {:?} not found", job_id)));
+            };
+            if matches!(
+                job.status,
+                JobStatus::Completed | JobStatus::Failed(_) | JobStatus::Cancelled
+            ) {
+                return Err(RaisinError::Validation(format!(
+                    "Cannot park terminal job {} in status {:?}",
+                    job_id, job.status
+                )));
+            }
+
+            let old = job.status.clone();
+            // NOT `retry_count += 1` — that is the entire point.
+            job.status = JobStatus::Scheduled;
+            job.error = Some(reason.clone());
+            job.last_heartbeat = None;
+            job.executing_since = None;
+            job.cancel_token = Some(std::sync::Arc::new(
+                tokio_util::sync::CancellationToken::new(),
+            ));
+            job.next_retry_at = Some(
+                Utc::now()
+                    + chrono::Duration::from_std(retry_after)
+                        .unwrap_or_else(|_| chrono::Duration::seconds(60)),
+            );
+
+            tracing::info!(
+                job_id = %job_id,
+                retry_count = job.retry_count,
+                retry_after_secs = retry_after.as_secs(),
+                next_retry_at = ?job.next_retry_at,
+                reason = %reason,
+                "Parked job — not attempted, retry budget untouched"
+            );
+
+            (job.to_job_info(), Some(old))
+        };
+
+        if let Some(persistence) = &self.persistence {
+            if let Err(e) = persistence.persist_job(job_id, &job_info).await {
+                tracing::error!(job_id = %job_id, error = %e, "Failed to persist parked state");
+                return Err(e);
+            }
+        }
+
+        let event = JobEvent {
+            job_id: job_id.clone(),
+            job_info,
+            old_status,
+            new_status: JobStatus::Scheduled,
+            timestamp: Utc::now(),
+        };
+        self.monitors.broadcast_update(event).await;
+
+        Ok(())
+    }
+
     /// Schedule a job retry after failure
     ///
     /// Increments retry count, resets status to Scheduled, and stores the error.
