@@ -86,6 +86,16 @@ pub async fn map_item(
     ctx: &SyncCtx<'_>,
     item: &ExternalItem,
 ) -> std::result::Result<Option<MappedItem>, AdapterError> {
+    // Normalize BEFORE either branch, so the built-in mapping and every custom
+    // `mapping_function` see the same item. A provider that omits the mimetype
+    // (Graph does, for Office formats) otherwise produces a node no processing
+    // rule can match — synced, browsable, and invisible to extraction,
+    // thumbnails and embedding, with no error anywhere. See
+    // `ExternalItem::ensure_mime_type`.
+    let mut normalized = item.clone();
+    normalized.ensure_mime_type();
+    let item = &normalized;
+
     let Some(mapper) = &ctx.mount.mapping_function else {
         return Ok(Some(MappedItem {
             node: default_mapping(item),

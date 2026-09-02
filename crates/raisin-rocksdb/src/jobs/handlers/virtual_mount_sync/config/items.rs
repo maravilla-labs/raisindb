@@ -43,6 +43,42 @@ pub struct ExternalItem {
     pub metadata: Option<Value>,
 }
 
+impl ExternalItem {
+    /// Fill `mime_type` from the filename when the provider did not supply one.
+    ///
+    /// # Why the engine and not each adapter
+    ///
+    /// EVERYTHING downstream keys off the mimetype: processing rules match on
+    /// it, so no mime means no rule, which means no task planned, no extraction
+    /// artifact recorded, and a thumbnail request that answers
+    /// `not_thumbnailable`. The file is synced and browsable and silently
+    /// invisible to the whole pipeline — no error anywhere, because "no rule
+    /// matched" is a legitimate outcome.
+    ///
+    /// Measured on one OneDrive mount: Graph returns no `file.mimeType` for
+    /// Office formats, so all nine `.docx` / `.xlsx` items had NO
+    /// `__extract_status` at all while every PDF, image and text file beside
+    /// them had one. Perfect correlation with the mime being absent.
+    ///
+    /// Putting the fallback in the ms-graph adapter would fix those nine and
+    /// leave Drive, IMAP and every connector written later to rediscover it —
+    /// the mirrored-implementation trap this codebase keeps paying for. The
+    /// engine normalizes once, before mapping, so the built-in mapping and
+    /// every custom `mapping_function` (which receives this struct serialized)
+    /// inherit it.
+    ///
+    /// A provider-supplied value always wins: it knows things an extension
+    /// cannot, and this is a fallback, not a correction. Folders never get one.
+    pub fn ensure_mime_type(&mut self) {
+        if self.is_folder || self.mime_type.is_some() {
+            return;
+        }
+        if let Some(guess) = mime_guess::from_path(&self.name).first() {
+            self.mime_type = Some(guess.essence_str().to_string());
+        }
+    }
+}
+
 /// One entry in a `get_changes` feed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Change {
@@ -249,5 +285,80 @@ pub fn default_mapping(item: &ExternalItem) -> MappedNode {
             name: Some(item.name.clone()),
             properties: props,
         }
+    }
+}
+
+#[cfg(test)]
+mod mime_fallback_tests {
+    use super::*;
+
+    fn item(name: &str, mime: Option<&str>, is_folder: bool) -> ExternalItem {
+        ExternalItem {
+            external_id: "x".into(),
+            name: name.into(),
+            mime_type: mime.map(str::to_string),
+            size_bytes: None,
+            is_folder,
+            parent_id: None,
+            created_at: None,
+            modified_at: None,
+            etag: None,
+            web_url: None,
+            download_url: None,
+            metadata: None,
+        }
+    }
+
+    /// The case that made nine synced Office files invisible to the pipeline.
+    #[test]
+    fn office_extensions_get_a_mime_when_the_provider_omits_one() {
+        let mut d = item("SOLUTAS-GMBH-STATUTEN-V01.docx", None, false);
+        d.ensure_mime_type();
+        assert_eq!(
+            d.mime_type.as_deref(),
+            Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        );
+
+        let mut x = item("Telefonliste.xlsx", None, false);
+        x.ensure_mime_type();
+        assert_eq!(
+            x.mime_type.as_deref(),
+            Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        );
+    }
+
+    /// A fallback, never a correction: the provider knows things we cannot.
+    #[test]
+    fn a_provider_supplied_mime_is_never_overwritten() {
+        let mut i = item("weird.docx", Some("application/octet-stream"), false);
+        i.ensure_mime_type();
+        assert_eq!(i.mime_type.as_deref(), Some("application/octet-stream"));
+    }
+
+    /// What the fallback actually resolves, printed so the coverage is a fact
+    /// rather than an assumption. Every Office family the rules match must land
+    /// on a mime one of them recognises.
+    #[test]
+    fn office_family_coverage() {
+        for name in [
+            "a.docx", "a.xlsx", "a.pptx", "a.doc", "a.xls", "a.ppt", "a.odt", "a.ods", "a.odp",
+            "a.rtf", "a.csv", "a.md", "a.pdf", "a.msg", "a.eml", "a.zip", "a.mp4", "a.mov",
+            "a.heic", "a.tiff", "a.webp",
+        ] {
+            let mut i = item(name, None, false);
+            i.ensure_mime_type();
+            println!("{name:>8} -> {:?}", i.mime_type);
+        }
+    }
+
+    #[test]
+    fn folders_and_extensionless_names_stay_bare() {
+        let mut f = item("Gründung", None, true);
+        f.ensure_mime_type();
+        assert!(f.mime_type.is_none());
+
+        let mut n = item("README", None, false);
+        n.ensure_mime_type();
+        assert!(n.mime_type.is_none());
     }
 }
