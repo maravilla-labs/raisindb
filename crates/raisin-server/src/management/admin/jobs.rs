@@ -74,3 +74,30 @@ pub async fn force_fail_stuck_global(
         }
     }
 }
+
+/// The whole job-system picture: upstream breakers, category pools, and
+/// per-tenant queue depth.
+///
+/// Superadmin-only, and that is the point of it existing separately. Every
+/// field is cross-tenant: a breaker is keyed by UPSTREAM and shared by every
+/// tenant on the host, so its hostname, failure streak and probe timer describe
+/// other tenants' traffic; the pools count everyone's work at once; and the
+/// tenant rows name tenants outright. The per-tenant route
+/// `GET /management/jobs/health` answers a reduced shape — one degraded bit and
+/// the caller's own queue depth — because it is reachable by a tenant admin.
+///
+/// Read entirely from live process state (breaker registry, pool atomics,
+/// scheduler queues), so it costs no storage reads and a dashboard may poll it.
+/// Per PROCESS, like the pools and the breakers themselves: on a cluster this
+/// is the answering node's view, not the fleet's.
+pub async fn get_job_system_health_global(
+    State(state): State<ManagementState<raisin_rocksdb::RocksDBStorage>>,
+) -> Result<Json<ApiResponse<raisin_storage::JobSystemHealth>>, StatusCode> {
+    match state.storage.get_job_system_health().await {
+        Ok(health) => Ok(Json(ApiResponse::ok(health))),
+        Err(e) => {
+            tracing::error!(error = %e, "Superadmin: failed to read job system health");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}

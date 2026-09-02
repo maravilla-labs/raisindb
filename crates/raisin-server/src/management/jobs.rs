@@ -343,27 +343,37 @@ where
     }
 }
 
-/// Job-system health: upstream circuit breakers and per-category pool
-/// saturation.
+/// This tenant's background-processing health: one degraded bit and this
+/// tenant's own queue depth.
 ///
-/// Read-only, and deliberately not tenant-filtered — a breaker is keyed by
-/// upstream and parks every tenant at once, and the pools belong to the
-/// process. What the caller learns is that the machine is unwell, which is
-/// what the 2026-09-02 incident took a CPU graph to discover.
+/// # Why this is not the operator view
 ///
-/// Sits on the same tenant-authenticated router as the rest of
-/// `/management/jobs/*`; there is nothing here to leak between tenants beyond
-/// an upstream's name and its own error text.
-pub async fn get_job_system_health<S>(
+/// It used to be. This route sits behind `ensure_tenant_middleware` +
+/// `require_admin_auth_middleware`, so a TENANT ADMIN reaches it — and it was
+/// returning upstream hostnames, per-breaker failure streaks, probe timers and
+/// host-wide pool saturation. A breaker is shared by every tenant on the box,
+/// so its failure streak and its next-probe time are a fingerprint of other
+/// tenants' traffic against that provider; the pools count everyone's work.
+/// None of it is a tenant's business, and none of it is anything a tenant can
+/// act on.
+///
+/// The full picture lives at `GET /management/admin/jobs/health`, behind the
+/// superadmin token. Same question, different reader.
+pub async fn get_tenant_job_health<S>(
     State(state): State<ManagementState<S>>,
-) -> Result<Json<ApiResponse<raisin_storage::JobSystemHealth>>, StatusCode>
+    Extension(tenant_info): Extension<TenantInfo>,
+) -> Result<Json<ApiResponse<raisin_storage::TenantJobHealth>>, StatusCode>
 where
     S: BackgroundJobs + Send + Sync,
 {
-    match state.storage.get_job_system_health().await {
+    match state
+        .storage
+        .get_tenant_job_health(&tenant_info.tenant_id)
+        .await
+    {
         Ok(health) => Ok(Json(ApiResponse::ok(health))),
         Err(e) => {
-            tracing::error!("Failed to get job system health: {}", e);
+            tracing::error!("Failed to get tenant job health: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }

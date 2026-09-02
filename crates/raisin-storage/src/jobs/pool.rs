@@ -75,4 +75,10 @@ pub struct CategoryPoolStats {
     pub queue_depth_low: usize,
     /// Number of dispatcher workers
     pub dispatcher_workers: usize,
+    /// Tenants with work queued in this pool right now — the length of one
+    /// scheduling round, and therefore the worst-case wait (in turns) a new
+    /// job faces. Operator-only: it counts OTHER tenants, so it is served from
+    /// the superadmin route and never from the per-tenant one.
+    #[serde(default)]
+    pub active_tenants: usize,
 }

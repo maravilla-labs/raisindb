@@ -5,7 +5,7 @@ import FunctionExecutionCard from '../../components/management/FunctionExecution
 import FlowExecutionCard from '../../components/management/FlowExecutionCard'
 import TriggerEvaluationCard, { TriggerEvaluationReport } from '../../components/management/TriggerEvaluationCard'
 import ErrorDetails from '../../components/management/ErrorDetails'
-import JobSystemHealthCard from '../../components/management/JobSystemHealthCard'
+import TenantJobHealthCard from '../../components/management/TenantJobHealthCard'
 import { managementApi, JobInfo, JobEvent, JobLogEvent, JobQueueStats, sseManager, formatJobType, formatDuration } from '../../api/management'
 import ConfirmDialog from '../../components/ConfirmDialog'
 import { useToast, ToastContainer } from '../../components/Toast'
@@ -581,7 +581,7 @@ export default function JobsManagement() {
       {/* Upstream breakers + pool saturation. Above the queue panel on purpose:
           a parked queue and an empty one look the same, and only this card says
           which one you are looking at. */}
-      <JobSystemHealthCard />
+      <TenantJobHealthCard />
 
       {/* Queue Status Panel */}
       {queueStats && (

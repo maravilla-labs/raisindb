@@ -74,7 +74,8 @@ pub use management::{
     CompactionStats, HealthCheck, HealthLevel, HealthStatus, IndexHealth, IndexIssue,
     IndexManagement, IndexReport, IndexStatus, IndexType, IntegrityReport, Issue, JobQueueStats,
     JobSystemHealth, ManagementOps, Metrics, OptimizeStats, PersistedStats, QueueDepthStats,
-    RebuildStats, RepairResult, RestoreStats, WorkerStats,
+    RebuildStats, RepairResult, RestoreStats, TenantJobHealth, TenantQueueDepth, TenantQueueHealth,
+    WorkerStats,
 };
 
 // Re-export job types from the new jobs module

@@ -203,34 +203,31 @@ export interface JobQueueStats {
 }
 
 /**
- * Job-system health: upstream circuit breakers plus per-category pool
- * saturation. Answers "is anything stuck, and why" — the question the
- * 2026-09-02 embedding outage took a host CPU graph to answer.
+ * What a TENANT admin is told about background processing: is my work
+ * degraded, and how much of it is waiting.
+ *
+ * Deliberately NOT the operator shape. The breaker keys, failure streaks,
+ * probe timers and host-wide pool saturation this card used to render are
+ * shared across every tenant on the host — an upstream's failure streak is a
+ * fingerprint of other tenants' traffic against it. They now live behind the
+ * superadmin token at `/management/admin/jobs/health`, which this console does
+ * not hold.
  */
-export interface JobSystemHealth {
-  breakers: BreakerHealth[]
-  pools: CategoryPoolStats[]
+export interface TenantJobHealth {
+  /** This tenant has work parked against an upstream that is currently down.
+   *  Derived from work THIS tenant parked, not from "a breaker is open
+   *  somewhere" — so an unaffected tenant is never alarmed by someone else's
+   *  outage. */
+  degraded: boolean
+  queued: TenantQueueDepth
 }
 
-export interface BreakerHealth {
-  /** The upstream this breaker guards, e.g. an embedding provider. */
-  key: string
-  state: 'closed' | 'open' | 'half_open'
-  consecutive_failures: number
-  last_error?: string | null
-  /** Seconds until a probe is allowed. Null unless the breaker is open. */
-  next_probe_in_secs?: number | null
-}
-
-export interface CategoryPoolStats {
-  category: string
-  active_handler_tasks: number
-  handler_permits_available: number
-  handler_permits_max: number
-  queue_depth_high: number
-  queue_depth_normal: number
-  queue_depth_low: number
-  dispatcher_workers: number
+export interface TenantQueueDepth {
+  high: number
+  normal: number
+  low: number
+  /** Sum of the three, computed server-side so the two cannot drift. */
+  total: number
 }
 
 export interface HistoryBackfillResponse {
@@ -432,8 +429,8 @@ export const managementApi = {
   getJobQueueStats: () =>
     api.get<ApiResponse<JobQueueStats>>('/management/jobs/stats'),
 
-  getJobSystemHealth: () =>
-    api.get<ApiResponse<JobSystemHealth>>('/management/jobs/health'),
+  getTenantJobHealth: () =>
+    api.get<ApiResponse<TenantJobHealth>>('/management/jobs/health'),
 
   backfillJobHistory: (cursor?: string) =>
     api.post<ApiResponse<HistoryBackfillResponse>>(

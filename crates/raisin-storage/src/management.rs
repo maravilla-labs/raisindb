@@ -188,18 +188,23 @@ pub trait BackgroundJobs: Send + Sync {
         ))
     }
 
-    /// Job-system health for the operator console: upstream circuit breakers
-    /// and per-category pool saturation.
+    /// What ONE tenant may be told about background processing.
     ///
-    /// Deliberately NOT tenant-scoped, and deliberately separate from
-    /// [`Self::get_job_queue_stats`]. A breaker is keyed by UPSTREAM and parks
-    /// every tenant's jobs at once, so there is no per-tenant answer to give;
-    /// and the pools are the process's, not a tenant's. What a tenant learns
-    /// here is that the machine is unwell, which is the point — the incident
-    /// this exists for was invisible from inside any one tenant's job list.
-    async fn get_job_system_health(&self) -> Result<JobSystemHealth> {
+    /// The operator picture — breaker keys, failure streaks, probe timers,
+    /// host-wide pool saturation — lives on [`BackgroundJobsInternal`] and is
+    /// reachable only through the superadmin subtree. It cannot be served here
+    /// however convenient it is: a breaker is keyed by UPSTREAM and shared by
+    /// every tenant on the box, so its hostname, its consecutive-failure count
+    /// and its next-probe time are a fingerprint of OTHER tenants' traffic
+    /// against that provider, and the pools count every tenant's work at once.
+    /// Handing that to a tenant admin is a cross-tenant disclosure through a
+    /// route that merely looks like a status check.
+    ///
+    /// So the answer is reduced to the two things a tenant can act on: is MY
+    /// processing degraded, and how much of MY work is waiting.
+    async fn get_tenant_job_health(&self, _tenant: &str) -> Result<TenantJobHealth> {
         Err(raisin_error::Error::Validation(
-            "get_job_system_health not supported by this storage backend".to_string(),
+            "get_tenant_job_health not supported by this storage backend".to_string(),
         ))
     }
 
@@ -238,14 +243,26 @@ pub trait BackgroundJobsInternal: Send + Sync {
 
     /// Restore pending jobs from persistent storage at startup.
     async fn restore_pending_jobs(&self) -> Result<()>;
+
+    /// The whole job-system picture for the operator dashboard: every upstream
+    /// breaker, every category pool, and per-tenant queue depth.
+    ///
+    /// On this trait — not on [`BackgroundJobs`] — because every field of it is
+    /// cross-tenant by construction, and this trait is the one whose contract
+    /// says so and whose routes are superadmin-gated.
+    async fn get_job_system_health(&self) -> Result<JobSystemHealth>;
 }
 
-/// The read model behind `GET /management/jobs/health`.
+/// The read model behind `GET /management/admin/jobs/health` — OPERATOR ONLY.
 ///
 /// Answers one question: is anything stuck, and why. The breakers say why work
 /// is not being attempted; the pools say whether it is queued behind a full
-/// machine. Neither alone distinguishes "upstream is down" from "we are busy",
+/// machine; the tenant rows say whose work it is. No one of them distinguishes
+/// "upstream is down" from "we are busy" from "one tenant is flooding the box",
 /// which is exactly the confusion that cost an operator half an hour.
+///
+/// Every field here is cross-tenant. This shape must never be served from a
+/// per-tenant route; see [`TenantJobHealth`] for what a tenant is told.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobSystemHealth {
     /// One entry per upstream this process has touched, sorted by key.
@@ -254,6 +271,76 @@ pub struct JobSystemHealth {
     /// (an embedded or test storage) rather than absent, so a reader never has
     /// to tell "no pools" from "field missing".
     pub pools: Vec<crate::jobs::CategoryPoolStats>,
+    /// One entry per (tenant, category) with work queued right now, sorted by
+    /// category then tenant. A tenant with an empty queue does not appear —
+    /// the scheduler drops an emptied queue, and inventing a zero row for every
+    /// tenant this process has ever served would make the list grow with
+    /// history rather than with load.
+    pub tenants: Vec<TenantQueueHealth>,
+}
+
+/// One tenant's queued work in one category pool, as an operator sees it.
+///
+/// A projection of the fair scheduler's `TenantQueueStats` rather than a
+/// re-export: that type lives above this crate, carries no category (the
+/// scheduler is per-category and does not need to say so), and is not a wire
+/// format.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TenantQueueHealth {
+    /// Tenant id the work is charged to. This is the attribution the fair
+    /// scheduler runs on, so it is also the answer to "who is using the box".
+    pub tenant: String,
+    /// `realtime`, `background` or `system` — the pool this depth is in.
+    pub category: String,
+    /// Credit granted per scheduling round. Equal for everyone until a tier
+    /// model exists; a value above the default means a weight provider is
+    /// installed.
+    pub weight: u32,
+    pub depth_high: usize,
+    pub depth_normal: usize,
+    pub depth_low: usize,
+    /// Sum of the three, so a dashboard sorting by "biggest queue" does not
+    /// have to agree with the server about how to add them up.
+    pub depth_total: usize,
+}
+
+/// The read model behind `GET /management/jobs/health` — what a TENANT admin is
+/// allowed to know.
+///
+/// Two facts, both of them about the caller's own work. Anything that would
+/// identify an upstream, count its failures, time its next probe or total up
+/// host-wide saturation is deliberately absent: those are shared across every
+/// tenant on the host, so serving them here would leak other tenants' traffic
+/// through a route that reads as a status check.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TenantJobHealth {
+    /// THIS tenant has background work parked against an upstream that is
+    /// currently down.
+    ///
+    /// Derived exactly as the per-tenant activity node derives it — from work
+    /// this tenant actually has parked — and NOT from "some breaker is open on
+    /// this host". The host-wide reading would alarm every tenant on the box,
+    /// including those with nothing in flight and those that do not use the
+    /// affected upstream at all; a false alarm trains people to ignore the
+    /// indicator, which costs us the next real incident.
+    pub degraded: bool,
+    /// This tenant's own queued work, summed across every category pool.
+    pub queued: TenantQueueDepth,
+}
+
+/// Queue depth for one tenant, by priority.
+///
+/// Depths only. Not the pool's capacity, not its permits, not how many other
+/// tenants are competing — a tenant learns how much of ITS work is waiting, and
+/// a share-of-machine figure would be an inference about everyone else's.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TenantQueueDepth {
+    pub high: usize,
+    pub normal: usize,
+    pub low: usize,
+    /// Sum of the three. Present so a client's "N waiting" and the server's
+    /// notion of the same number cannot drift.
+    pub total: usize,
 }
 
 /// One upstream circuit breaker, as an operator sees it.

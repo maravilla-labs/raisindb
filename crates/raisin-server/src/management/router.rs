@@ -175,9 +175,12 @@ pub fn management_router(
         )
         // Job queue management endpoints — also tenant-scoped via header.
         .route("/management/jobs/stats", get(jobs::get_job_queue_stats))
-        // Upstream breakers + pool saturation. Static segment, so it is matched
-        // ahead of `/management/jobs/{id}` — same as `stats` above.
-        .route("/management/jobs/health", get(jobs::get_job_system_health))
+        // This tenant's degraded bit + its own queue depth. Static segment, so
+        // it is matched ahead of `/management/jobs/{id}` — same as `stats`
+        // above. The breaker keys, failure counts, probe timers and host-wide
+        // pool figures this route used to return are cross-tenant and now live
+        // at `/management/admin/jobs/health`.
+        .route("/management/jobs/health", get(jobs::get_tenant_job_health))
         .route("/management/jobs/purge-all", post(jobs::purge_all_jobs))
         .route(
             "/management/jobs/purge-orphaned",
@@ -302,6 +305,15 @@ pub fn management_router(
         .route(
             "/management/admin/jobs/force-fail-stuck",
             post(admin::jobs::force_fail_stuck_global),
+        )
+        // The whole job-system picture: every upstream breaker, every category
+        // pool, and per-tenant queue depth. Superadmin-only because all three
+        // are cross-tenant — a breaker is shared by every tenant on the host,
+        // and the tenant rows name other tenants outright. The per-tenant
+        // `/management/jobs/health` answers the reduced shape instead.
+        .route(
+            "/management/admin/jobs/health",
+            get(admin::jobs::get_job_system_health_global),
         )
         // Server-wide health (moved from /management/health).
         .route(
@@ -474,9 +486,12 @@ where
         )
         // Job queue management endpoints — also tenant-scoped via header.
         .route("/management/jobs/stats", get(jobs::get_job_queue_stats))
-        // Upstream breakers + pool saturation. Static segment, so it is matched
-        // ahead of `/management/jobs/{id}` — same as `stats` above.
-        .route("/management/jobs/health", get(jobs::get_job_system_health))
+        // This tenant's degraded bit + its own queue depth. Static segment, so
+        // it is matched ahead of `/management/jobs/{id}` — same as `stats`
+        // above. The breaker keys, failure counts, probe timers and host-wide
+        // pool figures this route used to return are cross-tenant and now live
+        // at `/management/admin/jobs/health`.
+        .route("/management/jobs/health", get(jobs::get_tenant_job_health))
         .route("/management/jobs/purge-all", post(jobs::purge_all_jobs))
         .route(
             "/management/jobs/purge-orphaned",

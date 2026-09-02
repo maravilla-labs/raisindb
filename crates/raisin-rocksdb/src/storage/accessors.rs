@@ -88,6 +88,37 @@ impl RocksDBStorage {
         lock.as_ref().map(|d| d.stats())
     }
 
+    /// Per-tenant queue depth in every category — "who is using this box".
+    ///
+    /// One call per category rather than a single flattened one, because the
+    /// scheduler is per-category and a tenant can be deep in one pool while
+    /// absent from the others; flattening here would lose exactly the
+    /// distinction an operator needs during an incident (background backlog is
+    /// normal, a realtime backlog is not).
+    ///
+    /// Empty when no job system is running (an embedded or test storage), which
+    /// is the honest answer rather than an error: nothing is queued because
+    /// there is nowhere to queue it.
+    pub fn job_tenant_queue_stats(
+        &self,
+    ) -> Vec<(
+        raisin_storage::jobs::JobCategory,
+        Vec<crate::jobs::fair::TenantQueueStats>,
+    )> {
+        let lock = self.job_dispatcher.read().unwrap();
+        let Some(dispatcher) = lock.as_ref() else {
+            return Vec::new();
+        };
+        [
+            raisin_storage::jobs::JobCategory::Realtime,
+            raisin_storage::jobs::JobCategory::Background,
+            raisin_storage::jobs::JobCategory::System,
+        ]
+        .into_iter()
+        .map(|category| (category, dispatcher.tenant_stats(category)))
+        .collect()
+    }
+
     /// Publish the worker pool (called after `init_job_system`).
     ///
     /// Takes a `Weak` so the storage does not keep the pool — and, through the

@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use raisin_error::Result;
 use raisin_storage::{
     BackgroundJobs, BackgroundJobsInternal, CategoryQueueDepthStats, JobHandle, JobId,
-    JobQueueStats, JobSystemHealth, PersistedStats, QueueDepthStats, WorkerStats,
+    JobQueueStats, JobSystemHealth, PersistedStats, QueueDepthStats, TenantJobHealth, WorkerStats,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -421,22 +421,22 @@ impl BackgroundJobs for RocksDBStorage {
         })
     }
 
-    /// Upstream breaker state plus per-category pool saturation.
+    /// What this tenant may be told: one degraded bit and its own queue depth.
     ///
-    /// Both halves are read from live process state — the breaker registry and
-    /// the pool's atomics — so this costs no storage reads and can be polled at
-    /// console refresh rates. Contrast `get_job_queue_stats`, which deliberately
-    /// refuses to count persisted history for the same reason.
-    async fn get_job_system_health(&self) -> Result<JobSystemHealth> {
-        let breakers = crate::jobs::CircuitBreakerRegistry::global()
-            .statuses()
-            .into_iter()
-            .map(super::job_health::breaker_health)
-            .collect();
-
-        Ok(JobSystemHealth {
-            breakers,
-            pools: self.worker_pool_stats(),
+    /// Read entirely from live process state — the activity tracker's parked
+    /// upstreams and the scheduler's per-tenant depths — so it costs no storage
+    /// reads and can be polled at console refresh rates. Contrast
+    /// `get_job_queue_stats`, which deliberately refuses to count persisted
+    /// history for the same reason.
+    ///
+    /// Note what is NOT read here: the breaker registry is consulted only
+    /// through the tracker's own derivation, which starts from work THIS tenant
+    /// parked. Reaching into the registry directly would put another tenant's
+    /// upstream in this answer.
+    async fn get_tenant_job_health(&self, tenant: &str) -> Result<TenantJobHealth> {
+        Ok(TenantJobHealth {
+            degraded: crate::jobs::JobActivityTracker::global().tenant_degraded(tenant),
+            queued: super::job_health::tenant_queue_depth(&self.job_tenant_queue_stats(), tenant),
         })
     }
 
@@ -588,5 +588,28 @@ impl BackgroundJobsInternal for RocksDBStorage {
     async fn restore_pending_jobs(&self) -> Result<()> {
         // Delegate to the inherent restore_pending_jobs which returns RestoreStats.
         self.restore_pending_jobs().await.map(|_| ())
+    }
+
+    /// Every upstream breaker, every category pool, and per-tenant queue depth.
+    ///
+    /// All three halves are live process state — the breaker registry, the
+    /// pools' atomics, the scheduler's queues — so this costs no storage reads
+    /// and is safe to poll at dashboard refresh rates.
+    ///
+    /// Cross-tenant by construction, which is why it is on this trait and
+    /// mounted only under `/management/admin/*`. The per-tenant route answers
+    /// `get_tenant_job_health` instead; see that method for what it may not say.
+    async fn get_job_system_health(&self) -> Result<JobSystemHealth> {
+        let breakers = crate::jobs::CircuitBreakerRegistry::global()
+            .statuses()
+            .into_iter()
+            .map(super::job_health::breaker_health)
+            .collect();
+
+        Ok(JobSystemHealth {
+            breakers,
+            pools: self.worker_pool_stats(),
+            tenants: super::job_health::tenant_queue_health(self.job_tenant_queue_stats()),
+        })
     }
 }

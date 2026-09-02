@@ -157,6 +157,37 @@ impl JobActivityTracker {
         }
     }
 
+    /// Does THIS tenant have work parked against an upstream that is still
+    /// down, in any of its repositories?
+    ///
+    /// The tenant-facing `degraded` bit, and it goes through the SAME
+    /// derivation as the activity node — `any_parked_upstream_down` over the
+    /// keys the handler itself parked on. Two derivations of one bit is how a
+    /// banner and an endpoint end up disagreeing about whether a tenant is
+    /// affected, with no error anywhere to say which is lying.
+    ///
+    /// Deliberately NOT "is any breaker open on this host": a breaker is shared
+    /// by every tenant on the box, so the host-wide reading alarms tenants who
+    /// have nothing in flight and tenants who never touch that upstream. Tying
+    /// the bit to AFFECTED WORK means an unaffected tenant is told nothing,
+    /// which is also what keeps the shared upstream's identity out of the
+    /// answer.
+    ///
+    /// Aggregated across the tenant's repos because the caller asked about a
+    /// TENANT: the endpoint is not repo-scoped, and reporting only the first
+    /// repo would answer a question nobody asked.
+    pub fn tenant_degraded(&self, tenant: &str) -> bool {
+        let scopes = self.scopes.lock().unwrap_or_else(|e| e.into_inner());
+        scopes
+            .iter()
+            .filter(|((scope_tenant, _repo), _)| scope_tenant == tenant)
+            .any(|(_, state)| {
+                snapshot::any_parked_upstream_down(
+                    state.parked_upstreams.iter().map(String::as_str),
+                )
+            })
+    }
+
     /// Take the current snapshot for one scope, or `None` if the scope is
     /// unknown to this process.
     pub(super) fn snapshot(&self, key: &ScopeKey) -> Option<Snapshot> {

@@ -351,6 +351,7 @@ impl RocksDBWorkerPool {
                     queue_depth_normal: queue.normal_queue_len,
                     queue_depth_low: queue.low_queue_len,
                     dispatcher_workers: pool.num_workers,
+                    active_tenants: queue.active_tenants,
                 }
             })
             .collect();
