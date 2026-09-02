@@ -26,6 +26,7 @@
 //!    token is not ending its turn. Comparing token ids keeps those apart.
 
 use std::path::Path;
+use std::time::Instant;
 
 use candle_core::quantized::gguf_file;
 use candle_core::{Device, Tensor};
@@ -49,6 +50,17 @@ const REPEAT_LAST_N: usize = 64;
 const REPEAT_PENALTY: f32 = 1.1;
 /// A ceiling so a degenerate model cannot spin forever.
 const MAX_NEW_TOKENS: usize = 4096;
+/// Wall-clock budget for one generation.
+///
+/// A TIME budget rather than only a token budget, because the thing that hurts
+/// is seconds, not tokens: this model runs on whatever CPU or GPU the server
+/// has, so the same 2000-token answer is fifteen seconds on one machine and
+/// fifteen minutes on another. A token cap cannot tell those apart.
+///
+/// Observed before this existed: a request the client had already given up on
+/// kept six cores busy, because nothing downstream of the abandoned connection
+/// knew to stop.
+const TIME_BUDGET: std::time::Duration = std::time::Duration::from_secs(90);
 
 /// One chat turn, in the shape the provider hands over.
 pub struct ChatTurn<'a> {
@@ -183,12 +195,23 @@ impl QwenGenerator {
         logits = squeeze_last(logits)?;
 
         let budget = max_tokens.clamp(1, MAX_NEW_TOKENS);
+        let deadline = Instant::now() + TIME_BUDGET;
+        let started = Instant::now();
         let mut generated: Vec<u32> = Vec::with_capacity(budget);
         // Absolute position of the NEXT token — the KV cache already holds the
         // prompt, so decoding continues from the end of it.
         let mut index_pos = prompt_tokens.len();
 
         for _ in 0..budget {
+            if Instant::now() >= deadline {
+                return Err(CandleError::Inference(format!(
+                    "Generation exceeded {}s after {} tokens ({:.1} tok/s). This machine is too \
+                     slow for this model, or the answer was going to be very long.",
+                    TIME_BUDGET.as_secs(),
+                    generated.len(),
+                    generated.len() as f64 / started.elapsed().as_secs_f64().max(0.001),
+                )));
+            }
             let adjusted = if REPEAT_PENALTY == 1.0 || generated.is_empty() {
                 logits.clone()
             } else {
@@ -225,6 +248,16 @@ impl QwenGenerator {
             logits = squeeze_last(logits)?;
             index_pos += 1;
         }
+
+        // Logged so the real speed of a given box is discoverable rather than
+        // guessed at — it is the number that decides whether a local model is
+        // usable here at all.
+        tracing::info!(
+            tokens = generated.len(),
+            secs = started.elapsed().as_secs_f64(),
+            tok_per_s = generated.len() as f64 / started.elapsed().as_secs_f64().max(0.001),
+            "Qwen generation complete"
+        );
 
         self.tokenizer
             .decode(&generated, true)

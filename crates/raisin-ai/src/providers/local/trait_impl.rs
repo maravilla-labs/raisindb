@@ -288,7 +288,12 @@ impl LocalCandleProvider {
             }
 
             let prompt = crate::candle::QwenGenerator::build_prompt(&turns);
-            let max_tokens = request.max_tokens.unwrap_or(2048) as usize;
+            /* CAPPED WELL BELOW WHAT A CALLER ASKS FOR. Agents routinely set
+             * max_tokens to 4096 for a cloud model where that is seconds; here
+             * it is minutes, and a structured answer — which is what this model
+             * is for — is comfortably under 1024. The cap is what keeps a
+             * default configuration from pinning the machine. */
+            let max_tokens = (request.max_tokens.unwrap_or(1024) as usize).min(1024);
             let temperature = request.temperature.map(|t| t as f64);
 
             let text = {

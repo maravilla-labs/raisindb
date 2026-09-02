@@ -108,6 +108,28 @@ impl ModelRegistry {
     /// Refresh the download status for all models.
     ///
     /// Checks the cache directory to see which models are downloaded.
+    /// Does this directory hold any file, at any depth?
+    ///
+    /// Recursive because hf-hub nests the actual files under
+    /// `snapshots/<sha>/`, so a non-recursive check sees only directories and
+    /// concludes the model is absent.
+    fn dir_has_files(dir: &std::path::Path) -> bool {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            // `is_file` follows symlinks, which is what hf-hub stores.
+            if path.is_file() {
+                return true;
+            }
+            if path.is_dir() && Self::dir_has_files(&path) {
+                return true;
+            }
+        }
+        false
+    }
+
     pub async fn refresh_download_status(&self) {
         let mut models = self.models.write().await;
 
@@ -122,15 +144,17 @@ impl ModelRegistry {
             let hub_path = self
                 .cache_dir
                 .join(format!("models--{}", model.model_id.replace('/', "--")));
-            let model_path = if self.model_path(&model.model_id).is_dir() {
-                self.model_path(&model.model_id)
-            } else {
-                hub_path
-            };
+            /* WHICHEVER HAS FILES, not whichever exists. `download_model`
+             * creates its own directory up front, so the plain path is present
+             * and EMPTY for every model fetched through hf-hub — testing
+             * existence alone picks the empty one and reports a fully
+             * downloaded model as missing. */
+            let own_path = self.model_path(&model.model_id);
+            let model_path = if Self::dir_has_files(&own_path) { own_path } else { hub_path };
             if model_path.exists() && model_path.is_dir() {
                 // Check if there are files in the directory
-                if let Ok(entries) = std::fs::read_dir(&model_path) {
-                    let has_files = entries.flatten().count() > 0;
+                {
+                    let has_files = Self::dir_has_files(&model_path);
                     if has_files {
                         // Calculate actual size
                         let size = calculate_dir_size(&model_path);
