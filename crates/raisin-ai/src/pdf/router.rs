@@ -112,6 +112,10 @@ pub struct PdfProcessedResult {
     pub page_count: usize,
     /// Whether OCR was needed (for scanned pages).
     pub ocr_pages: Vec<usize>,
+    /// Mean OCR confidence (0-100) over `ocr_pages`, when the provider
+    /// measures one. `None` when no page was OCR'd or the provider does not
+    /// score — never zero for "not measured".
+    pub ocr_confidence: Option<f32>,
 }
 
 /// The method used for text extraction.
@@ -148,34 +152,28 @@ impl PdfProcessor {
 
     /// Process a PDF file held in memory, returning markdown text.
     ///
-    /// `options.strategy` is accepted for source compatibility but pdf_oxide
-    /// decides natively-extract-vs-OCR itself, so there is nothing to dispatch
-    /// on here; `ExtractionMethod::Native` is reported. Do not add a second
-    /// strategy dispatch in this function — that is how the fork came back.
+    /// Reads every page's text layer, and — as `options.strategy` says — OCRs
+    /// the pages that have none through their embedded scan image. See the
+    /// `pages` module for the mechanism and the failure policy. This is the
+    /// same implementation `process_pdf_from_storage` runs; do not add a
+    /// second extractor here — that is how the fork came back.
     pub async fn process(
         &self,
         pdf_data: &[u8],
-        _options: &PdfProcessingOptions,
+        options: &PdfProcessingOptions,
     ) -> ProcessingResult<PdfProcessedResult> {
         // Blocking file + parse work: keep it off the async worker thread.
         let data = pdf_data.to_vec();
-        let extracted = tokio::task::spawn_blocking(move || {
-            super::storage_processor::extract_markdown_from_bytes(&data)
+        let opts = options.clone();
+        let pages = tokio::task::spawn_blocking(move || {
+            super::storage_processor::extract_pages_from_bytes(&data, &opts)
         })
         .await
         .map_err(|e| PdfProcessingError::Extraction(format!("PDF task panicked: {e}")))?
         .map_err(|e| PdfProcessingError::Extraction(e.to_string()))?;
 
-        Ok(PdfProcessedResult {
-            text: extracted.text,
-            method_used: if extracted.ocr_used {
-                ExtractionMethod::Ocr
-            } else {
-                ExtractionMethod::Native
-            },
-            page_count: extracted.page_count,
-            ocr_pages: Vec::new(),
-        })
+        let provider = super::ocr::get_default_ocr_provider();
+        Ok(super::pages::finish_with_ocr(pages, &*provider, &options.ocr_options).await?)
     }
 }
 

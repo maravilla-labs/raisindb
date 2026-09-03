@@ -61,10 +61,13 @@ pub(super) async fn process_pdf(
         PdfExtractionStrategy::ForceOcr => PdfStrategy::ForceOcr,
     };
 
-    let pdf_options = PdfProcessingOptions {
-        strategy,
-        ..Default::default()
-    };
+    // `auto()` (not `Default`) so the native-vs-scan floor is the production
+    // value of 50 readable characters per page. The rule's OCR knobs travel
+    // with it: they are the same policy the image OCR path applies.
+    let mut pdf_options = PdfProcessingOptions::auto();
+    pdf_options.strategy = strategy;
+    pdf_options.ocr_options.languages = options.ocr_languages.clone();
+    pdf_options.ocr_options.min_word_confidence = options.ocr_min_word_confidence;
 
     let processor = PdfProcessor::new();
     let result = processor
@@ -77,15 +80,25 @@ pub(super) async fn process_pdf(
         raisin_ai::pdf::ExtractionMethod::Ocr | raisin_ai::pdf::ExtractionMethod::Hybrid
     );
 
+    // The confidence is the OCR provider's mean over the pages it read; a
+    // pure text-layer extraction measures nothing, and absent must not be
+    // conflated with zero — see `EXTRACT_CONFIDENCE_PROP`.
+    let detail = if used_ocr {
+        Some(format!(
+            "ocr on {} of {} pages",
+            result.ocr_pages.len(),
+            result.page_count
+        ))
+    } else {
+        None
+    };
     Ok(TextExtractionOutput {
         text: result.text,
         page_count: result.page_count,
         used_ocr,
         source: if used_ocr { "core-pdf-ocr" } else { "core-pdf" },
-        // The PDF pipeline reports no per-page score, and absent must not be
-        // conflated with zero — see `EXTRACT_CONFIDENCE_PROP`.
-        confidence: None,
-        detail: None,
+        confidence: result.ocr_confidence,
+        detail,
     })
 }
 

@@ -76,7 +76,8 @@ pub enum StoragePdfError {
 /// 1. **Get file path** - Uses `storage.get_as_path(key)`:
 ///    - Filesystem: Returns actual file path directly (zero-copy)
 ///    - S3/R2: Downloads to temp file, returns temp path
-/// 2. **Extract markdown** using pdf_oxide (pure Rust, includes OCR)
+/// 2. **Extract markdown** using pdf_oxide, OCR-ing scanned pages through
+///    their embedded image with the configured OCR provider (see `pages`)
 /// 3. **Cleanup temp file** if downloaded from S3
 ///
 /// # Example
@@ -109,55 +110,33 @@ pub async fn process_pdf_from_storage<B: BinaryStorage>(
         None
     };
 
-    // 2-3. The ONE extraction implementation (see `extract_markdown_from_path`).
-    extract_markdown_from_path(&file_path)
-}
-
-/// Extract a whole PDF as markdown from a path — **the single extraction
-/// implementation in this crate**.
-///
-/// Both public entry points funnel through here: [`process_pdf_from_storage`]
-/// (storage key; zero-copy on the filesystem backend) and
-/// [`crate::pdf::PdfProcessor::process`] (raw bytes, which is what the
-/// AssetProcessing job holds). They differ only in how they obtain a path.
-/// Keeping one body is deliberate: a second copy is exactly how you end up with
-/// a "PDF extraction" that works through one surface and silently returns
-/// nothing through the other — which is the state this replaced.
-#[cfg(feature = "pdf-markdown")]
-pub(crate) fn extract_markdown_from_path(
-    file_path: &std::path::Path,
-) -> Result<StoragePdfResult, StoragePdfError> {
-    use pdf_oxide::converters::ConversionOptions;
-    use pdf_oxide::PdfDocument;
-
-    let mut doc =
-        PdfDocument::open(file_path).map_err(|e| StoragePdfError::Processing(e.to_string()))?;
-
-    let page_count = doc
-        .page_count()
+    // 2-3. The ONE extraction implementation (see the `pages` module). This
+    // entry point has no strategy of its own: `auto` — text layer first, OCR
+    // the pages that have none.
+    let options = crate::pdf::PdfProcessingOptions::auto();
+    let pages = {
+        let path = file_path.clone();
+        let opts = options.clone();
+        tokio::task::spawn_blocking(move || super::pages::extract_pages_from_path(&path, &opts))
+            .await
+            .map_err(|e| StoragePdfError::Processing(format!("PDF task panicked: {e}")))??
+    };
+    let provider = super::ocr::get_default_ocr_provider();
+    let result = super::pages::finish_with_ocr(pages, &*provider, &options.ocr_options)
+        .await
         .map_err(|e| StoragePdfError::Processing(e.to_string()))?;
 
-    // pdf_oxide's to_markdown returns a String directly
-    let mut full_markdown = String::new();
-    let conversion_options = ConversionOptions::default();
-
-    for page_idx in 0..page_count {
-        let page_markdown = doc
-            .to_markdown(page_idx, &conversion_options)
-            .map_err(|e| StoragePdfError::Processing(format!("Page {}: {}", page_idx, e)))?;
-
-        if !full_markdown.is_empty() {
-            full_markdown.push_str("\n\n---\n\n"); // Page separator
-        }
-        full_markdown.push_str(&page_markdown);
-    }
-
+    let ocr_used = !result.ocr_pages.is_empty();
     Ok(StoragePdfResult {
-        text: full_markdown,
-        page_count,
-        is_scanned: false, // pdf_oxide doesn't expose this directly
-        ocr_used: false,   // Would need to check doc metadata
-        extraction_method: "pdf_oxide".to_string(),
+        text: result.text,
+        page_count: result.page_count,
+        is_scanned: ocr_used && result.ocr_pages.len() == result.page_count,
+        ocr_used,
+        extraction_method: match result.method_used {
+            crate::pdf::ExtractionMethod::Native => "pdf_oxide".to_string(),
+            crate::pdf::ExtractionMethod::Ocr => "pdf_oxide+ocr".to_string(),
+            crate::pdf::ExtractionMethod::Hybrid => "pdf_oxide+ocr(hybrid)".to_string(),
+        },
     })
 }
 
@@ -165,16 +144,19 @@ pub(crate) fn extract_markdown_from_path(
 ///
 /// The staging is not a workaround: `get_as_path` does the very same thing for
 /// the S3 backend, because pdf_oxide reads from a path. This exists so the
-/// bytes-shaped caller reaches [`extract_markdown_from_path`] instead of
-/// growing its own extractor.
+/// bytes-shaped caller reaches the same page extractor instead of growing its
+/// own — a second copy is exactly how you end up with a "PDF extraction" that
+/// works through one surface and silently returns nothing through the other,
+/// which is the state this replaced.
 #[cfg(feature = "pdf-markdown")]
-pub(crate) fn extract_markdown_from_bytes(
+pub(crate) fn extract_pages_from_bytes(
     data: &[u8],
-) -> Result<StoragePdfResult, StoragePdfError> {
+    options: &crate::pdf::PdfProcessingOptions,
+) -> Result<super::pages::PdfPages, StoragePdfError> {
     let path = std::env::temp_dir().join(format!("raisin-pdf-{}.pdf", uuid::Uuid::new_v4()));
     std::fs::write(&path, data)?;
     let _cleanup_guard = TempFileCleanup(path.clone());
-    extract_markdown_from_path(&path)
+    super::pages::extract_pages_from_path(&path, options)
 }
 
 /// Extract a PDF held in memory — stub when `pdf-markdown` is off.
@@ -184,9 +166,10 @@ pub(crate) fn extract_markdown_from_bytes(
 /// returning empty text, which would be indistinguishable from "this PDF had
 /// no words in it".
 #[cfg(not(feature = "pdf-markdown"))]
-pub(crate) fn extract_markdown_from_bytes(
+pub(crate) fn extract_pages_from_bytes(
     _data: &[u8],
-) -> Result<StoragePdfResult, StoragePdfError> {
+    _options: &crate::pdf::PdfProcessingOptions,
+) -> Result<super::pages::PdfPages, StoragePdfError> {
     Err(StoragePdfError::Processing(
         "PDF text extraction requires the `pdf-markdown` feature (enabled by the server's `ai` feature)"
             .to_string(),

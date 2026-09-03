@@ -39,6 +39,10 @@ pub mod ocr;
 // Router types for backward compatibility (PdfStrategy, ExtractionMethod, etc.)
 mod router;
 
+// Page-level extraction with the OCR fallback for scanned pages — the ONE
+// implementation both entry points below share.
+mod pages;
+
 // Storage-aware processing (primary API)
 pub mod storage_processor;
 
