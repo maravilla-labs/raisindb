@@ -46,13 +46,7 @@ impl UnifiedJobEventHandler {
         // triggers: the payload is operational metadata, and at bookkeeping
         // write rates a full trigger walk per commit is the cost that burned
         // three cores on an idle mount. Content writes never carry the marker.
-        if node_event
-            .metadata
-            .as_ref()
-            .and_then(|m| m.get("bookkeeping"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-        {
+        if Self::is_bookkeeping_event(node_event) {
             tracing::trace!(
                 node_id = %node_event.node_id,
                 "Skipping TriggerEvaluation: bookkeeping write"

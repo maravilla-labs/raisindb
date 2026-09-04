@@ -122,6 +122,31 @@ impl UnifiedJobEventHandler {
             .unwrap_or(false)
     }
 
+    /// Is this write engine bookkeeping — operational metadata, not content?
+    ///
+    /// Set by `TransactionalContext::set_bookkeeping`, whose contract is that
+    /// such a commit stays durable, versioned, replicated and observable, but
+    /// skips the CONTENT fan-out that is meaningless for a state blob and
+    /// ruinous at bookkeeping write rates.
+    ///
+    /// Reindexing is that fan-out. A virtual mount evicting its content cache
+    /// and refetching it moves `file` / `content_hash` / `__content_cached_at`
+    /// and nothing a vector is built from — yet each of those writes minted a
+    /// revision, which enqueued an embedding job, which re-derived the same
+    /// text, hashed it, found it identical and reused the vectors it already
+    /// had. Measured on one tenant: 2,233 of 2,339 embedding jobs in half an
+    /// hour were that no-op, and every one still rewrote its rows.
+    ///
+    /// Content writes never carry the marker, so a real edit is unaffected.
+    pub(super) fn is_bookkeeping_event(node_event: &NodeEvent) -> bool {
+        node_event
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("bookkeeping"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
     /// Build a JobContext from a NodeEvent
     pub(super) fn build_job_context(node_event: &NodeEvent) -> JobContext {
         JobContext {

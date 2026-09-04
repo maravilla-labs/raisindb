@@ -123,6 +123,10 @@ impl VirtualMountSyncHandler {
         // reconcile walk reads this as a user edit — an eviction must never be
         // pushed back to the provider as a deletion.
         tx.set_auth_context(AuthContext::system_as(SYNC_ACTOR))?;
+        // ENGINE BOOKKEEPING, not a content change — see the twin marker on the
+        // refetch in `content/mod.rs`. Dropping the cached bytes leaves every
+        // embeddable property untouched, so nothing downstream needs redoing.
+        tx.set_bookkeeping(true)?;
         tx.set_message("virtual mount: drop cached content")?;
         tx.upsert_node(&scope.workspace, &node).await?;
         tx.commit().await?;

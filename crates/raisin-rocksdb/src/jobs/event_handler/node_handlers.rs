@@ -262,6 +262,26 @@ impl UnifiedJobEventHandler {
         context: &JobContext,
         index_settings: &super::index_helpers::IndexSettings,
     ) -> Result<()> {
+        // Engine bookkeeping is not a content change, so there is nothing to
+        // re-embed. This is the gate that makes a cached virtual mount settle:
+        // the content-TTL cycle evicts the bytes and refetches them, moving
+        // `file` / `content_hash` / `__content_cached_at` and leaving
+        // `__extracted_text` exactly as it was — two revisions per asset per
+        // TTL period, each of which used to enqueue a job that re-derived the
+        // same text only to discover it had not moved.
+        //
+        // The job's own spec-hash check already caught it, but only AFTER the
+        // job was queued, scheduled, read the node, re-extracted its text and
+        // rewrote a row per chunk. Declining here is the same answer, arrived
+        // at before any of that.
+        if Self::is_bookkeeping_event(node_event) {
+            tracing::trace!(
+                node_id = %node_event.node_id,
+                "Skipping EmbeddingGenerate: bookkeeping write"
+            );
+            return Ok(());
+        }
+
         if self.embeddings_enabled(&node_event.tenant_id).await? && index_settings.vector {
             if let Err(e) = self
                 .enqueue_job(

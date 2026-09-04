@@ -614,3 +614,86 @@ async fn seed_activity_node(storage: &Arc<crate::RocksDBStorage>) {
         .await
         .unwrap();
 }
+
+/// A BOOKKEEPING write must not schedule embedding — and the identical write
+/// without the marker must.
+///
+/// Both halves are asserted on the same node, the same type and the same
+/// tenant config, so the ONLY difference is the marker. A one-sided test here
+/// would pass just as happily if embeddings were off, the node type were not
+/// vector-indexed, or the arm were removed altogether — none of which is what
+/// this guards.
+///
+/// What it guards: a virtual mount's content cache expiring and refetching
+/// writes the node twice per asset per TTL period, moving `file`,
+/// `content_hash` and `__content_cached_at` while leaving `__extracted_text`
+/// untouched. Each of those revisions used to enqueue an embedding job that
+/// re-read the node, re-derived the same text, hashed it, found it identical
+/// and reused the vectors it already had. Measured on one tenant: 2,233 of
+/// 2,339 embedding jobs in half an hour were that no-op — and the job still
+/// rewrote a row per chunk on the way to concluding it had nothing to do.
+#[tokio::test]
+async fn bookkeeping_write_does_not_enqueue_embedding() {
+    async fn jobs_for(bookkeeping: bool) -> Vec<String> {
+        let (_temp_dir, storage) = setup_test_storage();
+        let job_registry = Arc::new(JobRegistry::new());
+        let job_data_store = Arc::new(crate::jobs::JobDataStore::new(storage.db().clone()));
+        let dispatcher = create_test_dispatcher();
+        let handler = UnifiedJobEventHandler::new(
+            storage.clone(),
+            job_registry.clone(),
+            job_data_store,
+            dispatcher,
+            storage.processing_rules_repository(),
+        );
+
+        seed_node(&storage).await;
+
+        let mut config = TenantEmbeddingConfig::new("tenant1".to_string());
+        config.enabled = true;
+        storage
+            .tenant_embedding_config_repository()
+            .set_config(&config)
+            .unwrap();
+
+        let mut metadata = std::collections::HashMap::new();
+        if bookkeeping {
+            metadata.insert("bookkeeping".to_string(), serde_json::Value::Bool(true));
+        }
+
+        let node_event = NodeEvent {
+            tenant_id: "tenant1".to_string(),
+            repository_id: "repo1".to_string(),
+            workspace_id: "default".to_string(),
+            branch: "main".to_string(),
+            revision: raisin_hlc::HLC::new(1, 0),
+            node_id: "node1".to_string(),
+            node_type: Some("Document".to_string()),
+            kind: NodeEventKind::Updated,
+            path: None,
+            metadata: Some(metadata),
+        };
+
+        handler.handle_node_change(&node_event).await.unwrap();
+        job_registry
+            .list_jobs()
+            .await
+            .iter()
+            .map(|j| j.job_type.to_string())
+            .collect()
+    }
+
+    let ordinary = jobs_for(false).await;
+    assert!(
+        ordinary.iter().any(|j| j.contains("EmbeddingGenerate")),
+        "CONTROL: an ordinary content write must still embed. If this fails the \
+         negative half below proves nothing. Jobs seen: {ordinary:?}"
+    );
+
+    let marked = jobs_for(true).await;
+    assert!(
+        !marked.iter().any(|j| j.contains("EmbeddingGenerate")),
+        "a bookkeeping write must not enqueue embedding: nothing a vector is \
+         built from moved. Jobs seen: {marked:?}"
+    );
+}
