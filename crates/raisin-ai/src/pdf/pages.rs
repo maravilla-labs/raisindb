@@ -308,8 +308,16 @@ mod scan {
     }
 
     fn area(dict: &Dict) -> u64 {
-        let w = dict.get("Width").and_then(Object::as_integer).unwrap_or(0).max(0) as u64;
-        let h = dict.get("Height").and_then(Object::as_integer).unwrap_or(0).max(0) as u64;
+        let w = dict
+            .get("Width")
+            .and_then(Object::as_integer)
+            .unwrap_or(0)
+            .max(0) as u64;
+        let h = dict
+            .get("Height")
+            .and_then(Object::as_integer)
+            .unwrap_or(0)
+            .max(0) as u64;
         w * h
     }
 
@@ -479,7 +487,10 @@ mod tests {
     fn auto_ocrs_only_pages_without_a_text_layer() {
         let opts = PdfProcessingOptions::auto();
         assert!(wants_ocr(&opts, ""));
-        assert!(wants_ocr(&opts, "---\n\n# \n"), "markdown scaffolding is not text");
+        assert!(
+            wants_ocr(&opts, "---\n\n# \n"),
+            "markdown scaffolding is not text"
+        );
         assert!(wants_ocr(&opts, "Page 3"), "a stamp is below the floor");
         assert!(!wants_ocr(&opts, &"word ".repeat(20)));
     }
@@ -510,8 +521,13 @@ mod tests {
         let pages = PdfPages {
             pages: vec![page("", Some(0)), page("", Some(1))],
         };
-        let provider = Scripted(vec![Ok(("Seite eins", Some(90.0))), Ok(("Seite zwei", Some(80.0)))]);
-        let out = finish_with_ocr(pages, &provider, &OcrOptions::default()).await.unwrap();
+        let provider = Scripted(vec![
+            Ok(("Seite eins", Some(90.0))),
+            Ok(("Seite zwei", Some(80.0))),
+        ]);
+        let out = finish_with_ocr(pages, &provider, &OcrOptions::default())
+            .await
+            .unwrap();
         assert_eq!(out.method_used, ExtractionMethod::Ocr);
         assert_eq!(out.ocr_pages, vec![0, 1]);
         assert_eq!(out.text, "Seite eins\n\n---\n\nSeite zwei");
@@ -525,7 +541,9 @@ mod tests {
             pages: vec![page("Typed cover letter", None), page("", Some(0))],
         };
         let provider = Scripted(vec![Ok(("scanned attachment", None))]);
-        let out = finish_with_ocr(pages, &provider, &OcrOptions::default()).await.unwrap();
+        let out = finish_with_ocr(pages, &provider, &OcrOptions::default())
+            .await
+            .unwrap();
         assert_eq!(out.method_used, ExtractionMethod::Hybrid);
         assert_eq!(out.ocr_pages, vec![1]);
         assert_eq!(out.text, "Typed cover letter\n\n---\n\nscanned attachment");
@@ -538,7 +556,9 @@ mod tests {
             pages: vec![page("A real text layer with many words in it", Some(0))],
         };
         let provider = Scripted(vec![Ok(("A r", Some(20.0)))]);
-        let out = finish_with_ocr(pages, &provider, &OcrOptions::default()).await.unwrap();
+        let out = finish_with_ocr(pages, &provider, &OcrOptions::default())
+            .await
+            .unwrap();
         assert_eq!(out.method_used, ExtractionMethod::Native);
         assert!(out.ocr_pages.is_empty());
         assert_eq!(out.text, "A real text layer with many words in it");
@@ -550,7 +570,9 @@ mod tests {
             pages: vec![page("Typed page", None), page("", Some(0))],
         };
         let provider = Scripted(vec![Err("tesseract missing")]);
-        let out = finish_with_ocr(pages, &provider, &OcrOptions::default()).await.unwrap();
+        let out = finish_with_ocr(pages, &provider, &OcrOptions::default())
+            .await
+            .unwrap();
         assert_eq!(out.method_used, ExtractionMethod::Native);
         assert_eq!(out.text, "Typed page\n\n---\n\n");
     }
@@ -573,7 +595,9 @@ mod tests {
             pages: vec![page("", Some(0))],
         };
         let provider = Scripted(vec![Ok(("", None))]);
-        let out = finish_with_ocr(pages, &provider, &OcrOptions::default()).await.unwrap();
+        let out = finish_with_ocr(pages, &provider, &OcrOptions::default())
+            .await
+            .unwrap();
         assert_eq!(out.method_used, ExtractionMethod::Native);
         assert_eq!(out.text, "");
     }
@@ -621,7 +645,9 @@ mod scan_tests {
     /// phone scan. Offsets are computed, so the xref is valid.
     fn quartz_style_scan_pdf(jpeg: &[u8], text_layer: Option<&str>) -> Vec<u8> {
         let content = match text_layer {
-            Some(t) => format!("BT /F1 12 Tf 20 700 Td ({t}) Tj ET\nq 500 0 0 700 0 0 cm /Im1 Do Q"),
+            Some(t) => {
+                format!("BT /F1 12 Tf 20 700 Td ({t}) Tj ET\nq 500 0 0 700 0 0 cm /Im1 Do Q")
+            }
             None => "q 500 0 0 700 0 0 cm /Im1 Do Q".to_string(),
         };
         let icc = b"\x00\x00\x00\x00fake-icc-profile";
@@ -659,12 +685,19 @@ mod scan_tests {
             out.extend_from_slice(b"\nendobj\n");
         }
         let xref = out.len();
-        out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+        out.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes(),
+        );
         for o in offsets {
             out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
         }
         out.extend_from_slice(
-            format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", objs.len() + 1, xref).as_bytes(),
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
+                objs.len() + 1,
+                xref
+            )
+            .as_bytes(),
         );
         out
     }
