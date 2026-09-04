@@ -311,9 +311,15 @@ pub trait TransactionalContext: Send + Sync {
     /// replicated, and still emits node events (live observers keep working).
     /// What it skips is the content fan-out that is meaningless for a state
     /// blob and expensive at bookkeeping write rates: the per-revision
-    /// TreeSnapshot job and trigger evaluation. A sync engine persisting its
-    /// cursor once per page must not mint a snapshot job and a full trigger
-    /// walk per page.
+    /// TreeSnapshot job, trigger evaluation, and embedding generation. A sync
+    /// engine persisting its cursor once per page must not mint a snapshot job
+    /// and a full trigger walk per page, and a content cache expiring must not
+    /// re-embed a document whose text it never touched.
+    ///
+    /// The bar for setting it is therefore precise: NOTHING a downstream
+    /// consumer derives from content may move in this commit. Marking a write
+    /// that does change content is not a slow path, it is a silently missing
+    /// index — so when in doubt, leave it off and pay for the fan-out.
     ///
     /// Default is a no-op: a backend without the optimization treats the
     /// commit as ordinary, which is always correct.

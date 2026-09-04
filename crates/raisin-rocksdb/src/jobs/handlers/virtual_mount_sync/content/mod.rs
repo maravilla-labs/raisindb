@@ -346,6 +346,13 @@ impl VirtualMountSyncHandler {
         tx.set_actor(SYNC_ACTOR)?;
         // The auth context, not the raw actor, is what stamps `updated_by`.
         tx.set_auth_context(AuthContext::system_as(SYNC_ACTOR))?;
+        // ENGINE BOOKKEEPING, not a content change. This write moves the
+        // content CACHE — `file`, `content_hash`, `__content_cached_at`,
+        // `__synced_at` — and never `__extracted_text` or any property a
+        // vector or a trigger is built from. Marking it keeps the cache cycle
+        // from re-enqueueing an embedding job per asset per TTL period, which
+        // is work that could only ever conclude the text had not changed.
+        tx.set_bookkeeping(true)?;
         tx.set_message("virtual mount: fetch attachment content")?;
         tx.upsert_node(workspace, &node).await?;
         tx.commit().await?;
