@@ -10,6 +10,9 @@ import { clonePackage } from './commands/clone.js';
 import { createFromServer } from './commands/create-from-server.js';
 import { initPackage } from './commands/init.js';
 import { createAdapter } from './commands/create.js';
+import { createFunction } from './commands/create-function.js';
+import { functionBuild, functionDoctor } from './commands/function.js';
+import { functionRun, functionTest } from './commands/function-run.js';
 import { deployPackage } from './commands/deploy.js';
 import { serverInstall, serverStart, serverVersion, serverUpdate, serverStop, serverStatus, serverLogs } from './commands/server.js';
 import { flowDoctor, flowExplain } from './commands/flow.js';
@@ -247,6 +250,100 @@ createCmd
     } catch (error) {
       console.error('Error:', error instanceof Error ? error.message : String(error));
       process.exit(1);
+    }
+  });
+
+createCmd
+  .command('function <name>')
+  .description('Scaffold a WebAssembly function (rust | go | ts) inside a package')
+  .option('-l, --lang <lang>', 'Guest language: rust | go | ts')
+  .option('--ns <namespace>', 'Namespace under content/functions/lib (default: package name)')
+  .option('-d, --dir <path>', 'Package directory (default: nearest manifest.yaml above cwd)')
+  .option('--handler <name>', 'Handler name (default: "default", or <name> with --into)')
+  .option(
+    '--into <project>',
+    'Add this function as a SECOND handler of an existing wasm project, sharing its artifact'
+  )
+  .option('--description <text>', 'One-line description for the Function node')
+  .action(async (name, options) => {
+    try {
+      await createFunction(name, options);
+      process.exit(0);
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : String(error));
+      process.exit(1);
+    }
+  });
+
+// WebAssembly function commands. `build`/`doctor` are offline (toolchain +
+// local files only); `run` and `test --server` talk to a server.
+const functionCmd = program
+  .command('function')
+  .description('WebAssembly function tools: build, doctor, run, test');
+
+functionCmd
+  .command('build [path]')
+  .description('Build a wasm function project and copy the artifact into its Function node')
+  .option('--all', 'Build every wasm project in the package')
+  .option('-w, --watch', 'Rebuild on change until interrupted')
+  .option('--release', 'Build with the release profile (the default)')
+  .option('--debug', 'Build with the debug profile — faster, much larger artifacts')
+  .action(async (target, options) => {
+    try {
+      process.exit(await functionBuild(target, options));
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : String(error));
+      process.exit(2);
+    }
+  });
+
+functionCmd
+  .command('doctor [path]')
+  .description('Check toolchains, entry_file handler names and artifact size')
+  .option('--json', 'Machine-readable JSON output')
+  .option('--strict', 'Treat warnings as failures (non-zero exit)')
+  .action((target, options) => {
+    try {
+      process.exit(functionDoctor(target, { json: options.json, strict: options.strict }));
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : String(error));
+      process.exit(2);
+    }
+  });
+
+functionCmd
+  .command('run [path]')
+  .description('Run a wasm function against a server (uploads the local artifact when it differs)')
+  .option('-i, --input <json>', 'JSON input for the handler')
+  .option('--input-file <path>', 'Read the JSON input from a file')
+  .option('--handler <name>', 'Call this handler instead of the node\'s entry_file one')
+  .option('-t, --timeout <ms>', 'Timeout in milliseconds')
+  .option('-s, --server <url>', 'Server URL')
+  .option('-r, --repo <name>', 'Repository name')
+  .option('-b, --branch <name>', 'Branch to upload the artifact to (default: "main")')
+  .option('--json', 'Print one JSON object instead of the live view')
+  .action(async (target, options) => {
+    try {
+      process.exit(await functionRun(target, options));
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : String(error));
+      process.exit(2);
+    }
+  });
+
+functionCmd
+  .command('test [path]')
+  .description("Run a wasm project's native tests, or its tests/server.json with --server")
+  .option('--server [url]', 'Replay tests/server.json against a running server')
+  .option('-r, --repo <name>', 'Repository name (with --server)')
+  .option('-b, --branch <name>', 'Branch to upload the artifact to (with --server)')
+  .option('-t, --timeout <ms>', 'Per-case timeout in milliseconds')
+  .action(async (target, options) => {
+    try {
+      process.exit(await functionTest(target, options));
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : String(error));
+      process.exit(2);
     }
   });
 

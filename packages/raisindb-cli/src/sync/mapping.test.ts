@@ -1,8 +1,28 @@
 import { describe, it, expect } from 'vitest';
 import {
+  CODE_EXTENSIONS,
   mapChangeToNode,
   parseTranslationLocale,
 } from './mapping.js';
+
+describe('wasm artifacts', () => {
+  // A WebAssembly component is BYTES. Adding `.wasm` to CODE_EXTENSIONS would
+  // push it as an inline `code` string and mangle it at the first non-UTF-8
+  // byte; it must travel as a binary asset instead.
+  it('a .wasm artifact is an asset, never code', () => {
+    const m = mapChangeToNode('functions/lib/demo/greet-rust/main.wasm');
+    expect(m.kind).toBe('asset');
+    expect(m.workspace).toBe('functions');
+    expect(m.nodePath).toBe('lib/demo/greet-rust/main.wasm');
+    expect(CODE_EXTENSIONS).not.toContain('.wasm');
+  });
+
+  it("still maps a wasm function's .node.yaml to its node", () => {
+    const m = mapChangeToNode('functions/lib/demo/greet-rust/.node.yaml');
+    expect(m.kind).toBe('node-yaml');
+    expect(m.nodePath).toBe('lib/demo/greet-rust');
+  });
+});
 
 describe('mapChangeToNode', () => {
   describe('.node.yaml files (directory nodes)', () => {

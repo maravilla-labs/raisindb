@@ -7,7 +7,13 @@ exclude = [
     "crates/.data",
     "crates/.claude",
     "examples/*",
-    "tooling/*"
+    "tooling/*",
+    # Guest-side crates: they build for wasm32-wasip2 with their own profiles
+    # (opt-level="s", lto, panic="abort") and their own toolchains. Pulled into
+    # this workspace they would inherit its profiles and its `.cargo/config.toml`
+    # split-debuginfo setting, which does not exist on wasm32.
+    "fixtures/*",
+    "sdks/*"
 ]
 
 [workspace.dependencies]

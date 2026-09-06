@@ -175,7 +175,7 @@ pub struct DropNodeType {
 ///     published_by String
 ///   );
 /// ```
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct CreateMixin {
     /// Mixin name with namespace, e.g., 'myapp:Publishable'
     pub name: String,
@@ -185,17 +185,6 @@ pub struct CreateMixin {
     pub icon: Option<String>,
     /// Property definitions
     pub properties: Vec<PropertyDef>,
-}
-
-impl Default for CreateMixin {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            description: None,
-            icon: None,
-            properties: Vec::new(),
-        }
-    }
 }
 
 /// ALTER MIXIN statement

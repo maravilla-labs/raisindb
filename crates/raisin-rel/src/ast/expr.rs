@@ -113,20 +113,15 @@ impl std::fmt::Display for UnOp {
 }
 
 /// Direction for graph relationship traversal
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum RelDirection {
     /// Follow relationships outgoing from source node
     Outgoing,
     /// Follow relationships incoming to source node
     Incoming,
     /// Follow relationships in any direction
+    #[default]
     Any,
-}
-
-impl Default for RelDirection {
-    fn default() -> Self {
-        Self::Any
-    }
 }
 
 impl std::fmt::Display for RelDirection {

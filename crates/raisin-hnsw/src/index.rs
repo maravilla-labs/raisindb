@@ -786,6 +786,9 @@ impl HnswIndex {
         self.next_key
     }
 
+    /// Whether the index is memory-mapped from a file rather than owned.
+    /// Asserted on by this file's tests; nothing in the engine branches on it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn is_viewed(&self) -> bool {
         self.load_state == IndexLoadState::Viewed
     }

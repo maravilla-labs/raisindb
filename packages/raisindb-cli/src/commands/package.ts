@@ -72,6 +72,12 @@ export const DEFAULT_IGNORE_PATTERNS = [
   '*.tmp',
   '*.temp',
 
+  // Guest-toolchain build output. A wasm function's `target/` holds hundreds of
+  // MB of cargo intermediates next to the one artifact that ships; the artifact
+  // itself lives under content/, not here.
+  'target',
+  'target/**',
+
   // Environment files feeding {env:...} substitution. Their VALUES are baked
   // into the YAML at pack time; the files themselves must never ship.
   '.env',

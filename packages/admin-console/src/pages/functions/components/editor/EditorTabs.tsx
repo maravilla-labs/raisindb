@@ -12,6 +12,7 @@ const LANGUAGE_COLORS: Record<FunctionLanguage, string> = {
   javascript: 'text-yellow-400',
   starlark: 'text-blue-400',
   sql: 'text-green-400',
+  wasm: 'text-orange-400',
 }
 
 // Function icon color (distinctive purple/violet)

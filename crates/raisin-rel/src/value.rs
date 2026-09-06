@@ -5,9 +5,10 @@ use std::collections::HashMap;
 use std::fmt;
 
 /// Runtime value during expression evaluation
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Value {
+    #[default]
     Null,
     Boolean(bool),
     Integer(i64),
@@ -230,12 +231,6 @@ impl fmt::Display for Value {
                 write!(f, "}}")
             }
         }
-    }
-}
-
-impl Default for Value {
-    fn default() -> Self {
-        Self::Null
     }
 }
 

@@ -1,0 +1,36 @@
+node_type: raisin:Function
+properties:
+  name: greet-rust-shout
+  title: Greet, Shouting (Rust / wasm)
+  description: >
+    The SAME artifact as `greet-rust`, a different handler. `entry_file` points
+    at the sibling node's `main.wasm` and selects the `shout` handler, so one
+    uploaded component backs two Function nodes. The resolved path must stay
+    inside the functions workspace; the server refuses one that escapes it.
+  enabled: true
+  language: wasm
+  execution_mode: both
+  entry_file: ../greet-rust/main.wasm:shout
+  version: 1
+  resource_limits:
+    timeout_ms: 5000
+    max_memory_bytes: 67108864
+  network_policy:
+    http_enabled: false
+  input_schema:
+    type: object
+    additionalProperties: false
+    properties:
+      name:
+        type: string
+        description: Who to greet
+    required: [name]
+  output_schema:
+    type: object
+    properties:
+      greeting:
+        type: string
+      people:
+        type: integer
+      handler:
+        type: string

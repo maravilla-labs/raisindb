@@ -16,7 +16,8 @@
 //! the storage system and binary storage.
 
 use std::collections::HashMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
+use std::sync::Arc;
 
 use raisin_binary::BinaryStorage;
 use raisin_error::Result;
@@ -25,9 +26,13 @@ use raisin_models::nodes::Node;
 use raisin_storage::{ListOptions, NodeRepository, Storage, StorageScope};
 
 use crate::types::{
-    EmailPolicy, FunctionLanguage, FunctionMetadata, IdentityPolicy, NetworkPolicy, ResourceLimits,
-    SecretPolicy,
+    language_for_file_name, EmailPolicy, FunctionCode, FunctionLanguage, FunctionMetadata,
+    IdentityPolicy, NetworkPolicy, ResourceLimits, SecretPolicy,
 };
+
+/// `entry_file` resolution lives in [`super::entry_file`] — ONE implementation,
+/// re-exported here because this module is where every caller already looks.
+pub use super::entry_file::{default_handler_name, resolve_entry_file};
 
 /// Load a function node from the functions workspace by exact path.
 pub async fn load_function_node<S>(
@@ -117,6 +122,12 @@ where
 /// 3. Loads the asset node containing the code
 /// 4. Extracts the code from inline property or binary storage
 /// 5. Returns the code and function metadata
+///
+/// A `wasm` function yields [`FunctionCode::Bytes`] — its entry file is a
+/// compiled component, not source — and is size-capped here so a runaway
+/// artifact is refused before it reaches a compiler. Every other language
+/// yields [`FunctionCode::Text`].
+#[allow(clippy::too_many_arguments)]
 pub async fn load_function_code<S, B>(
     storage: &S,
     binary_storage: &B,
@@ -126,7 +137,7 @@ pub async fn load_function_code<S, B>(
     functions_workspace: &str,
     func_node: &Node,
     function_path: &str,
-) -> Result<(String, FunctionMetadata)>
+) -> Result<(FunctionCode, FunctionMetadata)>
 where
     S: Storage,
     B: BinaryStorage,
@@ -141,8 +152,10 @@ where
     let identity_policy = extract_identity_policy(func_node);
     let resource_limits = extract_resource_limits(func_node);
 
-    // Resolve entry file path
-    let (asset_path, handler_name) = resolve_entry_file(function_path, &entry_file);
+    // Resolve entry file path. Refuses a path that would climb out of the
+    // functions workspace; a parent-relative one (`../shared/main.wasm`) is
+    // deliberately allowed, so several Function nodes can share one artifact.
+    let (asset_path, handler_name) = resolve_entry_file(function_path, &entry_file, language)?;
 
     // Load asset node
     let asset_node = storage
@@ -157,8 +170,28 @@ where
             raisin_error::Error::NotFound(format!("Entry file not found: {}", asset_path))
         })?;
 
-    // Load code from asset
-    let code = extract_code_from_asset(&asset_node, binary_storage).await?;
+    // Load code from asset. Bytes for wasm, text for everything else — the
+    // UTF-8 decode that used to be unconditional is what made a `.wasm` entry
+    // file fail with "Code is not valid UTF-8".
+    let code = if language == FunctionLanguage::Wasm {
+        let bytes = extract_code_bytes_from_asset(&asset_node, binary_storage).await?;
+        // The cap is the CONFIGURED one (`[functions.wasm] max_artifact_bytes`),
+        // read through the single accessor every acceptance point uses. Comparing
+        // against the compiled-in default here instead is how an operator who
+        // raised the limit would find loads still refused at 32 MiB.
+        let max = crate::runtime::max_wasm_artifact_bytes();
+        if bytes.len() > max {
+            return Err(raisin_error::Error::Validation(format!(
+                "wasm artifact {} is {} bytes, over the {} byte limit",
+                asset_path,
+                bytes.len(),
+                max
+            )));
+        }
+        FunctionCode::Bytes(bytes)
+    } else {
+        FunctionCode::Text(extract_code_from_asset(&asset_node, binary_storage).await?)
+    };
 
     // Build metadata with network_policy and resource_limits from function node
     let mut metadata = FunctionMetadata::new(name, language).with_entry_file(handler_name);
@@ -186,6 +219,13 @@ pub fn extract_name(node: &Node) -> Result<String> {
 }
 
 /// Extract function language from node properties.
+///
+/// Delegates to [`FunctionLanguage`]'s `FromStr` rather than matching here.
+/// The hand-rolled match this replaces accepted only `javascript`/`js`/
+/// `starlark`/`python` and rejected `sql` — a language every OTHER reader of
+/// this property (`parse_language` in the HTTP helpers, the WS handlers, the
+/// backup callbacks) accepts. Two spellings of the same question is the
+/// mirrored-path bug class; there is now one table, in `FromStr`.
 pub fn extract_language(node: &Node) -> Result<FunctionLanguage> {
     let lang_str = node
         .properties
@@ -196,14 +236,9 @@ pub fn extract_language(node: &Node) -> Result<FunctionLanguage> {
         })
         .unwrap_or("JavaScript");
 
-    match lang_str.to_lowercase().as_str() {
-        "javascript" | "js" => Ok(FunctionLanguage::JavaScript),
-        "starlark" | "python" => Ok(FunctionLanguage::Starlark),
-        _ => Err(raisin_error::Error::Validation(format!(
-            "Unsupported function language: {}",
-            lang_str
-        ))),
-    }
+    lang_str.parse().map_err(|_| {
+        raisin_error::Error::Validation(format!("Unsupported function language: {}", lang_str))
+    })
 }
 
 /// Extract entry_file from node properties.
@@ -335,77 +370,19 @@ pub fn extract_resource_limits(node: &Node) -> ResourceLimits {
         .unwrap_or_default()
 }
 
-/// Resolve entry file path relative to function path.
+/// Extract an asset node's raw payload.
 ///
-/// Entry file format: `"filename:functionName"` (e.g., `"index.js:handleUserMessage"`)
-///
-/// Returns: `(full_asset_path, handler_function_name)`
-pub fn resolve_entry_file(function_path: &str, entry_file: &str) -> (String, String) {
-    // Split "filename:functionName" format
-    let (file_part, handler) = if let Some(idx) = entry_file.rfind(':') {
-        let (file, func) = entry_file.split_at(idx);
-        (file.to_string(), func[1..].to_string()) // Skip the ':'
-    } else {
-        // No function name specified, use default "handler"
-        (entry_file.to_string(), "handler".to_string())
-    };
-
-    // Build full path using std::path for normalization
-    let base = Path::new(function_path);
-    let file = Path::new(&file_part);
-
-    // Join and normalize the path
-    let joined = base.join(file);
-    let normalized = normalize_path(&joined);
-
-    // Convert back to string, ensuring leading /
-    let path_str = normalized.to_string_lossy().to_string();
-    let full_path = if path_str.starts_with('/') {
-        path_str
-    } else {
-        format!("/{}", path_str)
-    };
-
-    (full_path, handler)
-}
-
-/// Normalize a path by resolving `.` and `..` components.
-fn normalize_path(path: &Path) -> PathBuf {
-    let mut result = PathBuf::new();
-
-    for component in path.components() {
-        match component {
-            Component::ParentDir => {
-                result.pop();
-            }
-            Component::CurDir => {
-                // Skip current directory markers
-            }
-            Component::RootDir => {
-                result.push("/");
-            }
-            Component::Normal(name) => {
-                result.push(name);
-            }
-            Component::Prefix(prefix) => {
-                result.push(prefix.as_os_str());
-            }
-        }
-    }
-
-    result
-}
-
-/// Extract code from an asset node.
-///
-/// Tries inline "code" property first, then falls back to binary storage.
-pub async fn extract_code_from_asset<B>(node: &Node, binary_storage: &B) -> Result<String>
+/// Tries the inline `code` property first (its UTF-8 encoding), then the `file`
+/// Resource's blob in binary storage. THE one place that answers "where do an
+/// asset's bytes live"; [`extract_code_from_asset`] is a UTF-8 decode over it,
+/// and a wasm artifact takes the bytes as they are.
+pub async fn extract_code_bytes_from_asset<B>(node: &Node, binary_storage: &B) -> Result<Arc<[u8]>>
 where
     B: BinaryStorage,
 {
     // Try inline code property first
     if let Some(PropertyValue::String(code)) = node.properties.get("code") {
-        return Ok(code.clone());
+        return Ok(Arc::from(code.as_bytes()));
     }
 
     // Try binary storage via "file" resource property
@@ -419,9 +396,7 @@ where
                     ))
                 })?;
 
-                return String::from_utf8(bytes.to_vec()).map_err(|e| {
-                    raisin_error::Error::Validation(format!("Code is not valid UTF-8: {}", e))
-                });
+                return Ok(Arc::from(bytes.as_ref()));
             }
         }
     }
@@ -431,13 +406,27 @@ where
     ))
 }
 
+/// Extract code from an asset node as UTF-8 text.
+///
+/// Tries inline "code" property first, then falls back to binary storage.
+pub async fn extract_code_from_asset<B>(node: &Node, binary_storage: &B) -> Result<String>
+where
+    B: BinaryStorage,
+{
+    let bytes = extract_code_bytes_from_asset(node, binary_storage).await?;
+    String::from_utf8(bytes.to_vec())
+        .map_err(|e| raisin_error::Error::Validation(format!("Code is not valid UTF-8: {}", e)))
+}
+
 /// Load sibling files for module resolution.
 ///
 /// Lists children of the function node directory and loads code-like sibling files
 /// other than the entry file. Used by:
 /// - QuickJS ES modules (`.js`, `.mjs`)
 /// - Starlark load() (`.py`, `.star`, `.bzl`)
+///
 /// Returns a map of relative filename to source code.
+#[allow(clippy::too_many_arguments)]
 pub async fn load_sibling_files<S, B>(
     storage: &S,
     binary_storage: &B,
@@ -483,13 +472,15 @@ where
             continue;
         }
 
-        // Only load known module-capable code files
-        if !name.ends_with(".js")
-            && !name.ends_with(".mjs")
-            && !name.ends_with(".py")
-            && !name.ends_with(".star")
-            && !name.ends_with(".bzl")
-        {
+        // Only load known module-capable code files. The extension table is
+        // `language_for_file_name`'s, not a fourth copy of it: a binary
+        // artifact (`.wasm`) and a SQL file are not importable modules, and
+        // reading a `.wasm` sibling as text would fail the UTF-8 decode on
+        // every invocation.
+        if !matches!(
+            language_for_file_name(name),
+            Some(FunctionLanguage::JavaScript) | Some(FunctionLanguage::Starlark)
+        ) {
             continue;
         }
 
@@ -565,6 +556,7 @@ fn collect_external_import_dirs(code: &str) -> Vec<String> {
 /// The returned map uses keys like `"dir-name/file.js"` which match what the
 /// QuickJS module resolver produces when resolving `../dir-name/file.js` from
 /// an entry module.
+#[allow(clippy::too_many_arguments)]
 pub async fn load_external_modules<S, B>(
     storage: &S,
     binary_storage: &B,
@@ -685,35 +677,81 @@ where
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_resolve_entry_file_simple() {
-        let (path, handler) =
-            resolve_entry_file("/lib/raisin/agent-handler", "index.js:handleUserMessage");
-        assert_eq!(path, "/lib/raisin/agent-handler/index.js");
-        assert_eq!(handler, "handleUserMessage");
+    /// A `raisin:Function` node carrying just the property under test.
+    fn function_node(language: Option<&str>) -> Node {
+        let properties = match language {
+            Some(lang) => serde_json::json!({ "language": lang }),
+            None => serde_json::json!({}),
+        };
+        serde_json::from_value(serde_json::json!({
+            "id": "fn-1",
+            "name": "greet",
+            "path": "/greet",
+            "node_type": "raisin:Function",
+            "properties": properties,
+            "children": [],
+            "parent": null,
+            "version": 1,
+            "created_at": null,
+            "updated_at": null,
+            "published_by": null,
+        }))
+        .expect("a raisin:Function node")
     }
 
     #[test]
-    fn test_resolve_entry_file_no_handler() {
-        let (path, handler) = resolve_entry_file("/lib/raisin/agent-handler", "main.js");
-        assert_eq!(path, "/lib/raisin/agent-handler/main.js");
-        assert_eq!(handler, "handler"); // Default
+    fn extract_language_agrees_with_from_str_for_every_variant() {
+        // ONE table decides what a `language` property means, and it lives in
+        // `FromStr`. This used to be a second hand-rolled match that accepted
+        // javascript/js/starlark/python and REJECTED `sql` — a language every
+        // other reader of the same property accepts — so a SQL function loaded
+        // from the HTTP helpers and failed from the job executor.
+        for (spelling, expected) in [
+            ("javascript", FunctionLanguage::JavaScript),
+            ("js", FunctionLanguage::JavaScript),
+            ("JavaScript", FunctionLanguage::JavaScript),
+            ("starlark", FunctionLanguage::Starlark),
+            ("python", FunctionLanguage::Starlark),
+            ("sql", FunctionLanguage::Sql),
+            ("SQL", FunctionLanguage::Sql),
+            ("wasm", FunctionLanguage::Wasm),
+            ("wasm-component", FunctionLanguage::Wasm),
+            ("WASM", FunctionLanguage::Wasm),
+        ] {
+            let from_str: FunctionLanguage = spelling
+                .parse()
+                .unwrap_or_else(|e| panic!("FromStr rejected {spelling}: {e}"));
+            assert_eq!(from_str, expected, "FromStr for {spelling}");
+            assert_eq!(
+                extract_language(&function_node(Some(spelling))).unwrap(),
+                expected,
+                "extract_language for {spelling}"
+            );
+        }
+
+        // And every variant's own Display spelling round-trips through both.
+        for expected in [
+            FunctionLanguage::JavaScript,
+            FunctionLanguage::Starlark,
+            FunctionLanguage::Sql,
+            FunctionLanguage::Wasm,
+        ] {
+            let display = expected.to_string();
+            assert_eq!(display.parse::<FunctionLanguage>().unwrap(), expected);
+            assert_eq!(
+                extract_language(&function_node(Some(&display))).unwrap(),
+                expected
+            );
+        }
     }
 
     #[test]
-    fn test_resolve_entry_file_relative_parent() {
-        let (path, handler) =
-            resolve_entry_file("/lib/raisin/agent-handler", "../shared/utils.js:helper");
-        assert_eq!(path, "/lib/raisin/shared/utils.js");
-        assert_eq!(handler, "helper");
-    }
-
-    #[test]
-    fn test_resolve_entry_file_nested() {
-        let (path, handler) =
-            resolve_entry_file("/lib/raisin/agent-handler", "src/handlers/main.js:run");
-        assert_eq!(path, "/lib/raisin/agent-handler/src/handlers/main.js");
-        assert_eq!(handler, "run");
+    fn a_missing_language_is_javascript_and_an_unknown_one_is_an_error() {
+        assert_eq!(
+            extract_language(&function_node(None)).unwrap(),
+            FunctionLanguage::JavaScript
+        );
+        assert!(extract_language(&function_node(Some("brainfuck"))).is_err());
     }
 
     #[test]

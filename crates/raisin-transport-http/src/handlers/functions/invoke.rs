@@ -56,8 +56,13 @@ pub async fn invoke_function(
     // lookup - an anonymous lookup is RLS-filtered to nothing -> 404)
     let auth_context = auth.map(|Extension(ctx)| ctx);
 
+    // Phase timing for the sync path. `duration_ms` in the response covers the
+    // function's own execution only, so without this the rest of the handler is
+    // invisible and "invoke is slow" cannot be attributed to a step.
+    let t_lookup = std::time::Instant::now();
     let function_node =
         find_function_node(&state, tenant_id, &repo, &name, auth_context.as_ref()).await?;
+    let lookup_ms = t_lookup.elapsed().as_micros() as f64 / 1000.0;
 
     let execution_mode = parse_execution_mode(function_node.properties.get("execution_mode"));
     if req.sync && !execution_mode.allows_sync() {
@@ -74,6 +79,7 @@ pub async fn invoke_function(
 
     // Register job for tracking
     let async_execution_id = nanoid::nanoid!();
+    let t_register = std::time::Instant::now();
     let job_id = register_function_job(
         &rocksdb,
         tenant_id,
@@ -84,14 +90,18 @@ pub async fn invoke_function(
         auth_context.as_ref(),
     )
     .await?;
+    let register_ms = t_register.elapsed().as_micros() as f64 / 1000.0;
 
     if req.sync {
+        let t_status = std::time::Instant::now();
         rocksdb
             .job_registry()
             .update_status(&job_id, JobStatus::Running)
             .await
             .map_err(map_storage_error)?;
+        let status_ms = t_status.elapsed().as_micros() as f64 / 1000.0;
 
+        let t_exec = std::time::Instant::now();
         match execute_function_inline(
             &state,
             tenant_id,
@@ -104,7 +114,16 @@ pub async fn invoke_function(
         .await
         {
             Ok(result) => {
+                let exec_ms = t_exec.elapsed().as_micros() as f64 / 1000.0;
+                let t_persist = std::time::Instant::now();
                 persist_job_result(&rocksdb, tenant_id, &job_id, &result).await?;
+                let persist_ms = t_persist.elapsed().as_micros() as f64 / 1000.0;
+                tracing::debug!(
+                    target: "invoke_timing",
+                    lookup_ms, register_ms, status_ms, exec_ms, persist_ms,
+                    reported_ms = result.duration_ms,
+                    "sync invoke phases"
+                );
                 let response = InvokeFunctionResponse {
                     execution_id: result.execution_id.clone(),
                     sync: true,
@@ -415,16 +434,23 @@ async fn execute_function_inline(
     // works when run from a trigger or flow, which goes through `code_loader`
     // in the job executor. That inconsistency is very hard to diagnose from the
     // outside, so every path that builds a LoadedFunction must fill this in.
-    loaded.files = super::load_function_modules_on_branch(
-        state,
-        tenant_id,
-        repo,
-        DEFAULT_BRANCH,
-        &node.path,
-        loaded.metadata.entry_file_path(),
-        &loaded.code,
-    )
-    .await;
+    //
+    // A wasm component is the exception: its imports were linked when it was
+    // built, so the scan could only ever return files the runtime cannot use —
+    // the same skip `execution/executor.rs` and `run_file.rs` make, for the same
+    // reason.
+    if loaded.metadata.language != raisin_functions::FunctionLanguage::Wasm {
+        loaded.files = super::load_function_modules_on_branch(
+            state,
+            tenant_id,
+            repo,
+            DEFAULT_BRANCH,
+            &node.path,
+            loaded.metadata.entry_file_path(),
+            loaded.code.as_text().unwrap_or(""),
+        )
+        .await;
+    }
 
     if let Some(timeout) = timeout_override {
         loaded.metadata.resource_limits.timeout_ms = timeout;

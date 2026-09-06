@@ -101,6 +101,7 @@ impl ModelRegistry {
 
     /// Download a quantized (GGUF) model.
     #[cfg(feature = "huggingface")]
+    #[allow(clippy::too_many_arguments)]
     async fn download_quantized_model(
         &self,
         api: &hf_hub::api::tokio::Api,

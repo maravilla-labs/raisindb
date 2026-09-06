@@ -263,21 +263,35 @@ export function FunctionPropertiesForm({
           <option value="javascript">JavaScript</option>
           <option value="starlark">Python (Starlark)</option>
           <option value="sql">SQL</option>
+          <option value="wasm">WebAssembly</option>
         </select>
       </Field>
 
       {/* Entry File */}
       <Field
         label="Entry File"
-        hint={`Format: filename:functionName (e.g., ${
-          properties.language === 'starlark' ? 'index.py:handler' : 'index.js:handler'
-        })`}
+        hint={
+          properties.language === 'wasm'
+            // One artifact carries many named handlers, so the suffix selects one
+            // (a bare artifact name means the handler "default"). A parent-relative
+            // path lets several functions share one artifact.
+            ? 'Format: artifact.wasm[:handler] (e.g., main.wasm, main.wasm:on-order, ../shared/main.wasm:on-order)'
+            : `Format: filename:functionName (e.g., ${
+              properties.language === 'starlark' ? 'index.py:handler' : 'index.js:handler'
+            })`
+        }
       >
         <input
           type="text"
           value={properties.entry_file || ''}
           onChange={(e) => handleChange('entry_file', e.target.value)}
-          placeholder={properties.language === 'starlark' ? 'index.py:handler' : 'index.js:handler'}
+          placeholder={
+            properties.language === 'wasm'
+              ? 'main.wasm'
+              : properties.language === 'starlark'
+                ? 'index.py:handler'
+                : 'index.js:handler'
+          }
           disabled={disabled}
           className={inputClass}
         />

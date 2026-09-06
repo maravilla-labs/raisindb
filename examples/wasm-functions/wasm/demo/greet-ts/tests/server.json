@@ -1,0 +1,11 @@
+[
+  {
+    "input": { "name": "Ada" },
+    "expect": { "greeting": "Hello, Ada!", "language": "ts" }
+  },
+  {
+    "handler": "shout",
+    "input": { "name": "Ada" },
+    "expect": { "greeting": "HELLO, ADA!", "language": "ts" }
+  }
+]

@@ -359,7 +359,7 @@ where
                     ws,
                     &function_node.path,
                     loaded.metadata.entry_file_path(),
-                    &loaded.code,
+                    loaded.code.as_text().unwrap_or(""),
                 )
                 .await;
 

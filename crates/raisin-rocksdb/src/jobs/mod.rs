@@ -29,6 +29,7 @@ pub mod keyed_mutex;
 pub mod metadata_store;
 pub mod pool;
 pub mod trigger_registry;
+pub mod wasm_validator;
 pub mod watchdog;
 pub mod worker;
 
@@ -73,5 +74,9 @@ pub use keyed_mutex::{KeyedMutex, KeyedMutexGuard};
 pub use metadata_store::{JobMetadataStore, PersistedJobEntry};
 pub use pool::RocksDBWorkerPool;
 pub use trigger_registry::{CachedTrigger, TriggerFilters, TriggerRegistry};
+pub use wasm_validator::{
+    install_wasm_validator, validate_wasm_artifact, validate_wasm_artifact_async,
+    wasm_validator_installed, WasmArtifactValidator,
+};
 pub use watchdog::{OnJobTimeoutFn, TimeoutWatchdog};
 pub use worker::RocksDBWorker;

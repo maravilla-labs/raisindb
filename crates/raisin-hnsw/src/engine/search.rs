@@ -207,7 +207,9 @@ pub(crate) struct DocumentFetch {
     pub(crate) filtered_out: usize,
     /// How many times the draw doubled. `0` means the opening bid ended it.
     pub(crate) escalations: usize,
-    /// Why the loop stopped. See `FetchExit`.
+    /// Why the loop stopped. See `FetchExit`. Read by the tests, which is the
+    /// whole point of recording it — the rows cannot tell the exits apart.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) exit: FetchExit,
 }
 

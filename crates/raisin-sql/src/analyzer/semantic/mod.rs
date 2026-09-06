@@ -290,7 +290,7 @@ pub(crate) fn parse_interval_string(s: &str) -> Result<chrono::Duration> {
 
     let tokens: Vec<&str> = s.split_whitespace().collect();
 
-    if tokens.is_empty() || tokens.len() % 2 != 0 {
+    if tokens.is_empty() || !tokens.len().is_multiple_of(2) {
         return Err(AnalysisError::UnsupportedExpression(format!(
             "Invalid INTERVAL format '{}'. Expected format: '<number> <unit>' or '<number> <unit> <number> <unit>' (e.g., '1 hour' or '3 hour 30 minutes')",
             s

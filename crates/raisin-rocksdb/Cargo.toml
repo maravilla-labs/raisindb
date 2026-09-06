@@ -38,7 +38,14 @@ raisin-packages = { path = "../raisin-packages" }
 raisin-audit = { path = "../raisin-audit" }
 
 # RocksDB
-rocksdb = { version = "0.24", default-features = false, features = ["lz4"] }
+# `bindgen-runtime` is part of rocksdb's default feature set and selects
+# librocksdb-sys's bindgen backend. Turning defaults off without naming it
+# leaves librocksdb-sys with NO backend, and its build script then panics
+# with "a `libclang` shared library is not loaded on this thread" for any
+# command that builds this crate alone (`cargo test -p raisin-rocksdb`).
+# It only ever built because raisin-server takes rocksdb with defaults and
+# feature unification papered over the gap.
+rocksdb = { version = "0.24", default-features = false, features = ["lz4", "bindgen-runtime"] }
 
 # Serialization
 serde = { workspace = true }

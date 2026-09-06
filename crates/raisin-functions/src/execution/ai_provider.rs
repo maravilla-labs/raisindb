@@ -169,6 +169,11 @@ fn decrypt_api_key_if_needed(
             let master_key = get_master_key()?;
             let encryptor = ApiKeyEncryptor::new(&master_key);
 
+            // Context-free decryption is deliberate: these are the existing AI
+            // provider key blobs, sealed context-free by every writer. Binding
+            // them to a `SecretContext` is a format change for data at rest,
+            // not one this read path can make on its own.
+            #[allow(deprecated)]
             let key = encryptor.decrypt(encrypted).map_err(|e| {
                 raisin_error::Error::Backend(format!("Failed to decrypt API key: {}", e))
             })?;

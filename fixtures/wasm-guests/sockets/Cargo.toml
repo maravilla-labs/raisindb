@@ -1,0 +1,14 @@
+[package]
+name = "sockets"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = { workspace = true }
+# The genuine `wasi:sockets` bindings, so the import name in the component is
+# the real one the host refuses to link.
+wasi = { version = "0.14", default-features = false }

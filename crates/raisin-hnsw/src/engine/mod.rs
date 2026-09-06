@@ -359,7 +359,7 @@ impl HnswIndexingEngine {
             let on_disk = loaded.dimensions();
             if on_disk == spec.dimensions {
                 loaded
-            } else if loaded.len() == 0 {
+            } else if loaded.is_empty() {
                 // Nothing to lose: an empty index at the wrong width is just a stale
                 // artifact of a previous config (or of the old startup constant). Adopt
                 // the configured width silently rather than making the tenant run a

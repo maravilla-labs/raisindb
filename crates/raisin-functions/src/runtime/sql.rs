@@ -13,8 +13,8 @@ use std::sync::Arc;
 use super::FunctionRuntime;
 use crate::api::FunctionApi;
 use crate::types::{
-    ExecutionContext, ExecutionError, ExecutionResult, ExecutionStats, FunctionLanguage,
-    FunctionMetadata, LogEntry,
+    ExecutionContext, ExecutionError, ExecutionResult, ExecutionStats, FunctionCode,
+    FunctionLanguage, FunctionMetadata, LogEntry,
 };
 
 /// SQL passthrough runtime
@@ -42,13 +42,17 @@ impl Default for SqlRuntime {
 impl FunctionRuntime for SqlRuntime {
     async fn execute(
         &self,
-        code: &str,
+        code: &FunctionCode,
         _entrypoint: &str,
         context: ExecutionContext,
         _metadata: &FunctionMetadata,
         api: Arc<dyn FunctionApi>,
         _files: HashMap<String, String>,
     ) -> Result<ExecutionResult> {
+        // A text runtime cannot run an artifact: `language` and the payload
+        // shape must agree, and disagreeing is a configuration error, not a
+        // decoding one.
+        let code = code.as_text()?;
         let start = std::time::Instant::now();
         let execution_id = context.execution_id.clone();
 
@@ -98,7 +102,8 @@ impl FunctionRuntime for SqlRuntime {
         }
     }
 
-    fn validate(&self, code: &str) -> Result<()> {
+    fn validate(&self, code: &FunctionCode) -> Result<()> {
+        let code = code.as_text()?;
         if code.trim().is_empty() {
             return Err(Error::Validation("SQL code cannot be empty".to_string()));
         }

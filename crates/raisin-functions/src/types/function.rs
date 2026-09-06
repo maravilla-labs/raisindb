@@ -9,14 +9,16 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use super::{
-    EmailPolicy, IdentityPolicy, NetworkPolicy, ResourceLimits, SecretPolicy, TriggerCondition,
+    EmailPolicy, FunctionCode, IdentityPolicy, NetworkPolicy, ResourceLimits, SecretPolicy,
+    TriggerCondition,
 };
 
 /// Supported function runtime languages
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FunctionLanguage {
     /// JavaScript runtime (QuickJS)
+    #[default]
     JavaScript,
     /// Python-like runtime (Starlark)
     /// Also accepts "python" in YAML for user convenience
@@ -24,12 +26,13 @@ pub enum FunctionLanguage {
     Starlark,
     /// Native SQL passthrough
     Sql,
-}
-
-impl Default for FunctionLanguage {
-    fn default() -> Self {
-        Self::JavaScript
-    }
+    /// WebAssembly component (Component Model + WIT), run by wasmtime.
+    ///
+    /// A wasm function has no source on the server: its code is the uploaded
+    /// artifact, which is why [`crate::types::FunctionCode`] has a `Bytes`
+    /// shape at all.
+    #[serde(alias = "wasm-component")]
+    Wasm,
 }
 
 impl std::fmt::Display for FunctionLanguage {
@@ -38,6 +41,7 @@ impl std::fmt::Display for FunctionLanguage {
             Self::JavaScript => write!(f, "javascript"),
             Self::Starlark => write!(f, "starlark"),
             Self::Sql => write!(f, "sql"),
+            Self::Wasm => write!(f, "wasm"),
         }
     }
 }
@@ -50,27 +54,23 @@ impl std::str::FromStr for FunctionLanguage {
             "javascript" | "js" => Ok(Self::JavaScript),
             "starlark" | "python" => Ok(Self::Starlark),
             "sql" => Ok(Self::Sql),
+            "wasm" | "wasm-component" => Ok(Self::Wasm),
             _ => Err(format!("Unknown function language: {}", s)),
         }
     }
 }
 
 /// Function execution mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ExecutionMode {
     /// Always run via job queue (default)
+    #[default]
     Async,
     /// Can run synchronously (for WebAPI with timeout)
     Sync,
     /// Both modes supported - caller decides
     Both,
-}
-
-impl Default for ExecutionMode {
-    fn default() -> Self {
-        Self::Async
-    }
 }
 
 impl std::fmt::Display for ExecutionMode {
@@ -256,6 +256,11 @@ impl FunctionMetadata {
         Self::new(name, FunctionLanguage::Sql)
     }
 
+    /// Create a WebAssembly component function
+    pub fn wasm(name: impl Into<String>) -> Self {
+        Self::new(name, FunctionLanguage::Wasm)
+    }
+
     /// Set description
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
@@ -345,8 +350,9 @@ pub struct LoadedFunction {
     /// Function metadata
     pub metadata: FunctionMetadata,
 
-    /// Entry file source code (the main file specified in entry_file)
-    pub code: String,
+    /// Entry file payload — source text, or a binary artifact for `wasm`
+    /// (the main file specified in entry_file)
+    pub code: FunctionCode,
 
     /// All function files (path -> content) for module resolution
     /// Includes the entry file and any additional files in the function directory
@@ -366,14 +372,14 @@ impl LoadedFunction {
     /// Create a new loaded function
     pub fn new(
         metadata: FunctionMetadata,
-        code: String,
+        code: impl Into<FunctionCode>,
         path: String,
         node_id: String,
         workspace: String,
     ) -> Self {
         Self {
             metadata,
-            code,
+            code: code.into(),
             files: HashMap::new(),
             path,
             node_id,
@@ -384,7 +390,7 @@ impl LoadedFunction {
     /// Create a loaded function with file map for module support
     pub fn with_files(
         metadata: FunctionMetadata,
-        code: String,
+        code: impl Into<FunctionCode>,
         files: HashMap<String, String>,
         path: String,
         node_id: String,
@@ -392,7 +398,7 @@ impl LoadedFunction {
     ) -> Self {
         Self {
             metadata,
-            code,
+            code: code.into(),
             files,
             path,
             node_id,
@@ -459,5 +465,68 @@ mod execution_mode_tests {
         ] {
             assert_eq!(mode.to_string().parse::<ExecutionMode>().unwrap(), mode);
         }
+    }
+}
+
+#[cfg(test)]
+mod language_tests {
+    use super::*;
+
+    /// Every variant, its wire spelling, and the aliases `FromStr` accepts.
+    ///
+    /// `language` is written by hand in `.node.yaml` files and by three
+    /// different clients, so the spellings are a contract; the serde
+    /// representation and `FromStr` have to agree about all of them or a
+    /// function that installs cannot be loaded.
+    #[test]
+    fn language_spellings_round_trip() {
+        for (variant, wire, aliases) in [
+            (
+                FunctionLanguage::JavaScript,
+                "javascript",
+                &["js", "JavaScript"][..],
+            ),
+            (FunctionLanguage::Starlark, "starlark", &["python"][..]),
+            (FunctionLanguage::Sql, "sql", &["SQL"][..]),
+            (
+                FunctionLanguage::Wasm,
+                "wasm",
+                &["wasm-component", "WASM"][..],
+            ),
+        ] {
+            assert_eq!(variant.to_string(), wire, "Display for {variant:?}");
+            assert_eq!(wire.parse::<FunctionLanguage>().unwrap(), variant);
+            for alias in aliases {
+                assert_eq!(
+                    alias.parse::<FunctionLanguage>().unwrap(),
+                    variant,
+                    "FromStr for alias {alias}"
+                );
+            }
+            assert_eq!(
+                serde_json::to_value(variant).unwrap(),
+                serde_json::Value::String(wire.to_string())
+            );
+            assert_eq!(
+                serde_json::from_value::<FunctionLanguage>(serde_json::json!(wire)).unwrap(),
+                variant
+            );
+        }
+
+        // The serde alias exists so a node written before the name settled
+        // still deserialises.
+        assert_eq!(
+            serde_json::from_value::<FunctionLanguage>(serde_json::json!("wasm-component"))
+                .unwrap(),
+            FunctionLanguage::Wasm
+        );
+        assert!("brainfuck".parse::<FunctionLanguage>().is_err());
+    }
+
+    #[test]
+    fn a_wasm_function_declares_its_language() {
+        let metadata = FunctionMetadata::wasm("greet");
+        assert_eq!(metadata.language, FunctionLanguage::Wasm);
+        assert_eq!(metadata.name, "greet");
     }
 }

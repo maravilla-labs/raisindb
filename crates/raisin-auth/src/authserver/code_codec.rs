@@ -105,6 +105,11 @@ impl AuthorizationCodeCodec for SealedCodeCodec {
         let json = serde_json::to_vec(code).map_err(|e| {
             AuthServerError::ServerError(format!("authorization code could not be encoded: {e}"))
         })?;
+        // Context-free envelope (no `SecretContext` AAD). Migrating to
+        // `SecretBox::seal`/`open` is a format change that must land on the
+        // sealing and opening halves together — tracked with the other
+        // `encrypt_bytes`/`decrypt_bytes` callers, not done piecemeal here.
+        #[allow(deprecated)]
         let sealed = self.secret_box.encrypt_bytes(&json).map_err(|e| {
             AuthServerError::ServerError(format!("authorization code could not be sealed: {e}"))
         })?;
@@ -119,6 +124,8 @@ impl AuthorizationCodeCodec for SealedCodeCodec {
             || AuthServerError::InvalidGrant("authorization code is not valid".to_string());
 
         let sealed = URL_SAFE_NO_PAD.decode(value).map_err(|_| invalid())?;
+        // Pairs with the context-free `encrypt_bytes` in `seal` above.
+        #[allow(deprecated)]
         let json = self
             .secret_box
             .decrypt_bytes(&sealed)

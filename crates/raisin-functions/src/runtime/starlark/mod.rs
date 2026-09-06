@@ -23,7 +23,7 @@ mod tests {
     use super::*;
     use crate::api::MockFunctionApi;
     use crate::runtime::FunctionRuntime;
-    use crate::types::{ExecutionContext, FunctionMetadata};
+    use crate::types::{ExecutionContext, FunctionCode, FunctionMetadata};
     use starlark::environment::Module;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -37,38 +37,38 @@ mod tests {
     #[test]
     fn test_validate_empty_code() {
         let runtime = StarlarkRuntime::new();
-        let result = runtime.validate("");
+        let result = runtime.validate(&FunctionCode::from(""));
         assert!(result.is_err());
     }
 
     #[test]
     fn test_validate_no_def() {
         let runtime = StarlarkRuntime::new();
-        let result = runtime.validate("x = 1 + 2");
+        let result = runtime.validate(&FunctionCode::from("x = 1 + 2"));
         assert!(result.is_err());
     }
 
     #[test]
     fn test_validate_valid_code() {
         let runtime = StarlarkRuntime::new();
-        let result = runtime.validate(
+        let result = runtime.validate(&FunctionCode::from(
             r#"
 def handler(input):
     return input
 "#,
-        );
+        ));
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_validate_syntax_error() {
         let runtime = StarlarkRuntime::new();
-        let result = runtime.validate(
+        let result = runtime.validate(&FunctionCode::from(
             r#"
 def handler(input)
     return input  # Missing colon
 "#,
-        );
+        ));
         assert!(result.is_err());
     }
 
@@ -90,7 +90,14 @@ def handler(input):
         let metadata = FunctionMetadata::starlark("test-function");
 
         let result = runtime
-            .execute(code, "handler", context, &metadata, api, HashMap::new())
+            .execute(
+                &FunctionCode::from(code),
+                "handler",
+                context,
+                &metadata,
+                api,
+                HashMap::new(),
+            )
             .await;
 
         assert!(result.is_ok());
@@ -131,7 +138,14 @@ def handler(input):
         let metadata = FunctionMetadata::starlark("test-locks");
 
         let result = runtime
-            .execute(code, "handler", context, &metadata, api, HashMap::new())
+            .execute(
+                &FunctionCode::from(code),
+                "handler",
+                context,
+                &metadata,
+                api,
+                HashMap::new(),
+            )
             .await
             .expect("execution ok");
         assert!(result.success, "function errored: {:?}", result.error);
@@ -181,7 +195,14 @@ def handler(input):
         let metadata = FunctionMetadata::starlark("test-secrets");
 
         let result = runtime
-            .execute(code, "handler", context, &metadata, api, HashMap::new())
+            .execute(
+                &FunctionCode::from(code),
+                "handler",
+                context,
+                &metadata,
+                api,
+                HashMap::new(),
+            )
             .await
             .expect("execution ok");
         assert!(result.success, "function errored: {:?}", result.error);
@@ -225,7 +246,14 @@ def handler(input):
         let metadata = FunctionMetadata::starlark("test-secret-refs");
 
         let result = runtime
-            .execute(code, "handler", context, &metadata, api, HashMap::new())
+            .execute(
+                &FunctionCode::from(code),
+                "handler",
+                context,
+                &metadata,
+                api,
+                HashMap::new(),
+            )
             .await
             .expect("execution ok");
         assert!(result.success, "function errored: {:?}", result.error);
@@ -255,7 +283,14 @@ def handler(input):
         let metadata = FunctionMetadata::starlark("test-function");
 
         let result = runtime
-            .execute(code, "handler", context, &metadata, api, HashMap::new())
+            .execute(
+                &FunctionCode::from(code),
+                "handler",
+                context,
+                &metadata,
+                api,
+                HashMap::new(),
+            )
             .await;
 
         assert!(result.is_ok());
@@ -278,7 +313,14 @@ def other_function():
         let metadata = FunctionMetadata::starlark("test-function");
 
         let result = runtime
-            .execute(code, "handler", context, &metadata, api, HashMap::new())
+            .execute(
+                &FunctionCode::from(code),
+                "handler",
+                context,
+                &metadata,
+                api,
+                HashMap::new(),
+            )
             .await;
 
         assert!(result.is_err());
@@ -315,7 +357,14 @@ def plus(a, b):
             FunctionMetadata::starlark("test-function").with_entry_file("index.star:handler");
 
         let result = runtime
-            .execute(code, "handler", context, &metadata, api, files)
+            .execute(
+                &FunctionCode::from(code),
+                "handler",
+                context,
+                &metadata,
+                api,
+                files,
+            )
             .await;
 
         assert!(result.is_ok());
@@ -355,7 +404,14 @@ def mul(a, b):
             FunctionMetadata::starlark("test-function").with_entry_file("src/main.star:handler");
 
         let result = runtime
-            .execute(code, "handler", context, &metadata, api, files)
+            .execute(
+                &FunctionCode::from(code),
+                "handler",
+                context,
+                &metadata,
+                api,
+                files,
+            )
             .await;
 
         assert!(result.is_ok());

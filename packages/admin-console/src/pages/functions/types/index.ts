@@ -5,7 +5,9 @@
 import type { Node as NodeType } from '../../../api/nodes'
 
 // Function language types
-export type FunctionLanguage = 'javascript' | 'starlark' | 'sql'
+// `wasm` is a compiled WebAssembly component artifact: there is no editable
+// source on the server, so the IDE shows an artifact panel instead of Monaco.
+export type FunctionLanguage = 'javascript' | 'starlark' | 'sql' | 'wasm'
 
 // Execution mode types
 export type ExecutionMode = 'async' | 'sync' | 'both'

@@ -152,7 +152,9 @@ export function FunctionExplorer() {
               title: data.title,
               language: data.language || 'javascript',
               execution_mode: 'async',
-              entry_file: 'index.js:handler',
+              // A wasm function points at a compiled artifact, not a source file;
+              // a bare name means the handler "default".
+              entry_file: data.language === 'wasm' ? 'main.wasm' : 'index.js:handler',
               enabled: true,
               version: 1,
             },

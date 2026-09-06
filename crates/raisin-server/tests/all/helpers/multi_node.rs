@@ -22,6 +22,13 @@ pub struct ServerConfig {
     /// port is also written into the TOML rather than passed as a flag so the
     /// merge order in `startup/cli.rs` is exercised the same way production is.
     pub pgwire_port: Option<u16>,
+    /// `RUST_LOG` for the spawned server. Defaults to `info`.
+    ///
+    /// A test that asserts on a log line the server writes at `debug` needs to
+    /// raise the level for that ONE target, and it must be per-server rather
+    /// than an env var: these tests share a process, so a `set_var` would leak
+    /// into every other server this binary starts.
+    pub rust_log: String,
     _temp_dir: Option<TempDir>, // Keep alive so data_dir isn't deleted
 }
 
@@ -37,6 +44,7 @@ impl ServerConfig {
             cluster_node_id: None,
             replication_port: None,
             pgwire_port: None,
+            rust_log: "info".to_string(),
             _temp_dir: Some(temp_dir),
         }
     }
@@ -45,6 +53,13 @@ impl ServerConfig {
     #[allow(dead_code)]
     pub fn with_pgwire(mut self, port: u16) -> Self {
         self.pgwire_port = Some(port);
+        self
+    }
+
+    /// Override the spawned server's `RUST_LOG`.
+    #[allow(dead_code)]
+    pub fn with_rust_log(mut self, rust_log: impl Into<String>) -> Self {
+        self.rust_log = rust_log.into();
         self
     }
 
@@ -145,7 +160,7 @@ max_connections = 16
             .try_clone()
             .map_err(|e| format!("Failed to clone log handle: {}", e))?;
         cmd.current_dir(&workspace_root)
-            .env("RUST_LOG", "info")
+            .env("RUST_LOG", &config.rust_log)
             .arg("--config")
             .arg(&config_path)
             .arg("--dev-mode")

@@ -1,0 +1,10 @@
+# How `raisindb function build` turns this project into the artifact the
+# Function node points at.
+lang: ts
+node_dir: ../../../content/functions/lib/demo/greet-ts
+artifact: main.wasm
+# `raisin-wasm-build` (from @raisindb/function-wasm) wraps `jco componentize`:
+# it generates the entry that routes the WIT `handler(name, input)` export to
+# this module's exports, and points jco at the SDK's WIT copy, which
+# `make gen-bindings` keeps identical to crates/raisin-functions/wit.
+command: npm run build

@@ -224,11 +224,18 @@ the `raisin.locks` block in the same file for the established shape, including t
 Now `raisin.imap.fetchSince(...)` exists in QuickJS too — same protocol code, same
 `FunctionApi`, same policy gate.
 
-**Also update `packages/raisindb-functions-types/raisin.d.ts`.** Despite its
-"auto-generated" header it has **no generator and no drift test**, and
-`packages/raisindb-skills` tells agents it is the authoritative API list — a
-namespace missing from it is invisible to every TypeScript author and every
-skill-driven agent, with no CI signal.
+**Run `make gen-bindings` and commit the result.** The WebAssembly guest SDKs
+(Rust, Go, TypeScript) are rendered from the registry, so your descriptor
+reaches all three in one step — and `cargo test -p raisin-functions --lib`
+fails if the committed output is stale. It also refreshes
+`packages/raisindb-functions-types/raisin.generated.d.ts`.
+
+**Also update `packages/raisindb-functions-types/raisin.d.ts` by hand.** That
+file is still hand-maintained (the generated companion beside it is not yet
+authoritative: ~40 % of `raisin.d.ts` is prose and security notes the registry
+cannot produce), and `packages/raisindb-skills` tells agents it is the
+authoritative API list — a namespace missing from it is invisible to every
+TypeScript author and every skill-driven agent, with no CI signal.
 
 ---
 
@@ -303,6 +310,9 @@ The IMAP binding is the reference — grep `imap_fetch_since` (or
 
 ## See also
 
+- [The WebAssembly Function ABI](./wasm-function-abi.md) — the guest contract
+  your descriptor reaches through `make gen-bindings`, and why the wasm runtime
+  needs no per-method code.
 - [Virtual Node Adapters — Reference Contract](../reference/virtual-node-adapters.md)
   — the host APIs available to adapters, including `raisin.imap.*`.
 - [Virtual Nodes — Engine Internals](../concepts/virtual-nodes-internals.md#native-protocol-bindings)

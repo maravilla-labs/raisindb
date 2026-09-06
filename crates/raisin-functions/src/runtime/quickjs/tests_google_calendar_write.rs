@@ -54,7 +54,7 @@ async fn call_mapper(input: Value) -> (Option<Value>, Vec<Value>) {
     let metadata = FunctionMetadata::javascript("google_calendar_mapper");
     let result = runtime
         .execute(
-            &mapper_source(),
+            &FunctionCode::from(mapper_source()),
             "handler",
             context,
             &metadata,

@@ -353,17 +353,21 @@ impl RocksDBEmbeddingStorage {
             source_id,
             chunk_idx,
         );
-        for result in self.scan_from(cf, &prefix) {
-            let (key, value) = result.map_err(|e| {
-                raisin_error::Error::storage(format!("Failed to iterate embeddings: {}", e))
-            })?;
-            if !key.starts_with(&prefix) {
-                break;
+        // Exactly one row is of interest, so take the first and stop; iterating
+        // would read every later key in the CF for nothing.
+        match self.scan_from(cf, &prefix).next() {
+            Some(result) => {
+                let (key, value) = result.map_err(|e| {
+                    raisin_error::Error::storage(format!("Failed to iterate embeddings: {}", e))
+                })?;
+                if key.starts_with(&prefix) {
+                    Ok(Some(Self::deserialize(&value)?))
+                } else {
+                    Ok(None)
+                }
             }
-            return Ok(Some(Self::deserialize(&value)?));
+            None => Ok(None),
         }
-
-        Ok(None)
     }
 
     /// Every chunk row stored for one source under one embedder, as

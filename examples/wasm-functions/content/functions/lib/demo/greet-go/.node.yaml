@@ -1,0 +1,22 @@
+node_type: raisin:Function
+properties:
+  title: Greet (Go)
+  description: |
+    WebAssembly component built with TinyGo. Greets the caller and reports how
+    many nodes live under /people, proving the host gateway works from Go.
+  language: wasm
+  entry_file: main.wasm
+  execution_mode: both
+  enabled: true
+  resource_limits:
+    timeout_ms: 5000
+    max_memory_bytes: 67108864
+  network_policy:
+    http_enabled: false
+  input_schema:
+    type: object
+    properties:
+      name:
+        type: string
+    required:
+      - name

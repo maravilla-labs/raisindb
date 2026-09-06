@@ -117,7 +117,12 @@ name = "raisin-server"
 path = "src/main.rs"
 
 [features]
-default = ["fs", "storage-rocksdb", "websocket", "pgwire", "ai"]
+default = ["fs", "storage-rocksdb", "websocket", "pgwire", "ai", "wasm"]
+# WebAssembly component functions. `?/` so asking for wasm does not by itself
+# switch on the optional `raisin-functions` dependency — `storage-rocksdb`
+# owns that, and a `--no-default-features` build without it must still link
+# without Cranelift.
+wasm = ["raisin-functions?/wasm"]
 fs = []
 s3 = ["raisin-binary/s3", "raisin-transport-http/s3"]
 store-memory = ["raisin-transport-http/store-memory", "dep:raisin-storage-memory"]

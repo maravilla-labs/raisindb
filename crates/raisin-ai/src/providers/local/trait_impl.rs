@@ -4,7 +4,10 @@ use async_trait::async_trait;
 
 use crate::model_cache::{ModelCapabilities, ModelInfo};
 use crate::provider::{AIProviderTrait, ProviderError, Result};
-use crate::types::{CompletionRequest, CompletionResponse, Message};
+use crate::types::{CompletionRequest, CompletionResponse};
+// Only the `candle` inference paths build a response message.
+#[cfg(feature = "candle")]
+use crate::types::Message;
 
 use super::model::LocalModel;
 use super::LocalCandleProvider;

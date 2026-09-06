@@ -8,6 +8,13 @@ license = "BSL-1.1"
 [lib]
 path = "src/lib.rs"
 
+# Regenerates the WebAssembly guest-SDK bindings from the bindings registry
+# (`cargo run -p raisin-functions --bin gen-bindings`, or `make gen-bindings`).
+# Declared explicitly so the target name is stable regardless of auto-discovery.
+[[bin]]
+name = "gen-bindings"
+path = "src/bin/gen-bindings.rs"
+
 [dependencies]
 # Internal crates
 raisin-error = { path = "../raisin-error" }
@@ -94,10 +101,52 @@ webpki-roots = "1.0"
 # header-injection bugs get written.
 lettre = { version = "0.11.23", default-features = false, features = ["tokio1", "tokio1-rustls-tls", "builder", "smtp-transport", "hostname", "ring"] }
 
+# WebAssembly component runtime (feature `wasm`).
+#
+# VERSION PAIRING — wasmtime majors track rustc: 47.x declares MSRV 1.94.0 and
+# the repo toolchain is pinned to 1.94.1 (`rust-toolchain.toml`), so 47 is the
+# newest line that builds here. 48.x needs 1.95, 49.x needs 1.96. Each rustc
+# bump unlocks exactly one wasmtime major; bump both together or not at all.
+# Fallback if 47 ever has to be abandoned: the 36 LTS line.
+#
+# default-features = false keeps Winch, the GC proposals, the on-disk code
+# cache, wat and coredump out of the link. `component-model-async` (WASI 0.3)
+# is deliberately NOT enabled.
+wasmtime = { version = "47", optional = true, default-features = false, features = [
+    "runtime",
+    "cranelift",
+    "component-model",
+    "async",
+    "std",
+    "backtrace",
+    "addr2line",
+    "demangle",
+    "parallel-compilation",
+    "pooling-allocator",
+] }
+# WASI p2 only. p1 (preview1 / wiggle) and p3 stay out.
+wasmtime-wasi = { version = "47", optional = true, default-features = false, features = ["p2"] }
+
+# Compiled-component cache (feature `wasm`). moka gives the weighted LRU the
+# cache needs — compiled code is measured in MB, so an entry-count bound would
+# be meaningless — and blake3 hashes the artifact bytes. The key is OUR hash and
+# never the node's `content_hash`, which a tenant can write.
+moka = { version = "0.12", optional = true, features = ["sync"] }
+blake3 = { workspace = true, optional = true }
+
+[features]
+default = []
+# WebAssembly component functions. Not default here: only raisin-server turns it
+# on, so every other crate's tests keep building without Cranelift.
+wasm = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:moka", "dep:blake3"]
+
 [dev-dependencies]
 # Test-only: generate an ephemeral RSA keypair + JWK at runtime so no private
 # key material is ever committed to the repo (see runtime/crypto tests).
 rsa = { version = "0.9", features = ["pem"] }
 rand = "0.8"
+# Test-only: build a core (non-component) module in-test, to prove the runtime
+# rejects one.
+wat = "1"
 # Test-only: ephemeral RocksDB job stores for scheduler callback tests.
 tempfile = { workspace = true }

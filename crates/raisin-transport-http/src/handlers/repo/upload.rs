@@ -322,6 +322,18 @@ async fn handle_large_asset_upload<S: Storage + TransactionalStorage + 'static>(
     stored: &raisin_binary::StoredObject,
     file_name: Option<&str>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    // Same acceptance rule as the buffered path: an artifact that could never
+    // run is refused before a node points at it. A file this large is over the
+    // artifact cap and fails on its size alone, without being read back.
+    super::wasm_upload::reject_unrunnable_wasm_upload(
+        state,
+        nodes_svc,
+        &ctx.cleaned_path,
+        file_name,
+        stored,
+    )
+    .await?;
+
     let param_prop_path = q
         .property_path
         .clone()

@@ -1,5 +1,6 @@
 packages:
   - 'packages/*'
+  - 'sdks/ts/*'
   - 'tooling/packages/*/pkg'
 
 # esbuild's postinstall is what links its platform binary

@@ -105,7 +105,7 @@ async fn call_adapter(input: Value, responses: Vec<Value>) -> Run {
     let metadata = FunctionMetadata::javascript("ms_graph_adapter");
     let result = runtime
         .execute(
-            &adapter_source(),
+            &FunctionCode::from(adapter_source()),
             "handler",
             context,
             &metadata,

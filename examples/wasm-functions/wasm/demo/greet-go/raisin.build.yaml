@@ -1,0 +1,11 @@
+# How `raisindb function build` turns this project into the artifact the
+# Function node points at.
+lang: go
+node_dir: ../../../content/functions/lib/demo/greet-go
+artifact: main.wasm
+# The WIT package is the SDK's copy, which `make gen-bindings` keeps identical
+# to crates/raisin-functions/wit. Never add a fourth, unguarded copy here.
+command: >-
+  tinygo build -target=wasip2 -o main.wasm
+  --wit-package ../../../../../sdks/go/raisin/wit
+  --wit-world function .

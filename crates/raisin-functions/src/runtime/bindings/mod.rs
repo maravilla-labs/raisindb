@@ -59,6 +59,7 @@
 //! - `context` - Execution context
 //! - `internal` - Logging and internal helpers
 
+pub mod gen;
 pub mod methods;
 pub mod registry;
 
@@ -79,24 +80,14 @@ mod tests {
         let reg = registry();
         let count = reg.methods().len();
 
-        // We expect approximately 55+ methods:
-        // - nodes: 11 (get, getById, create, update, delete, updateProperty, move, query, getChildren, applyChildOrder, addResource)
-        // - sql: 2 (query, execute)
-        // - http: 1 (request)
-        // - ai: 4 (completion, listModels, getDefaultModel, embed)
-        // - events: 1 (emit)
-        // - tasks: 1 (create)
-        // - functions: 1 (execute)
-        // - resources: 1 (getBinary)
-        // - pdf: 1 (processFromStorage)
-        // - tx: 19 (begin, commit, rollback, setActor, setMessage, create, add, put, upsert,
-        //          createDeep, upsertDeep, update, delete, deleteById, get, getByPath, listChildren, move, updateProperty)
-        // - admin_nodes: 8
-        // - admin_sql: 2
-        // - context/internal: 3 (get, log, allowsAdminEscalation)
-        //
-        // Total: ~54 methods
-
+        // The registry is well over 100 methods across 30 categories today
+        // (nodes, sql, http, ai, events, tasks, functions, flows, branches,
+        // scheduler, platform, notify, locks, integrations, imap, email,
+        // secrets, identities, resources, ocr, pdf, assets, date, crypto, tx,
+        // admin_nodes, admin_sql, inventory, context, internal). The exact
+        // number is asserted with a lower and an upper bound in
+        // `methods/mod.rs::test_method_count_matches_expected`; this is only a
+        // floor tripwire against a whole category failing to register.
         assert!(count >= 50, "Expected at least 50 methods, got {}", count);
         println!("Total binding count: {}", count);
     }

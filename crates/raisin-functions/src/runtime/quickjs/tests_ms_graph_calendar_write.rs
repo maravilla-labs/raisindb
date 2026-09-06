@@ -52,7 +52,7 @@ async fn call_mapper(input: Value) -> (Option<Value>, Vec<Value>) {
     let metadata = FunctionMetadata::javascript("ms_graph_calendar");
     let result = runtime
         .execute(
-            &mapper_source(),
+            &FunctionCode::from(mapper_source()),
             "handler",
             context,
             &metadata,
@@ -610,7 +610,7 @@ async fn purge_is_refused_because_graph_cannot_do_it() {
     ));
     let result = runtime
         .execute(
-            &adapter_source(),
+            &FunctionCode::from(adapter_source()),
             "handler",
             context,
             &FunctionMetadata::javascript("ms_graph_adapter"),

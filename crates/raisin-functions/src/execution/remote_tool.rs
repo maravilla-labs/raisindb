@@ -404,6 +404,12 @@ fn decrypt_credential(node: &Node, descriptor: &McpConnectionDescriptor) -> Opti
         .ok()
         .flatten()?;
 
+    // Context-free decryption is deliberate and must stay that way: the writer
+    // of these blobs seals them context-free too (`SecretBox::encrypt_json` in
+    // transport-http's oauth callback). Binding the read side to a
+    // `SecretContext` the writer does not use would make every stored
+    // credential silently unreadable, and this reader swallows the error.
+    #[allow(deprecated)]
     let plaintext = raisin_crypto::SecretBox::new(&master_key)
         .decrypt_json(&ciphertext)
         .ok()

@@ -71,3 +71,52 @@ jobs:
             exit 1
           fi
           exit $status
+
+  wasm-sdks:
+    name: WebAssembly SDKs
+    runs-on: ubuntu-latest
+    # Three guest SDKs (Rust, Go, TypeScript) whose ONLY shared contract is the
+    # WIT file and the generated bindings. Nothing else in CI compiles them, and
+    # a drift between the registry and a generated SDK is invisible until a user
+    # builds a component — so this job runs the native suites plus the freshness
+    # tests that assert the committed output still matches the registry.
+    #
+    # Componentizing (wasm32-wasip2 / TinyGo / jco) stays a local `make` step:
+    # it needs three more toolchains and the artifacts it produces are build
+    # output, not something CI has to prove on every push.
+    steps:
+      - uses: actions/checkout@v4
+
+      # Must MATCH rust-toolchain.toml — see the note in the Format job.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.1
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # The wasm runtime + the generator's freshness tests
+      # (`generated_sdk_bindings_are_fresh`, `sdk_wit_copies_match_source`,
+      # `ts_sdk_api_wrapper_is_fresh`) live in the same lib test binary.
+      - name: raisin-functions unit tests (wasm feature)
+        run: cargo test -p raisin-functions --lib --features wasm
+
+      - name: Install the TypeScript SDK's dependencies
+        run: pnpm install --filter @raisindb/function-wasm...
+
+      # STRICT turns a missing toolchain into a failure: every one of the three
+      # is installed above, so a "skipped" line here means a suite silently
+      # stopped running, which is what this job exists to catch.
+      - name: Guest SDK suites
+        run: make wasm-sdks-test
+        env:
+          WASM_SDKS_STRICT: '1'

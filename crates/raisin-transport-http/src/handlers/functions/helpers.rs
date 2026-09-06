@@ -5,19 +5,21 @@
 //! Provides node lookup, metadata extraction, code loading, and property
 //! parsing utilities used by invoke, list, and webhook execution paths.
 
+use super::name_index;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::Utc;
 use raisin_binary::BinaryStorage;
 use raisin_functions::execution::code_loader::{
-    extract_email_policy, extract_identity_policy, extract_network_policy, extract_secret_policy,
+    extract_code_bytes_from_asset, extract_code_from_asset, extract_email_policy,
+    extract_identity_policy, extract_network_policy, extract_secret_policy,
 };
 use raisin_functions::{
-    ExecutionMode, FunctionLanguage, FunctionMetadata, LoadedFunction, ResourceLimits,
+    ExecutionMode, FunctionCode, FunctionLanguage, FunctionMetadata, LoadedFunction, ResourceLimits,
 };
 use raisin_models::auth::AuthContext;
-use raisin_models::nodes::properties::{value::Resource, PropertyValue};
+use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
 use raisin_storage::NodeRepository;
 
@@ -67,20 +69,50 @@ pub(crate) async fn find_function_node_on_branch(
         FUNCTIONS_WORKSPACE,
         auth_context.cloned(),
     );
+
+    // Fast path: this name resolved to a path before, so read that node
+    // directly. The lookup runs with the caller's auth context, so RLS applies
+    // exactly as it does to the scan below, and the result is re-checked
+    // against `name` — a renamed, moved or deleted function falls through and
+    // repopulates the memo instead of being served wrongly. See `name_index`.
+    if let Some(path) = name_index::get(tenant_id, repo, branch, name) {
+        match node_svc.get_by_path(&path).await {
+            Ok(Some(node)) if node.node_type == "raisin:Function" && matches_name(&node, name) => {
+                return Ok(node);
+            }
+            // Wrong, gone, or not visible to this caller: fall through to the
+            // scan, which is authoritative.
+            _ => name_index::forget(tenant_id, repo, branch, name),
+        }
+    }
+
+    // Slow path: load every function in the workspace and filter. This is what
+    // the fast path exists to avoid — it is ~170 ms on a server carrying the
+    // builtin packages, per invocation.
     let nodes = node_svc
         .list_by_type("raisin:Function")
         .await
         .map_err(map_storage_error)?;
 
-    nodes
+    let found = nodes
         .into_iter()
-        .find(|n| {
-            property_as_string(n.properties.get("name"))
-                .map(|p| p == name)
-                .unwrap_or(false)
-                || n.name == name
-        })
-        .ok_or_else(|| ApiError::not_found(format!("Function '{}' not found", name)))
+        .find(|n| matches_name(n, name))
+        .ok_or_else(|| ApiError::not_found(format!("Function '{}' not found", name)))?;
+
+    name_index::put(tenant_id, repo, branch, name, &found.path);
+    Ok(found)
+}
+
+/// A function answers to its `name` property or, failing that, its node name.
+///
+/// One predicate, used by both the memo re-check and the scan: if these two
+/// disagreed, a cached path could be re-validated by a rule the scan would
+/// never have matched.
+fn matches_name(node: &Node, name: &str) -> bool {
+    property_as_string(node.properties.get("name"))
+        .map(|p| p == name)
+        .unwrap_or(false)
+        || node.name == name
 }
 
 /// Find an Asset node by ID across all workspaces.
@@ -182,7 +214,7 @@ pub(crate) async fn load_function_code(
     tenant_id: &str,
     repo: &str,
     function_node: &Node,
-) -> Result<String, ApiError> {
+) -> Result<FunctionCode, ApiError> {
     load_function_code_on_branch(state, tenant_id, repo, DEFAULT_BRANCH, function_node).await
 }
 
@@ -197,7 +229,7 @@ pub(crate) async fn load_function_code_on_branch(
     repo: &str,
     branch: &str,
     function_node: &Node,
-) -> Result<String, ApiError> {
+) -> Result<FunctionCode, ApiError> {
     let (code, _metadata) = raisin_functions::execution::code_loader::load_function_code(
         state.storage.as_ref(),
         state.bin.as_ref(),
@@ -298,30 +330,41 @@ pub(crate) async fn load_function_modules_in(
     files
 }
 
-/// Load binary resource content as UTF-8 string.
-async fn load_resource_content(
-    bin: &Arc<impl BinaryStorage>,
-    res: &Resource,
-) -> Result<String, String> {
-    if let Some(meta) = &res.metadata {
-        if let Some(PropertyValue::String(key)) = meta.get("storage_key") {
-            let bytes = bin
-                .get(key)
-                .await
-                .map_err(|e| format!("Failed to load code asset: {}", e))?;
-            return String::from_utf8(bytes.to_vec())
-                .map_err(|e| format!("Invalid UTF-8 in code asset: {}", e));
+/// Load an Asset node's payload as the [`FunctionCode`] its language implies.
+///
+/// Text languages get `Text`; `wasm` gets `Bytes`, because a component is not
+/// UTF-8 and the unconditional decode this used to do is exactly what made a
+/// `.wasm` asset fail with "Code is not valid UTF-8".
+///
+/// The artifact cap is the CONFIGURED one, read through
+/// [`raisin_functions::max_wasm_artifact_bytes`] — the same accessor the loader
+/// and the upload path use, so run-file cannot end up with a limit of its own.
+pub(super) async fn load_asset_function_code(
+    state: &AppState,
+    asset: &Node,
+    language: FunctionLanguage,
+) -> Result<FunctionCode, ApiError> {
+    if language == FunctionLanguage::Wasm {
+        let bytes = extract_code_bytes_from_asset(asset, state.bin.as_ref())
+            .await
+            .map_err(|e| ApiError::validation_failed(e.to_string()))?;
+        let max = raisin_functions::max_wasm_artifact_bytes();
+        if bytes.len() > max {
+            return Err(ApiError::validation_failed(format!(
+                "wasm artifact '{}' is {} bytes, over the {} byte limit",
+                asset.name,
+                bytes.len(),
+                max
+            )));
         }
+        return Ok(FunctionCode::Bytes(bytes));
     }
-    Err("Resource missing storage_key metadata".into())
+
+    load_asset_text(state, asset).await.map(FunctionCode::Text)
 }
 
-/// Load code content from an Asset node.
-pub(super) async fn load_asset_code(
-    state: &AppState,
-    repo: &str,
-    asset: &Node,
-) -> Result<String, ApiError> {
+/// Load text code content from an Asset node.
+async fn load_asset_text(state: &AppState, asset: &Node) -> Result<String, ApiError> {
     // Check inline code property first
     if let Some(code) = property_as_string(asset.properties.get("code")) {
         return Ok(code);
@@ -332,11 +375,17 @@ pub(super) async fn load_asset_code(
         return Ok(code);
     }
 
-    // Fallback to file Resource property (external blob storage)
-    if let Some(PropertyValue::Resource(res)) = asset.properties.get("file") {
-        return load_resource_content(&state.bin, res)
+    // Fallback to file Resource property (external blob storage). The blob read
+    // is `code_loader`'s, not a second copy of it: "where do an asset's bytes
+    // live" has ONE answer, and a local re-implementation is what let this path
+    // drift from the loader every other execution surface uses.
+    if matches!(
+        asset.properties.get("file"),
+        Some(PropertyValue::Resource(_))
+    ) {
+        return extract_code_from_asset(asset, state.bin.as_ref())
             .await
-            .map_err(ApiError::validation_failed);
+            .map_err(|e| ApiError::validation_failed(e.to_string()));
     }
 
     Err(ApiError::validation_failed(
@@ -406,7 +455,10 @@ pub(super) fn build_metadata(node: &Node) -> Result<FunctionMetadata, ApiError> 
 }
 
 /// Build a `LoadedFunction` from a node and its code.
-pub(crate) fn build_loaded_function(node: &Node, code: String) -> Result<LoadedFunction, ApiError> {
+pub(crate) fn build_loaded_function(
+    node: &Node,
+    code: impl Into<FunctionCode>,
+) -> Result<LoadedFunction, ApiError> {
     let metadata = build_metadata(node)?;
     Ok(LoadedFunction::new(
         metadata,

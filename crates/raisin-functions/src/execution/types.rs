@@ -44,6 +44,11 @@ pub fn shared_http_client() -> reqwest::Client {
     CLIENT.get_or_init(reqwest::Client::new).clone()
 }
 
+/// Late-bound access to the virtual-mount sync engine. See
+/// [`ExecutionDependencies::mount_content`] for why this is a resolver.
+pub type MountContentResolver =
+    Arc<dyn Fn() -> Option<Arc<raisin_rocksdb::VirtualMountSyncHandler>> + Send + Sync>;
+
 /// Bundle of all dependencies needed for function execution.
 ///
 /// This struct is created once at startup and passed to `ExecutionProvider`
@@ -53,11 +58,6 @@ pub fn shared_http_client() -> reqwest::Client {
 /// # Type Parameters
 /// - `S`: Storage implementation (e.g., `RocksDBStorage`)
 /// - `B`: Binary storage implementation (e.g., `FilesystemBinaryStorage`)
-/// Late-bound access to the virtual-mount sync engine. See
-/// [`ExecutionDependencies::mount_content`] for why this is a resolver.
-pub type MountContentResolver =
-    Arc<dyn Fn() -> Option<Arc<raisin_rocksdb::VirtualMountSyncHandler>> + Send + Sync>;
-
 pub struct ExecutionDependencies<S, B>
 where
     S: Storage + TransactionalStorage + 'static,

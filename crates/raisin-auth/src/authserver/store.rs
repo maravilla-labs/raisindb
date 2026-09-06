@@ -199,7 +199,6 @@ impl RefreshTokenStore for InMemoryAuthServerStore {
 mod tests {
     use super::*;
     use crate::authserver::model::TokenEndpointAuthMethod;
-    use crate::authserver::pkce::CodeChallengeMethod;
 
     fn sample_client() -> OAuthClient {
         OAuthClient {

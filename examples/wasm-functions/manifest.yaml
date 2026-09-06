@@ -1,0 +1,26 @@
+name: wasm-functions
+version: 0.1.0
+title: WebAssembly Functions
+description: |
+  RaisinDB functions built as WebAssembly components. Each language subproject
+  under wasm/ builds ONE artifact; the Function nodes under
+  content/functions/lib/demo/ point at it with `entry_file: main.wasm[:handler]`.
+author: SOLUTAS GmbH
+license: BSL-1.1
+icon: cpu
+color: "#7c3aed"
+keywords:
+  - wasm
+  - functions
+  - example
+category: examples
+
+# The four Function nodes this package installs. `greet-rust-shout` has no
+# artifact of its own: its `entry_file` selects the `shout` handler out of
+# greet-rust's `main.wasm`.
+provides:
+  functions:
+    - /functions/lib/demo/greet-rust
+    - /functions/lib/demo/greet-rust-shout
+    - /functions/lib/demo/greet-go
+    - /functions/lib/demo/greet-ts

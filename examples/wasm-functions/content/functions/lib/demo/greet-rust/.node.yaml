@@ -1,0 +1,37 @@
+node_type: raisin:Function
+properties:
+  name: greet-rust
+  title: Greet (Rust / wasm)
+  description: >
+    Greets by name, counts the children of `/people` in the `content`
+    workspace, and logs one line. Compiled from `wasm/demo/greet-rust` to a
+    WebAssembly component with the `raisin-sdk` guest SDK.
+  enabled: true
+  language: wasm
+  execution_mode: both
+  entry_file: main.wasm
+  version: 1
+  resource_limits:
+    timeout_ms: 5000
+    max_memory_bytes: 67108864
+  network_policy:
+    http_enabled: false
+  input_schema:
+    type: object
+    additionalProperties: false
+    properties:
+      name:
+        type: string
+        description: Who to greet
+    required: [name]
+  output_schema:
+    type: object
+    properties:
+      greeting:
+        type: string
+      people:
+        type: integer
+        description: Number of children under /people in the content workspace
+      handler:
+        type: string
+        description: Which registered handler answered

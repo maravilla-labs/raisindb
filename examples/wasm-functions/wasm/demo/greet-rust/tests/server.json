@@ -1,0 +1,12 @@
+[
+  {
+    "handler": "default",
+    "input": { "name": "Ada" },
+    "expect": { "greeting": "Hello, Ada!", "handler": "default" }
+  },
+  {
+    "handler": "shout",
+    "input": { "name": "Ada" },
+    "expect": { "greeting": "HELLO, ADA!", "handler": "shout" }
+  }
+]

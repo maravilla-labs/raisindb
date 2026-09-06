@@ -697,6 +697,7 @@ async fn test_lazy_index_trigger_after_catchup() {
             None,                                                  // scheduled_trigger_finder
             None,                                                  // binary_retrieval
             None,                                                  // binary_storage
+            None,                                                  // binary_delete
             None,                                                  // binary_upload
             None,                                                  // flow_node_loader
             None,                                                  // flow_node_saver

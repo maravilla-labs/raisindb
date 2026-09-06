@@ -224,7 +224,7 @@ async fn execute_sync(
         DEFAULT_BRANCH,
         &function_node.path,
         loaded.metadata.entry_file_path(),
-        &loaded.code,
+        loaded.code.as_text().unwrap_or(""),
     )
     .await;
 

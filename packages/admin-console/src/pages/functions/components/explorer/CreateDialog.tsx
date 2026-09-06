@@ -165,6 +165,7 @@ export function CreateDialog({ type, parentPath = '', onClose, onCreate }: Creat
                 <option value="javascript">JavaScript</option>
                 <option value="starlark">Starlark</option>
                 <option value="sql">SQL</option>
+                <option value="wasm">WebAssembly</option>
               </select>
             </div>
           )}

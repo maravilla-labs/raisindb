@@ -1,0 +1,37 @@
+{
+  "name": "@raisindb/function-wasm",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Write a RaisinDB server function as a WebAssembly component in TypeScript/JavaScript",
+  "license": "BSL-1.1",
+  "main": "./src/index.js",
+  "types": "./src/generated/raisin.d.ts",
+  "exports": {
+    ".": "./src/index.js",
+    "./host-wit": "./src/host-wit.js",
+    "./testing": "./src/testing.js",
+    "./raisin.d.ts": "./src/generated/raisin.d.ts",
+    "./wit/raisin-function.wit": "./wit/raisin-function.wit"
+  },
+  "bin": {
+    "raisin-wasm-build": "./bin/raisin-wasm-build.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "wit",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@bytecodealliance/componentize-js": "^0.22.0",
+    "@bytecodealliance/jco": "^1.32.1",
+    "vitest": "^3.2.4"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
