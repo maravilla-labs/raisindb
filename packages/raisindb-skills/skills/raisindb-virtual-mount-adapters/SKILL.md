@@ -1,6 +1,6 @@
 ---
 name: raisindb-virtual-mount-adapters
-description: "Build custom connector adapters for RaisinDB virtual mounts: sync external systems (mail, calendars, drives, any API) into nodes and push local edits back. Covers the adapter operation contract (capabilities/list/get_changes/update/submit/subscribe), error taxonomy, cursors and has_more, bidirectional mappers, the receipt-etag and item-build-parity contracts, diverged-fields subsets, conflict policies (RemoteWins/LocalWins), write modes (state_only/mirror/submit), resolvers, echo prevention, the field-tested traps, and SHIPPING A MOUNT BUNDLE — the `mount_bundles` preset on your connector template that lets the admin console mint your connector's whole mount layout in one click, including per-entry target workspaces and the prompts that ask an operator for a mailbox, a site or a drive. Use whenever the user wants a connector, adapter, integration sync, virtual mount, two-way sync with an external service, or mentions raisin:VirtualMount, raisin:Integration, get_changes, or 'sync X into RaisinDB'."
+description: "Build custom connector adapters for RaisinDB virtual mounts: sync external systems (mail, calendars, drives, any API) into nodes and push local edits back. Covers the adapter operation contract (capabilities/list/get_changes/update/submit/subscribe), error taxonomy, cursors and has_more, bidirectional mappers, the receipt-etag and item-build-parity contracts, diverged-fields subsets, conflict policies (RemoteWins/LocalWins), write modes (state_only/mirror/submit), `accepts_content` (without which a file mount never pushes an edit), why a locally-created node under a mount path is NOT adopted unless `create_node_types` says so, `remap` as the migration path for a changed mapper, resolvers, echo prevention, the field-tested traps, and SHIPPING A MOUNT BUNDLE — the `mount_bundles` preset on your connector template that lets the admin console mint your connector's whole mount layout in one click, including per-entry target workspaces and the prompts that ask an operator for a mailbox, a site or a drive. Use whenever the user wants a connector, adapter, integration sync, virtual mount, two-way sync with an external service, or mentions raisin:VirtualMount, raisin:Integration, get_changes, or 'sync X into RaisinDB'."
 ---
 
 # RaisinDB Virtual-Mount Adapters
@@ -95,6 +95,21 @@ Every one of these was a real outage. Do not relearn them.
    must arrive base64 from the provider, like Graph's `contentBytes`, and
    be returned as `content_base64`, never `content`.)
 
+   **`accepts_content` is a SEPARATE flag from `mutable_fields`, and a file
+   mount is broken without it.** Unset by default. `mutable_fields` describes
+   PROPERTIES, and replacing a file's contents changes no property such a list
+   would sensibly name — so without `accepts_content` a drive mount pushes on
+   RENAME and on CREATE and never on an EDIT: someone replaces a document, the
+   node's `title` is unchanged, and the new version silently never reaches the
+   provider. The engine tests byte divergence separately
+   (`write/candidates.rs`, `view.content_diverges()`), and only for a mount
+   whose adapter opted in — which is why the flag is threaded all the way down
+   to the candidate scan. Test:
+   `candidates::tests::replacing_a_files_bytes_nominates_it`. Opting in also
+   means opting into a SECOND request shape: an object over the inline ceiling
+   arrives as a descriptor carrying no bytes, and the adapter must answer with
+   an upload URL or fail (`write::content`).
+
 5. **Stable `external_id` and honest `etag`.** `external_id` keys the node
    for its lifetime — a provider id that changes (Graph mail ids change on
    folder moves unless you send `Prefer: IdType="ImmutableId"`) turns a
@@ -150,6 +165,17 @@ Every one of these was a real outage. Do not relearn them.
   { external_id } }`. Be conservative: if the provider's "removed" can also
   mean "left the query window" (Graph calendarView), do NOT emit a delete
   you cannot attribute — the full reconcile prunes what is truly gone.
+- **You may omit `mime_type`; the ENGINE derives one from the filename**
+  (`ExternalItem::ensure_mime_type`, `config/items.rs`) before mapping, so the
+  built-in mapping and every custom mapper inherit it. A provider-supplied
+  value always wins, and folders never get one. Do NOT re-implement the
+  fallback in your adapter — that is the mirrored-implementation trap; fix it
+  in the walker if it is wrong. Why it exists: **processing rules match on
+  mimetype, so a node without one matches NO rule at all** — no extraction, no
+  thumbnail, no error, because "no rule matched" is a legitimate outcome.
+  Measured on one OneDrive mount: Graph returns no `file.mimeType` for Office
+  formats, so all nine `.docx`/`.xlsx` items had no `__extract_status` while
+  every PDF, image and text file beside them had one.
 
 ## Mappers (optional, bidirectional)
 
@@ -157,6 +183,19 @@ A mount may name a mapper function that reshapes provider items into typed
 nodes. **One function, both directions** — `to_node` (default operation),
 `to_external` (write-back), `mapper_capabilities` (`{ to_external: true }`):
 
+- **No `to_external` means the mount is READ-ONLY, and `mapper_capabilities`
+  is how the engine finds out.** Once per run — and only when the mount asks
+  for some write mode — `ctx.probe_mapper_writeback` invokes the mapper with
+  `{ operation: "mapper_capabilities", mount }` and accepts ONLY a literal
+  `{ to_external: true }`. A missing operation, a falsy value or a throw all
+  resolve the mount read-only, and `run.rs` records the cause in
+  `state.writeback_last_error` — read that field FIRST when a mount "silently
+  does not write". A mount with no `mapping_function` at all is read-only by
+  construction and is never probed: the built-in Rust `default_mapping` is
+  lossy, so inverting it would be guessing. It is a distinct operation rather
+  than a `to_external` call with a null node on purpose — probing with null
+  would oblige every future `to_external` to tolerate null forever, and a
+  strict one that threw on the probe would be misreported as read-only.
 - A mapper that declares a field mutable MUST round-trip it exactly, or
   echo-prevention breaks and the field re-pushes forever.
 - **`to_external` receives only the diverged subset.** The engine compares
@@ -213,6 +252,68 @@ writes echoing back as changes; `update` receives the stored `etag` as the
 concurrency base — throw `conflict` when the provider says the object moved
 on, never overwrite silently. And return the post-write etag in the receipt
 (rule 6) — the stamp-back is only as good as the etag you hand it.
+
+### A locally-created node is NOT adopted by default (current limitation)
+
+State this to anyone asking "why didn't my upload sync out". Every write path
+but one starts from the run's `SyncIndex`, and that index is keyed by
+`__external_id` over nodes carrying this mount's `__mount_id` — i.e. nodes the
+mount MATERIALISED (`materializer/index.rs`; the writeback candidate scan is
+"derived from the index the run already loaded", `write/candidates.rs`). A file
+uploaded into a mounted folder in Studio has no `__virtual`, no `__mount_id`
+and no `__external_id`. It renders under `/drives/...`, it is a real asset with
+real bytes, and the mount is structurally unaware of it. **Neither `sync` nor
+`remap` adopts it** — both walk the PROVIDER's items, and the provider has
+never heard of this one.
+
+The ONE exception is `write/create.rs`'s `drain_creates`, which does not use
+the index at all: it path-scans the mount (`scan_mount_nodes`) for nodes with
+no `__external_id`. It requires ALL of:
+
+- `write_config.mode: mirror`,
+- the node's type named in `write_config.create_node_types` — **empty by
+  default, and there is no "all types" value**,
+- the adapter declaring `can_create` (a mount that opts into local create and
+  an adapter that cannot is REFUSED, test
+  `a_mirror_that_creates_locally_still_demands_can_create`), and
+- `accepts_content` if the bytes must travel — otherwise `content_pending`
+  defers the create until an upload completes.
+
+Engine-authored ancestor folders are excluded from that scan, so a hierarchical
+`path_template` does not mint a synthetic folder tree at the provider.
+
+The empty default is deliberate, not an oversight: an ordinary content node
+under a mount path is ambiguous by nature (the read path deliberately tolerates
+foreign content there, `SyncIndex.by_path`), and guessing wrong pushes private
+content to a third party, which fixing the config afterwards does not undo.
+
+### `remap` is the migration path for a changed mapper
+
+An ordinary sync SKIPS any item whose `etag` matches the stored one, and that
+skip returns BEFORE the mapper's output is applied. So a changed mapper — a new
+node type, a renamed property, a new folder hierarchy — is invisible to
+everything already synced, however many times it syncs. Nothing reports this;
+the mount keeps looking healthy while serving the old shape.
+
+`mode: "remap"` sets `scope.force_rewrite` (`run.rs`), which re-materializes
+every item through the CURRENT mapper and path template ignoring etags, and
+moves nodes whose template now resolves elsewhere. Trigger:
+`POST /api/integrations/{repo}/mounts/{mount_id}/sync` with
+`{ "mode": "remap" }` — validated against `delta | full | remap`, because the
+engine treats an unrecognised mode as `delta` and a typo would report success
+for a migration that never happened. It writes a REVISION PER ITEM and re-fires
+downstream triggers, so it is an operator action, never a schedule.
+
+**Engine-derived properties survive a remap** (`materializer/stage.rs`,
+`DERIVED_KEYS` beside `CONTENT_KEYS`): `thumbnail`, `__thumbnail_skipped*` and
+the whole `__extract_*` family are carried forward, on the same terms as
+content — only when the mapper did not supply the key itself, so an adapter
+that genuinely owns one still wins. Before that fix a remap silently destroyed
+them (measured: one OneDrive mount went from 14 thumbnails to 11, each a
+LibreOffice conversion). The damage is worse than a missing picture:
+`__extract_fingerprint` is what tells the enqueue gate the binary was already
+read, so erasing it makes every remapped asset re-extract and re-embed — a
+provider bill and a CPU burst for output identical to what was just deleted.
 
 ### Read-path conflict semantics (know what the engine does to your nodes)
 

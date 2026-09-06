@@ -1,11 +1,11 @@
 ---
 name: raisindb-functions-triggers
-description: "Server-side functions and event-driven triggers for RaisinDB. Covers function definitions, the raisin.* runtime API, transactions, trigger filters, event handling, and WebAssembly functions (language: wasm) written in Rust, Go or TypeScript. Use when adding server-side logic."
+description: "Server-side functions and event-driven triggers for RaisinDB. Covers function definitions, the raisin.* runtime API, transactions, trigger filters, event handling, and WebAssembly functions (language: wasm) written in Rust or Go. Use when adding server-side logic."
 ---
 
 # Functions and Triggers
 
-Functions are handlers stored as nodes inside a RAP package — JavaScript by default, or Starlark, SQL, or a WebAssembly component built in Rust/Go/TypeScript. Triggers watch for events (node changes, schedules, webhooks) and invoke functions when conditions match. Together they form the server-side logic layer of RaisinDB.
+Functions are handlers stored as nodes inside a RAP package — JavaScript by default, or Starlark, SQL, or a WebAssembly component built in Rust or Go. Triggers watch for events (node changes, schedules, webhooks) and invoke functions when conditions match. Together they form the server-side logic layer of RaisinDB.
 
 **BEFORE writing any server-side function code:**
 1. Run `npm install` in the project root — this installs `@raisindb/functions-types` which contains `raisin.d.ts`, the COMPLETE TypeScript API for the function runtime. Read it before writing any code.
@@ -171,8 +171,8 @@ async function handleMoveCard(input) {
 
 ## WebAssembly Functions (`language: wasm`)
 
-A function can also be a **WebAssembly component** built in Rust, Go or
-TypeScript and uploaded as `main.wasm`. Reach for it when you want a real
+A function can also be a **WebAssembly component** built in Rust or Go and
+uploaded as `main.wasm`. Reach for it when you want a real
 toolchain (types, a package ecosystem, a native test runner) or CPU-bound work.
 Do **not** reach for it to edit code quickly: a wasm function has NO source on
 the server — the artifact is the code, and every change is a local rebuild plus
@@ -198,8 +198,8 @@ properties:
 | `main.wasm:shout` | `shout` | same artifact, second handler |
 | `../greet/main.wasm:shout` | `shout` | **another node's** artifact |
 
-So ONE artifact backs N Function nodes — which is how a package of TypeScript
-functions ships 12 MB instead of 200. The path must stay inside the functions
+So ONE artifact backs N Function nodes — which is how a package of many
+handlers ships one artifact instead of N. The path must stay inside the functions
 workspace; one that escapes it is refused. The host never validates the handler
 NAME: an unknown one comes back as an error listing what the guest registered.
 
@@ -218,10 +218,13 @@ package/.rapignore                                     wasm/
 **Commands** (all offline; they never talk to a server):
 
 ```bash
-raisindb create function greet --lang rust|go|ts [--ns demo]
+raisindb create function greet --lang rust|go [--ns demo]      # compiled to wasm
+raisindb create function greet --lang js|starlark [--ns demo]  # source, no build step
 raisindb create function greet-shout --into greet --handler shout   # share the artifact
-raisindb function build [path] [--all] [--watch] [--debug]
+raisindb function build  [path] [--all] [--watch] [--debug]
 raisindb function doctor [path] [--json] [--strict]
+raisindb function run    [path] --input '{"name":"Ada"}'       # upload + invoke
+raisindb function test   [path] [--server]
 raisindb deploy ./package --repo myapp --install
 ```
 
@@ -229,19 +232,68 @@ raisindb deploy ./package --repo myapp --install
 whose `entry_file` resolves to it. `function doctor` checks toolchains, artifact
 size against the 32 MiB server cap, `entry_file` resolution, and that the
 handler name a node asks for is actually registered by the project.
-`raisindb function run` / `test --server` do not exist yet — test natively
-(`cargo test`, `go test ./...`, `vitest run`; every SDK ships a mock host) and
-invoke a deployed function the normal way.
+`function run` uploads the local artifact when it differs from the deployed one
+and then invokes, so it is the edit-build-check loop. It works for `js` and
+`starlark` nodes too, where it uploads the source. `function test` runs the
+project's NATIVE tests (`cargo test`, `go test ./...`) against a mock host, so
+a guest is testable with no server running at all.
+
+**What a guest looks like.** Rust:
+
+```rust
+use raisin_sdk::{handler, nodes, log, Result};
+use serde::{Deserialize, Serialize};
+
+#[derive(Deserialize)] struct Input { name: String }
+#[derive(Serialize)]   struct Output { greeting: String, pages: usize }
+
+#[handler]                       // registers as "default"
+fn greet(input: Input) -> Result<Output> {
+    log::info(&format!("greeting {}", input.name));
+    let children = nodes::get_children("content", "/pages", Some(50))?;
+    Ok(Output { greeting: format!("Hello, {}", input.name), pages: children.len() })
+}
+
+#[handler(name = "shout")]       // a second handler in the SAME artifact
+fn shout(input: Input) -> Result<Output> { /* ... */ }
+```
+
+Go — registration happens in `init` because a component has no long-running
+`main`:
+
+```go
+func init() {
+    raisin.HandleDefault(func(in json.RawMessage) (any, error) {
+        var input struct{ Name string `json:"name"` }
+        if err := json.Unmarshal(in, &input); err != nil { return nil, err }
+        children, err := raisin.Nodes.GetChildren("content", "/pages", 50)
+        if err != nil { return nil, err }
+        return map[string]any{"greeting": "Hello, " + input.Name, "pages": len(children)}, nil
+    })
+    raisin.Handle("shout", func(in json.RawMessage) (any, error) { /* ... */ })
+}
+func main() {}
+```
+
+Dependencies are pinned by the scaffold to the release tag:
+`raisin-sdk = { git = "https://github.com/maravilla-labs/raisindb", tag = "v0.5.0" }`
+and `github.com/maravilla-labs/raisindb/sdks/go/raisin@v0.5.0`.
 
 **The API is the same `raisin.*` surface**, reached through one generic gateway;
 the typed wrappers in each SDK are generated from the server's registry. The
 sandbox is not the same, though: no `wasi:sockets`, no `wasi:http`, no
 filesystem, no timers. Egress is `raisin.http.*` only, gated by
-`network_policy`. In TypeScript, `fetch` / `setTimeout` / `Resource.resize` are
-NOT available — keep such a function in `javascript`.
+`network_policy`.
 
-Docs: `docs/website/docs/functions/wasm-functions.md` (and the per-language
-guides beside it); the ABI contract is `docs/guides/wasm-function-abi.md`.
+**AssemblyScript is NOT a supported guest yet.** It is the intended third
+language, and the host is proven to run a component built from it, but there is
+no SDK: AssemblyScript does not implement the Component Model, so the canonical
+ABI has to be hand-written. Do not scaffold one. See
+`docs/design/assemblyscript-guest.md` in the raisindb repo.
+
+Docs: https://raisindb.dev/docs/guides/functions/wasm-functions (with Rust and
+Go quickstarts beside it); the ABI contract is
+https://raisindb.dev/docs/reference/function-api/wasm-abi.
 
 ---
 
