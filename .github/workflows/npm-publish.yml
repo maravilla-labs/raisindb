@@ -355,6 +355,16 @@ jobs:
       - name: Build
         run: pnpm --filter @raisindb/cli run build
 
+      # WARNING: this pins @raisindb/client and @raisindb/schema-wasm to the
+      # CLI's version, so publishing the CLI at a version those two do NOT have
+      # ships a package that cannot be installed:
+      #
+      #   npm error notarget No matching version found for @raisindb/client@X
+      #
+      # The publish still succeeds and `npm view` still looks right — only an
+      # actual `npm install` fails. Publish all three at the same version, or
+      # publish the CLI at a version the other two already have. The guard
+      # below refuses the combination rather than shipping a broken package.
       - name: Align workspace dependency versions
         run: |
           VER="${{ env.VERSION }}"
@@ -362,6 +372,15 @@ jobs:
             echo "VERSION not set, skipping alignment"
             exit 0
           fi
+          for dep in @raisindb/client @raisindb/schema-wasm; do
+            if ! npm view "$dep@$VER" version >/dev/null 2>&1; then
+              echo "::error::$dep@$VER is not published. The CLI's dependency on"
+              echo "::error::it would be unresolvable, so `npm install @raisindb/cli@$VER`"
+              echo "::error::would fail. Publish $dep at $VER first:"
+              echo "::error::  gh workflow run npm-publish.yml -f package=${dep#@raisindb/} -f version=$VER"
+              exit 1
+            fi
+          done
           # Update local schema-wasm pkg version so workspace:* resolves correctly
           cd tooling/packages/raisin-schema-wasm/pkg
           node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync('package.json','utf8')); p.version='$VER'; fs.writeFileSync('package.json', JSON.stringify(p,null,2)+'\n')"
