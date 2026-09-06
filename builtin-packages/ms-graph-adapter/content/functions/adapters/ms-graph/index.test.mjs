@@ -355,8 +355,13 @@ test('drive content is POINTED at with a freshly minted url, never a stored one'
   assert.equal(out.content_base64, undefined)
   // The url is minted on THIS call. A pre-authenticated Graph link lives about
   // an hour, so serving a copy captured at sync time is the bug this avoids.
-  assert.match(calls[0].url, /\/items\/01ABC\?\$select=/)
-  assert.match(calls[0].url, /downloadUrl/)
+  assert.match(calls[0].url, /\/items\/01ABC$/)
+  // And it is fetched WITHOUT `$select`. `@microsoft.graph.downloadUrl` is an
+  // instance ANNOTATION, not a property: selecting it makes Graph answer with
+  // the selected properties and no annotation — a 200 carrying everything
+  // except the one field this call exists to read. Asserting the `$select` was
+  // asserting that bug.
+  assert.doesNotMatch(calls[0].url, /\$select=/)
 })
 
 test('a drive item with no download url is refused rather than half-served', () => {
