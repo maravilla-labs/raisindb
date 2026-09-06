@@ -20,8 +20,48 @@
 /** Guest languages with a first-party SDK and a build lane. */
 export type WasmLang = 'rust' | 'go' | 'ts';
 
-/** The languages `--lang` accepts, in help-text order. */
+/** The COMPILED languages `--lang` accepts, in help-text order. */
 export const WASM_LANGS: WasmLang[] = ['rust', 'go', 'ts'];
+
+/**
+ * Languages whose source IS the deliverable — no toolchain, no build step.
+ *
+ * `js` is the QuickJS runtime and `starlark` the Starlark one. They are here so
+ * that `raisindb create function` is the way to start ANY function, not only a
+ * WebAssembly one: the same command, the same node layout, the same
+ * `function run`. What differs is only that there is nothing to compile, so
+ * they have no `raisin.build.yaml` and their code lives under `content/`
+ * (where, being the deliverable, it is exactly what should ship).
+ */
+export type SourceLang = 'js' | 'starlark';
+
+/** The SOURCE languages `--lang` accepts, in help-text order. */
+export const SOURCE_LANGS: SourceLang[] = ['js', 'starlark'];
+
+/** Every language `raisindb create function` understands. */
+export type FunctionLang = WasmLang | SourceLang;
+
+/** True when the language compiles to an artifact rather than shipping source. */
+export function isWasmLang(lang: string): lang is WasmLang {
+  return (WASM_LANGS as string[]).includes(lang);
+}
+
+/** True when the language ships its source. */
+export function isSourceLang(lang: string): lang is SourceLang {
+  return (SOURCE_LANGS as string[]).includes(lang);
+}
+
+/** The `language` property a source language writes into `.node.yaml`. */
+export const SOURCE_NODE_LANGUAGE: Record<SourceLang, string> = {
+  js: 'javascript',
+  starlark: 'starlark',
+};
+
+/** The entry file a source language scaffolds. */
+export const SOURCE_ENTRY_FILE: Record<SourceLang, string> = {
+  js: 'index.js',
+  starlark: 'main.star',
+};
 
 /**
  * Server-side artifact cap (`[functions.wasm] max_artifact_bytes`, 32 MiB).

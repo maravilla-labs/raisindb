@@ -491,7 +491,10 @@ fn build_ai_messages(system_prompt: Option<&str>, messages: &[serde_json::Value]
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                Message::tool(&content, tool_call_id, None)
+                // The function this result answers for. Groq's gpt-oss
+                // (harmony) renderer refuses a tool message without a name.
+                let name = msg.get("name").and_then(|v| v.as_str()).map(String::from);
+                Message::tool(&content, tool_call_id, name)
             }
             _ => Message::user(&content),
         };

@@ -9,10 +9,15 @@
  */
 
 import type { FileEntry } from '../types.js';
+
+/** Published range for `@raisindb/function-wasm`. Bump when that package is released. */
+const TS_SDK_RANGE = '^0.1.0';
 import { camelIdent, type WasmFnVars } from './shared.js';
 
 function packageJson(v: WasmFnVars): string {
-  const sdk = v.sdk.kind === 'path' ? `file:${v.sdk.value}` : `^${v.sdk.value}`;
+  // A git TAG is not a semver range: `^v0.5.0` is not installable. The npm
+  // package has its own version line, so name that instead.
+  const sdk = v.sdk.kind === 'path' ? `file:${v.sdk.value}` : TS_SDK_RANGE;
   return `${JSON.stringify(
     {
       name: v.name,

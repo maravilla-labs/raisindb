@@ -1,0 +1,45 @@
+/**
+ * The WIT contract, inlined for scaffolds whose toolchain needs it inside the
+ * project (TinyGo is invoked with `--wit-package ./wit`).
+ *
+ * Byte-identical to `crates/raisin-functions/wit/raisin-function.wit`; a test
+ * asserts that, because a guest built against a drifted copy fails to link
+ * with an error naming neither file.
+ */
+export const RAISIN_WIT = `package raisin:function@0.1.0;
+
+/// Host surface for every RaisinDB function component. ONE generic gateway
+/// mirrors \`__raisin_call\` (QuickJS/Starlark): each raisin.* method has exactly
+/// one implementation, the registry invoker.
+interface host {
+    enum log-level { debug, info, warn, error }
+
+    /// Call a RaisinDB API method by registry \`internal_name\` ("nodes_get",
+    /// "http_request", "context_get", ...). \`args\` is a JSON array of positional
+    /// arguments; \`null\` = absent optional. Ok = \`InvokeResult::to_json_string()\`.
+    /// Err = human-readable message (unknown method, bad args, API error).
+    call: func(method: string, args: string) -> result<string, string>;
+
+    /// Structured log line -> ExecutionResult.logs + SSE log emitter.
+    log: func(level: log-level, message: string);
+
+    /// Execution context JSON, byte-identical to \`raisin.context.get()\` in JS/Starlark
+    /// (\`FunctionApi::get_context\`).
+    context: func() -> string;
+
+    /// Host ABI semver ("0.1.0"); SDKs refuse hosts older than they were generated for.
+    abi-version: func() -> string;
+}
+
+world function {
+    import host;
+
+    /// The single entry point. \`name\` is the handler selected by the Function
+    /// node's \`entry_file\` suffix (\`main.wasm:on-order\` -> "on-order"; a bare
+    /// \`main.wasm\` -> "default"), so ONE artifact can carry many handlers and
+    /// many Function nodes can share one artifact.
+    /// \`input\` = JSON-encoded function input. Ok = JSON output. Err = failure message.
+    /// An unknown \`name\` must return Err listing the names the guest registered.
+    export handler: func(name: string, input: string) -> result<string, string>;
+}
+`;

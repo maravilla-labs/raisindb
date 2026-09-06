@@ -28,7 +28,17 @@ import {
 } from '../templates/wasm/index.js';
 import { addHandler } from '../wasm-fn/add-handler.js';
 import { contentBase, discoverProjects, findPackageRoot, functionsRoot, loadProject } from '../wasm-fn/discover.js';
-import { WASM_LANGS, type WasmLang, type WasmProject } from '../wasm-fn/types.js';
+import { sourceFunctionFiles } from '../templates/source/index.js';
+import {
+  isSourceLang,
+  SOURCE_ENTRY_FILE,
+  SOURCE_LANGS,
+  SOURCE_NODE_LANGUAGE,
+  WASM_LANGS,
+  type FunctionLang,
+  type WasmLang,
+  type WasmProject,
+} from '../wasm-fn/types.js';
 
 /**
  * Release tag scaffolded projects pin their guest SDK to.
@@ -157,9 +167,17 @@ export async function createFunction(
   }
 
   const into = options.into ? resolveInto(options.into, packageRoot) : null;
-  const lang = (options.lang || into?.spec.lang) as WasmLang | undefined;
-  if (!lang || !WASM_LANGS.includes(lang)) {
-    throw new Error(`--lang is required and must be one of ${WASM_LANGS.join(', ')}.`);
+  const lang = (options.lang || into?.spec.lang) as FunctionLang | undefined;
+  const allLangs = [...WASM_LANGS, ...SOURCE_LANGS];
+  if (!lang || !allLangs.includes(lang as never)) {
+    throw new Error(`--lang is required and must be one of ${allLangs.join(', ')}.`);
+  }
+  if (into && isSourceLang(lang)) {
+    throw new Error(
+      `--into shares a compiled ARTIFACT between nodes; ${lang} functions ship source. ` +
+        `Add another exported handler to the existing file and create a node whose ` +
+        `entry_file names it.`
+    );
   }
   if (into && options.lang && options.lang !== into.spec.lang) {
     throw new Error(
@@ -177,6 +195,44 @@ export async function createFunction(
 
   const nodeDir = path.join(contentBase(packageRoot), 'functions', 'lib', ns, slug);
   const nodePath = path.relative(packageRoot, nodeDir).split(path.sep).join('/');
+
+  if (isSourceLang(lang)) {
+    if (fs.existsSync(path.join(nodeDir, '.node.yaml'))) {
+      throw new Error(`${nodeDir}/.node.yaml already exists. Choose a different name.`);
+    }
+    const sourceHandler = (options.handler || 'handler').trim();
+    if (!HANDLER_RE.test(sourceHandler)) {
+      throw new Error(`Invalid handler name "${sourceHandler}".`);
+    }
+    const files = sourceFunctionFiles(
+      {
+        name: slug,
+        ns,
+        lang,
+        handler: sourceHandler,
+        description:
+          options.description || `RaisinDB function "${slug}".`,
+      },
+      nodePath
+    );
+    const written = writeFileTree(packageRoot, files);
+    const entry = `${SOURCE_ENTRY_FILE[lang]}:${sourceHandler}`;
+
+    console.log(`\nScaffolded ${SOURCE_NODE_LANGUAGE[lang]} function "${slug}" in ${packageRoot}\n`);
+    console.log(`  Node:      ${nodePath}/.node.yaml   (entry_file: ${entry})`);
+    console.log(`  Source:    ${nodePath}/${SOURCE_ENTRY_FILE[lang]}`);
+    console.log(`  Files:     ${written}`);
+    console.log(`\nNothing to build — the source ships as-is.\n`);
+    console.log(`Next steps:`);
+    console.log(`  1. raisindb deploy . --repo <repo> --install`);
+    console.log(`  2. raisindb sync . --watch        # edit-and-push loop`);
+    console.log(
+      `\nNote: \`raisindb function run\` is WebAssembly-only today; invoke this one\n` +
+        `over HTTP or from the admin console.`
+    );
+    return;
+  }
+
   const projectPath = `wasm/${ns}/${slug}`;
   const projectDir = path.join(packageRoot, projectPath);
 

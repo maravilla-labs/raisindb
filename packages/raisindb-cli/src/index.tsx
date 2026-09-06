@@ -255,8 +255,11 @@ createCmd
 
 createCmd
   .command('function <name>')
-  .description('Scaffold a WebAssembly function (rust | go | ts) inside a package')
-  .option('-l, --lang <lang>', 'Guest language: rust | go | ts')
+  .description('Scaffold a function inside a package (WebAssembly, JavaScript or Starlark)')
+  .option(
+    '-l, --lang <lang>',
+    'rust | go | ts (compiled to WebAssembly) — or js | starlark (source, no build step)'
+  )
   .option('--ns <namespace>', 'Namespace under content/functions/lib (default: package name)')
   .option('-d, --dir <path>', 'Package directory (default: nearest manifest.yaml above cwd)')
   .option('--handler <name>', 'Handler name (default: "default", or <name> with --into)')

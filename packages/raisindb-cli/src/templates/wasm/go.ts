@@ -4,6 +4,7 @@
  */
 
 import type { FileEntry } from '../types.js';
+import { RAISIN_WIT } from './wit.js';
 import { camelIdent, type WasmFnVars } from './shared.js';
 
 const SDK_MODULE = 'github.com/maravilla-labs/raisindb/sdks/go/raisin';
@@ -21,7 +22,7 @@ replace ${SDK_MODULE} => ${v.sdk.value}
 
 go 1.22
 
-require ${SDK_MODULE} v0.0.0
+require ${SDK_MODULE} ${v.sdk.kind === 'path' ? 'v0.0.0' : v.sdk.value}
 ${replace}`;
 }
 
@@ -139,6 +140,9 @@ and registers \`shout\` here — one component, two functions.
 export function goFiles(v: WasmFnVars, projectPath: string): FileEntry[] {
   return [
     { path: `${projectPath}/go.mod`, content: goMod(v) },
+    // TinyGo is invoked with `--wit-package ./wit`, so the contract has to be
+    // IN the project. Rust gets it through the SDK crate; Go has no equivalent.
+    { path: `${projectPath}/wit/raisin-function.wit`, content: RAISIN_WIT },
     { path: `${projectPath}/main.go`, content: mainGo(v) },
     { path: `${projectPath}/main_test.go`, content: mainTestGo(v) },
     {
