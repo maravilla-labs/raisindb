@@ -1,0 +1,24 @@
+#!/bin/sh
+# Formatting is the one thing CI enforces unconditionally (`cargo fmt --all
+# --check` in the Format job), and it is the cheapest possible thing to get
+# wrong: a red build that says nothing about whether the code works.
+#
+# Checks the WHOLE workspace rather than the staged files, because that is
+# exactly what CI runs — a per-file check can pass here and still fail there.
+# Nothing is rewritten behind your back; a failure tells you to run the
+# formatter and stage the result, so what you committed is what you reviewed.
+#
+# Install once with:  git config core.hooksPath .githooks
+# Skip a single commit with:  git commit --no-verify
+
+if ! command -v cargo >/dev/null 2>&1; then
+    exit 0
+fi
+
+if ! cargo fmt --all -- --check; then
+    echo >&2
+    echo "pre-commit: rustfmt would change the files above; CI's Format job will fail." >&2
+    echo "  fix:  cargo fmt --all && git add -u" >&2
+    echo "  skip: git commit --no-verify" >&2
+    exit 1
+fi

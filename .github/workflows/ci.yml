@@ -104,6 +104,21 @@ jobs:
         with:
           node-version: '22'
 
+      # `raisin-functions` depends on `raisin-ai` with the `ocr` feature ON and
+      # not optional, so tesseract -> leptonica-sys is in this job's dependency
+      # graph whether or not a single test touches OCR. Without these headers
+      # `leptonica-sys`'s build script fails ("The system library `lept` ... was
+      # not found"), and the job dies BEFORE compiling any workspace crate.
+      #
+      # That is worse than it sounds: this is the only job in CI that compiles
+      # Rust at all, so while it was red every crate went unbuilt and the whole
+      # workspace was effectively untested on every push. It stayed that way
+      # from 2026-09-02 until this step existed.
+      - name: System libraries for the OCR feature
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libleptonica-dev libtesseract-dev clang pkg-config
+
       # The wasm runtime + the generator's freshness tests
       # (`generated_sdk_bindings_are_fresh`, `sdk_wit_copies_match_source`,
       # `ts_sdk_api_wrapper_is_fresh`) live in the same lib test binary.
