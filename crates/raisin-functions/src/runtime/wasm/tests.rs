@@ -264,3 +264,42 @@ async fn a_guest_over_its_memory_budget_is_reported_as_such() {
     assert!(!result.success);
     assert_eq!(result.error.unwrap().code, "MEMORY_LIMIT");
 }
+
+// ---------------------------------------------------------------------------
+// AssemblyScript
+// ---------------------------------------------------------------------------
+
+/// A component produced by AssemblyScript, not by a first-party SDK.
+///
+/// AssemblyScript deliberately does not implement WASI or the Component Model
+/// and has no maintained `wit-bindgen` backend, so `asc` emits a CORE MODULE.
+/// This fixture is that module, hand-lowered to the canonical ABI and wrapped
+/// with `wasm-tools component embed` + `component new` — the path
+/// `docs/design/assemblyscript-guest.md` proposes for a third guest language.
+///
+/// The test exists to keep that path honest: if the host ever stops accepting
+/// a component built this way, an AssemblyScript SDK built on it is dead, and
+/// the reason should surface here rather than in someone's scaffold.
+///
+/// Regenerate: see `fixtures/wasm-guests/assemblyscript/README.md`.
+const ASSEMBLYSCRIPT: &[u8] = include_bytes!("fixtures/assemblyscript.wasm");
+
+#[tokio::test]
+async fn an_assemblyscript_component_runs_and_receives_both_string_arguments() {
+    let result = run(
+        ASSEMBLYSCRIPT,
+        "greet",
+        json!({"name": "Ada"}),
+        mock_api(json!({})),
+    )
+    .await;
+
+    assert!(result.success, "{:?}", result.error);
+    let output = result.output.unwrap();
+
+    // The guest echoes its two canonical-ABI string parameters back, so this
+    // asserts the lowering itself: a wrong pointer or length would corrupt
+    // one of them rather than fail loudly.
+    assert_eq!(output["handler"], "greet");
+    assert_eq!(output["echo"]["name"], "Ada");
+}
