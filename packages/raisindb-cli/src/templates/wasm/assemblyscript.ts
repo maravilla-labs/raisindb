@@ -12,7 +12,7 @@ import { RAISIN_WIT } from './wit.js';
 import type { WasmFnVars } from './shared.js';
 
 /** Published range for `@raisindb/function-assemblyscript`. */
-const AS_SDK_RANGE = '^0.1.0';
+const AS_SDK_RANGE = '^0.1.1';
 
 function packageJson(v: WasmFnVars): string {
   // npm cannot install a package from a git SUBDIRECTORY, and this SDK lives
@@ -26,7 +26,9 @@ function packageJson(v: WasmFnVars): string {
   "type": "module",
   "scripts": {
     "build": "asc assembly/index.ts -o build/guest.core.wasm --runtime stub --exportRuntime --optimize --use abort=",
-    "check": "asc assembly/index.ts --noEmit"
+    "check": "asc assembly/index.ts --noEmit",
+    "pretest": "npm run build",
+    "test": "node --test tests/*.test.mjs"
   },
   "devDependencies": {
     "assemblyscript": "^0.28.20"
@@ -112,6 +114,63 @@ bundling one would make every artifact pay for it; use
 `;
 }
 
+
+function unitTest(v: WasmFnVars): string {
+  const handler = v.handler;
+  return `// Unit tests for ${v.name}. No server, no network.
+//
+// The mock host loads the CORE module (before it is wrapped as a component)
+// and answers \`raisin.*\` calls from JavaScript, so a handler is testable the
+// same way a Rust or Go guest is.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { loadGuest } from "@raisindb/function-assemblyscript/testing";
+
+const CORE = new URL("../build/guest.core.wasm", import.meta.url).pathname;
+
+test("${handler} returns a greeting and counts children", async () => {
+  const guest = await loadGuest(CORE, {
+    // Answer the one call this handler makes. An UNPLANNED call throws, so a
+    // handler that starts calling something new fails here rather than
+    // silently receiving a default.
+    call(method) {
+      if (method === "nodes_getChildren") {
+        return [{ id: "a", node_type: "raisin:Page" }];
+      }
+      throw new Error(\`unexpected \${method}\`);
+    },
+  });
+
+  const out = guest.invoke("${handler}", { name: "Ada" });
+
+  assert.equal(out.greeting, "hello");
+  assert.equal(out.children.length, 1);
+  assert.deepEqual(
+    guest.calls.map((c) => c.method),
+    ["nodes_getChildren"]
+  );
+  assert.ok(guest.logs.some((l) => l.message.includes("${v.name}")));
+});
+
+test("an unknown handler is reported, not a crash", async () => {
+  const guest = await loadGuest(CORE);
+  const out = guest.invoke("nope", {});
+  assert.match(out.error, /unknown handler/);
+});
+`;
+}
+
+function serverCases(v: WasmFnVars): string {
+  return `[
+  {
+    "handler": "${v.handler}",
+    "input": { "name": "Ada" },
+    "expect": { "greeting": "hello" }
+  }
+]
+`;
+}
+
 export function assemblyScriptFiles(v: WasmFnVars, projectPath: string): FileEntry[] {
   return [
     { path: `${projectPath}/package.json`, content: packageJson(v) },
@@ -119,6 +178,10 @@ export function assemblyScriptFiles(v: WasmFnVars, projectPath: string): FileEnt
     // `component embed` reads the contract from here, so it must be IN the
     // project — the SDK's copy is not on the build's path.
     { path: `${projectPath}/wit/raisin-function.wit`, content: RAISIN_WIT },
+    { path: `${projectPath}/tests/handler.test.mjs`, content: unitTest(v) },
+    // Scenarios for `raisindb function test --server`, the same file the Rust
+    // and Go scaffolds carry.
+    { path: `${projectPath}/tests/server.json`, content: serverCases(v) },
     { path: `${projectPath}/README.md`, content: readme(v) },
     { path: `${projectPath}/.gitignore`, content: 'node_modules/\nbuild/\n' },
   ];

@@ -32,10 +32,10 @@ export interface ServerCase {
 export function defaultTestCommand(lang: WasmLang): string {
   switch (lang) {
     case 'assemblyscript':
-      // `asc` has no test runner of its own and the SDK's surface is exercised
-      // by the host, so a scaffolded project runs a COMPILE as its native check:
-      // it catches type errors and a missing export without needing a server.
-      return 'npx asc assembly/index.ts --noEmit';
+      // `npm test` builds the core module and runs `node --test`, which drives
+      // the guest through the SDK's mock host — the same no-server guarantee
+      // `cargo test` and `go test` give.
+      return 'npm test';
     case 'rust':
       return 'cargo test';
     case 'go':

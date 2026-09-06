@@ -7,6 +7,7 @@
   "ascMain": "assembly/index.ts",
   "files": [
     "assembly",
+    "testing",
     "wit",
     "README.md"
   ],
@@ -22,6 +23,7 @@
       "types": "./assembly/index.ts",
       "default": "./assembly/index.ts"
     },
-    "./assembly/*": "./assembly/*"
+    "./assembly/*": "./assembly/*",
+    "./testing": "./testing/host.mjs"
   }
 }
