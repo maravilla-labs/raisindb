@@ -224,12 +224,9 @@ export async function createFunction(
     console.log(`  Files:     ${written}`);
     console.log(`\nNothing to build — the source ships as-is.\n`);
     console.log(`Next steps:`);
-    console.log(`  1. raisindb deploy . --repo <repo> --install`);
-    console.log(`  2. raisindb sync . --watch        # edit-and-push loop`);
-    console.log(
-      `\nNote: \`raisindb function run\` is WebAssembly-only today; invoke this one\n` +
-        `over HTTP or from the admin console.`
-    );
+    console.log(`  1. raisindb function doctor ${nodePath}`);
+    console.log(`  2. raisindb function run ${nodePath} --input '{"name":"Ada"}'`);
+    console.log(`  3. raisindb deploy . --repo <repo> --install`);
     return;
   }
 

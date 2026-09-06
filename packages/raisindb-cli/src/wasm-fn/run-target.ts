@@ -74,9 +74,18 @@ export function workspaceLocation(packageRoot: string, artifactPath: string): Wo
   return { workspace: segments[0], nodePath: segments.slice(1).join('/') };
 }
 
-/** True when this `.node.yaml` declares a WebAssembly function. */
-function isWasmNode(node: FunctionNode): boolean {
-  return node.language === 'wasm';
+/**
+ * True when `function run` can drive this node.
+ *
+ * WebAssembly, JavaScript and Starlark all qualify: the deploy step is the
+ * same multipart upload of whatever file `entry_file` names, and the server's
+ * code loader reads a text asset exactly as it reads an artifact. Only the
+ * BUILD differs between them, and `run` does not build.
+ *
+ * SQL functions are excluded: their code is not a file beside the node.
+ */
+function isRunnableNode(node: FunctionNode): boolean {
+  return node.language === 'wasm' || node.language === 'javascript' || node.language === 'starlark';
 }
 
 /** Nodes the target directory selects, before `--handler` narrows them. */
@@ -84,7 +93,7 @@ function candidatesFor(start: string, packageRoot: string): {
   nodes: FunctionNode[];
   project?: WasmProject;
 } {
-  const all = discoverFunctionNodes(packageRoot).filter(isWasmNode);
+  const all = discoverFunctionNodes(packageRoot).filter(isRunnableNode);
   const resolved = path.resolve(start);
 
   // A Function node directory (or its .node.yaml) selects exactly that node.
@@ -137,8 +146,8 @@ export function resolveRunTarget(
   const { nodes, project } = candidatesFor(start, packageRoot);
   if (nodes.length === 0) {
     throw new Error(
-      `No \`language: wasm\` Function node found under ${start}.\n` +
-        'Create one with `raisindb create function <name> --lang rust|go|ts`.'
+      `No runnable Function node found under ${start}.\n` +
+        'Create one with `raisindb create function <name> --lang rust|go|js|starlark`.'
     );
   }
 

@@ -99,7 +99,7 @@ describe('resolveRunTarget', () => {
   });
 
   it('explains an empty package rather than resolving nothing', () => {
-    expect(() => resolveRunTarget(root)).toThrow(/No `language: wasm` Function node/);
+    expect(() => resolveRunTarget(root)).toThrow(/No runnable Function node/);
   });
 });
 

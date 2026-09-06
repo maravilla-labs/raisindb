@@ -133,10 +133,76 @@ function checkProject(project: WasmProject, cwd: string, toolchains: boolean): F
   return findings;
 }
 
+
+/**
+ * A source-shipping function (`javascript`, `starlark`): its entry file must
+ * exist beside the node and export the handler the `entry_file` names.
+ *
+ * Both are runtime failures otherwise — a missing file is "function not found"
+ * and a missing handler is an error only when someone finally invokes it — so
+ * they are worth catching before deploy, exactly as for a wasm artifact.
+ */
+function checkSourceNode(node: FunctionNode, root: string): Finding[] {
+  const findings: Finding[] = [];
+  const language = node.language;
+  if (language !== 'javascript' && language !== 'starlark') return findings;
+
+  if (!node.entryFile) {
+    findings.push(err('FN_ENTRY_FILE_MISSING', node.name, `language is ${language} but entry_file is not set`));
+    return findings;
+  }
+  if (node.escapes) {
+    findings.push(
+      err(
+        'FN_ENTRY_FILE_ESCAPES',
+        node.name,
+        `entry_file "${node.entryFile}" resolves outside the functions workspace (${root}) — the server refuses it`
+      )
+    );
+    return findings;
+  }
+
+  const source = node.artifactPath as string;
+  if (!fs.existsSync(source)) {
+    findings.push(err('FN_SOURCE_MISSING', node.name, `entry_file target does not exist: ${source}`));
+    return findings;
+  }
+
+  let text = '';
+  try {
+    text = fs.readFileSync(source, 'utf-8');
+  } catch {
+    findings.push(warn('FN_SOURCE_UNREADABLE', node.name, `could not read ${source}`));
+    return findings;
+  }
+
+  // Textual, deliberately: parsing JavaScript or Starlark to be certain would
+  // mean shipping two parsers to answer a question a regex answers for every
+  // shape these scaffolds produce. A false negative costs a warning, not a
+  // wrong build.
+  const h = node.handler.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const declared =
+    language === 'javascript'
+      ? new RegExp(`(function\\s+${h}\\b|\\b${h}\\s*[:=]\\s*(async\\s*)?(function|\\()|exports\\.${h}\\b)`)
+      : new RegExp(`def\\s+${h}\\s*\\(`);
+  if (declared.test(text)) {
+    findings.push(hint('FN_HANDLER', node.name, `handler "${node.handler}" is defined in ${path.basename(source)}`));
+  } else {
+    findings.push(
+      warn(
+        'FN_HANDLER_NOT_FOUND',
+        node.name,
+        `no definition of "${node.handler}" found in ${path.basename(source)} — invoking it will fail`
+      )
+    );
+  }
+  return findings;
+}
+
 /** Everything about one Function node's `entry_file`. */
 function checkNode(node: FunctionNode, projects: WasmProject[], root: string): Finding[] {
   const findings: Finding[] = [];
-  if (node.language !== 'wasm') return findings;
+  if (node.language !== 'wasm') return checkSourceNode(node, root);
 
   if (!node.entryFile) {
     findings.push(err('WASM_ENTRY_FILE_MISSING', node.name, 'language is wasm but entry_file is not set'));
@@ -222,13 +288,18 @@ export function runWasmDoctor(
   // artifact no project builds, is exactly the case a per-project scope would
   // hide — and it is the case that fails at runtime on a deployed server.
   const root = packageRoot ? functionsRoot(packageRoot) : resolved;
-  const wasmNodes = nodes.filter((n) => n.language === 'wasm');
-  for (const node of wasmNodes) findings.push(...checkNode(node, projects, root));
+  // Every function node in the package is checked, whatever its language: a
+  // JavaScript function with a missing entry file fails at runtime in exactly
+  // the way a missing artifact does.
+  const checked = nodes.filter(
+    (n) => n.language === 'wasm' || n.language === 'javascript' || n.language === 'starlark'
+  );
+  for (const node of checked) findings.push(...checkNode(node, projects, root));
 
   const errors = findings.filter((f) => f.severity === 'error').length;
   const warnings = findings.filter((f) => f.severity === 'warning').length;
   let exitCode = 0;
-  if (projects.length === 0 && wasmNodes.length === 0 && failures.length === 0) exitCode = 2;
+  if (projects.length === 0 && checked.length === 0 && failures.length === 0) exitCode = 2;
   else if (errors > 0 || (options.strict && warnings > 0)) exitCode = 1;
 
   return { target: resolved, packageRoot, projects, nodes, findings, exitCode };
