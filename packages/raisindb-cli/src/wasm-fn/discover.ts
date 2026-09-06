@@ -77,6 +77,18 @@ export function defaultCommand(lang: WasmLang, release: boolean): string {
       return 'tinygo build -target=wasip2 -o main.wasm --wit-package ./wit --wit-world function .';
     case 'ts':
       return 'raisin-wasm-build src/index.js --out main.wasm';
+    case 'assemblyscript':
+      // Three steps, because AssemblyScript emits a CORE MODULE: compile, then
+      // attach the WIT, then wrap it as a component. `wasm-tools` does the last
+      // two and is a required toolchain for this language.
+      return (
+        // `npx`: asc is a local devDependency, not a global.
+        'npx asc assembly/index.ts -o build/guest.core.wasm --runtime stub --exportRuntime ' +
+        (release ? '--optimize ' : '') +
+        '--use abort= && ' +
+        'wasm-tools component embed wit build/guest.core.wasm -o build/guest.embed.wasm --world function && ' +
+        'wasm-tools component new build/guest.embed.wasm -o main.wasm'
+      );
   }
 }
 
@@ -105,6 +117,7 @@ export function defaultOutput(lang: WasmLang, projectDir: string, release: boole
       );
     case 'go':
     case 'ts':
+    case 'assemblyscript':
       return 'main.wasm';
   }
 }

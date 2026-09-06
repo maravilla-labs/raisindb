@@ -18,10 +18,10 @@
  */
 
 /** Guest languages with a first-party SDK and a build lane. */
-export type WasmLang = 'rust' | 'go' | 'ts';
+export type WasmLang = 'rust' | 'go' | 'ts' | 'assemblyscript';
 
 /** The COMPILED languages `--lang` accepts, in help-text order. */
-export const WASM_LANGS: WasmLang[] = ['rust', 'go', 'ts'];
+export const WASM_LANGS: WasmLang[] = ['rust', 'go', 'assemblyscript', 'ts'];
 
 /**
  * Languages whose source IS the deliverable — no toolchain, no build step.

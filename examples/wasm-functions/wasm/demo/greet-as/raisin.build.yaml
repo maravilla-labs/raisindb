@@ -1,0 +1,14 @@
+# How `raisindb function build` turns this project into the Function node's
+# artifact. ONE artifact can back several Function nodes: add a second handler
+# with `raisindb create function <other> --lang assemblyscript --into greet-as`.
+lang: assemblyscript
+node_dir: ../../../content/functions/lib/demo/greet-as
+artifact: main.wasm
+handlers:
+  - default
+command: >-
+  npx asc assembly/index.ts -o build/guest.core.wasm
+  --runtime stub --exportRuntime --optimize --use abort=
+  && wasm-tools component embed wit build/guest.core.wasm
+  -o build/guest.embed.wasm --world function
+  && wasm-tools component new build/guest.embed.wasm -o main.wasm

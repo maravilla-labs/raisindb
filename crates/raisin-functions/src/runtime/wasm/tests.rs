@@ -323,3 +323,53 @@ async fn an_assemblyscript_component_uses_the_host_imports() {
         "log() did not reach the execution logs: {logs:?}"
     );
 }
+
+/// A guest produced by `raisindb create function --lang assemblyscript`,
+/// unmodified, built by `raisindb function build`.
+///
+/// This is what an AssemblyScript user actually writes: `nodes.getChildren(...)`
+/// from `assembly/generated.ts`, which the binding generator emits from the same
+/// registry the Rust and Go SDKs come from. It exists separately from the
+/// hand-lowered fixture because the two can fail independently — the ABI can be
+/// right while the generated argument encoding is wrong, and vice versa.
+///
+/// Regenerate: scaffold it, `npm install`, `raisindb function build`, and copy
+/// the artifact here. That is deliberately the USER's path — if the scaffold
+/// stops producing something the host accepts, this test is where it shows.
+const ASSEMBLYSCRIPT_SDK: &[u8] = include_bytes!("fixtures/assemblyscript_sdk.wasm");
+
+#[tokio::test]
+async fn the_assemblyscript_sdk_surface_reaches_the_host() {
+    let result = run(
+        ASSEMBLYSCRIPT_SDK,
+        "default",
+        json!({"name": "Ada"}),
+        mock_api(json!({"tenant_id": "tenant1"})),
+    )
+    .await;
+
+    assert!(result.success, "{:?}", result.error);
+    let output = result.output.unwrap();
+
+    // `nodes.getChildren` went through the generated wrapper, which builds the
+    // positional JSON argument array itself.
+    assert_eq!(output["greeting"], "hello");
+
+    // `nodes.getChildren` went through the generated wrapper, which builds the
+    // positional JSON argument array itself — a wrong encoding here surfaces as
+    // an argument error from the host rather than as a decode failure.
+    assert!(
+        output["children"].is_array(),
+        "generated nodes.getChildren did not return the mock's node list: {}",
+        output["children"]
+    );
+    assert_eq!(output["children"][0]["node_type"], "raisin:Page");
+
+    assert!(
+        result
+            .logs
+            .iter()
+            .any(|l| l.message.contains("greet-as running")),
+        "log.info from the SDK did not reach the execution logs"
+    );
+}

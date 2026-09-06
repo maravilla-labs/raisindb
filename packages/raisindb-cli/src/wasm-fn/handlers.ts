@@ -128,6 +128,9 @@ function sourceFiles(lang: WasmLang, dir: string): string[] {
       return sources(dir, ['.go']).filter((f) => !f.endsWith('_test.go'));
     case 'ts':
       return sources(path.join(dir, 'src'), ['.js', '.mjs', '.ts']);
+    case 'assemblyscript':
+      // The entry module and anything it imports live under `assembly/`.
+      return sources(path.join(dir, 'assembly'), ['.ts']);
   }
 }
 

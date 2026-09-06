@@ -31,6 +31,11 @@ export interface ServerCase {
 /** The native test command per language, run in the project directory. */
 export function defaultTestCommand(lang: WasmLang): string {
   switch (lang) {
+    case 'assemblyscript':
+      // `asc` has no test runner of its own and the SDK's surface is exercised
+      // by the host, so a scaffolded project runs a COMPILE as its native check:
+      // it catches type errors and a missing export without needing a server.
+      return 'npx asc assembly/index.ts --noEmit';
     case 'rust':
       return 'cargo test';
     case 'go':

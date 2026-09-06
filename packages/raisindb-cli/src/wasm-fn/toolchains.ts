@@ -120,6 +120,15 @@ export function toolchainFor(lang: WasmLang): ToolStatus[] {
         { name: 'node', version: probe('node'), required: true },
         { name: 'npm', version: probe('npm'), required: true },
       ];
+    case 'assemblyscript':
+      // `wasm-tools` is REQUIRED here where it is optional elsewhere:
+      // AssemblyScript emits a core module, so without it there is no way to
+      // produce a component at all.
+      return [
+        { name: 'node', version: probe('node'), required: true },
+        { name: 'npm', version: probe('npm'), required: true },
+        { name: 'wasm-tools', version: probe('wasm-tools'), required: true },
+      ];
   }
 }
 

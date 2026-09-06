@@ -1,0 +1,15 @@
+{
+  "name": "greet-as",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "asc assembly/index.ts -o build/guest.core.wasm --runtime stub --exportRuntime --optimize --use abort=",
+    "check": "asc assembly/index.ts --noEmit"
+  },
+  "devDependencies": {
+    "assemblyscript": "^0.28.20"
+  },
+  "dependencies": {
+    "@raisindb/function-assemblyscript": "file:../../../../../sdks/assemblyscript"
+  }
+}

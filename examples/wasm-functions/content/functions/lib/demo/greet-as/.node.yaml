@@ -1,0 +1,38 @@
+node_type: raisin:Function
+properties:
+  name: greet-as
+  title: Greet As
+  description: >
+    RaisinDB function "greet-as", compiled to a WebAssembly component.
+  enabled: true
+  language: wasm
+  execution_mode: both
+  # The artifact lives beside this file. A suffix selects a handler:
+  # `main.wasm:on-order`; a bare `main.wasm` means the handler named
+  # "default". A sibling node may point at THIS artifact with
+  # `../greet-as/main.wasm:<handler>` — one component, many functions.
+  entry_file: main.wasm
+  version: 1
+  resource_limits:
+    timeout_ms: 5000
+    # Bytes, not megabytes: `ResourceLimits` has `max_memory_bytes` and
+    # ignores anything it does not know, so a wrong key is silently the
+    # 128 MiB default.
+    max_memory_bytes: 67108864
+  network_policy:
+    http_enabled: false
+  input_schema:
+    type: object
+    additionalProperties: false
+    properties:
+      name:
+        type: string
+        description: Who to greet
+    required: [name]
+  output_schema:
+    type: object
+    properties:
+      greeting:
+        type: string
+      handler:
+        type: string

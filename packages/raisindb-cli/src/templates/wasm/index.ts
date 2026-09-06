@@ -12,6 +12,7 @@ import type { FileEntry } from '../types.js';
 import { commonFiles, type WasmFnVars } from './shared.js';
 import { goFiles } from './go.js';
 import { rustFiles } from './rust.js';
+import { assemblyScriptFiles } from './assemblyscript.js';
 import { tsFiles } from './ts.js';
 
 export * from './shared.js';
@@ -27,6 +28,8 @@ export function wasmFunctionFiles(
       ? rustFiles(vars, projectPath)
       : vars.lang === 'go'
         ? goFiles(vars, projectPath)
-        : tsFiles(vars, projectPath);
+        : vars.lang === 'assemblyscript'
+          ? assemblyScriptFiles(vars, projectPath)
+          : tsFiles(vars, projectPath);
   return [...commonFiles(vars, nodePath, projectPath), ...lang];
 }

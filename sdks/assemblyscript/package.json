@@ -1,0 +1,27 @@
+{
+  "name": "@raisindb/function-assemblyscript",
+  "version": "0.1.0",
+  "description": "Guest SDK for writing RaisinDB server functions in AssemblyScript, compiled to a WebAssembly component",
+  "license": "BSL-1.1",
+  "types": "assembly/index.ts",
+  "ascMain": "assembly/index.ts",
+  "files": [
+    "assembly",
+    "wit",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "assemblyscript": ">=0.28"
+  },
+  "devDependencies": {
+    "assemblyscript": "^0.28.20"
+  },
+  "exports": {
+    ".": {
+      "assemblyscript": "./assembly/index.ts",
+      "types": "./assembly/index.ts",
+      "default": "./assembly/index.ts"
+    },
+    "./assembly/*": "./assembly/*"
+  }
+}

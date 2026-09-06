@@ -89,7 +89,12 @@ function manifestNamespace(packageRoot: string): string {
  * dependency is the only thing that builds; anywhere else it is a version.
  */
 function sdkRef(lang: WasmLang, projectDir: string, packageRoot: string): SdkRef {
-  const relative = { rust: 'sdks/rust/raisin-sdk', go: 'sdks/go/raisin', ts: 'sdks/ts/function-wasm' }[lang];
+  const relative = {
+    rust: 'sdks/rust/raisin-sdk',
+    go: 'sdks/go/raisin',
+    ts: 'sdks/ts/function-wasm',
+    assemblyscript: 'sdks/assemblyscript',
+  }[lang];
   let dir = packageRoot;
   for (;;) {
     const candidate = path.join(dir, relative);

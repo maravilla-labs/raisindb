@@ -122,6 +122,15 @@ properties:
 /** Default build command per language, written into `raisin.build.yaml`. */
 function buildCommand(v: WasmFnVars): string {
   switch (v.lang) {
+    case 'assemblyscript':
+      // Three steps: AssemblyScript emits a CORE MODULE, so the WIT is attached
+      // and the result wrapped as a component. `wasm-tools` is required.
+      return `>-
+  npx asc assembly/index.ts -o build/guest.core.wasm
+  --runtime stub --exportRuntime --optimize --use abort=
+  && wasm-tools component embed wit build/guest.core.wasm
+  -o build/guest.embed.wasm --world function
+  && wasm-tools component new build/guest.embed.wasm -o main.wasm`;
     case 'rust':
       return 'cargo build --release --target wasm32-wasip2';
     case 'go':

@@ -15,7 +15,8 @@
 //! `make gen-bindings`); `--check` verifies the committed output is current,
 //! which is what the freshness tests in [`tests`] assert.
 
-pub mod dts;
+pub mod assemblyscript;
+mod dts;
 pub mod go;
 pub mod model;
 pub mod rust;
@@ -68,6 +69,11 @@ pub fn render_all() -> Vec<GeneratedFile> {
             kind: OutputKind::Binding,
         },
         GeneratedFile {
+            path: "sdks/assemblyscript/assembly/generated.ts",
+            contents: assemblyscript::render(),
+            kind: OutputKind::Binding,
+        },
+        GeneratedFile {
             path: "sdks/ts/function-wasm/src/generated/raisin.d.ts",
             contents: ts::render_dts(),
             kind: OutputKind::Binding,
@@ -100,6 +106,7 @@ pub const WIT_COPIES: &[&str] = &[
     "sdks/rust/raisin-sdk/wit/raisin-function.wit",
     "sdks/go/raisin/wit/raisin-function.wit",
     "sdks/ts/function-wasm/wit/raisin-function.wit",
+    "sdks/assemblyscript/wit/raisin-function.wit",
 ];
 
 /// The repository root, derived from this crate's manifest directory.
