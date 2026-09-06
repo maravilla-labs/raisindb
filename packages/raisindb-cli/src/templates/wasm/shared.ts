@@ -9,11 +9,24 @@ import type { WasmLang } from '../../wasm-fn/types.js';
 
 /** How a scaffolded project depends on the guest SDK. */
 export interface SdkRef {
-  /** `path` inside this monorepo (or a checkout of it); `version` elsewhere. */
-  kind: 'path' | 'version';
-  /** The path (relative to the project dir) or the version requirement. */
+  /**
+   * How a scaffolded project reaches the guest SDK.
+   *
+   * * `path` — inside this monorepo (or a checkout of it).
+   * * `git`  — everywhere else: the SDKs live in the public `raisindb` repo
+   *   and are pinned to a release tag. This is the default outside the
+   *   monorepo because the Rust crate is NOT on crates.io (`publish = false`)
+   *   and the Go module is a subdirectory module; emitting a bare version
+   *   requirement produced a project that could not resolve its dependency.
+   * * `version` — a registry requirement, for when the SDKs are published.
+   */
+  kind: 'path' | 'git' | 'version';
+  /** The path, the git tag, or the version requirement. */
   value: string;
 }
+
+/** The public repository the guest SDKs are published from. */
+export const SDK_GIT_URL = 'https://github.com/maravilla-labs/raisindb';
 
 /** Substitution variables for a scaffolded wasm function. */
 export interface WasmFnVars {

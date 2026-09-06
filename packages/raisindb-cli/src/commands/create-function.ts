@@ -30,6 +30,14 @@ import { addHandler } from '../wasm-fn/add-handler.js';
 import { contentBase, discoverProjects, findPackageRoot, functionsRoot, loadProject } from '../wasm-fn/discover.js';
 import { WASM_LANGS, type WasmLang, type WasmProject } from '../wasm-fn/types.js';
 
+/**
+ * Release tag scaffolded projects pin their guest SDK to.
+ *
+ * Bump this with each release that changes the SDK or the WIT contract; a
+ * scaffold pinned to a tag keeps building after the SDK moves on.
+ */
+const SDK_GIT_TAG = 'v0.5.0';
+
 /** Options for `raisindb create function`. */
 export interface CreateFunctionOptions {
   /** Guest language. Required unless `--into` supplies it. */
@@ -83,7 +91,11 @@ function sdkRef(lang: WasmLang, projectDir: string, packageRoot: string): SdkRef
     if (parent === dir) break;
     dir = parent;
   }
-  return { kind: 'version', value: lang === 'rust' ? '0.1' : '0.1.0' };
+  // Outside the monorepo the SDKs come from the public repo, pinned to a
+  // release tag. NOT a registry version: the Rust crate is `publish = false`
+  // and the Go SDK is a subdirectory module, so a bare version requirement
+  // scaffolds a project that cannot resolve its dependency.
+  return { kind: 'git', value: SDK_GIT_TAG };
 }
 
 /** Make sure `.rapignore` keeps toolchain source out of the package. */

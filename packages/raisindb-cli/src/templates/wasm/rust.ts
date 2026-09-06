@@ -5,13 +5,15 @@
  */
 
 import type { FileEntry } from '../types.js';
-import { snakeIdent, type WasmFnVars } from './shared.js';
+import { snakeIdent, SDK_GIT_URL, type WasmFnVars } from './shared.js';
 
 function cargoToml(v: WasmFnVars): string {
   const dep =
     v.sdk.kind === 'path'
       ? `raisin-sdk = { path = "${v.sdk.value}" }`
-      : `raisin-sdk = "${v.sdk.value}"`;
+      : v.sdk.kind === 'git'
+        ? `raisin-sdk = { git = "${SDK_GIT_URL}", tag = "${v.sdk.value}" }`
+        : `raisin-sdk = "${v.sdk.value}"`;
   return `# Guest crate for the \`${v.name}\` Function node.
 #
 # Its own workspace: a wasm guest builds for wasm32-wasip2 with a size-tuned
