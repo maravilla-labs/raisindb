@@ -502,6 +502,85 @@ async fn compare_runtimes_against_a_real_server() {
         &mut rows,
     );
 
+    // -----------------------------------------------------------------
+    // CONCURRENCY SWEEP
+    //
+    // Everything above is SEQUENTIAL — one request at a time — which measures
+    // latency and says nothing about throughput. For an HTTP API layer the
+    // binding constraint is usually not per-call cost but
+    // `RAISIN_MAX_CONCURRENT_FUNCTIONS` (default 15, `runtime/mod.rs`), a
+    // process-wide semaphore sized for background jobs. This sweep shows where
+    // that ceiling actually bites: req/s should climb with in-flight requests
+    // and then flatten, and p99 should start climbing at the same point.
+    // -----------------------------------------------------------------
+    {
+        let wasm_fn = built
+            .iter()
+            .find(|a| a.label == "wasm")
+            .expect("wasm arm exists");
+        let mut lines = vec![format!(
+            "\n=== concurrency sweep (wasm, realistic, {PAGES} nodes) ===\n    {:>9} {:>10} {:>10} {:>10} {:>10}",
+            "in-flight", "req/s", "p50 ms", "p95 ms", "p99 ms"
+        )];
+
+        for &inflight in &[1usize, 4, 16, 48] {
+            // Enough requests that each level is more than warm-up noise.
+            let total = (inflight * 12).max(24);
+            let started = Instant::now();
+            let mut latencies = Vec::with_capacity(total);
+
+            // Fixed-size wave of concurrent requests, repeated until `total`.
+            let mut sent = 0usize;
+            while sent < total {
+                let batch = inflight.min(total - sent);
+                let mut handles = Vec::with_capacity(batch);
+                for _ in 0..batch {
+                    let client = client.clone();
+                    let base = base.clone();
+                    let token = token.clone();
+                    let name = wasm_fn.realistic.clone();
+                    let input = realistic_input.clone();
+                    handles.push(tokio::spawn(async move {
+                        let t = Instant::now();
+                        let r = client
+                            .post(format!("{base}/api/functions/{REPO}/{name}/invoke"))
+                            .bearer_auth(&token)
+                            .json(&json!({ "input": input, "sync": true }))
+                            .send()
+                            .await
+                            .expect("concurrent invoke failed");
+                        assert!(r.status().is_success(), "concurrent invoke: {}", r.status());
+                        let _ = r.text().await;
+                        ms(t.elapsed())
+                    }));
+                }
+                for h in handles {
+                    latencies.push(h.await.expect("request task panicked"));
+                }
+                sent += batch;
+            }
+
+            let wall = started.elapsed().as_secs_f64();
+            latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let pick = |q: f64| {
+                latencies[((latencies.len() as f64 * q) as usize).min(latencies.len() - 1)]
+            };
+            lines.push(format!(
+                "    {:>9} {:>10.1} {:>10.2} {:>10.2} {:>10.2}",
+                inflight,
+                total as f64 / wall,
+                pick(0.50),
+                pick(0.95),
+                pick(0.99)
+            ));
+        }
+        println!("{}", lines.join("\n"));
+        println!(
+            "\n  If req/s stops climbing while p99 rises, the limit is\n  \
+             RAISIN_MAX_CONCURRENT_FUNCTIONS (default 15), not the runtime."
+        );
+    }
+
     // DIAGNOSTIC: re-measure the arm that was sampled FIRST, now that ~96 jobs
     // have been registered. If it is still fast the overhead is arm- or
     // order-specific; if it has become slow, something ACCUMULATES per
@@ -521,11 +600,12 @@ async fn compare_runtimes_against_a_real_server() {
         rows.join("\n")
     );
     println!(
-        "\n  wall - server = everything the runtime does not control: HTTP, auth, node\n  \
-         lookup, and the sync invoke path's three RocksDB writes. It was ~190 ms\n  \
-         until two fixes landed: a validated name->path memo for the function\n  \
-         lookup (it loaded EVERY function node per call: 170 ms with the builtin\n  \
-         packages installed) and a memo on tenant NodeType initialization (it\n  \
-         re-ran, and re-failed, on every request: 20 ms). It is now ~2 ms."
+        "\n  wall - server = everything the runtime does not control: HTTP, auth and\n  \
+         the node lookup. It was ~190 ms until three fixes landed: a validated\n  \
+         name->path memo for the function lookup (it loaded EVERY function node\n  \
+         per call: 170 ms once the builtin packages are installed), a memo on\n  \
+         tenant NodeType init (it re-ran, and re-failed, on every request: 20 ms),\n  \
+         and dropping job bookkeeping from sync invocations (six storage writes\n  \
+         per API call). It is now ~2 ms."
     );
 }

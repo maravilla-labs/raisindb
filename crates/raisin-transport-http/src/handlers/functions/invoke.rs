@@ -77,30 +77,24 @@ pub async fn invoke_function(
         ));
     }
 
-    // Register job for tracking
     let async_execution_id = nanoid::nanoid!();
-    let t_register = std::time::Instant::now();
-    let job_id = register_function_job(
-        &rocksdb,
-        tenant_id,
-        &repo,
-        &function_node.path,
-        req.input.clone(),
-        async_execution_id.clone(),
-        auth_context.as_ref(),
-    )
-    .await?;
-    let register_ms = t_register.elapsed().as_micros() as f64 / 1000.0;
 
     if req.sync {
-        let t_status = std::time::Instant::now();
-        rocksdb
-            .job_registry()
-            .update_status(&job_id, JobStatus::Running)
-            .await
-            .map_err(map_storage_error)?;
-        let status_ms = t_status.elapsed().as_micros() as f64 / 1000.0;
-
+        // A SYNCHRONOUS invocation registers no job.
+        //
+        // It runs inline and returns its result in the response, so the job
+        // record served only as history — at a cost of six storage operations
+        // per call (`job_data_store` put, register, mark running, set result,
+        // mark completed, `job_data_store` delete). That is ~0.3 ms of latency
+        // but it is a write on every request, which is write amplification an
+        // HTTP API layer cannot afford at volume: WAL, compaction, and a job
+        // table that grows with traffic rather than with work.
+        //
+        // CONSEQUENCE, deliberate: sync invocations no longer appear in
+        // `GET /api/functions/{repo}/{name}/executions`, which lists job
+        // records. Async invocations (`sync: false`) still register and still
+        // appear, unchanged. To restore history for sync calls, write ONE
+        // already-terminal job record here instead of the six-step dance.
         let t_exec = std::time::Instant::now();
         match execute_function_inline(
             &state,
@@ -114,13 +108,10 @@ pub async fn invoke_function(
         .await
         {
             Ok(result) => {
-                let exec_ms = t_exec.elapsed().as_micros() as f64 / 1000.0;
-                let t_persist = std::time::Instant::now();
-                persist_job_result(&rocksdb, tenant_id, &job_id, &result).await?;
-                let persist_ms = t_persist.elapsed().as_micros() as f64 / 1000.0;
                 tracing::debug!(
                     target: "invoke_timing",
-                    lookup_ms, register_ms, status_ms, exec_ms, persist_ms,
+                    lookup_ms,
+                    exec_ms = t_exec.elapsed().as_micros() as f64 / 1000.0,
                     reported_ms = result.duration_ms,
                     "sync invoke phases"
                 );
@@ -129,7 +120,9 @@ pub async fn invoke_function(
                     sync: true,
                     result: result.result.clone(),
                     error: result.error.clone(),
-                    job_id: Some(job_id.to_string()),
+                    // No job is registered for a sync call, so there is no id
+                    // to report. The field is already `Option`.
+                    job_id: None,
                     duration_ms: Some(result.duration_ms),
                     logs: Some(result.logs.clone()),
                     status: Some("completed".to_string()),
@@ -139,16 +132,22 @@ pub async fn invoke_function(
                 };
                 Ok(Json(response))
             }
-            Err(err) => {
-                rocksdb
-                    .job_registry()
-                    .mark_failed(&job_id, err.message.clone())
-                    .await
-                    .map_err(map_storage_error)?;
-                Err(err)
-            }
+            Err(err) => Err(err),
         }
     } else {
+        // Asynchronous: the job IS the delivery mechanism, so it is registered
+        // here rather than for every invocation.
+        let job_id = register_function_job(
+            &rocksdb,
+            tenant_id,
+            &repo,
+            &function_node.path,
+            req.input.clone(),
+            async_execution_id.clone(),
+            auth_context.as_ref(),
+        )
+        .await?;
+
         if req.wait_for_completion {
             let wait_timeout_ms = req.wait_timeout_ms.unwrap_or(60_000).clamp(1_000, 300_000);
             let waited_job =
