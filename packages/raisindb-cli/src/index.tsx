@@ -258,7 +258,7 @@ createCmd
   .description('Scaffold a function inside a package (WebAssembly, JavaScript or Starlark)')
   .option(
     '-l, --lang <lang>',
-    'rust | go | ts (compiled to WebAssembly) — or js | starlark (source, no build step)'
+    'rust | go | assemblyscript | ts (compiled to WebAssembly) — or js | starlark (source, no build step)'
   )
   .option('--ns <namespace>', 'Namespace under content/functions/lib (default: package name)')
   .option('-d, --dir <path>', 'Package directory (default: nearest manifest.yaml above cwd)')
