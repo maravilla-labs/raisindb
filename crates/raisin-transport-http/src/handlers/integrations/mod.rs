@@ -23,6 +23,7 @@ mod config_secrets;
 mod connect_event;
 mod connections;
 mod manage;
+mod mount_config;
 mod mount_content;
 mod mount_control;
 mod mount_delete;
@@ -41,6 +42,8 @@ pub use config_secrets::set_config_secrets;
 pub use connect_event::connect_event;
 pub use connections::{create_connection, delete_connection, list_connections, update_connection};
 pub use manage::{disconnect, sync_mount};
+#[cfg(feature = "storage-rocksdb")]
+pub use mount_config::patch_sync_config;
 #[cfg(feature = "storage-rocksdb")]
 pub use mount_content::fetch_mount_content;
 #[cfg(feature = "storage-rocksdb")]

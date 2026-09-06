@@ -36,6 +36,7 @@ import PendingReason from '../components/mounts/PendingReason'
 import MountRunTimeline from '../components/mounts/MountRunTimeline'
 import MountPushPanel from '../components/mounts/MountPushPanel'
 import MountStatCard from '../components/mounts/MountStatCard'
+import MountSyncSettings from '../components/mounts/MountSyncSettings'
 import MountActivityFeed, {
   ConnectionPill,
   type ActivityBurst,
@@ -863,6 +864,34 @@ export default function MountDetail() {
                 </DetailRow>
               )}
             </dl>
+          </GlassCard>
+
+          {/*
+            Editable settings, driven by what THIS connector declares. Separate
+            from the read-only "Sync" card above on purpose: that one reports
+            what the engine DID, this one changes what it will do, and merging
+            them makes a stale engine verdict read as a rejection of the edit
+            just made. Saving goes through the field-scoped PATCH — the mount
+            editor's whole-node save can drop the engine's `state`.
+          */}
+          <GlassCard>
+            <h2 className="text-sm font-medium text-white mb-3">Sync settings</h2>
+            <MountSyncSettings
+              repo={repo!}
+              mount={mount}
+              caps={integration?.capabilities}
+              onSaved={() => void load(true)}
+              onError={showError}
+              onSuccess={showSuccess}
+              // A remap goes through the SAME confirmation as the toolbar
+              // button — it re-materializes every item and writes a revision
+              // each, and a second, quieter path to that cost is how it gets
+              // triggered by accident. A full sync is an ordinary walk and
+              // needs no dialog.
+              onRequestSync={(mode) =>
+                mode === 'remap' ? setConfirmRemap(true) : void enqueue('full', 'Full sync')
+              }
+            />
           </GlassCard>
 
           {integration && (

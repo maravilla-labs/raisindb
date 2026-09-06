@@ -569,7 +569,8 @@ export default function MountEditor({
                 <p className="mt-1 text-xs text-amber-400">
                   Changing this only affects items synced from now on. Already-synced nodes keep
                   their current path — the engine matches them by external id and updates them in
-                  place, so it will not move them.
+                  place, so it will not move them. Run <span className="text-zinc-300">Remap</span>{' '}
+                  on the mount page afterwards to re-materialize them under the new hierarchy.
                 </p>
               )}
             </div>

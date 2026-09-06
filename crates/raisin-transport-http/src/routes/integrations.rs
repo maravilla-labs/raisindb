@@ -95,6 +95,15 @@ pub(crate) fn integration_routes(state: &AppState) -> Router<AppState> {
                 "/api/integrations/content/{repo}/{branch}/{ws}/by-id/{node_id}",
                 post(integrations::fetch_mount_content),
             )
+            // Field-scoped `sync_config` edit. Same rule as pause/stop: it
+            // merges only the keys it is given and leaves `state` — the delta
+            // cursor, the push subscription, the backfill resume point — exactly
+            // as it read it. The generic node API replaces every property, so a
+            // config save through it races the sync engine's own state writes.
+            .route(
+                "/api/integrations/{repo}/mounts/{mount_id}/sync-config",
+                axum::routing::patch(integrations::patch_sync_config),
+            )
             .route(
                 "/api/integrations/{repo}/mounts/{mount_id}/pause",
                 post(integrations::pause_mount),

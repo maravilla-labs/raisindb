@@ -164,6 +164,30 @@ export interface Capabilities {
   supports_trash?: boolean
   /** `submit` forwards a provider-side idempotency key. */
   supports_idempotency_key?: boolean
+  /**
+   * Adapter wants a node's FILE BYTES on create/update, not just its
+   * properties — the switch that decides whether a "mirrored" file arrives at
+   * the provider with content or as a name with nothing behind it.
+   *
+   * Declared PER RESOURCE by connectors that serve several (ms-graph declares it
+   * for `resource: 'files'`, not for mail or calendar), so it is a fact about
+   * the provider and NOT a mount setting: the engine reads it from here and
+   * there is deliberately no `sync_config` key that can turn it on.
+   *
+   * It was missing from this interface while the Rust struct declared it, which
+   * is the same drift the engine's own duplicate `Capabilities` suffered — see
+   * the module comment on `raisin-models/.../capabilities.rs`.
+   */
+  accepts_content?: boolean
+  /**
+   * Which of {@link mutable_fields} express the object's LOCATION at the
+   * provider (folder, parent, label set). What makes `move_policy` mean
+   * anything: the engine is domain-blind and cannot tell that `folder`
+   * relocates a message while `unread` does not.
+   */
+  move_fields?: string[]
+  /** WHY `can_submit` is false, when the adapter can say. */
+  submit_unavailable_reason?: string | null
 }
 
 export interface Integration {
@@ -248,8 +272,40 @@ export interface SyncConfig {
   interval_seconds?: number
   include_patterns?: string[]
   exclude_patterns?: string[]
+  /**
+   * Expire the synced NODES — the mailbox pattern. Nothing to do with file
+   * bytes: {@link cache_content} governs those. An `ephemeral` mount with no
+   * {@link ttl_seconds} expires nothing, which is why the config endpoint
+   * refuses that combination rather than storing it.
+   */
   ephemeral?: boolean
+  /** How long a synced node survives, in seconds. Only read when `ephemeral`. */
   ttl_seconds?: number | null
+  /**
+   * May this deployment hold copies of the mount's file BYTES? A mount syncs
+   * metadata only; the bytes are fetched when something needs them (extract
+   * text, thumbnail, preview) and this is the switch that allows that at all —
+   * fetching means pulling someone else's storage onto this disk.
+   */
+  cache_content?: boolean
+  /**
+   * How long a cached copy outlives its last use, in seconds. Read only when
+   * `cache_content` is on. Absent is the engine DEFAULT (30 minutes), not
+   * "forever" — enabling the cache must not be able to silently mirror a drive.
+   * `0` drops the bytes as soon as processing is done.
+   */
+  content_ttl_seconds?: number | null
+  /**
+   * Whether a full walk may DELETE mount-owned nodes it did not see. On by
+   * default. Turn it OFF only for a mount whose provider listing is not
+   * authoritative for its own content (IMAP lists MAILBOXES, not messages) —
+   * with it off, nothing on the walk path ever prunes this mount again.
+   */
+  reconcile_deletes?: boolean
+  /** Item rejections tolerated before a run gives up while nothing was written. */
+  max_item_failures?: number
+  /** Node types this mount treats as FOLDERS, beyond `raisin:Folder`. */
+  folder_node_types?: string[]
   max_items_per_sync?: number
   /**
    * Folder hierarchy for materialized items, as a template over the item's
@@ -423,6 +479,38 @@ export interface WriteConfig {
    * way {@link SyncConfig} preserves provider-specific keys.
    */
   [key: string]: unknown
+}
+
+/**
+ * What has to be RUN for a config change to reach items that are ALREADY
+ * synced. Absent when the change reaches them on its own.
+ *
+ * An ordinary sync skips an item whose etag has not changed without even
+ * calling the mapper, and a delta feed only carries what changed at the
+ * provider — which for a config change is nothing. So a setting that decides
+ * what a node LOOKS LIKE needs a `remap` (re-materialize everything through the
+ * current mapper), and one that decides WHICH items become nodes needs a `full`
+ * walk (re-enumerate and reconcile). The server computes which; do not keep a
+ * second copy of that rule here, it would drift.
+ *
+ * Advisory. Never trigger it automatically: a remap writes a node revision per
+ * item, which is precisely the cost the etag skip exists to avoid.
+ */
+export interface SyncConfigFollowUp {
+  action: 'remap' | 'full'
+  /** The changed fields asking for it. */
+  fields: string[]
+  /** Operator-facing explanation, authored server-side beside the rule. */
+  reason: string
+}
+
+/** Answer from a `sync_config` patch. */
+export interface SyncConfigPatchResult {
+  ok: boolean
+  /** Keys this request changed, in request order. */
+  changed: string[]
+  sync_config: SyncConfig
+  follow_up?: SyncConfigFollowUp
 }
 
 /** How a sync run was started. */
@@ -1643,6 +1731,36 @@ export const integrationsApi = {
    */
   stopMount: (repo: string, mountId: string) =>
     api.post<MountControlResponse>(`/api/integrations/${repo}/mounts/${mountId}/stop`, {}),
+
+  /**
+   * Merge named `sync_config` keys into a mount, leaving every other property
+   * alone.
+   *
+   * Do NOT use {@link updateMount} for a settings change. That is a generic node
+   * PUT of the WHOLE property map, built from a copy the page has held since it
+   * loaded — so it can throw away `state`, which the sync engine rewrites on
+   * every run and every webhook and which carries the delta cursor, the push
+   * subscription id and the backfill resume point. Losing them costs a full
+   * re-walk or a dead subscription.
+   *
+   * An absent key is unchanged. An explicit `null` clears the key, and only
+   * `ttl_seconds` and `content_ttl_seconds` accept one — everywhere else
+   * "cleared" and "default" are the same value.
+   *
+   * The server refuses rather than silently accepting: a `webhook` mode on a
+   * connector that cannot push, a `content_ttl_seconds` on a mount that caches
+   * nothing, an `ephemeral` with no TTL. It also refuses `accepts_content`,
+   * which is an adapter capability and not a mount setting at all.
+   */
+  patchMountSyncConfig: (
+    repo: string,
+    mountId: string,
+    patch: Partial<SyncConfig>,
+  ) =>
+    api.patch<SyncConfigPatchResult>(
+      `/api/integrations/${repo}/mounts/${encodeURIComponent(mountId)}/sync-config`,
+      patch,
+    ),
 
   /**
    * Release ONE blocked batch of deletes.

@@ -60,8 +60,13 @@ pub struct SyncConfig {
     /// Long enough that the jobs which follow one another — extract, thumbnail,
     /// embed — all still find it, and that browsing does not pay a provider
     /// round-trip per click. Short enough that a large drive does not
-    /// accumulate. `Some(0)` drops the bytes as soon as processing is done;
-    /// `None` keeps them, which is what a small published mount wants.
+    /// accumulate. `Some(0)` drops the bytes as soon as processing is done.
+    ///
+    /// `None` is the ENGINE DEFAULT (30 minutes), not "keep forever" — see the
+    /// eviction pass in `run.rs`, which reads
+    /// `content_ttl_seconds.unwrap_or(DEFAULT_CONTENT_TTL_SECONDS)`. Enabling
+    /// the cache must not be able to silently mirror a whole drive, so there is
+    /// no spelling of "keep indefinitely" here at all.
     #[serde(default)]
     pub content_ttl_seconds: Option<u64>,
     #[serde(default = "default_max_items")]
