@@ -96,9 +96,25 @@ impl JobActivityTracker {
             };
         }
 
+        // A job this surface cannot NAME is not counted either. The record's
+        // promise is that `active` and `active_paths` describe the same work;
+        // a function run or a flow execution has no content subject, and
+        // counting it produced "Processing 1 item(s) / and 1 more" over an
+        // EMPTY list — a number pointing at nothing, which reads as a fault.
+        // A subject is either there or the job is invisible, both halves at
+        // once. (Only the cap can still make the list shorter than the count.)
+        let Some(node_id) = subject_node_id(job_type) else {
+            return ActivityGuard {
+                tracker: Arc::clone(self),
+                key,
+                job_id: job_id.clone(),
+                tracked: false,
+            };
+        };
+
         let entry = InFlight {
             workspace: context.workspace_id.clone(),
-            node_id: subject_node_id(job_type).map(|s| s.to_string()),
+            node_id: Some(node_id.to_string()),
         };
         {
             let mut scopes = self.scopes.lock().unwrap_or_else(|e| e.into_inner());

@@ -166,6 +166,30 @@ outage was discovered from a CPU graph. Add:
 
 Read-only first; operator actions (drain a tenant, force-close a breaker) after.
 
+#### Two doors, because the readers are not the same
+
+That list is the OPERATOR's, and every line of it is cross-tenant: a breaker is
+keyed by upstream and shared by every tenant on the box, so its hostname, its
+failure streak and its next-probe time describe other tenants' traffic against
+that provider, and the pool figures count everyone's work at once. The admin
+console authenticates as a tenant admin, so it may not see any of it.
+
+- `GET /management/jobs/health` — tenant plane (`ensure_tenant` +
+  `require_admin_auth`). Returns `{ degraded, queued: { high, normal, low,
+  total } }` and nothing else. `degraded` is derived exactly as the per-tenant
+  activity node derives it: this tenant has work PARKED against an upstream that
+  is down, never "some breaker is open on this host" — the host-wide reading
+  alarms tenants with nothing in flight and trains everyone to ignore the
+  indicator.
+- `GET /management/admin/jobs/health` — operator plane
+  (`require_superadmin_token`, and blocked from public traffic by Caddy).
+  Returns `{ breakers, pools, tenants }`: every breaker with key/state/failure
+  count/probe time, every category pool with its saturation and `active_tenants`,
+  and one row per (tenant, category) with queued work.
+
+The rule to keep: a per-tenant route may never serve a figure that aggregates
+across tenants or names a shared dependency.
+
 ## Multi-node caveat
 
 Job dedup and these pools are **per-process**. On an N-node cluster each node
