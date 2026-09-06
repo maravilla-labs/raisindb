@@ -116,6 +116,8 @@ pub struct MergedConfig {
     pub secrets: config::SecretsConfig,
     /// Operator-named platform hooks for `raisin.platform.hook`
     pub platform: config::PlatformConfig,
+    /// Function runtime tunables (`[functions]`, currently `[functions.wasm]`)
+    pub functions: config::FunctionsConfig,
 }
 
 impl ServerConfig {
@@ -281,6 +283,14 @@ impl ServerConfig {
             .map(|c| c.platform.clone())
             .unwrap_or_default();
 
+        // Function runtime tunables from TOML only (no CLI override: these are
+        // engine sizing numbers, installed process-wide once at boot).
+        // Absent section = the shipped defaults, wasm enabled at a 32 MiB cap.
+        let functions = toml_config
+            .as_ref()
+            .map(|c| c.functions.clone())
+            .unwrap_or_default();
+
         // Trigger circuit breaker config from TOML (no CLI override for now)
         let trigger_safety = toml_config
             .as_ref()
@@ -320,6 +330,7 @@ impl ServerConfig {
             mcp_client,
             secrets,
             platform,
+            functions,
             trigger_safety,
             max_active_jobs_per_tenant,
             storage,

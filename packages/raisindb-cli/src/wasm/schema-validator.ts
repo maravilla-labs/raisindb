@@ -14,6 +14,7 @@ import {
   validateTranslationFiles,
 } from './translation-validator.js';
 import { validateBundledResources } from './bundled-resource-validator.js';
+import { validateWasmFunctions } from '../wasm-fn/package-check.js';
 import { mergeFlowResults, validatePackageFlows } from '../flow/package-doctor.js';
 import {
   EnvContext,
@@ -282,7 +283,11 @@ export async function validatePackageDirectory(
     flowResults
   );
   const withBundled = mergeFlowResults(merged, bundledResults);
-  return mergeFlowResults(withBundled, envTokenResults(unresolved));
+  // `language: wasm` nodes: the artifact their entry_file names must exist, sit
+  // inside the functions workspace, and fit the server's upload cap. Like the
+  // bundled-binary check this reads the filesystem, not the YAML file map.
+  const withWasm = mergeFlowResults(withBundled, validateWasmFunctions(packageDir));
+  return mergeFlowResults(withWasm, envTokenResults(unresolved));
 }
 
 /**

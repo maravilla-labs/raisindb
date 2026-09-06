@@ -313,6 +313,7 @@ where
 }
 
 /// Execute a function via the job system and wait for completion
+#[allow(clippy::too_many_arguments)]
 async fn execute_function_job(
     job_registry: &raisin_storage::jobs::JobRegistry,
     job_data_store: &raisin_rocksdb::JobDataStore,

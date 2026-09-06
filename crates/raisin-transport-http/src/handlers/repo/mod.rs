@@ -22,6 +22,7 @@ mod revision;
 mod search;
 pub(crate) mod translation_helpers;
 mod upload;
+mod wasm_upload;
 mod write;
 
 // Re-export all public handler functions at the module level

@@ -107,7 +107,7 @@ impl fmt::Display for QuantizationType {
 ///
 /// Controls the accuracy/speed/memory tradeoff of the HNSW graph.
 /// Zero values mean "use library defaults" (usearch defaults are generally good).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct HnswParams {
     /// Graph connectivity (M parameter). Higher = more accurate, more memory.
     /// Default: 0 (usearch default, typically 16).
@@ -131,17 +131,6 @@ pub struct HnswParams {
     /// Default: F32 (full precision).
     #[serde(default)]
     pub quantization: QuantizationType,
-}
-
-impl Default for HnswParams {
-    fn default() -> Self {
-        Self {
-            connectivity: 0,
-            expansion_add: 0,
-            expansion_search: 0,
-            quantization: QuantizationType::default(),
-        }
-    }
 }
 
 /// A point in vector space with associated node metadata.

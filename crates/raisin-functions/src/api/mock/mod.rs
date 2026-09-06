@@ -39,6 +39,11 @@ pub struct MockFunctionApi {
     /// is what lets a test assert the exact URL, headers and body a function
     /// produced rather than just its return value.
     http_calls: std::sync::Mutex<Vec<Value>>,
+    /// Every `sql_query` made, as `{ sql, params }`, in order. The query used
+    /// to be echoed back inside the RESULT as a `_debug` key, which was only
+    /// possible because the mock returned an object where production returns
+    /// an array — see `sql_query`.
+    sql_queries: std::sync::Mutex<Vec<Value>>,
     /// In-memory secret store: `name -> versions`, append-only, newest last.
     /// A tombstone is a `None` value, so `get` can distinguish "deleted" from
     /// "never existed" exactly as the real store does.
@@ -61,6 +66,7 @@ impl MockFunctionApi {
             node_write_error: None,
             all_errors: None,
             http_responses: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            sql_queries: std::sync::Mutex::new(Vec::new()),
             http_calls: std::sync::Mutex::new(Vec::new()),
             secrets: std::sync::Mutex::new(std::collections::HashMap::new()),
             emails_sent: std::sync::Mutex::new(Vec::new()),
@@ -81,6 +87,11 @@ impl MockFunctionApi {
     }
 
     /// The `{ method, url, options }` of every HTTP request made so far.
+    /// Every `sql_query` this mock served, as `{ sql, params }`, in order.
+    pub fn sql_queries(&self) -> Vec<Value> {
+        self.sql_queries.lock().unwrap().clone()
+    }
+
     pub fn http_calls(&self) -> Vec<Value> {
         self.http_calls.lock().unwrap().clone()
     }
@@ -236,12 +247,28 @@ impl FunctionApi for MockFunctionApi {
 
     // ========== SQL Operations ==========
 
+    /// Returns what production returns: a JSON **array** of row objects keyed
+    /// by column name (`execution/callbacks/sql.rs` ends in `Ok(Value::Array(rows))`).
+    ///
+    /// It used to answer `{columns, rows, row_count}`, which no server ever
+    /// produces. A function unit-tested against that shape wrote `result.rows`
+    /// and broke the first time it ran for real — the mock has to lie in the
+    /// same direction as the thing it stands in for, or it certifies code that
+    /// cannot work. Found by the cross-runtime benchmark, whose Starlark arm
+    /// indexed `result["rows"]` happily against the mock and failed against a
+    /// live server.
+    ///
+    /// The query itself is recorded (see [`Self::sql_queries`]) rather than
+    /// echoed back inside the result.
     async fn sql_query(&self, sql: &str, params: Vec<Value>) -> Result<Value> {
         self.check_all_errors()?;
-        Ok(serde_json::json!({
-            "columns": ["id", "name"], "rows": [["1", "test"]], "row_count": 1,
-            "_debug": { "sql": sql, "params": params }
-        }))
+        self.sql_queries
+            .lock()
+            .unwrap()
+            .push(serde_json::json!({ "sql": sql, "params": params }));
+        Ok(serde_json::json!([
+            { "id": "1", "name": "test" }
+        ]))
     }
 
     async fn sql_execute(&self, _sql: &str, _params: Vec<Value>) -> Result<i64> {

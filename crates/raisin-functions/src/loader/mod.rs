@@ -272,6 +272,6 @@ mod tests {
 
         assert_eq!(function.metadata.name, "my_function");
         assert_eq!(function.metadata.language, FunctionLanguage::JavaScript);
-        assert!(function.code.contains("handler"));
+        assert!(function.code.as_text().unwrap().contains("handler"));
     }
 }

@@ -228,6 +228,8 @@ export function FunctionsProvider({ children }: { children: ReactNode }) {
         if (ext === 'ts') language = 'javascript' // TypeScript uses JS editor
         else if (ext === 'sql') language = 'sql'
         else if (ext === 'py' || ext === 'star' || ext === 'bzl') language = 'starlark'
+        // A compiled WebAssembly component: shown as an artifact, never edited
+        else if (ext === 'wasm') language = 'wasm'
       } else {
         language = (node.properties?.language as FunctionLanguage) || 'javascript'
       }

@@ -90,6 +90,18 @@ const sidebars: SidebarsConfig = {
             'access/security/examples',
           ],
         },
+        {
+          type: 'category',
+          label: 'Server Functions',
+          items: [
+            'functions/overview',
+            'functions/wasm-functions',
+            'functions/wasm-rust',
+            'functions/wasm-go',
+            'functions/wasm-typescript',
+            'functions/wasm-limits',
+          ],
+        },
         'operate/overview',
       ],
     },

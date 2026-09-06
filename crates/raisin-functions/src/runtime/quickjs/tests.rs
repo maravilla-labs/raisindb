@@ -29,7 +29,14 @@ async fn test_simple_function() {
     })));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -59,7 +66,14 @@ async fn test_console_logging() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -83,7 +97,14 @@ async fn test_syntax_error() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -108,7 +129,14 @@ async fn test_missing_entrypoint() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -140,7 +168,14 @@ async fn test_context_access() {
     })));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -179,7 +214,14 @@ async fn test_json_manipulation() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -216,7 +258,14 @@ async fn test_raisin_nodes_api() {
     })));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -276,7 +325,14 @@ async fn test_raisin_nodes_update_property() {
     })));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -293,10 +349,14 @@ async fn test_raisin_sql_api() {
 
     let code = r#"
         function handler(input) {
-            const result = raisin.sql.query("SELECT * FROM nodes WHERE id = $1", ["123"]);
+            // `raisin.sql.query` resolves to an ARRAY of row objects keyed by
+            // column name — the shape `execution/callbacks/sql.rs` builds.
+            const rows = raisin.sql.query("SELECT * FROM nodes WHERE id = $1", ["123"]);
             return {
-                columns: result.columns,
-                rowCount: result.row_count
+                isArray: Array.isArray(rows),
+                rowCount: rows.length,
+                firstId: rows[0].id,
+                columns: Object.keys(rows[0])
             };
         }
     "#;
@@ -308,14 +368,26 @@ async fn test_raisin_sql_api() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
     assert!(result.success);
     let output = result.output.unwrap();
-    assert_eq!(output["columns"], serde_json::json!(["id", "name"]));
+    assert_eq!(
+        output["isArray"], true,
+        "raisin.sql.query must resolve to an array, as production does"
+    );
     assert_eq!(output["rowCount"], 1);
+    assert_eq!(output["firstId"], "1");
+    assert_eq!(output["columns"], serde_json::json!(["id", "name"]));
 }
 
 #[test]
@@ -438,7 +510,14 @@ async fn test_raisin_ai_api_completion() {
     })));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -475,7 +554,14 @@ async fn test_raisin_ai_api_list_models() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -511,7 +597,14 @@ async fn test_raisin_ai_api_default_model() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -563,7 +656,14 @@ async fn test_raisin_functions_execute() {
     })));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -670,7 +770,14 @@ async fn test_raisin_nodes_transaction_api() {
     })));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -747,7 +854,14 @@ async fn test_raisin_nodes_transaction_rollback() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -798,7 +912,14 @@ async fn test_raisin_nodes_create_deep_top_level() {
     })));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -846,7 +967,14 @@ async fn test_busy_loop_is_interrupted_at_deadline() {
 
     let started = Instant::now();
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
     let elapsed = started.elapsed();
@@ -884,7 +1012,14 @@ async fn test_interrupt_deadline_does_not_leak_to_next_execution() {
         .with_resource_limits(crate::types::ResourceLimits::default().with_timeout_ms(300));
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
     let result = runtime
-        .execute(spin, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(spin),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
     assert!(!result.success);
@@ -898,7 +1033,14 @@ async fn test_interrupt_deadline_does_not_leak_to_next_execution() {
     let metadata = FunctionMetadata::javascript("ok_fn");
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
     let result = runtime
-        .execute(ok_code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(ok_code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
     assert!(
@@ -938,7 +1080,14 @@ async fn test_fetch_globals_exist() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -998,7 +1147,14 @@ async fn test_headers_class() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -1042,7 +1198,14 @@ async fn test_abort_controller() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -1085,7 +1248,14 @@ async fn test_request_class() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -1126,7 +1296,14 @@ async fn test_response_static_methods() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -1169,7 +1346,14 @@ async fn test_formdata_class() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -1223,7 +1407,14 @@ async fn test_locks_and_inventory_bindings() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -1289,7 +1480,14 @@ async fn test_secrets_bindings() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -1354,7 +1552,14 @@ async fn test_secrets_accepts_references() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -1396,7 +1601,14 @@ async fn test_integrations_sync_now_wrapper_round_trips() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -1444,7 +1656,14 @@ async fn test_imap_wrapper_round_trips() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -1487,7 +1706,14 @@ async fn test_crypto_verify_jwt_roundtrip() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -1534,7 +1760,14 @@ async fn test_crypto_sign_and_key_bindings_roundtrip_in_js() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -1614,7 +1847,14 @@ async fn test_raisin_branches_bindings_registered() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -1707,7 +1947,14 @@ async fn test_raisin_scheduler_bindings_registered() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -1789,7 +2036,14 @@ async fn test_node_write_errors_throw_in_js() {
     );
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -1837,7 +2091,14 @@ async fn test_uncaught_node_create_error_fails_function() {
     );
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -1876,7 +2137,14 @@ async fn test_node_write_success_shapes_unchanged() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -1932,7 +2200,14 @@ async fn a_resource_attachment_is_coerced_to_a_node_reference() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
     assert!(result.success, "function errored: {:?}", result.error);
@@ -2014,7 +2289,14 @@ async fn test_raisin_api_surface_snapshot() {
     })));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -2036,7 +2318,9 @@ async fn test_raisin_api_surface_snapshot() {
         vec![
             "ai",
             "asAdmin",
+            "assets",
             "branches",
+            "capabilities",
             "context",
             "crypto",
             "email",
@@ -2049,8 +2333,10 @@ async fn test_raisin_api_surface_snapshot() {
             "integrations",
             "inventory",
             "locks",
+            "media",
             "nodes",
             "notify",
+            "ocr",
             "pdf",
             "platform",
             "scheduler",
@@ -2217,7 +2503,14 @@ async fn test_swallowed_error_conventions_do_not_throw() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})).with_all_errors("backend down"));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -2281,7 +2574,14 @@ async fn test_gateway_argument_shapes() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -2383,7 +2683,7 @@ async fn test_pool_still_reuses_a_runtime_for_ordinary_functions() {
     for tenant in ["t1", "t2"] {
         let r = runtime
             .execute(
-                code,
+                &FunctionCode::from(code),
                 "handler",
                 ExecutionContext::new(tenant, "repo1", "main", "u")
                     .with_input(serde_json::json!({})),
@@ -2422,7 +2722,7 @@ async fn test_pool_global_state_does_not_leak_between_tenants() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
     let r1 = runtime
         .execute(
-            set_code,
+            &FunctionCode::from(set_code),
             "handler",
             context,
             &plain_metadata("t1"),
@@ -2445,7 +2745,7 @@ async fn test_pool_global_state_does_not_leak_between_tenants() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
     let r2 = runtime
         .execute(
-            read_code,
+            &FunctionCode::from(read_code),
             "handler",
             context,
             &plain_metadata("t2"),
@@ -2484,7 +2784,7 @@ async fn test_pool_module_loader_does_not_leak_between_tenants() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
     let r1 = runtime
         .execute(
-            mod_code,
+            &FunctionCode::from(mod_code),
             "handler",
             context,
             &plain_metadata("t1"),
@@ -2507,7 +2807,7 @@ async fn test_pool_module_loader_does_not_leak_between_tenants() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
     let r2 = runtime
         .execute(
-            steal_code,
+            &FunctionCode::from(steal_code),
             "handler",
             context,
             &plain_metadata("t2"),
@@ -2537,7 +2837,7 @@ async fn test_pool_recycles_runtime_after_threshold() {
         let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
         let r = runtime
             .execute(
-                code,
+                &FunctionCode::from(code),
                 "handler",
                 context,
                 &plain_metadata("recycle"),
@@ -2571,7 +2871,7 @@ async fn test_pool_poisons_runtime_on_error() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
     let r1 = runtime
         .execute(
-            ok_code,
+            &FunctionCode::from(ok_code),
             "handler",
             context,
             &plain_metadata("ok"),
@@ -2590,7 +2890,7 @@ async fn test_pool_poisons_runtime_on_error() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
     let r2 = runtime
         .execute(
-            throw_code,
+            &FunctionCode::from(throw_code),
             "handler",
             context,
             &plain_metadata("throw"),
@@ -2610,7 +2910,7 @@ async fn test_pool_poisons_runtime_on_error() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
     let r3 = runtime
         .execute(
-            ok_code,
+            &FunctionCode::from(ok_code),
             "handler",
             context,
             &plain_metadata("ok2"),
@@ -2654,7 +2954,7 @@ async fn test_pool_concurrent_tenants_do_not_cross() {
             let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
             let r = runtime
                 .execute(
-                    code,
+                    &FunctionCode::from(code),
                     "handler",
                     context,
                     &plain_metadata("conc"),
@@ -2705,7 +3005,14 @@ async fn leak_fresh_runtime_per_execution() {
         let metadata = FunctionMetadata::javascript("leaktest");
         let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
         let result = runtime
-            .execute(code, "handler", context, &metadata, api, HashMap::new())
+            .execute(
+                &FunctionCode::from(code),
+                "handler",
+                context,
+                &metadata,
+                api,
+                HashMap::new(),
+            )
             .await
             .unwrap();
         assert!(result.success);
@@ -2738,7 +3045,14 @@ async fn leak_shared_runtime_per_execution() {
         let metadata = FunctionMetadata::javascript("leaktest");
         let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
         let result = runtime
-            .execute(code, "handler", context, &metadata, api, HashMap::new())
+            .execute(
+                &FunctionCode::from(code),
+                "handler",
+                context,
+                &metadata,
+                api,
+                HashMap::new(),
+            )
             .await
             .unwrap();
         assert!(result.success);
@@ -2780,7 +3094,14 @@ async fn test_thrown_error_code_reaches_the_engine() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -2823,7 +3144,14 @@ async fn test_thrown_error_code_reaches_the_engine_from_async() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -2856,7 +3184,14 @@ async fn test_uncoded_error_message_is_unchanged() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -2904,7 +3239,14 @@ async fn a_script_may_end_with_module_exports() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .expect("module.exports must not be a syntax error in script mode");
 
@@ -2930,7 +3272,14 @@ async fn a_handler_reachable_only_through_module_exports_is_found() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .expect("an export-only handler must be found");
 
@@ -2957,7 +3306,14 @@ async fn the_bare_exports_alias_is_the_same_object() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .expect("the exports alias must work");
 
@@ -2986,7 +3342,14 @@ async fn a_top_level_declaration_still_wins() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let result = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await
         .expect("executes");
 
@@ -3009,7 +3372,14 @@ async fn a_missing_entrypoint_is_still_reported() {
     let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
 
     let err = runtime
-        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
         .await;
 
     let reported = match err {

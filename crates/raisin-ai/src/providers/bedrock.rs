@@ -480,36 +480,31 @@ impl AIProviderTrait for BedrockProvider {
         let mut text_content = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
 
-        if let Some(output) = response.output() {
-            match output {
-                bt::ConverseOutput::Message(msg) => {
-                    for block in msg.content() {
-                        match block {
-                            bt::ContentBlock::Text(text) => {
-                                if !text_content.is_empty() {
-                                    text_content.push('\n');
-                                }
-                                text_content.push_str(text);
-                            }
-                            bt::ContentBlock::ToolUse(tool_use) => {
-                                tool_calls.push(ToolCall {
-                                    id: tool_use.tool_use_id().to_string(),
-                                    call_type: "function".to_string(),
-                                    function: FunctionCall {
-                                        name: tool_use.name().to_string(),
-                                        arguments: serde_json::to_string(&document_to_json(
-                                            tool_use.input(),
-                                        ))
-                                        .unwrap_or_default(),
-                                    },
-                                    index: None,
-                                });
-                            }
-                            _ => {}
+        if let Some(bt::ConverseOutput::Message(msg)) = response.output() {
+            for block in msg.content() {
+                match block {
+                    bt::ContentBlock::Text(text) => {
+                        if !text_content.is_empty() {
+                            text_content.push('\n');
                         }
+                        text_content.push_str(text);
                     }
+                    bt::ContentBlock::ToolUse(tool_use) => {
+                        tool_calls.push(ToolCall {
+                            id: tool_use.tool_use_id().to_string(),
+                            call_type: "function".to_string(),
+                            function: FunctionCall {
+                                name: tool_use.name().to_string(),
+                                arguments: serde_json::to_string(&document_to_json(
+                                    tool_use.input(),
+                                ))
+                                .unwrap_or_default(),
+                            },
+                            index: None,
+                        });
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
 

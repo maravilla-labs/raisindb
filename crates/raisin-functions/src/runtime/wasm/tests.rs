@@ -1,0 +1,266 @@
+// SPDX-License-Identifier: BSL-1.1
+//
+// RaisinDB - Git-like hierarchical multi model database
+// Copyright (C) 2019-2025 SOLUTAS GmbH, Switzerland
+
+//! Tests for the WebAssembly runtime.
+//!
+//! Every fixture is a REAL component, built from `fixtures/wasm-guests` and
+//! committed next door (see that directory's README). Nothing here is mocked
+//! below the wasmtime boundary: a test that passed against a stubbed engine
+//! would prove nothing about the linker subset, the limiter or the traps,
+//! which is the entire surface this runtime adds.
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
+use serde_json::json;
+
+use super::*;
+use crate::api::MockFunctionApi;
+use crate::runtime::FunctionRuntime;
+use crate::types::{
+    ExecutionContext, ExecutionResult, FunctionCode, FunctionMetadata, ResourceLimits,
+};
+
+const ECHO: &[u8] = include_bytes!("fixtures/echo.wasm");
+const CALL_HOST: &[u8] = include_bytes!("fixtures/call_host.wasm");
+const LOG: &[u8] = include_bytes!("fixtures/log.wasm");
+const SPIN: &[u8] = include_bytes!("fixtures/spin.wasm");
+const ALLOC: &[u8] = include_bytes!("fixtures/alloc.wasm");
+
+fn metadata(timeout_ms: u64, max_memory_bytes: u64) -> FunctionMetadata {
+    FunctionMetadata::wasm("test_wasm_function").with_resource_limits(ResourceLimits {
+        timeout_ms,
+        max_memory_bytes,
+        max_instructions: None,
+        max_stack_bytes: 1024 * 1024,
+    })
+}
+
+fn mock_api(context: serde_json::Value) -> Arc<MockFunctionApi> {
+    Arc::new(MockFunctionApi::new(context))
+}
+
+/// Run one artifact under a handler name, with a default 5 s / 64 MiB budget.
+async fn run(
+    artifact: &[u8],
+    handler: &str,
+    input: serde_json::Value,
+    api: Arc<MockFunctionApi>,
+) -> ExecutionResult {
+    run_with(
+        artifact,
+        handler,
+        input,
+        api,
+        metadata(5_000, 64 * 1024 * 1024),
+        None,
+    )
+    .await
+}
+
+async fn run_with(
+    artifact: &[u8],
+    handler: &str,
+    input: serde_json::Value,
+    api: Arc<MockFunctionApi>,
+    metadata: FunctionMetadata,
+    log_emitter: Option<raisin_storage::LogEmitter>,
+) -> ExecutionResult {
+    let mut context =
+        ExecutionContext::new("tenant1", "repo1", "main", "test-user").with_input(input);
+    context.log_emitter = log_emitter;
+
+    WasmRuntime::new()
+        .execute(
+            &FunctionCode::from(artifact.to_vec()),
+            handler,
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
+        .await
+        .expect("the runtime itself must not fail")
+}
+
+// ---------------------------------------------------------------------------
+// Handler routing: one artifact, N handlers
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_default_handler_runs_and_sees_its_input() {
+    let result = run(
+        ECHO,
+        "default",
+        json!({"message": "hello"}),
+        mock_api(json!({})),
+    )
+    .await;
+
+    assert!(result.success, "{:?}", result.error);
+    let output = result.output.unwrap();
+    assert_eq!(output["handler"], "default");
+    assert_eq!(output["echo"]["message"], "hello");
+    assert_eq!(output["abi"], super::HOST_ABI_VERSION);
+}
+
+#[tokio::test]
+async fn one_artifact_serves_two_handlers() {
+    // The whole point of the name-routed export: two Function nodes may share
+    // this artifact and select different behaviour with `main.wasm:<handler>`.
+    let default = run(ECHO, "default", json!({"n": 1}), mock_api(json!({}))).await;
+    let reverse = run(ECHO, "reverse", json!({"n": 1}), mock_api(json!({}))).await;
+
+    assert_eq!(default.output.unwrap()["handler"], "default");
+    assert_eq!(reverse.output.unwrap()["handler"], "reverse");
+}
+
+#[tokio::test]
+async fn an_unknown_handler_is_the_guests_error_naming_what_it_registered() {
+    // The host must NOT hold an allow-list of handler names; the guest owns
+    // its namespace and is the only thing that can answer this correctly.
+    let result = run(ECHO, "main", json!({}), mock_api(json!({}))).await;
+
+    assert!(!result.success);
+    let error = result.error.unwrap();
+    assert_eq!(error.code, "RUNTIME_ERROR");
+    assert!(
+        error.message.contains("unknown handler 'main'")
+            && error.message.contains("default")
+            && error.message.contains("reverse"),
+        "the guest must name its registered handlers: {}",
+        error.message
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The host gateway
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_gateway_reaches_the_registry_and_reports_an_unknown_method_as_err() {
+    let api = mock_api(json!({"tenant_id": "tenant1", "repo_id": "repo1"}));
+    let result = run(CALL_HOST, "default", json!({}), api.clone()).await;
+
+    assert!(result.success, "{:?}", result.error);
+    let output = result.output.unwrap();
+
+    // `context_get` came back through the same generic gateway as everything else.
+    assert_eq!(output["context"]["tenant_id"], "tenant1");
+
+    // `http_request` really reached the API: the mock recorded the exact call.
+    let calls = api.http_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["method"], "GET");
+    assert_eq!(calls[0]["url"], "https://example.com/thing");
+    assert_eq!(calls[0]["options"]["headers"]["x-from"], "wasm");
+
+    // An unknown method is an `Err` the guest can handle, never a trap.
+    assert_eq!(
+        output["unknown_error"],
+        "Unknown raisin API method: no_such_method"
+    );
+}
+
+#[tokio::test]
+async fn two_executions_of_one_artifact_see_their_own_context() {
+    // The compiled artifact is the ONLY thing shared across tenants, and it
+    // holds no state: each store carries its own context JSON.
+    let first = run(
+        CALL_HOST,
+        "default",
+        json!({}),
+        mock_api(json!({"tenant_id": "tenant-a"})),
+    )
+    .await;
+    let second = run(
+        CALL_HOST,
+        "default",
+        json!({}),
+        mock_api(json!({"tenant_id": "tenant-b"})),
+    )
+    .await;
+
+    assert_eq!(first.output.unwrap()["context"]["tenant_id"], "tenant-a");
+    assert_eq!(second.output.unwrap()["context"]["tenant_id"], "tenant-b");
+}
+
+// ---------------------------------------------------------------------------
+// Logging
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_log_import_and_stdio_both_reach_the_result_and_the_emitter() {
+    let emitted = Arc::new(AtomicUsize::new(0));
+    let counter = emitted.clone();
+    let emitter: raisin_storage::LogEmitter = Arc::new(move |_level, _message| {
+        counter.fetch_add(1, Ordering::SeqCst);
+    });
+
+    let result = run_with(
+        LOG,
+        "default",
+        json!({}),
+        mock_api(json!({})),
+        metadata(5_000, 64 * 1024 * 1024),
+        Some(emitter),
+    )
+    .await;
+
+    assert!(result.success, "{:?}", result.error);
+    let messages: Vec<&str> = result.logs.iter().map(|l| l.message.as_str()).collect();
+    assert!(messages.contains(&"info from wasm"), "{messages:?}");
+    assert!(messages.contains(&"error from wasm"), "{messages:?}");
+    assert!(messages.contains(&"stdout from wasm"), "{messages:?}");
+    assert!(messages.contains(&"stderr from wasm"), "{messages:?}");
+
+    // Only the `log` import streams live; stdout/stderr are drained at the end.
+    assert_eq!(emitted.load(Ordering::SeqCst), 2);
+}
+
+// ---------------------------------------------------------------------------
+// Limits
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_spinning_guest_is_cut_off_by_the_epoch_deadline() {
+    let started = std::time::Instant::now();
+    let result = run_with(
+        SPIN,
+        "default",
+        json!({}),
+        mock_api(json!({})),
+        metadata(200, 64 * 1024 * 1024),
+        None,
+    )
+    .await;
+    let elapsed = started.elapsed();
+
+    assert!(!result.success);
+    assert_eq!(result.error.unwrap().code, "TIMEOUT");
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "the deadline must fire promptly, took {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_guest_over_its_memory_budget_is_reported_as_such() {
+    // The guest allocator aborts when `memory.grow` is refused, so the trap
+    // says `unreachable`; only the limiter knows it was the cap.
+    let result = run_with(
+        ALLOC,
+        "default",
+        json!({}),
+        mock_api(json!({})),
+        metadata(30_000, 32 * 1024 * 1024),
+        None,
+    )
+    .await;
+
+    assert!(!result.success);
+    assert_eq!(result.error.unwrap().code, "MEMORY_LIMIT");
+}

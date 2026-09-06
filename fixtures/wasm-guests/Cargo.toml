@@ -1,0 +1,32 @@
+# Guest fixtures for the `wasm` runtime's unit tests.
+#
+# A SEPARATE workspace on purpose (the repo root excludes `fixtures/*`): these
+# crates build for `wasm32-wasip2` with their own profile, and pulled into the
+# main workspace they would inherit its `.cargo/config.toml`
+# `split-debuginfo=unpacked`, which does not exist on wasm32.
+#
+# Build with `make wasm-fixtures` (see README.md) — NEVER from a build.rs.
+[workspace]
+resolver = "2"
+members = [
+    "echo",
+    "call-host",
+    "log",
+    "spin",
+    "alloc",
+    "wrong-world",
+    "sockets",
+    "bench",
+]
+
+[workspace.dependencies]
+# The guest-side bindings generator. Independent of the host's wasmtime major:
+# the two only have to agree on the component-model binary format.
+wit-bindgen = { version = "0.61", default-features = false, features = ["macros", "realloc", "std"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+strip = true
+codegen-units = 1

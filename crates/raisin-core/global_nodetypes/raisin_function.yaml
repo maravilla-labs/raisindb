@@ -47,7 +47,7 @@ properties:
     type: String
     required: true
     title: Language
-    description: Runtime language (javascript, starlark, sql)
+    description: Runtime language (javascript, starlark, sql, wasm)
     index: [Property]
 
   - name: execution_mode
@@ -69,7 +69,12 @@ properties:
     type: String
     required: false
     title: Entry File
-    description: Entry point in format 'filename:function' (e.g., 'index.js:handler')
+    description: >-
+      Entry point in format 'file:handler' (e.g., 'index.js:handler', or
+      'main.wasm:on-order' for a WebAssembly component; a bare 'main.wasm'
+      selects the handler named 'default'). The file may be parent-relative
+      ('../shared/main.wasm:on-order') so several functions can share one
+      artifact, as long as it stays inside the functions workspace.
     default: "index.js:handler"
 
   - name: version

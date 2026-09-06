@@ -72,6 +72,51 @@ async fn main() {
     tracing::info!("  HTTP Port: {}", server_config.port);
     tracing::info!("  Data Directory: {}", server_config.data_dir);
 
+    // Install the WebAssembly runtime's engine tunables from `[functions.wasm]`.
+    //
+    // Here, next to the plugin loader, and NOT down with `configure_mcp_client`:
+    // the wasm engine is built lazily on the FIRST execution, so a later install
+    // is dropped with a warning. Anything that can run a function — the job
+    // system, a trigger, an HTTP invoke — starts after this point.
+    #[cfg(all(feature = "wasm", feature = "storage-rocksdb"))]
+    {
+        let w = &server_config.functions.wasm;
+        raisin_functions::configure_wasm_runtime(raisin_functions::WasmRuntimeConfig {
+            enabled: w.enabled,
+            max_artifact_bytes: w.max_artifact_bytes,
+            compiled_cache_bytes: w.compiled_cache_bytes,
+            max_wasm_stack_bytes: w.max_wasm_stack_bytes as usize,
+            epoch_tick_ms: w.epoch_tick_ms,
+            allocation: match w.allocation {
+                config::WasmAllocation::OnDemand => {
+                    raisin_functions::WasmAllocationStrategy::OnDemand
+                }
+                config::WasmAllocation::Pooling => {
+                    raisin_functions::WasmAllocationStrategy::Pooling
+                }
+            },
+            max_instances: w.max_instances,
+            stdout_capture_bytes: w.stdout_capture_bytes,
+        });
+        tracing::info!(
+            enabled = w.enabled,
+            max_artifact_bytes = w.max_artifact_bytes,
+            allocation = ?w.allocation,
+            "wasm function runtime configured"
+        );
+
+        // Build the engine NOW rather than on the first invocation. wasmtime
+        // rejects some configurations outright — a pooling reservation the host
+        // will not give, an impossible stack size — and lazily that failure
+        // would land inside whichever request happened to reach wasm first, for
+        // every wasm execution and every `.wasm` upload thereafter. `enabled =
+        // false` skips it: nothing can execute, so nothing needs checking.
+        if let Err(e) = raisin_functions::init_wasm_engine() {
+            tracing::error!(error = %e, "refusing to start: [functions.wasm] is invalid");
+            std::process::exit(1);
+        }
+    }
+
     // Load C-ABI function-binding plugins (`.so`/`.dylib`/`.dll`) from the plugin
     // directory — `RAISIN_PLUGIN_DIR`, else `<data_dir>/plugins`. A distribution
     // drops a per-platform plugin lib here to add `raisin.<ns>.*` bindings to the
@@ -106,6 +151,28 @@ async fn main() {
                 "capability probe was already installed; keeping the first one. \
                  Two answers to \"what can this server do\" is the drift the \
                  registry exists to prevent"
+            );
+        }
+
+        // Tell the package installer whether a `.wasm` it is about to install
+        // could ever run here.
+        //
+        // Same inversion, same reason as the capability probe above:
+        // `raisin-rocksdb` owns `install_binary_file` and sits BELOW
+        // `raisin-functions`, which owns the wasm engine, so it can only ask
+        // through a closure handed down from here. Installed unconditionally —
+        // `validate_component` exists in every build and, without the `wasm`
+        // feature, warns once and accepts, which is what keeps a stock server
+        // able to install a package carrying an artifact it will never run.
+        if !raisin_rocksdb::install_wasm_validator(std::sync::Arc::new(
+            |bytes: &[u8]| -> Result<(), String> {
+                raisin_functions::validate_component(bytes).map_err(|e| e.to_string())
+            },
+        )) {
+            tracing::warn!(
+                "wasm artifact validator was already installed; keeping the first \
+                 one. Two answers to \"is this component runnable\" is the drift \
+                 the registry exists to prevent"
             );
         }
 

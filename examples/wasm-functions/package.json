@@ -1,0 +1,10 @@
+{
+  "name": "wasm-functions-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "RaisinDB functions as WebAssembly components: one package, three languages, one artifact serving two handlers.",
+  "scripts": {
+    "smoke": "node smoke.mjs"
+  }
+}

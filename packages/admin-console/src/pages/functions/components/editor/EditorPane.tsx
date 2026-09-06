@@ -15,6 +15,7 @@ import { RaisinFunctionNodeTypeEditor } from './RaisinFunctionNodeTypeEditor'
 import { RaisinTriggerNodeTypeEditor } from './RaisinTriggerNodeTypeEditor'
 import { RaisinFlowNodeTypeEditor } from './RaisinFlowNodeTypeEditor'
 import { RaisinAgentNodeTypeEditor } from './RaisinAgentNodeTypeEditor'
+import { WasmArtifactPanel } from './WasmArtifactPanel'
 import { RunConfigBar, createDefaultRunConfig, type RunConfig } from './RunConfigBar'
 import { QuickPick, addToRecentNodes } from './QuickPick'
 import { nodesApi } from '../../../../api/nodes'
@@ -32,6 +33,7 @@ const LANGUAGE_METADATA: Record<FunctionLanguage, { ext: string; mime: string; l
   javascript: { ext: 'js', mime: 'application/javascript', label: 'JavaScript' },
   starlark: { ext: 'py', mime: 'text/x-python', label: 'Python (Starlark)' },
   sql: { ext: 'sql', mime: 'application/sql', label: 'SQL' },
+  wasm: { ext: 'wasm', mime: 'application/wasm', label: 'WebAssembly' },
 }
 
 /** Detect language from file extension */
@@ -39,6 +41,7 @@ function detectLanguageFromExtension(fileName: string): FunctionLanguage {
   const ext = fileName.split('.').pop()?.toLowerCase()
   if (ext === 'py' || ext === 'star' || ext === 'bzl') return 'starlark'
   if (ext === 'sql') return 'sql'
+  if (ext === 'wasm') return 'wasm'
   return 'javascript' // Default for .js, .ts, etc.
 }
 
@@ -441,6 +444,11 @@ export function EditorPane() {
   // Determine if the current file is a standalone Asset (not under a Function parent)
   const isStandaloneFile = activeTab?.node_type === 'raisin:Asset' && !selectedNode
   const isJavaScriptAsset = activeTab?.node_type === 'raisin:Asset' && activeTab?.language === 'javascript'
+  // A .wasm Asset is a compiled artifact: it has no source to load or edit, so
+  // the code-loading effect skips it and WasmArtifactPanel replaces Monaco.
+  const isWasmArtifact =
+    activeTab?.node_type === 'raisin:Asset' &&
+    (activeTab.language === 'wasm' || detectLanguageFromExtension(activeTab.name) === 'wasm')
 
   const handleRunConfigChange = useCallback((nextConfig: RunConfig) => {
     setRunConfig(nextConfig)
@@ -470,6 +478,15 @@ export function EditorPane() {
     if (activeTab.node_type !== 'raisin:Asset') {
       setHasNoFiles(false)
       setLocalCode('')
+      return
+    }
+
+    // Never download a wasm artifact as text - the bytes are not UTF-8 and the
+    // panel reads what it needs from the node's properties instead.
+    if (isWasmArtifact) {
+      setHasNoFiles(false)
+      setLocalCode('')
+      setShowEmptyFilePrompt(false)
       return
     }
 
@@ -507,7 +524,7 @@ export function EditorPane() {
     }
 
     loadActiveCode()
-  }, [activeTab?.id, activeTab?.path, activeTab?.name, activeTab?.node_type, loadCode, updateTabPath])
+  }, [activeTab?.id, activeTab?.path, activeTab?.name, activeTab?.node_type, isWasmArtifact, loadCode, updateTabPath])
 
   const handleCodeChange = useCallback(
     (newCode: string) => {
@@ -967,6 +984,18 @@ export function EditorPane() {
     )
   }
 
+  // Route to the artifact panel for compiled .wasm Assets (no source to edit)
+  if (activeTab && isWasmArtifact) {
+    return (
+      <div className="h-full flex flex-col">
+        <EditorTabs />
+        <div className="flex-1 min-h-0">
+          <WasmArtifactPanel tab={activeTab} />
+        </div>
+      </div>
+    )
+  }
+
   // Route to trigger editor for raisin:Trigger nodes
   if (activeTab?.node_type === 'raisin:Trigger') {
     return (
@@ -1065,6 +1094,22 @@ export function EditorPane() {
           (() => {
             const language = (selectedNode as FunctionNode | undefined)?.properties?.language as FunctionLanguage || 'javascript'
             const metadata = LANGUAGE_METADATA[language] || LANGUAGE_METADATA.javascript
+            // A wasm function's artifact is COMPILED elsewhere - there is no
+            // template to write here, so offer instructions instead of a button.
+            if (language === 'wasm') {
+              return (
+                <div className="h-full flex flex-col items-center justify-center text-gray-400">
+                  <FileCode className="w-20 h-20 mb-6 opacity-30" />
+                  <h3 className="text-xl font-medium text-white mb-2">No artifact yet</h3>
+                  <p className="text-sm text-gray-500 max-w-md text-center">
+                    A WebAssembly function runs a compiled component. Build it locally and deploy it
+                    (<code className="text-gray-400">raisindb function build</code> then{' '}
+                    <code className="text-gray-400">raisindb deploy</code>), or upload a{' '}
+                    <code className="text-gray-400">main.wasm</code> file into this function.
+                  </p>
+                </div>
+              )
+            }
             return (
               <div className="h-full flex flex-col items-center justify-center text-gray-400">
                 <FileCode className="w-20 h-20 mb-6 opacity-30" />

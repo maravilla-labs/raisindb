@@ -13,7 +13,7 @@ properties:
   name: my-function
   title: My Function
   description: What this function does
-  language: javascript        # javascript | Starlark
+  language: javascript        # javascript | Starlark | sql | wasm
   entry_file: index.js:handler  # file:exportedFunction
   execution_mode: async       # async | sync
   enabled: true
@@ -34,7 +34,7 @@ properties:
 \`\`\`
 
 Key fields:
-- **language** -- \`javascript\` or \`Starlark\` (alias: \`python\`)
+- **language** -- \`javascript\`, \`Starlark\` (alias: \`python\`), \`sql\`, or \`wasm\` (a WebAssembly component; see wasm.md)
 - **entry_file** -- \`<filename>:<functionName>\`, e.g. \`index.js:handler\` or \`index.py:handler\`
 - **execution_mode** -- \`async\` (queued, retryable) or \`sync\` (immediate, blocking)
 - **input_schema / output_schema** -- JSON Schema for validation
@@ -150,5 +150,7 @@ const results = Array.isArray(rows) ? rows : (rows?.rows || []);
 
 - See **javascript.md** for JavaScript-specific patterns (async/await, context object)
 - See **starlark.md** for Starlark-specific patterns (synchronous API, fail() errors)
+- See **wasm.md** for WebAssembly functions in Rust/Go/TypeScript (\`language: wasm\`,
+  name-routed \`entry_file\`, the \`raisindb function\` build loop, sandbox limits)
 `;
 }

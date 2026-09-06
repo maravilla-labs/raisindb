@@ -1,0 +1,28 @@
+# Guest crate for the `greet-rust` / `greet-rust-shout` Function nodes.
+#
+# Its own workspace: the repo root excludes `examples/*`, and this builds for
+# wasm32-wasip2 with a size-tuned release profile.
+[workspace]
+
+[package]
+name = "greet-rust"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+# `cdylib` is what wasm32-wasip2 links into a component; `rlib` additionally
+# lets `tests/` link the crate natively. It costs nothing in the wasm output.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+raisin-sdk = { path = "../../../../../sdks/rust/raisin-sdk" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+strip = true
+codegen-units = 1

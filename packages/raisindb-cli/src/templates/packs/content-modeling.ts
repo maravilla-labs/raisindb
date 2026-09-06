@@ -15,6 +15,7 @@ import { flowsKnowledge } from '../content/knowledge/flows.js';
 import { functionsOverviewKnowledge } from '../content/knowledge/functions/overview.js';
 import { functionsJavascriptKnowledge } from '../content/knowledge/functions/javascript.js';
 import { functionsStarlarkKnowledge } from '../content/knowledge/functions/starlark.js';
+import { functionsWasmKnowledge } from '../content/knowledge/functions/wasm.js';
 import { sdkOverviewKnowledge } from '../content/knowledge/sdk/overview.js';
 import { sdkNodesKnowledge } from '../content/knowledge/sdk/nodes.js';
 import { sdkEventsKnowledge } from '../content/knowledge/sdk/events.js';
@@ -90,6 +91,7 @@ export const contentModelingPack: Pack = {
       { path: '.agent/knowledge/functions/overview.md', content: functionsOverviewKnowledge() },
       { path: '.agent/knowledge/functions/javascript.md', content: functionsJavascriptKnowledge() },
       { path: '.agent/knowledge/functions/starlark.md', content: functionsStarlarkKnowledge() },
+      { path: '.agent/knowledge/functions/wasm.md', content: functionsWasmKnowledge() },
       { path: '.agent/knowledge/sdk/overview.md', content: sdkOverviewKnowledge() },
       { path: '.agent/knowledge/sdk/nodes.md', content: sdkNodesKnowledge() },
       { path: '.agent/knowledge/sdk/events.md', content: sdkEventsKnowledge() },

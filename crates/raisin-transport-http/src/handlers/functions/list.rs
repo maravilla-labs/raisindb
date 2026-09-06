@@ -121,8 +121,15 @@ pub async fn get_function(
     let function_node =
         find_function_node(&state, tenant_id, &repo, &name, auth_ctx.as_ref()).await?;
 
+    // `to_display_string` rather than the payload: a wasm function's code is a
+    // component image, and splicing megabytes of non-UTF-8 into a JSON field is
+    // neither useful nor valid. Text functions are unchanged.
     let code = if query.include_code {
-        Some(load_function_code(&state, tenant_id, &repo, &function_node).await?)
+        Some(
+            load_function_code(&state, tenant_id, &repo, &function_node)
+                .await?
+                .to_display_string(),
+        )
     } else {
         None
     };

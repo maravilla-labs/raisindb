@@ -83,7 +83,7 @@ pub(super) async fn invoke_adapter(
         FUNCTIONS_BRANCH,
         &node.path,
         loaded.metadata.entry_file_path(),
-        &loaded.code,
+        loaded.code.as_text().unwrap_or(""),
     )
     .await;
 

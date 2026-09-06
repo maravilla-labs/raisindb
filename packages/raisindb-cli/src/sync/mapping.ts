@@ -51,7 +51,16 @@ export interface MappedChange {
   reason?: string;
 }
 
-/** Code file extensions pushed as inline `code` property on asset nodes */
+/**
+ * Code file extensions pushed as inline `code` property on asset nodes.
+ *
+ * `.wasm` is deliberately NOT here. A WebAssembly component is BYTES: it must
+ * travel as a binary asset (multipart upload), and inlining it as a `code`
+ * string would mangle it at the first non-UTF-8 byte. A wasm function's
+ * `.node.yaml` carries `language: wasm` and an `entry_file` naming the sibling
+ * artifact, which the `asset` branch below uploads unchanged.
+ * Test: `mapping.test.ts` — "a .wasm artifact is an asset, never code".
+ */
 export const CODE_EXTENSIONS = ['.js', '.py', '.star'];
 
 /**

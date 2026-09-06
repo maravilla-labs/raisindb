@@ -192,7 +192,7 @@ pub fn create_ai_completion(
                             .message
                             .tool_calls
                             .as_ref()
-                            .map_or(false, |tc| !tc.is_empty());
+                            .is_some_and(|tc| !tc.is_empty());
                         tracing::info!(
                             target: "ai_completion",
                             model = %response.model,
@@ -294,7 +294,7 @@ pub fn create_ai_completion(
                         .and_then(|v| v.as_str())
                         .map(|s| s.trim().is_empty())
                         .unwrap_or(true);
-                    let tc_empty = response.get("tool_calls").map_or(true, |v| {
+                    let tc_empty = response.get("tool_calls").is_none_or(|v| {
                         v.is_null() || v.as_array().map(|arr| arr.is_empty()).unwrap_or(false)
                     });
 
@@ -336,7 +336,7 @@ pub fn create_ai_completion(
                             .message
                             .tool_calls
                             .as_ref()
-                            .map_or(false, |tc| !tc.is_empty());
+                            .is_some_and(|tc| !tc.is_empty());
                         tracing::info!(
                             target: "ai_completion",
                             model = %fallback.model,
@@ -389,7 +389,7 @@ pub fn create_ai_completion(
                         .message
                         .tool_calls
                         .as_ref()
-                        .map_or(false, |tc| !tc.is_empty());
+                        .is_some_and(|tc| !tc.is_empty());
                     tracing::info!(
                         target: "ai_completion",
                         model = %response.model,
@@ -413,7 +413,7 @@ pub fn create_ai_completion(
                     .message
                     .tool_calls
                     .as_ref()
-                    .map_or(false, |tc| !tc.is_empty());
+                    .is_some_and(|tc| !tc.is_empty());
                 tracing::info!(
                     target: "ai_completion",
                     model = %response.model,
@@ -439,7 +439,7 @@ fn build_response_json(response: &raisin_ai::types::CompletionResponse) -> Value
         .message
         .tool_calls
         .as_ref()
-        .map_or(true, |tc| tc.is_empty());
+        .is_none_or(|tc| tc.is_empty());
 
     // Strip control tokens from content
     let mut content =

@@ -14,6 +14,7 @@ mod flow_events;
 pub(crate) mod helpers;
 mod invoke;
 mod list;
+mod name_index;
 mod run_file;
 mod run_flow;
 pub mod types;

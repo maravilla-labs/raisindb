@@ -6,8 +6,9 @@
 //! parent-function config lookup used when executing standalone files
 //! (as opposed to registered `raisin:Function` nodes).
 
+use raisin_functions::execution::code_loader::default_handler_name;
 use raisin_functions::{
-    ExecutionMode, FunctionLanguage, FunctionMetadata, NetworkPolicy, ResourceLimits,
+    language_for_file_name, ExecutionMode, FunctionMetadata, NetworkPolicy, ResourceLimits,
 };
 use raisin_models::nodes::Node;
 
@@ -23,7 +24,8 @@ use raisin_storage::{NodeRepository, Storage, StorageScope};
 // File validation
 // ============================================================================
 
-/// Validate that the node is a runnable Asset file (JavaScript, Starlark, or SQL).
+/// Validate that the node is a runnable Asset file (JavaScript, Starlark, SQL
+/// or a WebAssembly component).
 pub(super) fn validate_runnable_asset(node: &Node) -> Result<(), ApiError> {
     if node.node_type != "raisin:Asset" {
         return Err(ApiError::validation_failed(format!(
@@ -35,15 +37,16 @@ pub(super) fn validate_runnable_asset(node: &Node) -> Result<(), ApiError> {
     validate_runnable_asset_name(&node.name)
 }
 
-/// Validate that a file name is a runnable file (JavaScript, Starlark/Python, or SQL).
+/// Validate that a file name is a runnable file.
+///
+/// The extension table is `raisin_functions::language_for_file_name`, not a
+/// local copy: it is the same question the synthetic metadata below and the
+/// loader's sibling scan ask, and three hand-rolled lists is how `.wasm` would
+/// have had to be remembered three times.
 pub(super) fn validate_runnable_asset_name(name: &str) -> Result<(), ApiError> {
-    let is_js = name.ends_with(".js") || name.ends_with(".ts") || name.ends_with(".mjs");
-    let is_starlark = name.ends_with(".star") || name.ends_with(".py");
-    let is_sql = name.ends_with(".sql");
-
-    if !is_js && !is_starlark && !is_sql {
+    if language_for_file_name(name).is_none() {
         return Err(ApiError::validation_failed(format!(
-            "File '{}' is not a runnable file (.js, .ts, .mjs, .star, .py, or .sql)",
+            "File '{}' is not a runnable file (.js, .ts, .mjs, .star, .py, .bzl, .sql or .wasm)",
             name
         )));
     }
@@ -93,16 +96,23 @@ pub(super) fn build_synthetic_metadata_from_name(
         .map(|(n, _)| n)
         .unwrap_or(file_name);
 
-    // Detect language from file extension
-    let language = if file_name.ends_with(".sql") {
-        FunctionLanguage::Sql
-    } else if file_name.ends_with(".star") || file_name.ends_with(".py") {
-        FunctionLanguage::Starlark
-    } else {
-        FunctionLanguage::JavaScript
-    };
+    // Detect language from file extension. An unknown extension cannot reach
+    // here (`validate_runnable_asset_name` refuses it first) but must still
+    // answer something; JavaScript is what this path has always assumed.
+    let language = language_for_file_name(file_name).unwrap_or_default();
 
     let mut metadata = FunctionMetadata::new(name.to_string(), language);
+
+    // A caller that names no handler gets the language's default — `"handler"`
+    // for the text runtimes, `"default"` for wasm, because a wasm guest routes
+    // on the name and a single-handler guest registers it as `"default"`. The
+    // name is otherwise passed through VERBATIM: there is no host-side list of
+    // legal handler names, and the guest answers an unknown one itself.
+    let handler = if handler.trim().is_empty() {
+        default_handler_name(language)
+    } else {
+        handler
+    };
 
     metadata.title = format!("{} (direct execution)", name);
     metadata.description = Some(format!("Direct execution of {}", file_name));

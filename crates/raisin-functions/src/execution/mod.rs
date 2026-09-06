@@ -66,6 +66,7 @@ mod backup_main_callbacks;
 pub mod callbacks;
 pub mod code_loader;
 mod debug;
+mod entry_file;
 mod executor;
 pub mod flow_callbacks_factory;
 pub mod module_cache;

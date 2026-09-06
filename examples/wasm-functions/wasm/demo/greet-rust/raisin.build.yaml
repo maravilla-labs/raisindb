@@ -1,0 +1,11 @@
+# How `raisindb function build` turns this project into the Function node's
+# artifact. ONE artifact backs BOTH `greet-rust` (handler `default`) and
+# `greet-rust-shout` (handler `shout`, via `../greet-rust/main.wasm:shout`).
+lang: rust
+node_dir: ../../../content/functions/lib/demo/greet-rust
+artifact: main.wasm
+handlers:
+  - default
+  - shout
+command: cargo build --release --target wasm32-wasip2
+output: target/wasm32-wasip2/release/greet_rust.wasm

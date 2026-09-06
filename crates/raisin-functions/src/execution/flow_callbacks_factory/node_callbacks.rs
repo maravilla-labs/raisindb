@@ -69,6 +69,7 @@ fn flow_event_metadata(
 /// raisin-rocksdb/src/jobs/event_handler/node_handlers.rs); the flow write
 /// path does not enqueue trigger evaluation separately, so publishing here
 /// fires triggers exactly once - same as the NodeService path.
+#[allow(clippy::too_many_arguments)]
 async fn publish_node_event<S>(
     storage: &Arc<S>,
     tenant_id: &str,

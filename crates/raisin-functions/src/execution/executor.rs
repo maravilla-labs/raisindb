@@ -109,7 +109,7 @@ where
 }
 use crate::api::{FunctionApi, RaisinFunctionApi};
 use crate::executor::FunctionExecutor;
-use crate::types::{ExecutionContext, LoadedFunction};
+use crate::types::{ExecutionContext, FunctionLanguage, LoadedFunction};
 
 /// Execute a function given its path and context.
 ///
@@ -123,6 +123,7 @@ use crate::types::{ExecutionContext, LoadedFunction};
 /// The `auth_context` parameter controls RLS filtering for API operations:
 /// - `None`: Operations run without auth (system context, no RLS filtering)
 /// - `Some(auth)`: Operations are filtered based on user's permissions
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_function<S, B>(
     deps: &ExecutionDependencies<S, B>,
     config: &FunctionExecutionConfig,
@@ -194,18 +195,27 @@ where
     // dir plus a binary read per non-inline file — all of it repeated on every
     // invocation for a set that only changes when the function is edited, hence
     // the cache. Disabled by default; see `module_cache`.
+    //
+    // A wasm component has no module set at all: its imports were linked when
+    // it was built, and there is no source to scan for `../dir/` specifiers.
+    // Running the scan anyway would be a subtree scan per invocation that can
+    // only ever return files the runtime cannot use.
     let entry_file_name = metadata.entry_file_path().to_string();
-    let sibling_files = load_module_set(
-        deps,
-        tenant_id,
-        repo_id,
-        branch,
-        &config.functions_workspace,
-        function_path,
-        &code,
-        &entry_file_name,
-    )
-    .await;
+    let sibling_files = if metadata.language == FunctionLanguage::Wasm {
+        std::collections::HashMap::new()
+    } else {
+        load_module_set(
+            deps,
+            tenant_id,
+            repo_id,
+            branch,
+            &config.functions_workspace,
+            function_path,
+            code.as_text().unwrap_or(""),
+            &entry_file_name,
+        )
+        .await
+    };
 
     // 3. Create API callbacks
     // We need to clone the Arc to create callbacks with proper lifetimes

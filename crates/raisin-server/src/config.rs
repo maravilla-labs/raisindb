@@ -1,6 +1,10 @@
 // Configuration file support for RaisinDB Server
 
 use serde::{Deserialize, Serialize};
+
+mod functions;
+
+pub use functions::{FunctionsConfig, WasmAllocation, WasmFunctionsConfig};
 use std::path::Path;
 
 /// Replication peer configuration
@@ -166,6 +170,11 @@ pub struct ServerConfigFile {
     /// which is the only supported steady state.
     #[serde(default)]
     pub secrets: SecretsConfig,
+    /// Function runtimes (TOML `[functions]`). Currently only
+    /// `[functions.wasm]`. Absent means the shipped defaults, which have the
+    /// wasm runtime enabled with a 32 MiB artifact cap.
+    #[serde(default)]
+    pub functions: FunctionsConfig,
     /// Operator-configured platform hooks (TOML `[platform.hooks.<name>]`),
     /// reachable from functions as `raisin.platform.hook(name, payload)`.
     /// Absent means no hooks: the binding refuses every name.

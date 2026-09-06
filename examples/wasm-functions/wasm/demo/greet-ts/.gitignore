@@ -1,0 +1,5 @@
+# Build outputs. `main.wasm` is 8-12 MB (a whole JS engine); it is built on
+# demand and copied into the Function node directory by `raisindb function build`.
+main.wasm
+.raisin-entry.mjs
+node_modules/

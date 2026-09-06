@@ -163,10 +163,24 @@ pub(crate) use repositories::StorageNode;
 pub use tantivy_transfer::{TantivyIndexManager, TantivyIndexMetadata, TantivyIndexReceiver};
 
 // Re-export replication handlers for external use
+// Per-key queueing lock. `jobs` is private, and the wasm compile cache needs
+// exactly this primitive for its single flight: a second cold caller for the
+// same artifact must WAIT for the first compile rather than start its own.
+// (CLAUDE.md: prefer it over another hand-rolled `HashMap<K, Arc<Mutex<()>>>`.)
 pub use jobs::handlers::replication_sync::ReplicationSyncHandler;
 /// Outbound MCP tool discovery, assembled by the server binary from
 /// `[mcp_client]`.
 pub use jobs::handlers::{McpDiscoveryDeps, McpToolDiscoveryHandler};
+pub use jobs::keyed_mutex::{KeyedMutex, KeyedMutexGuard};
+
+// The `jobs` module is private, and the server binary must reach this from
+// outside: `raisin-functions` owns the wasm engine but depends on THIS crate,
+// so the package installer can only learn whether an artifact is runnable if
+// `main.rs` hands it a closure. Same inversion as `install_capability_probe`.
+pub use jobs::wasm_validator::{
+    install_wasm_validator, validate_wasm_artifact, validate_wasm_artifact_async,
+    wasm_validator_installed, WasmArtifactValidator,
+};
 
 // Re-export the spatial index build handler. The `jobs` module is private, and a
 // rebuild is not observable from outside the crate without either running the whole

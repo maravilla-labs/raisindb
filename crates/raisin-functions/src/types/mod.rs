@@ -5,12 +5,14 @@
 
 //! Core type definitions for Raisin Functions
 
+mod code;
 mod config;
 mod execution;
 mod flow;
 mod function;
 mod trigger;
 
+pub use code::*;
 pub use config::*;
 pub use execution::*;
 pub use flow::*;

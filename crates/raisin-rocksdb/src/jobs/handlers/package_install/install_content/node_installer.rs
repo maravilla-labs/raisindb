@@ -504,6 +504,23 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             return Ok(());
         }
 
+        // A `.wasm` that cannot run is refused HERE, before its bytes reach
+        // blob storage and a node points at them. The validator is installed
+        // from `main.rs` (this crate sits below `raisin-functions` and cannot
+        // call the engine); with none installed this is a pass-through, so a
+        // server that can never execute the artifact still installs the
+        // package. See `crate::jobs::wasm_validator`. The ASYNC form, because
+        // the validator compiles the component and Cranelift must not run on
+        // the job worker's tokio thread.
+        if let Err(message) =
+            crate::jobs::wasm_validator::validate_wasm_artifact_async(filename, data).await
+        {
+            return Err(Error::Validation(format!(
+                "package file '{}' is not a runnable WebAssembly component: {}",
+                zip_path, message
+            )));
+        }
+
         // Detect MIME type
         let mime_type = mime_guess::from_path(filename)
             .first()

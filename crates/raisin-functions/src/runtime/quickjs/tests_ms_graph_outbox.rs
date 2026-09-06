@@ -50,7 +50,7 @@ async fn call_mapper(input: Value) -> (Option<Value>, Vec<Value>) {
     let metadata = FunctionMetadata::javascript("ms_graph_outbox");
     let result = runtime
         .execute(
-            &mapper_source(),
+            &FunctionCode::from(mapper_source()),
             "handler",
             context,
             &metadata,

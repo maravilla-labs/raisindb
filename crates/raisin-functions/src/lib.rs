@@ -83,4 +83,21 @@ pub use plugin::{
 };
 pub use plugin_loader::{load_plugins_from_dir, RAISIN_PLUGIN_ABI_VERSION};
 pub use runtime::{FunctionRuntime, RuntimeRegistry};
+// Installed process-wide by `raisin-server` from `[functions.wasm]`, the same
+// inversion `configure_mcp_client` uses. Re-exported at the crate root so the
+// call site does not have to know which module the engine lives in.
+#[cfg(feature = "wasm")]
+pub use runtime::wasm::{
+    compile_count, configure_wasm_runtime, WasmAllocationStrategy, WasmRuntimeConfig,
+    HOST_ABI_VERSION,
+};
+// Upload-time and install-time artifact validation, plus the boot-time engine
+// build. Present in EVERY build: with the feature they are the real compile and
+// the real engine, without it a warn-once accept and a no-op, so the HTTP upload
+// path, the package installer and `main.rs` never cfg-branch. An async caller
+// must use `validate_component_async` — a compile is seconds of CPU and does
+// not belong on a tokio worker.
+pub use runtime::{
+    init_wasm_engine, max_wasm_artifact_bytes, validate_component, validate_component_async,
+};
 pub use types::*;

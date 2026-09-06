@@ -66,8 +66,8 @@ use pool::{QuickJsPool, GLOBAL_QUICKJS_POOL};
 
 use crate::api::FunctionApi;
 use crate::types::{
-    ExecutionContext, ExecutionError, ExecutionResult, ExecutionStats, FunctionLanguage,
-    FunctionMetadata, LogEntry,
+    ExecutionContext, ExecutionError, ExecutionResult, ExecutionStats, FunctionCode,
+    FunctionLanguage, FunctionMetadata, LogEntry,
 };
 
 use super::FunctionRuntime;
@@ -127,13 +127,17 @@ impl Default for QuickJsRuntime {
 impl FunctionRuntime for QuickJsRuntime {
     async fn execute(
         &self,
-        code: &str,
+        code: &FunctionCode,
         entrypoint: &str,
         context: ExecutionContext,
         metadata: &FunctionMetadata,
         api: Arc<dyn FunctionApi>,
         files: HashMap<String, String>,
     ) -> Result<ExecutionResult> {
+        // A text runtime cannot run an artifact: `language` and the payload
+        // shape must agree, and disagreeing is a configuration error, not a
+        // decoding one.
+        let code = code.as_text()?;
         let start = Instant::now();
         let execution_id = context.execution_id.clone();
         let timeout_ms = metadata.resource_limits.timeout_ms;
@@ -613,7 +617,8 @@ impl FunctionRuntime for QuickJsRuntime {
         }
     }
 
-    fn validate(&self, code: &str) -> Result<()> {
+    fn validate(&self, code: &FunctionCode) -> Result<()> {
+        let code = code.as_text()?;
         if code.trim().is_empty() {
             return Err(Error::Validation(
                 "Function code cannot be empty".to_string(),

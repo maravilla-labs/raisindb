@@ -1,0 +1,15 @@
+[package]
+name = "bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = { workspace = true }
+# The guest parses host results with serde_json on purpose: the generated Rust
+# SDK hands callers a `serde_json::Value`, so a benchmark that skipped the
+# parse would measure a guest no real function resembles.
+serde_json = "1"

@@ -111,6 +111,19 @@ Then ask your AI agent to scaffold the frontend using the
 `;
 }
 
+/**
+ * Package-level ignore file.
+ *
+ * `wasm/` holds guest-toolchain SOURCE for WebAssembly functions; only the
+ * built `main.wasm` under content/functions/ ships. `raisindb sync` treats
+ * every non-YAML file it finds as an asset, so Cargo.toml / main.go / go.mod
+ * must never be visible to it.
+ */
+function rapignore(): string {
+  return `wasm/
+`;
+}
+
 /** Prefix all paths in an array with a subdirectory */
 function prefixed(prefix: string, files: FileEntry[]): FileEntry[] {
   return files.map(f => ({ path: `${prefix}/${f.path}`, content: f.content }));
@@ -130,6 +143,13 @@ export const minimalPack: Pack = {
       { path: 'elementtypes/.gitkeep', content: '' },
       { path: 'static/.gitkeep', content: '' },
       { path: `content/functions/lib/${vars.namespace}/.gitkeep`, content: '' },
+      // Guest-toolchain source for WebAssembly functions
+      // (`raisindb create function <name> --lang rust|go|ts`). It lives OUTSIDE
+      // content/ on purpose: `sync` maps every non-YAML file under content/ to
+      // a node, so a Cargo.toml there would upload as an asset. `.rapignore`
+      // keeps this directory out of the .rap.
+      { path: 'wasm/.gitkeep', content: '' },
+      { path: '.rapignore', content: rapignore() },
       { path: 'content/functions/triggers/.gitkeep', content: '' },
 
       // Workspace

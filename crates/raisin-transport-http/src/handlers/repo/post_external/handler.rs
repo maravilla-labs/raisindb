@@ -116,6 +116,19 @@ pub(crate) async fn handle_external_upload<S: Storage + TransactionalStorage + '
         (stored, None)
     };
 
+    // A `.wasm` under a `raisin:Function` is that function's code, so it is
+    // compiled now rather than at the first invocation: the author who is
+    // standing here gets the error, not whoever the trigger fires for.
+    // Deletes the blob and returns 400 if it could never run.
+    super::super::wasm_upload::reject_unrunnable_wasm_upload(
+        state,
+        nodes_svc,
+        path,
+        file_name.as_deref(),
+        &stored,
+    )
+    .await?;
+
     // Determine resource property path and storage format from processor or defaults
     let (param_prop_path, storage_format, extra_properties, node_id_override, node_name_override) =
         if let Some(ref processed) = processed_upload {

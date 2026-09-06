@@ -1,0 +1,5 @@
+# Toolchain projects are SOURCE, not package content: only the built
+# `main.wasm` under content/functions/ ships. `raisindb sync` treats every
+# non-yaml file it finds as an asset, so go.mod / main.go must never be
+# visible to it.
+wasm/

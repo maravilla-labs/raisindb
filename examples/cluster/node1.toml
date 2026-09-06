@@ -80,3 +80,31 @@ default_timeout_ms = 30000
 # token_env = "STUDIO_INTERNAL_TOKEN"
 # token_header = "x-studio-internal-token"
 # timeout_ms = 120000
+
+# WebAssembly component functions (`language: wasm`). Every value below is the
+# shipped default, so the whole section may be omitted. It is installed
+# process-wide once at boot: the engine is built from these numbers on the
+# first execution and cannot be reconfigured afterwards.
+#
+# [functions.wasm]
+# # false still registers the runtime, so a wasm function fails naming this
+# # setting rather than reporting an unknown language.
+# enabled = true
+# # Largest artifact accepted at load, run-file and upload (32 MiB).
+# # jco/StarlingMonkey components are 8-15 MB, so do not lower this blindly.
+# max_artifact_bytes = 33554432
+# # Process-wide compiled-code budget, evicted LRU by weight (256 MiB).
+# compiled_cache_bytes = 268435456
+# # Engine-global guest stack ceiling. A function's resource_limits cannot
+# # raise it: wasmtime fixes the stack size when the engine is built.
+# max_wasm_stack_bytes = 1048576
+# # Epoch ticker period; timeout resolution is one tick.
+# epoch_tick_ms = 10
+# # "on-demand" (nothing reserved up front) or "pooling" (a pool reserved at
+# # engine construction -- faster to instantiate, and a too-large reservation
+# # fails at BOOT).
+# allocation = "on-demand"
+# # Pooling sizing only: concurrent component instances the pool reserves.
+# max_instances = 15
+# # Per stream, per execution capture ceiling for guest stdout/stderr.
+# stdout_capture_bytes = 1048576

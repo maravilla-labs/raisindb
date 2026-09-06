@@ -471,6 +471,11 @@ pub struct TokenResponse {
 }
 
 /// Exchange an authorization code for tokens.
+///
+/// Wide by the shape of the RFC 6749 / RFC 7636 token request itself: every
+/// argument is a separate wire parameter, so a parameter struct would only
+/// rename them.
+#[allow(clippy::too_many_arguments)]
 pub async fn exchange_code(
     http: &reqwest::Client,
     egress: &EgressPolicy,

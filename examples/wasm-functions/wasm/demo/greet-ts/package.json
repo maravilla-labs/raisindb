@@ -1,0 +1,17 @@
+{
+  "name": "greet-ts",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "RaisinDB wasm function example — an unmodified QuickJS handler, componentized",
+  "scripts": {
+    "build": "raisin-wasm-build src/index.js --out main.wasm",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@bytecodealliance/componentize-js": "^0.22.0",
+    "@bytecodealliance/jco": "^1.32.1",
+    "@raisindb/function-wasm": "file:../../../../../sdks/ts/function-wasm",
+    "vitest": "^3.2.4"
+  }
+}

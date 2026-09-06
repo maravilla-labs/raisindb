@@ -56,8 +56,13 @@ pub async fn invoke_function(
     // lookup - an anonymous lookup is RLS-filtered to nothing -> 404)
     let auth_context = auth.map(|Extension(ctx)| ctx);
 
+    // Phase timing for the sync path. `duration_ms` in the response covers the
+    // function's own execution only, so without this the rest of the handler is
+    // invisible and "invoke is slow" cannot be attributed to a step.
+    let t_lookup = std::time::Instant::now();
     let function_node =
         find_function_node(&state, tenant_id, &repo, &name, auth_context.as_ref()).await?;
+    let lookup_ms = t_lookup.elapsed().as_micros() as f64 / 1000.0;
 
     let execution_mode = parse_execution_mode(function_node.properties.get("execution_mode"));
     if req.sync && !execution_mode.allows_sync() {
@@ -72,26 +77,25 @@ pub async fn invoke_function(
         ));
     }
 
-    // Register job for tracking
     let async_execution_id = nanoid::nanoid!();
-    let job_id = register_function_job(
-        &rocksdb,
-        tenant_id,
-        &repo,
-        &function_node.path,
-        req.input.clone(),
-        async_execution_id.clone(),
-        auth_context.as_ref(),
-    )
-    .await?;
 
     if req.sync {
-        rocksdb
-            .job_registry()
-            .update_status(&job_id, JobStatus::Running)
-            .await
-            .map_err(map_storage_error)?;
-
+        // A SYNCHRONOUS invocation registers no job.
+        //
+        // It runs inline and returns its result in the response, so the job
+        // record served only as history — at a cost of six storage operations
+        // per call (`job_data_store` put, register, mark running, set result,
+        // mark completed, `job_data_store` delete). That is ~0.3 ms of latency
+        // but it is a write on every request, which is write amplification an
+        // HTTP API layer cannot afford at volume: WAL, compaction, and a job
+        // table that grows with traffic rather than with work.
+        //
+        // CONSEQUENCE, deliberate: sync invocations no longer appear in
+        // `GET /api/functions/{repo}/{name}/executions`, which lists job
+        // records. Async invocations (`sync: false`) still register and still
+        // appear, unchanged. To restore history for sync calls, write ONE
+        // already-terminal job record here instead of the six-step dance.
+        let t_exec = std::time::Instant::now();
         match execute_function_inline(
             &state,
             tenant_id,
@@ -104,13 +108,21 @@ pub async fn invoke_function(
         .await
         {
             Ok(result) => {
-                persist_job_result(&rocksdb, tenant_id, &job_id, &result).await?;
+                tracing::debug!(
+                    target: "invoke_timing",
+                    lookup_ms,
+                    exec_ms = t_exec.elapsed().as_micros() as f64 / 1000.0,
+                    reported_ms = result.duration_ms,
+                    "sync invoke phases"
+                );
                 let response = InvokeFunctionResponse {
                     execution_id: result.execution_id.clone(),
                     sync: true,
                     result: result.result.clone(),
                     error: result.error.clone(),
-                    job_id: Some(job_id.to_string()),
+                    // No job is registered for a sync call, so there is no id
+                    // to report. The field is already `Option`.
+                    job_id: None,
                     duration_ms: Some(result.duration_ms),
                     logs: Some(result.logs.clone()),
                     status: Some("completed".to_string()),
@@ -120,16 +132,22 @@ pub async fn invoke_function(
                 };
                 Ok(Json(response))
             }
-            Err(err) => {
-                rocksdb
-                    .job_registry()
-                    .mark_failed(&job_id, err.message.clone())
-                    .await
-                    .map_err(map_storage_error)?;
-                Err(err)
-            }
+            Err(err) => Err(err),
         }
     } else {
+        // Asynchronous: the job IS the delivery mechanism, so it is registered
+        // here rather than for every invocation.
+        let job_id = register_function_job(
+            &rocksdb,
+            tenant_id,
+            &repo,
+            &function_node.path,
+            req.input.clone(),
+            async_execution_id.clone(),
+            auth_context.as_ref(),
+        )
+        .await?;
+
         if req.wait_for_completion {
             let wait_timeout_ms = req.wait_timeout_ms.unwrap_or(60_000).clamp(1_000, 300_000);
             let waited_job =
@@ -415,16 +433,23 @@ async fn execute_function_inline(
     // works when run from a trigger or flow, which goes through `code_loader`
     // in the job executor. That inconsistency is very hard to diagnose from the
     // outside, so every path that builds a LoadedFunction must fill this in.
-    loaded.files = super::load_function_modules_on_branch(
-        state,
-        tenant_id,
-        repo,
-        DEFAULT_BRANCH,
-        &node.path,
-        loaded.metadata.entry_file_path(),
-        &loaded.code,
-    )
-    .await;
+    //
+    // A wasm component is the exception: its imports were linked when it was
+    // built, so the scan could only ever return files the runtime cannot use —
+    // the same skip `execution/executor.rs` and `run_file.rs` make, for the same
+    // reason.
+    if loaded.metadata.language != raisin_functions::FunctionLanguage::Wasm {
+        loaded.files = super::load_function_modules_on_branch(
+            state,
+            tenant_id,
+            repo,
+            DEFAULT_BRANCH,
+            &node.path,
+            loaded.metadata.entry_file_path(),
+            loaded.code.as_text().unwrap_or(""),
+        )
+        .await;
+    }
 
     if let Some(timeout) = timeout_override {
         loaded.metadata.resource_limits.timeout_ms = timeout;

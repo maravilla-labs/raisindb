@@ -2,10 +2,11 @@
 
 //! Direct file execution handler (SSE streaming).
 //!
-//! Executes a standalone JavaScript/Starlark/SQL file without requiring
-//! a parent `raisin:Function` node. Useful for testing individual files
-//! from the editor. Returns an SSE stream with started, log, result,
-//! and done events.
+//! Executes a standalone JavaScript/Starlark/SQL file — or a WebAssembly
+//! component uploaded as a `.wasm` asset — without requiring a parent
+//! `raisin:Function` node. Useful for testing individual files from the editor
+//! and it is the server half of the CLI dev loop, so the SSE event shape
+//! (started, log, result, done) is a contract: do not change it.
 
 use axum::{
     extract::{Path, State},
@@ -14,7 +15,10 @@ use axum::{
 };
 use chrono::Utc;
 use futures::stream::Stream;
-use raisin_functions::{ExecutionContext, FunctionExecutor, LoadedFunction};
+use raisin_functions::{
+    language_for_file_name, ExecutionContext, FunctionCode, FunctionExecutor, FunctionLanguage,
+    LoadedFunction,
+};
 use raisin_models::auth::AuthContext;
 use std::convert::Infallible;
 use std::time::Duration;
@@ -25,7 +29,7 @@ use super::file_helpers::{
     build_synthetic_metadata_from_name, resolve_file_input, validate_runnable_asset,
     validate_runnable_asset_name,
 };
-use super::helpers::{find_asset_node_by_id, load_asset_code};
+use super::helpers::{find_asset_node_by_id, load_asset_function_code};
 use super::types::{RunFileEvent, RunFileRequest};
 use super::{DEFAULT_BRANCH, FUNCTIONS_WORKSPACE};
 use crate::middleware::TenantInfo;
@@ -76,7 +80,7 @@ pub async fn run_file(
     let stream = async_stream::stream! {
         // Determine code source: inline code OR load from node
         // Returns (code, file_name, path, node_id, workspace)
-        let code_source: (String, String, String, String, String) = if let Some(inline_code) = req_code {
+        let code_source: (FunctionCode, String, String, String, String) = if let Some(inline_code) = req_code {
             // Use inline code directly (unsaved file case)
             let name = req_file_name.unwrap_or_else(|| "inline.js".to_string());
 
@@ -97,10 +101,39 @@ pub async fn run_file(
                 return;
             }
 
+            // A component is bytes, and this field is a JSON string. There is no
+            // lossless spelling of an artifact here, so say what to do instead
+            // of failing later inside the wasm loader on a mangled UTF-8 copy.
+            if language_for_file_name(&name) == Some(FunctionLanguage::Wasm) {
+                yield Ok(Event::default().event("result").data(
+                    serde_json::to_string(&RunFileEvent::Result {
+                        execution_id: exec_id.clone(),
+                        success: false,
+                        result: None,
+                        error: Some(
+                            "Inline 'code' cannot carry a WebAssembly component: \
+                             upload the artifact and run it by node_id"
+                                .to_string(),
+                        ),
+                        duration_ms: 0,
+                    }).unwrap_or_default()
+                ));
+                yield Ok(Event::default().event("done").data(
+                    serde_json::to_string(&RunFileEvent::Done).unwrap_or_default()
+                ));
+                return;
+            }
+
             // Synthetic values for inline execution
             let synthetic_path = format!("/_inline/{}", name);
             let synthetic_id = format!("inline-{}", exec_id);
-            (inline_code, name, synthetic_path, synthetic_id, FUNCTIONS_WORKSPACE.to_string())
+            (
+                FunctionCode::Text(inline_code),
+                name,
+                synthetic_path,
+                synthetic_id,
+                FUNCTIONS_WORKSPACE.to_string(),
+            )
         } else if let Some(node_id) = req_node_id {
             // Load from saved node (existing flow)
             let asset_result = find_asset_node_by_id(&state_clone, &tenant_clone, &repo_clone, &node_id, auth_clone.as_ref()).await;
@@ -140,8 +173,12 @@ pub async fn run_file(
                 return;
             }
 
-            // Load code from asset
-            let code_result = load_asset_code(&state_clone, &repo_clone, &asset_node).await;
+            // Load code from asset. Bytes for a `.wasm` component, text for
+            // everything else — the language is the file name's, exactly as the
+            // synthetic metadata below reads it.
+            let asset_language = language_for_file_name(&asset_node.name).unwrap_or_default();
+            let code_result =
+                load_asset_function_code(&state_clone, &asset_node, asset_language).await;
             match code_result {
                 Ok(c) => (
                     c,
@@ -226,8 +263,12 @@ pub async fn run_file(
         // Without this every `import` fails at declare time with
         // `Error resolving module '…' from 'entry'`, because the QuickJS loader
         // is rebuilt per execution against `files` and an empty map resolves
-        // nothing. Skipped for an inline-code run with no path to scan.
-        if let Some(dir) = module_dir {
+        // nothing. Skipped for an inline-code run with no path to scan, and for
+        // a component: its imports were linked when it was built, so the scan
+        // could only ever return files the runtime cannot use — the same
+        // reasoning (and the same skip) as `execution/executor.rs`.
+        let is_wasm = loaded.metadata.language == FunctionLanguage::Wasm;
+        if let Some(dir) = module_dir.filter(|_| !is_wasm) {
             loaded.files = super::load_function_modules_on_branch(
                 &state_clone,
                 &tenant_clone,
@@ -235,7 +276,7 @@ pub async fn run_file(
                 DEFAULT_BRANCH,
                 &dir,
                 &file_name,
-                &loaded.code,
+                loaded.code.as_text().unwrap_or(""),
             )
             .await;
         }

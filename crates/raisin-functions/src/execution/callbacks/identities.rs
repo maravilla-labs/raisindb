@@ -116,7 +116,7 @@ pub async fn apply_patch(
     }
 
     if let Some(display_name) = patch.display_name.clone() {
-        identity.display_name = if display_name.as_str().is_empty() {
+        identity.display_name = if display_name.is_empty() {
             None
         } else {
             Some(display_name)
