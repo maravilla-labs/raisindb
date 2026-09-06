@@ -514,65 +514,65 @@ async fn compare_runtimes_against_a_real_server() {
     // and then flatten, and p99 should start climbing at the same point.
     // -----------------------------------------------------------------
     {
-        let wasm_fn = built
-            .iter()
-            .find(|a| a.label == "wasm")
-            .expect("wasm arm exists");
         let mut lines = vec![format!(
-            "\n=== concurrency sweep (wasm, realistic, {PAGES} nodes) ===\n    {:>9} {:>10} {:>10} {:>10} {:>10}",
-            "in-flight", "req/s", "p50 ms", "p95 ms", "p99 ms"
+            "\n=== concurrency sweep (realistic, {PAGES} nodes, all runtimes) ===\n    {:>9} {:>9} {:>10} {:>10} {:>10} {:>10}",
+            "runtime", "in-flight", "req/s", "p50 ms", "p95 ms", "p99 ms"
         )];
 
-        for &inflight in &[1usize, 4, 16, 48] {
-            // Enough requests that each level is more than warm-up noise.
-            let total = (inflight * 12).max(24);
-            let started = Instant::now();
-            let mut latencies = Vec::with_capacity(total);
+        for arm in &built {
+            for &inflight in &[1usize, 4, 16, 48] {
+                // Enough requests that each level is more than warm-up noise.
+                let total = (inflight * 12).max(24);
+                let started = Instant::now();
+                let mut latencies = Vec::with_capacity(total);
 
-            // Fixed-size wave of concurrent requests, repeated until `total`.
-            let mut sent = 0usize;
-            while sent < total {
-                let batch = inflight.min(total - sent);
-                let mut handles = Vec::with_capacity(batch);
-                for _ in 0..batch {
-                    let client = client.clone();
-                    let base = base.clone();
-                    let token = token.clone();
-                    let name = wasm_fn.realistic.clone();
-                    let input = realistic_input.clone();
-                    handles.push(tokio::spawn(async move {
-                        let t = Instant::now();
-                        let r = client
-                            .post(format!("{base}/api/functions/{REPO}/{name}/invoke"))
-                            .bearer_auth(&token)
-                            .json(&json!({ "input": input, "sync": true }))
-                            .send()
-                            .await
-                            .expect("concurrent invoke failed");
-                        assert!(r.status().is_success(), "concurrent invoke: {}", r.status());
-                        let _ = r.text().await;
-                        ms(t.elapsed())
-                    }));
+                // Fixed-size wave of concurrent requests, repeated until `total`.
+                let mut sent = 0usize;
+                while sent < total {
+                    let batch = inflight.min(total - sent);
+                    let mut handles = Vec::with_capacity(batch);
+                    for _ in 0..batch {
+                        let client = client.clone();
+                        let base = base.clone();
+                        let token = token.clone();
+                        let name = arm.realistic.clone();
+                        let input = realistic_input.clone();
+                        handles.push(tokio::spawn(async move {
+                            let t = Instant::now();
+                            let r = client
+                                .post(format!("{base}/api/functions/{REPO}/{name}/invoke"))
+                                .bearer_auth(&token)
+                                .json(&json!({ "input": input, "sync": true }))
+                                .send()
+                                .await
+                                .expect("concurrent invoke failed");
+                            assert!(r.status().is_success(), "concurrent invoke: {}", r.status());
+                            let _ = r.text().await;
+                            ms(t.elapsed())
+                        }));
+                    }
+                    for h in handles {
+                        latencies.push(h.await.expect("request task panicked"));
+                    }
+                    sent += batch;
                 }
-                for h in handles {
-                    latencies.push(h.await.expect("request task panicked"));
-                }
-                sent += batch;
+
+                let wall = started.elapsed().as_secs_f64();
+                latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let pick = |q: f64| {
+                    latencies[((latencies.len() as f64 * q) as usize).min(latencies.len() - 1)]
+                };
+                lines.push(format!(
+                    "    {:>9} {:>9} {:>10.1} {:>10.2} {:>10.2} {:>10.2}",
+                    arm.label,
+                    inflight,
+                    total as f64 / wall,
+                    pick(0.50),
+                    pick(0.95),
+                    pick(0.99)
+                ));
             }
-
-            let wall = started.elapsed().as_secs_f64();
-            latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            let pick = |q: f64| {
-                latencies[((latencies.len() as f64 * q) as usize).min(latencies.len() - 1)]
-            };
-            lines.push(format!(
-                "    {:>9} {:>10.1} {:>10.2} {:>10.2} {:>10.2}",
-                inflight,
-                total as f64 / wall,
-                pick(0.50),
-                pick(0.95),
-                pick(0.99)
-            ));
+            lines.push(String::new());
         }
         println!("{}", lines.join("\n"));
         println!(
