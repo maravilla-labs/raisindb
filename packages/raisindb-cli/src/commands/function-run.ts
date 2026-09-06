@@ -13,10 +13,13 @@ import path from 'path';
 import React from 'react';
 import { render } from 'ink';
 import { FunctionRun } from '../components/FunctionRun.js';
-import { discoverProjects, findPackageRoot } from '../wasm-fn/discover.js';
+import { discoverFunctionNodes, discoverProjects, findPackageRoot } from '../wasm-fn/discover.js';
 import { executeRun, type ServerOptions } from '../wasm-fn/run.js';
 import { resolveInput, resolveRunTarget } from '../wasm-fn/run-target.js';
 import {
+  loadCasesFrom,
+  sourceCasesFile,
+  type ServerCase,
   loadServerCases,
   runNativeTests,
   runServerCases,
@@ -132,11 +135,58 @@ function soleProject(target: string | undefined): WasmProject {
   return projects[0];
 }
 
+
+/**
+ * The source-shipping Function node a target names, if it names one.
+ *
+ * Returns null for a wasm target so the ordinary project path runs. Resolution
+ * is deliberately by NODE rather than by project: `js` and `starlark` have no
+ * project directory to point at.
+ */
+function sourceFunctionTarget(
+  target: string | undefined
+): { dir: string; language: string } | null {
+  const start = path.resolve(target || process.cwd());
+  const packageRoot = findPackageRoot(start);
+  if (!packageRoot) return null;
+  const node = discoverFunctionNodes(packageRoot).find(
+    (n) => (n.dir === start || n.file === start) && n.language !== 'wasm'
+  );
+  if (!node) return null;
+  return { dir: node.dir, language: node.language };
+}
+
 /** Run a project's tests; returns the process exit code. */
 export async function functionTest(
   target: string | undefined,
   options: FunctionTestOptions = {}
 ): Promise<number> {
+  // A `js` or `starlark` function has no toolchain project. It still has
+  // server cases, so it is testable — just not natively, because there is
+  // nothing to compile and no mock host to compile against.
+  const source = sourceFunctionTarget(target);
+  if (source) {
+    if (!options.server) {
+      console.error(
+        `${path.basename(source.dir)} is a ${source.language} function: there is no native ` +
+          `test step for it (nothing to compile, and no mock host).\n` +
+          `Run its cases against a server with \`--server\`, or invoke it directly with ` +
+          `\`raisindb function run\`.`
+      );
+      return 2;
+    }
+    const cases = loadCasesFrom(sourceCasesFile(source.dir));
+    if (cases.length === 0) {
+      console.error(
+        `No server cases: ${sourceCasesFile(source.dir)} is missing or empty.\n` +
+          'Add [{ "input": {}, "expect": {} }] to it. The file is hidden so it is ' +
+          'not uploaded as content.'
+      );
+      return 2;
+    }
+    return await reportServerCases({ dir: source.dir } as WasmProject, cases, options);
+  }
+
   const project = soleProject(target);
 
   if (!options.server) {
@@ -152,6 +202,15 @@ export async function functionTest(
     return 2;
   }
 
+  return await reportServerCases(project, cases, options);
+}
+
+/** Run server cases and print the result table. Shared by both target kinds. */
+async function reportServerCases(
+  project: WasmProject,
+  cases: ServerCase[],
+  options: FunctionTestOptions
+): Promise<number> {
   console.log(`Running ${cases.length} server case(s) for ${path.basename(project.dir)}...`);
   const results = await runServerCases(project, cases, {
     server: typeof options.server === 'string' ? options.server : undefined,

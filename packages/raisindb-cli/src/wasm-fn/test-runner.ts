@@ -60,6 +60,33 @@ export function serverCasesFile(projectDir: string): string {
   return path.join(projectDir, 'tests', 'server.json');
 }
 
+/**
+ * Where a SOURCE-shipping function keeps its cases.
+ *
+ * A `js` or `starlark` function has no build project, so its cases live beside
+ * its node — and must be HIDDEN, because everything else under `content/` is
+ * uploaded: `sync/mapping.ts` skips dotfiles, and so does the package
+ * collector. A `tests/server.json` there would become a node.
+ */
+export function sourceCasesFile(nodeDir: string): string {
+  return path.join(nodeDir, '.tests.json');
+}
+
+/** Load cases from an explicit file. Returns `[]` when it does not exist. */
+export function loadCasesFrom(file: string): ServerCase[] {
+  if (!fs.existsSync(file)) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fs.readFileSync(file, 'utf-8'));
+  } catch (error) {
+    throw new Error(
+      `${file}: not valid JSON — ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+  if (!Array.isArray(parsed)) throw new Error(`${file}: expected a JSON array of cases`);
+  return parsed as ServerCase[];
+}
+
 /** Load `tests/server.json`. Returns `[]` when the project has none. */
 export function loadServerCases(projectDir: string): ServerCase[] {
   const file = serverCasesFile(projectDir);
