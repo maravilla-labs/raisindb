@@ -1,6 +1,6 @@
 # AssemblyScript as a guest language
 
-**Status:** export path PROVEN, import path not started. Written 2026-09-06.
+**Status:** the ABI is PROVEN in both directions. What remains is packaging it as an SDK. Written 2026-09-06.
 
 ## Why we want it
 
@@ -74,14 +74,37 @@ The artifact and its source are checked in at
 path cannot rot silently. For scale: 1.8 KB against 8–15 MB for the
 ComponentizeJS guest this is meant to replace.
 
+## The import side is proven too
+
+The guest calls `log`, `context` and `call` against the real host and the
+assertions cover each: the context comes back non-empty, `call` returns
+`nodes_getChildren`'s node list decoded, and the log line reaches the execution
+logs.
+
+Two details are worth carrying forward, because both cost time:
+
+* **The interface name carries the package version** — `@external` must say
+  `raisin:function/host@0.1.0`. Without it, `component new` refuses to resolve
+  the import. Loud, at least.
+* **A variant discriminant is a `u8`.** `result<string, string>` in memory is
+  `{ u8 tag, 3 bytes padding, i32 ptr, i32 len }`. Reading the tag as an `i32`
+  picks up padding and turns every `Ok` into an `Err` *while the payload still
+  decodes correctly* — the failure looks like the host returning errors, not
+  like a guest bug. This is the strongest argument for generating the lowering
+  rather than hand-writing it per project.
+
 ## What remains
 
-The spike proves the EXPORT side. A usable SDK needs the IMPORT side too —
-lowering `call`, `log`, `context` and `abi-version`, where the guest passes a
-return area it owns into each import and reads strings back out. Same ABI, more
-of it, and the part where mistakes are silent rather than loud. After that it is
-ordinary SDK work: a `lang: assemblyscript` arm in `raisin.build.yaml`, a
-template, and the existing `function build/doctor/run` pipeline unchanged.
+No unknowns, only work:
+
+1. Typed wrappers generated from the bindings registry, as the Rust and Go SDKs
+   already are — so no user hand-writes the lowering that bit us above.
+2. A `lang: assemblyscript` arm in `raisin.build.yaml`
+   (`asc … && wasm-tools component embed … && component new …`).
+3. A CLI template, and `assemblyscript` in `--lang`.
+
+`function build`, `doctor`, `run`, package install and the server are unchanged
+— they already see an ordinary component.
 
 ## Risks
 

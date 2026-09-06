@@ -285,21 +285,41 @@ async fn a_guest_over_its_memory_budget_is_reported_as_such() {
 const ASSEMBLYSCRIPT: &[u8] = include_bytes!("fixtures/assemblyscript.wasm");
 
 #[tokio::test]
-async fn an_assemblyscript_component_runs_and_receives_both_string_arguments() {
-    let result = run(
-        ASSEMBLYSCRIPT,
-        "greet",
-        json!({"name": "Ada"}),
-        mock_api(json!({})),
-    )
-    .await;
+async fn an_assemblyscript_component_uses_the_host_imports() {
+    let api = mock_api(json!({"tenant_id": "tenant1"}));
+    let result = run(ASSEMBLYSCRIPT, "greet", json!({"name": "Ada"}), api.clone()).await;
 
     assert!(result.success, "{:?}", result.error);
     let output = result.output.unwrap();
 
-    // The guest echoes its two canonical-ABI string parameters back, so this
-    // asserts the lowering itself: a wrong pointer or length would corrupt
-    // one of them rather than fail loudly.
+    // EXPORT side: both canonical-ABI string parameters arrived intact. A wrong
+    // pointer or length corrupts one of these rather than failing loudly.
     assert_eq!(output["handler"], "greet");
     assert_eq!(output["echo"]["name"], "Ada");
+
+    // IMPORT side, the half where ABI mistakes are silent:
+    // `context()` returns a string indirectly through a guest-owned area.
+    assert_eq!(output["ctx_has_tenant"], true, "context() came back empty");
+
+    // `call()` returns result<string, string> as (tag, ptr, len); the guest
+    // reports the tag and the decoded body, so a mis-read discriminant shows up
+    // as call_ok=false rather than as plausible-looking data.
+    assert_eq!(output["call_ok"], true, "call() reported an error tag");
+    assert!(
+        output["children"].is_array(),
+        "call() body did not decode as the mock's node list: {}",
+        output["children"]
+    );
+
+    // `log()` takes an enum plus a string and returns nothing.
+    let logs = result
+        .logs
+        .iter()
+        .map(|l| l.message.clone())
+        .collect::<Vec<_>>();
+    assert!(
+        logs.iter()
+            .any(|m| m.contains("assemblyscript guest running")),
+        "log() did not reach the execution logs: {logs:?}"
+    );
 }

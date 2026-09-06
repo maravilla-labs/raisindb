@@ -1,7 +1,8 @@
-# AssemblyScript guest (proof of path)
+# AssemblyScript guest (proven, both directions)
 
-AssemblyScript is not a supported guest language yet. This is the artifact that
-proves it *can* be one, and the regression test that keeps the path open.
+AssemblyScript is not a supported guest language YET — there is no SDK and the
+CLI will not scaffold one. This is the artifact proving the whole ABI works, and
+the regression test that keeps it working.
 
 ## Why it is hand-lowered
 
@@ -41,9 +42,27 @@ Verify with `wasm-tools component wit guest.component.wasm` — it must export
 
 Tooling used: AssemblyScript 0.28.20, wasm-tools 1.258.0.
 
+## The import side, and the trap in it
+
+`src/guest.ts` exercises all of it: `log`, `context` and `call`. Two details
+cost real debugging time and are the reason this fixture exists:
+
+**The interface name carries the package version.** `@external` must name
+`raisin:function/host@0.1.0`, not `raisin:function/host`. Without the version
+`wasm-tools component new` fails with "failed to resolve import", which at least
+fails loudly.
+
+**A variant discriminant is a `u8`, not an `i32`.** The canonical ABI stores a
+tag in the smallest integer that fits the case count, then pads to the payload's
+alignment, so `result<string, string>` is `{ u8 tag, 3 bytes pad, i32 ptr,
+i32 len }`. Reading the tag with `load<i32>` picks up the padding and turns
+every `Ok` into an `Err` — **while the payload still decodes perfectly**. That
+is what a silent ABI bug looks like, and why the test asserts the tag and the
+decoded body separately rather than just "it ran".
+
 ## What is still missing for a real SDK
 
-This proves the EXPORT side. A usable SDK also needs the IMPORT side — lowering
-`call`, `log`, `context` and `abi-version` from `raisin:function/host`, which
-means passing a caller-owned return area into each import and reading strings
-back out of it. Same ABI, more of it. See `docs/design/assemblyscript-guest.md`.
+The ABI is proven; what is missing is packaging it — typed wrappers generated
+from the bindings registry (as the Rust and Go SDKs are), a `lang:
+assemblyscript` arm in `raisin.build.yaml`, and a CLI template. No unknowns
+remain, only work. See `docs/design/assemblyscript-guest.md`.
