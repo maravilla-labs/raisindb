@@ -97,7 +97,12 @@ jobs:
           TARGETS: ${{ github.event_name == 'push' && 'all' || inputs.targets }}
         run: |
           set -euo pipefail
-          FEATURES="storage-rocksdb,websocket,pgwire,fs,pdf,pdf-markdown,candle,ocr"
+          # NOTE: the build below passes --no-default-features, so a feature
+          # being in raisin-server's `default` list does NOT put it in the
+          # release. `wasm` (the WebAssembly component runtime) must be named
+          # here or the shipped binary has no wasm support at all, silently:
+          # a `language: wasm` function would fail with "No runtime available".
+          FEATURES="storage-rocksdb,websocket,pgwire,fs,pdf,pdf-markdown,candle,ocr,wasm"
           LINUX=$(jq -cn --arg f "$FEATURES" \
             '{os:"ubuntu-latest",target:"x86_64-unknown-linux-gnu",archive:"tar.gz",ext:"",features:$f}')
           WINDOWS=$(jq -cn --arg f "$FEATURES" \
