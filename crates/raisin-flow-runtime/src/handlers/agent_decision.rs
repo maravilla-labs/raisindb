@@ -152,16 +152,28 @@ impl StepHandler for AgentDecisionHandler {
             instructions, branch_list
         );
 
+        // The SAME shape `raisin_ai::types::ResponseFormat` deserializes —
+        // `{type: json_schema, json_schema: {name, schema, strict}}` — and the
+        // shape `agent_step` already sends. It used to be `{type, schema}`,
+        // which `from_value` refused ("Invalid response_format, ignoring"), so
+        // every provider was asked for prose and the model answered with a bare
+        // branch id or a sentence; the JSON parse below then found nothing, the
+        // decision was never "routed by agent", and the step silently took its
+        // fallback on every run. Measured against Groq, 2026-09-03.
         let response_format = json!({
             "type": "json_schema",
-            "schema": {
-                "type": "object",
-                "properties": {
-                    "branch": { "type": "string", "enum": branch_ids },
-                    "reasoning": { "type": "string" },
-                    "confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0 }
+            "json_schema": {
+                "name": "agent_decision",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "branch": { "type": "string", "enum": branch_ids },
+                        "reasoning": { "type": "string" },
+                        "confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0 }
+                    },
+                    "required": ["branch", "confidence"]
                 },
-                "required": ["branch", "confidence"]
+                "strict": false
             }
         });
 
@@ -181,18 +193,42 @@ impl StepHandler for AgentDecisionHandler {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let parsed: Option<Value> = serde_json::from_str(&content).ok();
+        let parsed: Option<Value> = serde_json::from_str(&content)
+            .ok()
+            // Some models wrap the object in a code fence even when asked for
+            // JSON; strip one before giving up.
+            .or_else(|| {
+                let trimmed = content.trim();
+                let inner = trimmed
+                    .strip_prefix("```json")
+                    .or_else(|| trimmed.strip_prefix("```"))
+                    .and_then(|s| s.strip_suffix("```"))?;
+                serde_json::from_str(inner.trim()).ok()
+            });
+
+        // A BARE BRANCH ID is an answer too. A provider that ignores the
+        // response format (or a model that follows "answer with the branch id"
+        // literally) returns `approve_fix` and nothing else; treating that as
+        // "no valid branch" would route to the fallback while the model had in
+        // fact decided. Accepted at full confidence: the id is unambiguous.
+        let bare = {
+            let t = content
+                .trim()
+                .trim_matches(|c| c == '"' || c == '\'' || c == '`');
+            branches.iter().find(|b| b.id == t).map(|b| b.id.clone())
+        };
 
         let chosen = parsed
             .as_ref()
             .and_then(|p| p.get("branch"))
             .and_then(|v| v.as_str())
-            .map(String::from);
+            .map(String::from)
+            .or_else(|| bare.clone());
         let confidence = parsed
             .as_ref()
             .and_then(|p| p.get("confidence"))
             .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
+            .unwrap_or(if bare.is_some() { 1.0 } else { 0.0 });
         let reasoning = parsed
             .as_ref()
             .and_then(|p| p.get("reasoning"))

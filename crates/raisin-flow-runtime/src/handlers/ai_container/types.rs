@@ -114,6 +114,15 @@ pub struct AiMessage {
     /// Tool call ID (for tool response messages)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+
+    /// The FUNCTION a tool response answers for. OpenAI-compatible providers
+    /// accept a tool message without it, but Groq's harmony renderer (the
+    /// gpt-oss models) refuses the whole request with "Tools should have a
+    /// name!" when a `role: tool` message carries no `name` — which made every
+    /// tool loop die on its SECOND call, right after the tool had run.
+    /// Measured 2026-09-03.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 impl From<AiMessage> for Message {
@@ -137,7 +146,7 @@ impl From<AiMessage> for Message {
                     .collect()
             }),
             tool_call_id: msg.tool_call_id,
-            name: None,
+            name: msg.name,
         }
     }
 }

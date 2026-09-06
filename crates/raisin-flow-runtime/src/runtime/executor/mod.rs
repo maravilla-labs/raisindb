@@ -22,4 +22,4 @@ pub use execution_loop::execute_flow;
 
 // Re-exported for `FlowContext::to_json`, which republishes the visit counter
 // as the `visits` expression namespace.
-pub(crate) use helpers::{extract_token_usage, HISTORY_KEY, VISITS_KEY};
+pub(crate) use helpers::{extract_token_usage, HISTORY_KEY, RESUME_REENTRY_KEY, VISITS_KEY};

@@ -22,7 +22,8 @@ use std::time::Instant;
 use tracing::info;
 
 use super::helpers::{
-    bump_visit_count, extract_token_usage, project_output_key, record_step_output,
+    bump_visit_count, current_visit_count, extract_token_usage, project_output_key,
+    record_step_output, take_resume_reentry,
 };
 use super::isolated_branch::execute_step;
 use super::result_handlers::{
@@ -198,15 +199,26 @@ pub(super) async fn execute_flow_with_retry(
         // with everything else; `__`-prefixed keys are already protected from
         // being clobbered by a step output. `FlowContext::to_json` republishes
         // it as the `visits` namespace.
-        let visit_count = bump_visit_count(&mut instance, &current_step.id);
-        tracing::debug!(step_id = %current_step.id, visit = visit_count, "Step visit");
+        //
+        // EXCEPT when the node is being re-entered to consume what it waited
+        // for (a parked function result, a chat reply, a human answer): that
+        // is the same visit continuing, and the resume marks it so.
+        let reentry = take_resume_reentry(&mut instance);
+        let visit_count = if reentry {
+            current_visit_count(&instance, &current_step.id)
+        } else {
+            bump_visit_count(&mut instance, &current_step.id)
+        };
+        tracing::debug!(step_id = %current_step.id, visit = visit_count, reentry, "Step visit");
 
         // Record where we are, if this flow asked for a replayable history.
         // Taken BEFORE the step runs, so a checkpoint is a position you can
         // start from rather than one you have already moved past — the useful
         // question is "run it again from here", and answering it needs the state
-        // the step saw, not the state it left.
-        instance.record_checkpoint(checkpoint_limit, visit_count);
+        // the step saw, not the state it left. A re-entry is the same position.
+        if !reentry {
+            instance.record_checkpoint(checkpoint_limit, visit_count);
+        }
 
         // Emit StepStarted event
         let step_start = Instant::now();

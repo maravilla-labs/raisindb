@@ -104,6 +104,29 @@ impl StepHandler for AiContainerHandler {
         if state.iteration == 0 && messages.is_empty() {
             self.init_user_message_to(step, context, &mut messages);
             debug!("Initialized conversation with {} messages", messages.len());
+            // PERSIST IT. History is reloaded from the conversation node on
+            // every re-entry (after a tool result, after a park), and a
+            // history that starts with the assistant's tool call and no user
+            // turn is what made the model answer "please provide the title
+            // and description you'd like evaluated" on its second call.
+            if let (Some(first), Ok(path)) = (messages.first(), self.get_conversation_path(context))
+            {
+                if first.role == MessageRole::User && !first.content.is_empty() {
+                    if let Err(e) = conversation_persistence::persist_user_message(
+                        callbacks,
+                        &context.instance_id,
+                        &path,
+                        conversation_persistence::SYSTEM_WORKSPACE,
+                        &first.content,
+                        Some("flow"),
+                        Some("Automation"),
+                    )
+                    .await
+                    {
+                        warn!("Failed to persist the initial user message: {}", e);
+                    }
+                }
+            }
         }
 
         // Check max iterations
@@ -168,6 +191,7 @@ impl StepHandler for AiContainerHandler {
                     content,
                     tool_calls: None,
                     tool_call_id: Some(result.tool_call_id),
+                    name: Some(result.name),
                 });
             }
         }
@@ -255,16 +279,26 @@ impl StepHandler for AiContainerHandler {
                 if let Some(tool_call_id) = &m.tool_call_id {
                     msg["tool_call_id"] = Value::String(tool_call_id.clone());
                 }
+                if let Some(name) = &m.name {
+                    msg["name"] = Value::String(name.clone());
+                }
                 msg
             })
             .collect();
 
-        // Build response_format payload if configured
+        // Build response_format payload if configured — in the shape
+        // `raisin_ai::types::ResponseFormat` deserializes (`json_schema:
+        // {name, schema, strict}`), the same one agent_step sends. The old
+        // `{type, schema}` was refused by `from_value` and silently dropped.
         let response_format = config.response_format.as_ref().map(|fmt| {
             let mut rf = serde_json::json!({ "type": fmt });
             if fmt == "json_schema" {
                 if let Some(schema) = &config.output_schema {
-                    rf["schema"] = schema.clone();
+                    rf["json_schema"] = serde_json::json!({
+                        "name": "container_output",
+                        "schema": schema.clone(),
+                        "strict": false
+                    });
                 }
             }
             rf
@@ -286,6 +320,14 @@ impl StepHandler for AiContainerHandler {
             "AI response received: {:?}",
             ai_response.get("finish_reason")
         );
+
+        // Tool NAME → FUNCTION PATH, from the callback (via `_tool_map` on the
+        // accumulated response). Auto-executed tools are resolved through it;
+        // executing by bare name asked for a function called `update-node`.
+        let tool_paths: std::collections::HashMap<String, String> = ai_response
+            .get("_tool_map")
+            .and_then(|m| serde_json::from_value(m.clone()).ok())
+            .unwrap_or_default();
 
         // Accumulate this turn's usage onto the container's running total, so a
         // tool loop's cost survives the SameStep re-entries and reaches the
@@ -410,7 +452,7 @@ impl StepHandler for AiContainerHandler {
                     callbacks,
                     &context.instance_id,
                     &tools,
-                    message_path.as_deref(),
+                    &tool_paths,
                     &mut state,
                 )
                 .await;
@@ -468,7 +510,7 @@ impl StepHandler for AiContainerHandler {
                     callbacks,
                     &context.instance_id,
                     &auto_tools,
-                    message_path.as_deref(),
+                    &tool_paths,
                     &mut state,
                 )
                 .await;
@@ -497,7 +539,7 @@ async fn execute_auto_tools(
     callbacks: &dyn FlowCallbacks,
     instance_id: &str,
     tools: &[ToolCall],
-    message_path: Option<&str>,
+    tool_paths: &std::collections::HashMap<String, String>,
     state: &mut AiContainerState,
 ) {
     for tool in tools {
@@ -510,8 +552,9 @@ async fn execute_auto_tools(
             .await;
 
         // Resolve function path from tool map or use name directly
-        let function_ref = message_path
-            .map(|_| tool.name.clone())
+        let function_ref = tool_paths
+            .get(&tool.name)
+            .cloned()
             .unwrap_or_else(|| tool.name.clone());
 
         // Execute the tool

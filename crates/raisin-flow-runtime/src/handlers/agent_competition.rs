@@ -244,22 +244,34 @@ impl StepHandler for AgentCompetitionHandler {
                 }
             );
 
+            // The SAME shape `raisin_ai::types::ResponseFormat` deserializes —
+            // `{type: json_schema, json_schema: {name, schema, strict}}`, as
+            // `agent_step` and `agent_decision` send. It used to be
+            // `{type, schema}`, which the callback refused ("Invalid
+            // response_format, ignoring: missing field `json_schema`"), so the
+            // referee answered in prose, the parse below found nothing, and
+            // every competition ended "winner = first competitor, confidence
+            // 0.00". Measured against Groq, 2026-09-03.
             let referee_format = json!({
                 "type": "json_schema",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "action": { "type": "string", "enum": ["accept", "refine"] },
-                        "winner": { "type": "string", "enum": competitor_ids },
-                        "confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
-                        "reasoning": { "type": "string" },
-                        "feedback": {
-                            "type": "object",
-                            "description": "Per-competitor feedback for refinement, keyed by competitor id",
-                            "additionalProperties": { "type": "string" }
-                        }
+                "json_schema": {
+                    "name": "competition_verdict",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "action": { "type": "string", "enum": ["accept", "refine"] },
+                            "winner": { "type": "string", "enum": competitor_ids },
+                            "confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+                            "reasoning": { "type": "string" },
+                            "feedback": {
+                                "type": "object",
+                                "description": "Per-competitor feedback for refinement, keyed by competitor id",
+                                "additionalProperties": { "type": "string" }
+                            }
+                        },
+                        "required": ["action", "winner", "confidence"]
                     },
-                    "required": ["action", "winner", "confidence"]
+                    "strict": false
                 }
             });
 
@@ -276,7 +288,26 @@ impl StepHandler for AgentCompetitionHandler {
                 .get("content")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let parsed: Value = serde_json::from_str(referee_content).unwrap_or(Value::Null);
+            // Some models wrap the object in a code fence even when asked for
+            // JSON; strip one before giving up.
+            let parsed: Value = serde_json::from_str(referee_content)
+                .ok()
+                .or_else(|| {
+                    let trimmed = referee_content.trim();
+                    let inner = trimmed
+                        .strip_prefix("```json")
+                        .or_else(|| trimmed.strip_prefix("```"))
+                        .and_then(|s| s.strip_suffix("```"))?;
+                    serde_json::from_str(inner.trim()).ok()
+                })
+                .unwrap_or(Value::Null);
+            if parsed.is_null() {
+                warn!(
+                    "Competition '{}': referee answer was not JSON ({} chars) - verdict unusable",
+                    step.id,
+                    referee_content.len()
+                );
+            }
 
             let action = parsed
                 .get("action")

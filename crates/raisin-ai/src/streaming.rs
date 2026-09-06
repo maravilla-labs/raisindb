@@ -124,18 +124,47 @@ where
     let mut usage: Option<Value> = None;
     let mut end_session = false;
     let mut handoff_to: Option<String> = None;
+    // The tool NAME → FUNCTION PATH map the callback sends as its first chunk
+    // (`{"_tool_map": {...}}`). Passed through on the result so a caller can
+    // execute a tool by path; a container that only knew the name asked the
+    // runtime for a function called `update-node` and got "not found".
+    let mut path_map: Option<Value> = None;
     let mut detector = tool_call_extraction::StreamingToolCallDetector::new();
     let mut think_detector = ThinkTagDetector::new();
 
     while let Some(chunk) = rx.recv().await {
+        if let Some(m) = chunk.get("_tool_map") {
+            if m.is_object() {
+                path_map = Some(m.clone());
+            }
+        }
         // Extract text: streaming chunks carry `delta`; complete
         // (non-streaming) responses forwarded as a single chunk - the
         // fallback path when no streaming provider is configured - carry
         // the full text in `content`.
+        // TWO CHUNK SHAPES arrive here and both are legitimate:
+        //   flat      { "delta": "text", "tool_calls": [...], "stop_reason" }
+        //   envelope  { "delta": { "content": "text", "tool_calls": [...] }, "finish_reason" }
+        // The envelope is what `call_ai_streaming` sends (StreamChunkEnvelope in
+        // raisin-functions), and reading only the flat shape lost BOTH the text
+        // (`delta` was an object, not a string) and every tool call an agent
+        // made inside a flow — the container saw `finish_reason: tool_calls`
+        // with an empty `tool_calls` array, completed after one iteration and
+        // published an empty answer. Measured against Groq, 2026-09-03.
+        let delta_obj = chunk.get("delta").and_then(|d| d.as_object());
         let text_delta = chunk
             .get("delta")
             .and_then(|d| d.as_str())
+            .or_else(|| {
+                delta_obj
+                    .and_then(|d| d.get("content"))
+                    .and_then(|c| c.as_str())
+            })
             .or_else(|| chunk.get("content").and_then(|c| c.as_str()));
+        let nested_tool_calls = delta_obj
+            .and_then(|d| d.get("tool_calls"))
+            .and_then(|v| v.as_array())
+            .cloned();
 
         if let Some(delta) = text_delta {
             if !delta.is_empty() {
@@ -186,6 +215,11 @@ where
 
         // Merge tool call deltas
         if let Some(tcs) = chunk.get("tool_calls").and_then(|v| v.as_array()) {
+            for tc_delta in tcs {
+                merge_streaming_tool_call(&mut tool_calls, tc_delta);
+            }
+        }
+        if let Some(tcs) = nested_tool_calls.as_ref() {
             for tc_delta in tcs {
                 merge_streaming_tool_call(&mut tool_calls, tc_delta);
             }
@@ -299,6 +333,7 @@ where
 
     // Build accumulated response
     let mut result = serde_json::json!({
+        "_tool_map": path_map.unwrap_or_else(|| serde_json::json!({})),
         "content": content,
         "model": model,
     });
@@ -498,6 +533,36 @@ mod tests {
         assert_eq!(tool_calls.len(), 2);
         assert_eq!(tool_calls[0]["function"]["name"], "tool_a");
         assert_eq!(tool_calls[1]["function"]["name"], "tool_b");
+    }
+
+    #[tokio::test]
+    async fn accumulates_the_envelope_shape_with_nested_tool_calls() {
+        // What `call_ai_streaming` actually sends: text and tool-call deltas
+        // nested under `delta`, and `finish_reason` rather than `stop_reason`.
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut tool_map = HashMap::new();
+        tx.send(serde_json::json!({ "delta": { "content": "Applying" }, "model": "m" }))
+            .await
+            .unwrap();
+        tx.send(serde_json::json!({ "delta": { "tool_calls": [
+            { "index": 0, "id": "call_1", "function": { "name": "update-node", "arguments": "{\"path\":" } }
+        ] } }))
+            .await
+            .unwrap();
+        tx.send(serde_json::json!({ "delta": { "tool_calls": [
+            { "index": 0, "id": "", "function": { "name": "", "arguments": "\"/a\"}" } }
+        ] }, "finish_reason": "tool_calls" }))
+            .await
+            .unwrap();
+        drop(tx);
+        let out = accumulate_stream(&mut rx, |_| async {}, &mut tool_map).await;
+        assert_eq!(out["content"], "Applying");
+        assert_eq!(out["finish_reason"], "tool_calls");
+        let calls = out["tool_calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["id"], "call_1");
+        assert_eq!(calls[0]["function"]["name"], "update-node");
+        assert_eq!(calls[0]["function"]["arguments"], "{\"path\":\"/a\"}");
     }
 
     #[tokio::test]

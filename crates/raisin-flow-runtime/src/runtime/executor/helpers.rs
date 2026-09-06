@@ -211,6 +211,29 @@ pub(crate) fn extract_token_usage(value: &Value) -> Option<(u64, u64)> {
 /// its own visit count.
 pub(crate) const VISITS_KEY: &str = "__visits";
 
+/// One-shot marker planted by a resume: the next node entered is the one that
+/// was waiting, coming back for its result, and is NOT a new visit.
+pub(crate) const RESUME_REENTRY_KEY: &str = "__resume_reentry";
+
+/// Consume the re-entry marker, saying whether this entry is one.
+pub(crate) fn take_resume_reentry(instance: &mut FlowInstance) -> bool {
+    instance
+        .variables
+        .as_object_mut()
+        .map(|vars| vars.remove(RESUME_REENTRY_KEY).is_some())
+        .unwrap_or(false)
+}
+
+/// The visit `step_id` is currently on, without counting a new one.
+pub(crate) fn current_visit_count(instance: &FlowInstance, step_id: &str) -> u64 {
+    instance
+        .variables
+        .get(VISITS_KEY)
+        .and_then(|v| v.get(step_id))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1)
+}
+
 /// Record that `step_id` is being entered, and return which visit this is
 /// (1 on the first).
 ///

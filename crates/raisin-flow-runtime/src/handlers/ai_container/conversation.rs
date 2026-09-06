@@ -70,8 +70,14 @@ impl AiContainerHandler {
                 .and_then(|v| v.as_str())
                 .map(String::from);
 
+            let name = props
+                .get("name")
+                .or_else(|| props.get("function_name"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
             messages.push(AiMessage {
                 role,
+                name,
                 content,
                 tool_calls,
                 tool_call_id,
@@ -208,6 +214,34 @@ impl AiContainerHandler {
 
     /// Get conversation path from flow context
     pub(crate) fn get_conversation_path(&self, context: &FlowContext) -> FlowResult<String> {
+        // A CONVERSATION IS ONLY SHARED WHEN A MESSAGE STARTED THE FLOW. The
+        // parent-of-the-triggering-node rule below is the chat case: a
+        // raisin:Message under a conversation, so the container continues that
+        // conversation. Any other trigger — a page Updated, an order paid, a
+        // manual run — has no conversation to continue, and deriving one from
+        // the node's parent made every run on that FOLDER share one history:
+        // the second run of an automation on a page saw the first run's
+        // messages, never received its own prompt (it is only appended to an
+        // empty history), and answered "please provide the title…". Measured
+        // 2026-09-03. Those runs get a conversation of their own, under the
+        // flow instance.
+        let is_message_trigger = context
+            .trigger_info
+            .as_ref()
+            .map(|t| t.node_type.ends_with("Message"))
+            .unwrap_or(false);
+        let has_event_path = context
+            .input
+            .get("event")
+            .and_then(|e| e.get("node_path"))
+            .is_some();
+        if !is_message_trigger && !(context.trigger_info.is_none() && has_event_path) {
+            return Ok(format!(
+                "/flows/instances/{}/conversation",
+                context.instance_id
+            ));
+        }
+
         // Get message path from trigger info or flow input
         let message_path = context
             .trigger_info
@@ -304,6 +338,7 @@ impl AiContainerHandler {
                 content,
                 tool_calls: None,
                 tool_call_id: None,
+                name: None,
             });
         }
     }

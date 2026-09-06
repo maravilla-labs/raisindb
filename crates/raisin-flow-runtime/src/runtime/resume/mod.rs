@@ -361,6 +361,7 @@ async fn fail_timed_out(
 fn process_resume_data(instance_id: &str, instance: &mut FlowInstance, resume_data: &Value) {
     if let Some(wait_info) = &instance.wait_info {
         info!(instance_id = %instance_id, wait_type = ?wait_info.wait_type, "Processing resume data");
+        let is_retry = matches!(wait_info.wait_type, WaitType::Retry);
 
         match wait_info.wait_type {
             WaitType::ToolCall => {
@@ -408,8 +409,27 @@ fn process_resume_data(instance_id: &str, instance: &mut FlowInstance, resume_da
                 set_instance_variable(instance, "__resume_data", resume_data.clone());
             }
         }
+        // Every wait except a retry backoff re-enters the SAME node to consume
+        // what it waited for — a function step parks and comes back for its
+        // result, a chat step comes back for each user message. That re-entry
+        // is not a new visit, and must not count as one: `visits.<step>` is
+        // the author's loop bound, and doubling it for every parked step made
+        // `visits.draft < 3` allow one real pass. A retry is different — a
+        // failed attempt burns a visit on purpose (see `bump_visit_count`).
+        if !is_retry {
+            set_instance_variable(
+                instance,
+                crate::runtime::executor::RESUME_REENTRY_KEY,
+                Value::Bool(true),
+            );
+        }
     } else {
         warn!(instance_id = %instance_id, "Flow is waiting but has no wait_info - storing as generic resume data");
         set_instance_variable(instance, "__resume_data", resume_data.clone());
+        set_instance_variable(
+            instance,
+            crate::runtime::executor::RESUME_REENTRY_KEY,
+            Value::Bool(true),
+        );
     }
 }
