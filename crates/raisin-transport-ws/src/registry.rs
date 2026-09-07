@@ -31,6 +31,16 @@ pub struct ConnectionRegistry {
     connections: DashMap<String, Arc<RwLock<ConnectionState>>>,
     /// Index: workspace -> set of connection IDs subscribed to that workspace
     /// The special key "*" contains connections with wildcard subscriptions
+    ///
+    /// SECURITY: this index is keyed by workspace name ONLY, with no tenant
+    /// dimension — every tenant's connections subscribed to a given workspace
+    /// name (e.g. every tenant's inbox lives under the same
+    /// "raisin:access_control" workspace) land in the same bucket. `get_by_workspace`
+    /// therefore returns candidates across ALL tenants; it is NOT itself a
+    /// tenant boundary. The actual enforcement point is the `tenant_id`
+    /// equality check in `event_handler::forwarding::forward_to_matching_connections`
+    /// (and in `broadcast_permissions_changed`) — do not treat this index as
+    /// tenant-safe, and do not remove that downstream check.
     workspace_subscribers: DashMap<String, DashSet<String>>,
 }
 

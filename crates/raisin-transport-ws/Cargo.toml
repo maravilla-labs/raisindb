@@ -64,6 +64,7 @@ raisin-locks = { path = "../raisin-locks" }
 [dev-dependencies]
 tower = "0.5"
 tempfile = "3.8"
+raisin-storage-memory = { path = "../raisin-storage-memory" }
 
 [features]
 default = ["storage-rocksdb"]

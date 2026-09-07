@@ -79,6 +79,14 @@ impl<S: Storage> WsEventHandler<S> {
         let mut notified = 0usize;
         for connection in &connections {
             let conn = connection.read();
+            // Tenant boundary: an ACL write in one tenant must never tell
+            // another tenant's connections to re-resolve permissions — that
+            // both wastes every other tenant's re-resolve cycle and leaks the
+            // fact that something changed in a tenant the connection has no
+            // access to. `get_all()` is process-wide across all tenants.
+            if conn.tenant_id != node_event.tenant_id {
+                continue;
+            }
             if !conn.is_authenticated() {
                 continue; // anonymous — nothing to refresh
             }

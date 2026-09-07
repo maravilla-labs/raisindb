@@ -71,10 +71,22 @@ impl<S: Storage> WsEventHandler<S> {
             // async-safe and must not be held across `.await`).
             let (auth_opt, has_matching) = {
                 let conn = connection.read();
-                let has_matching = !conn
-                    .matches_subscription(workspace, path, event_type, node_type)
-                    .is_empty();
-                (conn.auth_context().cloned(), has_matching)
+                // Tenant boundary: a connection may only ever receive events
+                // for its own tenant. `ConnectionRegistry::get_by_workspace`
+                // indexes purely by workspace name across all tenants (e.g.
+                // every tenant's inbox lives under the same
+                // "raisin:access_control" workspace), so this check is the
+                // one place that actually enforces tenant isolation for the
+                // WS event fan-out. Do not remove it without re-introducing
+                // a cross-tenant leak.
+                if conn.tenant_id != tenant_id {
+                    (None, false)
+                } else {
+                    let has_matching = !conn
+                        .matches_subscription(workspace, path, event_type, node_type)
+                        .is_empty();
+                    (conn.auth_context().cloned(), has_matching)
+                }
             };
 
             if !has_matching {
@@ -184,5 +196,85 @@ impl<S: Storage> WsEventHandler<S> {
                 "Event forwarding completed"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::connection::ConnectionState;
+    use crate::event_handler::WsEventHandler;
+    use crate::protocol::SubscriptionFilters;
+    use crate::registry::ConnectionRegistry;
+    use parking_lot::RwLock;
+    use raisin_events::{Event, EventHandler, NodeEvent, NodeEventKind};
+    use raisin_storage_memory::InMemoryStorage;
+    use std::sync::Arc;
+
+    /// Registers a connection for `tenant_id`, subscribed (no path/type filter)
+    /// to `workspace`, and returns its event receiver.
+    fn register_subscriber(
+        registry: &ConnectionRegistry,
+        tenant_id: &str,
+        workspace: &str,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<crate::protocol::EventMessage> {
+        let conn = ConnectionState::new(tenant_id.to_string(), None, 4, 100);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        conn.set_event_channel(tx);
+        let connection_id = conn.connection_id.clone();
+        conn.add_subscription(
+            "sub-1".to_string(),
+            SubscriptionFilters {
+                workspace: Some(workspace.to_string()),
+                path: None,
+                event_types: None,
+                node_type: None,
+                include_node: false,
+            },
+        );
+        let conn = Arc::new(RwLock::new(conn));
+        registry.register(conn);
+        registry.add_workspace_subscription(&connection_id, Some(workspace));
+        rx
+    }
+
+    fn node_event_for_tenant(tenant_id: &str) -> NodeEvent {
+        NodeEvent {
+            tenant_id: tenant_id.to_string(),
+            repository_id: "repo1".to_string(),
+            branch: "main".to_string(),
+            workspace_id: "raisin:access_control".to_string(),
+            node_id: "task-1".to_string(),
+            node_type: Some("raisin:InboxTask".to_string()),
+            revision: raisin_hlc::HLC::now(),
+            kind: NodeEventKind::Created,
+            path: Some("/mtex/home/inbox/task-1".to_string()),
+            metadata: None,
+        }
+    }
+
+    /// A node event created in tenant "mtex" must never reach a connection
+    /// belonging to a different tenant ("solutas"), even though both are
+    /// subscribed to the exact same (tenant-agnostic) workspace name. This is
+    /// the regression test for the cross-tenant inbox-notification leak.
+    #[tokio::test]
+    async fn node_event_is_not_forwarded_across_tenants() {
+        let registry = Arc::new(ConnectionRegistry::new());
+        let mut mtex_rx = register_subscriber(&registry, "mtex", "raisin:access_control");
+        let mut solutas_rx = register_subscriber(&registry, "solutas", "raisin:access_control");
+
+        let storage = Arc::new(InMemoryStorage::default());
+        let handler = WsEventHandler::new(registry, storage);
+
+        let event = Event::Node(node_event_for_tenant("mtex"));
+        handler.handle(&event).await.expect("event handling failed");
+
+        assert!(
+            mtex_rx.try_recv().is_ok(),
+            "same-tenant connection should receive its own tenant's event"
+        );
+        assert!(
+            solutas_rx.try_recv().is_err(),
+            "cross-tenant connection must NOT receive another tenant's event"
+        );
     }
 }

@@ -7932,6 +7932,7 @@ dependencies = [
  "raisin-rocksdb",
  "raisin-sql-execution",
  "raisin-storage",
+ "raisin-storage-memory",
  "reqwest",
  "rmp-serde",
  "serde",
