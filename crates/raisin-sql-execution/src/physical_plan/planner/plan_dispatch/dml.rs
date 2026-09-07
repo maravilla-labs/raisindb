@@ -21,12 +21,14 @@ impl PhysicalPlanner {
                 columns,
                 values,
                 is_upsert,
+                returning,
             } => Some(Ok(PhysicalPlan::PhysicalInsert {
                 target: target.clone(),
                 schema: schema.clone(),
                 columns: columns.clone(),
                 values: values.clone(),
                 is_upsert: *is_upsert,
+                returning: returning.clone(),
             })),
 
             LogicalPlan::Update {
@@ -35,12 +37,14 @@ impl PhysicalPlanner {
                 assignments,
                 filter,
                 branch_override,
+                returning,
             } => Some(Ok(PhysicalPlan::PhysicalUpdate {
                 target: target.clone(),
                 schema: schema.clone(),
                 assignments: assignments.clone(),
                 filter: filter.clone(),
                 branch_override: branch_override.clone(),
+                returning: returning.clone(),
             })),
 
             LogicalPlan::Delete {
@@ -48,11 +52,13 @@ impl PhysicalPlanner {
                 schema,
                 filter,
                 branch_override,
+                returning,
             } => Some(Ok(PhysicalPlan::PhysicalDelete {
                 target: target.clone(),
                 schema: schema.clone(),
                 filter: filter.clone(),
                 branch_override: branch_override.clone(),
+                returning: returning.clone(),
             })),
 
             LogicalPlan::Order {

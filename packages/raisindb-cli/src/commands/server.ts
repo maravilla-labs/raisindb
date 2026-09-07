@@ -12,7 +12,10 @@ import { ServerInstallUI, type InstallState } from '../components/ServerInstall.
 import { ServerReady } from '../components/ServerReady.js';
 
 const BIN_NAME = 'raisindb';
-const REPO = process.env.RAISINDB_REPO || 'maravilla-labs/raisindb';
+// Distinct from RAISINDB_REPO, which names the default *content* repository for
+// --repo-less commands (config.ts). Reusing it here made
+// `RAISINDB_REPO=myapp raisindb server install` download from github.com/myapp.
+const REPO = process.env.RAISINDB_SERVER_GITHUB_REPO || 'maravilla-labs/raisindb';
 const GH_TOKEN = process.env.RAISINDB_GH_TOKEN || process.env.GITHUB_TOKEN || '';
 const HTTP_TIMEOUT_MS = Number(process.env.RAISINDB_HTTP_TIMEOUT_MS || 15000);
 const HTTP_RETRIES = Math.max(1, Number(process.env.RAISINDB_HTTP_RETRIES || 3));
@@ -321,6 +324,63 @@ const orange = (s: string) => `\x1b[38;5;208m${s}\x1b[0m`;
 
 // --- Server Start ---
 
+
+/** What `server start` forwards to the `raisindb` binary, and what it advertises. */
+export interface ServerArgsOptions {
+  devMode: boolean;
+  /** `--port` from the CLI; the binary's flag is `--port` / `-p`, NOT `--http-port`. */
+  port?: string;
+  /** `--pgwire-port` from the CLI. */
+  pgwirePort?: string;
+  /** Process environment; `RAISIN_PGWIRE_*` there is respected as an explicit choice. */
+  env?: NodeJS.ProcessEnv;
+}
+
+/**
+ * Build the argument list for the server binary from `server start` options
+ * plus any pass-through flags the user typed after the command.
+ *
+ * Pure so it can be tested. Two things it gets right that the inline version
+ * got wrong: the HTTP port flag is `--port` (the binary rejected `--http-port`
+ * with "unexpected argument"), and the pgwire listener is OFF in the binary by
+ * default, so it is turned on here — the banner advertises a PostgreSQL URL.
+ * An explicit choice wins: pass-through `--pgwire-enabled`, a `--config` file
+ * (its `[pgwire]` section rules) or `RAISIN_PGWIRE_ENABLED` in the environment
+ * all suppress the default, and the banner then only claims pgwire when it was
+ * enabled here.
+ */
+export function buildServerArgs(
+  passthrough: string[],
+  options: ServerArgsOptions,
+): { args: string[]; pgwireEnabled: boolean } {
+  const args = [...passthrough];
+  const has = (flag: string) => args.some((a) => a === flag || a.startsWith(`${flag}=`));
+  const env = options.env ?? {};
+
+  if (options.devMode && !has('--dev-mode')) args.push('--dev-mode');
+  if (options.port && !has('--port') && !has('-p')) args.push('--port', options.port);
+
+  const pgwireDecidedElsewhere =
+    has('--pgwire-enabled') || has('--config') || has('-c') || env.RAISIN_PGWIRE_ENABLED !== undefined;
+  let pgwireEnabled = false;
+  if (!pgwireDecidedElsewhere) {
+    args.push('--pgwire-enabled', 'true');
+    pgwireEnabled = true;
+  } else if (has('--pgwire-enabled')) {
+    const i = args.findIndex((a) => a === '--pgwire-enabled' || a.startsWith('--pgwire-enabled='));
+    const v = args[i].includes('=') ? args[i].split('=')[1] : args[i + 1];
+    pgwireEnabled = v === 'true';
+  } else if (env.RAISIN_PGWIRE_ENABLED !== undefined) {
+    pgwireEnabled = env.RAISIN_PGWIRE_ENABLED === 'true';
+  }
+  if (options.pgwirePort && !has('--pgwire-port')) args.push('--pgwire-port', options.pgwirePort);
+  else if (pgwireEnabled && !pgwireDecidedElsewhere && !has('--pgwire-port') && !env.RAISIN_PGWIRE_PORT) {
+    args.push('--pgwire-port', '5432');
+  }
+
+  return { args, pgwireEnabled };
+}
+
 export async function serverStart(args: string[], options: { verbose?: boolean; production?: boolean; detach?: boolean; port?: string; pgwirePort?: string }): Promise<void> {
   // If the first positional arg is an existing directory, treat it as the
   // project working directory (where ./.data/rocksdb lives) instead of
@@ -368,9 +428,12 @@ export async function serverStart(args: string[], options: { verbose?: boolean; 
   }
 
   // Build server args
-  const serverArgs = [...args];
-  if (devMode && !serverArgs.includes('--dev-mode')) serverArgs.push('--dev-mode');
-  if (options.port) serverArgs.push('--http-port', options.port);
+  const { args: serverArgs, pgwireEnabled } = buildServerArgs(args, {
+    devMode,
+    port: options.port,
+    pgwirePort: options.pgwirePort,
+    env: process.env,
+  });
 
   // First run detection — generate and show password only on fresh start
   const dataDir = path.resolve('.data', 'rocksdb');
@@ -447,6 +510,7 @@ export async function serverStart(args: string[], options: { verbose?: boolean; 
       devMode,
       httpPort,
       pgwirePort,
+      pgwireEnabled,
       adminPassword: isFirstRun ? generatedPassword : null,
       dataDir,
       isFirstRun,
@@ -486,7 +550,7 @@ function printBanner(ver: string | null, devMode: boolean, httpPort: string, pgw
   if (isFirstRun) {
     console.log('');
     console.log(`  ${dim('Get started:')}`);
-    console.log(`    ${dim('$')} psql -h localhost -p ${pgwirePort} -U admin`);
+    console.log(`    ${dim('$')} psql -h localhost -p ${pgwirePort} -U default -d <repo>   ${dim('(password: an API key)')}`);
     console.log(`    ${dim('$')} open ${cyan(`http://localhost:${httpPort}/admin`)}`);
     console.log(`    ${dim('$')} raisindb shell`);
   }

@@ -57,6 +57,34 @@ properties:
     description: How function can be executed (async, sync, both). Default is async.
     default: "async"
 
+  - name: execution_context
+    type: String
+    required: false
+    title: Execution Context
+    description: |
+      Whose identity this function runs with. Values: "user" (default) or
+      "system".
+
+      "user" — the function runs as the INVOKING CALLER'S real identity, so
+      RLS applies to every `raisin.db.*` read/write the function itself
+      issues, exactly as if that caller had run the query directly. An
+      anonymous caller runs as nobody: RLS narrows their reads/writes to
+      whatever an unauthenticated identity can see, i.e. usually nothing.
+
+      "system" — elevated, no caller identity at all: `raisin.db.*` calls
+      inside the function bypass RLS. Reserve this for functions that
+      legitimately need cross-user access (shared inventory writes, admin
+      operations) — it is now an explicit, auditable opt-in rather than the
+      silent default every function used to get.
+
+      This DEFAULTS TO "user", which is a deliberate behavior change: a
+      function written to assume system-level access (e.g. writing another
+      user's order, claiming shared inventory) must now set
+      `execution_context: "system"` explicitly, or its own reads/writes will
+      be RLS-scoped to the caller and it will find nothing to act on. Audit
+      existing write-verb functions for this before relying on the new
+      default.
+
   - name: enabled
     type: Boolean
     required: false

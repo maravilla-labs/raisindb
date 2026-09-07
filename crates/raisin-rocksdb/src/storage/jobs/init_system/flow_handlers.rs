@@ -236,6 +236,14 @@ pub fn create_scheduled_invocation_handler(
                 // (see jobs/flow_scheduler.rs).
                 let scheduler: &dyn raisin_flow_runtime::service::FlowJobScheduler =
                     storage.as_ref();
+                // A scheduled/timer trigger is genuinely system-initiated, not
+                // an anonymous external caller — pass an explicit system
+                // AuthContext (not `None`) so `run_flow`'s "authenticated
+                // caller required" gate reads it as authenticated-as-system
+                // rather than refusing it. `system_as` keeps the caller-facing
+                // label (the schedule's actor string) as provenance on the
+                // trigger event while still carrying system privilege.
+                let system_auth = raisin_models::auth::AuthContext::system_as(actor);
                 let result = raisin_flow_runtime::service::run_flow(
                     storage.as_ref(),
                     scheduler,
@@ -245,8 +253,7 @@ pub fn create_scheduled_invocation_handler(
                     &repo_id,
                     &flow_path,
                     input,
-                    actor,
-                    None,
+                    Some(&system_auth),
                 )
                 .await
                 .map_err(|e| {

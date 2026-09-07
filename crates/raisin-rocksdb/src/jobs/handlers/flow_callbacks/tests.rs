@@ -116,7 +116,7 @@ mod agent_provenance {
 
         let exec_sink = sink.clone();
         let executor: FunctionExecutorCallback =
-            Arc::new(move |_f, _input, _t, _r, _b, _w, agent| {
+            Arc::new(move |_f, _input, _t, _r, _b, _w, agent, _triggering_user| {
                 exec_sink.lock().unwrap().push(agent);
                 Box::pin(async { Ok(serde_json::json!(null)) })
             });

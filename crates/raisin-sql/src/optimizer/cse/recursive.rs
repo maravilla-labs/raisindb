@@ -98,6 +98,18 @@ pub fn apply_cse_recursive(plan: LogicalPlan, config: &CseConfig) -> LogicalPlan
             anti,
         },
 
+        LogicalPlan::SetOperation {
+            left,
+            right,
+            kind,
+            all,
+        } => LogicalPlan::SetOperation {
+            left: Box::new(apply_cse_recursive(*left, config)),
+            right: Box::new(apply_cse_recursive(*right, config)),
+            kind,
+            all,
+        },
+
         LogicalPlan::WithCTE { ctes, main_query } => {
             let optimized_ctes = ctes
                 .into_iter()

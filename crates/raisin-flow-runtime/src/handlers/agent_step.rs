@@ -100,10 +100,13 @@ impl StepHandler for AgentStepHandler {
                 Value::Null => String::new(),
                 other => other.to_string(),
             },
+            // A trigger-started flow carries the changed node as `input.node`
+            // (see the trigger evaluation job); the older `event.node_data`
+            // spelling is still accepted.
             None => context
                 .input
-                .get("event")
-                .and_then(|e| e.get("node_data"))
+                .get("node")
+                .or_else(|| context.input.get("event").and_then(|e| e.get("node_data")))
                 .and_then(|n| n.get("properties"))
                 .and_then(|p| p.get("content"))
                 .and_then(|c| c.as_str())

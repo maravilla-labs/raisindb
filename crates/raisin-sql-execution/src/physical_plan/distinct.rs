@@ -70,6 +70,17 @@ fn row_to_hash_key(row: &Row) -> String {
     column_hashes.join("|")
 }
 
+/// Hash key over a row's VALUES in column order, ignoring column names.
+/// Set operations use this so rows from two differently-named sides compare
+/// positionally.
+pub(super) fn row_values_hash_key(row: &Row) -> String {
+    row.columns
+        .values()
+        .map(property_value_to_hash_key)
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
 /// Generate a hash key for specific columns (for DISTINCT ON)
 fn row_columns_to_hash_key(row: &Row, columns: &[String]) -> String {
     let column_hashes: Vec<String> = columns

@@ -113,6 +113,7 @@ impl LogicalPlan {
             | LogicalPlan::Relate { .. }
             | LogicalPlan::Unrelate { .. } => vec![],
             LogicalPlan::SemiJoin { left, .. } => left.schema(),
+            LogicalPlan::SetOperation { left, .. } => left.schema(),
             LogicalPlan::Empty => vec![],
         }
     }
@@ -133,7 +134,10 @@ impl LogicalPlan {
             | LogicalPlan::Window { input, .. }
             | LogicalPlan::LateralMap { input, .. } => vec![input.as_ref()],
             LogicalPlan::Join { left, right, .. } => vec![left.as_ref(), right.as_ref()],
-            LogicalPlan::SemiJoin { left, right, .. } => vec![left.as_ref(), right.as_ref()],
+            LogicalPlan::SemiJoin { left, right, .. }
+            | LogicalPlan::SetOperation { left, right, .. } => {
+                vec![left.as_ref(), right.as_ref()]
+            }
             LogicalPlan::WithCTE { ctes, main_query } => {
                 let mut inputs = vec![];
                 for (_, cte_plan) in ctes {

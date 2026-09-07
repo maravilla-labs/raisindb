@@ -153,6 +153,66 @@ pub(crate) fn replace_common_subexpressions(
             negated,
         },
 
+        e @ (Expr::Exists { .. } | Expr::ScalarSubquery { .. }) => e,
+
+        Expr::QuantifiedSubquery {
+            left,
+            op,
+            subquery,
+            all,
+        } => Expr::QuantifiedSubquery {
+            left: Box::new(replace_common_subexpressions(
+                *left,
+                replacement_map,
+                table_qualifier,
+            )),
+            op,
+            subquery,
+            all,
+        },
+
+        Expr::Quantified {
+            left,
+            op,
+            right,
+            all,
+        } => Expr::Quantified {
+            left: Box::new(replace_common_subexpressions(
+                *left,
+                replacement_map,
+                table_qualifier,
+            )),
+            op,
+            right: Box::new(replace_common_subexpressions(
+                *right,
+                replacement_map,
+                table_qualifier,
+            )),
+            all,
+        },
+
+        Expr::Regex {
+            expr,
+            pattern,
+            case_insensitive,
+            negated,
+            similar_to,
+        } => Expr::Regex {
+            expr: Box::new(replace_common_subexpressions(
+                *expr,
+                replacement_map,
+                table_qualifier,
+            )),
+            pattern: Box::new(replace_common_subexpressions(
+                *pattern,
+                replacement_map,
+                table_qualifier,
+            )),
+            case_insensitive,
+            negated,
+            similar_to,
+        },
+
         Expr::Like {
             expr,
             pattern,

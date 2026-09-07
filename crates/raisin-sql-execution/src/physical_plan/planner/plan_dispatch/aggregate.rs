@@ -35,9 +35,17 @@ impl PhysicalPlanner {
 
         // Optimization: Detect COUNT(*) with no GROUP BY over a TableScan
         // Note: COUNT(*) is often converted to COUNT(1) by the analyzer, so we accept both
+        // COUNT(expr) must skip NULL rows, so only a bare COUNT(*) (no
+        // argument, or the literal `1` the analyzer substitutes for `*`) may
+        // be answered from an index count.
         let is_count_star = aggregates.len() == 1
             && aggregates[0].func == AggregateFunction::Count
-            && (aggregates[0].args.is_empty() || aggregates[0].args.len() == 1)
+            && (aggregates[0].args.is_empty()
+                || (aggregates[0].args.len() == 1
+                    && matches!(
+                        aggregates[0].args[0].expr,
+                        raisin_sql::analyzer::Expr::Literal(raisin_sql::analyzer::Literal::Int(_))
+                    )))
             // A FILTER (WHERE ...) clause must be evaluated per row — the
             // index-count pushdowns would silently drop it.
             && aggregates[0].filter.is_none();

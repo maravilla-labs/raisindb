@@ -8,6 +8,7 @@
 
 mod expressions;
 mod operators;
+mod walk;
 mod window;
 
 pub use expressions::{Expr, Literal, TypedExpr};

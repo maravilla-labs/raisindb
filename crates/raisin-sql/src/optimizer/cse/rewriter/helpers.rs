@@ -33,7 +33,9 @@ pub(crate) fn get_table_qualifier(plan: &LogicalPlan) -> String {
         | LogicalPlan::Window { input, .. }
         | LogicalPlan::LateralMap { input, .. } => get_table_qualifier(input),
         LogicalPlan::Join { left, .. } => get_table_qualifier(left),
-        LogicalPlan::SemiJoin { left, .. } => get_table_qualifier(left),
+        LogicalPlan::SemiJoin { left, .. } | LogicalPlan::SetOperation { left, .. } => {
+            get_table_qualifier(left)
+        }
         LogicalPlan::WithCTE { main_query, .. } => get_table_qualifier(main_query),
         // DML operations don't have meaningful table qualifiers (they're leaf nodes)
         LogicalPlan::Insert { target, .. }

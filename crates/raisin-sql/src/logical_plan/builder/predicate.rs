@@ -54,11 +54,18 @@ impl<'a> PlanBuilder<'a> {
                     tables.extend(Self::extract_table_references(item));
                 }
             }
-            Expr::InSubquery { expr, .. } => {
+            Expr::InSubquery { expr, .. } | Expr::QuantifiedSubquery { left: expr, .. } => {
                 // Only extract from the left expression, subquery has its own scope
                 tables.extend(Self::extract_table_references(expr));
             }
-            Expr::Like { expr, pattern, .. } | Expr::ILike { expr, pattern, .. } => {
+            Expr::Exists { .. } | Expr::ScalarSubquery { .. } => {}
+            Expr::Quantified { left, right, .. } => {
+                tables.extend(Self::extract_table_references(left));
+                tables.extend(Self::extract_table_references(right));
+            }
+            Expr::Regex { expr, pattern, .. }
+            | Expr::Like { expr, pattern, .. }
+            | Expr::ILike { expr, pattern, .. } => {
                 tables.extend(Self::extract_table_references(expr));
                 tables.extend(Self::extract_table_references(pattern));
             }

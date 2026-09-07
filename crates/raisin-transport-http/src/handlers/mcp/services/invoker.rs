@@ -159,14 +159,38 @@ impl HttpFunctionInvoker {
         )
         .await;
 
-        let actor = identity
-            .subject
-            .clone()
-            .unwrap_or_else(|| "system".to_string());
+        // Enforce the function's declared `execution_context`: "system" strips
+        // the caller's identity even though this whole path already threads it
+        // — it is an explicit, auditable opt-in for a tool that legitimately
+        // needs cross-user access — but keeps their `agent` marker for
+        // attribution (matches trigger evaluation's established convention).
+        // "user" (the default) keeps executing as the calling identity, as
+        // documented above.
+        let auth_for_execution = match loaded.metadata.execution_context {
+            raisin_functions::types::FunctionExecutionContext::System => {
+                let system = AuthContext::system();
+                Some(match auth.agent {
+                    Some(agent) => system.with_agent(agent),
+                    None => system,
+                })
+            }
+            raisin_functions::types::FunctionExecutionContext::User => Some(auth),
+        };
+
+        let actor = match &auth_for_execution {
+            Some(auth) => auth
+                .user_id
+                .clone()
+                .or_else(|| identity.subject.clone())
+                .unwrap_or_else(|| "system".to_string()),
+            None => "system".to_string(),
+        };
         let mut context = ExecutionContext::new(&self.tenant_id, &self.repo, &self.branch, &actor)
             .with_workspace("functions")
-            .with_input(input)
-            .with_auth(auth.clone());
+            .with_input(input);
+        if let Some(auth) = auth_for_execution.clone() {
+            context = context.with_auth(auth);
+        }
         // Custom MCP tools never auto-escalate to admin.
         context = context.with_admin_escalation(false);
 
@@ -178,7 +202,7 @@ impl HttpFunctionInvoker {
             "functions",
             loaded.metadata.network_policy.clone(),
             loaded.metadata.secret_policy.clone(),
-            Some(auth),
+            auth_for_execution,
         );
 
         FunctionExecutor::new()

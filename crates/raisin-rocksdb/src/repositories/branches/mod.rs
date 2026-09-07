@@ -32,6 +32,10 @@ pub struct BranchRepositoryImpl {
     pub(crate) operation_capture: Option<Arc<crate::OperationCapture>>,
     pub(crate) job_registry: Option<Arc<JobRegistry>>,
     pub(crate) job_data_store: Option<Arc<JobDataStore>>,
+    /// Publishes `RepositoryEventKind::BranchCreated`, which is what enqueues
+    /// the fulltext and embedding branch-copy jobs. Without it a new branch
+    /// has its records but no derived indexes until a rebuild.
+    pub(crate) event_bus: Option<Arc<dyn raisin_events::EventBus>>,
 }
 
 impl BranchRepositoryImpl {
@@ -42,6 +46,7 @@ impl BranchRepositoryImpl {
             operation_capture: None,
             job_registry: None,
             job_data_store: None,
+            event_bus: None,
         }
     }
 
@@ -52,7 +57,14 @@ impl BranchRepositoryImpl {
             operation_capture: Some(operation_capture),
             job_registry: None,
             job_data_store: None,
+            event_bus: None,
         }
+    }
+
+    /// Set the event bus on which branch lifecycle events are published.
+    pub fn with_event_bus(mut self, event_bus: Arc<dyn raisin_events::EventBus>) -> Self {
+        self.event_bus = Some(event_bus);
+        self
     }
 
     /// Set the job registry and data store for background job enqueueing

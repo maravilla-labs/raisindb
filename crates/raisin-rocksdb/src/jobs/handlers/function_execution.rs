@@ -305,6 +305,30 @@ impl FunctionExecutionHandler {
             .metadata
             .get(crate::jobs::AUTH_CONTEXT_KEY)
             .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+        // A genuine trigger firing (as opposed to the "ws"/"http" pseudo-names
+        // the transports use for their own async invokes, which already log
+        // their own absence-of-auth case) structurally has no caller — a
+        // schema or timer trigger was never a person's request. If the
+        // function declares `execution_context: "user"` (the default), it
+        // still runs, with no auth context (equivalent to `system`, per
+        // `execute_function`'s doc comment); this is the audit trail for that
+        // fallback, not a way to prevent the trigger from firing.
+        if auth_context.is_none() {
+            if let Some(name) = trigger_name.as_deref() {
+                if name != "ws" && name != "http" {
+                    tracing::warn!(
+                        job_id = %job.id,
+                        execution_id = %execution_id,
+                        function_path = %function_path,
+                        trigger_name = %name,
+                        "Trigger has no originating caller identity; function runs \
+                         with no auth context (system-equivalent) regardless of its \
+                         declared execution_context"
+                    );
+                }
+            }
+        }
         let start = std::time::Instant::now();
         let result = executor(
             function_path.clone(),

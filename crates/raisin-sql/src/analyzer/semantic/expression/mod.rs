@@ -131,6 +131,30 @@ impl<'a> AnalyzerContext<'a> {
                 negated,
             } => self.analyze_in_subquery(expr, subquery, *negated),
 
+            SqlExpr::Exists { subquery, negated } => self.analyze_exists(subquery, *negated),
+
+            SqlExpr::Subquery(subquery) => self.analyze_scalar_subquery(subquery),
+
+            SqlExpr::AnyOp {
+                left,
+                compare_op,
+                right,
+                is_some: _,
+            } => self.analyze_quantified(left, compare_op, right, false),
+
+            SqlExpr::AllOp {
+                left,
+                compare_op,
+                right,
+            } => self.analyze_quantified(left, compare_op, right, true),
+
+            SqlExpr::SimilarTo {
+                negated,
+                expr,
+                pattern,
+                escape_char: _,
+            } => self.analyze_regex(expr, pattern, false, *negated, true),
+
             SqlExpr::CompoundFieldAccess { root, access_chain } => {
                 self.analyze_compound_field_access(root, access_chain)
             }
@@ -157,7 +181,9 @@ impl<'a> AnalyzerContext<'a> {
             // other returned `UnsupportedExpression`.
             SqlExpr::Array(array) => self.analyze_array(&array.elem, expr),
 
-            _ => Err(AnalysisError::UnsupportedExpression(format!("{:?}", expr))),
+            _ => Err(AnalysisError::UnsupportedExpression(
+                describe_unsupported_expr(expr),
+            )),
         }
     }
 
@@ -272,4 +298,51 @@ impl<'a> AnalyzerContext<'a> {
 
         Ok(result)
     }
+}
+
+/// Name the SQL construct that is not supported, followed by its SQL text
+/// (truncated), instead of dumping the parser's AST.
+pub(in crate::analyzer) fn describe_unsupported_expr(expr: &SqlExpr) -> String {
+    let construct = match expr {
+        SqlExpr::Array(_) => "ARRAY literal (only numeric vector literals and ANY/ALL arrays)",
+        SqlExpr::Tuple(_) => "row/tuple value",
+        SqlExpr::GroupingSets(_) => "GROUPING SETS",
+        SqlExpr::Cube(_) => "CUBE",
+        SqlExpr::Rollup(_) => "ROLLUP",
+        SqlExpr::Collate { .. } => "COLLATE",
+        SqlExpr::AtTimeZone { .. } => "AT TIME ZONE",
+        SqlExpr::Overlay { .. } => "OVERLAY",
+        SqlExpr::Convert { .. } => "CONVERT",
+        SqlExpr::TypedString { .. } => "typed string literal",
+        SqlExpr::Dictionary(_) | SqlExpr::Map(_) => "map/dictionary literal",
+        SqlExpr::Lambda(_) => "lambda expression",
+        SqlExpr::MatchAgainst { .. } => "MATCH ... AGAINST",
+        SqlExpr::Struct { .. } => "STRUCT literal",
+        SqlExpr::Named { .. } => "named argument",
+        SqlExpr::IsTrue(_)
+        | SqlExpr::IsNotTrue(_)
+        | SqlExpr::IsFalse(_)
+        | SqlExpr::IsNotFalse(_)
+        | SqlExpr::IsUnknown(_)
+        | SqlExpr::IsNotUnknown(_) => "IS [NOT] TRUE/FALSE/UNKNOWN",
+        SqlExpr::IsNormalized { .. } => "IS NORMALIZED",
+        SqlExpr::RLike { .. } => "RLIKE / REGEXP (use ~ or SIMILAR TO)",
+        SqlExpr::Position { .. } => "POSITION",
+        SqlExpr::Substring { .. } => "SUBSTRING",
+        SqlExpr::Trim { .. } => "TRIM",
+        SqlExpr::Extract { .. } => "EXTRACT",
+        SqlExpr::Ceil { .. } => "CEIL",
+        SqlExpr::Floor { .. } => "FLOOR",
+        SqlExpr::Prefixed { .. } => "prefixed literal",
+        SqlExpr::OuterJoin(_) => "Oracle (+) outer join",
+        SqlExpr::Prior(_) => "PRIOR",
+        SqlExpr::Wildcard(_) | SqlExpr::QualifiedWildcard(..) => "wildcard in this position",
+        _ => "expression",
+    };
+    let mut text = expr.to_string();
+    if text.len() > 120 {
+        text.truncate(117);
+        text.push_str("...");
+    }
+    format!("{construct}: `{text}`")
 }

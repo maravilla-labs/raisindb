@@ -112,6 +112,10 @@ pub struct AggregateExpr {
     pub return_type: DataType,
     /// Optional FILTER clause: e.g., COUNT(*) FILTER (WHERE x > 10)
     pub filter: Option<TypedExpr>,
+    /// `DISTINCT` inside the call (`COUNT(DISTINCT x)`, `ARRAY_AGG(DISTINCT x)`).
+    pub distinct: bool,
+    /// Inner `ORDER BY` keys (`ARRAY_AGG(x ORDER BY y DESC)`), `true` = DESC.
+    pub order_by: Vec<(TypedExpr, bool)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

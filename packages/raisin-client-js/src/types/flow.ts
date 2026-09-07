@@ -21,13 +21,13 @@ export interface FlowRunResponse {
 
 /** Flow instance status values */
 export type FlowInstanceStatus =
-  | 'queued'
   | 'pending'
   | 'running'
+  | 'waiting'
   | 'completed'
   | 'failed'
-  | 'waiting'
-  | 'cancelled';
+  | 'cancelled'
+  | 'rolled_back';
 
 /** Response from GET flow instance status endpoint. */
 export interface FlowInstanceStatusResponse {

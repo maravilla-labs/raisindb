@@ -327,6 +327,22 @@ pub struct DesignerStepProperties {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub escalation_assignee: Option<String>,
 
+    // === Group assignee (assignee is a raisin:Group) ===
+    /// How many member responses complete the wait: `any` (default), `all`,
+    /// or `quorum` (see `group_quorum`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_completion: Option<String>,
+
+    /// Number of qualifying responses required when `group_completion` is
+    /// `quorum`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_quorum: Option<u32>,
+
+    /// Optional REL over `response` / `responses` deciding whether a member's
+    /// response counts towards the group policy
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_condition: Option<String>,
+
     /// Target node ID when the wait deadline expires
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_edge: Option<String>,

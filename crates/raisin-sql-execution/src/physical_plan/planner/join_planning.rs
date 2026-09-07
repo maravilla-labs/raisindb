@@ -376,7 +376,19 @@ impl PhysicalPlanner {
                     .unwrap_or(true)
             }
             // Subqueries and window functions cannot be hash-join keys.
-            Expr::InSubquery { .. } | Expr::Window { .. } => false,
+            Expr::InSubquery { .. }
+            | Expr::Window { .. }
+            | Expr::Exists { .. }
+            | Expr::ScalarSubquery { .. }
+            | Expr::QuantifiedSubquery { .. } => false,
+            Expr::Quantified { left, right, .. } => {
+                Self::collect_expr_qualifiers(left, out)
+                    && Self::collect_expr_qualifiers(right, out)
+            }
+            Expr::Regex { expr, pattern, .. } => {
+                Self::collect_expr_qualifiers(expr, out)
+                    && Self::collect_expr_qualifiers(pattern, out)
+            }
         }
     }
 }

@@ -4,6 +4,7 @@
 //! for COALESCE, TO_JSON/TO_JSONB, and JSON_GET functions.
 
 use super::super::{AnalyzerContext, Result};
+use super::scalar_call::ScalarResolution;
 use crate::analyzer::{
     error::AnalysisError,
     functions::{FunctionCategory, FunctionSignature},
@@ -115,6 +116,33 @@ impl<'a> AnalyzerContext<'a> {
         let args = args?;
         let arg_types: Vec<DataType> = args.iter().map(|a| a.data_type.clone()).collect();
 
+        // Aggregate modifiers: DISTINCT and an inner ORDER BY. `Expr::Function`
+        // has no slot for them, so they are encoded into the function name and
+        // the ORDER BY keys are appended to the arguments (see `aggregate_spec`).
+        let (agg_distinct, agg_order_by): (bool, Vec<(TypedExpr, bool)>) = match (
+            &func.args,
+            crate::analyzer::aggregate_spec::AggregateSpec::parse(&func_name),
+        ) {
+            (FunctionArguments::List(arg_list), Some(_)) => {
+                let distinct = matches!(
+                    arg_list.duplicate_treatment,
+                    Some(sqlparser::ast::DuplicateTreatment::Distinct)
+                );
+                let mut order_by = Vec::new();
+                for clause in &arg_list.clauses {
+                    if let sqlparser::ast::FunctionArgumentClause::OrderBy(keys) = clause {
+                        for key in keys {
+                            let typed = self.analyze_expr(&key.expr)?;
+                            let desc = key.options.asc == Some(false);
+                            order_by.push((typed, desc));
+                        }
+                    }
+                }
+                (distinct, order_by)
+            }
+            _ => (false, Vec::new()),
+        };
+
         // Check if this is a window function (has OVER clause)
         if let Some(over) = &func.over {
             return self.analyze_window_function(&func_name, args, over);
@@ -135,33 +163,16 @@ impl<'a> AnalyzerContext<'a> {
             return self.analyze_json_get(&args);
         }
 
-        // Resolve function signature
-        let signature = self
-            .functions
-            .resolve(&func_name, &arg_types)
-            .ok_or_else(|| AnalysisError::FunctionNotFound {
-                name: func_name.clone(),
-                args: arg_types
-                    .iter()
-                    .map(|t| t.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            })?;
-
-        // Coerce arguments to match signature parameter types
-        let mut coerced_args = Vec::new();
-        for (arg, param_type) in args.iter().zip(&signature.params) {
-            let coerced = self.coerce_if_needed(arg.clone(), param_type)?;
-            coerced_args.push(coerced);
+        // Variadic scalar functions (CONCAT, GREATEST, FORMAT, ...) have no
+        // fixed-arity signature in the registry.
+        if let Some(result) = self.analyze_variadic_scalar(&func_name, &args)? {
+            return Ok(result);
         }
-        let args = coerced_args;
 
-        // Apply constant folding for deterministic functions
-        if signature.is_deterministic && args.iter().all(|a| matches!(a.expr, Expr::Literal(_))) {
-            if let Some(folded) = self.try_constant_fold(&func_name, &args)? {
-                return Ok(folded);
-            }
-        }
+        let (signature, args) = match self.resolve_scalar_call(&func_name, args)? {
+            ScalarResolution::Folded(folded) => return Ok(folded),
+            ScalarResolution::Call(signature, args) => (signature, args),
+        };
 
         // Analyze FILTER clause if present (for aggregate functions)
         let filter = if let Some(filter_expr) = &func.filter {
@@ -192,11 +203,23 @@ impl<'a> AnalyzerContext<'a> {
             signature.return_type.clone()
         };
 
+        let (func_name, args) = if agg_distinct || !agg_order_by.is_empty() {
+            let mut spec = crate::analyzer::aggregate_spec::AggregateSpec::parse(&func_name)
+                .expect("modifiers only collected for aggregates");
+            spec.distinct = agg_distinct;
+            spec.order_desc = agg_order_by.iter().map(|(_, d)| *d).collect();
+            let mut args = args;
+            args.extend(agg_order_by.into_iter().map(|(e, _)| e));
+            (spec.encode(), args)
+        } else {
+            (func_name, args)
+        };
+
         Ok(TypedExpr::new(
             Expr::Function {
                 name: func_name,
                 args,
-                signature: signature.clone(),
+                signature,
                 filter,
             },
             return_type,

@@ -41,7 +41,7 @@ class TaskState {
     this.error = null;
   }
 
-  /** Register reconnect resync + polling fallback. Call once after hydration. */
+  /** Register the reconnect resync. Call once after hydration. */
   connect(): void {
     if (this.#connected) return;
     this.#connected = true;
@@ -50,15 +50,9 @@ class TaskState {
     getClient().onReconnected(() => {
       this.refresh().catch(() => {});
     });
-    // Fallback poll: the flow engine currently writes task nodes through the
-    // storage layer directly (create_deep_node), which does NOT publish
-    // node:created/node:updated events — only NodeService writes do (e.g.
-    // chat messages). Until the server emits events for flow-created nodes,
-    // a slow poll keeps the panel honest; the subscription path above it is
-    // the intended mechanism and takes over as soon as events arrive.
-    setInterval(() => {
-      this.refresh().catch(() => {});
-    }, 30_000);
+    // Live updates arrive through the shared inbox subscription (see
+    // notifications.svelte.ts -> onInboxEvent): the flow engine publishes
+    // node:created for the task nodes it writes, so no polling is needed.
   }
 
   /** Re-fetch pending tasks (reconnect resync). */

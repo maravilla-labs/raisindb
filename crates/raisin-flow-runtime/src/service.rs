@@ -91,6 +91,10 @@ pub struct FlowInstanceStatus {
 struct ValidatedFlow {
     workflow_data: Value,
     flow_version: i32,
+    /// Whether `run_flow`/`run_flow_test` may start this flow without an
+    /// authenticated caller. See the `allow_unauthenticated_invoke` property
+    /// doc in `raisin_flow.yaml` for why this defaults to `false`.
+    allow_unauthenticated_invoke: bool,
 }
 
 /// Load a `raisin:Flow` node by path and validate it.
@@ -143,9 +147,19 @@ async fn load_and_validate_flow<S: Storage>(
         })
         .unwrap_or(1);
 
+    let allow_unauthenticated_invoke = flow_node
+        .properties
+        .get("allow_unauthenticated_invoke")
+        .and_then(|v| match v {
+            PropertyValue::Boolean(b) => Some(*b),
+            _ => None,
+        })
+        .unwrap_or(false);
+
     Ok(ValidatedFlow {
         workflow_data,
         flow_version,
+        allow_unauthenticated_invoke,
     })
 }
 
@@ -184,6 +198,18 @@ async fn load_instance<S: Storage>(
 /// Start a new flow execution.
 ///
 /// Validates the flow node, creates a `FlowInstance`, and queues a job.
+///
+/// `auth_context` is BOTH an authorization gate and an identity source:
+/// `None` means no caller identity at all, and is refused unless the flow
+/// opted into `allow_unauthenticated_invoke` — a webhook-triggered automation
+/// does not need that opt-in, since webhooks invoke through a
+/// `raisin:Trigger` (`trigger_type: "http"`), a separate and separately
+/// secured surface, never through this function. A genuinely system-initiated
+/// start (a scheduled/timer trigger) passes `Some(&AuthContext::system())`
+/// rather than `None` — it is authenticated as the system principal, not
+/// anonymous. When a real user identity is present, it is carried onto the
+/// instance so `execution_context: "user"` steps inside the flow can resolve
+/// it instead of always falling back to System.
 pub async fn run_flow<S: Storage>(
     storage: &S,
     scheduler: &dyn FlowJobScheduler,
@@ -191,10 +217,23 @@ pub async fn run_flow<S: Storage>(
     repo: &str,
     flow_path: &str,
     input: Value,
-    actor: String,
-    actor_home: Option<String>,
+    auth_context: Option<&raisin_models::auth::AuthContext>,
 ) -> Result<FlowRunResult, FlowError> {
     let flow = load_and_validate_flow(storage, tenant_id, repo, flow_path).await?;
+
+    if auth_context.is_none() && !flow.allow_unauthenticated_invoke {
+        return Err(FlowError::PermissionDenied(format!(
+            "Flow '{}' requires an authenticated caller to start. Set \
+             allow_unauthenticated_invoke: true on the flow to allow anonymous \
+             starts (a webhook automation should use a raisin:Trigger instead).",
+            flow_path
+        )));
+    }
+
+    let actor = auth_context
+        .and_then(|a| a.user_id.clone())
+        .unwrap_or_else(|| "anonymous".to_string());
+    let actor_home = auth_context.and_then(|a| a.home.clone());
 
     let trigger = FlowTriggerEvent::Manual {
         actor,
@@ -202,7 +241,7 @@ pub async fn run_flow<S: Storage>(
         timestamp: chrono::Utc::now(),
     };
 
-    let instance = FlowInstanceBuilder::new(
+    let mut instance_builder = FlowInstanceBuilder::new(
         flow_path.to_string(),
         flow.flow_version,
         flow.workflow_data,
@@ -212,9 +251,23 @@ pub async fn run_flow<S: Storage>(
     .tenant_id(tenant_id.to_string())
     .repo_id(repo.to_string())
     .branch(DEFAULT_BRANCH.to_string())
-    .workspace(FUNCTIONS_WORKSPACE.to_string())
-    .build()
-    .map_err(|e| FlowError::Other(format!("Failed to create flow instance: {}", e)))?;
+    .workspace(FUNCTIONS_WORKSPACE.to_string());
+
+    // See `TRIGGERING_USER_VAR`: lets a step with `execution_context: "user"`
+    // resolve this real caller instead of always falling back to System.
+    // "system" is excluded on purpose — the scheduled-invocation path passes
+    // `AuthContext::system()` to clear the auth gate above, and that is not a
+    // resolvable human to run a step as.
+    if let Some(user_id) = auth_context
+        .and_then(|a| a.user_id.as_deref())
+        .filter(|id| *id != "anonymous" && *id != "system")
+    {
+        instance_builder = instance_builder.triggering_user(user_id.to_string());
+    }
+
+    let instance = instance_builder
+        .build()
+        .map_err(|e| FlowError::Other(format!("Failed to create flow instance: {}", e)))?;
 
     let instance_id = instance.id.clone();
 
@@ -229,6 +282,16 @@ pub async fn run_flow<S: Storage>(
         "flow_instance".to_string(),
         serde_json::to_value(&instance).unwrap_or(Value::Null),
     );
+    // The "start" execution reads its triggering-user off JOB metadata, not
+    // the (not-yet-persisted) instance — mirrors
+    // `raisin-rocksdb`'s `TRIGGERING_ACTOR_KEY` ("triggering_actor"), which
+    // this crate cannot reference directly (layering).
+    if let Some(user_id) = auth_context
+        .and_then(|a| a.user_id.as_deref())
+        .filter(|id| *id != "anonymous" && *id != "system")
+    {
+        metadata.insert("triggering_actor".to_string(), serde_json::json!(user_id));
+    }
 
     let job_id = scheduler
         .schedule_flow_job(tenant_id, repo, job_type, metadata)
@@ -256,18 +319,36 @@ pub async fn run_flow_test<S: Storage>(
     flow_path: &str,
     input: Value,
     mut test_config: crate::types::TestRunConfig,
+    auth_context: Option<&raisin_models::auth::AuthContext>,
 ) -> Result<FlowRunResult, FlowError> {
     let flow = load_and_validate_flow(storage, tenant_id, repo, flow_path).await?;
 
+    // Same gate as `run_flow` — a test run still executes real function code
+    // (only side effects may be mocked, per `test_config`), so it is not a
+    // safe unauthenticated surface by default either.
+    if auth_context.is_none() && !flow.allow_unauthenticated_invoke {
+        return Err(FlowError::PermissionDenied(format!(
+            "Flow '{}' requires an authenticated caller to test-run. Set \
+             allow_unauthenticated_invoke: true on the flow to allow anonymous \
+             starts.",
+            flow_path
+        )));
+    }
+
+    let actor = auth_context
+        .and_then(|a| a.user_id.clone())
+        .unwrap_or_else(|| "anonymous".to_string());
+    let actor_home = auth_context.and_then(|a| a.home.clone());
+
     let trigger = FlowTriggerEvent::Manual {
-        actor: "test_api".to_string(),
-        actor_home: None,
+        actor,
+        actor_home,
         timestamp: chrono::Utc::now(),
     };
 
     test_config.is_test_run = true;
 
-    let instance = FlowInstanceBuilder::new(
+    let mut instance_builder = FlowInstanceBuilder::new(
         flow_path.to_string(),
         flow.flow_version,
         flow.workflow_data,
@@ -278,9 +359,18 @@ pub async fn run_flow_test<S: Storage>(
     .repo_id(repo.to_string())
     .branch(DEFAULT_BRANCH.to_string())
     .workspace(FUNCTIONS_WORKSPACE.to_string())
-    .test_config(test_config)
-    .build()
-    .map_err(|e| FlowError::Other(format!("Failed to create flow instance: {}", e)))?;
+    .test_config(test_config);
+
+    if let Some(user_id) = auth_context
+        .and_then(|a| a.user_id.as_deref())
+        .filter(|id| *id != "anonymous" && *id != "system")
+    {
+        instance_builder = instance_builder.triggering_user(user_id.to_string());
+    }
+
+    let instance = instance_builder
+        .build()
+        .map_err(|e| FlowError::Other(format!("Failed to create flow instance: {}", e)))?;
 
     let instance_id = instance.id.clone();
 
@@ -296,6 +386,12 @@ pub async fn run_flow_test<S: Storage>(
         serde_json::to_value(&instance).unwrap_or(Value::Null),
     );
     metadata.insert("is_test_run".to_string(), serde_json::json!(true));
+    if let Some(user_id) = auth_context
+        .and_then(|a| a.user_id.as_deref())
+        .filter(|id| *id != "anonymous" && *id != "system")
+    {
+        metadata.insert("triggering_actor".to_string(), serde_json::json!(user_id));
+    }
 
     let job_id = scheduler
         .schedule_flow_job(tenant_id, repo, job_type, metadata)

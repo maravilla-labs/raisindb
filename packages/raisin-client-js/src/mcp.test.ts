@@ -97,8 +97,12 @@ describe('McpClient.subscribeResource', () => {
     const subscribe = vi.fn(
       (): McpFrameStream =>
         frameStream([
-          // Initial ack — should NOT be yielded.
-          { jsonrpc: '2.0', id: 1, result: { subscribed: true, uri } },
+          // Acknowledgement frame — should NOT be yielded.
+          {
+            jsonrpc: '2.0',
+            method: 'notifications/subscriptions/acknowledged',
+            params: { notifications: { resourceSubscriptions: [uri] } },
+          },
           {
             jsonrpc: '2.0',
             method: 'notifications/resources/updated',
@@ -110,6 +114,8 @@ describe('McpClient.subscribeResource', () => {
             method: 'notifications/resources/updated',
             params: {},
           },
+          // Graceful close — the response to the listen request, not yielded.
+          { jsonrpc: '2.0', id: 1, result: { resultType: 'complete' } },
         ]),
     );
     const transport: McpTransport = { rpc: vi.fn(), subscribe };
@@ -120,7 +126,9 @@ describe('McpClient.subscribeResource', () => {
       updates.push(update);
     }
 
-    expect(subscribe).toHaveBeenCalledWith('resources/subscribe', { uri });
+    expect(subscribe).toHaveBeenCalledWith('subscriptions/listen', {
+      notifications: { resourceSubscriptions: [uri] },
+    });
     expect(updates).toEqual([{ uri }]);
   });
 

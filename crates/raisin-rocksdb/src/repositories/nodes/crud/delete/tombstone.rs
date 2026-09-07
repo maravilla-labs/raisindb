@@ -122,46 +122,75 @@ impl NodeRepositoryImpl {
         )
         .await;
 
-        // Stamp the SAME attribution onto the local event that the replication
-        // capture above carries. Without this the origin records the delete with
-        // no actor while every replica records the one from `attribution` — the
-        // origin/replica divergence this whole path exists to prevent. Keys must
-        // match what `raisin-core::audit_events` reads: "actor" and "agent".
-        let event_metadata = {
-            let mut m = std::collections::HashMap::new();
-            if let Some(actor) = attribution.actor.as_deref() {
-                m.insert(
-                    "actor".to_string(),
-                    serde_json::Value::String(actor.to_string()),
-                );
-            }
-            if let Some(agent) = attribution.agent.as_deref() {
-                m.insert(
-                    "agent".to_string(),
-                    serde_json::Value::String(agent.to_string()),
-                );
-            }
-            (!m.is_empty()).then_some(m)
-        };
+        self.publish_deleted_event(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            revision,
+            &node,
+            attribution,
+        );
 
-        // Emit node deletion event to trigger background cleanup job
+        Ok(true)
+    }
+
+    /// Publish the `node:deleted` event for one node.
+    ///
+    /// ONE emitter for both delete paths (single-node `delete_impl` and the
+    /// cascade in `crud/cascade/tree.rs`): the cascade path used to emit
+    /// nothing, so a WebSocket subscriber never saw `node:deleted` for the
+    /// default (cascade = true) delete, and only the job system — which reads
+    /// tombstones directly — noticed the deletion.
+    ///
+    /// The metadata carries the same `actor` / `agent` attribution the
+    /// replication capture carries (keys read by `raisin-core::audit_events`),
+    /// plus `node_data`, the full pre-delete node: the node is tombstoned by
+    /// the time a subscriber asks for it, so `include_node` and RLS on the WS
+    /// side can only be served from the event itself.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::repositories::nodes) fn publish_deleted_event(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        revision: raisin_hlc::HLC,
+        node: &raisin_models::nodes::Node,
+        attribution: crate::repositories::nodes::WriteAttribution<'_>,
+    ) {
+        let mut m = std::collections::HashMap::new();
+        if let Some(actor) = attribution.actor.as_deref() {
+            m.insert(
+                "actor".to_string(),
+                serde_json::Value::String(actor.to_string()),
+            );
+        }
+        if let Some(agent) = attribution.agent.as_deref() {
+            m.insert(
+                "agent".to_string(),
+                serde_json::Value::String(agent.to_string()),
+            );
+        }
+        if let Ok(node_json) = serde_json::to_value(node) {
+            m.insert("node_data".to_string(), node_json);
+        }
+
         let node_event = NodeEvent {
             tenant_id: tenant_id.to_string(),
             repository_id: repo_id.to_string(),
             workspace_id: workspace.to_string(),
             branch: branch.to_string(),
             revision,
-            node_id: id.to_string(),
+            node_id: node.id.clone(),
             node_type: Some(node.node_type.clone()),
             kind: NodeEventKind::Deleted,
             path: Some(node.path.clone()),
-            metadata: event_metadata,
+            metadata: Some(m),
         };
 
         self.event_bus
             .publish(raisin_events::Event::Node(node_event));
-
-        Ok(true)
     }
 
     /// Add tombstone entries for common node field indexes.

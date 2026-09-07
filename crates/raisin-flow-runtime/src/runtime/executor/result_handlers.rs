@@ -364,13 +364,7 @@ pub(super) async fn handle_error_result(
     }
 
     // Check for continue_on_fail - if set, continue to next step
-    let continue_on_fail = current_step
-        .properties
-        .get("continue_on_fail")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
-    if continue_on_fail {
+    if continues_after_error(current_step) {
         info!(
             "Step {} has continue_on_fail=true, continuing despite error",
             current_step.id
@@ -419,6 +413,27 @@ pub(super) async fn handle_error_result(
     )
     .await
     .map(|()| true)
+}
+
+/// Whether a failed step lets the flow carry on to its successor.
+///
+/// `continue_on_fail: true`, or the designer's node-level `on_error` set to
+/// `continue` or `skip`. `on_error` was lowered onto the node all along but
+/// read by nothing, so the designer's "Continue" and "Skip" choices ran as
+/// "Stop". Both mean "do not fail the flow because of this step": `skip`
+/// treats the step as skipped, `continue` treats the error as ignored, and
+/// in both cases the next sibling runs with `error.*` populated.
+pub(crate) fn continues_after_error(step: &crate::types::FlowNode) -> bool {
+    let continue_on_fail = step
+        .properties
+        .get("continue_on_fail")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let on_error_continues = matches!(
+        step.properties.get("on_error").and_then(|v| v.as_str()),
+        Some("continue") | Some("skip")
+    );
+    continue_on_fail || on_error_continues
 }
 
 /// Fail the flow NOW: no retry, no error edge, no continue-on-fail.
@@ -471,4 +486,47 @@ pub(super) async fn fail_flow_terminally(
     notify_parent_flow(instance, "failed", None, Some(error.to_string()), callbacks).await;
 
     Err(error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{FlowNode, StepType};
+    use std::collections::HashMap;
+
+    fn step(props: &[(&str, Value)]) -> FlowNode {
+        FlowNode {
+            id: "s".to_string(),
+            step_type: StepType::FunctionStep,
+            properties: props
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect::<HashMap<_, _>>(),
+            children: Vec::new(),
+            next_node: None,
+        }
+    }
+
+    /// The designer's `on_error: continue | skip` means the same as
+    /// `continue_on_fail`; `stop` (or nothing) fails the flow.
+    #[test]
+    fn test_on_error_continue_and_skip_carry_on_like_continue_on_fail() {
+        assert!(continues_after_error(&step(&[(
+            "continue_on_fail",
+            Value::Bool(true)
+        )])));
+        assert!(continues_after_error(&step(&[(
+            "on_error",
+            Value::from("continue")
+        )])));
+        assert!(continues_after_error(&step(&[(
+            "on_error",
+            Value::from("skip")
+        )])));
+        assert!(!continues_after_error(&step(&[(
+            "on_error",
+            Value::from("stop")
+        )])));
+        assert!(!continues_after_error(&step(&[])));
+    }
 }

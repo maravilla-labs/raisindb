@@ -107,10 +107,19 @@ pub(super) fn collect_subexpressions(
                 stack.push(expr);
             }
 
-            Expr::Like { expr, pattern, .. } | Expr::ILike { expr, pattern, .. } => {
+            Expr::Like { expr, pattern, .. }
+            | Expr::ILike { expr, pattern, .. }
+            | Expr::Regex { expr, pattern, .. } => {
                 stack.push(pattern);
                 stack.push(expr);
             }
+
+            Expr::Quantified { left, right, .. } => {
+                stack.push(right);
+                stack.push(left);
+            }
+            Expr::QuantifiedSubquery { left, .. } => stack.push(left),
+            Expr::Exists { .. } | Expr::ScalarSubquery { .. } => {}
 
             Expr::JsonExtract { object, key }
             | Expr::JsonExtractText { object, key }

@@ -119,6 +119,12 @@ impl<'a> AnalyzerContext<'a> {
             found_columns = property_candidates;
         }
 
+        if found_columns.is_empty() {
+            if let Some(aliased) = self.select_aliases.get(col_name) {
+                return Ok(aliased.clone());
+            }
+        }
+
         match found_columns.len() {
             0 => Err(AnalysisError::ColumnNotFound {
                 table: if self.current_tables.is_empty() {

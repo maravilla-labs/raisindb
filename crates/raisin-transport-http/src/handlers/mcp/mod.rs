@@ -67,7 +67,7 @@ pub(crate) const MCP_DISCOVERY_WORKSPACE: &str = "mcp";
 /// Handle one MCP Streamable HTTP request: `POST /mcp/{repo}/{branch}/{slug}`.
 ///
 /// The body is a single JSON-RPC 2.0 message. Requests (with an `id`) return a
-/// JSON-RPC response; `resources/subscribe` returns an SSE stream of
+/// JSON-RPC response; `subscriptions/listen` returns an SSE stream of
 /// `notifications/resources/updated`; notifications (no `id`) return `202`.
 #[cfg(feature = "storage-rocksdb")]
 pub async fn handle_mcp(
@@ -491,10 +491,18 @@ fn subscribe_sse(
             "params": { "_meta": { META_SUBSCRIPTION_ID: stream_id.clone() } },
         });
 
+        // With no resource subscriptions `select_all` is empty and ends at the
+        // first poll, which used to close a tools-only stream right after the
+        // acknowledgement. Only poll it when there is something to poll.
+        let has_resources = !streams.is_empty();
         let merged = futures::stream::select_all(streams.into_iter().map(Box::pin));
         futures::pin_mut!(merged);
 
-        loop {
+        // Nothing granted at all: there is nothing this stream could ever
+        // carry, so close it gracefully instead of parking forever.
+        let nothing_to_send = !tools_wanted && !has_resources;
+
+        while !nothing_to_send {
             let notification = tokio::select! {
                 // Only polled when the client asked for tools; otherwise the
                 // branch is disabled and the server cannot send what it did not
@@ -523,7 +531,7 @@ fn subscribe_sse(
                     }
                     continue;
                 }
-                next = merged.next() => match next {
+                next = merged.next(), if has_resources => match next {
                     Some(notification) => notification,
                     None => break,
                 },

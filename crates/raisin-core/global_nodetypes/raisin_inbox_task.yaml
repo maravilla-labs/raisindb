@@ -32,7 +32,11 @@ icon: inbox
 # task per member per step, so tasks are the highest-volume node here, and an
 # embedding job per task buys little over lexical search on a short title.
 # Bump forces the resync so existing repositories pick the gate up.
-version: 7
+# v8: corrected the priority description (5 is highest, matching the runtime
+# default/clamp, the inbox sort order and the SDK) and declared the ESCALATION
+# slots the agent-assignee path writes (escalated_from, escalation_reason,
+# escalated_at). Bump forces resync.
+version: 8
 strict: true
 indexable: true
 index_types: [Property, Fulltext]
@@ -128,7 +132,7 @@ properties:
     type: Number
     required: false
     title: Priority
-    description: Task priority (1-5, where 1 is highest priority)
+    description: Task priority (1-5, where 5 is highest priority)
     default: 3
     index: [Property]
 
@@ -248,6 +252,29 @@ properties:
     required: false
     title: Cancellation Reason
     description: Why a pending task was cancelled (e.g. group_completed)
+
+  # --- Agent-assignee escalation ------------------------------------------
+  # Written when an AI agent assignee could not decide (low confidence,
+  # unparseable output or an AI error) and the task was handed to a person.
+
+  - name: escalated_from
+    type: String
+    required: false
+    title: Escalated From
+    description: Path of the AI agent that was originally assigned and escalated the task
+    index: [Property]
+
+  - name: escalation_reason
+    type: String
+    required: false
+    title: Escalation Reason
+    description: Why the agent assignee escalated the task
+
+  - name: escalated_at
+    type: Date
+    required: false
+    title: Escalated At
+    description: When the task was escalated to a person
 
   - name: completed_by
     type: String

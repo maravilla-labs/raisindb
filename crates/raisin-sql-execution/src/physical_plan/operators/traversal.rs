@@ -20,7 +20,8 @@ impl PhysicalPlan {
             | PhysicalPlan::SpatialAnnotate { input, .. } => vec![input.as_ref()],
             PhysicalPlan::NestedLoopJoin { left, right, .. }
             | PhysicalPlan::HashJoin { left, right, .. }
-            | PhysicalPlan::HashSemiJoin { left, right, .. } => {
+            | PhysicalPlan::HashSemiJoin { left, right, .. }
+            | PhysicalPlan::SetOperation { left, right, .. } => {
                 vec![left.as_ref(), right.as_ref()]
             }
             PhysicalPlan::IndexLookupJoin { outer, .. } => {
@@ -66,7 +67,8 @@ impl PhysicalPlan {
             | PhysicalPlan::SpatialAnnotate { input, .. } => vec![input.as_mut()],
             PhysicalPlan::NestedLoopJoin { left, right, .. }
             | PhysicalPlan::HashJoin { left, right, .. }
-            | PhysicalPlan::HashSemiJoin { left, right, .. } => {
+            | PhysicalPlan::HashSemiJoin { left, right, .. }
+            | PhysicalPlan::SetOperation { left, right, .. } => {
                 vec![left.as_mut(), right.as_mut()]
             }
             PhysicalPlan::IndexLookupJoin { outer, .. } => {

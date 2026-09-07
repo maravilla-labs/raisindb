@@ -7,6 +7,7 @@ use super::UnifiedJobEventHandler;
 use raisin_error::Result;
 use raisin_events::NodeEvent;
 use raisin_storage::jobs::{IndexOperation, JobContext, JobType};
+use raisin_storage::Storage;
 use std::collections::HashMap;
 
 impl UnifiedJobEventHandler {
@@ -102,6 +103,28 @@ impl UnifiedJobEventHandler {
             "Schema change event received"
         );
 
+        // A NodeType that declares (or changes) a compound index needs that
+        // index BUILT before the planner will use it: the fail-closed
+        // availability gate answers `NotBuilt` until a build has recorded its
+        // state, and the sweep is the only producer of build jobs. It runs
+        // for local and replicated schema events alike, because every node of
+        // a cluster maintains its own compound index. A steady-state sweep
+        // (every index `Ready`) queues nothing.
+        if schema_event.schema_type == "NodeType"
+            && matches!(
+                schema_event.kind,
+                raisin_events::SchemaEventKind::NodeTypeCreated
+                    | raisin_events::SchemaEventKind::NodeTypeUpdated
+            )
+        {
+            self.sweep_compound_index_builds_for_branch(
+                &schema_event.tenant_id,
+                &schema_event.repository_id,
+                &schema_event.branch,
+            )
+            .await;
+        }
+
         // TODO: Future enhancements:
         // - Rebuild fulltext indexes if NodeType.indexable or index_types changed
         // - Invalidate cached NodeType/Archetype/ElementType schemas
@@ -109,6 +132,114 @@ impl UnifiedJobEventHandler {
         // - Trigger webhook notifications (for local events only)
 
         Ok(())
+    }
+
+    /// Handle workspace lifecycle events.
+    ///
+    /// A workspace created after its NodeTypes were declared has no compound
+    /// build state of its own (state is per workspace), so the declaration-time
+    /// sweep never saw it. Sweep it on every branch of the repository.
+    pub(crate) async fn handle_workspace_change(
+        &self,
+        workspace_event: &raisin_events::WorkspaceEvent,
+    ) -> Result<()> {
+        use raisin_events::WorkspaceEventKind;
+        use raisin_storage::BranchRepository;
+
+        if !matches!(
+            workspace_event.kind,
+            WorkspaceEventKind::Created | WorkspaceEventKind::Updated
+        ) {
+            return Ok(());
+        }
+
+        let branches = self
+            .storage
+            .branches()
+            .list_branches(&workspace_event.tenant_id, &workspace_event.repository_id)
+            .await?;
+        for branch in branches {
+            self.sweep_compound_index_builds_for_workspace(
+                &workspace_event.tenant_id,
+                &workspace_event.repository_id,
+                &branch.name,
+                &workspace_event.workspace,
+            )
+            .await;
+        }
+        Ok(())
+    }
+
+    /// Queue compound index builds for every workspace of a branch whose
+    /// declared indexes are not `Ready`. Errors are logged, never propagated:
+    /// a failed sweep must not fail the event that triggered it, and the next
+    /// schema or workspace event sweeps again.
+    pub(crate) async fn sweep_compound_index_builds_for_branch(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+    ) {
+        use raisin_storage::WorkspaceRepository;
+
+        let workspaces = match self
+            .storage
+            .workspaces()
+            .list(raisin_storage::RepoScope::new(tenant_id, repo_id))
+            .await
+        {
+            Ok(list) => list,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    tenant = %tenant_id,
+                    repo = %repo_id,
+                    "compound index sweep: failed to list workspaces"
+                );
+                return;
+            }
+        };
+        for workspace in workspaces {
+            self.sweep_compound_index_builds_for_workspace(
+                tenant_id,
+                repo_id,
+                branch,
+                &workspace.name,
+            )
+            .await;
+        }
+    }
+
+    async fn sweep_compound_index_builds_for_workspace(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+    ) {
+        match self
+            .storage
+            .sweep_compound_index_builds(tenant_id, repo_id, branch, workspace)
+            .await
+        {
+            Ok(0) => {}
+            Ok(queued) => tracing::info!(
+                tenant = %tenant_id,
+                repo = %repo_id,
+                branch = %branch,
+                workspace = %workspace,
+                queued,
+                "compound index sweep queued builds"
+            ),
+            Err(e) => tracing::warn!(
+                error = %e,
+                tenant = %tenant_id,
+                repo = %repo_id,
+                branch = %branch,
+                workspace = %workspace,
+                "compound index sweep failed"
+            ),
+        }
     }
 
     /// Check if an event originated from replication (remote)

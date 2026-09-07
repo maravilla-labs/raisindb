@@ -89,6 +89,17 @@ impl EventHandler for UnifiedJobEventHandler {
 
                     Ok(())
                 }
+                Event::Workspace(workspace_event) => {
+                    if let Err(e) = self.handle_workspace_change(workspace_event).await {
+                        tracing::error!(
+                            error = %e,
+                            workspace = %workspace_event.workspace,
+                            event_kind = ?workspace_event.kind,
+                            "Error processing workspace event"
+                        );
+                    }
+                    Ok(())
+                }
                 _ => Ok(()),
             }
         })

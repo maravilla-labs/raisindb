@@ -114,6 +114,12 @@ pub type FunctionExecutorCallback = Arc<
             String,
             // agent marker (agent_identity vocabulary), provenance only
             Option<String>,
+            // raw actor id of whoever's write triggered this flow instance,
+            // for `execution_context: "user"` resolution — must stay
+            // structurally identical to `raisin_rocksdb`'s
+            // `flow_callbacks::types::FunctionExecutorCallback`, which this
+            // is assigned into.
+            Option<String>,
         ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, String>> + Send>>
         + Send
         + Sync,

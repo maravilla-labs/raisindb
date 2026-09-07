@@ -255,6 +255,22 @@ impl<'a> AnalyzerContext<'a> {
             });
         }
 
+        // The static catalog still carries a legacy `nodes` table definition
+        // for catalog-less analysis (unit tests, completion). On a catalog that
+        // knows real workspaces it must not shadow them: `FROM nodes` is only
+        // valid when a workspace is actually called `nodes`.
+        let has_registered_workspaces = self
+            .catalog
+            .list_tables()
+            .iter()
+            .any(|t| self.catalog.is_workspace(t));
+        if table_name.eq_ignore_ascii_case("nodes")
+            && has_registered_workspaces
+            && self.catalog.get_workspace_table(table_name).is_none()
+        {
+            return Err(AnalysisError::TableNotFound(table_name.to_string()));
+        }
+
         // Check if table exists in catalog as a regular table
         if self.catalog.get_table(table_name).is_some() {
             return Ok(TableRef {

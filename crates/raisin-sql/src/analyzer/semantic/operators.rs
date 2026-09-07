@@ -87,6 +87,38 @@ impl<'a> AnalyzerContext<'a> {
             SqlBinaryOp::StringConcat => {
                 return self.analyze_string_concat(&typed_left, &typed_right);
             }
+            SqlBinaryOp::PGRegexMatch => {
+                return self.regex_expr(typed_left, typed_right, false, false)
+            }
+            SqlBinaryOp::PGRegexIMatch => {
+                return self.regex_expr(typed_left, typed_right, true, false)
+            }
+            SqlBinaryOp::PGRegexNotMatch => {
+                return self.regex_expr(typed_left, typed_right, false, true)
+            }
+            SqlBinaryOp::PGRegexNotIMatch => {
+                return self.regex_expr(typed_left, typed_right, true, true)
+            }
+            SqlBinaryOp::PGLikeMatch | SqlBinaryOp::PGNotLikeMatch => {
+                return Ok(TypedExpr::new(
+                    Expr::Like {
+                        expr: Box::new(typed_left),
+                        pattern: Box::new(typed_right),
+                        negated: matches!(op, SqlBinaryOp::PGNotLikeMatch),
+                    },
+                    DataType::Boolean,
+                ));
+            }
+            SqlBinaryOp::PGILikeMatch | SqlBinaryOp::PGNotILikeMatch => {
+                return Ok(TypedExpr::new(
+                    Expr::ILike {
+                        expr: Box::new(typed_left),
+                        pattern: Box::new(typed_right),
+                        negated: matches!(op, SqlBinaryOp::PGNotILikeMatch),
+                    },
+                    DataType::Boolean,
+                ));
+            }
             _ => {}
         }
 
@@ -159,6 +191,83 @@ impl<'a> AnalyzerContext<'a> {
             },
             DataType::Boolean,
         )))
+    }
+
+    /// `expr [NOT] SIMILAR TO pattern` (anchored SQL-regex match).
+    pub(super) fn analyze_regex(
+        &self,
+        expr: &sqlparser::ast::Expr,
+        pattern: &sqlparser::ast::Expr,
+        case_insensitive: bool,
+        negated: bool,
+        similar_to: bool,
+    ) -> Result<TypedExpr> {
+        let typed_expr = self.analyze_expr(expr)?;
+        let typed_pattern = self.analyze_expr(pattern)?;
+        self.build_regex(
+            typed_expr,
+            typed_pattern,
+            case_insensitive,
+            negated,
+            similar_to,
+        )
+    }
+
+    fn regex_expr(
+        &self,
+        left: TypedExpr,
+        right: TypedExpr,
+        case_insensitive: bool,
+        negated: bool,
+    ) -> Result<TypedExpr> {
+        self.build_regex(left, right, case_insensitive, negated, false)
+    }
+
+    fn build_regex(
+        &self,
+        expr: TypedExpr,
+        pattern: TypedExpr,
+        case_insensitive: bool,
+        negated: bool,
+        similar_to: bool,
+    ) -> Result<TypedExpr> {
+        let textual = |t: &DataType| {
+            matches!(
+                t.base_type(),
+                DataType::Text | DataType::Path | DataType::Uuid | DataType::Unknown
+            )
+        };
+        if !textual(&expr.data_type) || !textual(&pattern.data_type) {
+            return Err(AnalysisError::InvalidBinaryOp {
+                left: expr.data_type.to_string(),
+                op: if similar_to { "SIMILAR TO" } else { "~" }.to_string(),
+                right: pattern.data_type.to_string(),
+            });
+        }
+        // Reject a malformed constant pattern at analysis time, so the error
+        // names the pattern rather than surfacing per row.
+        if let Expr::Literal(Literal::Text(p)) = &pattern.expr {
+            let source = if similar_to {
+                crate::analyzer::regex_pattern::similar_to_regex(p)
+            } else {
+                p.clone()
+            };
+            if let Err(e) = regex::Regex::new(&source) {
+                return Err(AnalysisError::UnsupportedExpression(format!(
+                    "invalid regular expression '{p}': {e}"
+                )));
+            }
+        }
+        Ok(TypedExpr::new(
+            Expr::Regex {
+                expr: Box::new(expr),
+                pattern: Box::new(pattern),
+                case_insensitive,
+                negated,
+                similar_to,
+            },
+            DataType::Boolean,
+        ))
     }
 
     /// Convert SQL binary operator to internal representation

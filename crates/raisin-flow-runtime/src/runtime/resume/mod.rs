@@ -243,8 +243,10 @@ async fn handle_timeout_expiry(
             .as_ref()
             .and_then(|w| w.target_path.clone())
         {
+            // A patch, so the expired task keeps its title, options and
+            // flow_instance_id for the inbox listing.
             let _ = callbacks
-                .update_node_in_workspace(
+                .patch_node_in_workspace(
                     crate::handlers::human_task::INBOX_WORKSPACE,
                     &task_path,
                     serde_json::json!({ "status": "expired" }),

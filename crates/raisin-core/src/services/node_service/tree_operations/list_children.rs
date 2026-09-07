@@ -30,11 +30,18 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
         // Clamp limit to reasonable bounds
         let limit = limit.clamp(1, 1000);
 
-        // Determine which revision to query
-        let target_revision = cursor.and_then(|c| c.revision).or(self.revision);
+        // A revision-bounded listing used to be answered from the tree store,
+        // but `get_root_tree_id` has nothing behind it, so every bounded read
+        // (the HTTP handler bounds each request to the branch HEAD) came back
+        // as an empty page. The ordered-children index carries revisions
+        // itself, so a bounded read takes the same keyset path as HEAD and
+        // honours `self.revision` through `ListOptions::at_revision`. The tree
+        // path is kept only for a cursor that was minted by it.
+        let tree_revision = cursor
+            .filter(|c| c.kind == models::tree::PageCursorKind::TreeEntry)
+            .and_then(|c| c.revision);
 
-        // If viewing a specific revision, use tree-based query
-        if let Some(revision) = target_revision {
+        if let Some(revision) = tree_revision {
             // Special case: root level
             if parent_path == "/" || parent_path.is_empty() {
                 return self.list_root_page(cursor, limit).await;

@@ -20,6 +20,7 @@ mod handlers;
 pub(crate) mod helpers;
 mod restore;
 mod spatial_admin;
+mod subquery_bind;
 
 pub use batch::batch_requires_async;
 pub use catalog_cache::{
@@ -492,6 +493,11 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         let analyzed = analyzer
             .analyze(sql)
             .map_err(|e| Error::Validation(format!("Analysis error: {}", e)))?;
+
+        // Uncorrelated subqueries (EXISTS, scalar, ANY/ALL, INSERT…SELECT) are
+        // evaluated once here and folded into literals so every path below —
+        // query, EXPLAIN, DML — plans against constants.
+        let analyzed = self.bind_subqueries(analyzed).await?;
 
         // Route by statement type
         match &analyzed {

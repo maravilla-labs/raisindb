@@ -81,9 +81,10 @@ pub(super) async fn try_agent_assignee(
                 "Agent decided the task - completing"
             );
 
-            // Complete the inbox task (same contract as a human completion)
+            // Complete the inbox task (same contract as a human completion).
+            // A PATCH: the task keeps its title, options and flow_instance_id.
             let _ = callbacks
-                .update_node_in_workspace(
+                .patch_node_in_workspace(
                     INBOX_WORKSPACE,
                     task_path,
                     json!({
@@ -342,7 +343,10 @@ async fn escalate(
         );
     }
 
+    // A PATCH, never a replace: the task must keep its status, title,
+    // options and flow_instance_id, or the person it was escalated to cannot
+    // find it and completing it cannot resume the flow.
     let _ = callbacks
-        .update_node_in_workspace(INBOX_WORKSPACE, task_path, Value::Object(updates))
+        .patch_node_in_workspace(INBOX_WORKSPACE, task_path, Value::Object(updates))
         .await;
 }

@@ -30,6 +30,7 @@ fn get_plan_schema(plan: &LogicalPlan) -> Option<Arc<TableSchema>> {
         LogicalPlan::Aggregate { .. } => None,                         // Aggregate changes schema
         LogicalPlan::Join { .. } => None,                              // Join combines schemas
         LogicalPlan::SemiJoin { left, .. } => get_plan_schema(left), // SemiJoin returns left schema
+        LogicalPlan::SetOperation { .. } => None, // sides are pruned independently
         LogicalPlan::WithCTE { main_query, .. } => get_plan_schema(main_query),
         LogicalPlan::Window { input, .. } => get_plan_schema(input), // Window adds columns to input schema
         LogicalPlan::LateralMap { input, .. } => get_plan_schema(input), // LateralMap adds a column to input schema
@@ -379,6 +380,23 @@ fn apply_projection_pruning_impl(
                 left_key,
                 right_key,
                 anti,
+            }
+        }
+
+        LogicalPlan::SetOperation {
+            left,
+            right,
+            kind,
+            all,
+        } => {
+            // Each side ends in its own Project, which fixes the columns it
+            // needs; parent requirements are positional and cannot be pushed
+            // through by name.
+            LogicalPlan::SetOperation {
+                left: Box::new(apply_projection_pruning_impl(*left, None)),
+                right: Box::new(apply_projection_pruning_impl(*right, None)),
+                kind,
+                all,
             }
         }
 

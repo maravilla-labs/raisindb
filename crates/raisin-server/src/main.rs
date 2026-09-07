@@ -486,6 +486,13 @@ async fn main() {
     )
     .await;
 
+    // Self-heal any compound index stuck at `NotBuilt` because its declaring
+    // schema/workspace event fired before this binary tracked build state (or
+    // whose state was lost). See the function doc for why this can't be
+    // covered by the resync above.
+    #[cfg(feature = "storage-rocksdb")]
+    startup::binary::sweep_compound_indexes_at_boot(&storage);
+
     // ========================================================================
     // Locks / inventory subsystem
     // ========================================================================

@@ -289,15 +289,10 @@ export class NodeOperations {
    * @returns Node or null if not found
    */
   async getByPath(path: string): Promise<Node | null> {
-    try {
-      const result = await this.query({
-        query: { path },
-        limit: 1,
-      });
-      return result.length > 0 ? result[0] : null;
-    } catch (error) {
-      return null;
-    }
+    // Dedicated request type: the generic `node_query` only understands
+    // `type` / `parent`, so a `{ path }` query there lists every node.
+    const result = await this.sendRequest({ path }, 'node_query_by_path');
+    return (result as Node | null) ?? null;
   }
 
   /**
@@ -313,14 +308,14 @@ export class NodeOperations {
     propertyValue: PropertyValue,
     limit?: number
   ): Promise<Node[]> {
-    return this.query({
-      query: {
-        properties: {
-          [propertyName]: propertyValue,
-        },
-      },
+    // `node_query_by_property` matches top-level property key/value pairs
+    // given directly under `query` (no `properties` wrapper).
+    const payload: NodeQueryPayload = {
+      query: { [propertyName]: propertyValue },
       limit,
-    });
+    };
+    const result = await this.sendRequest(payload, 'node_query_by_property');
+    return result as Node[];
   }
 
   /**
@@ -331,8 +326,9 @@ export class NodeOperations {
    * @returns Array of nodes
    */
   async queryByType(nodeType: string, limit?: number): Promise<Node[]> {
+    // The server's `node_query` filters on `type`, not `node_type`.
     return this.query({
-      query: { node_type: nodeType },
+      query: { type: nodeType },
       limit,
     });
   }
@@ -424,8 +420,9 @@ export class NodeOperations {
    * @returns Root node with nested children
    */
   async getTree(rootPath: string, maxDepth?: number): Promise<Node> {
-    const payload: { root_path: string; max_depth?: number } = {
-      root_path: rootPath,
+    // Server payload field is `parent_path` (same as node_list_children).
+    const payload: { parent_path: string; max_depth?: number } = {
+      parent_path: rootPath,
     };
 
     if (maxDepth !== undefined) {
@@ -444,8 +441,9 @@ export class NodeOperations {
    * @returns Array of nodes in tree order
    */
   async getTreeFlat(rootPath: string, maxDepth?: number): Promise<Node[]> {
-    const payload: { root_path: string; max_depth?: number } = {
-      root_path: rootPath,
+    // Server payload field is `parent_path` (same as node_list_children).
+    const payload: { parent_path: string; max_depth?: number } = {
+      parent_path: rootPath,
     };
 
     if (maxDepth !== undefined) {

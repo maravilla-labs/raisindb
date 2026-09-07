@@ -451,6 +451,30 @@ impl PhysicalPlanner {
                 })
             }
 
+            LogicalPlan::SetOperation {
+                left,
+                right,
+                kind,
+                all,
+            } => {
+                // Each side is a complete query; neither inherits the parent's
+                // ORDER BY / LIMIT context (those apply to the combined rows).
+                let physical_left = self.plan_with_context(left, &PlanContext::empty())?;
+                let physical_right = self.plan_with_context(right, &PlanContext::empty())?;
+                let columns = left
+                    .schema()
+                    .into_iter()
+                    .map(|c| c.name)
+                    .collect::<Vec<_>>();
+                Ok(PhysicalPlan::SetOperation {
+                    left: Box::new(physical_left),
+                    right: Box::new(physical_right),
+                    kind: *kind,
+                    all: *all,
+                    columns,
+                })
+            }
+
             // Empty plan - used for DDL statements that bypass logical planning
             LogicalPlan::Empty => Ok(PhysicalPlan::Empty),
 

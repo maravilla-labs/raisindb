@@ -41,7 +41,9 @@ use crate::physical_plan::executor::{ExecutionContext, Row, RowStream};
 use futures::stream;
 use raisin_error::Error;
 use raisin_models::nodes::properties::PropertyValue;
+use raisin_models::nodes::Node;
 use raisin_sql::analyzer::{catalog::SchemaTableKind, DmlTableTarget, TypedExpr};
+use raisin_sql::logical_plan::ProjectionExpr;
 use raisin_storage::Storage;
 
 // Re-export public types
@@ -86,9 +88,14 @@ pub async fn execute_insert<
     columns: &'a [String],
     values: &'a [Vec<TypedExpr>],
     is_upsert: bool,
+    returning: Option<&'a [ProjectionExpr]>,
     ctx: &'a ExecutionContext<S>,
 ) -> Result<RowStream, Error> {
     let row_count = values.len();
+    let mut written: Vec<Node> = Vec::new();
+    if returning.is_some() {
+        reject_returning_on_schema_table(target, "INSERT")?;
+    }
 
     match target {
         DmlTableTarget::SchemaTable(kind) => match kind {
@@ -109,7 +116,18 @@ pub async fn execute_insert<
             }
         },
         DmlTableTarget::Workspace(workspace) => {
-            execute_insert_workspace(workspace, columns, values, is_upsert, ctx).await?;
+            execute_insert_workspace(
+                workspace,
+                columns,
+                values,
+                is_upsert,
+                returning.map(|_| &mut written),
+                ctx,
+            )
+            .await?;
+            if let Some(exprs) = returning {
+                return returning_rows(workspace, &written, exprs);
+            }
         }
     }
 
@@ -122,6 +140,37 @@ pub async fn execute_insert<
     Ok(Box::pin(stream::once(async move { Ok(result_row) })))
 }
 
+/// RETURNING only makes sense for content nodes; schema tables are managed
+/// through DDL and have no node row to project.
+fn reject_returning_on_schema_table(target: &DmlTableTarget, op: &str) -> Result<(), Error> {
+    if matches!(target, DmlTableTarget::SchemaTable(_)) {
+        return Err(Error::Validation(format!(
+            "{op} ... RETURNING is only supported on workspace (node) tables"
+        )));
+    }
+    Ok(())
+}
+
+/// One output row per written node, each RETURNING expression evaluated
+/// against the node the same way a SELECT projection would be.
+fn returning_rows(
+    workspace: &str,
+    nodes: &[Node],
+    exprs: &[ProjectionExpr],
+) -> Result<RowStream, Error> {
+    let mut rows = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        let source = helpers::node_to_row(node, workspace);
+        let mut out = Row::new();
+        for proj in exprs {
+            let value = helpers::eval_expr_with_row_to_property_value(&proj.expr, &source)?;
+            out.insert(proj.alias.clone(), value);
+        }
+        rows.push(Ok(out));
+    }
+    Ok(Box::pin(stream::iter(rows)))
+}
+
 /// Execute a physical UPDATE operation.
 ///
 /// Updates existing rows in a schema table or workspace table.
@@ -132,8 +181,13 @@ pub async fn execute_update<
     target: &'a DmlTableTarget,
     assignments: &'a [(String, TypedExpr)],
     filter: &'a Option<TypedExpr>,
+    returning: Option<&'a [ProjectionExpr]>,
     ctx: &'a ExecutionContext<S>,
 ) -> Result<RowStream, Error> {
+    if returning.is_some() {
+        reject_returning_on_schema_table(target, "UPDATE")?;
+    }
+    let mut written: Vec<Node> = Vec::new();
     let affected = match target {
         DmlTableTarget::SchemaTable(kind) => {
             let name = extract_name_from_filter(filter)?;
@@ -151,7 +205,18 @@ pub async fn execute_update<
             }
         }
         DmlTableTarget::Workspace(workspace) => {
-            execute_update_workspace(workspace, assignments, filter, ctx).await?
+            let n = execute_update_workspace(
+                workspace,
+                assignments,
+                filter,
+                returning.map(|_| &mut written),
+                ctx,
+            )
+            .await?;
+            if let Some(exprs) = returning {
+                return returning_rows(workspace, &written, exprs);
+            }
+            n
         }
     };
 
@@ -173,8 +238,13 @@ pub async fn execute_delete<
 >(
     target: &'a DmlTableTarget,
     filter: &'a Option<TypedExpr>,
+    returning: Option<&'a [ProjectionExpr]>,
     ctx: &'a ExecutionContext<S>,
 ) -> Result<RowStream, Error> {
+    if returning.is_some() {
+        reject_returning_on_schema_table(target, "DELETE")?;
+    }
+    let mut deleted: Vec<Node> = Vec::new();
     let affected = match target {
         DmlTableTarget::SchemaTable(kind) => {
             let name = extract_name_from_filter(filter)?;
@@ -186,7 +256,13 @@ pub async fn execute_delete<
             }
         }
         DmlTableTarget::Workspace(workspace) => {
-            execute_delete_workspace(workspace, filter, ctx).await?
+            let n =
+                execute_delete_workspace(workspace, filter, returning.map(|_| &mut deleted), ctx)
+                    .await?;
+            if let Some(exprs) = returning {
+                return returning_rows(workspace, &deleted, exprs);
+            }
+            n
         }
     };
 

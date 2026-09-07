@@ -87,6 +87,20 @@ pub(crate) fn project_output_key(step: &FlowNode, output: Value) -> Value {
     Value::Object(map)
 }
 
+/// The wire name of a step type, as it appears in `step_started.step_type`.
+///
+/// Uses the enum's serde spelling (`human_task`, `function_step`, `end`) so the
+/// event stream speaks the same vocabulary as the flow definition and the SDK
+/// types. It used to be the Rust variant name (`HumanTask`), which no other
+/// surface used.
+pub(crate) fn step_type_name(step_type: &crate::types::StepType) -> String {
+    match serde_json::to_value(step_type) {
+        Ok(Value::String(s)) => s,
+        // `Custom(name)` serializes as an object; fall back to the debug form
+        _ => format!("{:?}", step_type).to_lowercase(),
+    }
+}
+
 /// Calculate timeout from metadata
 pub(crate) fn calculate_timeout(metadata: &Value) -> Option<chrono::DateTime<Utc>> {
     metadata
@@ -517,6 +531,16 @@ mod tests {
             calculate_backoff(1, Some(&step)),
             chrono::Duration::seconds(10)
         );
+    }
+
+    /// `step_started.step_type` speaks the definition's vocabulary, not Rust's.
+    #[test]
+    fn test_step_type_name_is_snake_case() {
+        use crate::types::StepType;
+        assert_eq!(step_type_name(&StepType::HumanTask), "human_task");
+        assert_eq!(step_type_name(&StepType::FunctionStep), "function_step");
+        assert_eq!(step_type_name(&StepType::AgentStep), "agent_step");
+        assert_eq!(step_type_name(&StepType::End), "end");
     }
 
     #[test]

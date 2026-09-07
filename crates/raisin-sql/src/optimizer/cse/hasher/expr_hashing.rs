@@ -139,6 +139,52 @@ impl ExprHasher {
                 negated.hash(hasher);
             }
 
+            Expr::Regex {
+                expr,
+                pattern,
+                case_insensitive,
+                negated,
+                similar_to,
+            } => {
+                101u8.hash(hasher);
+                Self::hash_typed_expr(expr, hasher);
+                Self::hash_typed_expr(pattern, hasher);
+                case_insensitive.hash(hasher);
+                negated.hash(hasher);
+                similar_to.hash(hasher);
+            }
+
+            Expr::Quantified {
+                left,
+                op,
+                right,
+                all,
+            } => {
+                102u8.hash(hasher);
+                Self::hash_typed_expr(left, hasher);
+                format!("{:?}", op).hash(hasher);
+                Self::hash_typed_expr(right, hasher);
+                all.hash(hasher);
+            }
+
+            Expr::QuantifiedSubquery { left, op, all, .. } => {
+                103u8.hash(hasher);
+                Self::hash_typed_expr(left, hasher);
+                format!("{:?}", op).hash(hasher);
+                all.hash(hasher);
+                // Subquery bodies are never CSE candidates (volatile); a
+                // structural hash of the analysed query is not needed.
+            }
+
+            Expr::Exists { negated, .. } => {
+                104u8.hash(hasher);
+                negated.hash(hasher);
+            }
+
+            Expr::ScalarSubquery { .. } => {
+                105u8.hash(hasher);
+            }
+
             Expr::Like {
                 expr,
                 pattern,

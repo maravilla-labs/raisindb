@@ -52,7 +52,7 @@ provides:
     - /adapters/${v.name}
   # Pre-configured connector template (disabled until credentials are supplied).
   content:
-    - raisin:system/integrations/${v.name}
+    - raisin:system/connectors/${v.name}
 
 # Sync configuration for package updates. Declares the paths this package owns
 # so re-installs merge cleanly instead of colliding with other packages.
@@ -66,7 +66,7 @@ sync:
       include:
         - "**"
       mode: merge
-    - root: /integrations/${v.name}
+    - root: /connectors/${v.name}
       workspace: raisin:system
       include:
         - "**"
@@ -102,7 +102,7 @@ This package implements the frozen adapter contract in
 | Path | Workspace | Purpose |
 |------|-----------|---------|
 | \`/adapters/${v.name}\` | \`functions\` | Adapter function (\`handler(input)\`). |
-| \`/integrations/${v.name}\` | \`raisin:system\` | Pre-configured connector template, **disabled**. |
+| \`/connectors/${v.name}\` | \`raisin:system\` | Pre-configured connector template, **disabled**. Use **Add connector** in the admin console to create a configured instance under \`/integrations\`. |
 
 ## Install
 
@@ -122,9 +122,9 @@ Or build a \`.rap\` and upload it:
    into \`client_secret_encrypted\` (AES-256-GCM) server-side; it is never stored
    in cleartext and never ships in this package.
 3. Set \`redirect_uri\` to match your deployment callback, e.g.
-   \`https://<your-host>/api/integrations/oauth/callback\`.
+   \`https://<your-host>/api/integrations/<repo>/oauth/callback\`.
 4. Fill in \`auth_url\`, \`token_url\`, and \`scopes\` for your provider in
-   \`content/_raisin__system/integrations/${v.name}/.node.yaml\`.
+   \`content/_raisin__system/connectors/${v.name}/.node.yaml\`.
 5. **Enable** the connector, then **connect an account**.
 
 ## Implement the adapter
@@ -350,7 +350,7 @@ properties:
     token_url: ""
     scopes: []
     # Filled in by the admin console to match the deployment's callback URL,
-    # e.g. https://<host>/api/integrations/oauth/callback
+    # e.g. https://<host>/api/integrations/<repo>/oauth/callback
     redirect_uri: ""
     # Request a refresh token so offline sync works, where the provider supports it.
     access_type: offline
@@ -366,7 +366,7 @@ properties:
  */
 export function adapterFiles(v: AdapterVars): FileEntry[] {
   const fnDir = `content/functions/adapters/${v.name}`;
-  const sysDir = `content/_raisin__system/integrations/${v.name}`;
+  const sysDir = `content/_raisin__system/connectors/${v.name}`;
   return [
     { path: 'manifest.yaml', content: manifestYaml(v) },
     { path: 'README.md', content: readmeMd(v) },

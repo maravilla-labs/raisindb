@@ -18,6 +18,20 @@ use super::helpers::{
     deserialize_relation_ref, get_relation_cf, is_tombstone, parse_forward_key, parse_reverse_key,
 };
 
+/// Result of scanning the versioned forward index for one source node.
+pub(super) struct OutgoingScan {
+    /// Live relations, newest revision per `relation_type:target`.
+    pub relations: Vec<RelationRef>,
+    /// Every `relation_type:target` key the scan decided on, live OR tombstoned.
+    /// A packed snapshot must not re-introduce a key in this set.
+    pub seen: HashSet<String>,
+}
+
+/// Key under which a relation is deduplicated across revisions.
+pub(super) fn relation_key(relation_type: &str, target_id: &str) -> String {
+    format!("{}:{}", relation_type, target_id)
+}
+
 /// Get all outgoing relations from a node
 pub(super) async fn get_outgoing_relations(
     db: &Arc<DB>,
@@ -28,6 +42,30 @@ pub(super) async fn get_outgoing_relations(
     workspace: &str,
     node_id: &str,
 ) -> Result<Vec<RelationRef>> {
+    scan_outgoing_relations(
+        db,
+        max_revision,
+        tenant_id,
+        repo_id,
+        branch,
+        workspace,
+        node_id,
+    )
+    .await
+    .map(|scan| scan.relations)
+}
+
+/// Scan the versioned forward index, returning the live relations together
+/// with every key the scan resolved (including tombstoned ones).
+pub(super) async fn scan_outgoing_relations(
+    db: &Arc<DB>,
+    max_revision: &HLC,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    workspace: &str,
+    node_id: &str,
+) -> Result<OutgoingScan> {
     // Get relation column family handle
     let cf_relation = get_relation_cf(db)?;
 
@@ -78,7 +116,7 @@ pub(super) async fn get_outgoing_relations(
 
         // Create unique key for this target to detect duplicates (only take newest)
         // Use relation_type + target to distinguish different relation types to same node
-        let target_key = format!("{}:{}", components.relation_type, components.target_id);
+        let target_key = relation_key(&components.relation_type, &components.target_id);
 
         // Skip if we've already seen this target (we only want the newest revision)
         if seen_targets.contains(&target_key) {
@@ -101,7 +139,10 @@ pub(super) async fn get_outgoing_relations(
         seen_targets.insert(target_key);
     }
 
-    Ok(relations)
+    Ok(OutgoingScan {
+        relations,
+        seen: seen_targets,
+    })
 }
 
 /// Get all incoming relations to a node

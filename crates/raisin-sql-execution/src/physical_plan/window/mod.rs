@@ -26,7 +26,7 @@
 //! - Window frame computation: O(frame_size) per row
 
 mod aggregates;
-mod compare;
+pub(crate) mod compare;
 mod frame;
 mod ranking;
 
@@ -162,11 +162,11 @@ fn compute_window_for_partition(
     let mut rank_state = RankState::new();
     let input_rows = part.clone();
     for (idx, mut row) in part.into_iter().enumerate() {
-        let (start, end) = determine_frame_bounds(idx, n, &we.frame);
+        let (start, end) = determine_frame_bounds(idx, n, &we.frame, !we.order_by.is_empty());
         let val = match &we.function {
             WindowFunction::RowNumber => Literal::BigInt((idx + 1) as i64),
-            WindowFunction::Rank => rank_state.compute_rank(idx, &result, we),
-            WindowFunction::DenseRank => rank_state.compute_dense_rank(idx, &result, we),
+            WindowFunction::Rank => rank_state.compute_rank(idx, &input_rows, we),
+            WindowFunction::DenseRank => rank_state.compute_dense_rank(idx, &input_rows, we),
             WindowFunction::Count => Literal::BigInt((end - start) as i64),
             WindowFunction::Sum(x) => compute_sum_over_frame(&input_rows, start, end, x)?,
             WindowFunction::Avg(x) => compute_avg_over_frame(&input_rows, start, end, x)?,

@@ -36,6 +36,10 @@ use raisin_ai::config::{AIProvider, EmbedderId};
 /// own `raisin-ai` dependency — one crate owns the shape, one crate owns the
 /// rule.
 pub use raisin_ai::config::TenantAIConfig;
+pub use raisin_ai::config::{
+    AIModelConfig, AIProvider as AIProviderKind, AIProviderConfig, AIUseCase,
+};
+pub use raisin_ai::storage::StorageError as AIConfigStorageError;
 pub use raisin_ai::storage::TenantAIConfigStore;
 use raisin_crypto::ApiKeyEncryptor;
 use raisin_error::{Error, Result};

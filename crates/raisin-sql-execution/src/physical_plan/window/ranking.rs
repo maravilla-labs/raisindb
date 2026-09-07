@@ -27,6 +27,9 @@ impl RankState {
 
     /// Compute RANK() for current row
     ///
+    /// `result_rows` is the whole sorted partition (it must contain
+    /// `row_idx` and `row_idx - 1`); the caller iterates it in order.
+    ///
     /// RANK gives the same rank to tied rows, with gaps in the sequence.
     /// Example: 1, 1, 3, 4, 4, 6
     pub(crate) fn compute_rank(

@@ -32,6 +32,14 @@ pub struct RocksDBFlowCallbacks {
     /// `AuthContext::system()`, which is exactly what these paths already used.
     pub(super) agent: Option<String>,
 
+    /// Raw actor id of whoever's write triggered this flow instance (a
+    /// `raisin:User`-resolvable identity, NOT a marker) — carried so a step
+    /// with `execution_context: "user"` can resolve a real caller instead of
+    /// always falling back to System. `None` when no such identity is
+    /// available (a timer trigger, an API-started flow). See
+    /// `TRIGGERING_USER_VAR`.
+    pub(super) triggering_user: Option<String>,
+
     /// Callback for loading nodes
     pub(super) node_loader: Option<NodeLoaderCallback>,
 
@@ -69,6 +77,7 @@ impl RocksDBFlowCallbacks {
             branch,
             flows_workspace: "raisin:system".to_string(),
             agent: None,
+            triggering_user: None,
             node_loader: None,
             node_saver: None,
             node_creator: None,
@@ -84,6 +93,12 @@ impl RocksDBFlowCallbacks {
     /// Set the agent marker stamped on everything this flow's steps write.
     pub fn with_agent(mut self, agent: Option<String>) -> Self {
         self.agent = agent;
+        self
+    }
+
+    /// Set the raw actor id of whoever's write triggered this flow instance.
+    pub fn with_triggering_user(mut self, triggering_user: Option<String>) -> Self {
+        self.triggering_user = triggering_user;
         self
     }
 

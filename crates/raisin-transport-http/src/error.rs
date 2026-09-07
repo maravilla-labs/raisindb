@@ -180,6 +180,11 @@ impl ApiError {
         Self::new(StatusCode::NOT_FOUND, "NOT_FOUND", message)
     }
 
+    /// Authentication is required and was not provided (401).
+    pub fn unauthorized(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::UNAUTHORIZED, "AUTH_REQUIRED", message)
+    }
+
     // === Validation Errors (400) ===
 
     pub fn invalid_node_type(node_type: impl Into<String>) -> Self {
@@ -514,6 +519,7 @@ impl From<raisin_flow_runtime::types::FlowError> for ApiError {
             }
             FlowError::NotSupported(msg) => ApiError::internal(msg),
             FlowError::Serialization(msg) => ApiError::internal(msg),
+            FlowError::PermissionDenied(msg) => ApiError::unauthorized(msg),
             other => ApiError::internal(other.to_string()),
         }
     }

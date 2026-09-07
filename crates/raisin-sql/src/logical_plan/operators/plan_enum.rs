@@ -129,6 +129,17 @@ pub enum LogicalPlan {
         anti: bool,
     },
 
+    /// UNION / INTERSECT / EXCEPT of two query plans.
+    ///
+    /// Output columns are the LEFT side's; the right side's rows are matched
+    /// to them by position. Without `all` the result is de-duplicated.
+    SetOperation {
+        left: Box<LogicalPlan>,
+        right: Box<LogicalPlan>,
+        kind: crate::analyzer::SetOperationKind,
+        all: bool,
+    },
+
     /// CTE (Common Table Expression) wrapper
     /// Executes CTEs first, then executes main query with CTE results available
     WithCTE {
@@ -181,6 +192,8 @@ pub enum LogicalPlan {
         values: Vec<Vec<TypedExpr>>,
         /// Whether this is an UPSERT (create-or-update) vs INSERT (create-only)
         is_upsert: bool,
+        /// `RETURNING` projection over the written nodes (None = affected_rows)
+        returning: Option<Vec<ProjectionExpr>>,
     },
 
     /// Update rows in a table
@@ -195,6 +208,8 @@ pub enum LogicalPlan {
         filter: Option<TypedExpr>,
         /// Optional branch override (for cross-branch operations)
         branch_override: Option<String>,
+        /// `RETURNING` projection over the updated nodes
+        returning: Option<Vec<ProjectionExpr>>,
     },
 
     /// Delete rows from a table
@@ -207,6 +222,8 @@ pub enum LogicalPlan {
         filter: Option<TypedExpr>,
         /// Optional branch override (for cross-branch operations)
         branch_override: Option<String>,
+        /// `RETURNING` projection over the deleted nodes
+        returning: Option<Vec<ProjectionExpr>>,
     },
 
     /// Reorder a node relative to a sibling

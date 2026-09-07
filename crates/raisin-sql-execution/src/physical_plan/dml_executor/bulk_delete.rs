@@ -11,6 +11,7 @@
 use crate::physical_plan::executor::ExecutionContext;
 use raisin_error::Error;
 use raisin_models::auth::AuthContext;
+use raisin_models::nodes::Node;
 use raisin_sql::analyzer::TypedExpr;
 use raisin_storage::Storage;
 
@@ -22,6 +23,7 @@ use super::bulk_operations::{
 pub async fn execute_bulk_delete_workspace<S>(
     workspace: &str,
     filter: &TypedExpr,
+    deleted: Option<&mut Vec<Node>>,
     ctx: &ExecutionContext<S>,
 ) -> Result<usize, Error>
 where
@@ -44,22 +46,45 @@ where
         return Ok(0);
     }
 
-    delete_nodes_by_ids(workspace, matching_ids, ctx).await
+    delete_nodes_by_ids(workspace, matching_ids, deleted, ctx).await
 }
 
 /// Delete a provided set of node IDs (already resolved) with batching/auto-commit behavior.
+///
+/// With `deleted` (RETURNING), the nodes are read BEFORE the delete so the
+/// caller can report them as they were.
 pub(super) async fn delete_nodes_by_ids<S>(
     workspace: &str,
     matching_ids: Vec<String>,
+    deleted: Option<&mut Vec<Node>>,
     ctx: &ExecutionContext<S>,
 ) -> Result<usize, Error>
 where
     S: Storage + raisin_storage::transactional::TransactionalStorage + 'static,
 {
     use raisin_storage::transactional::TransactionalContext;
+    use raisin_storage::{NodeRepository, StorageScope};
 
     if matching_ids.is_empty() {
         return Ok(0);
+    }
+
+    if let Some(out) = deleted {
+        for node_id in &matching_ids {
+            if let Some(node) = ctx
+                .storage
+                .nodes()
+                .get(
+                    StorageScope::new(&ctx.tenant_id, &ctx.repo_id, &ctx.branch, workspace),
+                    node_id,
+                    ctx.max_revision.as_ref(),
+                )
+                .await
+                .map_err(|e| Error::storage(e.to_string()))?
+            {
+                out.push(node);
+            }
+        }
     }
 
     // Batched path for large deletions

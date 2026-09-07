@@ -4,7 +4,7 @@
 //! and AI tool result aggregation jobs.
 
 use super::UnifiedJobEventHandler;
-use crate::jobs::ORIGIN_AGENT_KEY;
+use crate::jobs::{ORIGIN_AGENT_KEY, TRIGGERING_ACTOR_KEY};
 use raisin_error::Result;
 use raisin_events::NodeEvent;
 use raisin_storage::jobs::{JobContext, JobType};
@@ -26,6 +26,25 @@ fn carry_origin_agent(node_event: &NodeEvent, metadata: &mut HashMap<String, ser
         .and_then(|v| v.as_str())
     {
         metadata.insert(ORIGIN_AGENT_KEY.to_string(), serde_json::json!(agent));
+    }
+}
+
+/// Carry the raw actor id of the write that produced `node_event`, so a
+/// trigger fired by it (and anything the trigger goes on to start, like a
+/// flow) can resolve `execution_context: "user"` against a real human rather
+/// than falling back to System every time. See [`TRIGGERING_ACTOR_KEY`].
+fn carry_triggering_actor(
+    node_event: &NodeEvent,
+    metadata: &mut HashMap<String, serde_json::Value>,
+) {
+    if let Some(actor) = node_event
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("actor"))
+        .and_then(|v| v.as_str())
+        .filter(|a| *a != "anonymous" && *a != "system")
+    {
+        metadata.insert(TRIGGERING_ACTOR_KEY.to_string(), serde_json::json!(actor));
     }
 }
 
@@ -109,6 +128,7 @@ impl UnifiedJobEventHandler {
         let mut metadata = HashMap::new();
         metadata.insert("node_path".to_string(), serde_json::json!(node_path));
         carry_origin_agent(node_event, &mut metadata);
+        carry_triggering_actor(node_event, &mut metadata);
 
         // Include node_data if available from event metadata
         if let Some(meta) = &node_event.metadata {

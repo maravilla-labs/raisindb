@@ -13,6 +13,7 @@ use crate::physical_plan::executor::ExecutionContext;
 use raisin_error::Error;
 use raisin_models::auth::AuthContext;
 use raisin_models::nodes::properties::PropertyValue;
+use raisin_models::nodes::Node;
 use raisin_sql::analyzer::TypedExpr;
 use raisin_storage::Storage;
 
@@ -96,6 +97,7 @@ pub async fn execute_bulk_update_workspace<S>(
     workspace: &str,
     assignments: &[(String, TypedExpr)],
     filter: &TypedExpr,
+    mut written: Option<&mut Vec<Node>>,
     ctx: &ExecutionContext<S>,
 ) -> Result<usize, Error>
 where
@@ -135,6 +137,7 @@ where
             matching_ids,
             original_message,
             &actor,
+            written,
             ctx,
         )
         .await;
@@ -159,8 +162,14 @@ where
             .unwrap_or_else(AuthContext::anonymous);
         txn_ctx.set_auth_context(auth)?;
 
-        let affected =
-            update_nodes_in_txn(txn_ctx.as_ref(), workspace, &matching_ids, assignments).await?;
+        let affected = update_nodes_in_txn(
+            txn_ctx.as_ref(),
+            workspace,
+            &matching_ids,
+            assignments,
+            written.as_deref_mut(),
+        )
+        .await?;
 
         txn_ctx.commit().await?;
 
@@ -176,8 +185,14 @@ where
     let tx_lock = ctx.transaction_context.read().await;
     let txn_ctx = tx_lock.as_ref().unwrap();
 
-    let affected =
-        update_nodes_in_txn(txn_ctx.as_ref(), workspace, &matching_ids, assignments).await?;
+    let affected = update_nodes_in_txn(
+        txn_ctx.as_ref(),
+        workspace,
+        &matching_ids,
+        assignments,
+        written,
+    )
+    .await?;
 
     tracing::info!("Bulk UPDATE completed: {} rows affected", affected);
 
@@ -190,6 +205,7 @@ async fn update_nodes_in_txn(
     workspace: &str,
     node_ids: &[String],
     assignments: &[(String, TypedExpr)],
+    mut written: Option<&mut Vec<Node>>,
 ) -> Result<usize, Error> {
     let mut affected = 0;
     for node_id in node_ids {
@@ -206,6 +222,9 @@ async fn update_nodes_in_txn(
 
         txn_ctx.put_node(workspace, &node).await?;
         affected += 1;
+        if let Some(out) = written.as_deref_mut() {
+            out.push(txn_ctx.get_node(workspace, node_id).await?.unwrap_or(node));
+        }
 
         if affected % 1000 == 0 {
             tracing::debug!("Bulk UPDATE progress: {} rows updated", affected);
@@ -221,6 +240,7 @@ async fn execute_bulk_update_batched<S>(
     matching_ids: Vec<String>,
     original_message: Option<String>,
     actor: &str,
+    mut written: Option<&mut Vec<Node>>,
     ctx: &ExecutionContext<S>,
 ) -> Result<usize, Error>
 where
@@ -267,6 +287,9 @@ where
                 }
                 txn_ctx.put_node(workspace, &node).await?;
                 affected += 1;
+                if let Some(out) = written.as_deref_mut() {
+                    out.push(txn_ctx.get_node(workspace, node_id).await?.unwrap_or(node));
+                }
             }
         }
 
@@ -342,6 +365,8 @@ where
         branch_override: None,
         locales: vec![],
         distinct: None,
+        having: None,
+        set_operation: None,
     };
 
     let mut catalog = StaticCatalog::default_nodes_schema();

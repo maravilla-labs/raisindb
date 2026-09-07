@@ -109,23 +109,38 @@ impl CustomTool {
     /// Returns `None` when there is no `mcp` block, when it sets `enabled: false`,
     /// or when no usable tool name can be derived.
     pub fn from_function_properties(props: &Value) -> Option<Self> {
+        Self::from_function_node(None, props)
+    }
+
+    /// Like [`Self::from_function_properties`], but with the function node's
+    /// `path`, which becomes the tool's `function` reference.
+    ///
+    /// The invoker resolves `function` as a PATH in the functions workspace
+    /// (one direct read), so a function-side tool must carry its path, not its
+    /// `name`: with the name, the tool was listed by `tools/list` and then
+    /// failed every `tools/call` with "function not found".
+    pub fn from_function_node(path: Option<&str>, props: &Value) -> Option<Self> {
         let mcp = props.get("mcp")?;
         if mcp.get("enabled").and_then(Value::as_bool) == Some(false) {
             return None;
         }
 
-        let function = props
+        let function_name = props
             .get("name")
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())?
             .to_string();
+        let function = path
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| function_name.clone());
 
         let name = mcp
             .get("name")
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
             .map(str::to_string)
-            .unwrap_or_else(|| function.clone());
+            .unwrap_or_else(|| function_name.clone());
 
         let description = mcp
             .get("description")
@@ -216,6 +231,22 @@ mod tests {
         assert_eq!(tool.input_schema, props["input_schema"]);
         assert_eq!(tool.output_schema, Some(props["output_schema"].clone()));
         assert_eq!(tool.scopes, vec!["catalog:read".to_string()]);
+    }
+
+    /// The invoker reads `function` as a path, so a function-side tool must
+    /// reference its node by path when one is known.
+    #[test]
+    fn function_side_uses_the_node_path_as_the_function_reference() {
+        let props = json!({ "name": "greet", "mcp": { "enabled": true } });
+        let tool = CustomTool::from_function_node(Some("/lib/acme/greet"), &props).expect("tool");
+        assert_eq!(tool.function, "/lib/acme/greet");
+        assert_eq!(
+            tool.name, "greet",
+            "the advertised name stays the function name"
+        );
+        // Without a path the name is all there is.
+        let tool = CustomTool::from_function_node(None, &props).expect("tool");
+        assert_eq!(tool.function, "greet");
     }
 
     #[test]

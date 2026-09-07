@@ -53,13 +53,6 @@ pub async fn run_flow(
 ) -> Result<Json<RunFlowResponse>, ApiError> {
     let scheduler = get_scheduler(&state)?;
 
-    let actor = auth_context
-        .as_ref()
-        .and_then(|ext| ext.user_id.clone())
-        .unwrap_or_else(|| "http_api".to_string());
-
-    let actor_home = auth_context.as_ref().and_then(|ext| ext.home.clone());
-
     let result = raisin_flow_runtime::service::run_flow(
         state.storage.as_ref(),
         scheduler,
@@ -67,8 +60,7 @@ pub async fn run_flow(
         &repo,
         &req.flow_path,
         req.input.clone(),
-        actor,
-        actor_home,
+        auth_context.as_ref().map(|Extension(ctx)| ctx),
     )
     .await?;
 
@@ -103,6 +95,7 @@ pub async fn run_flow_test(
     State(state): State<AppState>,
     Extension(tenant_info): Extension<TenantInfo>,
     Path(repo): Path<String>,
+    auth_context: Option<Extension<AuthContext>>,
     Json(req): Json<RunFlowTestRequest>,
 ) -> Result<Json<RunFlowResponse>, ApiError> {
     let scheduler = get_scheduler(&state)?;
@@ -115,6 +108,7 @@ pub async fn run_flow_test(
         &req.flow_path,
         req.input.clone(),
         req.test_config,
+        auth_context.as_ref().map(|Extension(ctx)| ctx),
     )
     .await?;
 

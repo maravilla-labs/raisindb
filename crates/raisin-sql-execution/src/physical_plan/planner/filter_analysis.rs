@@ -480,30 +480,14 @@ impl PhysicalPlanner {
                     }
                 }
 
-                // Also handle JSON property LIKE: properties->>'key' LIKE 'prefix%'
-                if !negated {
-                    if let Expr::JsonExtractText { object, key } = &expr.expr {
-                        if let Expr::Column { table, column: _ } = &object.expr {
-                            if let Expr::Literal(Literal::Text(key_str)) = &key.expr {
-                                if let Expr::Literal(Literal::Text(pattern_str)) = &pattern.expr {
-                                    // Check if this is a prefix pattern (ends with %)
-                                    if pattern_str.ends_with('%')
-                                        && !pattern_str[..pattern_str.len() - 1]
-                                            .contains(['%', '_'])
-                                    {
-                                        let prefix = &pattern_str[..pattern_str.len() - 1];
-                                        // Use the JSON key as the column for property prefix scan
-                                        return Some(CanonicalPredicate::PropertyPrefixRange {
-                                            table: table.clone(),
-                                            column: key_str.clone(),
-                                            prefix: prefix.to_string(),
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                // `properties->>'key' LIKE 'prefix%'` is deliberately NOT turned
+                // into a `PropertyPrefixRange`: that variant carries only a column
+                // name, and `CanonicalPredicate::to_expr` renders it back as a bare
+                // `key LIKE 'prefix%'` on a column the row does not have, so the
+                // residual filter rejected every row the range scan produced. The
+                // pattern stays a row-level filter (`Other`) on the real
+                // `->>` expression, and another indexable predicate in the same
+                // WHERE clause still drives the scan.
             }
 
             // column IN (v1, v2, ...) with all-literal list → ColumnIn / JsonPropertyIn.

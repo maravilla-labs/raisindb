@@ -301,6 +301,26 @@ impl FlowInstanceExecutionHandler {
         }
         callbacks = callbacks.with_agent(agent_marker);
 
+        // Same "start carries it in job context, resume reads it off the
+        // persisted instance" split as `agent_marker` above, for the raw actor
+        // id of whoever's write triggered this instance — see
+        // `TRIGGERING_ACTOR_KEY` / `TRIGGERING_USER_VAR`.
+        let mut triggering_user = context
+            .metadata
+            .get(crate::jobs::TRIGGERING_ACTOR_KEY)
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        if triggering_user.is_none() && execution_type != "start" {
+            if let Ok(instance) = callbacks.load_instance(&instance_path).await {
+                triggering_user = instance
+                    .variables
+                    .get(raisin_flow_runtime::integration::triggers::TRIGGERING_USER_VAR)
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+            }
+        }
+        callbacks = callbacks.with_triggering_user(triggering_user);
+
         // Take the instance's execution lock BEFORE ANY WRITE: a flow
         // instance has one writer at a time. Several producers legitimately advance the same
         // instance in the same instant (sibling parallel branches reporting
@@ -338,8 +358,10 @@ impl FlowInstanceExecutionHandler {
             }
         };
 
-        // For "start" execution, extract FlowInstance from metadata and save to storage first
-        if execution_type == "start" {
+        // For "start" (and "test", which is a start with a TestRunConfig on the
+        // instance) execution, extract FlowInstance from metadata and save to
+        // storage first
+        if persists_instance_from_metadata(&execution_type) {
             if let Some(flow_instance_value) = context.metadata.get("flow_instance") {
                 // Deserialize the FlowInstance from metadata
                 let flow_instance: raisin_flow_runtime::types::FlowInstance =
@@ -394,8 +416,8 @@ impl FlowInstanceExecutionHandler {
         const MAX_CONFLICT_RETRIES: u32 = 20;
         let result = loop {
             let attempt = match execution_type.as_str() {
-                "start" => {
-                    // Start: execute flow from the beginning
+                "start" | "test" => {
+                    // Start (or test start): execute flow from the beginning
                     raisin_flow_runtime::runtime::execute_flow(&instance_id, &callbacks).await
                 }
                 "resume" => {
@@ -537,9 +559,29 @@ impl Default for FlowInstanceExecutionHandler {
     }
 }
 
+/// Whether an execution type carries a fresh `FlowInstance` in its job
+/// metadata that must be persisted before the executor can load it.
+///
+/// `test` is what `POST /api/flows/{repo}/test` queues; it is a `start` whose
+/// instance carries a `TestRunConfig`. It used to be rejected as an unknown
+/// execution type, so a test run was queued, never saved, and never ran.
+pub(crate) fn persists_instance_from_metadata(execution_type: &str) -> bool {
+    matches!(execution_type, "start" | "test")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A test run is a start: its instance must be saved from the job metadata
+    /// and executed, not rejected as an unknown execution type.
+    #[test]
+    fn test_run_execution_type_is_treated_as_a_start() {
+        assert!(persists_instance_from_metadata("start"));
+        assert!(persists_instance_from_metadata("test"));
+        assert!(!persists_instance_from_metadata("resume"));
+        assert!(!persists_instance_from_metadata("timeout_check"));
+    }
 
     #[test]
     fn test_handler_creation() {

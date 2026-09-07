@@ -155,6 +155,18 @@ impl Optimizer {
                 }
             }
 
+            LogicalPlan::SetOperation {
+                left,
+                right,
+                kind,
+                all,
+            } => LogicalPlan::SetOperation {
+                left: Box::new(self.apply_constant_folding(*left)),
+                right: Box::new(self.apply_constant_folding(*right)),
+                kind,
+                all,
+            },
+
             LogicalPlan::WithCTE { ctes, main_query } => {
                 // Apply constant folding to CTEs and main query
                 let folded_ctes: Vec<(String, Box<LogicalPlan>)> = ctes

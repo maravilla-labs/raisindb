@@ -43,13 +43,11 @@ properties:
     type: boolean
     default: false
     description: >
-      Whether the server is reachable without authentication. When false the
-      caller must be authenticated. Note: if anonymous access is enabled for the
-      repository, an unauthenticated request resolves to the anonymous principal,
-      which still satisfies a non-public server that declares no `scopes`. To
-      restrict a non-public server to specific callers, declare `scopes` the
-      anonymous role does not hold (data tools remain row-level-security scoped
-      to the caller regardless).
+      Whether the server is reachable without authentication. When true,
+      requests without a token run as the anonymous role. When false, an
+      unauthenticated or anonymous request is rejected with 401 and an OAuth
+      challenge, even if the server declares no `scopes`. Data tools and custom
+      functions always run row-level-security scoped to the caller.
 
   - name: scopes
     title: Scopes
@@ -58,9 +56,8 @@ properties:
       type: string
     description: >
       Scopes a caller must hold to open the server at all. Each scope is a role
-      or group id from raisin:access_control. On a non-public server, declaring
-      scopes is the reliable way to gate access — the anonymous role will not
-      hold a custom scope, so anonymous callers are rejected.
+      or group id from raisin:access_control; the caller must hold every listed
+      scope. A superadmin or system caller satisfies any scope requirement.
 
   - name: data
     title: Data Policy
@@ -80,8 +77,9 @@ properties:
           type: string
         description: >
           Enabled data operations. One built-in tool is generated per entry.
-          Allowed values - query_nodes, get_node, search_nodes, create_node,
-          update_node, delete_node, list_workspaces.
+          Allowed values - query_nodes, get_node, search_nodes, list_children,
+          create_node, update_node, delete_node, move_node, reorder_node,
+          list_workspaces. An unknown value fails the whole server.
       resources:
         type: boolean
         description: Whether raisin:// resources are exposed for the workspaces above.
@@ -145,10 +143,7 @@ properties:
           description: >
             PATH of the raisin:Function node to invoke, in the functions
             workspace - e.g. /lib/studio/mcp-list-stories. Used verbatim as one
-            direct read. This is a path, not a name: a name resolved by listing
-            every raisin:Function node in the workspace and linear-searching it,
-            on every single tool call, so invoking one tool got slower for
-            everyone each time a package shipped another function.
+            direct read; a bare function name does not resolve.
         name:
           type: string
           description: Tool name advertised to clients.
@@ -246,10 +241,10 @@ properties:
                 type: string
               description: >
                 Who may call this tool - "model" (the agent) and/or "app" (the
-                widget). Defaults to both per SEP-1865. NOT a security boundary,
-                which is what scopes are for - the host enforces this, and a
-                tool declaring scopes is defaulted to ["model"] so a privileged
-                tool never becomes widget-callable by omission.
+                widget). Defaults to both per SEP-1865, also for a tool that
+                declares scopes (the server logs a warning in that case; set it
+                explicitly). NOT a security boundary, which is what scopes are
+                for - the host enforces this.
             prefersBorder:
               type: boolean
               description: >

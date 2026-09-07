@@ -50,7 +50,8 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
                 columns.insert(
                     "message".to_string(),
                     PropertyValue::String(
-                        "Bulk operation started. Poll /api/jobs/{job_id} for status.".to_string(),
+                        "Bulk operation started. Poll GET /management/jobs/{job_id} for status."
+                            .to_string(),
                     ),
                 );
 
@@ -115,7 +116,8 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
                 statement_type_name(analyzed)
             );
 
-            let result = self.execute_analyzed_statement(analyzed).await?;
+            let bound = self.bind_subqueries(analyzed.clone()).await?;
+            let result = self.execute_analyzed_statement(&bound).await?;
             last_result = Some(result);
         }
 

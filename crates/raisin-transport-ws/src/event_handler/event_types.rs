@@ -24,19 +24,7 @@ impl<S: Storage> WsEventHandler<S> {
         let path = event.path.as_deref().unwrap_or("");
         let node_type = event.node_type.as_deref();
 
-        let event_type = match &event.kind {
-            raisin_events::NodeEventKind::Created => "node:created",
-            raisin_events::NodeEventKind::Updated => "node:updated",
-            raisin_events::NodeEventKind::Deleted => "node:deleted",
-            raisin_events::NodeEventKind::Reordered => "node:reordered",
-            raisin_events::NodeEventKind::Published => "node:published",
-            raisin_events::NodeEventKind::Unpublished => "node:unpublished",
-            raisin_events::NodeEventKind::PropertyChanged { property: _ } => {
-                "node:property_changed"
-            }
-            raisin_events::NodeEventKind::RelationAdded { .. } => "node:relation_added",
-            raisin_events::NodeEventKind::RelationRemoved { .. } => "node:relation_removed",
-        };
+        let event_type = Self::node_event_type(&event.kind);
 
         tracing::info!(
             event_type = %event_type,
@@ -128,28 +116,58 @@ impl<S: Storage> WsEventHandler<S> {
         .await;
     }
 
+    /// The wire event type string for a node event kind (ONE mapping, used by
+    /// forwarding and by the pre-forward node resolution).
+    pub(super) fn node_event_type(kind: &raisin_events::NodeEventKind) -> &'static str {
+        match kind {
+            raisin_events::NodeEventKind::Created => "node:created",
+            raisin_events::NodeEventKind::Updated => "node:updated",
+            raisin_events::NodeEventKind::Deleted => "node:deleted",
+            raisin_events::NodeEventKind::Reordered => "node:reordered",
+            raisin_events::NodeEventKind::Published => "node:published",
+            raisin_events::NodeEventKind::Unpublished => "node:unpublished",
+            raisin_events::NodeEventKind::PropertyChanged { property: _ } => {
+                "node:property_changed"
+            }
+            raisin_events::NodeEventKind::RelationAdded { .. } => "node:relation_added",
+            raisin_events::NodeEventKind::RelationRemoved { .. } => "node:relation_removed",
+        }
+    }
+
     /// Resolve a node for RLS evaluation from metadata or storage.
     async fn resolve_node_for_rls(
         &self,
         event: &NodeEvent,
         connections: &[Arc<parking_lot::RwLock<crate::connection::ConnectionState>>],
     ) -> Option<Node> {
-        let has_non_system_subscribers = connections.iter().any(|conn| {
+        // The node is needed when a non-system subscriber must be RLS-checked,
+        // OR when any matching subscription asked for `include_node`. The second
+        // case used to be missing, so a system (superadmin) connection that
+        // subscribed with `include_node: true` never received `payload.node`.
+        let path = event.path.as_deref().unwrap_or("");
+        let event_type = Self::node_event_type(&event.kind);
+        let needs_node = connections.iter().any(|conn| {
             let conn = conn.read();
-            if let Some(auth) = conn.auth_context() {
-                !auth.is_system
-            } else {
-                true
-            }
+            let non_system = conn.auth_context().map(|a| !a.is_system).unwrap_or(true);
+            non_system
+                || conn
+                    .matches_subscription(
+                        &event.workspace_id,
+                        path,
+                        event_type,
+                        event.node_type.as_deref(),
+                    )
+                    .iter()
+                    .any(|(_, f)| f.include_node)
         });
 
-        if !has_non_system_subscribers
-            || matches!(event.kind, raisin_events::NodeEventKind::Deleted)
-        {
+        if !needs_node {
             return None;
         }
 
-        // Try metadata first (avoids DB read)
+        // Try metadata first (avoids DB read). For a Deleted event this is the
+        // ONLY source: the node is already tombstoned, so a storage read at the
+        // latest revision returns nothing.
         let from_metadata = event
             .metadata
             .as_ref()
@@ -162,6 +180,10 @@ impl<S: Storage> WsEventHandler<S> {
                 "Using node_data from event metadata for RLS (skipped DB read)"
             );
             return from_metadata;
+        }
+
+        if matches!(event.kind, raisin_events::NodeEventKind::Deleted) {
+            return None;
         }
 
         // Fallback: fetch from DB

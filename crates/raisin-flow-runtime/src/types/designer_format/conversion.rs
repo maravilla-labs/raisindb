@@ -976,6 +976,24 @@ fn convert_step_node(
             Value::String(escalation.clone()),
         );
     }
+    // Group-assignee policy. The runtime has always read these from the node;
+    // without them here the designer format silently dropped them and every
+    // group wait fell back to `any`.
+    if let Some(completion) = &properties.group_completion {
+        props.insert(
+            "group_completion".to_string(),
+            Value::String(completion.clone()),
+        );
+    }
+    if let Some(quorum) = properties.group_quorum {
+        props.insert("group_quorum".to_string(), Value::Number(quorum.into()));
+    }
+    if let Some(cond) = &properties.response_condition {
+        props.insert(
+            "response_condition".to_string(),
+            Value::String(cond.clone()),
+        );
+    }
     if let Some(timeout_edge) = &properties.timeout_edge {
         props.insert(
             "timeout_edge".to_string(),

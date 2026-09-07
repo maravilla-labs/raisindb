@@ -59,7 +59,22 @@ impl<'a> AnalyzerContext<'a> {
                     }
                 }
             }
-            _ => {}
+            _ => {
+                // Every other scalar function folds through the shared kernel,
+                // the same code the executor runs per row.
+                let literals: Vec<Literal> = args
+                    .iter()
+                    .filter_map(|a| match &a.expr {
+                        Expr::Literal(lit) => Some(lit.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                if literals.len() == args.len() {
+                    if let Some(folded) = crate::scalar::fold(func_name, &literals) {
+                        return Ok(Some(TypedExpr::literal(folded)));
+                    }
+                }
+            }
         }
 
         Ok(None)

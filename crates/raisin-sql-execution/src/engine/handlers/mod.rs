@@ -252,6 +252,8 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             branch_override: None,
             locales: vec![],
             distinct: None,
+            having: None,
+            set_operation: None,
         };
 
         let mut catalog = raisin_sql::StaticCatalog::default_nodes_schema();

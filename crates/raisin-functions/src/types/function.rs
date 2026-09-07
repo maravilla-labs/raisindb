@@ -95,6 +95,54 @@ impl ExecutionMode {
     }
 }
 
+/// Whose identity a `raisin:Function` executes as.
+///
+/// Named distinctly from [`crate::types::ExecutionContext`] (the per-invocation
+/// runtime context) to avoid confusion — this is the function's declared
+/// PREFERENCE, read once from its node properties.
+///
+/// `User` is the default and is the security-positive choice: RLS applies to
+/// every `raisin.db.*` call the function itself issues, scoped to whoever
+/// invoked it (or to nobody, for an anonymous caller). `System` is an explicit,
+/// auditable opt-in for functions that legitimately need cross-user access.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FunctionExecutionContext {
+    /// Run as the invoking caller's real identity; RLS applies to the
+    /// function's own storage calls.
+    #[default]
+    User,
+    /// Run elevated, with no caller identity — bypasses RLS.
+    System,
+}
+
+impl std::fmt::Display for FunctionExecutionContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::User => write!(f, "user"),
+            Self::System => write!(f, "system"),
+        }
+    }
+}
+
+/// Parse the `execution_context` property of a `raisin:Function` node.
+///
+/// Unlike [`ExecutionMode`], an unknown or absent value falls back to the
+/// LEAST-privileged variant (`User`), not the most restrictive-sounding one —
+/// "restrictive" and "safe" point the same direction here, so there is no
+/// tension to resolve. A malformed value must never silently grant `System`.
+impl std::str::FromStr for FunctionExecutionContext {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "user" => Ok(Self::User),
+            "system" => Ok(Self::System),
+            other => Err(format!("Unknown execution context: {other}")),
+        }
+    }
+}
+
 /// Parse the `execution_mode` property of a `raisin:Function` node.
 ///
 /// CASE-INSENSITIVE, and that is the whole point of having it. The property is
@@ -144,6 +192,11 @@ pub struct FunctionMetadata {
     /// Execution mode
     #[serde(default)]
     pub execution_mode: ExecutionMode,
+
+    /// Whose identity this function executes as ("user", the default, or
+    /// "system"). See [`FunctionExecutionContext`].
+    #[serde(default)]
+    pub execution_context: FunctionExecutionContext,
 
     /// Function version (incremented on updates)
     #[serde(default = "default_version")]
@@ -226,6 +279,7 @@ impl FunctionMetadata {
             description: None,
             language,
             execution_mode: ExecutionMode::default(),
+            execution_context: FunctionExecutionContext::default(),
             version: 1,
             enabled: true,
             entry_file: "index.js:handler".to_string(),

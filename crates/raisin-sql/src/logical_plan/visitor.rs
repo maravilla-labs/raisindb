@@ -105,6 +105,21 @@ pub trait PlanRewriter {
                     anti,
                 }
             }
+            LogicalPlan::SetOperation {
+                left,
+                right,
+                kind,
+                all,
+            } => {
+                let new_left = self.rewrite(*left);
+                let new_right = self.rewrite(*right);
+                LogicalPlan::SetOperation {
+                    left: Box::new(new_left),
+                    right: Box::new(new_right),
+                    kind,
+                    all,
+                }
+            }
             LogicalPlan::WithCTE { ctes, main_query } => {
                 // Rewrite each CTE
                 let new_ctes: Vec<(String, Box<LogicalPlan>)> = ctes

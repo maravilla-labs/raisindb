@@ -24,7 +24,14 @@ where
 {
     let deps = deps.clone();
     Arc::new(
-        move |function_ref, input, tenant_id, repo_id, branch, workspace, agent| {
+        move |function_ref,
+              input,
+              tenant_id,
+              repo_id,
+              branch,
+              workspace,
+              agent,
+              triggering_user| {
             let deps = deps.clone();
             Box::pin(async move {
                 tracing::debug!(
@@ -55,9 +62,11 @@ where
                     &branch,
                     &workspace,
                     // WHO this call is, and — when the marker names an AGENT
-                    // that asked for its own rights — what it may do. See
-                    // `flow_auth_context` below.
-                    flow_auth_context(&deps, &tenant_id, &repo_id, &branch, agent).await?,
+                    // that asked for its own rights or the triggering
+                    // caller's — what it may do. See `flow_auth_context`
+                    // below.
+                    flow_auth_context(&deps, &tenant_id, &repo_id, &branch, agent, triggering_user)
+                        .await?,
                     None, // no real-time log streaming for flow functions
                 )
                 .await
@@ -91,6 +100,7 @@ async fn flow_auth_context<S, B>(
     repo_id: &str,
     branch: &str,
     agent: Option<String>,
+    triggering_user: Option<String>,
 ) -> Result<Option<raisin_models::auth::AuthContext>, String>
 where
     S: Storage + TransactionalStorage + 'static,
@@ -116,6 +126,7 @@ where
             AGENTS_WORKSPACE,
             agent_path,
             &marker,
+            triggering_user.as_deref(),
         )
         .await?
         {

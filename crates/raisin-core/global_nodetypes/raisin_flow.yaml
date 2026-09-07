@@ -46,6 +46,25 @@ properties:
     default: true
     index: [Property]
 
+  - name: allow_unauthenticated_invoke
+    type: Boolean
+    required: false
+    title: Allow Unauthenticated Invoke
+    description: |
+      Whether POST /api/flows/{repo}/run (and /test) may start this flow
+      WITHOUT an authenticated caller. Defaults to false: manual/API flow
+      starts require authentication, so `raisin.context.actor`/RLS inside the
+      flow's own function steps reflect a real identity instead of an
+      anonymous placeholder.
+
+      A webhook-triggered automation does NOT need this — webhooks invoke
+      through a `raisin:Trigger` node with `trigger_type: "http"` (its own,
+      separately configured public surface), never through this endpoint.
+      Set this only for a flow that genuinely must be startable by an
+      unauthenticated manual/API caller.
+    default: false
+    index: [Property]
+
   - name: workflow_data
     type: Object
     required: false

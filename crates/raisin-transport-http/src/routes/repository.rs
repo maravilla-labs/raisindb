@@ -109,6 +109,32 @@ pub(crate) fn repository_routes(state: &AppState) -> Router<AppState> {
             "/resources/{repo}/{branch}/{ws}/{*path}",
             get(crate::handlers::static_site::serve_static),
         )
+        // ----------------------------------------------------------------
+        // Audit and revision-history REST endpoints.
+        //
+        // These MUST be registered before the middleware layers below: axum's
+        // `.layer()` wraps only the routes already on the router, and these
+        // two groups used to be added afterwards, so they never saw
+        // `optional_auth_middleware`. Every caller was the anonymous principal,
+        // which RLS filtered to "node not found" (audit) and `[]` (history)
+        // even with a valid token.
+        // ----------------------------------------------------------------
+        .route(
+            "/api/audit/{repo}/{branch}/{ws}/by-id/{id}",
+            get(crate::handlers::audit::audit_get_by_id),
+        )
+        .route(
+            "/api/audit/{repo}/{branch}/{ws}/{*node_path}",
+            get(crate::handlers::audit::audit_get_by_path),
+        )
+        .route(
+            "/api/history/{repo}/{branch}/{ws}/by-id/{id}",
+            get(crate::handlers::history::history_get_by_id),
+        )
+        .route(
+            "/api/history/{repo}/{branch}/{ws}/{*node_path}",
+            get(crate::handlers::history::history_get_by_path),
+        )
         .layer(from_fn(raisin_parsing_middleware));
 
     // Apply optional auth middleware (RocksDB only)
@@ -119,32 +145,6 @@ pub(crate) fn repository_routes(state: &AppState) -> Router<AppState> {
 
         router = router.layer(from_fn_with_state(state.clone(), optional_auth_middleware));
     }
-
-    // ----------------------------------------------------------------
-    // Audit REST endpoints
-    // ----------------------------------------------------------------
-    router = router
-        .route(
-            "/api/audit/{repo}/{branch}/{ws}/by-id/{id}",
-            get(crate::handlers::audit::audit_get_by_id),
-        )
-        .route(
-            "/api/audit/{repo}/{branch}/{ws}/{*node_path}",
-            get(crate::handlers::audit::audit_get_by_path),
-        );
-
-    // ----------------------------------------------------------------
-    // Node revision-history (git-style file history) REST endpoints
-    // ----------------------------------------------------------------
-    router = router
-        .route(
-            "/api/history/{repo}/{branch}/{ws}/by-id/{id}",
-            get(crate::handlers::history::history_get_by_id),
-        )
-        .route(
-            "/api/history/{repo}/{branch}/{ws}/{*node_path}",
-            get(crate::handlers::history::history_get_by_path),
-        );
 
     router
 }

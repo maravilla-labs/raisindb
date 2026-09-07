@@ -141,15 +141,24 @@ pub fn execute_plan<
             PhysicalPlan::Union { .. } => {
                 crate::physical_plan::union::execute_union(plan, ctx).await
             }
+            PhysicalPlan::SetOperation { .. } => {
+                crate::physical_plan::set_operation::execute_set_operation(plan, ctx).await
+            }
             PhysicalPlan::PhysicalInsert {
                 target,
                 columns,
                 values,
                 is_upsert,
+                returning,
                 ..
             } => {
                 crate::physical_plan::dml_executor::execute_insert(
-                    target, columns, values, *is_upsert, ctx,
+                    target,
+                    columns,
+                    values,
+                    *is_upsert,
+                    returning.as_deref(),
+                    ctx,
                 )
                 .await
             }
@@ -157,13 +166,31 @@ pub fn execute_plan<
                 target,
                 assignments,
                 filter,
+                returning,
                 ..
             } => {
-                crate::physical_plan::dml_executor::execute_update(target, assignments, filter, ctx)
-                    .await
+                crate::physical_plan::dml_executor::execute_update(
+                    target,
+                    assignments,
+                    filter,
+                    returning.as_deref(),
+                    ctx,
+                )
+                .await
             }
-            PhysicalPlan::PhysicalDelete { target, filter, .. } => {
-                crate::physical_plan::dml_executor::execute_delete(target, filter, ctx).await
+            PhysicalPlan::PhysicalDelete {
+                target,
+                filter,
+                returning,
+                ..
+            } => {
+                crate::physical_plan::dml_executor::execute_delete(
+                    target,
+                    filter,
+                    returning.as_deref(),
+                    ctx,
+                )
+                .await
             }
             PhysicalPlan::PhysicalOrder {
                 source,

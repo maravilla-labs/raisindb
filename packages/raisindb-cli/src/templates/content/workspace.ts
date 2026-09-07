@@ -1,11 +1,10 @@
 import type { TemplateVars } from '../types.js';
 
+// Keys mirror `raisin_models::workspace::Workspace`, which is what the package
+// installer deserializes this file into; any other key is dropped silently.
 export function workspace(vars: TemplateVars): string {
   return `name: {{workspace}}
-title: {{workspace}}
 description: {{description}}
-icon: layout-grid
-color: "#6366f1"
 
 allowed_node_types:
   - raisin:Folder
@@ -13,10 +12,12 @@ allowed_node_types:
 allowed_root_node_types:
   - raisin:Folder
 
-root_structure:
-  - name: content
-    node_type: raisin:Folder
-    title: Content
-    description: Root content folder
+# Root-level nodes created when the workspace is first installed.
+initial_structure:
+  children:
+    - name: content
+      node_type: raisin:Folder
+      properties:
+        description: Root content folder
 `;
 }

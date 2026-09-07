@@ -697,3 +697,165 @@ async fn bookkeeping_write_does_not_enqueue_embedding() {
          built from moved. Jobs seen: {marked:?}"
     );
 }
+
+/// A NodeType declaring a compound index is not an index the planner can use:
+/// the availability gate answers `NotBuilt` until a build job has run, and
+/// nothing used to queue that job. The schema event must sweep every
+/// workspace of the branch and queue a build for each unbuilt index; a
+/// workspace created afterwards must be swept by its own event.
+#[tokio::test]
+async fn schema_and_workspace_events_queue_compound_index_builds() {
+    use raisin_events::{SchemaEvent, SchemaEventKind, WorkspaceEvent, WorkspaceEventKind};
+    use raisin_models::nodes::properties::schema::{
+        CompoundColumnType, CompoundIndexColumn, CompoundIndexDefinition,
+    };
+    use raisin_models::nodes::NodeType;
+    use raisin_storage::{
+        BranchRepository, BranchScope, CommitMetadata, NodeTypeRepository, RepoScope,
+        WorkspaceRepository,
+    };
+
+    let (_temp_dir, storage) = setup_test_storage();
+    let job_data_store = Arc::new(crate::jobs::JobDataStore::new(storage.db().clone()));
+    let handler = UnifiedJobEventHandler::new(
+        storage.clone(),
+        storage.job_registry().clone(),
+        job_data_store,
+        create_test_dispatcher(),
+        storage.processing_rules_repository(),
+    );
+
+    let _ = storage
+        .branches()
+        .create_branch("t", "r", "main", "test", None, None, false, false)
+        .await;
+    storage
+        .workspaces()
+        .put(
+            RepoScope::new("t", "r"),
+            raisin_models::workspace::Workspace::new("feed".to_string()),
+        )
+        .await
+        .unwrap();
+
+    let node_type = NodeType {
+        id: Some("app:Post".to_string()),
+        name: "app:Post".to_string(),
+        strict: Some(false),
+        allowed_children: vec!["*".to_string()],
+        indexable: Some(true),
+        created_at: Some(chrono::Utc::now()),
+        extends: None,
+        mixins: Vec::new(),
+        overrides: None,
+        description: None,
+        icon: None,
+        version: Some(1),
+        properties: None,
+        required_nodes: Vec::new(),
+        initial_structure: None,
+        versionable: Some(true),
+        publishable: Some(true),
+        auditable: Some(false),
+        index_types: None,
+        updated_at: None,
+        published_at: None,
+        published_by: None,
+        previous_version: None,
+        is_mixin: None,
+        compound_indexes: Some(vec![CompoundIndexDefinition {
+            name: "idx_category_created".to_string(),
+            columns: vec![
+                CompoundIndexColumn {
+                    property: "category".to_string(),
+                    column_type: CompoundColumnType::String,
+                    ascending: None,
+                },
+                CompoundIndexColumn {
+                    property: "__created_at".to_string(),
+                    column_type: CompoundColumnType::Timestamp,
+                    ascending: Some(false),
+                },
+            ],
+            has_order_column: true,
+        }]),
+    };
+    storage
+        .node_types()
+        .upsert(
+            BranchScope::new("t", "r", "main"),
+            node_type,
+            CommitMetadata::system("seed"),
+        )
+        .await
+        .unwrap();
+
+    let queued_builds = || async {
+        storage
+            .job_registry()
+            .list_jobs()
+            .await
+            .into_iter()
+            .filter_map(|job| match &job.job_type {
+                JobType::CompoundIndexBuild {
+                    workspace,
+                    index_name,
+                    ..
+                } => Some((workspace.clone(), index_name.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        queued_builds().await.is_empty(),
+        "nothing queued before the event"
+    );
+
+    handler
+        .handle_schema_change(&SchemaEvent {
+            tenant_id: "t".into(),
+            repository_id: "r".into(),
+            branch: "main".into(),
+            schema_id: "app:Post".into(),
+            schema_type: "NodeType".into(),
+            kind: SchemaEventKind::NodeTypeCreated,
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        queued_builds().await,
+        vec![("feed".to_string(), "idx_category_created".to_string())],
+        "the schema event queues one build per unbuilt index per workspace"
+    );
+
+    // A second workspace, created after the declaration, is swept by its own event.
+    storage
+        .workspaces()
+        .put(
+            RepoScope::new("t", "r"),
+            raisin_models::workspace::Workspace::new("later".to_string()),
+        )
+        .await
+        .unwrap();
+    handler
+        .handle_workspace_change(&WorkspaceEvent {
+            tenant_id: "t".into(),
+            repository_id: "r".into(),
+            workspace: "later".into(),
+            kind: WorkspaceEventKind::Created,
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let builds = queued_builds().await;
+    assert!(
+        builds.contains(&("later".to_string(), "idx_category_created".to_string())),
+        "{builds:?}"
+    );
+    assert_eq!(
+        builds.len(),
+        2,
+        "no duplicate for the already-queued workspace: {builds:?}"
+    );
+}

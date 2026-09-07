@@ -1152,3 +1152,49 @@ fn schema_table_equality_on_primary_key_diverts_off_the_schema_reader() {
          'full-table SELECTs only' rule from the schema-tables reference."
     );
 }
+
+/// `properties->>'title' LIKE 'Post%'` used to plan as a `PropertyRangeScan`
+/// whose residual filter was rendered as a bare `title LIKE 'Post%'` — a
+/// column no row has — so every row the scan produced was rejected and the
+/// query returned nothing. The pattern must stay a row-level filter on the
+/// real `->>` expression.
+#[test]
+fn test_json_property_like_prefix_is_a_row_filter_not_a_range_scan() {
+    use raisin_sql::analyzer::Expr;
+    let like = TypedExpr::new(
+        Expr::Like {
+            expr: Box::new(json_ref("nodes", "title")),
+            pattern: Box::new(TypedExpr::literal(Literal::Text("Post%".to_string()))),
+            negated: false,
+        },
+        DataType::Boolean,
+    );
+    let physical = plan_with_filter("nodes", like);
+    let explain = physical.explain();
+    assert!(!explain.contains("PropertyRangeScan"), "{}", explain);
+    assert!(explain.contains("filter"), "{}", explain);
+
+    // Combined with an indexable predicate, that predicate drives the scan and
+    // the LIKE remains a residual filter.
+    let combined = and(json_eq("nodes", "status", "published"), like_title("Post%"));
+    let physical = plan_with_filter("nodes", combined);
+    let explain = physical.explain();
+    assert!(
+        explain.contains("PropertyIndexScan: status=published"),
+        "{}",
+        explain
+    );
+    assert!(!explain.contains("PropertyRangeScan"), "{}", explain);
+}
+
+fn like_title(pattern: &str) -> TypedExpr {
+    use raisin_sql::analyzer::Expr;
+    TypedExpr::new(
+        Expr::Like {
+            expr: Box::new(json_ref("nodes", "title")),
+            pattern: Box::new(TypedExpr::literal(Literal::Text(pattern.to_string()))),
+            negated: false,
+        },
+        DataType::Boolean,
+    )
+}

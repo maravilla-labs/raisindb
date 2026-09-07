@@ -23,7 +23,7 @@ describe('adapterFiles', () => {
     expect(paths).toContain('content/functions/adapters/dropbox/index.js');
     expect(paths).toContain('content/functions/adapters/dropbox/.node.yaml');
     expect(paths).toContain(
-      'content/_raisin__system/integrations/dropbox/.node.yaml'
+      'content/_raisin__system/connectors/dropbox/.node.yaml'
     );
   });
 
@@ -41,7 +41,7 @@ describe('adapterFiles', () => {
     expect(manifest.builtin).toBe(false);
     expect(manifest.provides.functions).toContain('/adapters/box');
     expect(manifest.provides.content).toContain(
-      'raisin:system/integrations/box'
+      'raisin:system/connectors/box'
     );
   });
 
@@ -52,7 +52,7 @@ describe('adapterFiles', () => {
       description: 'x',
     });
     const node = files.find((f) =>
-      f.path.endsWith('integrations/box/.node.yaml')
+      f.path.endsWith('connectors/box/.node.yaml')
     )!;
     const parsed = yaml.parse(node.content);
 
@@ -123,7 +123,7 @@ describe('createAdapter', () => {
     ).toBe(true);
     expect(
       fs.existsSync(
-        path.join(dir, 'content/_raisin__system/integrations/dropbox/.node.yaml')
+        path.join(dir, 'content/_raisin__system/connectors/dropbox/.node.yaml')
       )
     ).toBe(true);
   });
@@ -134,7 +134,7 @@ describe('createAdapter', () => {
 
     const node = yaml.parse(
       fs.readFileSync(
-        path.join(dir, 'content/_raisin__system/integrations/mydrive/.node.yaml'),
+        path.join(dir, 'content/_raisin__system/connectors/mydrive/.node.yaml'),
         'utf-8'
       )
     );

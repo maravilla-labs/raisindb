@@ -143,11 +143,7 @@ where
         let scheduler = JobQueueFlowScheduler::new(job_registry.clone(), job_data_store.clone());
         let tenant = tenant_id.clone();
         let repo = repo_id.clone();
-        let actor = auth_context
-            .as_ref()
-            .and_then(|a| a.user_id.clone())
-            .unwrap_or_else(|| "function".to_string());
-        let actor_home = auth_context.as_ref().and_then(|a| a.home.clone());
+        let auth_context = auth_context.clone();
 
         Box::pin(async move {
             // Normalize the flow path: ensure a leading slash for the lookup
@@ -173,8 +169,7 @@ where
                 &repo,
                 &flow_path,
                 input,
-                actor,
-                actor_home,
+                auth_context.as_ref(),
             )
             .await
             .map_err(|e| Error::Backend(format!("Failed to start flow '{}': {}", flow_path, e)))?;

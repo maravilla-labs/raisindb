@@ -25,6 +25,14 @@ use crate::types::{FlowDefinition, FlowInstance, TriggerEventType, TriggerInfo};
 /// field so instances written by an older binary keep deserializing -- the same
 /// reason `__trigger_info` is stored this way.
 pub const AGENT_VAR: &str = "__agent";
+
+/// Reserved instance variable holding the raw actor id of whoever's write
+/// triggered this instance — carried so a step with `execution_context:
+/// "user"` can resolve a real caller instead of always falling back to
+/// System. Absent when the trigger has no such identity (a timer, an
+/// API-started flow). Same "JSON object, not a struct field" reasoning as
+/// [`AGENT_VAR`].
+pub const TRIGGERING_USER_VAR: &str = "__triggering_user";
 use crate::FlowError;
 
 use super::events::FlowTriggerEvent;
@@ -221,6 +229,7 @@ pub struct FlowInstanceBuilder {
     branch: Option<String>,
     workspace: Option<String>,
     agent: Option<String>,
+    triggering_user: Option<String>,
     test_config: Option<crate::types::TestRunConfig>,
 }
 
@@ -244,6 +253,7 @@ impl FlowInstanceBuilder {
             branch: None,
             workspace: None,
             agent: None,
+            triggering_user: None,
             test_config: None,
         }
     }
@@ -282,6 +292,14 @@ impl FlowInstanceBuilder {
     /// no privilege.
     pub fn agent(mut self, agent: String) -> Self {
         self.agent = Some(agent);
+        self
+    }
+
+    /// Set the raw actor id of whoever's write triggered this instance.
+    /// Stored as [`TRIGGERING_USER_VAR`], for the same resume-survival reason
+    /// as [`Self::agent`].
+    pub fn triggering_user(mut self, user_id: String) -> Self {
+        self.triggering_user = Some(user_id);
         self
     }
 
@@ -335,6 +353,12 @@ impl FlowInstanceBuilder {
             // Survives the resume hop, whose job context is rebuilt from scratch.
             if let Some(agent) = self.agent {
                 vars.insert(AGENT_VAR.to_string(), Value::String(agent));
+            }
+            if let Some(triggering_user) = self.triggering_user {
+                vars.insert(
+                    TRIGGERING_USER_VAR.to_string(),
+                    Value::String(triggering_user),
+                );
             }
         }
 

@@ -28,6 +28,7 @@ impl LogicalPlan {
             | LogicalPlan::Aggregate { .. }
             | LogicalPlan::Join { .. }
             | LogicalPlan::SemiJoin { .. }
+            | LogicalPlan::SetOperation { .. }
             | LogicalPlan::WithCTE { .. }
             | LogicalPlan::CTEScan { .. }
             | LogicalPlan::Subquery { .. }

@@ -6,6 +6,7 @@
 //! Dry run simulation for content nodes and package assets
 
 use raisin_error::{Error, Result};
+use raisin_models::auth::AuthContext;
 use raisin_models::nodes::properties::value::PropertyValue;
 use raisin_storage::transactional::{TransactionalContext, TransactionalStorage};
 use raisin_storage::Storage;
@@ -185,6 +186,10 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         let tx = self.storage.begin_context().await?;
         tx.set_tenant_repo(tenant_id, repo_id)?;
         tx.set_branch(branch)?;
+        // Same actor as the real install (node_installer.rs). Without it the
+        // existence lookups below see nothing, and every existing node previews
+        // as "create" — the dry run reported the opposite of what install did.
+        tx.set_auth_context(AuthContext::system())?;
 
         for item in items_to_check {
             match item {
@@ -359,6 +364,10 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         let tx = self.storage.begin_context().await?;
         tx.set_tenant_repo(tenant_id, repo_id)?;
         tx.set_branch(branch)?;
+        // Same actor as the real install (node_installer.rs). Without it the
+        // existence lookups below see nothing, and every existing node previews
+        // as "create" — the dry run reported the opposite of what install did.
+        tx.set_auth_context(AuthContext::system())?;
 
         for asset in assets_to_check {
             let (category_name, asset_path) = match &asset {

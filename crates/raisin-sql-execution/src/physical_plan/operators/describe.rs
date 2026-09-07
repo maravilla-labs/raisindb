@@ -521,6 +521,14 @@ impl PhysicalPlan {
             PhysicalPlan::Union { inputs } => {
                 format!("Union: {} branch(es)", inputs.len())
             }
+            PhysicalPlan::SetOperation {
+                kind, all, columns, ..
+            } => format!(
+                "{}{}: {}",
+                kind.keyword(),
+                if *all { " ALL" } else { "" },
+                columns.join(", ")
+            ),
             PhysicalPlan::Empty => "Empty (DDL)".to_string(),
         }
     }
@@ -561,7 +569,8 @@ impl PhysicalPlan {
 
             PhysicalPlan::NestedLoopJoin { left, right, .. }
             | PhysicalPlan::HashJoin { left, right, .. }
-            | PhysicalPlan::HashSemiJoin { left, right, .. } => {
+            | PhysicalPlan::HashSemiJoin { left, right, .. }
+            | PhysicalPlan::SetOperation { left, right, .. } => {
                 output.push_str(&left.explain_impl(indent + 1));
                 output.push_str(&right.explain_impl(indent + 1));
             }

@@ -432,7 +432,7 @@ pub async fn discover_function_tools(
     let props = scan_function_props(backend, &descriptor.data_policy.workspaces).await?;
     Ok(props
         .iter()
-        .filter_map(|(_, p)| CustomTool::from_function_properties(p))
+        .filter_map(|(path, p)| CustomTool::from_function_node(path.as_deref(), p))
         .collect())
 }
 
@@ -527,8 +527,8 @@ pub async fn resolve_plan(
     // Function-side tools, resolved but not yet deduplicated against
     // server-side names — that needs a built registry, which is per-caller.
     let mut function_tools = Vec::new();
-    for (_, props) in &func_props {
-        if let Some(mut custom) = CustomTool::from_function_properties(props) {
+    for (path, props) in &func_props {
+        if let Some(mut custom) = CustomTool::from_function_node(path.as_deref(), props) {
             // A function-side `mcp` block may reference the server's named
             // widgets too; the descriptor resolved only its own tools.
             let name = custom.name.clone();

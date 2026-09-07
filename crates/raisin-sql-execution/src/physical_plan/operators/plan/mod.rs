@@ -485,6 +485,16 @@ define_physical_plan! {
         Union {
             inputs: Vec<PhysicalPlan>,
         },
+        /// UNION / INTERSECT / EXCEPT of two plans. `columns` names the
+        /// output (the left side's projection); the right side's rows are
+        /// renamed to them by position. Without `all`, duplicates are removed.
+        SetOperation {
+            left: Box<PhysicalPlan>,
+            right: Box<PhysicalPlan>,
+            kind: raisin_sql::analyzer::SetOperationKind,
+            all: bool,
+            columns: Vec<String>,
+        },
 
         // ── Join Operators ───────────────────────────────────────
 
@@ -528,6 +538,8 @@ define_physical_plan! {
             columns: Vec<String>,
             values: Vec<Vec<TypedExpr>>,
             is_upsert: bool,
+            /// `RETURNING` projection over the written nodes
+            returning: Option<Vec<ProjectionExpr>>,
         },
         /// Physical UPDATE operation
         PhysicalUpdate {
@@ -536,6 +548,8 @@ define_physical_plan! {
             assignments: Vec<(String, TypedExpr)>,
             filter: Option<TypedExpr>,
             branch_override: Option<String>,
+            /// `RETURNING` projection over the updated nodes
+            returning: Option<Vec<ProjectionExpr>>,
         },
         /// Physical DELETE operation
         PhysicalDelete {
@@ -543,6 +557,8 @@ define_physical_plan! {
             schema: raisin_sql::analyzer::catalog::TableDef,
             filter: Option<TypedExpr>,
             branch_override: Option<String>,
+            /// `RETURNING` projection over the deleted nodes
+            returning: Option<Vec<ProjectionExpr>>,
         },
         /// Physical ORDER operation
         PhysicalOrder {

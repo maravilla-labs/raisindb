@@ -330,3 +330,37 @@ async fn root_level_listing_paginates() -> Result<()> {
 
     Ok(())
 }
+
+/// The HTTP handler bounds every listing to the branch HEAD via
+/// `at_revision`. That used to route the page through the tree store, whose
+/// root lookup has no data behind it, so `?limit=N` returned an empty page for
+/// a parent with children.
+#[tokio::test]
+async fn revision_bounded_listing_returns_children() -> Result<()> {
+    let (storage, _tmp) = setup().await?;
+    seed(&storage, 5).await?;
+
+    let head = storage
+        .branches()
+        .get_branch(TENANT, REPO, "main")
+        .await?
+        .expect("branch exists")
+        .head;
+    let svc = service(storage.clone()).at_revision(head);
+
+    let first = svc.list_children_page("/parent", None, 2).await?;
+    assert_eq!(first.items.len(), 2, "first page must not be empty");
+    assert!(first.next_cursor.is_some());
+
+    let all = page_through(&svc, "/parent", 2).await?;
+    assert_eq!(
+        all,
+        (0..5).map(|i| format!("child-{i:02}")).collect::<Vec<_>>()
+    );
+
+    // Root level, bounded the same way.
+    let root = svc.list_children_page("/", None, 10).await?;
+    assert_eq!(root.items.len(), 1);
+    assert_eq!(root.items[0].name, "parent");
+    Ok(())
+}

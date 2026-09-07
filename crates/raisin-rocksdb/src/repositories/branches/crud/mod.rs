@@ -175,6 +175,32 @@ impl BranchRepository for BranchRepositoryImpl {
             }
         }
 
+        // Announce the branch. The job event handler turns this into the
+        // fulltext and embedding branch-copy jobs; nothing else copies the
+        // derived indexes, so a branch created without this event searched
+        // an empty vector index until someone ran REBUILD VECTOR INDEX.
+        if let Some(ref event_bus) = self.event_bus {
+            let mut metadata = HashMap::new();
+            metadata.insert(
+                "source_branch".to_string(),
+                serde_json::Value::String(source_branch_for_indexes.clone()),
+            );
+            event_bus.publish(raisin_events::Event::Repository(
+                raisin_events::RepositoryEvent {
+                    tenant_id: tenant_id.to_string(),
+                    repository_id: repo_id.to_string(),
+                    kind: raisin_events::RepositoryEventKind::BranchCreated,
+                    workspace: None,
+                    revision_id: effective_revision.map(|r| r.to_string()),
+                    branch_name: Some(branch_name.to_string()),
+                    tag_name: None,
+                    message: None,
+                    actor: Some(created_by.to_string()),
+                    metadata: Some(metadata),
+                },
+            ));
+        }
+
         Ok(branch)
     }
 

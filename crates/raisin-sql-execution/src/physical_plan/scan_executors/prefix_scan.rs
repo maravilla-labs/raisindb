@@ -375,21 +375,25 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
             tracing::debug!("   Scanning descendants in tree order for path '{}'...", path_prefix);
 
             let parent_path = path_prefix.trim_end_matches('/');
-            let parent_node = storage
-                .nodes()
-                .get_by_path(
-                    StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
-                    parent_path,
-                    if let Some(rev) = max_revision.as_ref() {
-                        Some(rev)
-                    } else {
-                        None
-                    },
-                )
-                .await?;
+            // The workspace root has no node record of its own; the ordering
+            // index keys root-level children under "/", so a descendant walk
+            // from the root (`DESCENDANT_OF('/')`) starts there instead of
+            // looking up a path that resolves to nothing.
+            let parent_id: Option<String> = if parent_path.is_empty() {
+                Some("/".to_string())
+            } else {
+                storage
+                    .nodes()
+                    .get_by_path(
+                        StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
+                        parent_path,
+                        max_revision.as_ref(),
+                    )
+                    .await?
+                    .map(|parent| parent.id)
+            };
 
-            if let Some(parent) = parent_node {
-                let parent_id = parent.id.clone();
+            if let Some(parent_id) = parent_id {
 
                 // Paged refill, as on the direct-children path: the walk is now
                 // bounded by the query's exact limit, but RLS and the skipped
@@ -409,7 +413,7 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
                         .nodes()
                         .scan_descendants_ordered_page(
                             StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
-                            &parent.id,
+                            &parent_id,
                             page_cursor.as_deref(),
                             // The traversal root is emitted but filtered out below,
                             // so leave room for it when bounding the walk.

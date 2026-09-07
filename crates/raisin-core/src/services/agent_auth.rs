@@ -31,17 +31,21 @@ use crate::services::permission_service::PermissionService;
 /// What an agent's `execution_context` asked for, once it has been read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentExecution {
-    /// Run with full system privileges (`"system"`, and the legacy `"user"`
-    /// default, whose per-user resolution has never been implemented).
+    /// Run with full system privileges (`"system"`, or an unrecognised value).
     System,
-    /// Run under the agent's OWN roles and groups.
+    /// Run under the agent's OWN roles and groups (`"agent"`).
     OwnRights,
+    /// Run under WHOEVER CAUSED this execution (`"user"`, the schema default).
+    /// Only resolvable where the caller can name that identity — see
+    /// [`resolve_agent_context`]'s `triggering_user_id` parameter.
+    CallerRights,
 }
 
 /// Read `execution_context` off an agent node.
 pub fn execution_of(agent: &Node) -> AgentExecution {
     match agent.properties.get("execution_context") {
         Some(PropertyValue::String(value)) if value == "agent" => AgentExecution::OwnRights,
+        Some(PropertyValue::String(value)) if value == "user" => AgentExecution::CallerRights,
         _ => AgentExecution::System,
     }
 }
@@ -63,11 +67,22 @@ pub fn granted_ids(agent: &Node, key: &str) -> Vec<String> {
 
 /// The auth context a write BY THIS AGENT should carry.
 ///
-/// * `Ok(Some(ctx))` — the agent runs under its own resolved permissions.
-/// * `Ok(None)` — the agent did not ask for its own rights, or asked but was
-///   granted nothing; the caller keeps whatever system context it would have
-///   used. An agent that may do NOTHING is a silent, baffling failure, so an
-///   empty grant list is treated as "not configured" rather than as a lockout.
+/// `triggering_user_id` is the raw actor id of whoever/whatever CAUSED this
+/// execution — for a flow started by a node-change trigger, the actor stamped
+/// on the write that fired it (see `raisin-rocksdb`'s
+/// `transaction/commit/events.rs`, `metadata["actor"]`, carried through the
+/// trigger-evaluation and flow-instance job chain). It is consulted only when
+/// the agent asks for `CallerRights` (`execution_context: "user"`); `None`
+/// means no such identity could be named for this call path (a timer trigger,
+/// an API-started flow) and the caller keeps its existing context.
+///
+/// * `Ok(Some(ctx))` — the agent runs under its own resolved permissions, or
+///   the resolved triggering user's.
+/// * `Ok(None)` — the agent did not ask for elevated/caller rights, asked but
+///   was granted nothing, or asked for `CallerRights` with no resolvable
+///   identity; the caller keeps whatever system context it would have used.
+///   An agent that may do NOTHING is a silent, baffling failure, so an empty
+///   grant list is treated as "not configured" rather than as a lockout.
 /// * `Err(_)` — the rights could not be resolved. The caller must FAIL CLOSED:
 ///   quietly inheriting system privileges is the one outcome nobody notices.
 pub async fn resolve_agent_context<S>(
@@ -78,6 +93,7 @@ pub async fn resolve_agent_context<S>(
     workspace: &str,
     agent_path: &str,
     marker: &str,
+    triggering_user_id: Option<&str>,
 ) -> Result<Option<AuthContext>, String>
 where
     S: Storage + 'static,
@@ -99,43 +115,121 @@ where
         return Ok(None);
     };
 
-    if execution_of(&agent) != AgentExecution::OwnRights {
-        return Ok(None);
-    }
+    match execution_of(&agent) {
+        AgentExecution::System => Ok(None),
+        AgentExecution::CallerRights => {
+            resolve_caller_context(
+                storage,
+                tenant_id,
+                repo_id,
+                branch,
+                agent_path,
+                marker,
+                triggering_user_id,
+            )
+            .await
+        }
+        AgentExecution::OwnRights => {
+            let roles = granted_ids(&agent, "roles");
+            let groups = granted_ids(&agent, "groups");
+            if roles.is_empty() && groups.is_empty() {
+                tracing::warn!(
+                    agent_path = %agent_path,
+                    "Agent is set to run under its own permissions but has no roles or groups; \
+                     falling back to the caller's context"
+                );
+                return Ok(None);
+            }
 
-    let roles = granted_ids(&agent, "roles");
-    let groups = granted_ids(&agent, "groups");
-    if roles.is_empty() && groups.is_empty() {
+            let resolved = PermissionService::new(storage.clone())
+                .resolve_for_principal_node(tenant_id, repo_id, branch, &agent)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "Failed to resolve permissions for '{}': {}",
+                        agent_path, error
+                    )
+                })?;
+
+            tracing::info!(
+                agent_path = %agent_path,
+                roles = ?resolved.effective_roles,
+                permissions = resolved.permissions.len(),
+                "Agent executing under its own permissions"
+            );
+
+            // `user_id` is the agent's own marker, so an RLS condition
+            // (`node.created_by == auth.user_id`) and the authorship stamp agree
+            // on who this is.
+            Ok(Some(
+                AuthContext::for_user(marker)
+                    .with_permissions(resolved)
+                    .with_agent(marker.to_string()),
+            ))
+        }
+    }
+}
+
+/// Resolve `CallerRights`: run as whoever's write caused this execution.
+async fn resolve_caller_context<S>(
+    storage: &Arc<S>,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    agent_path: &str,
+    marker: &str,
+    triggering_user_id: Option<&str>,
+) -> Result<Option<AuthContext>, String>
+where
+    S: Storage + 'static,
+{
+    let Some(user_id) =
+        triggering_user_id.filter(|id| !id.is_empty() && *id != "anonymous" && *id != "system")
+    else {
         tracing::warn!(
             agent_path = %agent_path,
-            "Agent is set to run under its own permissions but has no roles or groups; \
-             falling back to the caller's context"
+            "Agent execution_context is \"user\", but no triggering identity is \
+             available on this call path (e.g. a timer trigger or an API-started \
+             flow); falling back to the caller's existing context"
         );
         return Ok(None);
-    }
+    };
 
+    // `created_by`/`updated_by` and a `NodeEvent`'s `actor` field are all
+    // `AuthContext::actor_id()` — the identity_id from the JWT `sub` claim —
+    // not a `raisin:User` node's own UUID. `resolve_for_identity_id` is the
+    // resolver keyed on that; `resolve_for_user_id` (node UUID) would look up
+    // the wrong thing entirely and silently find nothing.
     let resolved = PermissionService::new(storage.clone())
-        .resolve_for_principal_node(tenant_id, repo_id, branch, &agent)
+        .resolve_for_identity_id(tenant_id, repo_id, branch, user_id)
         .await
         .map_err(|error| {
             format!(
-                "Failed to resolve permissions for '{}': {}",
-                agent_path, error
+                "Failed to resolve permissions for triggering user '{}': {}",
+                user_id, error
             )
         })?;
 
+    let Some(resolved) = resolved else {
+        tracing::warn!(
+            agent_path = %agent_path,
+            user_id = %user_id,
+            "Triggering identity is not a resolvable raisin:User; falling back \
+             to the caller's existing context"
+        );
+        return Ok(None);
+    };
+
     tracing::info!(
         agent_path = %agent_path,
+        user_id = %user_id,
         roles = ?resolved.effective_roles,
         permissions = resolved.permissions.len(),
-        "Agent executing under its own permissions"
+        "Agent executing under the triggering user's permissions"
     );
 
-    // `user_id` is the agent's own marker, so an RLS condition
-    // (`node.created_by == auth.user_id`) and the authorship stamp agree on who
-    // this is.
     Ok(Some(
-        AuthContext::for_user(marker)
+        AuthContext::for_user(user_id)
             .with_permissions(resolved)
             .with_agent(marker.to_string()),
     ))

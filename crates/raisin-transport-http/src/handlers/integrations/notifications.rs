@@ -15,8 +15,9 @@
 //! - **Token → mount** — the unguessable `{mount_token}` path segment is matched
 //!   against the token the engine baked into each mount's stored
 //!   `state.push_notification_url` (ground truth: that URL is literally what the
-//!   provider was told to call), falling back to a `state.push_token` field or
-//!   the mount id. No match → 404.
+//!   provider was told to call), falling back to the engine-minted
+//!   `state.push_mount_token` (present before the first `subscribe`, e.g. for a
+//!   Pub/Sub push subscription an operator wires by hand). No match → 410.
 //! - **Secret verification** — the mount's stored `state.push_secret` is looked
 //!   for, matched in constant time, in *any* request carrier: any query value,
 //!   any header value, or any string ANYWHERE in the JSON body (nested, depth-
@@ -98,7 +99,7 @@ pub async fn notify(
 
     let Some(mount) = mounts
         .into_iter()
-        .find(|n| token_matches(&mount_token, &mount_state(n), &n.id))
+        .find(|n| token_matches(&mount_token, &mount_state(n)))
     else {
         // An ORPHANED subscription: the mount is gone but the provider was never
         // told, so it keeps delivering forever.
@@ -437,21 +438,22 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 
 /// Whether `mount_token` identifies this mount. The authoritative match is the
 /// last path segment of the stored `push_notification_url` (that URL is exactly
-/// what the provider calls back), with a `push_token` field and the mount id as
-/// fallbacks. Comparison is constant-time on the token.
-fn token_matches(mount_token: &str, state: &Value, mount_id: &str) -> bool {
+/// what the provider calls back), with the engine-minted `push_mount_token` as
+/// the fallback so a URL handed out by `setup-urls` resolves before the first
+/// `subscribe`. The bare mount id is NOT accepted: it is visible in every
+/// console URL and API response, so it would let anyone who has seen it drive
+/// the public endpoint. Comparison is constant-time on the token.
+fn token_matches(mount_token: &str, state: &Value) -> bool {
     if let Some(url) = string_field(state, "push_notification_url") {
         let seg = url.rsplit('/').next().unwrap_or_default();
         if !seg.is_empty() && ct_eq(seg.as_bytes(), mount_token.as_bytes()) {
             return true;
         }
     }
-    if let Some(tok) = string_field(state, "push_token") {
-        if ct_eq(tok.as_bytes(), mount_token.as_bytes()) {
-            return true;
-        }
+    match string_field(state, "push_mount_token") {
+        Some(tok) => ct_eq(tok.as_bytes(), mount_token.as_bytes()),
+        None => false,
     }
-    ct_eq(mount_id.as_bytes(), mount_token.as_bytes())
 }
 
 #[cfg(test)]
@@ -592,17 +594,21 @@ mod tests {
             "push_notification_url": "https://h/api/integrations/r/notifications/tok-abc",
             "push_secret": "s",
         });
-        assert!(token_matches("tok-abc", &state, "mount-1"));
-        // A miss: the token->mount lookup returns false (handler maps to 404).
-        assert!(!token_matches("tok-zzz", &state, "mount-1"));
+        assert!(token_matches("tok-abc", &state));
+        // A miss: the token->mount lookup returns false (handler maps to 410).
+        assert!(!token_matches("tok-zzz", &state));
     }
 
+    /// The token `setup-urls` mints is stored as `push_mount_token` and must
+    /// resolve before `subscribe` has stored a `push_notification_url`; the
+    /// bare mount id must not.
     #[test]
-    fn token_lookup_falls_back_to_push_token_and_mount_id() {
-        let state = json!({ "push_token": "pt-1" });
-        assert!(token_matches("pt-1", &state, "mount-9"));
-        assert!(token_matches("mount-9", &Value::Null, "mount-9"));
-        assert!(!token_matches("nope", &Value::Null, "mount-9"));
+    fn token_lookup_falls_back_to_push_mount_token_but_not_the_mount_id() {
+        let state = json!({ "push_mount_token": "mount-9.abc" });
+        assert!(token_matches("mount-9.abc", &state));
+        assert!(!token_matches("mount-9", &state));
+        assert!(!token_matches("mount-9", &Value::Null));
+        assert!(!token_matches("nope", &Value::Null));
     }
 }
 

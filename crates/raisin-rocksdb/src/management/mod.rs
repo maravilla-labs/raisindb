@@ -50,7 +50,8 @@ pub use background::{
 };
 pub use fulltext::{rebuild_fulltext_index, reconcile_fulltext_index};
 pub use helpers::{
-    list_branches, list_repos_with_virtual_mounts, list_repositories, list_tenants, list_workspaces,
+    list_branches, list_repos_with_virtual_mounts, list_repositories, list_tenants,
+    list_workspaces, sweep_compound_index_builds_at_boot,
 };
 pub use vector::{
     DimensionMismatch, HnswManagement, RebuildStats as VectorRebuildStats, VerificationReport,

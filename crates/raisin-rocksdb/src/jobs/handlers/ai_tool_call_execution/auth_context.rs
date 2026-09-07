@@ -181,6 +181,10 @@ impl<S: Storage + 'static> AIToolCallExecutionHandler<S> {
                     &agent_workspace,
                     &agent_path,
                     &agent_marker,
+                    // The conversation owner is resolved directly below, in the
+                    // "user" arm of this same match — not via this shared
+                    // helper's CallerRights branch.
+                    None,
                 )
                 .await
                 {
@@ -212,18 +216,74 @@ impl<S: Storage + 'static> AIToolCallExecutionHandler<S> {
                 system_initiated_by(Some(agent_marker))
             }
             _ => {
-                // User context: for now, use system context as fallback
-                // TODO: Implement proper user context resolution from conversation owner
-                // The conversation should have created_by or owner info we can use
-                tracing::info!(
-                    agent_path = %agent_path,
-                    "Using system context for function execution (user context not yet implemented - using system as fallback)"
-                );
-                // NOTE: the agent marker is provenance only and does NOT resolve
-                // the TODO below — that is about which *human's* permissions
-                // apply, which is an authorization question, not an attribution
-                // one.
-                system_initiated_by(Some(agent_marker)) // TODO: Return actual user auth context
+                // User context: resolve the conversation's owning human and run
+                // as THEM, not as the agent and not as system. The agent marker
+                // is provenance only — it names who is running, not whose
+                // permissions apply, so it rides along on every branch below.
+                let owner_id = conversation
+                    .created_by
+                    .clone()
+                    .filter(|id| id != "anonymous" && id != "system")
+                    .or_else(|| {
+                        conversation
+                            .owner_id
+                            .clone()
+                            .filter(|id| id != "anonymous" && id != "system")
+                    });
+
+                let Some(owner_id) = owner_id else {
+                    tracing::warn!(
+                        agent_path = %agent_path,
+                        conversation_path = %conversation_path,
+                        "Conversation has no resolvable owner; using system context \
+                         (user context requires a real conversation owner)"
+                    );
+                    return system_initiated_by(Some(agent_marker));
+                };
+
+                // `created_by`/`owner_id` are `AuthContext::actor_id()` — the
+                // identity_id from the JWT `sub` claim — not a `raisin:User`
+                // node's own UUID, so this resolves by identity, not by node id.
+                match raisin_core::services::permission_service::PermissionService::new(
+                    self.storage.clone(),
+                )
+                .resolve_for_identity_id(tenant_id, repo_id, branch, &owner_id)
+                .await
+                {
+                    Ok(Some(resolved)) => {
+                        tracing::info!(
+                            agent_path = %agent_path,
+                            user_id = %owner_id,
+                            "Resolved conversation owner's permissions for user execution_context"
+                        );
+                        Some(
+                            AuthContext::for_user(&owner_id)
+                                .with_permissions(resolved)
+                                .with_agent(agent_marker),
+                        )
+                    }
+                    Ok(None) => {
+                        tracing::warn!(
+                            agent_path = %agent_path,
+                            user_id = %owner_id,
+                            "Conversation owner is not a resolvable raisin:User; \
+                             using system context"
+                        );
+                        system_initiated_by(Some(agent_marker))
+                    }
+                    Err(error) => {
+                        // FAIL CLOSED, matching the "agent" branch above: a
+                        // resolution failure must not silently widen to system.
+                        tracing::error!(
+                            agent_path = %agent_path,
+                            user_id = %owner_id,
+                            error = %error,
+                            "Failed to resolve the conversation owner's permissions; \
+                             refusing the tool call"
+                        );
+                        None
+                    }
+                }
             }
         }
     }

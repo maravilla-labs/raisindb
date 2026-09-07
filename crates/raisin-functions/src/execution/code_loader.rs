@@ -200,6 +200,7 @@ where
     metadata.email_policy = email_policy;
     metadata.identity_policy = identity_policy;
     metadata.resource_limits = resource_limits;
+    metadata.execution_context = extract_execution_context(func_node);
 
     Ok((code, metadata))
 }
@@ -356,6 +357,29 @@ pub fn extract_identity_policy(node: &Node) -> IdentityPolicy {
             IdentityPolicy::default()
         }
     }
+}
+
+/// Extract execution_context from node properties.
+///
+/// Defaults to `User` (the least-privileged variant) on an absent or
+/// unrecognised value — see [`FunctionExecutionContext::from_str`]'s doc for
+/// why this must never silently fall back to `System`.
+pub fn extract_execution_context(node: &Node) -> crate::types::FunctionExecutionContext {
+    use std::str::FromStr;
+
+    let Some(PropertyValue::String(raw)) = node.properties.get("execution_context") else {
+        return crate::types::FunctionExecutionContext::default();
+    };
+
+    crate::types::FunctionExecutionContext::from_str(raw).unwrap_or_else(|_| {
+        tracing::warn!(
+            function_path = %node.path,
+            value = %raw,
+            "execution_context could not be parsed and was ignored; \
+             this function runs as the invoking caller (User), not System."
+        );
+        crate::types::FunctionExecutionContext::default()
+    })
 }
 
 /// Extract resource_limits from node properties.

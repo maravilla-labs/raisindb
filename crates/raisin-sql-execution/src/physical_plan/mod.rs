@@ -72,6 +72,7 @@ pub mod project;
 pub mod scan_executors;
 pub mod search;
 pub mod semi_join;
+pub mod set_operation;
 pub mod sort;
 pub mod spatial_annotate;
 pub mod table_function;

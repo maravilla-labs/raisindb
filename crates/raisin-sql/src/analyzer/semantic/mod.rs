@@ -40,6 +40,7 @@ use super::{
     catalog::{Catalog, ColumnDef, TableDef},
     error::{AnalysisError, Result},
     functions::FunctionRegistry,
+    typed_expr::TypedExpr,
     types::DataType,
 };
 use std::collections::HashMap;
@@ -58,6 +59,10 @@ pub(super) struct AnalyzerContext<'a> {
     /// Whether the current INSERT statement is actually an UPSERT.
     /// Set to true before analyzing an UPSERT statement.
     is_upsert: bool,
+    /// SELECT-list aliases visible to HAVING / ORDER BY. Consulted by
+    /// identifier resolution only after no table supplies the name, so an
+    /// alias can never shadow a real column.
+    select_aliases: HashMap<String, TypedExpr>,
 }
 
 impl<'a> AnalyzerContext<'a> {
@@ -68,6 +73,22 @@ impl<'a> AnalyzerContext<'a> {
             current_tables: Vec::new(),
             cte_catalog: HashMap::new(),
             is_upsert: false,
+            select_aliases: HashMap::new(),
+        }
+    }
+
+    /// A fresh context for a nested query scope (subquery, set-operation
+    /// side). Inherits the catalog, function registry and every CTE defined
+    /// so far; sees none of the enclosing query's tables — which is what makes
+    /// a correlated reference a resolution error rather than a silent NULL.
+    pub(super) fn nested_scope(&self) -> AnalyzerContext<'a> {
+        AnalyzerContext {
+            catalog: self.catalog,
+            functions: self.functions,
+            current_tables: Vec::new(),
+            cte_catalog: self.cte_catalog.clone(),
+            is_upsert: false,
+            select_aliases: HashMap::new(),
         }
     }
 

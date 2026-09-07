@@ -86,6 +86,37 @@ pub fn eval_expr(expr: &TypedExpr, row: &Row) -> Result<Literal, Error> {
                 .to_string(),
         )),
 
+        Expr::Exists { .. } | Expr::ScalarSubquery { .. } | Expr::QuantifiedSubquery { .. } => {
+            Err(Error::Validation(
+                "subquery reached the executor unbound: the engine evaluates EXISTS / scalar / \
+                 ANY-ALL subqueries before planning (engine::subquery_bind); this statement \
+                 path skipped that step"
+                    .to_string(),
+            ))
+        }
+
+        Expr::Quantified {
+            left,
+            op,
+            right,
+            all,
+        } => super::regex_ops::eval_quantified(left, *op, right, *all, row),
+
+        Expr::Regex {
+            expr,
+            pattern,
+            case_insensitive,
+            negated,
+            similar_to,
+        } => super::regex_ops::eval_regex(
+            expr,
+            pattern,
+            *case_insensitive,
+            *negated,
+            *similar_to,
+            row,
+        ),
+
         Expr::Like {
             expr,
             pattern,

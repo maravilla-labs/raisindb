@@ -108,6 +108,10 @@ pub type FunctionExecutorCallback = Arc<
             String,
             // agent marker (agent_identity vocabulary), provenance only
             Option<String>,
+            // raw actor id of whoever's write triggered this flow instance,
+            // for `execution_context: "user"` resolution — see
+            // `TRIGGERING_USER_VAR` / `raisin-rocksdb`'s `TRIGGERING_ACTOR_KEY`
+            Option<String>,
         ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + Send>>
         + Send
         + Sync,

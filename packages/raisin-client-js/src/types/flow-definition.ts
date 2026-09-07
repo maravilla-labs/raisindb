@@ -288,6 +288,15 @@ export interface FlowStepProperties {
    * not confident enough */
   escalation_assignee?: string;
 
+  // Group assignee (assignee is a raisin:Group)
+
+  /** How many member responses complete the wait: 'any' (default), 'all' or 'quorum' */
+  group_completion?: 'any' | 'all' | 'quorum';
+  /** Qualifying responses required when group_completion is 'quorum' */
+  group_quorum?: number;
+  /** REL over `response` / `responses` deciding whether a member's response counts */
+  response_condition?: string;
+
   // Wait step (step_type = 'wait')
 
   /** What to wait for (defaults to 'delay') */

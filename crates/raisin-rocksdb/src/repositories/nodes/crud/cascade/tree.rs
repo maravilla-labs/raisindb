@@ -187,6 +187,29 @@ impl NodeRepositoryImpl {
         )
         .await;
 
+        // Emit `node:deleted` for the root and every descendant, through the
+        // same emitter as the non-cascade path (see `publish_deleted_event`).
+        self.publish_deleted_event(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            revision,
+            &node,
+            attribution,
+        );
+        for deleted_node in &deleted_descendants {
+            self.publish_deleted_event(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                revision,
+                deleted_node,
+                attribution,
+            );
+        }
+
         Ok(true)
     }
 

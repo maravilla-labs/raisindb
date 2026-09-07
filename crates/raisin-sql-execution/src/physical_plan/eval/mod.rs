@@ -24,6 +24,7 @@ pub(crate) mod functions;
 mod helpers;
 mod json_ops;
 mod pattern;
+mod regex_ops;
 mod vector_ops;
 
 // Public API - re-export the main functions

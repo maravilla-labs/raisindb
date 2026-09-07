@@ -3,6 +3,7 @@ import {
   AIConfigResponse,
   KNOWN_PROVIDERS,
   SLUG_PATTERN,
+  buildModelList,
   mergeProviderConfig,
   parseModelSpec,
   resolveApiKey,
@@ -39,6 +40,44 @@ describe('parseModelSpec', () => {
   it('rejects empty model ids', () => {
     expect(() => parseModelSpec('', 0)).toThrow(/Invalid --model spec/);
     expect(() => parseModelSpec(':DisplayOnly', 0)).toThrow(/Invalid --model spec/);
+  });
+
+  it('registers an embedding model for embedding only, with no sampling defaults', () => {
+    const model = parseModelSpec('bge-m3:BGE M3', 0, ['embedding']);
+    expect(model).toEqual({
+      model_id: 'bge-m3',
+      display_name: 'BGE M3',
+      use_cases: ['embedding'],
+      default_temperature: 0,
+      default_max_tokens: 0,
+      is_default: true,
+    });
+  });
+});
+
+describe('buildModelList', () => {
+  it('returns undefined when no model flag was given (keep stored models)', () => {
+    expect(buildModelList(undefined, undefined)).toBeUndefined();
+    expect(buildModelList([], [])).toBeUndefined();
+  });
+
+  it('gives chat and embedding lists their own default', () => {
+    const models = buildModelList(['gpt-4o', 'gpt-4o-mini'], ['text-embedding-3-small'])!;
+    expect(models.map((m) => [m.model_id, m.use_cases, m.is_default])).toEqual([
+      ['gpt-4o', ['chat', 'agent'], true],
+      ['gpt-4o-mini', ['chat', 'agent'], false],
+      ['text-embedding-3-small', ['embedding'], true],
+    ]);
+  });
+
+  it('accepts embedding models alone', () => {
+    const models = buildModelList(undefined, ['nomic-embed-text'])!;
+    expect(models).toHaveLength(1);
+    expect(models[0].use_cases).toEqual(['embedding']);
+  });
+
+  it('rejects a model id listed in both flags', () => {
+    expect(() => buildModelList(['x'], ['x'])).toThrow(/more than once/);
   });
 });
 

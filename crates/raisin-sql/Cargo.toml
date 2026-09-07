@@ -13,6 +13,10 @@ thiserror = { workspace = true }
 indexmap = { version = "2.2", features = ["serde"] }
 chrono = { workspace = true }
 tracing = { workspace = true }
+regex = { workspace = true }
+md5 = "0.8.0"
+sha2 = "0.10"
+hex = { workspace = true }
 
 # RaisinDB crates (WASM-compatible)
 raisin-error = { path = "../raisin-error" }

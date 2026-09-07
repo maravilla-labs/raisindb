@@ -245,7 +245,11 @@ pub trait FlowCallbacks: Send + Sync {
         self.list_children(path).await
     }
 
-    /// Update a node in an explicit workspace
+    /// Update a node in an explicit workspace.
+    ///
+    /// The properties REPLACE the node's properties. To change a few fields of
+    /// a node whose other properties must survive (an inbox task's `status`,
+    /// `flow_instance_id`, `options`, ...), use `patch_node_in_workspace`.
     async fn update_node_in_workspace(
         &self,
         _workspace: &str,
@@ -253,6 +257,33 @@ pub trait FlowCallbacks: Send + Sync {
         properties: Value,
     ) -> FlowResult<Value> {
         self.update_node(path, properties).await
+    }
+
+    /// Merge `patch` into a node's existing properties and write the result.
+    ///
+    /// Reads the node first so the write carries everything it already had.
+    /// Escalating an inbox task used to call `update_node_in_workspace` with
+    /// only the escalation fields, which replaced the whole property set: the
+    /// task lost its `status`, `flow_instance_id`, `title` and `options`,
+    /// vanished from the pending list, and could no longer resume its flow.
+    async fn patch_node_in_workspace(
+        &self,
+        workspace: &str,
+        path: &str,
+        patch: Value,
+    ) -> FlowResult<Value> {
+        let mut merged = self
+            .get_node_in_workspace(workspace, path)
+            .await?
+            .and_then(|node| node.get("properties").cloned())
+            .filter(Value::is_object)
+            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+        if let (Some(dst), Some(src)) = (merged.as_object_mut(), patch.as_object()) {
+            for (key, value) in src {
+                dst.insert(key.clone(), value.clone());
+            }
+        }
+        self.update_node_in_workspace(workspace, path, merged).await
     }
 
     /// Emit a flow execution event for real-time tracking
@@ -433,5 +464,97 @@ pub trait FlowCallbacks: Send + Sync {
         Ok(caller_id
             .map(String::from)
             .unwrap_or_else(|| format!("flow-runtime-{}", identity_mode)))
+    }
+}
+
+#[cfg(test)]
+mod patch_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+
+    /// A node store of exactly one node, recording what the last write held.
+    struct OneNode {
+        properties: Mutex<Value>,
+    }
+
+    #[async_trait]
+    impl FlowCallbacks for OneNode {
+        async fn load_instance(&self, _path: &str) -> FlowResult<FlowInstance> {
+            unimplemented!()
+        }
+        async fn save_instance(&self, _instance: &FlowInstance) -> FlowResult<()> {
+            Ok(())
+        }
+        async fn save_instance_with_version(
+            &self,
+            _instance: &FlowInstance,
+            _expected_version: i32,
+        ) -> FlowResult<()> {
+            Ok(())
+        }
+        async fn create_node(&self, _t: &str, _p: &str, props: Value) -> FlowResult<Value> {
+            Ok(props)
+        }
+        async fn update_node(&self, _path: &str, properties: Value) -> FlowResult<Value> {
+            *self.properties.lock().unwrap() = properties.clone();
+            Ok(properties)
+        }
+        async fn get_node(&self, _path: &str) -> FlowResult<Option<Value>> {
+            Ok(Some(serde_json::json!({
+                "properties": self.properties.lock().unwrap().clone()
+            })))
+        }
+        async fn queue_job(&self, _job_type: &str, _payload: Value) -> FlowResult<String> {
+            Ok("job".to_string())
+        }
+        async fn call_ai(
+            &self,
+            _w: &str,
+            _a: &str,
+            _m: Vec<Value>,
+            _f: Option<Value>,
+        ) -> FlowResult<Value> {
+            Ok(Value::Null)
+        }
+        async fn execute_function(&self, _f: &str, _i: Value) -> FlowResult<Value> {
+            Ok(Value::Null)
+        }
+    }
+
+    /// THE BUG THIS GUARDS: escalating a task wrote only the escalation
+    /// fields, replacing the whole property set. A patch keeps the rest.
+    #[tokio::test]
+    async fn test_patch_keeps_the_properties_it_does_not_name() {
+        let store = OneNode {
+            properties: Mutex::new(serde_json::json!({
+                "status": "pending",
+                "flow_instance_id": "inst-1",
+                "title": "Approve",
+                "assignee": "/agents/bot",
+            })),
+        };
+
+        store
+            .patch_node_in_workspace(
+                "raisin:access_control",
+                "/agents/bot/inbox/task-1",
+                serde_json::json!({
+                    "assignee": "/users/admin",
+                    "escalated_from": "/agents/bot",
+                }),
+            )
+            .await
+            .unwrap();
+
+        let written = store.properties.lock().unwrap().clone();
+        assert_eq!(written["status"], "pending", "status must survive");
+        assert_eq!(
+            written["flow_instance_id"], "inst-1",
+            "the flow link must survive"
+        );
+        assert_eq!(written["title"], "Approve");
+        assert_eq!(written["assignee"], "/users/admin", "patched field wins");
+        assert_eq!(written["escalated_from"], "/agents/bot", "new field added");
     }
 }

@@ -142,9 +142,10 @@ pub async fn execute_neighbors_scan<S: Storage + 'static>(
                     }
                 }
 
+                // `RelationRef::target` is the target node's ID, not its path.
                 let target_node = storage
                     .nodes()
-                    .get_by_path(
+                    .get(
                         StorageScope::new(&tenant_id, &repo_id, &branch, &relation.workspace),
                         &relation.target, max_revision_opt.as_ref(),
                     )
@@ -208,9 +209,10 @@ pub async fn execute_neighbors_scan<S: Storage + 'static>(
                     if &relation.relation_type != rel_type { continue; }
                 }
 
+                // The reverse index yields the source node's ID, not its path.
                 let source_node = storage
                     .nodes()
-                    .get_by_path(
+                    .get(
                         StorageScope::new(&tenant_id, &repo_id, &branch, &src_workspace),
                         &src_id, max_revision_opt.as_ref(),
                     )

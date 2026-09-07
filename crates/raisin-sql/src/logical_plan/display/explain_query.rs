@@ -158,6 +158,19 @@ pub(super) fn explain_query_op(plan: &LogicalPlan, prefix: &str, indent: usize) 
                 right.explain_with_indent(indent + 1)
             )
         }
+        LogicalPlan::SetOperation {
+            left,
+            right,
+            kind,
+            all,
+        } => format!(
+            "{}{}{}\n{}\n{}",
+            prefix,
+            kind.keyword(),
+            if *all { " ALL" } else { "" },
+            left.explain_with_indent(indent + 1),
+            right.explain_with_indent(indent + 1)
+        ),
         LogicalPlan::WithCTE { ctes, main_query } => {
             let mut result = format!("{}WithCTE: {} CTE(s)\n", prefix, ctes.len());
 

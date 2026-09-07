@@ -1,8 +1,5 @@
 name: launchpad
-title: Launchpad
 description: Content workspace for Launchpad portal
-icon: rocket
-color: "#6366f1"
 
 allowed_node_types:
   - launchpad:Page
@@ -12,8 +9,9 @@ allowed_root_node_types:
   - raisin:Folder
   - launchpad:Page
 
-root_structure:
-  - name: pages
-    node_type: raisin:Folder
-    title: Pages
-    description: Site pages
+initial_structure:
+  children:
+    - name: pages
+      node_type: raisin:Folder
+      properties:
+        description: Site pages

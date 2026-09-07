@@ -12,6 +12,18 @@ pub const ORIGIN_AGENT_KEY: &str = "origin_agent";
 /// evaluation; read by `handlers/function_execution.rs`.
 pub const AUTH_CONTEXT_KEY: &str = "auth_context";
 
+/// `JobContext.metadata` key holding the raw actor id (`metadata["actor"]` off
+/// the `NodeEvent` that fired a trigger — see `transaction/commit/events.rs`)
+/// of whoever's write caused this job. Distinct from `ORIGIN_AGENT_KEY`, which
+/// is a provenance MARKER string (`trigger:/triggers/t`), and from
+/// `AUTH_CONTEXT_KEY`, which is a full serialized system context for the
+/// trigger's own writes: this is a bare, resolvable user id, carried so an
+/// `execution_context: "user"` agent invoked further downstream (e.g. inside a
+/// triggered flow) can run AS that human rather than as System. Absent for
+/// event classes with no human behind them (a timer trigger) or when the
+/// write's actor resolved to `"anonymous"`/`"system"`.
+pub const TRIGGERING_ACTOR_KEY: &str = "triggering_actor";
+
 pub mod activity;
 pub mod batch_aggregator;
 pub mod circuit_breaker;

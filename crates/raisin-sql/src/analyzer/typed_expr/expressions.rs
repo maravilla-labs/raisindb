@@ -108,6 +108,56 @@ pub enum Expr {
         negated: bool,
     },
 
+    /// EXISTS / NOT EXISTS (subquery). Uncorrelated only: the engine
+    /// evaluates the subquery once before planning and replaces this node
+    /// with a boolean literal (`engine::subquery_bind`).
+    Exists {
+        subquery: Box<crate::analyzer::semantic::AnalyzedQuery>,
+        negated: bool,
+    },
+
+    /// Scalar subquery: `(SELECT COUNT(*) FROM 'ws')`. Must return one
+    /// column; zero rows yield NULL, more than one row is an error. Bound to
+    /// a literal by the engine before planning, like [`Expr::Exists`].
+    ScalarSubquery {
+        subquery: Box<crate::analyzer::semantic::AnalyzedQuery>,
+    },
+
+    /// Quantified comparison over an array value: `x = ANY(ARRAY[...])`,
+    /// `x > ALL('[1,2]')`. `right` evaluates to a JSON array (a JSONB
+    /// literal, a JSON-text literal, or a `{a,b}` PostgreSQL array text).
+    Quantified {
+        left: Box<TypedExpr>,
+        op: BinaryOperator,
+        right: Box<TypedExpr>,
+        /// true = ALL, false = ANY / SOME
+        all: bool,
+    },
+
+    /// Quantified comparison over a subquery: `x > ALL (SELECT ...)`. The
+    /// engine materialises the subquery's single column into a JSON array
+    /// and rewrites this into [`Expr::Quantified`]. (`= ANY (subquery)` is
+    /// analysed straight to [`Expr::InSubquery`] instead, so it keeps the
+    /// semi-join plan.)
+    QuantifiedSubquery {
+        left: Box<TypedExpr>,
+        op: BinaryOperator,
+        subquery: Box<crate::analyzer::semantic::AnalyzedQuery>,
+        all: bool,
+    },
+
+    /// Regular-expression match: `~`, `~*`, `!~`, `!~*` and `SIMILAR TO`.
+    /// `~` searches (unanchored); `SIMILAR TO` is an anchored full match
+    /// whose SQL pattern is translated to a regex at evaluation time.
+    Regex {
+        expr: Box<TypedExpr>,
+        pattern: Box<TypedExpr>,
+        case_insensitive: bool,
+        negated: bool,
+        /// Pattern is in SQL `SIMILAR TO` syntax (`%`, `_`, anchored).
+        similar_to: bool,
+    },
+
     /// LIKE pattern matching: name LIKE 'test%'
     Like {
         expr: Box<TypedExpr>,

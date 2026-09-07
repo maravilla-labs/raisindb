@@ -9,8 +9,10 @@ use crate::logical_plan::{
 
 impl<'a> PlanBuilder<'a> {
     pub(crate) fn build_query(&self, query: &AnalyzedQuery) -> Result<LogicalPlan> {
-        // TODO: For now, only handle single-table queries
-        // Join support will be added in Phase 2
+        if let Some(set_op) = &query.set_operation {
+            return self.build_set_operation(query, set_op);
+        }
+
         if query.from.is_empty() {
             return Err(PlanError::InvalidPlan(
                 "FROM clause has no tables".to_string(),
@@ -128,6 +130,40 @@ impl<'a> PlanBuilder<'a> {
                 input: Box::new(plan),
                 group_by: query.group_by.clone(),
                 aggregates: query.aggregates.clone(),
+            };
+        }
+
+        // 3.5. HAVING: a Filter over the aggregate's output. Group-by
+        // expressions are rewritten to the group-key column names (the same
+        // rewrite the projection gets); aggregate calls are left as-is and
+        // resolve by their canonical column name, which the hash aggregate
+        // stores alongside the alias.
+        if let Some(having) = &query.having {
+            let mut predicate = having.clone();
+            if !query.group_by.is_empty() {
+                let group_by = query.group_by.clone();
+                predicate.rewrite(&mut |e| {
+                    if Self::is_aggregate_call(e) {
+                        return;
+                    }
+                    for group_expr in &group_by {
+                        if Self::exprs_match(e, group_expr) {
+                            let canonical = Self::generate_groupby_column_name(group_expr);
+                            *e = crate::analyzer::TypedExpr::new(
+                                crate::analyzer::Expr::Column {
+                                    table: String::new(),
+                                    column: canonical,
+                                },
+                                e.data_type.clone(),
+                            );
+                            return;
+                        }
+                    }
+                });
+            }
+            plan = LogicalPlan::Filter {
+                input: Box::new(plan),
+                predicate: FilterPredicate::from_expr(predicate),
             };
         }
 
@@ -393,6 +429,70 @@ impl<'a> PlanBuilder<'a> {
                 cte_plans.push((cte_name.clone(), Box::new(cte_plan)));
             }
 
+            plan = LogicalPlan::WithCTE {
+                ctes: cte_plans,
+                main_query: Box::new(plan),
+            };
+        }
+
+        Ok(plan)
+    }
+
+    fn is_aggregate_call(expr: &crate::analyzer::TypedExpr) -> bool {
+        matches!(
+            &expr.expr,
+            crate::analyzer::Expr::Function { name, .. }
+                if crate::analyzer::aggregate_spec::is_aggregate_name(name)
+        )
+    }
+
+    /// `left UNION|INTERSECT|EXCEPT [ALL] right`, then the outer ORDER BY /
+    /// LIMIT over the combined rows. The outer ORDER BY was analysed against
+    /// the output column names, so it needs no rewriting.
+    fn build_set_operation(
+        &self,
+        query: &AnalyzedQuery,
+        set_op: &crate::analyzer::AnalyzedSetOperation,
+    ) -> Result<LogicalPlan> {
+        let left = self.build_query(&set_op.left)?;
+        let right = self.build_query(&set_op.right)?;
+
+        let mut plan = LogicalPlan::SetOperation {
+            left: Box::new(left),
+            right: Box::new(right),
+            kind: set_op.kind,
+            all: set_op.all,
+        };
+
+        if !query.order_by.is_empty() {
+            let sort_exprs: Vec<SortExpr> = query
+                .order_by
+                .iter()
+                .map(|order_spec| SortExpr {
+                    expr: order_spec.expr.clone(),
+                    ascending: !order_spec.descending,
+                    nulls_first: order_spec.nulls_first(),
+                })
+                .collect();
+            plan = LogicalPlan::Sort {
+                input: Box::new(plan),
+                sort_exprs,
+            };
+        }
+
+        if query.limit.is_some() || query.offset.is_some() {
+            plan = LogicalPlan::Limit {
+                input: Box::new(plan),
+                limit: query.limit.unwrap_or(usize::MAX),
+                offset: query.offset.unwrap_or(0),
+            };
+        }
+
+        if !query.ctes.is_empty() {
+            let mut cte_plans = Vec::new();
+            for (cte_name, cte_query) in &query.ctes {
+                cte_plans.push((cte_name.clone(), Box::new(self.build_query(cte_query)?)));
+            }
             plan = LogicalPlan::WithCTE {
                 ctes: cte_plans,
                 main_query: Box::new(plan),

@@ -317,6 +317,13 @@ pub struct AnalyzedInsert {
     /// Optional branch override (from a `__branch` pseudo-column in the column list)
     /// None = use default/context branch, Some(name) = insert into a specific branch
     pub branch_override: Option<String>,
+    /// `INSERT ... SELECT`: the query supplying the rows. The engine runs it
+    /// before planning and fills `values` with one literal row per result row,
+    /// so the executor only ever sees VALUES.
+    pub source: Option<Box<AnalyzedQuery>>,
+    /// `RETURNING` projection: one output row per written node instead of the
+    /// `affected_rows` summary.
+    pub returning: Option<Vec<(TypedExpr, Option<String>)>>,
 }
 
 /// Analyzed UPDATE statement
@@ -333,6 +340,8 @@ pub struct AnalyzedUpdate {
     /// Optional branch override (from __branch = 'x' in WHERE clause)
     /// None = use default branch, Some(name) = operate on specific branch
     pub branch_override: Option<String>,
+    /// `RETURNING` projection over the updated nodes.
+    pub returning: Option<Vec<(TypedExpr, Option<String>)>>,
 }
 
 /// Analyzed DELETE statement
@@ -347,6 +356,8 @@ pub struct AnalyzedDelete {
     /// Optional branch override (from __branch = 'x' in WHERE clause)
     /// None = use default branch, Some(name) = operate on specific branch
     pub branch_override: Option<String>,
+    /// `RETURNING` projection over the deleted nodes (as they were).
+    pub returning: Option<Vec<(TypedExpr, Option<String>)>>,
 }
 
 /// EXPLAIN statement with options
@@ -403,6 +414,45 @@ pub struct AnalyzedQuery {
     pub locales: Vec<String>,
     /// DISTINCT specification (None = no distinct)
     pub distinct: Option<AnalyzedDistinct>,
+    /// HAVING predicate (evaluated after grouping). Aggregates it mentions are
+    /// appended to `aggregates`; group-by expressions inside it are rewritten
+    /// to the group-key column names by the plan builder.
+    pub having: Option<TypedExpr>,
+    /// When set this query is a set operation (UNION / INTERSECT / EXCEPT)
+    /// over two sub-queries. `projection` mirrors the LEFT side (it names the
+    /// output columns), `from`/`joins`/`selection` are copied from the left
+    /// side only so that consumers which peek at the first table for context
+    /// keep working; the plan builder ignores them and builds both sides.
+    /// `order_by` / `limit` / `offset` apply to the combined result.
+    pub set_operation: Option<Box<AnalyzedSetOperation>>,
+}
+
+/// Which set operation combines two query bodies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetOperationKind {
+    Union,
+    Intersect,
+    Except,
+}
+
+impl SetOperationKind {
+    pub fn keyword(&self) -> &'static str {
+        match self {
+            SetOperationKind::Union => "UNION",
+            SetOperationKind::Intersect => "INTERSECT",
+            SetOperationKind::Except => "EXCEPT",
+        }
+    }
+}
+
+/// `left <op> [ALL] right`
+#[derive(Debug, Clone)]
+pub struct AnalyzedSetOperation {
+    pub kind: SetOperationKind,
+    /// `ALL` keeps duplicates; without it the result is de-duplicated.
+    pub all: bool,
+    pub left: AnalyzedQuery,
+    pub right: AnalyzedQuery,
 }
 
 /// CTE (Common Table Expression) definition

@@ -131,6 +131,22 @@ impl VirtualMountSyncHandler {
         // API needs no credential at all, and those mounts must keep syncing.
         // Their credential simply resolves to `None`, exactly as before.
         if let Some(integ_node) = self.load_integration_node(&svc, &mount).await? {
+            // A disabled connector is an operator's pause on everything behind
+            // it: skip every mount that points at it, the same way a paused
+            // mount is skipped, without touching its state or subscription.
+            if matches!(
+                integ_node.properties.get("enabled"),
+                Some(raisin_models::nodes::properties::PropertyValue::Boolean(
+                    false
+                ))
+            ) {
+                tracing::debug!(
+                    mount_id = %mount_id,
+                    integration = %mount.integration_ref,
+                    "connector is disabled; skipping"
+                );
+                return Ok(Preflight::Skip("connector_disabled"));
+            }
             if let Ok(cfg) = IntegrationConfig::from_node(&integ_node) {
                 if let Err(err) = cfg.account_for(mount.account_ref.as_deref()) {
                     if matches!(err, AccountSelectionError::NoAccounts) {

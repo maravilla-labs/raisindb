@@ -486,6 +486,7 @@ impl FlowCallbacks for RocksDBFlowCallbacks {
             self.branch.clone(),
             "functions".to_string(), // Functions are always in "functions" workspace
             self.agent.clone(),
+            self.triggering_user.clone(),
         )
         .await
         .map_err(|e| FlowError::FunctionExecution(format!("Function execution failed: {}", e)))
@@ -531,6 +532,7 @@ impl FlowCallbacks for RocksDBFlowCallbacks {
             self.branch.clone(),
             "functions".to_string(),
             Some(marker),
+            self.triggering_user.clone(),
         )
         .await
         .map_err(|e| FlowError::FunctionExecution(format!("Function execution failed: {}", e)))

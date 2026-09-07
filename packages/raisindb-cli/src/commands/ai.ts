@@ -6,7 +6,7 @@ import {
   KNOWN_PROVIDERS,
   entrySlug,
   mergeProviderConfig,
-  parseModelSpec,
+  buildModelList,
   resolveApiKey,
   validateProviderSlug,
 } from './ai-config.js';
@@ -38,6 +38,7 @@ export interface AiProviderSetCliOptions extends ApiKeyFlags {
   enabled?: boolean;
   disabled?: boolean;
   model?: string[];
+  embeddingModel?: string[];
   tenant?: string;
 }
 
@@ -59,9 +60,7 @@ export async function aiProviderSet(
 
   const tenant = options.tenant || 'default';
   const resolved = await resolveApiKey(options, keyDeps);
-  const models = options.model?.length
-    ? options.model.map((spec, i) => parseModelSpec(spec, i))
-    : undefined;
+  const models = buildModelList(options.model, options.embeddingModel);
 
   // Read current config (GET never exposes key material)
   const getResult = await apiCall<AIConfigResponse>(

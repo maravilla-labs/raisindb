@@ -8,6 +8,25 @@ use crate::analyzer::{
 use crate::logical_plan::{error::Result, operators::LogicalPlan};
 
 impl<'a> PlanBuilder<'a> {
+    /// RETURNING items → projection expressions, aliased like a SELECT list.
+    fn returning_exprs(
+        items: Option<&[(crate::analyzer::TypedExpr, Option<String>)]>,
+    ) -> Option<Vec<crate::logical_plan::operators::ProjectionExpr>> {
+        items.map(|items| {
+            items
+                .iter()
+                .map(
+                    |(expr, alias)| crate::logical_plan::operators::ProjectionExpr {
+                        expr: expr.clone(),
+                        alias: alias
+                            .clone()
+                            .unwrap_or_else(|| Self::derive_column_name(expr)),
+                    },
+                )
+                .collect()
+        })
+    }
+
     /// Build a logical plan for an INSERT statement
     ///
     /// Also handles UPSERT statements (when `insert.is_upsert` is true)
@@ -18,6 +37,7 @@ impl<'a> PlanBuilder<'a> {
             columns: insert.columns.clone(),
             values: insert.values.clone(),
             is_upsert: insert.is_upsert,
+            returning: Self::returning_exprs(insert.returning.as_deref()),
         })
     }
 
@@ -29,6 +49,7 @@ impl<'a> PlanBuilder<'a> {
             assignments: update.assignments.clone(),
             filter: update.filter.clone(),
             branch_override: update.branch_override.clone(),
+            returning: Self::returning_exprs(update.returning.as_deref()),
         })
     }
 
@@ -39,6 +60,7 @@ impl<'a> PlanBuilder<'a> {
             schema: delete.schema.clone(),
             filter: delete.filter.clone(),
             branch_override: delete.branch_override.clone(),
+            returning: Self::returning_exprs(delete.returning.as_deref()),
         })
     }
 

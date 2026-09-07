@@ -48,6 +48,7 @@ pub mod completion;
 pub mod logical_plan;
 pub mod optimizer;
 pub mod params;
+pub mod scalar;
 
 // Re-export commonly used items from ast
 pub use ast::{parse_sql, ParseError, RaisinDialect};

@@ -13,6 +13,8 @@ use super::{
     super::{
         catalog::{is_schema_table, SchemaTableKind, TableDef},
         error::{AnalysisError, Result},
+        typed_expr::TypedExpr,
+        types::DataType,
     },
     predicates::{extract_branch_predicate, extract_branch_value},
     types::{AnalyzedDelete, AnalyzedInsert, AnalyzedStatement, AnalyzedUpdate, DmlTableTarget},
@@ -93,6 +95,7 @@ impl<'a> AnalyzerContext<'a> {
         // Analyze VALUES clause - each row should have values matching column count
         let mut typed_values = Vec::new();
         let mut branch_override: Option<String> = None;
+        let mut source_query: Option<Box<super::AnalyzedQuery>> = None;
 
         if let Some(source) = &insert.source {
             if let sqlparser::ast::SetExpr::Values(values) = &*source.body {
@@ -170,15 +173,48 @@ impl<'a> AnalyzerContext<'a> {
                     typed_values.push(typed_row);
                 }
             } else {
-                return Err(AnalysisError::UnsupportedStatement(
-                    "INSERT with SELECT is not yet supported".to_string(),
-                ));
+                // INSERT ... SELECT: the engine runs the query before planning
+                // and turns every result row into a literal VALUES row.
+                if branch_col_idx.is_some() {
+                    return Err(AnalysisError::UnsupportedStatement(
+                        "INSERT ... SELECT cannot carry a __branch pseudo-column; use IN BRANCH \
+                         or a VALUES list"
+                            .to_string(),
+                    ));
+                }
+                let query = self.analyze_nested_query(source, "INSERT ... SELECT")?;
+                if query.projection.len() != columns.len() {
+                    return Err(AnalysisError::InvalidArgumentCount {
+                        function: format!("INSERT INTO {} ... SELECT", table_name),
+                        expected: columns.len(),
+                        actual: query.projection.len(),
+                    });
+                }
+                for ((expr, _), col_name) in query.projection.iter().zip(columns.iter()) {
+                    let col_def = schema.get_column(col_name).ok_or_else(|| {
+                        AnalysisError::InternalError(format!(
+                            "Column {} disappeared during analysis",
+                            col_name
+                        ))
+                    })?;
+                    if !expr.data_type.can_coerce_to(&col_def.data_type)
+                        && !matches!(expr.data_type.base_type(), DataType::Unknown)
+                    {
+                        return Err(AnalysisError::TypeMismatch {
+                            expected: format!("{} for column {}", col_def.data_type, col_name),
+                            actual: expr.data_type.to_string(),
+                        });
+                    }
+                }
+                source_query = Some(Box::new(query));
             }
         } else {
             return Err(AnalysisError::UnsupportedStatement(
                 "INSERT without VALUES clause is not supported".to_string(),
             ));
         }
+
+        let returning = self.analyze_returning(&table_name, insert.returning.as_deref())?;
 
         Ok(AnalyzedStatement::Insert(AnalyzedInsert {
             target,
@@ -187,7 +223,40 @@ impl<'a> AnalyzerContext<'a> {
             values: typed_values,
             is_upsert,
             branch_override,
+            source: source_query,
+            returning,
         }))
+    }
+
+    /// `RETURNING <select items>` on INSERT / UPDATE / DELETE, resolved against
+    /// the target table (so `*`, column names and property lookups all work).
+    fn analyze_returning(
+        &mut self,
+        table_name: &str,
+        items: Option<&[sqlparser::ast::SelectItem]>,
+    ) -> Result<Option<Vec<(TypedExpr, Option<String>)>>> {
+        let Some(items) = items else {
+            return Ok(None);
+        };
+        self.current_tables.push(super::TableRef {
+            table: table_name.to_string(),
+            alias: None,
+            workspace: None,
+            table_function: None,
+            subquery: None,
+            lateral_function: None,
+        });
+        let result = self.analyze_projection(items);
+        self.current_tables.pop();
+        let projection = result?;
+        for (expr, _) in &projection {
+            if self.extract_aggregates(expr, None)?.is_some() {
+                return Err(AnalysisError::UnsupportedExpression(
+                    "aggregate functions are not allowed in RETURNING".into(),
+                ));
+            }
+        }
+        Ok(Some(projection))
     }
 
     /// Analyze an UPDATE statement
@@ -202,6 +271,7 @@ impl<'a> AnalyzerContext<'a> {
         table: &TableWithJoins,
         assignments: &[Assignment],
         selection: Option<&SqlExpr>,
+        returning: Option<&[sqlparser::ast::SelectItem]>,
     ) -> Result<AnalyzedStatement> {
         // Extract table name from UPDATE statement
         let table_name = extract_table_name_from_table_with_joins(table)?;
@@ -268,12 +338,15 @@ impl<'a> AnalyzerContext<'a> {
         // Remove table from context
         self.current_tables.pop();
 
+        let returning = self.analyze_returning(&table_name, returning)?;
+
         Ok(AnalyzedStatement::Update(AnalyzedUpdate {
             target,
             schema,
             assignments: typed_assignments,
             filter,
             branch_override,
+            returning,
         }))
     }
 
@@ -312,11 +385,14 @@ impl<'a> AnalyzerContext<'a> {
         // Remove table from context
         self.current_tables.pop();
 
+        let returning = self.analyze_returning(&table_name, delete.returning.as_deref())?;
+
         Ok(AnalyzedStatement::Delete(AnalyzedDelete {
             target,
             schema,
             filter,
             branch_override,
+            returning,
         }))
     }
 

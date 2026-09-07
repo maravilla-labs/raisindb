@@ -186,7 +186,18 @@ impl<'a> PlanBuilder<'a> {
             Expr::IsNotNull { .. } => "?column?".to_string(),
             Expr::Between { .. } => "?column?".to_string(),
             Expr::InList { .. } => "?column?".to_string(),
-            Expr::InSubquery { .. } => "?column?".to_string(),
+            Expr::InSubquery { .. }
+            | Expr::Exists { .. }
+            | Expr::Quantified { .. }
+            | Expr::QuantifiedSubquery { .. }
+            | Expr::Regex { .. } => "?column?".to_string(),
+            // PostgreSQL names a scalar subquery column after its inner
+            // projection, e.g. `SELECT (SELECT COUNT(*) ...)` → `count`.
+            Expr::ScalarSubquery { subquery } => subquery
+                .projection
+                .first()
+                .map(|(e, alias)| alias.clone().unwrap_or_else(|| Self::derive_column_name(e)))
+                .unwrap_or_else(|| "?column?".to_string()),
             Expr::Like { .. } | Expr::ILike { .. } => "?column?".to_string(),
             Expr::JsonExtract { .. } => "?column?".to_string(),
             Expr::JsonExtractText { .. } => "?column?".to_string(),

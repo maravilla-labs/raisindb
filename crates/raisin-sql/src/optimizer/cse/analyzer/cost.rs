@@ -50,6 +50,10 @@ fn estimate_cost(expr: &TypedExpr) -> u32 {
         Expr::Like { expr, pattern, .. } | Expr::ILike { expr, pattern, .. } => {
             30 + estimate_cost(expr) + estimate_cost(pattern)
         }
+        Expr::Regex { expr, pattern, .. } => 40 + estimate_cost(expr) + estimate_cost(pattern),
+        Expr::Quantified { left, right, .. } => 20 + estimate_cost(left) + estimate_cost(right),
+        Expr::QuantifiedSubquery { left, .. } => 100 + estimate_cost(left),
+        Expr::Exists { .. } | Expr::ScalarSubquery { .. } => 100,
 
         // Range and list operations
         Expr::Between { expr, low, high } => {
@@ -187,9 +191,14 @@ fn is_volatile(expr: &TypedExpr) -> bool {
             true
         }
 
-        Expr::Like { expr, pattern, .. } | Expr::ILike { expr, pattern, .. } => {
-            is_volatile(expr) || is_volatile(pattern)
-        }
+        Expr::Like { expr, pattern, .. }
+        | Expr::ILike { expr, pattern, .. }
+        | Expr::Regex { expr, pattern, .. } => is_volatile(expr) || is_volatile(pattern),
+
+        Expr::Quantified { left, right, .. } => is_volatile(left) || is_volatile(right),
+
+        // Depend on database state, like InSubquery
+        Expr::Exists { .. } | Expr::ScalarSubquery { .. } | Expr::QuantifiedSubquery { .. } => true,
 
         Expr::JsonExtract { object, key }
         | Expr::JsonExtractText { object, key }

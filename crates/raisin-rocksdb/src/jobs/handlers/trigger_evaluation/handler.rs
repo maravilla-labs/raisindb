@@ -7,7 +7,7 @@ use super::types::{
 };
 use crate::jobs::data_store::JobDataStore;
 use crate::jobs::dispatcher::JobDispatcher;
-use crate::jobs::{AUTH_CONTEXT_KEY, ORIGIN_AGENT_KEY};
+use crate::jobs::{AUTH_CONTEXT_KEY, ORIGIN_AGENT_KEY, TRIGGERING_ACTOR_KEY};
 use raisin_error::{Error, Result};
 use raisin_models::auth::{agent_identity, AuthContext};
 use raisin_storage::jobs::{JobContext, JobInfo, JobRegistry, JobType};
@@ -299,6 +299,14 @@ impl TriggerEvaluationHandler {
         metadata.insert("node_type".to_string(), serde_json::json!(node_type));
         metadata.insert("node_path".to_string(), serde_json::json!(node_path));
 
+        // Carry the identity of whoever's write fired this trigger, so an
+        // `execution_context: "user"` agent invoked downstream (directly, or
+        // inside a flow this trigger starts) can resolve a real caller instead
+        // of always falling back to System. See `TRIGGERING_ACTOR_KEY`.
+        if let Some(actor) = context.metadata.get(TRIGGERING_ACTOR_KEY) {
+            metadata.insert(TRIGGERING_ACTOR_KEY.to_string(), actor.clone());
+        }
+
         // Provenance: everything this trigger goes on to write is attributable
         // to the trigger, composed with whatever caused the originating write.
         // A trigger node has a path; an inline trigger has none, so the function
@@ -477,7 +485,7 @@ impl TriggerEvaluationHandler {
         );
 
         // Build the flow instance
-        let instance = FlowInstanceBuilder::new(
+        let mut instance_builder = FlowInstanceBuilder::new(
             trigger_path.clone(),
             1, // version
             workflow_data.clone(),
@@ -490,9 +498,23 @@ impl TriggerEvaluationHandler {
         .workspace(context.workspace_id.clone())
         // Persisted on the instance so the marker survives the resume hop,
         // whose job context is rebuilt from scratch and would otherwise drop it.
-        .agent(flow_marker.clone())
-        .build()
-        .map_err(|e| Error::Backend(format!("Failed to create flow instance: {}", e)))?;
+        .agent(flow_marker.clone());
+
+        // Same resume-survival reason as `.agent()` above. See
+        // `TRIGGERING_ACTOR_KEY`: lets a step with `execution_context: "user"`
+        // resolve the human whose write started this flow, instead of always
+        // falling back to System.
+        if let Some(actor) = job_context
+            .metadata
+            .get(TRIGGERING_ACTOR_KEY)
+            .and_then(|v| v.as_str())
+        {
+            instance_builder = instance_builder.triggering_user(actor.to_string());
+        }
+
+        let instance = instance_builder
+            .build()
+            .map_err(|e| Error::Backend(format!("Failed to create flow instance: {}", e)))?;
 
         let instance_id = instance.id.clone();
 

@@ -190,6 +190,31 @@ where
     )
     .await?;
 
+    // 2a. Enforce the function's declared `execution_context`. This is the ONE
+    // point every invocation path (HTTP, MCP, WS, triggers, flow runtime, JS
+    // chat) funnels through, so it is the one place this needs enforcing.
+    //
+    // "system" strips the CALLER'S identity — whatever AuthContext they
+    // threaded in, regardless of how privileged they were — but keeps their
+    // `agent` provenance marker for attribution, matching the convention
+    // trigger evaluation already established (`AuthContext::system()
+    // .with_agent(marker)`). A function that opted into System must not be
+    // reachable with elevated rights just because an admin happened to invoke
+    // it. "user" (the default) passes the caller's real AuthContext through
+    // unchanged, including `None` for an anonymous or not-yet-wired caller:
+    // RLS then narrows to whatever that identity (or lack of one) can see,
+    // rather than silently promoting to System.
+    let auth_context = match metadata.execution_context {
+        crate::types::FunctionExecutionContext::System => {
+            let system = AuthContext::system();
+            Some(match auth_context.and_then(|a| a.agent) {
+                Some(agent) => system.with_agent(agent),
+                None => system,
+            })
+        }
+        crate::types::FunctionExecutionContext::User => auth_context,
+    };
+
     // 2b/2c. Resolve the module set: sibling files plus anything reachable via
     // `../dir/` imports. This is a subtree prefix scan plus one scan per external
     // dir plus a binary read per non-inline file — all of it repeated on every

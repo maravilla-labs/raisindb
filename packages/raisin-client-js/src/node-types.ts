@@ -5,12 +5,22 @@
 import { RequestContext, RequestType } from './protocol';
 
 export class NodeTypes {
-  private sendRequest: (payload: unknown, requestType: string) => Promise<unknown>;
+  private context: RequestContext;
+  private sendRequest: (
+    payload: unknown,
+    requestType: string,
+    contextOverride?: RequestContext
+  ) => Promise<unknown>;
 
   constructor(
-    _context: RequestContext,
-    sendRequest: (payload: unknown, requestType: string) => Promise<unknown>
+    context: RequestContext,
+    sendRequest: (
+      payload: unknown,
+      requestType: string,
+      contextOverride?: RequestContext
+    ) => Promise<unknown>
   ) {
+    this.context = context;
     this.sendRequest = sendRequest;
   }
 
@@ -102,14 +112,25 @@ export class NodeTypes {
   }
 
   /**
-   * Validate a node against its NodeType
+   * Validate a node against its NodeType.
+   *
+   * The server validates in the context of a workspace (workspace-level
+   * allow-lists and unique checks), so one is required. Pass it here, or
+   * create the database with a workspace already in its context.
    */
-  async validate(node: Record<string, unknown>): Promise<unknown> {
+  async validate(node: Record<string, unknown>, workspace?: string): Promise<unknown> {
+    const ws = workspace ?? this.context.workspace;
+    if (!ws) {
+      throw new Error(
+        'nodeTypes().validate() requires a workspace: pass it as the second argument'
+      );
+    }
     return this.sendRequest(
       {
         node
       },
-      RequestType.NodeTypeValidate
+      RequestType.NodeTypeValidate,
+      { ...this.context, workspace: ws }
     );
   }
 

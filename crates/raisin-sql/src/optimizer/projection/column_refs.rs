@@ -77,11 +77,24 @@ pub fn extract_column_refs(expr: &TypedExpr) -> HashSet<String> {
             extract_column_refs(expr)
         }
 
-        Expr::Like { expr, pattern, .. } | Expr::ILike { expr, pattern, .. } => {
+        Expr::Like { expr, pattern, .. }
+        | Expr::ILike { expr, pattern, .. }
+        | Expr::Regex { expr, pattern, .. } => {
             let mut cols = extract_column_refs(expr);
             cols.extend(extract_column_refs(pattern));
             cols
         }
+
+        Expr::Quantified { left, right, .. } => {
+            let mut cols = extract_column_refs(left);
+            cols.extend(extract_column_refs(right));
+            cols
+        }
+
+        Expr::QuantifiedSubquery { left, .. } => extract_column_refs(left),
+
+        // Subquery bodies have their own scope; nothing from this row.
+        Expr::Exists { .. } | Expr::ScalarSubquery { .. } => HashSet::new(),
 
         Expr::Window {
             function,

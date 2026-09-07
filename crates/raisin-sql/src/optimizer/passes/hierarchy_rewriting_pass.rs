@@ -105,6 +105,18 @@ impl Optimizer {
                 anti,
             },
 
+            LogicalPlan::SetOperation {
+                left,
+                right,
+                kind,
+                all,
+            } => LogicalPlan::SetOperation {
+                left: Box::new(self.apply_hierarchy_rewriting(*left)),
+                right: Box::new(self.apply_hierarchy_rewriting(*right)),
+                kind,
+                all,
+            },
+
             LogicalPlan::WithCTE { ctes, main_query } => {
                 let rewritten_ctes: Vec<(String, Box<LogicalPlan>)> = ctes
                     .into_iter()

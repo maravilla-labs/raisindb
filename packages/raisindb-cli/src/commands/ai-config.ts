@@ -135,9 +135,20 @@ export interface SetConfigBody {
 
 /**
  * Parse a --model spec: `model_id[:display_name]`.
- * The first model in the list becomes the default.
+ * The first model in the list becomes the default for its use cases.
+ *
+ * `useCases` decides what the model is registered for. Chat models default
+ * to `['chat', 'agent']`; an embedding model (`--embedding-model`) is
+ * registered as `['embedding']` only, because a model listed for chat is
+ * offered to agents and a model listed for embedding is what the embedding
+ * configuration's `ai_model_ref` may point at. Sampling defaults are
+ * meaningless for an embedding model, so they are zero there.
  */
-export function parseModelSpec(spec: string, index: number): AIModelConfig {
+export function parseModelSpec(
+  spec: string,
+  index: number,
+  useCases: string[] = ['chat', 'agent']
+): AIModelConfig {
   const trimmed = spec.trim();
   const colon = trimmed.indexOf(':');
   const modelId = colon === -1 ? trimmed : trimmed.slice(0, colon).trim();
@@ -147,14 +158,42 @@ export function parseModelSpec(spec: string, index: number): AIModelConfig {
     throw new Error(`Invalid --model spec: "${spec}" (expected model_id[:display_name])`);
   }
 
+  const isEmbedding = useCases.includes('embedding');
   return {
     model_id: modelId,
     display_name: displayName,
-    use_cases: ['chat', 'agent'],
-    default_temperature: 0.3,
-    default_max_tokens: 1024,
+    use_cases: [...useCases],
+    default_temperature: isEmbedding ? 0 : 0.3,
+    default_max_tokens: isEmbedding ? 0 : 1024,
     is_default: index === 0,
   };
+}
+
+/**
+ * Build the model list for a provider from `--model` and `--embedding-model`
+ * flags. Each list has its own default (the first entry), so a provider can
+ * carry a default chat model and a default embedding model side by side.
+ * Returns undefined when neither flag was given (keep the stored models).
+ */
+export function buildModelList(
+  chatSpecs: string[] | undefined,
+  embeddingSpecs: string[] | undefined
+): AIModelConfig[] | undefined {
+  if (!chatSpecs?.length && !embeddingSpecs?.length) {
+    return undefined;
+  }
+  const chat = (chatSpecs ?? []).map((spec, i) => parseModelSpec(spec, i));
+  const embedding = (embeddingSpecs ?? []).map((spec, i) => parseModelSpec(spec, i, ['embedding']));
+  const seen = new Set<string>();
+  for (const m of [...chat, ...embedding]) {
+    if (seen.has(m.model_id)) {
+      throw new Error(
+        `Model '${m.model_id}' was given more than once; a model id may appear in --model or --embedding-model, not both.`
+      );
+    }
+    seen.add(m.model_id);
+  }
+  return [...chat, ...embedding];
 }
 
 export interface ApiKeyFlags {

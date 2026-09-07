@@ -110,6 +110,17 @@ mod inner {
         let mut metadata = HashMap::new();
         metadata.insert("input".to_string(), payload.input);
 
+        // Persist the connection's auth context so the async job executes as
+        // the invoking caller, matching the sync WS path and HTTP's async
+        // invoke. The job handler drops this unless the function's declared
+        // `execution_context` is "user" (the default) — see
+        // `function_execution.rs`.
+        if let Some(auth) = connection_state.read().auth_context() {
+            if let Ok(serialized) = serde_json::to_value(auth) {
+                metadata.insert("auth_context".to_string(), serialized);
+            }
+        }
+
         let context = raisin_storage::jobs::JobContext {
             tenant_id: tenant_id.clone(),
             repo_id: repo.clone(),
@@ -423,30 +434,64 @@ mod inner {
             schema_stats_cache: state.schema_stats_cache.clone(),
         });
 
+        // Enforce the function's declared `execution_context`, same as the HTTP
+        // and MCP invocation paths funneled through `execute_function`: "system"
+        // is an explicit opt-in and strips the connection's identity (keeping
+        // its `agent` marker, if any, for attribution); "user" (the default)
+        // runs as the WS connection's own resolved identity, or as nobody if
+        // the connection never authenticated — never silently as "system".
+        let auth_context = match metadata.execution_context {
+            raisin_functions::types::FunctionExecutionContext::System => {
+                let system = raisin_models::auth::AuthContext::system();
+                Some(
+                    match connection_state
+                        .read()
+                        .auth_context()
+                        .and_then(|a| a.agent.clone())
+                    {
+                        Some(agent) => system.with_agent(agent),
+                        None => system,
+                    },
+                )
+            }
+            raisin_functions::types::FunctionExecutionContext::User => {
+                connection_state.read().auth_context().cloned()
+            }
+        };
+        let actor = auth_context
+            .as_ref()
+            .and_then(|a| a.user_id.as_ref())
+            .map(|s| s.as_str())
+            .unwrap_or("system");
+
         // Build callbacks via canonical create_production_callbacks
         let callbacks = create_production_callbacks(
             deps,
             tenant_id.clone(),
             repo.clone(),
             DEFAULT_BRANCH.to_string(),
-            None, // no auth context from WS for now
+            auth_context.clone(),
         );
+
+        let mut api_context = ExecutionContext::new(&tenant_id, &repo, DEFAULT_BRANCH, actor)
+            .with_workspace(FUNCTIONS_WORKSPACE);
+        if let Some(auth) = auth_context.clone() {
+            api_context = api_context.with_auth(auth);
+        }
 
         let api = Arc::new(
-            RaisinFunctionApi::new(
-                ExecutionContext::new(&tenant_id, &repo, DEFAULT_BRANCH, "system")
-                    .with_workspace(FUNCTIONS_WORKSPACE),
-                metadata.network_policy.clone(),
-                callbacks,
-            )
-            .with_secret_policy(metadata.secret_policy.clone())
-            .with_email_policy(metadata.email_policy.clone())
-            .with_identity_policy(metadata.identity_policy.clone()),
+            RaisinFunctionApi::new(api_context, metadata.network_policy.clone(), callbacks)
+                .with_secret_policy(metadata.secret_policy.clone())
+                .with_email_policy(metadata.email_policy.clone())
+                .with_identity_policy(metadata.identity_policy.clone()),
         );
 
-        let context = ExecutionContext::new(&tenant_id, &repo, DEFAULT_BRANCH, "system")
+        let mut context = ExecutionContext::new(&tenant_id, &repo, DEFAULT_BRANCH, actor)
             .with_workspace(FUNCTIONS_WORKSPACE)
             .with_input(payload.input);
+        if let Some(auth) = auth_context {
+            context = context.with_auth(auth);
+        }
 
         let executor = FunctionExecutor::new();
         let result = executor

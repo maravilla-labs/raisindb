@@ -19,11 +19,13 @@ use sqlparser::parser::Parser as SqlParser;
 
 use crate::ast::{is_graph_table_expression, preprocess_graph_tables};
 
+pub mod aggregate_spec;
 pub mod catalog;
 pub mod error;
 pub mod functions;
 mod helpers;
 pub mod pg_catalog;
+pub mod regex_pattern;
 pub mod semantic;
 mod statement_analysis;
 pub mod typed_expr;
@@ -36,10 +38,11 @@ pub use error::{AnalysisError, Result};
 pub use functions::{FunctionCategory, FunctionRegistry, FunctionSignature};
 pub use semantic::{
     AnalyzedCopy, AnalyzedDelete, AnalyzedDistinct, AnalyzedInsert, AnalyzedMove, AnalyzedOrder,
-    AnalyzedQuery, AnalyzedRelate, AnalyzedRelateEndpoint, AnalyzedRestore, AnalyzedShow,
-    AnalyzedStatement, AnalyzedTranslate, AnalyzedTranslateFilter, AnalyzedTranslationValue,
-    AnalyzedUnrelate, AnalyzedUpdate, DmlTableTarget, ExplainFormat, ExplainStatement, JoinInfo,
-    JoinType, TableFunctionArg, TableFunctionRef, TableRef,
+    AnalyzedQuery, AnalyzedRelate, AnalyzedRelateEndpoint, AnalyzedRestore, AnalyzedSetOperation,
+    AnalyzedShow, AnalyzedStatement, AnalyzedTranslate, AnalyzedTranslateFilter,
+    AnalyzedTranslationValue, AnalyzedUnrelate, AnalyzedUpdate, DmlTableTarget, ExplainFormat,
+    ExplainStatement, JoinInfo, JoinType, SetOperationKind, TableFunctionArg, TableFunctionRef,
+    TableRef,
 };
 pub use typed_expr::{
     BinaryOperator, Expr, FrameBound, FrameMode, Literal, TypedExpr, UnaryOperator, WindowFrame,

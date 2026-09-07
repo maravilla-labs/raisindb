@@ -109,7 +109,7 @@ async fn resolve(
     storage: &Arc<InMemoryStorage>,
     path: &str,
 ) -> Result<Option<raisin_models::auth::AuthContext>, String> {
-    resolve_agent_context(storage, TENANT, REPO, BRANCH, FUNCTIONS, path, MARKER).await
+    resolve_agent_context(storage, TENANT, REPO, BRANCH, FUNCTIONS, path, MARKER, None).await
 }
 
 #[tokio::test]

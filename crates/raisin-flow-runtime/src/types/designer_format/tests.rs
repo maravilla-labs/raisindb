@@ -890,3 +890,42 @@ fn test_unbounded_with_max_iterations_is_rejected() {
     .unwrap();
     assert!(def.validate().unwrap_err().to_string().contains("pick one"));
 }
+
+/// The group-assignee policy must survive the designer lowering. The runtime
+/// has always read `group_completion` / `group_quorum` / `response_condition`
+/// from the node, but the designer struct did not carry them, so every group
+/// wait silently fell back to `any`.
+#[test]
+fn test_designer_human_task_carries_group_policy() {
+    let json = r#"{
+        "version": 1,
+        "nodes": [
+            {
+                "id": "sign_off",
+                "node_type": "raisin:FlowStep",
+                "properties": {
+                    "action": "Sign off",
+                    "step_type": "human_task",
+                    "task_type": "approval",
+                    "assignee": "/groups/reviewers",
+                    "group_completion": "quorum",
+                    "group_quorum": 2,
+                    "response_condition": "response.action == \"approve\""
+                }
+            }
+        ]
+    }"#;
+
+    let def: DesignerFlowDefinition = serde_json::from_str(json).expect("parses");
+    let runtime = def.to_runtime_format();
+    let step = runtime.nodes.iter().find(|n| n.id == "sign_off").unwrap();
+    assert_eq!(
+        step.get_string_property("group_completion").as_deref(),
+        Some("quorum")
+    );
+    assert_eq!(step.get_u32_property("group_quorum"), Some(2));
+    assert_eq!(
+        step.get_string_property("response_condition").as_deref(),
+        Some("response.action == \"approve\"")
+    );
+}

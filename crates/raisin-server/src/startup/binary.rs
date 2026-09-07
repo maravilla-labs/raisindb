@@ -64,6 +64,31 @@ pub async fn register_builtin_package_handler<B: BinaryStorage + 'static>(
     tracing::info!("Builtin package init handler registered");
 }
 
+/// Queue a build for every declared compound index with no usable build
+/// state, across every tenant/repo/branch/workspace.
+///
+/// The only other producers of this queue are a NodeType create/update event
+/// and a workspace create event (`jobs/event_handler/delete_and_schema_handlers.rs`)
+/// — so an index whose declaring event fired before the binary that first
+/// tracked build state, or whose state was lost (`cf::INDEX_STATUS` is
+/// excluded from branch copy), has no event left to ever re-fire it, and the
+/// fail-closed planner gate answers `NotBuilt` forever with nothing to notice.
+/// Spawned rather than awaited: enumeration is cheap, but a real backlog of
+/// first-time builds must not hold up the rest of startup.
+#[cfg(feature = "storage-rocksdb")]
+pub fn sweep_compound_indexes_at_boot(storage: &Arc<raisin_rocksdb::RocksDBStorage>) {
+    let storage = storage.clone();
+    tokio::spawn(async move {
+        match raisin_rocksdb::management::sweep_compound_index_builds_at_boot(&storage).await {
+            Ok(0) => {
+                tracing::debug!("Boot compound-index sweep: every declared index already usable")
+            }
+            Ok(queued) => tracing::info!(queued, "Boot compound-index sweep: queued builds"),
+            Err(e) => tracing::warn!(error = %e, "Boot compound-index sweep failed"),
+        }
+    });
+}
+
 /// Re-sync built-in (`raisin:*`) NodeTypes and Workspaces into every EXISTING
 /// repository so a schema change reaches repos created before the change.
 ///

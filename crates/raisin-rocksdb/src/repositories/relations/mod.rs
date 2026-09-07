@@ -170,30 +170,39 @@ impl RelationRepository for RelationRepositoryImpl {
             }
         };
 
-        // 1. Try to read from packed storage first
+        // The versioned forward index is the source of truth: every writer
+        // (this repository, the transaction context, replication apply) puts
+        // its keys there, and it carries tombstones. The packed adjacency
+        // snapshot is only written by this repository's add/remove, so a
+        // relation created through a transaction (SQL RELATE, the node
+        // service) is missing from it. Merge the two: versioned entries win,
+        // and a packed entry is added only for a key the versioned scan never
+        // saw at all (neither live nor tombstoned).
+        let mut scan = queries::scan_outgoing_relations(
+            &self.db, max_rev, tenant_id, repo_id, branch, workspace, node_id,
+        )
+        .await?;
+
         if let Ok(Some(packed_relations)) = self
             .packed_repo
             .get_packed_relations(max_rev, tenant_id, repo_id, branch, workspace, node_id)
             .await
         {
-            // Convert CompactRelation to RelationRef
-            return Ok(packed_relations
-                .into_iter()
-                .map(|c| RelationRef {
-                    target: c.target_id,
-                    workspace: c.target_workspace,
-                    target_node_type: c.target_node_type,
-                    relation_type: c.relation_type,
-                    weight: c.weight,
-                })
-                .collect());
+            for c in packed_relations {
+                let key = queries::relation_key(&c.relation_type, &c.target_id);
+                if scan.seen.insert(key) {
+                    scan.relations.push(RelationRef {
+                        target: c.target_id,
+                        workspace: c.target_workspace,
+                        target_node_type: c.target_node_type,
+                        relation_type: c.relation_type,
+                        weight: c.weight,
+                    });
+                }
+            }
         }
 
-        // 2. Fallback to legacy storage
-        queries::get_outgoing_relations(
-            &self.db, max_rev, tenant_id, repo_id, branch, workspace, node_id,
-        )
-        .await
+        Ok(scan.relations)
     }
 
     async fn get_incoming_relations(

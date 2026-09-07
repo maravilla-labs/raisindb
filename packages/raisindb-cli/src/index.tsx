@@ -613,7 +613,8 @@ aiProviderCmd
   .option('--icon-url <url>', 'Icon URL shown in UIs')
   .option('--enabled', 'Enable the provider')
   .option('--disabled', 'Disable the provider')
-  .option('-m, --model <spec>', 'Model as model_id[:display_name] (repeatable; first becomes default)', collect, [])
+  .option('-m, --model <spec>', 'Chat/agent model as model_id[:display_name] (repeatable; first becomes default)', collect, [])
+  .option('-e, --embedding-model <spec>', 'Embedding model as model_id[:display_name] (repeatable; first becomes the default embedding model)', collect, [])
   .option('--tenant <tenant>', 'Tenant ID', 'default')
   .action((slug, options) =>
     runAdmin(() =>
@@ -628,6 +629,7 @@ aiProviderCmd
         enabled: options.enabled,
         disabled: options.disabled,
         model: options.model,
+        embeddingModel: options.embeddingModel,
         tenant: options.tenant,
       })
     )

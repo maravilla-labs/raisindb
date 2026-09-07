@@ -13,6 +13,7 @@ use indexmap::IndexMap;
 use raisin_error::Error;
 use raisin_models::auth::AuthContext;
 use raisin_models::nodes::properties::PropertyValue;
+use raisin_models::nodes::Node;
 use raisin_sql::analyzer::TypedExpr;
 use raisin_storage::{NodeRepository, Storage, StorageScope};
 
@@ -33,6 +34,7 @@ pub(super) async fn execute_insert_workspace<S>(
     columns: &[String],
     values: &[Vec<TypedExpr>],
     is_upsert: bool,
+    written: Option<&mut Vec<Node>>,
     ctx: &ExecutionContext<S>,
 ) -> Result<(), Error>
 where
@@ -60,7 +62,16 @@ where
             .unwrap_or_else(AuthContext::anonymous);
         txn_ctx.set_auth_context(auth)?;
 
-        insert_rows_via_txn(txn_ctx.as_ref(), ctx, workspace, columns, values, is_upsert).await?;
+        insert_rows_via_txn(
+            txn_ctx.as_ref(),
+            ctx,
+            workspace,
+            columns,
+            values,
+            is_upsert,
+            written,
+        )
+        .await?;
     } else {
         tracing::debug!("{} using auto-commit mode", op_name);
         let txn_ctx = ctx.storage.begin_context().await?;
@@ -86,7 +97,16 @@ where
             .unwrap_or_else(AuthContext::anonymous);
         txn_ctx.set_auth_context(auth)?;
 
-        insert_rows_via_txn(txn_ctx.as_ref(), ctx, workspace, columns, values, is_upsert).await?;
+        insert_rows_via_txn(
+            txn_ctx.as_ref(),
+            ctx,
+            workspace,
+            columns,
+            values,
+            is_upsert,
+            written,
+        )
+        .await?;
 
         txn_ctx.commit().await?;
     }
@@ -95,6 +115,10 @@ where
 }
 
 /// Shared logic for inserting rows via a transaction context.
+///
+/// When `written` is given (RETURNING), every node is re-read after its write
+/// so the caller sees server-assigned fields (id, version, timestamps,
+/// authorship) rather than the client-built record.
 async fn insert_rows_via_txn<S: Storage>(
     txn_ctx: &dyn raisin_storage::transactional::TransactionalContext,
     ctx: &ExecutionContext<S>,
@@ -102,6 +126,7 @@ async fn insert_rows_via_txn<S: Storage>(
     columns: &[String],
     values: &[Vec<TypedExpr>],
     is_upsert: bool,
+    mut written: Option<&mut Vec<Node>>,
 ) -> Result<(), Error> {
     for row_values in values {
         let mut col_map = IndexMap::new();
@@ -129,6 +154,14 @@ async fn insert_rows_via_txn<S: Storage>(
             )
             .await?;
         }
+
+        if let Some(out) = written.as_deref_mut() {
+            let stored = txn_ctx
+                .get_node_by_path(workspace, &node.path)
+                .await?
+                .unwrap_or(node);
+            out.push(stored);
+        }
     }
 
     Ok(())
@@ -139,6 +172,7 @@ pub(super) async fn execute_update_workspace<S>(
     workspace: &str,
     assignments: &[(String, TypedExpr)],
     filter: &Option<TypedExpr>,
+    written: Option<&mut Vec<Node>>,
     ctx: &ExecutionContext<S>,
 ) -> Result<usize, Error>
 where
@@ -154,7 +188,14 @@ where
             let filter_expr = filter
                 .as_ref()
                 .ok_or_else(|| Error::Validation("UPDATE requires a WHERE clause".to_string()))?;
-            return execute_bulk_update_workspace(workspace, assignments, filter_expr, ctx).await;
+            return execute_bulk_update_workspace(
+                workspace,
+                assignments,
+                filter_expr,
+                written,
+                ctx,
+            )
+            .await;
         }
     };
 
@@ -170,7 +211,11 @@ where
             Error::InvalidState("Transaction context lost during execution".to_string())
         })?;
 
-        update_single_node(txn_ctx.as_ref(), workspace, &node_identifier, assignments).await?;
+        let node =
+            update_single_node(txn_ctx.as_ref(), workspace, &node_identifier, assignments).await?;
+        if let Some(out) = written {
+            out.push(node);
+        }
     } else {
         tracing::debug!("UPDATE using auto-commit mode");
         let txn_ctx = ctx.storage.begin_context().await?;
@@ -185,9 +230,13 @@ where
             .unwrap_or_else(AuthContext::anonymous);
         txn_ctx.set_auth_context(auth)?;
 
-        update_single_node(txn_ctx.as_ref(), workspace, &node_identifier, assignments).await?;
+        let node =
+            update_single_node(txn_ctx.as_ref(), workspace, &node_identifier, assignments).await?;
 
         txn_ctx.commit().await?;
+        if let Some(out) = written {
+            out.push(node);
+        }
     }
 
     Ok(1)
@@ -199,7 +248,7 @@ async fn update_single_node(
     workspace: &str,
     node_identifier: &NodeIdentifier,
     assignments: &[(String, TypedExpr)],
-) -> Result<(), Error> {
+) -> Result<Node, Error> {
     let mut node = match node_identifier {
         NodeIdentifier::Id(id) => txn_ctx
             .get_node(workspace, id)
@@ -219,7 +268,7 @@ async fn update_single_node(
     }
 
     txn_ctx.put_node(workspace, &node).await?;
-    Ok(())
+    Ok(txn_ctx.get_node(workspace, &node.id).await?.unwrap_or(node))
 }
 
 /// Execute DELETE on workspace table.
@@ -233,6 +282,7 @@ async fn update_single_node(
 pub(super) async fn execute_delete_workspace<S>(
     workspace: &str,
     filter: &Option<TypedExpr>,
+    deleted: Option<&mut Vec<Node>>,
     ctx: &ExecutionContext<S>,
 ) -> Result<usize, Error>
 where
@@ -246,14 +296,14 @@ where
             let filter_expr = filter
                 .as_ref()
                 .ok_or_else(|| Error::Validation("DELETE requires a WHERE clause".to_string()))?;
-            return execute_bulk_delete_workspace(workspace, filter_expr, ctx).await;
+            return execute_bulk_delete_workspace(workspace, filter_expr, deleted, ctx).await;
         }
     };
 
     // Gather node IDs to delete (target + descendants)
     let ids_to_delete = collect_cascade_ids(&node_identifier, workspace, ctx).await?;
 
-    super::bulk_delete::delete_nodes_by_ids(workspace, ids_to_delete, ctx).await
+    super::bulk_delete::delete_nodes_by_ids(workspace, ids_to_delete, deleted, ctx).await
 }
 
 /// Collect node IDs for cascade delete (target node + all descendants).

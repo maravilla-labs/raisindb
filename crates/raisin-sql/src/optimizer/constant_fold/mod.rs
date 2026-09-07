@@ -235,6 +235,56 @@ pub fn fold_constants(expr: TypedExpr) -> TypedExpr {
             )
         }
 
+        // Subqueries are bound by the engine; nothing to fold here.
+        Expr::Exists { .. } | Expr::ScalarSubquery { .. } => expr,
+
+        Expr::QuantifiedSubquery {
+            left,
+            op,
+            subquery,
+            all,
+        } => TypedExpr::new(
+            Expr::QuantifiedSubquery {
+                left: Box::new(fold_constants(*left)),
+                op,
+                subquery,
+                all,
+            },
+            expr.data_type,
+        ),
+
+        Expr::Quantified {
+            left,
+            op,
+            right,
+            all,
+        } => TypedExpr::new(
+            Expr::Quantified {
+                left: Box::new(fold_constants(*left)),
+                op,
+                right: Box::new(fold_constants(*right)),
+                all,
+            },
+            expr.data_type,
+        ),
+
+        Expr::Regex {
+            expr: inner,
+            pattern,
+            case_insensitive,
+            negated,
+            similar_to,
+        } => TypedExpr::new(
+            Expr::Regex {
+                expr: Box::new(fold_constants(*inner)),
+                pattern: Box::new(fold_constants(*pattern)),
+                case_insensitive,
+                negated,
+                similar_to,
+            },
+            expr.data_type,
+        ),
+
         Expr::Like {
             expr: inner,
             pattern,

@@ -89,6 +89,15 @@ async fn apply_test_mock(
     }))
 }
 
+/// Whether a step was switched off in the designer (`disabled: true`).
+///
+/// The designer has offered the toggle all along and the converter carried it
+/// through, but nothing read it: a disabled step ran exactly like an enabled
+/// one. A disabled step is now skipped with a null output.
+pub(crate) fn is_disabled(step: &FlowNode) -> bool {
+    step.get_bool_property("disabled").unwrap_or(false)
+}
+
 /// Internal step execution logic (without branch handling)
 pub(crate) async fn execute_step_inner(
     step: &FlowNode,
@@ -96,6 +105,21 @@ pub(crate) async fn execute_step_inner(
     flow_def: &FlowDefinition,
     callbacks: &dyn FlowCallbacks,
 ) -> FlowResult<StepResult> {
+    // A disabled step is skipped: straight to its successor, no handler, no
+    // output.
+    if is_disabled(step) {
+        info!("Step {} is disabled - skipping", step.id);
+        let next_node_id = step
+            .next_node
+            .clone()
+            .or_else(|| flow_def.next_node_id(&step.id))
+            .unwrap_or_else(|| "end".to_string());
+        return Ok(StepResult::Continue {
+            next_node_id,
+            output: Value::Null,
+        });
+    }
+
     // Test-run mocks bypass the real handler entirely
     if let Some(mock_result) = apply_test_mock(step, instance, flow_def).await {
         return mock_result;
@@ -225,4 +249,31 @@ pub(crate) async fn execute_step_inner(
     sync_context_to_instance(&context, instance);
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn step(props: &[(&str, Value)]) -> FlowNode {
+        FlowNode {
+            id: "s".to_string(),
+            step_type: StepType::FunctionStep,
+            properties: props
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+            children: Vec::new(),
+            next_node: None,
+        }
+    }
+
+    /// `disabled: true` is the only spelling that switches a step off; absent
+    /// or false runs it.
+    #[test]
+    fn test_disabled_is_read_from_the_step() {
+        assert!(is_disabled(&step(&[("disabled", Value::Bool(true))])));
+        assert!(!is_disabled(&step(&[("disabled", Value::Bool(false))])));
+        assert!(!is_disabled(&step(&[])));
+    }
 }

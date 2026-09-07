@@ -23,7 +23,7 @@ use tracing::info;
 
 use super::helpers::{
     bump_visit_count, current_visit_count, extract_token_usage, project_output_key,
-    record_step_output, take_resume_reentry,
+    record_step_output, step_type_name, take_resume_reentry,
 };
 use super::isolated_branch::execute_step;
 use super::result_handlers::{
@@ -233,7 +233,7 @@ pub(super) async fn execute_flow_with_retry(
                 FlowExecutionEvent::step_started(
                     &current_step.id,
                     step_name,
-                    format!("{:?}", current_step.step_type),
+                    step_type_name(&current_step.step_type),
                 ),
             )
             .await;

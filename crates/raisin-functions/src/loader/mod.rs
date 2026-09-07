@@ -154,6 +154,11 @@ impl FunctionLoader {
                     _ => None,
                 })
                 .unwrap_or_default(),
+            execution_context: props
+                .get("execution_context")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_default(),
             version: props.get("version").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
             enabled,
             entry_file,

@@ -10,7 +10,8 @@ use super::predicates::{
     extract_branch_predicate, extract_locale_predicate, extract_revision_predicate,
 };
 use super::types::{
-    AnalyzedQuery, AnalyzedShow, AnalyzedStatement, CteDefinition, ExplainFormat, ExplainStatement,
+    AnalyzedQuery, AnalyzedSetOperation, AnalyzedShow, AnalyzedStatement, CteDefinition,
+    ExplainFormat, ExplainStatement, OrderBySpec, SetOperationKind,
 };
 use super::{AnalyzerContext, Result};
 use crate::analyzer::{
@@ -41,11 +42,14 @@ impl<'a> AnalyzerContext<'a> {
                 table,
                 assignments,
                 selection,
+                returning,
                 ..
-            } => self.analyze_update(table, assignments, selection.as_ref()),
+            } => self.analyze_update(table, assignments, selection.as_ref(), returning.as_deref()),
             Statement::Delete(delete) => self.analyze_delete(delete),
             Statement::ShowVariable { variable } => self.analyze_show_variable(variable),
-            _ => Err(AnalysisError::UnsupportedStatement(format!("{:?}", stmt))),
+            _ => Err(AnalysisError::UnsupportedStatement(
+                describe_unsupported_statement(stmt),
+            )),
         }
     }
 
@@ -93,7 +97,7 @@ impl<'a> AnalyzerContext<'a> {
                 selection,
                 ..
             } => {
-                let analyzed = self.analyze_update(table, assignments, selection.as_ref())?;
+                let analyzed = self.analyze_update(table, assignments, selection.as_ref(), None)?;
                 Ok(AnalyzedStatement::Explain(ExplainStatement {
                     target: Box::new(analyzed),
                     analyze,
@@ -149,16 +153,227 @@ impl<'a> AnalyzerContext<'a> {
             SetExpr::Select(select) => {
                 self.analyze_select(select, order_by_exprs, limit_expr, offset_expr)?
             }
-            _ => {
+            SetExpr::SetOperation { .. } | SetExpr::Query(_) => {
+                self.analyze_set_operation_query(set_expr, order_by_exprs, limit_expr, offset_expr)?
+            }
+            SetExpr::Values(_) => {
                 return Err(AnalysisError::UnsupportedStatement(
-                    "Only SELECT queries are supported".into(),
+                    "VALUES as a standalone query is not supported (use SELECT)".into(),
                 ))
+            }
+            other => {
+                return Err(AnalysisError::UnsupportedStatement(format!(
+                    "query body `{}`: only SELECT and UNION/INTERSECT/EXCEPT are supported",
+                    truncate(&other.to_string())
+                )))
             }
         };
 
         // Add CTEs to the analyzed query
         analyzed.ctes = ctes;
         Ok(analyzed)
+    }
+
+    /// Analyse one side of a set operation (or a nested set operation).
+    /// Sides carry no ORDER BY / LIMIT of their own unless parenthesised as a
+    /// full query.
+    fn analyze_set_expr_side(&mut self, side: &SetExpr) -> Result<AnalyzedQuery> {
+        match side {
+            SetExpr::Select(select) => {
+                let mut ctx = self.nested_scope();
+                ctx.analyze_select(select, &[], None, None)
+            }
+            SetExpr::SetOperation { .. } => self.analyze_set_operation_query(side, &[], None, None),
+            SetExpr::Query(query) => {
+                let mut ctx = self.nested_scope();
+                ctx.analyze_query(query)
+            }
+            other => Err(AnalysisError::UnsupportedStatement(format!(
+                "set operation operand `{}`: only SELECT queries can be combined",
+                truncate(&other.to_string())
+            ))),
+        }
+    }
+
+    /// `left UNION|INTERSECT|EXCEPT [ALL] right [ORDER BY ...] [LIMIT ...]`
+    fn analyze_set_operation_query(
+        &mut self,
+        body: &SetExpr,
+        order_by: &[OrderByExpr],
+        limit: Option<&sqlparser::ast::Expr>,
+        offset: Option<&sqlparser::ast::Expr>,
+    ) -> Result<AnalyzedQuery> {
+        use sqlparser::ast::{SetOperator, SetQuantifier};
+
+        let (op, set_quantifier, left, right) = match body {
+            SetExpr::SetOperation {
+                op,
+                set_quantifier,
+                left,
+                right,
+            } => (op, set_quantifier, left, right),
+            // A parenthesised query as the whole body: `(SELECT ...) ORDER BY`
+            SetExpr::Query(query) => {
+                let mut inner = self.nested_scope().analyze_query(query)?;
+                if !order_by.is_empty() || limit.is_some() || offset.is_some() {
+                    self.apply_outer_order_limit(&mut inner, order_by, limit, offset)?;
+                }
+                return Ok(inner);
+            }
+            _ => unreachable!("analyze_set_operation_query called on a non-set body"),
+        };
+
+        let kind = match op {
+            SetOperator::Union => SetOperationKind::Union,
+            SetOperator::Intersect => SetOperationKind::Intersect,
+            SetOperator::Except | SetOperator::Minus => SetOperationKind::Except,
+        };
+        let all = match set_quantifier {
+            SetQuantifier::All => true,
+            SetQuantifier::Distinct | SetQuantifier::None => false,
+            other => {
+                return Err(AnalysisError::UnsupportedStatement(format!(
+                    "{} {other}: BY NAME set operations are not supported",
+                    kind.keyword()
+                )))
+            }
+        };
+
+        let left_q = self.analyze_set_expr_side(left)?;
+        let right_q = self.analyze_set_expr_side(right)?;
+
+        if left_q.projection.len() != right_q.projection.len() {
+            return Err(AnalysisError::UnsupportedStatement(format!(
+                "each {} query must have the same number of columns: left has {}, right has {}",
+                kind.keyword(),
+                left_q.projection.len(),
+                right_q.projection.len()
+            )));
+        }
+        for (i, ((l, _), (r, _))) in left_q
+            .projection
+            .iter()
+            .zip(right_q.projection.iter())
+            .enumerate()
+        {
+            let compatible = l.data_type.common_type(&r.data_type).is_some()
+                || matches!(l.data_type.base_type(), DataType::Unknown)
+                || matches!(r.data_type.base_type(), DataType::Unknown);
+            if !compatible {
+                return Err(AnalysisError::TypeMismatch {
+                    expected: format!(
+                        "{} column {} of type {}",
+                        kind.keyword(),
+                        i + 1,
+                        l.data_type
+                    ),
+                    actual: r.data_type.to_string(),
+                });
+            }
+        }
+
+        let mut combined = AnalyzedQuery {
+            ctes: Vec::new(),
+            projection: left_q.projection.clone(),
+            from: left_q.from.clone(),
+            joins: Vec::new(),
+            selection: None,
+            group_by: Vec::new(),
+            aggregates: Vec::new(),
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            max_revision: None,
+            branch_override: None,
+            locales: Vec::new(),
+            distinct: None,
+            having: None,
+            set_operation: Some(Box::new(AnalyzedSetOperation {
+                kind,
+                all,
+                left: left_q,
+                right: right_q,
+            })),
+        };
+        self.apply_outer_order_limit(&mut combined, order_by, limit, offset)?;
+        Ok(combined)
+    }
+
+    /// ORDER BY / LIMIT / OFFSET over a combined result. ORDER BY may name
+    /// output columns (by alias or by the left side's column name) only —
+    /// there is no single input table to resolve arbitrary expressions
+    /// against.
+    fn apply_outer_order_limit(
+        &mut self,
+        query: &mut AnalyzedQuery,
+        order_by: &[OrderByExpr],
+        limit: Option<&sqlparser::ast::Expr>,
+        offset: Option<&sqlparser::ast::Expr>,
+    ) -> Result<()> {
+        let output_columns: std::collections::HashMap<String, TypedExpr> = query
+            .projection
+            .iter()
+            .map(|(expr, alias)| {
+                let name = alias.clone().unwrap_or_else(|| output_column_name(expr));
+                (
+                    name.clone(),
+                    TypedExpr::column(String::new(), name, expr.data_type.clone()),
+                )
+            })
+            .collect();
+
+        let mut specs = Vec::with_capacity(order_by.len());
+        for item in order_by {
+            let typed = match &item.expr {
+                sqlparser::ast::Expr::Identifier(ident) => {
+                    output_columns.get(&ident.value).cloned().ok_or_else(|| {
+                        AnalysisError::ColumnNotFound {
+                            table: "set operation result".into(),
+                            column: ident.value.clone(),
+                        }
+                    })?
+                }
+                sqlparser::ast::Expr::Value(v) => {
+                    // ORDER BY <ordinal>
+                    let n = v.value.to_string().parse::<usize>().ok();
+                    match n.and_then(|n| query.projection.get(n.wrapping_sub(1)).map(|p| (n, p))) {
+                        Some((_, (expr, alias))) => {
+                            let name = alias
+                                .clone()
+                                .unwrap_or_else(|| output_column_name(expr));
+                            TypedExpr::column(String::new(), name, expr.data_type.clone())
+                        }
+                        None => {
+                            return Err(AnalysisError::UnsupportedStatement(format!(
+                                "ORDER BY position {} is not in the select list",
+                                v.value
+                            )))
+                        }
+                    }
+                }
+                other => {
+                    return Err(AnalysisError::UnsupportedStatement(format!(
+                        "ORDER BY `{other}` over a set operation: only output column names or positions are allowed"
+                    )))
+                }
+            };
+            let is_desc = item.options.asc == Some(false);
+            specs.push(OrderBySpec::with_nulls(
+                typed,
+                is_desc,
+                item.options.nulls_first,
+            ));
+        }
+        query.order_by = specs;
+        query.limit = match limit {
+            Some(e) => Some(self.analyze_limit(e)?),
+            None => None,
+        };
+        query.offset = match offset {
+            Some(e) => Some(self.analyze_offset(e)?),
+            None => None,
+        };
+        Ok(())
     }
 
     /// Analyze a SELECT statement
@@ -169,13 +384,6 @@ impl<'a> AnalyzerContext<'a> {
         limit: Option<&sqlparser::ast::Expr>,
         offset: Option<&sqlparser::ast::Expr>,
     ) -> Result<AnalyzedQuery> {
-        // Validate no unsupported features
-        if select.having.is_some() {
-            return Err(AnalysisError::UnsupportedStatement(
-                "HAVING not yet supported".into(),
-            ));
-        }
-
         // Analyze FROM clause
         let (tables, joins) = if select.from.is_empty() {
             (Vec::new(), Vec::new())
@@ -217,16 +425,60 @@ impl<'a> AnalyzerContext<'a> {
             }
         }
 
-        // Validate GROUP BY usage
-        if has_aggregates || !group_by.is_empty() {
-            self.validate_grouping(&projection, &group_by, &aggregates)?;
-        }
-
-        // Build alias map for ORDER BY resolution
+        // Build alias map for HAVING / ORDER BY resolution
         let alias_map: std::collections::HashMap<String, TypedExpr> = projection
             .iter()
             .filter_map(|(expr, alias)| alias.as_ref().map(|a| (a.clone(), expr.clone())))
             .collect();
+
+        // Analyze HAVING: aliases resolve to their select-list expression;
+        // aggregates it introduces are added to the aggregate list so the
+        // grouping operator computes them even when they are not projected.
+        let having = if let Some(having_expr) = &select.having {
+            self.select_aliases = alias_map.clone();
+            let typed = self.analyze_expr(having_expr);
+            self.select_aliases.clear();
+            let typed = typed?;
+            if !matches!(typed.data_type.base_type(), DataType::Boolean) {
+                return Err(AnalysisError::TypeMismatch {
+                    expected: "BOOLEAN (HAVING)".into(),
+                    actual: typed.data_type.to_string(),
+                });
+            }
+            if let Some(agg_exprs) = self.extract_aggregates(&typed, None)? {
+                for agg in agg_exprs {
+                    let dup = aggregates.iter().any(
+                        |a: &crate::logical_plan::operators::AggregateExpr| {
+                            a.func == agg.func
+                                && a.args.len() == agg.args.len()
+                                && a.args
+                                    .iter()
+                                    .zip(agg.args.iter())
+                                    .all(|(x, y)| super::equivalence::expressions_equivalent(x, y))
+                                && a.filter.is_none() == agg.filter.is_none()
+                        },
+                    );
+                    if !dup {
+                        aggregates.push(agg);
+                    }
+                }
+                has_aggregates = true;
+            }
+            if !self.is_valid_in_aggregate_query(&typed, &group_by)? {
+                return Err(AnalysisError::ColumnNotInGroupBy(format!(
+                    "HAVING references `{}`, which is neither grouped nor aggregated",
+                    having_expr
+                )));
+            }
+            Some(typed)
+        } else {
+            None
+        };
+
+        // Validate GROUP BY usage
+        if has_aggregates || !group_by.is_empty() {
+            self.validate_grouping(&projection, &group_by, &aggregates)?;
+        }
 
         // Analyze ORDER BY (with alias resolution)
         let order_by_analyzed = self.analyze_order_by(order_by, &alias_map)?;
@@ -283,6 +535,8 @@ impl<'a> AnalyzerContext<'a> {
             branch_override,
             locales,
             distinct,
+            having,
+            set_operation: None,
         })
     }
 
@@ -474,4 +728,38 @@ impl<'a> AnalyzerContext<'a> {
 
         Ok(())
     }
+}
+
+/// The name a projection item gets in the output row when it has no alias.
+/// Must agree with the plan builder's `derive_column_name`.
+fn output_column_name(expr: &TypedExpr) -> String {
+    match &expr.expr {
+        Expr::Column { column, .. } => column.clone(),
+        Expr::Function { name, .. } => name.to_lowercase(),
+        Expr::Cast { expr, .. } => output_column_name(expr),
+        _ => "?column?".to_string(),
+    }
+}
+
+fn truncate(text: &str) -> String {
+    if text.len() > 120 {
+        format!("{}...", &text[..117])
+    } else {
+        text.to_string()
+    }
+}
+
+/// Name the statement kind instead of dumping the AST.
+fn describe_unsupported_statement(stmt: &Statement) -> String {
+    let text = stmt.to_string();
+    let keyword: String = text
+        .split_whitespace()
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_uppercase();
+    format!(
+        "{keyword} statement is not supported: `{}`",
+        truncate(&text)
+    )
 }

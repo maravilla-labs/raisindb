@@ -22,16 +22,19 @@ pub(crate) fn determine_frame_bounds(
     current_row: usize,
     partition_size: usize,
     frame: &Option<raisin_sql::analyzer::WindowFrame>,
+    has_order_by: bool,
 ) -> (usize, usize) {
-    // Default frame (when no frame specified):
-    // - With ORDER BY: RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    // Default frame (when no frame specified), as in PostgreSQL:
+    // - With ORDER BY: UNBOUNDED PRECEDING .. CURRENT ROW (running aggregate)
     // - Without ORDER BY: entire partition
-    // Since we are already sorted by ORDER BY, we treat no frame as entire partition
     let frame = match frame {
         Some(f) => f,
         None => {
-            // Default: entire partition
-            return (0, partition_size);
+            return if has_order_by {
+                (0, current_row + 1)
+            } else {
+                (0, partition_size)
+            };
         }
     };
 

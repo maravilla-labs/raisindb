@@ -41,7 +41,12 @@ export async function initPackage(folder: string, options: InitOptions): Promise
   console.log(`  Workspace:   ${workspace}`);
   console.log(`  Files:       ${count}`);
 
-  if (!options.skipInstall) {
+  // Only the packs that write a root package.json have anything for npm to
+  // install or scripts to run; the content-modeling pack ships neither, so
+  // `npm install` failed there and "npm run validate" pointed at nothing.
+  const hasPackageJson = files.some((f) => f.path === 'package.json');
+
+  if (!options.skipInstall && hasPackageJson) {
     // Run npm install
     console.log(`\nInstalling dependencies...`);
     try {
@@ -64,6 +69,10 @@ export async function initPackage(folder: string, options: InitOptions): Promise
 
   console.log(`\nReady! Next steps:`);
   console.log(`  cd ${folder}`);
-  console.log(`  npm run validate`);
+  if (hasPackageJson) {
+    console.log(`  npm run validate`);
+  } else {
+    console.log(`  raisindb package validate ./package`);
+  }
   console.log('');
 }

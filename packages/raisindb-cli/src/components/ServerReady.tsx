@@ -9,6 +9,8 @@ interface ServerReadyProps {
   devMode: boolean;
   httpPort: string;
   pgwirePort: string;
+  /** Whether `server start` turned the pgwire listener on (it is off in the binary by default). */
+  pgwireEnabled?: boolean;
   adminPassword?: string | null;
   dataDir?: string;
   isFirstRun: boolean;
@@ -21,7 +23,7 @@ function Arrow() {
 }
 
 export function ServerReady({
-  version, devMode, httpPort, pgwirePort,
+  version, devMode, httpPort, pgwirePort, pgwireEnabled = true,
   adminPassword, dataDir, pid, readyTime
 }: ServerReadyProps) {
 
@@ -42,7 +44,9 @@ export function ServerReady({
       {/* Connection info */}
       <Box flexDirection="column" marginTop={1}>
         <Box><Text>  </Text><Arrow /><Text>  </Text><Box width={10}><Text dimColor>HTTP</Text></Box><Text color="cyan">http://localhost:{httpPort}</Text></Box>
-        <Box><Text>  </Text><Arrow /><Text>  </Text><Box width={10}><Text dimColor>PgSQL</Text></Box><Text color="cyan">postgresql://localhost:{pgwirePort}</Text></Box>
+        {pgwireEnabled && (
+          <Box><Text>  </Text><Arrow /><Text>  </Text><Box width={10}><Text dimColor>PgSQL</Text></Box><Text color="cyan">postgresql://localhost:{pgwirePort}</Text><Text dimColor>  psql -U default -d {'<repo>'} (password: an API key)</Text></Box>
+        )}
         <Box><Text>  </Text><Arrow /><Text>  </Text><Box width={10}><Text dimColor>Admin</Text></Box><Text color="cyan">http://localhost:{httpPort}/admin</Text></Box>
         {dataDir && (
           <Box><Text>  </Text><Arrow /><Text>  </Text><Box width={10}><Text dimColor>Data</Text></Box><Text dimColor>{dataDir}</Text></Box>

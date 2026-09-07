@@ -184,6 +184,7 @@ impl NodeRepositoryImpl {
             .build_prefix();
 
         let cf = cf_handle(&self.db, cf::NODES)?;
+        let prefix_clone = prefix.clone();
         let iter = self.db.prefix_iterator_cf(cf, prefix);
 
         let mut seen_nodes = HashSet::new();
@@ -191,6 +192,15 @@ impl NodeRepositoryImpl {
 
         for item in iter {
             let (key, value) = item.map_err(|e| raisin_error::Error::Backend(e.to_string()))?;
+
+            // `prefix_iterator_cf` positions at the prefix but does not STOP at
+            // its end (cf::NODES has no prefix extractor), so without this guard
+            // the count ran on into every later workspace, branch and repository
+            // in the column family. An unfiltered COUNT(*) over a four-node
+            // workspace answered 639.
+            if !key.starts_with(&prefix_clone) {
+                break;
+            }
 
             let revision = match keys::extract_revision_from_key(&key) {
                 Ok(rev) => rev,
@@ -312,5 +322,73 @@ impl NodeRepositoryImpl {
         }
 
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod count_all_tests {
+    use raisin_models::nodes::Node;
+    use raisin_storage::{CreateNodeOptions, NodeRepository, Storage, StorageScope};
+    use std::collections::HashMap;
+
+    fn node(id: &str, path: &str) -> Node {
+        Node {
+            id: id.to_string(),
+            path: path.to_string(),
+            name: path.trim_start_matches('/').to_string(),
+            parent: Some("/".to_string()),
+            node_type: "raisin:Page".to_string(),
+            properties: HashMap::new(),
+            ..Default::default()
+        }
+    }
+
+    async fn create(storage: &crate::RocksDBStorage, ws: &str, id: &str) {
+        storage
+            .nodes()
+            .create(
+                StorageScope::new("t", "r", "main", ws),
+                node(id, &format!("/{id}")),
+                CreateNodeOptions {
+                    validate_schema: false,
+                    validate_parent_allows_child: false,
+                    validate_workspace_allows_type: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("create");
+    }
+
+    /// `prefix_iterator_cf` does not stop at the end of the prefix, so an
+    /// unfiltered COUNT(*) used to count every node in every later workspace
+    /// as well. A four-node workspace answered 639 on a small server.
+    #[tokio::test]
+    async fn count_all_counts_only_the_named_workspace() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let storage = crate::RocksDBStorage::new(tmp.path()).unwrap();
+
+        for id in ["a1", "a2"] {
+            create(&storage, "aaa", id).await;
+        }
+        for id in ["b1", "b2", "b3", "b4"] {
+            create(&storage, "bbb", id).await;
+        }
+        // A workspace that sorts AFTER both, so a runaway iterator would reach it.
+        for id in ["z1"] {
+            create(&storage, "zzz", id).await;
+        }
+
+        async fn count(storage: &crate::RocksDBStorage, ws: &str) -> usize {
+            storage
+                .nodes()
+                .count_all(StorageScope::new("t", "r", "main", ws), None)
+                .await
+                .unwrap()
+        }
+        assert_eq!(count(&storage, "aaa").await, 2);
+        assert_eq!(count(&storage, "bbb").await, 4);
+        assert_eq!(count(&storage, "zzz").await, 1);
+        assert_eq!(count(&storage, "nothing").await, 0);
     }
 }

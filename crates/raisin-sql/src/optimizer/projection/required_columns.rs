@@ -106,6 +106,12 @@ pub fn compute_required_columns(plan: &LogicalPlan) -> HashSet<String> {
             cols
         }
 
+        LogicalPlan::SetOperation { left, right, .. } => {
+            let mut cols = compute_required_columns(left);
+            cols.extend(compute_required_columns(right));
+            cols
+        }
+
         LogicalPlan::SemiJoin {
             left,
             right,

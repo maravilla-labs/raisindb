@@ -614,3 +614,35 @@ async fn updated_and_deleted_nodes_do_not_linger() {
         "stale property entries must not survive a reopen, got {held:?}"
     );
 }
+
+/// `DESCENDANT_OF('/')` walks the whole workspace. The workspace root has no
+/// node record, so the ordered walk must start from the root ordering key
+/// instead of resolving the path (which returned nothing and yielded 0 rows).
+#[tokio::test]
+async fn descendant_of_root_returns_every_node() {
+    let (_storage, _td, engine) = setup().await;
+    seed_two_subtrees(&engine).await;
+
+    let paths = run_sql_paths(&engine, "SELECT path FROM items WHERE DESCENDANT_OF('/')").await;
+    assert_eq!(
+        paths,
+        vec![
+            "/joba".to_string(),
+            "/joba/other".to_string(),
+            "/joba/t-000".to_string(),
+            "/joba/t-001".to_string(),
+            "/jobb".to_string(),
+            "/jobb/t-000".to_string(),
+            "/jobb/t-001".to_string(),
+        ],
+        "a root walk must reach every node in the workspace"
+    );
+
+    // A bounded root walk must still terminate and honour LIMIT.
+    let n = run_sql_count(
+        &engine,
+        "SELECT path FROM items WHERE DESCENDANT_OF('/') LIMIT 3",
+    )
+    .await;
+    assert_eq!(n, 3);
+}

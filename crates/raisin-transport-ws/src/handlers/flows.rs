@@ -50,17 +50,11 @@ mod inner {
     use raisin_rocksdb::get_flow_job_scheduler;
     use raisin_storage::Storage;
 
-    /// Extract the actor identity and home path from the connection state.
-    fn extract_actor(connection_state: &Arc<RwLock<ConnectionState>>) -> (String, Option<String>) {
-        let conn = connection_state.read();
-        let auth = conn.auth_context().cloned();
-        drop(conn);
-        let actor = auth
-            .as_ref()
-            .and_then(|a| a.user_id.clone())
-            .unwrap_or_else(|| "ws_api".to_string());
-        let actor_home = auth.as_ref().and_then(|a| a.home.clone());
-        (actor, actor_home)
+    /// The connection's resolved auth context, if it authenticated.
+    fn extract_auth(
+        connection_state: &Arc<RwLock<ConnectionState>>,
+    ) -> Option<raisin_models::auth::AuthContext> {
+        connection_state.read().auth_context().cloned()
     }
 
     /// Require `context.repository` from the request.
@@ -92,7 +86,7 @@ mod inner {
         let payload: FlowRunPayload = serde_json::from_value(request.payload.clone())?;
         let tenant = require_tenant(&request);
         let repo = require_repo(&request)?;
-        let (actor, actor_home) = extract_actor(connection_state);
+        let auth = extract_auth(connection_state);
         let scheduler = get_flow_job_scheduler(&state.rocksdb_storage)?;
 
         let result = service::run_flow(
@@ -102,8 +96,7 @@ mod inner {
             &repo,
             &payload.flow_path,
             payload.input,
-            actor,
-            actor_home,
+            auth.as_ref(),
         )
         .await?;
 
@@ -129,7 +122,6 @@ mod inner {
         let payload: FlowResumePayload = serde_json::from_value(request.payload.clone())?;
         let tenant = require_tenant(&request);
         let repo = require_repo(&request)?;
-        let _actor = extract_actor(connection_state);
         let scheduler = get_flow_job_scheduler(&state.rocksdb_storage)?;
 
         let result = service::resume_flow(

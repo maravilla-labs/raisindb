@@ -12,6 +12,7 @@
 use super::eval::eval_expr;
 use super::executor::{ExecutionContext, ExecutionError, Row, RowStream};
 use super::operators::PhysicalPlan;
+use super::window::compare::compare_literals;
 use futures::stream::{self, StreamExt};
 use indexmap::IndexMap;
 use raisin_models::nodes::properties::PropertyValue;
@@ -19,6 +20,7 @@ use raisin_sql::analyzer::{Literal, TypedExpr};
 use raisin_sql::logical_plan::{AggregateExpr, AggregateFunction};
 use raisin_storage::Storage;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 /// Execute a hash aggregate operation
 pub async fn execute_hash_aggregate<
@@ -56,10 +58,7 @@ pub async fn execute_hash_aggregate<
 
         // Get or create accumulators for this group
         let (stored_values, accumulators) = groups.entry(group_key.clone()).or_insert_with(|| {
-            let new_accumulators = aggregates
-                .iter()
-                .map(|agg| Accumulator::new(&agg.func))
-                .collect();
+            let new_accumulators = aggregates.iter().map(Accumulator::new).collect();
             (group_values.clone(), new_accumulators)
         });
 
@@ -84,15 +83,22 @@ pub async fn execute_hash_aggregate<
 
             // Only update accumulator if filter passes
             if should_include {
-                // Evaluate aggregate argument
+                // Evaluate aggregate argument. COUNT(*) has no argument and
+                // counts the row; COUNT(expr) and the others skip NULLs.
                 let value = if agg_expr.args.is_empty() {
-                    // COUNT(*) - no argument
                     Literal::Int(1)
                 } else {
                     eval_expr(&agg_expr.args[0], &row)?
                 };
+                if !agg_expr.args.is_empty() && matches!(value, Literal::Null) {
+                    continue;
+                }
+                let mut sort_keys = Vec::with_capacity(agg_expr.order_by.len());
+                for (key_expr, _) in &agg_expr.order_by {
+                    sort_keys.push(eval_expr(key_expr, &row)?);
+                }
 
-                accumulators[i].update(value)?;
+                accumulators[i].update(value, sort_keys)?;
             }
         }
     }
@@ -196,7 +202,7 @@ fn generate_canonical_aggregate_name(agg_expr: &AggregateExpr) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
-    let func_name_upper = match agg_expr.func {
+    let base = match agg_expr.func {
         AggregateFunction::Count => "COUNT",
         AggregateFunction::CountDistinct => "COUNT",
         AggregateFunction::Sum => "SUM",
@@ -205,12 +211,22 @@ fn generate_canonical_aggregate_name(agg_expr: &AggregateExpr) -> String {
         AggregateFunction::Max => "MAX",
         AggregateFunction::ArrayAgg => "ARRAY_AGG",
     };
+    // The projection still holds the analyzer's `Expr::Function`, whose name
+    // carries DISTINCT / ORDER BY modifiers and whose argument list includes
+    // the ORDER BY keys — reproduce both so the lookup name matches.
+    let func_name_upper = raisin_sql::analyzer::aggregate_spec::AggregateSpec {
+        base: base.to_string(),
+        distinct: agg_expr.distinct,
+        order_desc: agg_expr.order_by.iter().map(|(_, d)| *d).collect(),
+    }
+    .encode();
+    let total_args = agg_expr.args.len() + agg_expr.order_by.len();
 
     // Generate base name matching eval.rs format: FUNCTION_NAME(arg) or FUNCTION_NAME()
-    let base_name = if agg_expr.args.is_empty() {
+    let base_name = if total_args == 0 {
         // No arguments (e.g., COUNT(*) which is represented as empty args in some contexts)
         format!("{}()", func_name_upper)
-    } else if agg_expr.args.len() == 1 {
+    } else if total_args == 1 {
         // Single argument - extract argument name
         let arg_name = match &agg_expr.args[0].expr {
             Expr::Column { table, column } => format!("{}.{}", table, column),
@@ -235,23 +251,47 @@ fn generate_canonical_aggregate_name(agg_expr: &AggregateExpr) -> String {
 }
 
 /// Accumulator for aggregate functions
+///
+/// NULL inputs never reach an accumulator (the caller skips them for every
+/// function except `COUNT(*)`), so each variant only has to fold real values.
 #[derive(Debug, Clone)]
 enum Accumulator {
-    Count { count: usize },
-    Sum { sum: f64, has_value: bool },
-    Avg { sum: f64, count: usize },
-    Min { min: Option<PropertyValue> },
-    Max { max: Option<PropertyValue> },
-    ArrayAgg { values: Vec<PropertyValue> },
+    Count {
+        count: usize,
+    },
+    CountDistinct {
+        seen: HashSet<String>,
+    },
+    Sum {
+        sum: f64,
+        has_value: bool,
+    },
+    Avg {
+        sum: f64,
+        count: usize,
+    },
+    Min {
+        min: Option<Literal>,
+    },
+    Max {
+        max: Option<Literal>,
+    },
+    ArrayAgg {
+        /// `(value, inner ORDER BY keys, DESC flags)` in arrival order
+        values: Vec<(Literal, Vec<Literal>)>,
+        order_desc: Vec<bool>,
+        distinct: bool,
+    },
 }
 
 impl Accumulator {
-    /// Create new accumulator for the given aggregate function
-    fn new(func: &AggregateFunction) -> Self {
-        match func {
-            AggregateFunction::Count | AggregateFunction::CountDistinct => {
-                Accumulator::Count { count: 0 }
-            }
+    /// Create new accumulator for the given aggregate expression
+    fn new(agg: &AggregateExpr) -> Self {
+        match agg.func {
+            AggregateFunction::Count => Accumulator::Count { count: 0 },
+            AggregateFunction::CountDistinct => Accumulator::CountDistinct {
+                seen: HashSet::new(),
+            },
             AggregateFunction::Sum => Accumulator::Sum {
                 sum: 0.0,
                 has_value: false,
@@ -259,15 +299,22 @@ impl Accumulator {
             AggregateFunction::Avg => Accumulator::Avg { sum: 0.0, count: 0 },
             AggregateFunction::Min => Accumulator::Min { min: None },
             AggregateFunction::Max => Accumulator::Max { max: None },
-            AggregateFunction::ArrayAgg => Accumulator::ArrayAgg { values: Vec::new() },
+            AggregateFunction::ArrayAgg => Accumulator::ArrayAgg {
+                values: Vec::new(),
+                order_desc: agg.order_by.iter().map(|(_, d)| *d).collect(),
+                distinct: agg.distinct,
+            },
         }
     }
 
-    /// Update accumulator with a new value
-    fn update(&mut self, value: Literal) -> Result<(), ExecutionError> {
+    /// Update accumulator with a new (non-NULL) value
+    fn update(&mut self, value: Literal, sort_keys: Vec<Literal>) -> Result<(), ExecutionError> {
         match self {
             Accumulator::Count { count } => {
                 *count += 1;
+            }
+            Accumulator::CountDistinct { seen } => {
+                seen.insert(format!("{:?}", value));
             }
             Accumulator::Sum { sum, has_value } => {
                 if let Some(num) = extract_number(&value) {
@@ -282,32 +329,27 @@ impl Accumulator {
                 }
             }
             Accumulator::Min { min } => {
-                let prop_value = literal_to_property_value(value)?;
-                // Simple comparison - we compare the debug string representation
-                let should_update = if let Some(current_min) = min {
-                    format!("{:?}", prop_value) < format!("{:?}", current_min)
-                } else {
-                    true
+                let smaller = match min {
+                    Some(current) => compare_literals(&value, current) == std::cmp::Ordering::Less,
+                    None => true,
                 };
-                if should_update {
-                    *min = Some(prop_value);
+                if smaller {
+                    *min = Some(value);
                 }
             }
             Accumulator::Max { max } => {
-                let prop_value = literal_to_property_value(value)?;
-                // Simple comparison - we compare the debug string representation
-                let should_update = if let Some(current_max) = max {
-                    format!("{:?}", prop_value) > format!("{:?}", current_max)
-                } else {
-                    true
+                let larger = match max {
+                    Some(current) => {
+                        compare_literals(&value, current) == std::cmp::Ordering::Greater
+                    }
+                    None => true,
                 };
-                if should_update {
-                    *max = Some(prop_value);
+                if larger {
+                    *max = Some(value);
                 }
             }
-            Accumulator::ArrayAgg { values } => {
-                let prop_value = literal_to_property_value(value)?;
-                values.push(prop_value);
+            Accumulator::ArrayAgg { values, .. } => {
+                values.push((value, sort_keys));
             }
         }
         Ok(())
@@ -317,6 +359,7 @@ impl Accumulator {
     fn finalize(&self) -> Result<PropertyValue, ExecutionError> {
         match self {
             Accumulator::Count { count } => Ok(PropertyValue::Integer(*count as i64)),
+            Accumulator::CountDistinct { seen } => Ok(PropertyValue::Integer(seen.len() as i64)),
             Accumulator::Sum { sum, has_value } => {
                 // Return 0 if no values, following PostgreSQL behavior
                 Ok(PropertyValue::Float(if *has_value { *sum } else { 0.0 }))
@@ -329,18 +372,39 @@ impl Accumulator {
                     Ok(PropertyValue::Float(0.0))
                 }
             }
+            // No non-NULL input: NULL, as in PostgreSQL
             Accumulator::Min { min } => {
-                // Return Float(0.0) as a default for now
-                // In production we'd want Option<PropertyValue> return type
-                Ok(min.clone().unwrap_or(PropertyValue::Float(0.0)))
+                literal_to_property_value(min.clone().unwrap_or(Literal::Null))
             }
             Accumulator::Max { max } => {
-                // Return Float(0.0) as a default for now
-                Ok(max.clone().unwrap_or(PropertyValue::Float(0.0)))
+                literal_to_property_value(max.clone().unwrap_or(Literal::Null))
             }
-            Accumulator::ArrayAgg { values } => {
-                // Convert Vec<PropertyValue> to PropertyValue::Array
-                Ok(PropertyValue::Array(values.clone()))
+            Accumulator::ArrayAgg {
+                values,
+                order_desc,
+                distinct,
+            } => {
+                let mut items: Vec<(Literal, Vec<Literal>)> = values.clone();
+                if !order_desc.is_empty() {
+                    items.sort_by(|a, b| {
+                        for (i, desc) in order_desc.iter().enumerate() {
+                            let c = compare_literals(&a.1[i], &b.1[i]);
+                            if c != std::cmp::Ordering::Equal {
+                                return if *desc { c.reverse() } else { c };
+                            }
+                        }
+                        std::cmp::Ordering::Equal
+                    });
+                }
+                let mut out = Vec::with_capacity(items.len());
+                let mut seen = HashSet::new();
+                for (value, _) in items {
+                    if *distinct && !seen.insert(format!("{:?}", value)) {
+                        continue;
+                    }
+                    out.push(literal_to_property_value(value)?);
+                }
+                Ok(PropertyValue::Array(out))
             }
         }
     }
@@ -359,56 +423,113 @@ fn extract_number(lit: &Literal) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use raisin_sql::analyzer::DataType;
+
+    fn agg(func: AggregateFunction) -> AggregateExpr {
+        AggregateExpr {
+            func,
+            args: vec![],
+            alias: "a".into(),
+            return_type: DataType::Unknown,
+            filter: None,
+            distinct: false,
+            order_by: vec![],
+        }
+    }
 
     #[test]
     fn test_count_accumulator() {
-        let mut acc = Accumulator::new(&AggregateFunction::Count);
-        acc.update(Literal::Int(1)).unwrap();
-        acc.update(Literal::Int(2)).unwrap();
-        acc.update(Literal::Int(3)).unwrap();
+        let mut acc = Accumulator::new(&agg(AggregateFunction::Count));
+        for v in [1, 2, 3] {
+            acc.update(Literal::Int(v), vec![]).unwrap();
+        }
+        assert_eq!(acc.finalize().unwrap(), PropertyValue::Integer(3));
+    }
 
-        let result = acc.finalize().unwrap();
-        assert_eq!(result, PropertyValue::Integer(3));
+    #[test]
+    fn count_distinct_counts_unique_values() {
+        let mut acc = Accumulator::new(&agg(AggregateFunction::CountDistinct));
+        for v in ["a", "b", "a", "a"] {
+            acc.update(Literal::Text(v.into()), vec![]).unwrap();
+        }
+        assert_eq!(acc.finalize().unwrap(), PropertyValue::Integer(2));
     }
 
     #[test]
     fn test_sum_accumulator() {
-        let mut acc = Accumulator::new(&AggregateFunction::Sum);
-        acc.update(Literal::Int(1)).unwrap();
-        acc.update(Literal::Int(2)).unwrap();
-        acc.update(Literal::Int(3)).unwrap();
-
-        let result = acc.finalize().unwrap();
-        assert_eq!(result, PropertyValue::Float(6.0));
+        let mut acc = Accumulator::new(&agg(AggregateFunction::Sum));
+        for v in [1, 2, 3] {
+            acc.update(Literal::Int(v), vec![]).unwrap();
+        }
+        assert_eq!(acc.finalize().unwrap(), PropertyValue::Float(6.0));
     }
 
     #[test]
     fn test_avg_accumulator() {
-        let mut acc = Accumulator::new(&AggregateFunction::Avg);
-        acc.update(Literal::Int(1)).unwrap();
-        acc.update(Literal::Int(2)).unwrap();
-        acc.update(Literal::Int(3)).unwrap();
+        let mut acc = Accumulator::new(&agg(AggregateFunction::Avg));
+        for v in [1, 2, 3] {
+            acc.update(Literal::Int(v), vec![]).unwrap();
+        }
+        assert_eq!(acc.finalize().unwrap(), PropertyValue::Float(2.0));
+    }
 
-        let result = acc.finalize().unwrap();
-        assert_eq!(result, PropertyValue::Float(2.0));
+    #[test]
+    fn min_max_compare_numerically_and_return_null_when_empty() {
+        // 101 < 42 lexicographically; the accumulators must compare as numbers
+        let mut mn = Accumulator::new(&agg(AggregateFunction::Min));
+        let mut mx = Accumulator::new(&agg(AggregateFunction::Max));
+        for v in [101, 42, 8] {
+            mn.update(Literal::Int(v), vec![]).unwrap();
+            mx.update(Literal::Int(v), vec![]).unwrap();
+        }
+        assert_eq!(mn.finalize().unwrap(), PropertyValue::Integer(8));
+        assert_eq!(mx.finalize().unwrap(), PropertyValue::Integer(101));
+
+        let empty = Accumulator::new(&agg(AggregateFunction::Max));
+        assert_eq!(empty.finalize().unwrap(), PropertyValue::Null);
     }
 
     #[test]
     fn test_array_agg_accumulator() {
-        let mut acc = Accumulator::new(&AggregateFunction::ArrayAgg);
-        acc.update(Literal::Text("a".to_string())).unwrap();
-        acc.update(Literal::Text("b".to_string())).unwrap();
-        acc.update(Literal::Text("c".to_string())).unwrap();
-
-        let result = acc.finalize().unwrap();
-        match result {
+        let mut acc = Accumulator::new(&agg(AggregateFunction::ArrayAgg));
+        for v in ["a", "b", "c"] {
+            acc.update(Literal::Text(v.into()), vec![]).unwrap();
+        }
+        match acc.finalize().unwrap() {
             PropertyValue::Array(arr) => {
                 assert_eq!(arr.len(), 3);
                 assert_eq!(arr[0], PropertyValue::String("a".to_string()));
-                assert_eq!(arr[1], PropertyValue::String("b".to_string()));
                 assert_eq!(arr[2], PropertyValue::String("c".to_string()));
             }
             _ => panic!("Expected array"),
         }
+    }
+
+    #[test]
+    fn array_agg_honours_distinct_and_order_by() {
+        let mut spec = agg(AggregateFunction::ArrayAgg);
+        spec.distinct = true;
+        spec.order_by = vec![(
+            raisin_sql::analyzer::TypedExpr::column("t".into(), "k".into(), DataType::Int),
+            true,
+        )];
+        let mut acc = Accumulator::new(&spec);
+        // (value, sort key): sorted DESC by key, duplicates removed
+        for (v, k) in [("b", 2), ("a", 1), ("c", 3), ("a", 5)] {
+            acc.update(Literal::Text(v.into()), vec![Literal::Int(k)])
+                .unwrap();
+        }
+        let arr = match acc.finalize().unwrap() {
+            PropertyValue::Array(arr) => arr,
+            _ => panic!("Expected array"),
+        };
+        let names: Vec<String> = arr
+            .into_iter()
+            .map(|p| match p {
+                PropertyValue::String(s) => s,
+                other => panic!("unexpected {:?}", other),
+            })
+            .collect();
+        assert_eq!(names, vec!["a", "c", "b"]);
     }
 }

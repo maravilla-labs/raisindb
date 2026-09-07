@@ -261,6 +261,11 @@ impl HnswIndexingEngine {
         source_branch: &str,
         target_branch: &str,
     ) -> Result<()> {
+        // The copy is file based, and a partition that only lives in the cache
+        // (written in the last snapshot interval) has no file yet, or a stale
+        // one. Flush first so the fork reads what the source branch searches.
+        self.snapshot_dirty_indexes()?;
+
         let partitions = self.list_partitions(tenant_id, repo_id, source_branch)?;
 
         if partitions.is_empty() {

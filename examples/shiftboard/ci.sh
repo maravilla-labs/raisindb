@@ -12,14 +12,14 @@
 #   RAISIN_USER      system username             (default admin)
 #   RAISIN_PASSWORD  system password             (default Admin12345!@#)
 #   RAISIN_TENANT    tenant for system auth      (default default)
-#   REPO             target repository           (default shiftboard-pkg)
-#   APP_ORIGIN       SPA origin to allow (CORS)  (default http://localhost:5173)
+#   REPO             target repository           (default shiftboard)
+#   APP_ORIGIN       SPA origin to allow (CORS)  (default http://localhost:5175)
 #   RAISINDB_BIN     raisindb CLI binary         (default: raisindb on PATH)
 #   RUN_SMOKE        run smoke.mjs at the end    (default 1; costs Groq tokens)
 #
 # Usage:
 #   ./ci.sh
-#   RAISINDB_SERVER=https://my-instance RAISINDB_TOKEN=... REPO=shiftboard-pkg ./ci.sh
+#   RAISINDB_SERVER=https://my-instance RAISINDB_TOKEN=... REPO=shiftboard ./ci.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,8 +29,8 @@ export RAISINDB_SERVER="${RAISINDB_SERVER:-http://localhost:8081}"
 RAISIN_USER="${RAISIN_USER:-admin}"
 RAISIN_PASSWORD="${RAISIN_PASSWORD:-Admin12345!@#}"
 RAISIN_TENANT="${RAISIN_TENANT:-default}"
-REPO="${REPO:-shiftboard-pkg}"
-APP_ORIGIN="${APP_ORIGIN:-http://localhost:5173}"
+REPO="${REPO:-shiftboard}"
+APP_ORIGIN="${APP_ORIGIN:-http://localhost:5175}"
 RAISINDB_BIN="${RAISINDB_BIN:-raisindb}"
 RUN_SMOKE="${RUN_SMOKE:-1}"
 
@@ -125,7 +125,7 @@ groq = [p for p in providers if p.get("provider") == "groq"]
 ok = groq and groq[0].get("has_api_key") and groq[0].get("enabled")
 print("Groq provider configured for tenant:", "yes" if ok else "NO")
 sys.exit(0 if ok else 1)
-' || { echo "ERROR: configure a Groq API key, e.g.: $RAISINDB_BIN ai provider set groq --api-key-env GROQ_API_KEY --model llama-3.3-70b-versatile" >&2; exit 1; }
+' || { echo "ERROR: configure a Groq API key, e.g.: $RAISINDB_BIN ai provider set groq --kind groq --api-key-env GROQ_API_KEY --enabled --model llama-3.3-70b-versatile" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
 log "7/8 Allow the SPA origin for this repo (CORS)"

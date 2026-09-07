@@ -8,7 +8,8 @@
 //! ## Why this exists
 //!
 //! Core's binary handling is much narrower than the estate assumes. The whole
-//! text-extraction vocabulary is `application/pdf` plus `image/*` via OCR —
+//! text-extraction vocabulary is `application/pdf`, `text/*` read verbatim,
+//! plus `image/*` via OCR —
 //! `is_extractable_mime` in
 //! `raisin-rocksdb/src/jobs/handlers/asset_processing/helpers.rs` — while
 //! Word, PowerPoint, Excel, video and audio are handled only by an out-of-tree
@@ -56,6 +57,10 @@ pub enum CoreSupport {
     /// Core produces a CLIP embedding and can OCR the image. No resize, no
     /// thumbnail, no face detection.
     ImageEmbeddingAndOcr,
+    /// Core stores the bytes as text, verbatim (`process_text` in the asset
+    /// job, via `is_extractable_mime` accepting `text/*`). No markup is
+    /// stripped, so HTML lands with its tags.
+    PlainText,
     /// Core never opens these bytes. The same content pasted into a node
     /// *property* is embedded normally; as an uploaded asset it is inert.
     None,
@@ -66,6 +71,7 @@ impl CoreSupport {
         match self {
             CoreSupport::TextExtraction => "text extraction (native + OCR fallback)",
             CoreSupport::ImageEmbeddingAndOcr => "CLIP embedding + OCR",
+            CoreSupport::PlainText => "read as text (verbatim, no markup stripping)",
             CoreSupport::None => "nothing",
         }
     }
@@ -149,13 +155,13 @@ pub const MEDIA_KINDS: &[MediaKind] = &[
     MediaKind {
         label: "text",
         mime_types: &["text/plain", "text/markdown", "text/csv"],
-        core: CoreSupport::None,
+        core: CoreSupport::PlainText,
         plugin_method: None,
     },
     MediaKind {
         label: "html",
         mime_types: &["text/html"],
-        core: CoreSupport::None,
+        core: CoreSupport::PlainText,
         plugin_method: Some("media.browser.extractHtml"),
     },
 ];
@@ -284,15 +290,16 @@ mod tests {
         assert_eq!(rows.len(), MEDIA_KINDS.len());
 
         // With no plugin registered (the unit-test process), the report must be
-        // exactly what core's own code supports: PDF text and images. Anything
-        // else claiming Core here would be this file lying about the binary.
+        // exactly what core's own code supports: PDF text, images, and `text/*`
+        // read verbatim (`is_extractable_mime` in the asset job). Anything else
+        // claiming Core here would be this file lying about the binary.
         let core_kinds: Vec<&str> = rows
             .iter()
             .filter(|r| matches!(r.provider, Provider::Core { .. }))
             .map(|r| r.kind)
             .collect();
         if plugin_manifest().is_empty() {
-            assert_eq!(core_kinds, vec!["pdf", "image"]);
+            assert_eq!(core_kinds, vec!["pdf", "image", "text", "html"]);
             assert!(rows
                 .iter()
                 .any(|r| r.kind == "docx" && r.provider == Provider::Unsupported));

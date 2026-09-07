@@ -7,7 +7,7 @@
  * transport-injected wrapper so any JS/TS backend (not just AI agents) can talk
  * to a RaisinDB MCP server programmatically, using the exact JSON-RPC method
  * names the engine implements (`tools/list`, `tools/call`, `resources/read`,
- * `resources/subscribe`).
+ * `subscriptions/listen`).
  *
  * The transport is injected (see {@link McpTransport}) so the client stays
  * unit-testable and independent of the concrete HTTP layer — the HTTP client
@@ -104,7 +104,7 @@ export interface McpResourceSubscription extends AsyncIterable<McpResourceUpdate
  *
  * `rpc` performs one request/response JSON-RPC round trip and returns the
  * already-unwrapped `result` (throwing on a JSON-RPC `error`). `subscribe`
- * opens the `resources/subscribe` SSE stream and yields each raw JSON-RPC frame
+ * opens the `subscriptions/listen` SSE stream and yields each raw JSON-RPC frame
  * forwarded by the server.
  */
 export interface McpTransport {
@@ -120,8 +120,8 @@ export interface McpTransport {
    * Open an SSE stream for a subscribing method and yield each JSON-RPC frame
    * the server pushes (the initial ack plus subsequent notifications).
    *
-   * @param method - Subscribing JSON-RPC method (`"resources/subscribe"`).
-   * @param params - Method parameters (`{ uri }`).
+   * @param method - Subscribing JSON-RPC method (`"subscriptions/listen"`).
+   * @param params - Method parameters (`{ notifications: { … } }`).
    */
   subscribe(method: string, params: unknown): McpFrameStream;
 }
@@ -220,16 +220,19 @@ export class McpClient {
   /**
    * Subscribe to change notifications for a resource URI (or URI prefix).
    *
-   * Wraps the `resources/subscribe` JSON-RPC method, which upgrades to an SSE
-   * stream. The returned {@link McpResourceSubscription} is an async iterable of
-   * {@link McpResourceUpdate}; the server's initial subscription ack is consumed
-   * internally and not yielded. Call `close()` to end the stream.
+   * Opens a `subscriptions/listen` stream (SSE) with a `resourceSubscriptions`
+   * filter naming the URI. The returned {@link McpResourceSubscription} is an
+   * async iterable of {@link McpResourceUpdate}; the server's acknowledgement
+   * frame and the closing response are consumed internally and not yielded.
+   * Call `close()` to end the stream.
    *
    * @param uri - `raisin://` URI (or prefix) to watch.
    * @returns A live, closeable subscription.
    */
   subscribeResource(uri: string): McpResourceSubscription {
-    const stream = this.transport.subscribe('resources/subscribe', { uri });
+    const stream = this.transport.subscribe('subscriptions/listen', {
+      notifications: { resourceSubscriptions: [uri] },
+    });
     return {
       close: () => stream.close(),
       async *[Symbol.asyncIterator](): AsyncIterator<McpResourceUpdate> {

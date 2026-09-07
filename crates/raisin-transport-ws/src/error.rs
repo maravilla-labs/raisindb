@@ -110,6 +110,7 @@ impl From<raisin_flow_runtime::types::FlowError> for WsError {
             }
             FlowError::NotSupported(msg) => WsError::InternalError(msg),
             FlowError::Serialization(msg) => WsError::InternalError(msg),
+            FlowError::PermissionDenied(_) => WsError::NotAuthenticated,
             other => WsError::InternalError(other.to_string()),
         }
     }

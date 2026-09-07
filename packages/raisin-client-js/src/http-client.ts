@@ -1143,7 +1143,7 @@ export class RaisinHttpClient extends EventEmitter {
   }
 
   /**
-   * Open the `resources/subscribe` SSE stream for an MCP server endpoint.
+   * Open the `subscriptions/listen` SSE stream for an MCP server endpoint.
    *
    * Streams JSON-RPC frames (the subscription ack followed by
    * `notifications/resources/updated` frames) from

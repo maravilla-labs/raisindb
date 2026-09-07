@@ -458,6 +458,25 @@ async fn execute_function_inline(
     // Check if function requires admin escalation (from function metadata)
     let requires_admin = property_as_bool(node.properties.get("requiresAdmin")).unwrap_or(false);
 
+    // Enforce the function's declared `execution_context`: "system" strips
+    // whatever AuthContext the HTTP caller carried, regardless of how
+    // privileged that caller was, but keeps their `agent` marker for
+    // attribution (matches trigger evaluation's established convention).
+    // "user" (the default) leaves it as the caller's real identity, threaded
+    // in from `optional_auth_middleware` above. Mirrors the same branch in
+    // `execution::executor::execute_function` — this path is a second,
+    // hand-rolled funnel that does not go through it.
+    let auth_context = match loaded.metadata.execution_context {
+        raisin_functions::types::FunctionExecutionContext::System => {
+            let system = AuthContext::system();
+            Some(match auth_context.and_then(|a| a.agent) {
+                Some(agent) => system.with_agent(agent),
+                None => system,
+            })
+        }
+        raisin_functions::types::FunctionExecutionContext::User => auth_context,
+    };
+
     // Determine actor from auth context or default to "system"
     let actor = auth_context
         .as_ref()

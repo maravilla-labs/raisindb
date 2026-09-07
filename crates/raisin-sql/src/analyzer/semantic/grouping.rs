@@ -71,8 +71,12 @@ impl<'a> AnalyzerContext<'a> {
             Expr::Function {
                 name, args, filter, ..
             } => {
-                // Check if this is an aggregate function
-                let agg_func = match name.to_uppercase().as_str() {
+                // Check if this is an aggregate function (modifiers such as
+                // DISTINCT / inner ORDER BY are encoded in the name, see
+                // `aggregate_spec`).
+                let spec = crate::analyzer::aggregate_spec::AggregateSpec::parse(name);
+                let agg_func = spec.as_ref().and_then(|s| match s.base.as_str() {
+                    "COUNT" if s.distinct => Some(AggregateFunction::CountDistinct),
                     "COUNT" => Some(AggregateFunction::Count),
                     "SUM" => Some(AggregateFunction::Sum),
                     "AVG" => Some(AggregateFunction::Avg),
@@ -80,9 +84,18 @@ impl<'a> AnalyzerContext<'a> {
                     "MAX" => Some(AggregateFunction::Max),
                     "ARRAY_AGG" => Some(AggregateFunction::ArrayAgg),
                     _ => None,
-                };
+                });
 
                 if let Some(func) = agg_func {
+                    let spec = spec.expect("spec present when agg_func is");
+                    // Trailing arguments are the inner ORDER BY keys.
+                    let value_args = args.len().saturating_sub(spec.order_arg_count());
+                    let (args, order_args) = args.split_at(value_args);
+                    let order_by: Vec<(TypedExpr, bool)> = order_args
+                        .iter()
+                        .cloned()
+                        .zip(spec.order_desc.iter().copied())
+                        .collect();
                     // Determine the return type
                     let return_type = if matches!(func, AggregateFunction::ArrayAgg) {
                         // array_agg returns an array of the argument type
@@ -97,10 +110,12 @@ impl<'a> AnalyzerContext<'a> {
 
                     aggregates.push(AggregateExpr {
                         func,
-                        args: args.clone(),
+                        args: args.to_vec(),
                         alias: alias.unwrap_or(name).to_string(),
                         return_type,
                         filter: filter.as_ref().map(|f| (**f).clone()),
+                        distinct: spec.distinct,
+                        order_by,
                     });
                 } else {
                     // Not an aggregate, recurse into arguments
@@ -177,10 +192,7 @@ impl<'a> AnalyzerContext<'a> {
         match &expr.expr {
             Expr::Function { name, args, .. } => {
                 // Aggregate functions are valid
-                let is_aggregate = matches!(
-                    name.to_uppercase().as_str(),
-                    "COUNT" | "SUM" | "AVG" | "MIN" | "MAX" | "ARRAY_AGG"
-                );
+                let is_aggregate = crate::analyzer::aggregate_spec::is_aggregate_name(name);
 
                 if is_aggregate {
                     return Ok(true);
@@ -223,6 +235,24 @@ impl<'a> AnalyzerContext<'a> {
                 self.is_valid_in_aggregate_query(inner, group_by)
             }
             Expr::Cast { expr: inner, .. } => {
+                for group_expr in group_by {
+                    if expressions_equivalent(expr, group_expr) {
+                        return Ok(true);
+                    }
+                }
+                self.is_valid_in_aggregate_query(inner, group_by)
+            }
+            // A subquery / EXISTS is a constant with respect to the group.
+            Expr::Exists { .. } | Expr::ScalarSubquery { .. } => Ok(true),
+            Expr::Quantified { left, .. } | Expr::QuantifiedSubquery { left, .. } => {
+                for group_expr in group_by {
+                    if expressions_equivalent(expr, group_expr) {
+                        return Ok(true);
+                    }
+                }
+                self.is_valid_in_aggregate_query(left, group_by)
+            }
+            Expr::Regex { expr: inner, .. } => {
                 for group_expr in group_by {
                     if expressions_equivalent(expr, group_expr) {
                         return Ok(true);
@@ -294,11 +324,7 @@ impl<'a> AnalyzerContext<'a> {
         match &expr.expr {
             Expr::Literal(_) => Ok(true),
             Expr::Function { name, .. } => {
-                let is_aggregate = matches!(
-                    name.to_uppercase().as_str(),
-                    "COUNT" | "SUM" | "AVG" | "MIN" | "MAX" | "ARRAY_AGG"
-                );
-                Ok(is_aggregate)
+                Ok(crate::analyzer::aggregate_spec::is_aggregate_name(name))
             }
             Expr::Window { .. } => Ok(true),
             Expr::BinaryOp { left, right, .. } => {

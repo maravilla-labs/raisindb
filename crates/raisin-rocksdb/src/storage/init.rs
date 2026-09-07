@@ -139,7 +139,8 @@ impl RocksDBStorage {
         // Recreate branch repository with operation capture and job system
         let branch_repo_arc = Arc::new(
             BranchRepositoryImpl::new_with_capture(db.clone(), operation_capture.clone())
-                .with_job_system(job_registry.clone(), job_data_store.clone()),
+                .with_job_system(job_registry.clone(), job_data_store.clone())
+                .with_event_bus(event_bus.clone()),
         );
 
         // Build the workspace repository now that operation capture exists, so a

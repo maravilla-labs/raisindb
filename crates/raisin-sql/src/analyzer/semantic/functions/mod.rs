@@ -8,4 +8,6 @@
 
 mod analysis;
 mod constant_fold;
+mod scalar_call;
+mod variadic;
 mod window;
