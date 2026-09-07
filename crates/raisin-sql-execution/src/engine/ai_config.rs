@@ -1191,13 +1191,21 @@ mod provider_operation_tests {
         assert_eq!(emb.default_max_tokens, 0);
         assert_eq!(
             config
-                .get_default_model(AIUseCase::Embedding)
+                .get_default_provider(AIUseCase::Embedding)
+                .and_then(|p| p
+                    .models
+                    .iter()
+                    .find(|m| m.use_cases.contains(&AIUseCase::Embedding) && m.is_default))
                 .map(|m| m.model_id.as_str()),
             Some("text-embedding-3-small")
         );
         assert_eq!(
             config
-                .get_default_model(AIUseCase::Chat)
+                .get_default_provider(AIUseCase::Chat)
+                .and_then(|p| p
+                    .models
+                    .iter()
+                    .find(|m| m.use_cases.contains(&AIUseCase::Chat) && m.is_default))
                 .map(|m| m.model_id.as_str()),
             Some("gpt-4o")
         );

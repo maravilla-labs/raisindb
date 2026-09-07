@@ -245,18 +245,28 @@ impl PhysicalPlanner {
                     }
                 }
 
-                // JSON property: properties->>'key' = 'value'
+                // JSON property: properties->>'key' = 'value', with or without the
+                // documented `::String` key-cast (`properties->>'key'::String = 'value'`).
                 //
-                // NOTE: only the *bare* `properties->>'key'` form is canonicalized to
-                // JsonPropertyEq here. The documented cast form
-                // `properties->>'key'::String = 'value'` is intentionally left as
-                // `Other` (a verbatim row-level filter). Canonicalizing the cast form
-                // would let it match a compound index, which only returns correct
-                // results when that index is populated —
-                // an unbuilt/stale compound index would silently return zero rows.
-                // Keeping the cast form as `Other` preserves the full-scan + verbatim
-                // filter path callers rely on for correctness.
-                if let Expr::JsonExtractText { object, key } = &left.expr {
+                // The cast targets Text, and `->>` (JsonExtractText) already yields
+                // Text — it's a no-op cast kept only so the predicate reads
+                // unambiguously, so it is unwrapped here and canonicalized exactly
+                // like the bare form. What used to make the bare form's compound-
+                // index routing safe against a stale/unbuilt index is the
+                // `PhysicalPlanner::compound_availability` gate downstream (fails
+                // closed to a full scan), not withholding canonicalization at this
+                // layer — so there's nothing left for excluding the cast form to
+                // protect, and it was paying a full-scan cost for no correctness
+                // benefit. See CLAUDE.md's "JSON Property Queries" section.
+                let json_extract = match &left.expr {
+                    Expr::JsonExtractText { .. } => Some(&left.expr),
+                    Expr::Cast {
+                        expr: inner,
+                        target_type: DataType::Text,
+                    } if matches!(inner.expr, Expr::JsonExtractText { .. }) => Some(&inner.expr),
+                    _ => None,
+                };
+                if let Some(Expr::JsonExtractText { object, key }) = json_extract {
                     if let (Expr::Column { table, column }, Expr::Literal(Literal::Text(key_str))) =
                         (&object.expr, &key.expr)
                     {
@@ -675,15 +685,34 @@ impl PhysicalPlanner {
     }
 
     /// Recognize a JSON property text-extraction expression and return
-    /// `(table, json_col, key)`. Handles both the canonicalized
-    /// `CAST(properties::jsonb ->> ['key'] AS text)` shape (from
-    /// `properties->>'key'::String`) and the simpler `JsonExtractText` shape.
+    /// `(table, json_col, key)`. Handles the simpler `JsonExtractText` shape
+    /// (`properties->>'key'`), the documented `::String` key-cast on it
+    /// (`properties->>'key'::String` — a no-op Cast-to-Text wrapper, since
+    /// `->>` already yields text), and the `$.` dollar-dot double-cast shape
+    /// (`CAST(properties::jsonb ->> ['key'] AS text)`, from
+    /// `$.properties.key::TEXT`).
     fn match_json_key_extract(expr: &Expr) -> Option<(String, String, String)> {
         // Simple shape: properties->>'key'
         if let Expr::JsonExtractText { object, key } = expr {
             if let Expr::Column { table, column } = &object.expr {
                 if let Expr::Literal(Literal::Text(key_str)) = &key.expr {
                     return Some((table.clone(), column.clone(), key_str.clone()));
+                }
+            }
+        }
+
+        // Documented cast shape: properties->>'key'::String — a no-op Text cast
+        // directly around JsonExtractText (not the double-cast $.-path shape below).
+        if let Expr::Cast {
+            expr: inner,
+            target_type: DataType::Text,
+        } = expr
+        {
+            if let Expr::JsonExtractText { object, key } = &inner.expr {
+                if let Expr::Column { table, column } = &object.expr {
+                    if let Expr::Literal(Literal::Text(key_str)) = &key.expr {
+                        return Some((table.clone(), column.clone(), key_str.clone()));
+                    }
                 }
             }
         }

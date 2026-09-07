@@ -141,10 +141,14 @@ Start a 3-node test cluster: `./scripts/start-cluster.sh`
 
 ### JSON Property Queries
 
-Query JSON properties with the `->>` operator. **Prefer the `::String` key-cast
-form** — it evaluates as a verbatim row-level filter, so it is always correct,
-including when combined with `path =` / `node_type =` and on workspaces that have
-compound indexes:
+Query JSON properties with the `->>` operator. **Always use the `::String`
+key-cast form** — it evaluates as a verbatim row-level filter, so it is always
+correct, including when combined with `path =` / `node_type =` and on
+workspaces that have compound indexes. The cast form now gets the same
+`property_index`/compound-index eligibility as the bare form (the planner's
+`JsonPropertyEq` canonicalizer sees through the cast), so there is no
+performance reason left to prefer the bare, uncast spelling — the cast form
+has no downside and the correctness guarantee, so just always cast:
 
 ```sql
 -- ✅ Recommended: cast the key. Verbatim filter, always correct.
@@ -179,9 +183,13 @@ Notes:
   routed to the `property_index` or a **compound index**. It now matches
   correctly when combined with another predicate (fixed `JsonPropertyEq::to_expr`,
   which previously rebuilt it as `@>` and dropped the key — that was the old
-  "no cast returns empty results" symptom). However, if a matching compound index
-  is unbuilt/stale it can still return zero rows — so when in doubt, use the cast
-  form.
+  "no cast returns empty results" symptom). Like the bare form, the `::String`
+  cast form is *also* canonicalized into the same `JsonPropertyEq` shape and
+  gets the same index routing (`filter_analysis.rs`'s canonicalizer unwraps a
+  no-op `Cast { _, Text }` around the JSON extract before matching) — both
+  spellings share the same fail-closed gate (`compound_availability`), so
+  neither one silently trusts a stale/unbuilt index. There is therefore no
+  remaining performance trade-off between the two forms; always cast.
 
 ## Editorial Ordering (`__order` / `__tree_order`)
 

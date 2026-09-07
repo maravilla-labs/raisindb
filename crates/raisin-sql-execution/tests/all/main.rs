@@ -39,6 +39,7 @@ mod pgq_rls;
 mod profiling_test;
 mod references_compose_tests;
 mod references_integration_tests;
+mod regex_and_quantified_ops;
 mod restore_workspace;
 mod rocksdb_integration_tests;
 mod search_table_function_rls;

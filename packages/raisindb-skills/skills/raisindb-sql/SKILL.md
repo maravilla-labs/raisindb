@@ -102,10 +102,50 @@ SELECT JSON_GET_BOOL(properties, '$.featured') FROM social
 
 ### Timestamp casting and comparison
 
+Same rule as above -- cast the **key**, not the result. `TIMESTAMP` comparisons
+against a `String`-cast property key work directly; no need to cast the result
+to `TIMESTAMP` on the other side:
+
 ```sql
-WHERE (properties ->> 'publishing_date')::TIMESTAMP <= NOW()
-ORDER BY (properties ->> 'publishing_date')::TIMESTAMP DESC
+WHERE properties->>'publishing_date'::String <= NOW()
+ORDER BY properties->>'publishing_date'::String DESC
 ```
+
+### `NOW()` / `INTERVAL` -- relative-date filtering
+
+`NOW()` / `CURRENT_TIMESTAMP` and `INTERVAL 'N days'` (also `hours`, `minutes`,
+`months`, `years`) are real, working SQL -- timestamp ± interval arithmetic and
+timestamp/text comparisons are both supported end to end:
+
+```sql
+-- Posts older than 30 days
+SELECT * FROM social
+WHERE properties->>'published_at'::String < NOW() - INTERVAL '30 days'
+
+-- Anything touched in the last 7 days, using the structural column
+SELECT * FROM social WHERE updated_at >= NOW() - INTERVAL '7 days'
+```
+
+### Regular expressions
+
+Postgres-style regex operators and quantified array comparisons are supported
+and reach the executor directly (no scalar-function call needed):
+
+```sql
+-- ~ / ~* / !~ / !~* : match / case-insensitive match / negated forms
+SELECT * FROM social WHERE properties->>'slug'::String ~ '^[a-z0-9-]+$'
+SELECT * FROM social WHERE name ~* 'draft'
+
+-- SIMILAR TO: SQL pattern, anchored (use % for "contains")
+SELECT * FROM social WHERE properties->>'title'::String SIMILAR TO 'Guide%'
+
+-- = ANY(...) / <> ALL(...): compare one value against an array
+SELECT * FROM social WHERE node_type = ANY(ARRAY['news:Article', 'news:Video'])
+```
+
+A function-call form also exists (`REGEXP_MATCH`, `REGEXP_REPLACE`,
+`REGEXP_LIKE`) -- same regex engine, useful when you need the matched text
+rather than a boolean, or a replacement.
 
 ## 4. INSERT
 
@@ -831,3 +871,5 @@ be named `workspaces` — the schema table would shadow it.
 | References | `WHERE REFERENCES('workspace:/path')` |
 | Geospatial | `WHERE ST_DWITHIN(location, ST_POINT($1, $2), 5000)` |
 | Schema tables | `SELECT ... FROM NodeTypes \| Archetypes \| ElementTypes \| Workspaces` (no `WHERE name=`) |
+| Relative date | `WHERE updated_at < NOW() - INTERVAL '30 days'` |
+| Regex | `WHERE properties->>'slug'::String ~ '^[a-z0-9-]+$'` |

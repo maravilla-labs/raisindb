@@ -122,6 +122,8 @@ pub(super) fn compare_literals(
         let right_num = literal_to_number(right)?;
 
         return Ok(match op {
+            BinaryOperator::Eq => (left_num - right_num).abs() < f64::EPSILON,
+            BinaryOperator::NotEq => (left_num - right_num).abs() >= f64::EPSILON,
             BinaryOperator::Lt => left_num < right_num,
             BinaryOperator::LtEq => left_num <= right_num,
             BinaryOperator::Gt => left_num > right_num,
@@ -133,6 +135,8 @@ pub(super) fn compare_literals(
     // Handle text comparisons
     if let (Literal::Text(a), Literal::Text(b)) = (left, right) {
         return Ok(match op {
+            BinaryOperator::Eq => a == b,
+            BinaryOperator::NotEq => a != b,
             BinaryOperator::Lt => a < b,
             BinaryOperator::LtEq => a <= b,
             BinaryOperator::Gt => a > b,
@@ -147,6 +151,8 @@ pub(super) fn compare_literals(
         | (Literal::Path(a), Literal::Text(b))
         | (Literal::Text(a), Literal::Path(b)) => {
             return Ok(match op {
+                BinaryOperator::Eq => a == b,
+                BinaryOperator::NotEq => a != b,
                 BinaryOperator::Lt => a < b,
                 BinaryOperator::LtEq => a <= b,
                 BinaryOperator::Gt => a > b,
@@ -160,6 +166,8 @@ pub(super) fn compare_literals(
     // Handle timestamp comparisons
     if let (Literal::Timestamp(a), Literal::Timestamp(b)) = (left, right) {
         return Ok(match op {
+            BinaryOperator::Eq => a == b,
+            BinaryOperator::NotEq => a != b,
             BinaryOperator::Lt => a < b,
             BinaryOperator::LtEq => a <= b,
             BinaryOperator::Gt => a > b,
@@ -177,6 +185,8 @@ pub(super) fn compare_literals(
                 Error::Validation(format!("Cannot parse '{}' as timestamp for comparison", s))
             })?;
             return Ok(match op {
+                BinaryOperator::Eq => ts == &parsed,
+                BinaryOperator::NotEq => ts != &parsed,
                 BinaryOperator::Lt => ts < &parsed,
                 BinaryOperator::LtEq => ts <= &parsed,
                 BinaryOperator::Gt => ts > &parsed,
@@ -189,6 +199,8 @@ pub(super) fn compare_literals(
                 Error::Validation(format!("Cannot parse '{}' as timestamp for comparison", s))
             })?;
             return Ok(match op {
+                BinaryOperator::Eq => &parsed == ts,
+                BinaryOperator::NotEq => &parsed != ts,
                 BinaryOperator::Lt => &parsed < ts,
                 BinaryOperator::LtEq => &parsed <= ts,
                 BinaryOperator::Gt => &parsed > ts,
@@ -197,6 +209,15 @@ pub(super) fn compare_literals(
             });
         }
         _ => {}
+    }
+
+    // Boolean equality (only Eq/NotEq are meaningful for booleans)
+    if let (Literal::Boolean(a), Literal::Boolean(b)) = (left, right) {
+        return Ok(match op {
+            BinaryOperator::Eq => a == b,
+            BinaryOperator::NotEq => a != b,
+            _ => return Err(Error::Validation("Invalid comparison operator".to_string())),
+        });
     }
 
     Err(Error::Validation(format!(

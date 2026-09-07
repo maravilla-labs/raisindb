@@ -645,6 +645,20 @@ fn json_eq(table: &str, key: &str, value: &str) -> TypedExpr {
     )
 }
 
+/// `properties->>'key'::String = 'value'` — the documented, always-correct
+/// key-cast form. Must plan identically to the bare form (`json_eq` above).
+fn json_eq_cast(table: &str, key: &str, value: &str) -> TypedExpr {
+    use raisin_sql::analyzer::Expr;
+    let cast = TypedExpr::new(
+        Expr::Cast {
+            expr: Box::new(json_ref(table, key)),
+            target_type: DataType::Text,
+        },
+        DataType::Text,
+    );
+    eq(cast, TypedExpr::literal(Literal::Text(value.to_string())))
+}
+
 fn and(left: TypedExpr, right: TypedExpr) -> TypedExpr {
     use raisin_sql::analyzer::Expr;
     TypedExpr::new(
@@ -672,6 +686,74 @@ fn test_compound_index_full_equality_match() {
     assert!(
         explain.contains("CompoundIndexScan: grp_status_time [group=/g1, status=open]"),
         "{}",
+        explain
+    );
+}
+
+/// The documented `::String` key-cast form must plan exactly like the bare
+/// form: same CompoundIndexScan, not a fall-back full scan. Before the fix,
+/// the cast wrapped the key extraction in a no-op `Cast(_, Text)` node the
+/// compound-index matcher didn't see through, so the recommended-safe
+/// spelling silently lost the index the bare form got.
+#[test]
+fn test_compound_index_full_equality_match_with_string_cast() {
+    let planner = planner_with_compound_index();
+    let filter = LogicalPlan::Filter {
+        input: Box::new(scan_nodes("nodes")),
+        predicate: FilterPredicate::from_expr(and(
+            json_eq_cast("nodes", "group", "/g1"),
+            json_eq_cast("nodes", "status", "open"),
+        )),
+    };
+    let physical = planner.plan(&filter).unwrap();
+    let explain = physical.explain();
+    assert!(
+        explain.contains("CompoundIndexScan: grp_status_time [group=/g1, status=open]"),
+        "{}",
+        explain
+    );
+}
+
+/// An unbuilt compound index must still be declined for the cast form —
+/// canonicalizing `::String` the same as the bare form must not bypass the
+/// `compound_availability` fail-closed gate.
+#[test]
+fn test_compound_index_declined_when_not_built_with_string_cast() {
+    use raisin_models::nodes::properties::schema::{
+        CompoundColumnType, CompoundIndexColumn, CompoundIndexDefinition,
+    };
+
+    let mut planner = compound_planner(false);
+    planner.set_compound_indexes(vec![CompoundIndexDefinition {
+        name: "grp_status_time".to_string(),
+        columns: vec![
+            CompoundIndexColumn {
+                property: "group".to_string(),
+                column_type: CompoundColumnType::String,
+                ascending: None,
+            },
+            CompoundIndexColumn {
+                property: "status".to_string(),
+                column_type: CompoundColumnType::String,
+                ascending: None,
+            },
+        ],
+        has_order_column: false,
+    }]);
+
+    let filter = LogicalPlan::Filter {
+        input: Box::new(scan_nodes("nodes")),
+        predicate: FilterPredicate::from_expr(and(
+            json_eq_cast("nodes", "group", "/g1"),
+            json_eq_cast("nodes", "status", "open"),
+        )),
+    };
+    let physical = planner.plan(&filter).unwrap();
+    let explain = physical.explain();
+
+    assert!(
+        !explain.contains("CompoundIndexScan"),
+        "an unbuilt compound index must not be planned against, cast form included; plan:\n{}",
         explain
     );
 }
@@ -745,6 +827,8 @@ fn test_count_over_node_type_in_uses_summed_index_count() {
             alias: "count_star".to_string(),
             return_type: DataType::BigInt,
             filter: None,
+            distinct: false,
+            order_by: vec![],
         }],
     };
     let physical = PhysicalPlanner::new().plan(&agg).unwrap();
