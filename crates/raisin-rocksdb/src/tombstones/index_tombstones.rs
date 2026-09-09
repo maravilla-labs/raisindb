@@ -9,6 +9,7 @@ use crate::keys;
 use raisin_error::Result;
 use raisin_hlc::HLC;
 use raisin_models::nodes::Node;
+use raisin_models::nodes::{INDEXED_MIXIN_KEY, INDEXED_SUPERTYPE_KEY};
 use rocksdb::{WriteBatch, DB};
 
 /// Tombstone all property indexes (PROPERTY_INDEX CF)
@@ -58,6 +59,30 @@ pub(super) fn tombstone_property_indexes(
         is_published,
     );
     batch.put_cf(cfs.property_index, node_type_key, TOMBSTONE);
+
+    // Tombstone TYPE MEMBERSHIP entries — one per supertype, one per mixin.
+    // Must mirror `index_node_properties` exactly: a member written there and
+    // not tombstoned here stays live for ever and `IS_A` keeps matching a
+    // deleted node.
+    for (pseudo_key, members) in [
+        (INDEXED_SUPERTYPE_KEY, node.effective_supertypes()),
+        (INDEXED_MIXIN_KEY, node.effective_mixins()),
+    ] {
+        for member in members {
+            let key = keys::property_index_key_versioned(
+                ctx.tenant_id,
+                ctx.repo_id,
+                ctx.branch,
+                ctx.workspace,
+                pseudo_key,
+                &member,
+                revision,
+                &node.id,
+                is_published,
+            );
+            batch.put_cf(cfs.property_index, key, TOMBSTONE);
+        }
+    }
 
     // Tombstone __name index (if present)
     if !node.name.is_empty() {

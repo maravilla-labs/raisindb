@@ -111,6 +111,28 @@ pub enum CanonicalPredicate {
         target_workspace: String,
         target_path: String,
     },
+    /// A type-membership test (`IS_A` / `HAS_MIXIN`) the property index can drive.
+    ///
+    /// The write path stores ONE property-index entry per supertype and per
+    /// mixin under a multi-valued pseudo-property (`__supertype` / `__mixin`),
+    /// so membership is an exact equality lookup instead of a scan of every row
+    /// in the workspace. Without this variant the call stays `Other` and can
+    /// only ever be a post-filter — which is what made `IS_A` ~25x slower than
+    /// the equivalent `node_type =` on a 2,300-node workspace.
+    TypeMembership {
+        /// The pseudo-property the entries live under: `__supertype` or `__mixin`.
+        index_property: String,
+        /// The type or mixin name being tested.
+        type_name: String,
+        /// The verbatim source expression, re-applied as a residual filter
+        /// whenever this predicate is not the scan driver.
+        ///
+        /// Kept rather than reconstructed because there is no COLUMN to
+        /// reconstruct it as: `__supertype` names an index keyspace, not
+        /// anything the row carries. Rendering it as `supertype = 'X'` would
+        /// produce a filter referencing a column that does not exist.
+        original: Box<TypedExpr>,
+    },
     Other(TypedExpr),
 }
 
@@ -398,6 +420,7 @@ impl CanonicalPredicate {
             // wrote, and a residual filter built from the widened window cannot
             // reject the rows the widening admitted.
             CanonicalPredicate::SpatialDWithin { original, .. } => (**original).clone(),
+            CanonicalPredicate::TypeMembership { original, .. } => (**original).clone(),
             CanonicalPredicate::References {
                 target_workspace,
                 target_path,

@@ -7,6 +7,7 @@ use raisin_error::Result;
 use raisin_hlc::HLC;
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
+use raisin_models::nodes::{INDEXED_MIXIN_KEY, INDEXED_SUPERTYPE_KEY};
 
 use crate::repositories::hash_property_value;
 use crate::transaction::RocksDBTransaction;
@@ -80,6 +81,37 @@ pub(super) fn index_node_properties(
         is_published,
     );
     batch.put_cf(cf_property, node_type_key, node.id.as_bytes());
+
+    // Index TYPE MEMBERSHIP: one entry per supertype and per mixin.
+    //
+    // `$supertypes` / `$mixins` are Arrays, and `hash_property_value` hashes an
+    // Array as a whole — so the entry written for the property itself can only
+    // answer "is the set exactly this?". Writing one entry per MEMBER under a
+    // multi-valued pseudo-property is what lets `IS_A(...)` / `HAS_MIXIN(...)`
+    // be served by an index lookup instead of scanning the workspace.
+    //
+    // Same shape as `__node_type` above, and therefore the same tombstone,
+    // MVCC and bloom-filter machinery — see `tombstone_property_indexes` and
+    // `add_stale_property_tombstones`, which must stay in step with this.
+    for (pseudo_key, members) in [
+        (INDEXED_SUPERTYPE_KEY, node.effective_supertypes()),
+        (INDEXED_MIXIN_KEY, node.effective_mixins()),
+    ] {
+        for member in members {
+            let key = keys::property_index_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                pseudo_key,
+                &member,
+                revision,
+                &node.id,
+                is_published,
+            );
+            batch.put_cf(cf_property, key, node.id.as_bytes());
+        }
+    }
 
     // Index name if not empty
     if !node.name.is_empty() {

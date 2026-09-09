@@ -92,6 +92,9 @@ impl PhysicalPlanner {
                 projection,
                 context,
             ),
+            CanonicalPredicate::TypeMembership { .. } => self.build_property_index_scan(
+                canonical, table, alias, workspace, branch, projection, context,
+            ),
             CanonicalPredicate::References {
                 ref target_workspace,
                 ref target_path,
@@ -191,6 +194,19 @@ impl PhysicalPlanner {
                             p,
                             CanonicalPredicate::ColumnEq { column, .. }
                                 if format!("__{}", column.to_lowercase()) == prop_name
+                        ) && !matches!(
+                            p,
+                            // The membership entries are exact: one per member,
+                            // raw value in the key, tombstoned when a member is
+                            // dropped. So the driving predicate is fully
+                            // enforced by the scan and re-checking it per row
+                            // would only cost time. Any OTHER membership test in
+                            // the same WHERE clause stays in the residual.
+                            CanonicalPredicate::TypeMembership {
+                                index_property,
+                                type_name,
+                                ..
+                            } if *index_property == prop_name && *type_name == prop_value
                         )
                     })
                     .cloned()

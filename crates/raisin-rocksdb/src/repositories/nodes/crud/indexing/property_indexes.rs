@@ -6,6 +6,7 @@ use crate::{cf, cf_handle, keys};
 use raisin_error::Result;
 use raisin_hlc::HLC;
 use raisin_models::nodes::Node;
+use raisin_models::nodes::{INDEXED_MIXIN_KEY, INDEXED_SUPERTYPE_KEY};
 use rocksdb::WriteBatch;
 
 /// Write property-index TOMBSTONES for every value-bearing entry of `old_node`
@@ -106,6 +107,33 @@ pub(crate) fn add_stale_property_tombstones(
         }
     }
 
+    // TYPE MEMBERSHIP: tombstone every member the node no longer has.
+    //
+    // Multi-valued, so this is a set difference rather than a value comparison:
+    // changing `node_type`, or editing the NodeType's `extends` / `mixins` and
+    // re-saving, drops members that must stop matching `IS_A` / `HAS_MIXIN`.
+    // Members still present are deliberately NOT tombstoned — the live entry is
+    // rewritten at this same revision by `index_node_properties`, and a
+    // tombstone at an identical key would hide the node instead.
+    for (pseudo_key, old_members, new_members) in [
+        (
+            INDEXED_SUPERTYPE_KEY,
+            old_node.effective_supertypes(),
+            new_node.effective_supertypes(),
+        ),
+        (
+            INDEXED_MIXIN_KEY,
+            old_node.effective_mixins(),
+            new_node.effective_mixins(),
+        ),
+    ] {
+        for member in old_members {
+            if tag_changed || !new_members.contains(&member) {
+                tombstone_pseudo(pseudo_key, &member);
+            }
+        }
+    }
+
     // Timestamp pseudo-properties use the timestamp key encoding.
     let mut tombstone_timestamp = |name: &str, micros: i64| {
         let key = keys::property_index_key_versioned_timestamp(
@@ -194,6 +222,31 @@ impl NodeRepositoryImpl {
             is_published,
         );
         batch.put_cf(cf_property, node_type_key, node.id.as_bytes());
+
+        // Index TYPE MEMBERSHIP: one entry per supertype and per mixin, so
+        // `IS_A` / `HAS_MIXIN` are index lookups. Mirrors the transaction path
+        // in `transaction/context/nodes/create/indexing.rs`; the two must stay
+        // in step or a node is indexed differently depending on which door it
+        // came through.
+        for (pseudo_key, members) in [
+            (INDEXED_SUPERTYPE_KEY, node.effective_supertypes()),
+            (INDEXED_MIXIN_KEY, node.effective_mixins()),
+        ] {
+            for member in members {
+                let key = keys::property_index_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    pseudo_key,
+                    &member,
+                    revision,
+                    &node.id,
+                    is_published,
+                );
+                batch.put_cf(cf_property, key, node.id.as_bytes());
+            }
+        }
 
         // Index: name
         if !node.name.is_empty() {

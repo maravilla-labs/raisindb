@@ -37,6 +37,12 @@ impl PhysicalPlanner {
                 }
             }
             CanonicalPredicate::JsonPropertyEq { .. } => 0.05,
+            // Type membership is an exact equality lookup on a multi-valued
+            // pseudo-property. Deliberately LESS selective than `node_type =`:
+            // a supertype matches every concrete type below it, so `IS_A` on a
+            // base type is by construction a wider set than an equality on one
+            // leaf type. Where both appear, the leaf equality should drive.
+            CanonicalPredicate::TypeMembership { .. } => 0.10,
             // IN predicates: roughly n * per-value equality selectivity, capped.
             CanonicalPredicate::ColumnIn { values, .. } => (0.05 * values.len() as f64).min(1.0),
             CanonicalPredicate::JsonPropertyIn { values, .. } => {

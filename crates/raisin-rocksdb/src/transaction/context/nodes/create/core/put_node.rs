@@ -207,11 +207,23 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
     // ever passing through NodeService. Validating here but stamping only up
     // there is what left `has_mixin()` / `is_a()` answering false for every
     // node written from `psql` or a child POST.
-    if tx.is_validate_schema_enabled() {
+    //
+    // Membership is stamped EITHER WAY. Schema-shape validation is a toggle;
+    // type membership is not, because `is_a()` / `has_mixin()`, the
+    // `allowed_children` family match below and the type-membership index all
+    // read it, and an unstamped node answers `false` about itself rather than
+    // erroring. `stamp_effective_types` fails open if the type cannot resolve.
+    {
         let validator = tx.create_validator();
-        validator
-            .validate_and_stamp(workspace, &mut normalized_node)
-            .await?;
+        if tx.is_validate_schema_enabled() {
+            validator
+                .validate_and_stamp(workspace, &mut normalized_node)
+                .await?;
+        } else {
+            validator
+                .stamp_effective_types(workspace, &mut normalized_node)
+                .await?;
+        }
     }
 
     // 5b. Check unique property constraints

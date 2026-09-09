@@ -136,6 +136,16 @@ impl PhysicalPlanner {
                     };
                     return Some((key.clone(), value_str));
                 }
+                // Type membership: `IS_A` / `HAS_MIXIN` resolve to the
+                // multi-valued `__supertype` / `__mixin` pseudo-property the
+                // write path materializes, one entry per member.
+                CanonicalPredicate::TypeMembership {
+                    index_property,
+                    type_name,
+                    ..
+                } => {
+                    return Some((index_property.clone(), type_name.clone()));
+                }
                 // Pseudo-property columns indexed by index_node_properties:
                 // node_type, archetype, name, created_by, updated_by → the
                 // corresponding __-prefixed entry in the property index.

@@ -695,6 +695,9 @@ impl PhysicalPlanner {
                     usable
                 }
                 CanonicalPredicate::References { .. } => true,
+                // Backed by the `__supertype` / `__mixin` entries the write
+                // path materializes — always available, like `__node_type`.
+                CanonicalPredicate::TypeMembership { .. } => true,
                 CanonicalPredicate::Other(_) => false,
             };
 

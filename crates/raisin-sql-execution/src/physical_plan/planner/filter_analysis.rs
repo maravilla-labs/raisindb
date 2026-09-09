@@ -225,6 +225,44 @@ impl PhysicalPlanner {
                 }
             }
 
+            // IS_A(properties, 'X') / HAS_MIXIN(properties, 'X') — type membership
+            // served by the property index.
+            //
+            // The write path stores one entry per supertype and per mixin under
+            // `__supertype` / `__mixin`, so this is an exact equality lookup.
+            // Canonicalizing here is what makes it reachable: left as `Other` it
+            // is only ever a post-filter, which is why it measured ~25x slower
+            // than the equivalent `node_type =` predicate.
+            //
+            // The first argument is required to be the bare `properties` column,
+            // matching the functions' own signature. Anything else (a nested
+            // object, a literal) is left as `Other` and still evaluates
+            // correctly per row.
+            Expr::Function { name, args, .. }
+                if matches!(name.to_uppercase().as_str(), "IS_A" | "HAS_MIXIN") =>
+            {
+                if args.len() == 2 {
+                    let first_is_properties = matches!(
+                        &args[0].expr,
+                        Expr::Column { column, .. } if column.eq_ignore_ascii_case("properties")
+                    );
+                    if first_is_properties {
+                        if let Expr::Literal(Literal::Text(type_name)) = &args[1].expr {
+                            let index_property = if name.eq_ignore_ascii_case("IS_A") {
+                                raisin_models::nodes::INDEXED_SUPERTYPE_KEY
+                            } else {
+                                raisin_models::nodes::INDEXED_MIXIN_KEY
+                            };
+                            return Some(CanonicalPredicate::TypeMembership {
+                                index_property: index_property.to_string(),
+                                type_name: type_name.clone(),
+                                original: Box::new(expr.clone()),
+                            });
+                        }
+                    }
+                }
+            }
+
             // DEPTH(path) = value
             Expr::BinaryOp {
                 left,

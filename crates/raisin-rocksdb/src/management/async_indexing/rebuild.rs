@@ -183,6 +183,12 @@ async fn rebuild_property_indexes(
     // 2. Clear existing property indexes for this workspace
     clear_property_indexes(storage, tenant_id, repo_id, branch, workspace).await?;
 
+    // 2a. Effective type membership per NodeType, from the SCHEMA rather than
+    // from the nodes. This is what turns a rebuild into a backfill for
+    // `__supertype` / `__mixin`: nodes written before membership was stamped
+    // carry no `$supertypes` of their own to derive it from.
+    let membership = membership_by_node_type(storage, tenant_id, repo_id, branch).await?;
+
     // 3. Rebuild from nodes
     let mut batch = WriteBatch::default();
     let cf_prop = cf_handle(storage.db(), cf::PROPERTY_INDEX)?;
@@ -248,6 +254,46 @@ async fn rebuild_property_indexes(
             is_published,
         );
         batch.put_cf(cf_prop, node_type_key, node.id.as_bytes());
+
+        // Index: __supertype / __mixin — one entry per member.
+        //
+        // The node's own type counts as one of its supertypes so that
+        // `IS_A(properties, 'X')` matches an X directly, matching
+        // `Node::is_a`, which checks `node_type` before the stamped set.
+        if let Some((supertypes, mixins)) = membership.get(&node.node_type) {
+            let mut members: Vec<&str> = vec![node.node_type.as_str()];
+            members.extend(supertypes.iter().map(|s| s.as_str()));
+            for member in members {
+                let key = keys::property_index_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    raisin_models::nodes::INDEXED_SUPERTYPE_KEY,
+                    member,
+                    &current_revision,
+                    &node.id,
+                    is_published,
+                );
+                batch.put_cf(cf_prop, key, node.id.as_bytes());
+                system_props_indexed += 1;
+            }
+            for member in mixins {
+                let key = keys::property_index_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    raisin_models::nodes::INDEXED_MIXIN_KEY,
+                    member,
+                    &current_revision,
+                    &node.id,
+                    is_published,
+                );
+                batch.put_cf(cf_prop, key, node.id.as_bytes());
+                system_props_indexed += 1;
+            }
+        }
         system_props_indexed += 1;
 
         // Index: __name
@@ -611,6 +657,80 @@ async fn rebuild_compound_indexes(
 /// branch, not about one type. Matches how the planner loads declarations in
 /// `engine/helpers.rs::load_all_compound_indexes`, including its
 /// first-declaration-wins dedup by name.
+/// Effective type membership per NodeType name: `(supertypes, mixins)`.
+///
+/// Computes the `extends` + `mixins` closure directly from the stored NodeType
+/// records rather than going through `raisin-core`'s resolver, because the
+/// dependency points the other way. The closure is small (chains are shallow and
+/// capped at 20 by the resolver) and this runs once per rebuild.
+///
+/// This is what makes a rebuild a genuine BACKFILL: a node written before
+/// membership was indexed carries no `$supertypes` property at all, so deriving
+/// the entries from the node itself would reproduce the gap it exists to close.
+/// The NodeType is the source of truth; the node only supplies its type name.
+async fn membership_by_node_type(
+    storage: &RocksDBStorage,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+) -> Result<std::collections::HashMap<String, (Vec<String>, Vec<String>)>> {
+    use raisin_storage::NodeTypeRepository;
+
+    let node_types = storage
+        .node_types
+        .list(
+            raisin_storage::BranchScope::new(tenant_id, repo_id, branch),
+            None,
+        )
+        .await?;
+
+    let by_name: std::collections::HashMap<String, (Option<String>, Vec<String>)> = node_types
+        .into_iter()
+        .map(|nt| (nt.name, (nt.extends, nt.mixins)))
+        .collect();
+
+    const MAX_DEPTH: usize = 20;
+    let mut out = std::collections::HashMap::new();
+
+    for name in by_name.keys() {
+        let mut supertypes: Vec<String> = Vec::new();
+        let mut mixins: Vec<String> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        // Walk the `extends` chain, collecting each ancestor and its mixins.
+        // A cycle or a missing parent simply ends the walk — a rebuild must not
+        // fail because one NodeType is malformed.
+        let mut cursor = Some(name.clone());
+        let mut depth = 0usize;
+        while let Some(current) = cursor {
+            if depth >= MAX_DEPTH || !seen.insert(current.clone()) {
+                break;
+            }
+            depth += 1;
+
+            let Some((extends, own_mixins)) = by_name.get(&current) else {
+                break;
+            };
+            if current != *name {
+                supertypes.push(current.clone());
+            }
+            for m in own_mixins {
+                if !mixins.contains(m) {
+                    mixins.push(m.clone());
+                }
+                if !supertypes.contains(m) {
+                    supertypes.push(m.clone());
+                }
+            }
+            cursor = extends.clone();
+        }
+
+        out.insert(name.clone(), (supertypes, mixins));
+    }
+
+    Ok(out)
+}
+
 async fn declared_compound_indexes(
     storage: &RocksDBStorage,
     tenant_id: &str,

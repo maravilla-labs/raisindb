@@ -162,6 +162,49 @@ impl<S: Storage> NodeValidator<S> {
         Ok(())
     }
 
+    /// Stamp the materialized effective-mixin / supertype sets WITHOUT running
+    /// schema-shape validation.
+    ///
+    /// Type membership is ENGINE METADATA, not user schema: `is_a()` /
+    /// `has_mixin()`, `allowed_children` family matching and the type-membership
+    /// index all read it, and a node that lacks it does not merely skip a check
+    /// — it silently answers `false` to questions about itself. So it must be
+    /// stamped on every write, including the paths that deliberately turn
+    /// schema validation off (bulk import, replication, `psql`).
+    ///
+    /// The same reasoning the immutability check in `put_node.rs` already uses:
+    /// not everything on the write path is schema-shape validation, and the
+    /// parts that are not must not ride on that toggle.
+    ///
+    /// FAILS OPEN. If the NodeType cannot be resolved — it does not exist yet,
+    /// or this is a replication stream carrying nodes ahead of their schema —
+    /// the node is left unstamped rather than rejected. Turning validation off
+    /// must never turn a write that used to succeed into an error.
+    pub async fn stamp_effective_types(&self, workspace: &str, node: &mut Node) -> Result<()> {
+        // Never trust client-supplied membership sets.
+        node.strip_reserved_properties();
+
+        match self
+            .resolver
+            .resolve_for_workspace(workspace, &node.node_type)
+            .await
+        {
+            Ok(resolved) => {
+                let supertypes = resolved.effective_supertypes();
+                node.set_effective_types(resolved.resolved_mixins.clone(), supertypes);
+            }
+            Err(e) => {
+                tracing::debug!(
+                    node_type = %node.node_type,
+                    workspace = %workspace,
+                    error = %e,
+                    "type membership not stamped: NodeType could not be resolved"
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Validate that the NodeType exists (without checking if published)
     /// Use this for draft content creation where unpublished NodeTypes are allowed
     pub async fn validate_node_type_exists(&self, node_type_name: &str) -> Result<()> {

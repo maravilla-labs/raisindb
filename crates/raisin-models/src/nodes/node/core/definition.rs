@@ -35,6 +35,24 @@ pub const RESERVED_MIXINS_KEY: &str = "$mixins";
 /// / `node.isNodeType()`.
 pub const RESERVED_SUPERTYPES_KEY: &str = "$supertypes";
 
+/// Pseudo-property name under which each of the node's supertypes is indexed,
+/// ONE INDEX ENTRY PER MEMBER.
+///
+/// `$supertypes` is an Array, and the property index hashes a value as a whole —
+/// so the stored `$supertypes` property can only ever answer "is the set exactly
+/// this?", never "does the set contain X?". Writing a separate entry per member
+/// under this pseudo-property is what makes `IS_A(...)` an index lookup instead
+/// of a scan of every row in the workspace.
+///
+/// Modelled on `__node_type`, which is indexed the same way — the difference is
+/// only that this one is MULTI-VALUED.
+pub const INDEXED_SUPERTYPE_KEY: &str = "__supertype";
+
+/// Pseudo-property name under which each of the node's effective mixins is
+/// indexed, one entry per member. Backs an indexed `HAS_MIXIN(...)`.
+/// See [`INDEXED_SUPERTYPE_KEY`].
+pub const INDEXED_MIXIN_KEY: &str = "__mixin";
+
 /// Reserved property keys are server-computed metadata and must never be trusted
 /// from client input. The convention is a leading `$`.
 pub fn is_reserved_property_key(key: &str) -> bool {
@@ -494,6 +512,14 @@ impl Node {
     /// The node's effective mixin names (materialized).
     pub fn effective_mixins(&self) -> Vec<String> {
         read_string_array(&self.properties, RESERVED_MIXINS_KEY)
+    }
+
+    /// The node's full "is-a" membership set (materialized): its `extends`
+    /// ancestors and every effective mixin. Does NOT include `node_type` itself
+    /// unless the stamper put it there — use [`Node::is_a`] for the question
+    /// "is this node an X?", which checks both.
+    pub fn effective_supertypes(&self) -> Vec<String> {
+        read_string_array(&self.properties, RESERVED_SUPERTYPES_KEY)
     }
 
     /// True if this node carries the given mixin (by exact name).
