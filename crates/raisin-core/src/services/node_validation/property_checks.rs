@@ -290,12 +290,38 @@ fn value_matches(declared: &PropertyType, value: &PropertyValue) -> bool {
         (T::Composite, PropertyValue::Composite(_)) => true,
         (T::Element, PropertyValue::Element(_)) => true,
         (T::Geometry, PropertyValue::Geometry(_)) => true,
-        (T::Array, PropertyValue::Array(_)) => true,
-        // A Composite and an Element are both object-shaped; a schema that says
-        // `Object` is describing a bag, and all three satisfy that reading.
+        // An EMPTY ARRAY IS INDISTINGUISHABLE FROM AN EMPTY VECTOR, and
+        // `PropertyValue` is untagged with `Vector(Vec<f32>)` declared BEFORE
+        // `Array`, so serde resolves `[]` to `Vector([])` every time. Measured:
+        // `raisin:Role.permissions: []` — the shipped `studio_member` default
+        // role, which is deliberately empty — was refused on install with
+        // "declared Array but the value is Vector". That is every empty array in
+        // the system, not one role: an `Array` property is unwritable the moment
+        // it holds nothing.
+        //
+        // Accepting Vector here is the narrow fix. Reordering the enum would
+        // change how every existing array-of-numbers deserializes, and a real
+        // embedding satisfies "is an array" anyway.
+        (T::Array, PropertyValue::Array(_) | PropertyValue::Vector(_)) => true,
+        // A Composite, an Element and a Reference are all object-shaped; a schema
+        // that says `Object` is describing a bag, and all of them satisfy that
+        // reading.
+        //
+        // Reference is included because a reference envelope
+        // (`{raisin:ref, raisin:workspace}`) IS an object on the wire — only
+        // `PropertyValue`'s untagged deserialization classifies it as Reference.
+        // Measured: `raisin:Trigger.function_flow` is declared Object and its
+        // consumer (`webhooks/execution.rs`) simply does `serde_json::to_value`
+        // on whatever is there, so an inline flow object and a pointer to a
+        // `raisin:Flow` node are both valid and both work. Enforcing Object
+        // strictly refused the pointer spelling and rejected two shipped triggers
+        // on install.
         (
             T::Object,
-            PropertyValue::Object(_) | PropertyValue::Composite(_) | PropertyValue::Element(_),
+            PropertyValue::Object(_)
+            | PropertyValue::Composite(_)
+            | PropertyValue::Element(_)
+            | PropertyValue::Reference(_),
         ) => true,
 
         _ => false,
