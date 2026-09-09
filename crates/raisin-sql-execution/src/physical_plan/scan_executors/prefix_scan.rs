@@ -236,13 +236,13 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
 
                     if safety_scanned > SCAN_COUNT_CEILING {
                         tracing::warn!("PrefixScan count limit reached: {} nodes checked", safety_scanned);
-                        break 'pages;
+                        Err(super::scan_count_budget_exceeded(safety_scanned, start_time.elapsed()))?;
                     }
 
                     if safety_scanned % TIME_CHECK_INTERVAL == 0 && start_time.elapsed() > SCAN_TIME_LIMIT {
                         tracing::warn!("PrefixScan time limit reached: {:?} elapsed, {} nodes checked",
                                        start_time.elapsed(), safety_scanned);
-                        break 'pages;
+                        Err(super::scan_time_budget_exceeded(safety_scanned, start_time.elapsed()))?;
                     }
 
                     if node.path == "/" {
@@ -330,13 +330,13 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
 
                 if safety_scanned > SCAN_COUNT_CEILING {
                     tracing::warn!("PrefixScan count limit reached: {} nodes checked", safety_scanned);
-                    break;
+                    Err(super::scan_count_budget_exceeded(safety_scanned, start_time.elapsed()))?;
                 }
 
                 if safety_scanned % TIME_CHECK_INTERVAL == 0 && start_time.elapsed() > SCAN_TIME_LIMIT {
                     tracing::warn!("PrefixScan time limit reached: {:?} elapsed, {} nodes checked",
                                    start_time.elapsed(), safety_scanned);
-                    break;
+                    Err(super::scan_time_budget_exceeded(safety_scanned, start_time.elapsed()))?;
                 }
 
                 if node.path == "/" {
@@ -456,13 +456,13 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
 
                         if safety_scanned > SCAN_COUNT_CEILING {
                             tracing::warn!("PrefixScan count limit reached: {} nodes checked", safety_scanned);
-                            break 'subtree;
+                            Err(super::scan_count_budget_exceeded(safety_scanned, start_time.elapsed()))?;
                         }
 
                         if safety_scanned % TIME_CHECK_INTERVAL == 0 && start_time.elapsed() > SCAN_TIME_LIMIT {
                             tracing::warn!("PrefixScan time limit reached: {:?} elapsed, {} nodes checked",
                                            start_time.elapsed(), safety_scanned);
-                            break 'subtree;
+                            Err(super::scan_time_budget_exceeded(safety_scanned, start_time.elapsed()))?;
                         }
 
                         if node.path == "/" {

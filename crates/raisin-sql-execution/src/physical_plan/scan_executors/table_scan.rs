@@ -142,13 +142,13 @@ pub async fn execute_table_scan<S: Storage + 'static>(
 
             if safety_scanned > SCAN_COUNT_CEILING {
                 tracing::warn!("TableScan count limit reached: {} nodes checked", safety_scanned);
-                break;
+                Err(super::scan_count_budget_exceeded(safety_scanned, start.elapsed()))?;
             }
 
             if safety_scanned % TIME_CHECK_INTERVAL == 0 && start.elapsed() > SCAN_TIME_LIMIT {
                 tracing::warn!("TableScan time limit reached: {:?} elapsed, {} nodes checked",
                                start.elapsed(), safety_scanned);
-                break;
+                Err(super::scan_time_budget_exceeded(safety_scanned, start.elapsed()))?;
             }
 
             // Materialize node on-demand (LAST POSSIBLE MOMENT)

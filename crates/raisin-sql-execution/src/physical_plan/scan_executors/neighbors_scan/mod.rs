@@ -129,11 +129,11 @@ pub async fn execute_neighbors_scan<S: Storage + 'static>(
                 safety_scanned += 1;
                 if safety_scanned > SCAN_COUNT_CEILING {
                     tracing::warn!("NeighborsScan count limit reached: {} relations checked", safety_scanned);
-                    break;
+                    Err(super::scan_count_budget_exceeded(safety_scanned, start_time.elapsed()))?;
                 }
                 if safety_scanned % TIME_CHECK_INTERVAL == 0 && start_time.elapsed() > SCAN_TIME_LIMIT {
                     tracing::warn!("NeighborsScan time limit reached: {:?} elapsed", start_time.elapsed());
-                    break;
+                    Err(super::scan_time_budget_exceeded(safety_scanned, start_time.elapsed()))?;
                 }
 
                 if let Some(ref rel_type) = relation_type {
@@ -198,11 +198,11 @@ pub async fn execute_neighbors_scan<S: Storage + 'static>(
                 safety_scanned += 1;
                 if safety_scanned > SCAN_COUNT_CEILING {
                     tracing::warn!("NeighborsScan count limit reached: {} relations checked", safety_scanned);
-                    break;
+                    Err(super::scan_count_budget_exceeded(safety_scanned, start_time.elapsed()))?;
                 }
                 if safety_scanned % TIME_CHECK_INTERVAL == 0 && start_time.elapsed() > SCAN_TIME_LIMIT {
                     tracing::warn!("NeighborsScan time limit reached: {:?} elapsed", start_time.elapsed());
-                    break;
+                    Err(super::scan_time_budget_exceeded(safety_scanned, start_time.elapsed()))?;
                 }
 
                 if let Some(ref rel_type) = relation_type {

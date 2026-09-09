@@ -123,13 +123,13 @@ pub(super) async fn execute_property_index_order_scan<S: Storage + 'static>(
 
             if scanned > SCAN_COUNT_CEILING {
                 tracing::warn!("PropertyOrderScan count limit reached: {} entries checked", scanned);
-                break;
+                Err(super::super::scan_count_budget_exceeded(scanned, start_time.elapsed()))?;
             }
 
             if scanned % TIME_CHECK_INTERVAL == 0 && start_time.elapsed() > SCAN_TIME_LIMIT {
                 tracing::warn!("PropertyOrderScan time limit reached: {:?} elapsed, {} entries checked",
                                start_time.elapsed(), scanned);
-                break;
+                Err(super::super::scan_time_budget_exceeded(scanned, start_time.elapsed()))?;
             }
 
             let node_opt = storage

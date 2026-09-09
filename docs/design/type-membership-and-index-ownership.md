@@ -191,3 +191,88 @@ cast defeats the `node_type` predicate and routes the query to a foreign index. 
 cast must preserve node-type qualification, or it must not be index-eligible. Note the
 downstream docs still recommend adding `::String` as a workaround from an earlier era —
 those recommendations are now actively harmful and should be retracted with the fix.
+
+---
+
+# Addendum: what a row actually costs (measured 2026-09-09)
+
+Prompted by "why does a 20k-row listing take seconds". Two findings, one of them
+a correction to numbers reported earlier in this note's lifetime.
+
+## The earlier numbers were a DEBUG build
+
+Everything measured before this section came from `target/debug`. Release is
+~6x faster on the read path, and it changes the conclusions:
+
+| query (16,700 matching rows) | debug | release |
+|---|---:|---:|
+| `COUNT(*)` | 33 ms | **8 ms** |
+| `SELECT path` LIMIT 5000 | 1265 ms | **204 ms** |
+| `SELECT path` (all) | truncated at ~12,999 in 3.2s | **16,700 rows in 672 ms** |
+| `SELECT path, properties` (all) | truncated at 7,999 | **16,700 rows in 1061 ms** |
+
+So the truncation that prompted this was largely a debug artifact: in release a
+20k-row listing lands around 0.8–1.3s and never reaches the budget. The budget
+still fires around 50–80k rows, which is why the silent-subset problem below was
+worth fixing on its own terms rather than dismissing.
+
+## Where the time goes
+
+Per 5000 nodes, release, instrumented inside `get_at_revision_impl`:
+
+| step | per 5000 | per node |
+|---|---:|---:|
+| `get_revision_at_or_before` | 18–45 ms | ~4–9 µs |
+| RocksDB point get | 4–6 ms | ~1 µs |
+| **msgpack deserialize** | **57–66 ms** | **~12 µs** |
+| `materialize_path` | 0 ms | free* |
+| `populate_has_children` | 0 ms | free |
+
+\* free *here* because the fixture is root-level. Path is NOT stored in the blob
+(`StorageNode` omits it deliberately, for O(1) moves) and is walked from the
+parent chain, so a deep tree pays for it.
+
+Above the storage layer the scan adds ~22 µs/row of async dispatch and per-row
+overhead; RLS is 0.4 µs, locale 0.3 µs and row building 0.7 µs — all noise.
+
+**The single removable cost is the msgpack deserialize.** `SELECT path` decodes
+every property of every node and throws them away.
+
+Two things were tried and did NOT help, recorded so they are not retried:
+
+- **Hoisting the branch-head resolution out of the scan loop.** `NodeRepository::get`
+  with `max_revision: None` resolves the head per call, so a 16,700-row scan
+  resolved it 16,700 times — but it is cached and the change measured flat
+  (207 ms vs 204 ms). It was kept anyway, for a different reason: per-call
+  resolution means a head that advances mid-scan makes later rows come from a
+  newer snapshot than earlier ones. One revision for the whole scan is a
+  consistent read; that is a correctness fix, not a speed one.
+- **`populate_has_children`**, suspected because `dispatch_get` passes `true`
+  unconditionally. It measured at zero.
+
+## The optimisation NOT taken, and why
+
+Projection pushdown — skipping the node fetch when the projection needs only
+`id`/`path` — is the real fix and would take a path-only scan close to the
+`COUNT(*)` number. It was deliberately not built here because it is only sound
+under four conditions that must ALL hold, and getting any of them wrong is a
+correctness or security bug rather than a slow query:
+
+1. **The projection must need no properties.** A residual filter is the trap:
+   `IS_A(x) AND status='y'` evaluates `properties->>'status'` on the ROW, so a
+   row without properties silently matches nothing.
+2. **RLS must not inspect the node.** `rls_filter::filter_node` returns early on
+   `auth.is_system` or `permissions.is_system_admin` — both node-independent, so
+   this IS decidable once per scan. For any other principal RLS reads the node's
+   path, workspace and properties, and skipping the fetch would be an RLS
+   BYPASS, not a speedup.
+3. **Head queries only.** The `node_path` column family (id → path) is
+   maintained for O(1) moves and is not revision-scoped, so a point-in-time query
+   cannot read paths from it.
+4. **Tombstones.** The fast path must still see a deletion that the MVCC walk
+   would have found.
+
+A narrower version is safe and probably worth doing first: decode only the
+header fields when no properties are projected. `StorageNode` is a serde struct
+over msgpack, so this needs care about field order rather than a new keyspace,
+and it helps every query rather than only path-only ones.

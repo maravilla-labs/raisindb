@@ -53,6 +53,31 @@ pub enum Error {
         cell: String,
         limit: usize,
     },
+    /// A scan hit its time or count budget before it finished.
+    ///
+    /// Typed, and an ERROR rather than a short result, for the reason the whole
+    /// index-ownership work exists: the executors used to stop at the budget,
+    /// log a warning nobody reads, and end the stream — so the caller got a
+    /// perfectly ordinary success carrying a SUBSET of the rows, with no way to
+    /// tell. An export wrote a short file, a migration read half a workspace,
+    /// and a count disagreed with a listing over the same predicate.
+    ///
+    /// A partial answer that cannot be distinguished from a complete one is the
+    /// worst shape a failure can take. Refusing is recoverable — add a LIMIT,
+    /// narrow the predicate, page it — and being told is the point.
+    #[error(
+        "Scan budget exceeded: {scanned} rows examined in {elapsed_ms}ms ({limit}); the result \
+         would be a silent subset, so the query is refused. Add a LIMIT, narrow the predicate, \
+         or page through the results."
+    )]
+    ScanBudgetExceeded {
+        /// How many rows the scan had examined when it stopped.
+        scanned: usize,
+        /// Wall time spent scanning, in milliseconds.
+        elapsed_ms: u64,
+        /// Which ceiling was reached, spelled for a human.
+        limit: String,
+    },
     /// A call to an EXTERNAL provider failed, carrying WHOSE fault it was.
     ///
     /// Typed rather than a `Backend(String)` for the same reason
@@ -135,6 +160,11 @@ impl Error {
     /// Every other caller should treat it as an ordinary error.
     pub fn is_spatial_budget_exceeded(&self) -> bool {
         matches!(self, Self::SpatialBudgetExceeded { .. })
+    }
+
+    /// Did a scan stop at its budget rather than finish?
+    pub fn is_scan_budget_exceeded(&self) -> bool {
+        matches!(self, Self::ScanBudgetExceeded { .. })
     }
 
     /// Is this an upstream's fault rather than ours?

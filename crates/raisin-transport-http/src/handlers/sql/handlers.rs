@@ -232,7 +232,11 @@ async fn collect_and_respond(
     let mut explain_plan: Option<String> = None;
 
     while let Some(row) = stream.next().await {
-        let row = row.map_err(|e| ApiError::internal(format!("Failed to fetch row: {}", e)))?;
+        // Convert through `From`, not into a string. Stringifying collapsed every
+        // streaming failure to a 500 — including the typed ones a caller can act
+        // on, such as a scan that stopped at its budget, which is a 400 telling
+        // you to add a LIMIT rather than a server fault.
+        let row = row.map_err(ApiError::from)?;
 
         tracing::debug!(
             "   Row has {} columns: {:?}",

@@ -17,7 +17,9 @@ use async_stream::try_stream;
 use raisin_core::services::rls_filter;
 use raisin_error::Error;
 use raisin_models::permissions::PermissionScope;
-use raisin_storage::{NodeRepository, PropertyIndexRepository, Storage, StorageScope};
+use raisin_storage::{
+    BranchRepository, NodeRepository, PropertyIndexRepository, Storage, StorageScope,
+};
 use std::time::Instant;
 
 /// Execute a PropertyIndexScan operator.
@@ -95,6 +97,28 @@ pub async fn execute_property_index_scan<S: Storage + 'static>(
 
         tracing::info!("   PropertyIndexScan found {} node IDs", node_ids.len());
 
+        // Resolve the branch head ONCE for the whole scan.
+        //
+        // `NodeRepository::get` with `max_revision: None` resolves it per call,
+        // so a 16,700-row scan read the BRANCHES column family 16,700 times —
+        // pure overhead on the hottest loop in the engine. Hoisting it is also
+        // more CORRECT: per-call resolution means a head that advances mid-scan
+        // makes later rows come from a newer snapshot than earlier ones, which
+        // is a torn read. One revision for the whole scan is a consistent one.
+        //
+        // Falls back to `None` when the head cannot be resolved, because the
+        // per-call path also accepts a TAG name here and resolves it through a
+        // different repository; keeping that fallback means a tag-scoped query
+        // behaves exactly as before.
+        let scan_revision: Option<raisin_hlc::HLC> = match ctx_clone.max_revision.clone() {
+            Some(rev) => Some(rev),
+            None => storage
+                .branches()
+                .get_head(&tenant_id, &repo_id, &branch)
+                .await
+                .ok(),
+        };
+
         let mut emitted = 0;
         let mut safety_scanned = 0usize;
         let start_time = Instant::now();
@@ -110,18 +134,18 @@ pub async fn execute_property_index_scan<S: Storage + 'static>(
 
             if safety_scanned > SCAN_COUNT_CEILING {
                 tracing::warn!("PropertyIndexScan count limit reached: {} nodes checked", safety_scanned);
-                break;
+                Err(super::scan_count_budget_exceeded(safety_scanned, start_time.elapsed()))?;
             }
 
             if safety_scanned % TIME_CHECK_INTERVAL == 0 && start_time.elapsed() > SCAN_TIME_LIMIT {
                 tracing::warn!("PropertyIndexScan time limit reached: {:?} elapsed, {} nodes checked",
                                start_time.elapsed(), safety_scanned);
-                break;
+                Err(super::scan_time_budget_exceeded(safety_scanned, start_time.elapsed()))?;
             }
 
             let node_opt = storage
                 .nodes()
-                .get(StorageScope::new(&tenant_id, &repo_id, &branch, &workspace), &node_id, None)
+                .get(StorageScope::new(&tenant_id, &repo_id, &branch, &workspace), &node_id, scan_revision.as_ref())
                 .await?;
 
             if let Some(node) = node_opt {

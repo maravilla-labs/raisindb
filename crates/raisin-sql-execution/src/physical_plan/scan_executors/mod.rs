@@ -41,6 +41,7 @@ mod spatial_scan;
 mod table_scan;
 mod vector_scan;
 
+use raisin_error::Error;
 use std::time::Duration;
 
 // Re-export all public scan executor functions
@@ -69,3 +70,26 @@ const SCAN_COUNT_CEILING: usize = 200_000;
 /// How often to check elapsed time during scanning.
 /// We only check every N items to minimize Instant::now() syscall overhead.
 const TIME_CHECK_INTERVAL: usize = 1000;
+
+/// The error a scan raises when it reaches [`SCAN_TIME_LIMIT`].
+///
+/// A budget stop must FAIL, not return early. Ending the stream quietly hands
+/// the caller an ordinary success carrying a subset of the rows, with nothing to
+/// distinguish it from a complete answer — the failure shape this whole area has
+/// been getting wrong. See [`raisin_error::Error::ScanBudgetExceeded`].
+pub(crate) fn scan_time_budget_exceeded(scanned: usize, elapsed: std::time::Duration) -> Error {
+    Error::ScanBudgetExceeded {
+        scanned,
+        elapsed_ms: elapsed.as_millis() as u64,
+        limit: format!("time limit {}s", SCAN_TIME_LIMIT.as_secs()),
+    }
+}
+
+/// The error a scan raises when it reaches [`SCAN_COUNT_CEILING`].
+pub(crate) fn scan_count_budget_exceeded(scanned: usize, elapsed: std::time::Duration) -> Error {
+    Error::ScanBudgetExceeded {
+        scanned,
+        elapsed_ms: elapsed.as_millis() as u64,
+        limit: format!("row ceiling {SCAN_COUNT_CEILING}"),
+    }
+}

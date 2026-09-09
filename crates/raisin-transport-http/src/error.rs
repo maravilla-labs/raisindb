@@ -451,6 +451,19 @@ impl From<raisin_error::Error> for ApiError {
             // the row-scan fallback (no fallback was attached). It is a capacity
             // condition, not a bug in the request, and the message already names
             // the workspace, property and cell.
+            // A scan stopped at its budget. 400 rather than 503: the server is
+            // fine and retrying unchanged will fail identically — the query
+            // itself is what has to change (a LIMIT, a narrower predicate, or
+            // paging). Telling the caller is the whole point; the alternative,
+            // which this replaces, was a 200 carrying a silent subset.
+            ref budget @ raisin_error::Error::ScanBudgetExceeded { .. } => {
+                tracing::warn!("Scan budget exceeded: {}", budget);
+                ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    "SCAN_BUDGET_EXCEEDED",
+                    budget.to_string(),
+                )
+            }
             ref budget @ raisin_error::Error::SpatialBudgetExceeded { .. } => {
                 tracing::error!("Spatial budget exceeded: {}", budget);
                 ApiError::new(

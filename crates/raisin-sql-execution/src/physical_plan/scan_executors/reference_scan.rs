@@ -151,7 +151,7 @@ pub async fn execute_reference_index_scan<S: Storage + 'static>(
 
             if emitted > SCAN_COUNT_CEILING {
                 tracing::warn!("ReferenceIndexScan count limit reached: {} nodes", emitted);
-                break;
+                Err(super::scan_count_budget_exceeded(emitted, start_time.elapsed()))?;
             }
 
             if emitted % TIME_CHECK_INTERVAL == 0 && start_time.elapsed() > SCAN_TIME_LIMIT {
@@ -159,7 +159,7 @@ pub async fn execute_reference_index_scan<S: Storage + 'static>(
                     "ReferenceIndexScan time limit reached: {:?} elapsed, {} nodes",
                     start_time.elapsed(), emitted
                 );
-                break;
+                Err(super::scan_time_budget_exceeded(emitted, start_time.elapsed()))?;
             }
 
             let node = match storage
