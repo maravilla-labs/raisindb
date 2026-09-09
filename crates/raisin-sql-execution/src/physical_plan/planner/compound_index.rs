@@ -168,6 +168,32 @@ impl PhysicalPlanner {
         // type.
         let queried_node_type = equality_map.get("__node_type");
 
+        // …and the types named by any IS_A() in the same WHERE clause.
+        //
+        // `IS_A(X)` scopes a query to X's whole FAMILY, and an index declared on
+        // X is written by every member of that family (inheritance merges
+        // `compound_indexes` along `extends`), so the index keyspace is exactly
+        // the set IS_A(X) asks for. Refusing it would leave every filtered
+        // base-type listing on a post-scan filter — measured at 3046ms against
+        // 1ms for the same predicate under `node_type =`.
+        //
+        // Only an EXACT owner match is sound. An index owned by an ANCESTOR of X
+        // is a superset (it also holds X's siblings) and one owned by a
+        // DESCENDANT is a subset; neither answers IS_A(X) on its own.
+        let membership_types: Vec<&str> = predicates
+            .iter()
+            .filter_map(|p| match p {
+                CanonicalPredicate::TypeMembership {
+                    index_property,
+                    type_name,
+                    ..
+                } if index_property == raisin_models::nodes::INDEXED_SUPERTYPE_KEY => {
+                    Some(type_name.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+
         for index in &self.compound_indexes {
             // OWNERSHIP GATE.
             //
@@ -185,9 +211,10 @@ impl PhysicalPlanner {
             // silent subset. Falling back to a scan is slower and correct; that
             // trade is not close, because the failure it replaces is invisible.
             if let Some(owner) = index.owner_node_type.as_deref() {
-                match queried_node_type {
-                    Some(queried) if queried == owner => {}
-                    _ => continue,
+                let scoped_by_node_type = queried_node_type.map(|q| q == owner).unwrap_or(false);
+                let scoped_by_membership = membership_types.iter().any(|t| *t == owner);
+                if !scoped_by_node_type && !scoped_by_membership {
+                    continue;
                 }
             }
 

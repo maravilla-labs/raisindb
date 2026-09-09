@@ -40,9 +40,24 @@ impl NodeRepositoryImpl {
             None => return Ok(()), // No NodeType = no compound indexes
         };
 
-        // Check if this NodeType has compound indexes
-        let compound_indexes = match node_type.compound_indexes {
-            Some(ref indexes) if !indexes.is_empty() => indexes,
+        // Compound indexes INCLUDING the ones inherited through `extends`.
+        //
+        // This used to read `node_type.compound_indexes` off the raw stored
+        // record, which never contains an ancestor's declarations — so a subtype
+        // wrote NO entries for an index declared on its parent, and every query
+        // on that subtype silently fell back to a scan while the parent's own
+        // queries were fast. Inheritance merges `compound_indexes` along the
+        // chain, and the write path has to honour that or the index is a lie for
+        // half the family.
+        //
+        // Resolved locally rather than through raisin-core's resolver because
+        // the dependency points the other way; the chain is shallow and the
+        // NodeType reads are cached.
+        let inherited = self
+            .resolve_inherited_compound_indexes(&node_type, tenant_id, repo_id, branch)
+            .await?;
+        let compound_indexes = match inherited {
+            ref indexes if !indexes.is_empty() => indexes,
             _ => return Ok(()), // No compound indexes defined
         };
 
@@ -259,5 +274,63 @@ impl NodeRepositoryImpl {
                 }
             }
         }
+    }
+
+    /// A NodeType's compound indexes, merged along its `extends` chain.
+    ///
+    /// Most-derived wins on a name collision, matching the core resolver: parent
+    /// first, then own. A missing or cyclic parent simply ends the walk — an
+    /// index write must not fail because one NodeType is malformed.
+    pub(crate) async fn resolve_inherited_compound_indexes(
+        &self,
+        node_type: &raisin_models::nodes::types::node_type::NodeType,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+    ) -> Result<Vec<CompoundIndexDefinition>> {
+        use raisin_storage::NodeTypeRepository;
+
+        const MAX_DEPTH: usize = 20;
+
+        // Walk up to the root, collecting each level's declarations.
+        let mut chain: Vec<Vec<CompoundIndexDefinition>> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut current = Some(node_type.clone());
+        let mut depth = 0usize;
+
+        while let Some(nt) = current {
+            if depth >= MAX_DEPTH || !seen.insert(nt.name.clone()) {
+                break;
+            }
+            depth += 1;
+            chain.push(nt.compound_indexes.clone().unwrap_or_default());
+
+            current = match nt.extends.as_deref() {
+                Some(parent) if !parent.is_empty() => self
+                    .node_type_repo
+                    .get(
+                        raisin_storage::BranchScope::new(tenant_id, repo_id, branch),
+                        parent,
+                        None,
+                    )
+                    .await
+                    .ok()
+                    .flatten(),
+                _ => None,
+            };
+        }
+
+        // Parent first so a derived declaration of the same NAME replaces it.
+        let mut merged: Vec<CompoundIndexDefinition> = Vec::new();
+        for level in chain.into_iter().rev() {
+            for idx in level {
+                if let Some(existing) = merged.iter_mut().find(|e| e.name == idx.name) {
+                    *existing = idx;
+                } else {
+                    merged.push(idx);
+                }
+            }
+        }
+        Ok(merged)
     }
 }

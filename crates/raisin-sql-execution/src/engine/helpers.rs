@@ -304,6 +304,20 @@ async fn load_compound_indexes_uncached<S: Storage>(
         .await
     {
         Ok(Some(node_type)) => {
+            // OWN declarations only, deliberately.
+            //
+            // Resolving the `extends` chain here and letting a subtype use an
+            // ancestor's index is sound in PLANNING terms — the `node_type =`
+            // predicate is not one of the index columns, so it survives as a
+            // residual filter and narrows the family back to this type — but it
+            // is NOT sound today, because the entries are missing: the write
+            // path only recently learned to resolve inheritance and a rebuild
+            // does not backfill a subtype's rows into an ancestor's keyspace.
+            // Measured: with inheritance resolved here, VipPerson + status
+            // returned 0 rows where 10 exist. An index the planner trusts and
+            // the writer never filled is the exact failure this ownership work
+            // exists to remove, so the loader stays conservative until the
+            // backfill is proven. See the design note.
             if let Some(ref indexes) = node_type.compound_indexes {
                 if !indexes.is_empty() {
                     tracing::debug!(
@@ -311,9 +325,6 @@ async fn load_compound_indexes_uncached<S: Storage>(
                         indexes.len(),
                         node_type_name
                     );
-                    // These are the RESOLVED indexes for this type (inheritance
-                    // already merged), so the queried type is the correct owner
-                    // even for one declared on an ancestor.
                     return Some(
                         indexes
                             .iter()

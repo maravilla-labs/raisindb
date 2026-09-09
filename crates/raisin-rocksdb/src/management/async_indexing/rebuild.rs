@@ -592,16 +592,41 @@ async fn rebuild_compound_indexes(
 
         // Resolve (and cache) this node_type's compound-index definitions
         if !defs_cache.contains_key(&node.node_type) {
-            let defs = storage
-                .node_types
-                .get(
-                    raisin_storage::BranchScope::new(tenant_id, repo_id, branch),
-                    &node.node_type,
-                    None,
-                )
-                .await?
-                .and_then(|nt| nt.compound_indexes)
-                .filter(|defs| !defs.is_empty());
+            // Own declarations PLUS the ones inherited through `extends`.
+            // Reading the raw record here would rebuild a subtype WITHOUT the
+            // indexes its ancestors declare — the same gap the live write path
+            // had, and a rebuild is exactly where it would look repaired.
+            let mut merged: Vec<raisin_models::nodes::properties::schema::CompoundIndexDefinition> =
+                Vec::new();
+            let mut seen_type = std::collections::HashSet::new();
+            let mut cursor = Some(node.node_type.clone());
+            let mut depth = 0usize;
+            while let Some(name) = cursor {
+                if depth >= 20 || !seen_type.insert(name.clone()) {
+                    break;
+                }
+                depth += 1;
+                let nt = storage
+                    .node_types
+                    .get(
+                        raisin_storage::BranchScope::new(tenant_id, repo_id, branch),
+                        &name,
+                        None,
+                    )
+                    .await?;
+                let Some(nt) = nt else { break };
+                if let Some(ref indexes) = nt.compound_indexes {
+                    for idx in indexes {
+                        // Derived-first walk, so the first occurrence of a name
+                        // is the most-derived declaration and wins.
+                        if !merged.iter().any(|m| m.name == idx.name) {
+                            merged.push(idx.clone());
+                        }
+                    }
+                }
+                cursor = nt.extends.clone().filter(|p| !p.is_empty());
+            }
+            let defs = Some(merged).filter(|d: &Vec<_>| !d.is_empty());
             defs_cache.insert(node.node_type.clone(), defs);
         }
 
@@ -747,6 +772,11 @@ async fn declared_compound_indexes(
         )
         .await?;
 
+    // Every DECLARED index name in the branch. Deduplicated by name because the
+    // name IS the keyspace, so two types declaring it describe the same entries.
+    // Inheritance needs no special handling HERE — a child's entries are written
+    // by the write path, which resolves the chain — but the declaration must be
+    // seen even when only an ancestor declares it.
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for node_type in node_types {
