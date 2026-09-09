@@ -11,6 +11,14 @@
 // by the Apache License, Version 2.0.
 
 //! `AuthStrategy` trait implementation for `OidcStrategy`.
+//!
+//! The trait is the shape every strategy shares. Two of its methods cannot
+//! express the OIDC authorization-code flow, and both say so rather than
+//! pretending: `get_authorization_url` has nowhere to return the PKCE verifier
+//! it must mint, and `handle_callback` has nowhere to receive it. The real
+//! entry points are [`OidcStrategy::begin_login`] and
+//! [`OidcStrategy::complete_login`] in `flow.rs`, which pass that secret
+//! through the sealed login state.
 
 use async_trait::async_trait;
 use raisin_error::{Error, Result};
@@ -37,7 +45,6 @@ impl AuthStrategy for OidcStrategy {
         config: &AuthProviderConfig,
         decrypted_secret: Option<&str>,
     ) -> Result<()> {
-        // Validate required fields
         let client_id = config
             .client_id
             .as_ref()
@@ -46,7 +53,6 @@ impl AuthStrategy for OidcStrategy {
         let client_secret = decrypted_secret
             .ok_or_else(|| Error::Validation("OIDC provider requires client_secret".to_string()))?;
 
-        // Extract scopes with defaults
         let scopes = if config.scopes.is_empty() {
             vec![
                 "openid".to_string(),
@@ -57,45 +63,34 @@ impl AuthStrategy for OidcStrategy {
             config.scopes.clone()
         };
 
-        // Extract attribute mapping with fallback to defaults if empty
         let attribute_mapping = AttributeMappingConfig {
-            email_claim: if config.attribute_mapping.email.is_empty() {
-                "email".to_string()
-            } else {
-                config.attribute_mapping.email.clone()
-            },
-            name_claim: if config.attribute_mapping.name.is_empty() {
-                "name".to_string()
-            } else {
-                config.attribute_mapping.name.clone()
-            },
-            picture_claim: if config.attribute_mapping.picture.is_empty() {
-                "picture".to_string()
-            } else {
-                config.attribute_mapping.picture.clone()
-            },
-            email_verified_claim: if config.attribute_mapping.email_verified.is_empty() {
-                "email_verified".to_string()
-            } else {
-                config.attribute_mapping.email_verified.clone()
-            },
+            email_claim: non_empty(&config.attribute_mapping.email, "email"),
+            name_claim: non_empty(&config.attribute_mapping.name, "name"),
+            picture_claim: non_empty(&config.attribute_mapping.picture, "picture"),
+            email_verified_claim: non_empty(
+                &config.attribute_mapping.email_verified,
+                "email_verified",
+            ),
         };
 
-        // Determine endpoints: use discovery if issuer_url is provided,
-        // otherwise require manual config
-        let (authorization_endpoint, token_endpoint, userinfo_endpoint) =
-            resolve_endpoints(config).await?;
+        let endpoints = resolve_endpoints(config).await?;
 
-        // Store configuration
         let oidc_config = OidcConfig {
             client_id: client_id.clone(),
             client_secret: client_secret.to_string(),
-            authorization_endpoint,
-            token_endpoint,
-            userinfo_endpoint,
+            issuer: endpoints.issuer,
+            authorization_endpoint: endpoints.authorization_endpoint,
+            token_endpoint: endpoints.token_endpoint,
+            userinfo_endpoint: endpoints.userinfo_endpoint,
+            jwks_uri: config.jwks_url.clone().or(endpoints.jwks_uri),
+            // Empty is permitted here and refused at `begin_login`, so a
+            // provider can be listed and inspected before its callback URL is
+            // registered, without the login silently using a wrong one.
+            redirect_uri: config.redirect_uri.clone().unwrap_or_default(),
             scopes,
             attribute_mapping,
             groups_claim: config.groups_claim.clone(),
+            allowed_email_domains: config.allowed_email_domains.clone(),
         };
 
         self.config
@@ -111,25 +106,15 @@ impl AuthStrategy for OidcStrategy {
         credentials: AuthCredentials,
     ) -> Result<AuthenticationResult> {
         match credentials {
-            AuthCredentials::OAuth2Code {
-                code,
-                redirect_uri,
-                state: _,
-            } => {
-                let _ = (code, redirect_uri);
-                Err(Error::invalid_state(
-                    "OAuth2 code authentication requires code_verifier from session. \
-                     Use handle_callback() instead, which manages the full flow.",
-                ))
-            }
+            AuthCredentials::OAuth2Code { .. } => Err(Error::invalid_state(
+                "an OIDC code exchange needs the PKCE verifier from the sealed login state; \
+                 call complete_login()",
+            )),
 
-            AuthCredentials::OAuth2RefreshToken { refresh_token } => {
-                let _ = refresh_token;
-                Err(Error::invalid_state(
-                    "Refresh token authentication is not yet fully implemented. \
-                     Enable the 'oidc' feature for real HTTP requests.",
-                ))
-            }
+            AuthCredentials::OAuth2RefreshToken { .. } => Err(Error::invalid_state(
+                "refreshing at the provider is not implemented; RaisinDB issues its own session \
+                 tokens once, at login",
+            )),
 
             _ => Err(Error::Validation(
                 "OIDC strategy requires OAuth2Code or OAuth2RefreshToken credentials".to_string(),
@@ -140,21 +125,17 @@ impl AuthStrategy for OidcStrategy {
     async fn get_authorization_url(
         &self,
         _tenant_id: &str,
-        state: &str,
-        redirect_uri: &str,
+        _state: &str,
+        _redirect_uri: &str,
     ) -> Result<Option<String>> {
-        let code_verifier = Self::generate_code_verifier();
-        let code_challenge = Self::generate_code_challenge(&code_verifier);
-
-        tracing::warn!(
-            "PKCE code_verifier generated but not stored: {}. \
-             Store this in session storage keyed by state parameter: {}",
-            code_verifier,
-            state
-        );
-
-        let url = self.build_authorization_url(redirect_uri, state, &code_challenge, None)?;
-        Ok(Some(url))
+        // Deliberately not implemented. The flow mints a PKCE verifier that
+        // must reach the callback, and this signature returns only a URL. The
+        // previous version logged the verifier at WARN and threw it away,
+        // which left the exchange to run with a placeholder.
+        Err(Error::invalid_state(
+            "use begin_login(), which returns the authorization URL together with the sealed \
+             state carrying the PKCE verifier",
+        ))
     }
 
     async fn handle_callback(
@@ -162,32 +143,22 @@ impl AuthStrategy for OidcStrategy {
         _tenant_id: &str,
         params: HashMap<String, String>,
     ) -> Result<AuthenticationResult> {
-        let code = params
-            .get("code")
-            .ok_or_else(|| Error::Validation("Missing 'code' parameter in callback".to_string()))?;
-
-        let state = params.get("state").ok_or_else(|| {
-            Error::Validation("Missing 'state' parameter in callback".to_string())
-        })?;
-
-        let redirect_uri = params.get("redirect_uri").ok_or_else(|| {
-            Error::Validation("Missing 'redirect_uri' parameter in callback".to_string())
-        })?;
-
-        tracing::warn!(
-            "Callback received with state: {}. Retrieve code_verifier from session storage.",
-            state
-        );
-
-        let code_verifier = "PLACEHOLDER_CODE_VERIFIER";
-
-        let token_response = self
-            .exchange_code_for_tokens(code, redirect_uri, code_verifier)
-            .await?;
-
-        let user_info = self.fetch_user_info(&token_response.access_token).await?;
-
-        self.map_user_info(user_info)
+        // Validated in the order a caller would hit them, so a missing `code`
+        // is reported as such rather than as a missing verifier.
+        if !params.contains_key("code") {
+            return Err(Error::Validation(
+                "Missing 'code' parameter in callback".to_string(),
+            ));
+        }
+        if !params.contains_key("state") {
+            return Err(Error::Validation(
+                "Missing 'state' parameter in callback".to_string(),
+            ));
+        }
+        Err(Error::invalid_state(
+            "use complete_login(), which opens the sealed state to recover the PKCE verifier \
+             and the nonce this callback must be checked against",
+        ))
     }
 
     fn supports(&self, credentials: &AuthCredentials) -> bool {
@@ -198,49 +169,75 @@ impl AuthStrategy for OidcStrategy {
     }
 }
 
-/// Resolve OIDC endpoints from discovery or manual config.
-async fn resolve_endpoints(config: &AuthProviderConfig) -> Result<(String, String, String)> {
-    if let Some(issuer_url) = &config.issuer_url {
-        // Try OIDC discovery
-        match OidcStrategy::discover_endpoints(issuer_url).await {
-            Ok(discovery) => Ok((
-                discovery.authorization_endpoint,
-                discovery.token_endpoint,
-                discovery.userinfo_endpoint,
-            )),
-            Err(e) => {
-                tracing::warn!(
-                    "OIDC discovery failed for {}: {}. Falling back to manual configuration.",
-                    issuer_url,
-                    e
-                );
-                extract_manual_endpoints(config)
-            }
-        }
+/// Fall back to a default when a configured claim name is blank.
+fn non_empty(configured: &str, fallback: &str) -> String {
+    if configured.is_empty() {
+        fallback.to_string()
     } else {
-        extract_manual_endpoints(config)
+        configured.to_string()
     }
 }
 
+/// The endpoints a login needs, however they were obtained.
+pub(super) struct ResolvedEndpoints {
+    pub(super) issuer: String,
+    pub(super) authorization_endpoint: String,
+    pub(super) token_endpoint: String,
+    pub(super) userinfo_endpoint: Option<String>,
+    pub(super) jwks_uri: Option<String>,
+}
+
+/// Resolve OIDC endpoints from discovery, falling back to manual config.
+///
+/// Discovery failing is not fatal, because a provider behind a slow network or
+/// a temporary outage should not take down a login path that has every endpoint
+/// written down. It is logged at WARN: a deployment that meant to use discovery
+/// and quietly fell back would otherwise never learn that its `jwks_uri` is
+/// whatever was configured months ago.
+async fn resolve_endpoints(config: &AuthProviderConfig) -> Result<ResolvedEndpoints> {
+    if let Some(issuer_url) = &config.issuer_url {
+        match OidcStrategy::discover_endpoints(issuer_url).await {
+            Ok(doc) => {
+                return Ok(ResolvedEndpoints {
+                    issuer: doc.issuer,
+                    authorization_endpoint: doc.authorization_endpoint,
+                    token_endpoint: doc.token_endpoint,
+                    userinfo_endpoint: doc.userinfo_endpoint,
+                    jwks_uri: doc.jwks_uri,
+                })
+            }
+            Err(e) => {
+                tracing::warn!(
+                    issuer = %issuer_url,
+                    error = %e,
+                    "OIDC discovery failed; falling back to the manually configured endpoints"
+                );
+            }
+        }
+    }
+    extract_manual_endpoints(config)
+}
+
 /// Extract endpoints from manual config fields.
-fn extract_manual_endpoints(config: &AuthProviderConfig) -> Result<(String, String, String)> {
-    let auth_endpoint = config.authorization_url.as_ref().ok_or_else(|| {
+fn extract_manual_endpoints(config: &AuthProviderConfig) -> Result<ResolvedEndpoints> {
+    let authorization_endpoint = config.authorization_url.clone().ok_or_else(|| {
         Error::Validation("OIDC provider requires issuer_url or authorization_url".to_string())
     })?;
 
     let token_endpoint = config
         .token_url
-        .as_ref()
+        .clone()
         .ok_or_else(|| Error::Validation("OIDC provider requires token_url".to_string()))?;
 
-    let userinfo_endpoint = config
-        .userinfo_url
-        .as_ref()
-        .ok_or_else(|| Error::Validation("OIDC provider requires userinfo_url".to_string()))?;
-
-    Ok((
-        auth_endpoint.clone(),
-        token_endpoint.clone(),
-        userinfo_endpoint.clone(),
-    ))
+    Ok(ResolvedEndpoints {
+        // With no discovery document there is no canonical issuer to compare
+        // against, so the configured issuer_url is used verbatim. A provider
+        // that spells its issuer differently must be configured with the
+        // spelling it puts in the token.
+        issuer: config.issuer_url.clone().unwrap_or_default(),
+        authorization_endpoint,
+        token_endpoint,
+        userinfo_endpoint: config.userinfo_url.clone(),
+        jwks_uri: config.jwks_url.clone(),
+    })
 }

@@ -33,5 +33,5 @@ mod one_time_token;
 
 pub use local::LocalStrategy;
 pub use magic_link::MagicLinkStrategy;
-pub use oidc::OidcStrategy;
+pub use oidc::{LoginRedirect, OidcLoginState, OidcStrategy, LOGIN_STATE_TTL_SECONDS};
 pub use one_time_token::OneTimeTokenStrategy;

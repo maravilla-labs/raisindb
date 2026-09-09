@@ -35,7 +35,7 @@ base64 = { workspace = true }
 rand = "0.8"
 
 # HTTP client for OIDC
-reqwest = { workspace = true, features = ["json"], optional = true }
+reqwest = { workspace = true, features = ["json"] }
 
 # URL handling
 url = { workspace = true }
@@ -57,4 +57,5 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
 [features]
 default = []
-oidc = ["reqwest"]
+# Kept so `--features oidc` on dependants still resolves; HTTP is always on now.
+oidc = []

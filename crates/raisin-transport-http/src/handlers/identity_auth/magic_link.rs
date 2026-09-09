@@ -640,7 +640,8 @@ async fn verify_magic_link_core(
     wants_json: bool,
 ) -> Result<Response, ApiError> {
     use super::helpers::{
-        build_auth_response, create_session, extract_repos, generate_tokens, AuthRepositories,
+        build_auth_response, create_session, extract_repos, generate_tokens_with_policy,
+        AuthRepositories,
     };
     use super::user_node::ensure_user_node;
     use raisin_auth::strategies::MagicLinkStrategy;
@@ -731,7 +732,7 @@ async fn verify_magic_link_core(
         .await
         .map_err(|e| ApiError::internal(format!("Failed to save identity: {e}")))?;
 
-    let (session, expires_at) = create_session(
+    let (session, _expires_at) = create_session(
         &repos.session,
         tenant_id,
         &identity.identity_id,
@@ -768,8 +769,16 @@ async fn verify_magic_link_core(
         }
     };
 
-    let tokens = generate_tokens(state, &identity, &session, Some(repo), home.as_deref())?;
-    let response = build_auth_response(&identity, tokens, expires_at, home);
+    let policy = super::policy::load_auth_policy(state, tenant_id).await;
+    let tokens = generate_tokens_with_policy(
+        state,
+        &identity,
+        &session,
+        Some(repo),
+        home.as_deref(),
+        &policy,
+    )?;
+    let response = build_auth_response(&identity, tokens, home);
 
     if wants_json {
         return Ok(Json(response).into_response());

@@ -19,7 +19,7 @@ use serde::Deserialize;
 use crate::error::ApiError;
 use crate::state::AppState;
 
-use super::helpers::validate_password;
+use super::policy::load_auth_policy;
 
 #[derive(Debug, Deserialize)]
 pub struct ChangePasswordRequest {
@@ -60,7 +60,9 @@ pub async fn change_password(
         ));
     };
 
-    validate_password(&req.new_password)?;
+    load_auth_policy(&state, &claims.tenant_id)
+        .await
+        .validate_password(&req.new_password)?;
 
     if req.new_password == req.old_password {
         return Err(ApiError::new(

@@ -27,13 +27,19 @@
 //! # Module Structure
 //!
 //! - `config`: OIDC configuration types
-//! - `discovery`: OIDC endpoint discovery
+//! - `discovery`: OIDC endpoint discovery, JWKS retrieval, token exchange
+//! - `flow`: the authorization-code flow, `begin_login` and `complete_login`
+//! - `idtoken`: `id_token` signature and claim verification
+//! - `login_state`: the sealed `state` parameter carrying the PKCE verifier
 //! - `mapping`: User info claim mapping
 //! - `pkce`: PKCE code verifier/challenge generation
 //! - `strategy`: `AuthStrategy` trait implementation
 
 mod config;
 mod discovery;
+mod flow;
+mod idtoken;
+mod login_state;
 mod mapping;
 mod pkce;
 mod strategy;
@@ -47,6 +53,9 @@ use std::sync::OnceLock;
 use crate::strategy::StrategyId;
 
 use config::OidcConfig;
+
+pub use flow::LoginRedirect;
+pub use login_state::{OidcLoginState, LOGIN_STATE_TTL_SECONDS};
 
 /// OpenID Connect authentication strategy.
 ///
@@ -78,6 +87,16 @@ impl OidcStrategy {
             display_name: display_name.into(),
             config: OnceLock::new(),
         }
+    }
+
+    /// The provider slug, e.g. `google` for the strategy `oidc:google`.
+    ///
+    /// Falls back to the whole strategy id, which cannot happen for a strategy
+    /// built by [`Self::new`] but keeps this total.
+    pub fn provider_name(&self) -> &str {
+        self.strategy_id
+            .provider_name()
+            .unwrap_or_else(|| self.strategy_id.as_ref())
     }
 
     /// Get the OIDC configuration.

@@ -150,6 +150,30 @@ impl SecretContext {
         Self::build("", "", "authserver", "authorization_code", V1Policy::Reject)
     }
 
+    /// The sealed OIDC login state: the PKCE verifier and nonce for one
+    /// in-flight browser login.
+    ///
+    /// Not repo-scoped — a login belongs to a tenant, and the repository it
+    /// lands in is carried inside the payload rather than in the binding.
+    ///
+    /// [`V1Policy::Accept`] because `seal` still emits v1 while
+    /// `RAISIN_CRYPTO_EMIT_V2` is off, and a family that rejected v1 could not
+    /// open its own output. The binding becomes load-bearing when that gate
+    /// flips.
+    pub fn oidc_login_state(tenant: impl Into<String>) -> Result<Self> {
+        Self::build(tenant, "", "oidc", "login_state", V1Policy::Accept)
+    }
+
+    /// An OIDC provider's client secret, as stored in the tenant auth config.
+    ///
+    /// [`V1Policy::Reject`]: `RAISIN_CRYPTO_EMIT_V2` is on in every
+    /// environment this ships to, so every blob this family writes is v2 —
+    /// accepting v1 would only make the tenant binding "accident detection,
+    /// not attacker resistance" for a value that must not cross tenants.
+    pub fn oidc_client_secret(tenant: impl Into<String>) -> Result<Self> {
+        Self::build(tenant, "", "oidc", "client_secret", V1Policy::Reject)
+    }
+
     /// A value in the node secret store (`secret://` references).
     ///
     /// Defaults to [`V1Policy::Reject`]: this family is new, so every blob it

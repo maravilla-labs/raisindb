@@ -21,6 +21,7 @@ use raisin_rocksdb::repositories::{IdentityRepository, SessionRepository};
 use raisin_rocksdb::{AuthService, RocksDBStorage};
 
 use super::constants::session_duration_nanos;
+use super::policy::{load_auth_policy, EffectiveAuthPolicy};
 use super::types::{AuthTokensResponse, IdentityInfo};
 
 // ============================================================================
@@ -126,22 +127,43 @@ pub async fn create_session(
 // ============================================================================
 
 /// Generate authentication tokens for an identity.
+///
+/// This is the ONE token-minting path for every identity login (local
+/// password, magic link, OpenID Connect): it loads the tenant's effective
+/// auth policy and mints with the configured lifetimes. A handler that has
+/// already loaded the policy can call [`generate_tokens_with_policy`]
+/// instead and skip the second config read.
 #[cfg(feature = "storage-rocksdb")]
-pub fn generate_tokens(
+pub async fn generate_tokens(
     state: &AppState,
     identity: &Identity,
     session: &Session,
     repo: Option<&str>,
     home: Option<&str>,
 ) -> Result<AuthTokens, ApiError> {
+    let policy = load_auth_policy(state, &identity.tenant_id).await;
+    generate_tokens_with_policy(state, identity, session, repo, home, &policy)
+}
+
+/// Generate authentication tokens with an already-loaded auth policy.
+#[cfg(feature = "storage-rocksdb")]
+pub fn generate_tokens_with_policy(
+    state: &AppState,
+    identity: &Identity,
+    session: &Session,
+    repo: Option<&str>,
+    home: Option<&str>,
+    policy: &EffectiveAuthPolicy,
+) -> Result<AuthTokens, ApiError> {
     let auth_service = get_auth_service(state)?;
 
     auth_service
-        .generate_user_tokens(
+        .generate_user_tokens_with_lifetimes(
             identity,
             session,
             repo.map(String::from),
             home.map(String::from),
+            policy.token_lifetimes(),
         )
         .map_err(|e| {
             ApiError::new(
@@ -157,20 +179,30 @@ pub fn generate_tokens(
 // ============================================================================
 
 /// Build an AuthTokensResponse from components.
+///
+/// `expires_at` is the ACCESS TOKEN expiry as a Unix timestamp in SECONDS,
+/// the same unit the admin login and the refresh endpoint use. (It used to be
+/// the session expiry in milliseconds, which disagreed with refresh.)
 #[cfg(feature = "storage-rocksdb")]
 pub fn build_auth_response(
     identity: &Identity,
     tokens: AuthTokens,
-    expires_at: StorageTimestamp,
     home: Option<String>,
 ) -> AuthTokensResponse {
+    let expires_at = access_token_expires_at(&tokens);
     AuthTokensResponse {
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,
         token_type: "Bearer".to_string(),
-        expires_at: expires_at.timestamp_nanos() / 1_000_000, // Convert to millis
+        expires_at,
         identity: IdentityInfo::from_identity(identity, home),
     }
+}
+
+/// Unix timestamp (seconds) at which the access token in `tokens` expires.
+#[cfg(feature = "storage-rocksdb")]
+pub fn access_token_expires_at(tokens: &AuthTokens) -> i64 {
+    chrono::Utc::now().timestamp() + i64::try_from(tokens.expires_in).unwrap_or(i64::MAX)
 }
 
 // ============================================================================
@@ -211,21 +243,36 @@ pub fn validate_email(email: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// Validate password strength.
+/// Validate password strength against the legacy fixed rule.
+///
+/// Handlers use `EffectiveAuthPolicy::validate_password`, which applies the
+/// tenant's stored policy and falls back to this rule when none is stored.
 pub fn validate_password(password: &str) -> Result<(), ApiError> {
-    if password.len() < 8 {
-        return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "WEAK_PASSWORD",
-            "Password must be at least 8 characters long",
-        ));
-    }
-    Ok(())
+    EffectiveAuthPolicy::default().validate_password(password)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "storage-rocksdb")]
+    #[test]
+    fn auth_response_expires_at_is_access_token_expiry_in_seconds() {
+        let identity = Identity::new("id".into(), "t".into(), "a@example.com".into());
+        let tokens = AuthTokens {
+            access_token: "a".into(),
+            refresh_token: "r".into(),
+            token_type: "Bearer".into(),
+            expires_in: 600,
+            refresh_expires_in: Some(7200),
+        };
+        let before = chrono::Utc::now().timestamp();
+        let resp = build_auth_response(&identity, tokens, None);
+        let after = chrono::Utc::now().timestamp();
+        assert!(resp.expires_at >= before + 600 && resp.expires_at <= after + 600);
+        // Seconds, never milliseconds: a millisecond epoch is > 1e11.
+        assert!(resp.expires_at < 100_000_000_000);
+    }
 
     #[test]
     fn test_mask_email() {

@@ -3,22 +3,15 @@
 // RaisinDB - Git-like hierarchical multi model database
 // Copyright (C) 2019-2025 SOLUTAS GmbH, Switzerland
 
-//! Session management handlers (refresh, logout, list, revoke).
+//! Token refresh handler. Logout, listing and revocation live in `sessions.rs`.
 
-use axum::{
-    extract::{Path, State},
-    http::StatusCode,
-    Json,
-};
+use axum::{extract::State, http::StatusCode, Json};
 
 use crate::error::ApiError;
 use crate::state::AppState;
 
-use super::constants::ACCESS_TOKEN_SECONDS;
 use super::helpers::{extract_repos, get_auth_service};
-use super::types::{
-    AuthTokensResponse, IdentityInfo, RefreshTokenRequest, SessionInfo, SessionsResponse,
-};
+use super::types::{AuthTokensResponse, IdentityInfo, RefreshTokenRequest};
 
 /// Refresh authentication tokens.
 ///
@@ -158,12 +151,14 @@ pub async fn refresh_token(
     }
 
     // 6. Generate new tokens with incremented generation (preserves home from refresh token)
+    let policy = super::policy::load_auth_policy(&state, tenant_id).await;
     let (tokens, new_generation) = auth_service
-        .refresh_user_tokens(
+        .refresh_user_tokens_with_lifetimes(
             &identity,
             &session,
             &refresh_claims,
             refresh_claims.home.clone(),
+            policy.token_lifetimes(),
         )
         .map_err(|e| {
             ApiError::new(
@@ -200,86 +195,12 @@ pub async fn refresh_token(
     );
 
     // 8. Return new tokens (home is preserved from original refresh token)
+    let expires_at = super::helpers::access_token_expires_at(&tokens);
     Ok(Json(AuthTokensResponse {
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,
         token_type: "Bearer".to_string(),
-        expires_at: chrono::Utc::now().timestamp() + ACCESS_TOKEN_SECONDS,
+        expires_at,
         identity: IdentityInfo::from_identity(&identity, refresh_claims.home),
     }))
-}
-
-/// Logout and revoke the current session.
-///
-/// # Endpoint
-/// POST /auth/logout
-///
-/// # Headers
-/// Authorization: Bearer {access_token}
-#[cfg(feature = "storage-rocksdb")]
-pub async fn logout(
-    State(_state): State<AppState>,
-    // TODO: Extension(claims): Extension<AuthClaims>,
-) -> Result<StatusCode, ApiError> {
-    // TODO: Implement
-    // 1. Extract session_id from claims
-    // 2. Delete session
-    // 3. Invalidate cache
-    // 4. Return success
-
-    Err(ApiError::new(
-        StatusCode::NOT_IMPLEMENTED,
-        "NOT_IMPLEMENTED",
-        "Logout not yet implemented",
-    ))
-}
-
-/// List all sessions for the current identity.
-///
-/// # Endpoint
-/// GET /auth/sessions
-///
-/// # Headers
-/// Authorization: Bearer {access_token}
-#[cfg(feature = "storage-rocksdb")]
-pub async fn list_sessions(
-    State(_state): State<AppState>,
-    // TODO: Extension(claims): Extension<AuthClaims>,
-) -> Result<Json<SessionsResponse>, ApiError> {
-    // TODO: Implement
-    // 1. Extract identity_id from claims
-    // 2. Load all sessions for identity
-    // 3. Return session list with current session marked
-
-    Err(ApiError::new(
-        StatusCode::NOT_IMPLEMENTED,
-        "NOT_IMPLEMENTED",
-        "Session listing not yet implemented",
-    ))
-}
-
-/// Revoke a specific session.
-///
-/// # Endpoint
-/// DELETE /auth/sessions/{session_id}
-///
-/// # Headers
-/// Authorization: Bearer {access_token}
-#[cfg(feature = "storage-rocksdb")]
-pub async fn revoke_session(
-    State(_state): State<AppState>,
-    Path(_session_id): Path<String>,
-    // TODO: Extension(claims): Extension<AuthClaims>,
-) -> Result<StatusCode, ApiError> {
-    // TODO: Implement
-    // 1. Verify session belongs to current identity
-    // 2. Delete session
-    // 3. Invalidate cache
-    // 4. Return success
-
-    Err(ApiError::new(
-        StatusCode::NOT_IMPLEMENTED,
-        "NOT_IMPLEMENTED",
-        "Session revocation not yet implemented",
-    ))
 }

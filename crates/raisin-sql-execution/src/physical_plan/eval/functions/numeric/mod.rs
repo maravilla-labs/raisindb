@@ -1,18 +1,10 @@
-//! Numeric manipulation functions
+//! Numeric functions.
 //!
-//! This module contains functions for numeric operations:
-//! - ROUND: Round numeric values to specified decimal places
-
-mod round;
-
-pub use round::RoundFunction;
+//! The numeric library (ABS, CEIL, ROUND, POWER, ...) lives in the scalar
+//! kernels — see `functions::kernel`. This module is the seam kept for numeric
+//! functions that need the execution context, and registers nothing today.
 
 use super::registry::FunctionRegistry;
 
-/// Register all numeric functions in the provided registry
-///
-/// This function is called during registry initialization to register
-/// all numeric manipulation functions.
-pub fn register_functions(registry: &mut FunctionRegistry) {
-    registry.register(Box::new(RoundFunction));
-}
+/// Register all numeric functions in the provided registry.
+pub fn register_functions(_registry: &mut FunctionRegistry) {}

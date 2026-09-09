@@ -12,5 +12,9 @@ properties:
       operations:
         - update
         - delete
-      conditions:
-        owner: "$user.id"
+      # The ownership test. This MUST be `condition` (singular): it is the key
+      # `parse_permission` reads. Written as `conditions: {owner: "$user.id"}`
+      # it was silently dropped, and an author could edit and delete anyone's
+      # content. The parser still accepts that spelling as an alias, producing
+      # exactly this expression, so roles already installed keep working.
+      condition: "auth.user_id != null && (node.owner_id == auth.user_id || (node.owner_id == null && node.created_by == auth.user_id))"

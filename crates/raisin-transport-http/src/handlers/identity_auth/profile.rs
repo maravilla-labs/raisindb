@@ -13,47 +13,106 @@ use axum::{
 use crate::error::ApiError;
 use crate::state::AppState;
 
-use super::types::{AuthProvidersResponse, MeForRepoResponse, MeResponse};
+use super::types::{AuthProviderInfo, AuthProvidersResponse, MeForRepoResponse, MeResponse};
+
+/// Build the provider list from the tenant's stored auth config.
+///
+/// Local and magic-link sign-in default to ENABLED when the tenant has never
+/// written a config: their login routes do not consult the config, so
+/// reporting them off would make a UI hide a button that works. An explicit
+/// `enabled: false` entry is honoured. OIDC providers are listed only when
+/// enabled, with the server-relative URL that starts a login; `repo` is
+/// appended so the callback provisions the user into that repository.
+#[cfg(feature = "storage-rocksdb")]
+async fn providers_response(
+    state: &AppState,
+    tenant_id: &str,
+    repo: Option<&str>,
+) -> Result<AuthProvidersResponse, ApiError> {
+    use raisin_models::auth::TenantAuthConfig;
+
+    let config = state
+        .storage()
+        .tenant_auth_config_repository()
+        .get_config(tenant_id)
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to load auth config: {e}")))?
+        .unwrap_or_else(|| TenantAuthConfig::new(tenant_id.to_string()));
+
+    Ok(providers_from_config(&config, repo))
+}
+
+/// The pure half of [`providers_response`], separated so it can be tested
+/// without storage.
+pub(super) fn providers_from_config(
+    config: &raisin_models::auth::TenantAuthConfig,
+    repo: Option<&str>,
+) -> AuthProvidersResponse {
+    let enabled_or_default = |strategy: &str| {
+        config
+            .get_provider(strategy)
+            .map(|p| p.enabled)
+            .unwrap_or(true)
+    };
+
+    let providers = super::config_oidc::oidc_provider_views(config)
+        .into_iter()
+        .filter(|p| p.enabled)
+        .map(|p| {
+            let auth_url = match repo {
+                Some(r) => format!("{}?repo={}", p.authorize_url, urlencoding::encode(r)),
+                None => p.authorize_url.clone(),
+            };
+            AuthProviderInfo {
+                id: p.provider_id,
+                display_name: p.display_name,
+                icon: p.icon,
+                auth_url,
+            }
+        })
+        .collect();
+
+    AuthProvidersResponse {
+        providers,
+        local_enabled: enabled_or_default("local"),
+        magic_link_enabled: enabled_or_default("magic_link"),
+    }
+}
 
 /// Get available authentication providers for a tenant.
 ///
 /// # Endpoint
 /// GET /auth/providers
 ///
-/// This returns the list of configured authentication providers for the tenant,
-/// allowing the UI to display appropriate login options.
+/// Returns the sign-in methods a login page should offer: whether password and
+/// magic-link sign-in are on, and every enabled OIDC provider with the URL
+/// that starts its flow. No secrets, no client ids.
 #[cfg(feature = "storage-rocksdb")]
 pub async fn get_providers(
-    State(_state): State<AppState>,
-    Extension(_tenant_info): Extension<crate::middleware::TenantInfo>,
+    State(state): State<AppState>,
+    Extension(tenant_info): Extension<crate::middleware::TenantInfo>,
 ) -> Result<Json<AuthProvidersResponse>, ApiError> {
-    // TODO: Load from TenantAuthConfig via IdentityAuthService
-    // For now, return a basic response with local auth enabled
-
-    Ok(Json(AuthProvidersResponse {
-        providers: vec![],
-        local_enabled: true,
-        magic_link_enabled: true,
-    }))
+    Ok(Json(
+        providers_response(&state, &tenant_info.tenant_id, None).await?,
+    ))
 }
 
 /// Get available authentication providers for a specific repository.
 ///
 /// # Endpoint
 /// GET /auth/{repo}/providers
+///
+/// Same list as `/auth/providers`; the OIDC start URLs carry `?repo=` so the
+/// callback provisions the user node in this repository.
 #[cfg(feature = "storage-rocksdb")]
 pub async fn get_providers_for_repo(
-    State(_state): State<AppState>,
-    Extension(_tenant_info): Extension<crate::middleware::TenantInfo>,
-    Path(_repo): Path<String>,
+    State(state): State<AppState>,
+    Extension(tenant_info): Extension<crate::middleware::TenantInfo>,
+    Path(repo): Path<String>,
 ) -> Result<Json<AuthProvidersResponse>, ApiError> {
-    // TODO: Load from RepoAuthConfig
-    // For now, return a basic response with local auth enabled
-    Ok(Json(AuthProvidersResponse {
-        providers: vec![],
-        local_enabled: true,
-        magic_link_enabled: true,
-    }))
+    Ok(Json(
+        providers_response(&state, &tenant_info.tenant_id, Some(&repo)).await?,
+    ))
 }
 
 /// Get current identity information.
@@ -183,4 +242,51 @@ pub async fn get_me_for_repo(
         home,
         user_node,
     }))
+}
+
+#[cfg(all(test, feature = "storage-rocksdb"))]
+mod tests {
+    use super::*;
+    use raisin_models::auth::{AuthProviderConfig, TenantAuthConfig};
+
+    /// A tenant that never saved a config still gets working password and
+    /// magic-link buttons: those routes do not read the config.
+    #[test]
+    fn an_empty_config_reports_local_and_magic_link_on() {
+        let r = providers_from_config(&TenantAuthConfig::new("t".into()), None);
+        assert!(r.local_enabled && r.magic_link_enabled);
+        assert!(r.providers.is_empty());
+    }
+
+    #[test]
+    fn an_explicit_disable_is_honoured() {
+        let mut cfg = TenantAuthConfig::new("t".into());
+        let mut local = AuthProviderConfig::local();
+        local.enabled = false;
+        cfg.providers.push(local);
+        assert!(!providers_from_config(&cfg, None).local_enabled);
+    }
+
+    #[test]
+    fn enabled_oidc_providers_are_listed_with_their_start_url() {
+        let mut cfg = TenantAuthConfig::new("t".into());
+        cfg.providers
+            .push(AuthProviderConfig::oidc("keycloak", "Staff SSO"));
+        let mut off = AuthProviderConfig::oidc("legacy", "Old");
+        off.enabled = false;
+        cfg.providers.push(off);
+
+        let r = providers_from_config(&cfg, Some("my repo"));
+        assert_eq!(r.providers.len(), 1);
+        assert_eq!(r.providers[0].id, "keycloak");
+        assert_eq!(r.providers[0].display_name, "Staff SSO");
+        assert_eq!(
+            r.providers[0].auth_url,
+            "/auth/oidc/keycloak?repo=my%20repo"
+        );
+        assert_eq!(
+            providers_from_config(&cfg, None).providers[0].auth_url,
+            "/auth/oidc/keycloak"
+        );
+    }
 }

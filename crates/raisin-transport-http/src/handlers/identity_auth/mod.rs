@@ -30,6 +30,7 @@
 
 // Module declarations
 mod config;
+mod config_oidc;
 mod config_types;
 mod constants;
 pub mod helpers;
@@ -37,15 +38,19 @@ mod local;
 mod magic_link;
 mod oidc;
 mod password;
+pub mod policy;
 mod profile;
 mod session;
+mod sessions;
 mod types;
 pub mod user_node;
 
 // Re-export all public types
+pub use config_oidc::{open_client_secret, seal_client_secret};
 pub use config_types::{
-    AccessSettingsConfig, LocalAuthConfig, MagicLinkConfig, PasswordPolicyConfig,
-    SessionSettingsConfig, TenantAuthConfigResponse, UpdateTenantAuthConfigRequest,
+    AccessSettingsConfig, LocalAuthConfig, MagicLinkConfig, OidcProviderInput, OidcProviderView,
+    PasswordPolicyConfig, SessionSettingsConfig, TenantAuthConfigResponse,
+    UpdateTenantAuthConfigRequest,
 };
 pub use types::{
     AuthProviderInfo, AuthProvidersResponse, AuthTokensResponse, IdentityInfo, LocalLoginRequest,
@@ -76,4 +81,7 @@ pub use password::change_password;
 pub use profile::{get_me, get_me_for_repo, get_providers, get_providers_for_repo};
 
 #[cfg(feature = "storage-rocksdb")]
-pub use session::{list_sessions, logout, refresh_token, revoke_session};
+pub use session::refresh_token;
+
+#[cfg(feature = "storage-rocksdb")]
+pub use sessions::{list_sessions, logout, revoke_session};

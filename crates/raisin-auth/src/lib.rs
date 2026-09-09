@@ -26,62 +26,56 @@
 //! ┌─────────────────────────────────────────────────────────────┐
 //! │                     AUTHENTICATION LAYER                    │
 //! │                                                             │
-//! │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐         │
-//! │  │   Local     │  │   OIDC      │  │  Magic Link │  ...    │
-//! │  │  Strategy   │  │  Strategy   │  │  Strategy   │         │
-//! │  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘         │
+//! │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐          │
+//! │  │   Local     │  │   OIDC      │  │  Magic Link │  ...     │
+//! │  │  Strategy   │  │  Strategy   │  │  Strategy   │          │
+//! │  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘          │
 //! │         └────────────────┼────────────────┘                 │
 //! │                          ▼                                  │
 //! │              ┌───────────────────────┐                      │
-//! │              │   AuthStrategyRegistry │                     │
-//! │              └───────────┬───────────┘                      │
-//! │                          ▼                                  │
-//! │              ┌───────────────────────┐                      │
-//! │              │      AuthService      │                      │
+//! │              │  transport handlers   │                      │
+//! │              │  + AuthService (JWT)  │                      │
 //! │              └───────────────────────┘                      │
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! # Usage
+//! # How a strategy is reached
+//!
+//! There is no registry. A transport handler loads the tenant's
+//! [`raisin_models::auth::TenantAuthConfig`], picks the provider the request
+//! names, builds the strategy for it and uses it once. A strategy therefore
+//! always sees the configuration as it stands right now, which is what lets an
+//! administrator change a provider without restarting the server, and there is
+//! exactly one place that decides which strategy runs.
+//!
+//! An earlier `AuthStrategyRegistry` held strategies initialised at startup and
+//! was never wired to a transport. It is gone rather than left beside the
+//! working path, because two mechanisms for the same decision drift.
+//!
+//! # OIDC login
 //!
 //! ```ignore
-//! use raisin_auth::{AuthStrategyRegistry, AuthService, strategies::LocalStrategy};
+//! use raisin_auth::strategies::{OidcStrategy, OidcLoginState};
+//! use raisin_auth::AuthStrategy;
 //!
-//! // Create registry and register strategies
-//! let registry = AuthStrategyRegistry::new();
-//! registry.register(Arc::new(LocalStrategy::new())).await;
+//! let mut strategy = OidcStrategy::new("google", "Sign in with Google");
+//! strategy.init(&provider_config, Some(&client_secret)).await?;
 //!
-//! // Create auth service
-//! let auth_service = AuthService::new(
-//!     registry,
-//!     identity_store,
-//!     session_store,
-//!     jwt_secret,
-//! );
+//! // Send the browser here. The sealed state carries the PKCE verifier.
+//! let redirect = strategy.begin_login(tenant_id, &master_key, app_redirect, repo)?;
 //!
-//! // Authenticate
-//! let tokens = auth_service.authenticate(
-//!     "tenant-1",
-//!     AuthCredentials::UsernamePassword {
-//!         username: "user@example.com".to_string(),
-//!         password: "password".to_string(),
-//!     },
-//! ).await?;
+//! // ... the provider redirects back with `code` and `state` ...
+//! let state = OidcLoginState::open(&state_param, &master_key, tenant_id, "google")?;
+//! let result = strategy.complete_login(&state, &code).await?;
 //! ```
 //!
-//! # Features
-//!
-//! - `oidc`: Enable OIDC support (requires `reqwest`)
-
 pub mod authserver;
 pub mod cache;
 pub mod jobs;
-pub mod registry;
 pub mod strategies;
 pub mod strategy;
 
 // Re-export main types
-pub use registry::AuthStrategyRegistry;
 pub use strategy::{AuthCredentials, AuthStrategy, AuthenticationResult, StrategyId};
 
 // Re-export models for convenience

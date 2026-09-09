@@ -208,6 +208,17 @@ pub async fn update_auth_config(
         config.cors_allowed_origins = cors_origins;
     }
 
+    // Replace the OIDC provider list. Client secrets are sealed here, under
+    // the master key bound to this tenant, and never stored in the clear.
+    if let Some(providers) = &req.oidc_providers {
+        let master_key = state
+            .get_master_key()
+            .map_err(|e| ApiError::internal(format!("master key unavailable: {e}")))?;
+        super::config_oidc::apply_oidc_providers(&mut config, providers, |plaintext| {
+            super::config_oidc::seal_client_secret(&master_key, &tenant_id, plaintext)
+        })?;
+    }
+
     // Save the updated config
     storage
         .tenant_auth_config_repository()

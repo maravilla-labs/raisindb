@@ -22,6 +22,7 @@ mod fulltext;
 pub(crate) mod geospatial;
 mod hierarchy;
 mod json;
+mod kernel;
 mod numeric;
 mod registry;
 mod string;
@@ -93,6 +94,11 @@ pub use aggregate::naming::generate_function_column_name;
 /// on first access, even if multiple threads try to access it simultaneously.
 static FUNCTIONS: LazyLock<FunctionRegistry> = LazyLock::new(|| {
     let mut registry = FunctionRegistry::new();
+
+    // The scalar kernels go in first; the hand-written registrations below
+    // are the ones a kernel cannot express, because they need the row, the
+    // auth context or storage.
+    kernel::register_functions(&mut registry);
 
     // Register functions by category
     string::register_functions(&mut registry);

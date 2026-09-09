@@ -437,3 +437,89 @@ fn fold_only_deterministic_and_successful() {
     assert_eq!(fold("LN", &[i(0)]), None);
     assert_eq!(fold("NOPE", &[]), None);
 }
+
+/// A kernel with no entry in [`signature`](super::signature) resolves to
+/// nothing in SQL: the analyzer would report `Unknown function` for a function
+/// the engine can actually evaluate. The two halves of one definition are
+/// tied together here rather than by a comment.
+#[test]
+fn every_kernel_and_alias_has_a_plan_time_signature() {
+    for kernel in all_kernels() {
+        assert!(
+            signature::arity_of(kernel.name).is_some(),
+            "kernel {} has no arity entry in scalar::signature",
+            kernel.name
+        );
+        for name in std::iter::once(&kernel.name).chain(kernel.aliases.iter()) {
+            assert!(
+                signature::resolve(name, &[]).is_some(),
+                "{} does not resolve through scalar::signature",
+                name
+            );
+        }
+    }
+}
+
+#[test]
+fn signature_reports_arity_errors_and_return_types() {
+    use crate::analyzer::types::DataType;
+
+    // Too few, too many, and variadic lower bounds are all plan-time errors.
+    let err = signature::resolve("SUBSTR", &[DataType::Text])
+        .unwrap()
+        .unwrap_err();
+    assert!(err.contains("SUBSTR expects 2 to 3"), "{}", err);
+    let err = signature::resolve("CONCAT_WS", &[DataType::Text])
+        .unwrap()
+        .unwrap_err();
+    assert!(err.contains("at least 2"), "{}", err);
+    let err = signature::resolve("PI", &[DataType::Int])
+        .unwrap()
+        .unwrap_err();
+    assert!(err.contains("PI expects 0"), "{}", err);
+
+    let ret = |name: &str, args: &[DataType]| {
+        signature::resolve(name, args).unwrap().unwrap().return_type
+    };
+    // ABS and SIGN keep an integral input integral, as the kernels do.
+    assert_eq!(ret("ABS", &[DataType::Int]), DataType::Int);
+    assert_eq!(ret("ABS", &[DataType::BigInt]), DataType::BigInt);
+    assert_eq!(ret("ABS", &[DataType::Double]), DataType::Double);
+    assert_eq!(ret("SIGN", &[DataType::Text]), DataType::Double);
+    assert_eq!(
+        ret("MOD", &[DataType::Int, DataType::Int]),
+        DataType::BigInt
+    );
+    assert_eq!(
+        ret("MOD", &[DataType::Double, DataType::Int]),
+        DataType::Double
+    );
+    assert_eq!(ret("LENGTH", &[DataType::Text]), DataType::Int);
+    assert_eq!(
+        ret("STARTS_WITH", &[DataType::Text, DataType::Text]),
+        DataType::Boolean
+    );
+    assert_eq!(
+        ret("REGEXP_MATCH", &[DataType::Text, DataType::Text]),
+        DataType::JsonB
+    );
+    assert_eq!(ret("CURRENT_DATE", &[]), DataType::TimestampTz);
+    assert_eq!(ret("CURRENT_TIME", &[]), DataType::Text);
+    assert_eq!(ret("AGE", &[DataType::TimestampTz]), DataType::Interval);
+    // An alias resolves to its kernel's canonical name.
+    assert_eq!(
+        signature::resolve("CEILING", &[DataType::Double])
+            .unwrap()
+            .unwrap()
+            .name,
+        "CEIL"
+    );
+    assert_eq!(
+        signature::resolve("substring", &[DataType::Text, DataType::Int])
+            .unwrap()
+            .unwrap()
+            .name,
+        "SUBSTR"
+    );
+    assert!(signature::resolve("NO_SUCH_FUNCTION", &[]).is_none());
+}

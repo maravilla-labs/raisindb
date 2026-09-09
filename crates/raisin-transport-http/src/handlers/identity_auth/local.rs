@@ -22,9 +22,10 @@ use raisin_models::timestamp::StorageTimestamp;
 use raisin_rocksdb::repositories::IdentityRepository;
 
 use super::helpers::{
-    build_auth_response, create_session, extract_repos, generate_tokens, validate_email,
-    validate_password, AuthRepositories,
+    build_auth_response, create_session, extract_repos, generate_tokens_with_policy,
+    validate_email, AuthRepositories,
 };
+use super::policy::{load_auth_policy, EffectiveAuthPolicy};
 use super::types::{AuthTokensResponse, LocalLoginRequest, RegisterRequest};
 use super::user_node::ensure_user_node;
 
@@ -39,12 +40,13 @@ async fn create_identity_and_session(
     repos: &AuthRepositories,
     tenant_id: &str,
     req: &RegisterRequest,
+    policy: &EffectiveAuthPolicy,
 ) -> Result<(Identity, Session, StorageTimestamp), ApiError> {
     use uuid::Uuid;
 
     // Validate inputs
     validate_email(&req.email)?;
-    validate_password(&req.password)?;
+    policy.validate_password(&req.password)?;
 
     // Check if email already exists
     if repos
@@ -126,6 +128,7 @@ async fn verify_credentials_and_create_session(
     email: &str,
     password: &str,
     remember_me: bool,
+    policy: &EffectiveAuthPolicy,
 ) -> Result<(Identity, Session, StorageTimestamp), ApiError> {
     use raisin_auth::strategies::LocalStrategy;
 
@@ -184,8 +187,8 @@ async fn verify_credentials_and_create_session(
             .record_failed_login(
                 tenant_id,
                 &identity.identity_id,
-                5,  // lockout after 5 attempts
-                15, // 15 minutes lockout
+                policy.lockout_threshold,
+                policy.lockout_duration_minutes,
             )
             .await;
 
@@ -241,15 +244,14 @@ pub async fn register(
     let repos = extract_repos(&state)?;
     let tenant_id = &tenant_info.tenant_id;
 
-    let (identity, session, expires_at) =
-        create_identity_and_session(&repos, tenant_id, &req).await?;
+    let policy = load_auth_policy(&state, tenant_id).await;
+    let (identity, session, _expires_at) =
+        create_identity_and_session(&repos, tenant_id, &req, &policy).await?;
 
     // Generate tokens (no repo context, no home)
-    let tokens = generate_tokens(&state, &identity, &session, None, None)?;
+    let tokens = generate_tokens_with_policy(&state, &identity, &session, None, None, &policy)?;
 
-    Ok(Json(build_auth_response(
-        &identity, tokens, expires_at, None,
-    )))
+    Ok(Json(build_auth_response(&identity, tokens, None)))
 }
 
 /// Register a new user for a specific repository.
@@ -269,8 +271,9 @@ pub async fn register_for_repo(
     let repos = extract_repos(&state)?;
     let tenant_id = &tenant_info.tenant_id;
 
-    let (identity, session, expires_at) =
-        create_identity_and_session(&repos, tenant_id, &req).await?;
+    let policy = load_auth_policy(&state, tenant_id).await;
+    let (identity, session, _expires_at) =
+        create_identity_and_session(&repos, tenant_id, &req, &policy).await?;
 
     // Create user node inline in the repository's access_control workspace
     let home = match ensure_user_node(
@@ -304,11 +307,16 @@ pub async fn register_for_repo(
     };
 
     // Generate tokens with repo context and home path
-    let tokens = generate_tokens(&state, &identity, &session, Some(&repo), home.as_deref())?;
+    let tokens = generate_tokens_with_policy(
+        &state,
+        &identity,
+        &session,
+        Some(&repo),
+        home.as_deref(),
+        &policy,
+    )?;
 
-    Ok(Json(build_auth_response(
-        &identity, tokens, expires_at, home,
-    )))
+    Ok(Json(build_auth_response(&identity, tokens, home)))
 }
 
 /// Authenticate with email and password (generic, no repo context).
@@ -324,21 +332,21 @@ pub async fn login(
     let repos = extract_repos(&state)?;
     let tenant_id = &tenant_info.tenant_id;
 
-    let (identity, session, expires_at) = verify_credentials_and_create_session(
+    let policy = load_auth_policy(&state, tenant_id).await;
+    let (identity, session, _expires_at) = verify_credentials_and_create_session(
         &repos,
         tenant_id,
         &req.email,
         &req.password,
         req.remember_me,
+        &policy,
     )
     .await?;
 
     // Generate tokens (no repo context, no home)
-    let tokens = generate_tokens(&state, &identity, &session, None, None)?;
+    let tokens = generate_tokens_with_policy(&state, &identity, &session, None, None, &policy)?;
 
-    Ok(Json(build_auth_response(
-        &identity, tokens, expires_at, None,
-    )))
+    Ok(Json(build_auth_response(&identity, tokens, None)))
 }
 
 /// Login to a specific repository.
@@ -358,12 +366,14 @@ pub async fn login_for_repo(
     let repos = extract_repos(&state)?;
     let tenant_id = &tenant_info.tenant_id;
 
-    let (identity, session, expires_at) = verify_credentials_and_create_session(
+    let policy = load_auth_policy(&state, tenant_id).await;
+    let (identity, session, _expires_at) = verify_credentials_and_create_session(
         &repos,
         tenant_id,
         &req.email,
         &req.password,
         req.remember_me,
+        &policy,
     )
     .await?;
 
@@ -401,7 +411,14 @@ pub async fn login_for_repo(
     };
 
     // Generate tokens with repo context and home path
-    let tokens = generate_tokens(&state, &identity, &session, Some(&repo), home.as_deref())?;
+    let tokens = generate_tokens_with_policy(
+        &state,
+        &identity,
+        &session,
+        Some(&repo),
+        home.as_deref(),
+        &policy,
+    )?;
 
     tracing::info!(
         identity_id = %identity.identity_id,
@@ -409,7 +426,5 @@ pub async fn login_for_repo(
         "User logged in via repo-scoped endpoint"
     );
 
-    Ok(Json(build_auth_response(
-        &identity, tokens, expires_at, home,
-    )))
+    Ok(Json(build_auth_response(&identity, tokens, home)))
 }
