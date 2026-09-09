@@ -34,6 +34,7 @@ async fn create_simple_node_type(storage: &InMemoryStorage, name: &str) {
         required_nodes: Vec::new(),
         initial_structure: None,
         versionable: Some(true),
+        immutable: None,
         publishable: Some(true),
         auditable: Some(false),
         indexable: Some(true),

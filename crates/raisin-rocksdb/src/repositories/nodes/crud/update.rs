@@ -82,6 +82,32 @@ impl NodeRepositoryImpl {
             }
         };
 
+        // VALIDATION 3a: Reject a `properties` change to an immutable node,
+        // and resolve `old_node`'s NodeType once for reuse at the revision
+        // -allocation step below (`versionable == Some(false)`). This is the
+        // repository-layer backstop (mirrors put_node's check): SQL DML's
+        // `update_property_by_path_impl` delegates straight into this
+        // function, so it is covered here too, without a separate hook.
+        // Fails OPEN if the type can't be resolved. See `crate::immutability`.
+        let old_node_type = {
+            use raisin_storage::NodeTypeRepository as _;
+            self.node_type_repo
+                .get(
+                    BranchScope::new(tenant_id, repo_id, branch),
+                    &old_node.node_type,
+                    None,
+                )
+                .await?
+        };
+        if let Some(old_type) = old_node_type.as_ref() {
+            crate::immutability::reject_if_immutable(
+                old_type,
+                &old_node.id,
+                &old_node.properties,
+                &node.properties,
+            )?;
+        }
+
         // Stamp modification time at this write level too — mirrors the
         // transaction-layer put_node stamping so non-transactional updates
         // (e.g. property updates by path) also record when they happened.
@@ -133,8 +159,41 @@ impl NodeRepositoryImpl {
             .await?;
 
         // ========== STEP 1: Allocate revision ==========
+        //
+        // `versionable == Some(false)` reuses `old_node`'s current revision
+        // instead of minting a fresh one, so the write lands at the same
+        // `{node_id}\0{~revision}` key and no new history entry is created.
+        // See `crate::immutability`'s module doc and the mirrored logic in
+        // `put_node.rs`.
+        //
+        // `update_head_to_batch` below is still called unconditionally with
+        // this (possibly reused) revision — it already has its own
+        // monotonic-advance guard (`new_head <= branch.head` => skip), so a
+        // reused older-or-equal revision is naturally a no-op there without
+        // any special-casing here.
         let step_start = std::time::Instant::now();
-        let revision = self.revision_repo.allocate_revision();
+        let mut reused_revision = false;
+        let revision = if old_node_type
+            .as_ref()
+            .map(|t| t.versionable == Some(false))
+            .unwrap_or(false)
+        {
+            match self
+                .get_history(tenant_id, repo_id, branch, workspace, &node.id, Some(1))
+                .await?
+                .into_iter()
+                .next()
+                .map(|(hlc, _)| hlc)
+            {
+                Some(hlc) => {
+                    reused_revision = true;
+                    hlc
+                }
+                None => self.revision_repo.allocate_revision(),
+            }
+        } else {
+            self.revision_repo.allocate_revision()
+        };
         let revision_time = step_start.elapsed().as_micros();
 
         // ========== STEP 2: Build WriteBatch with all indexes ==========

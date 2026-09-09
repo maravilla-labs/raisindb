@@ -42,6 +42,7 @@ pub(crate) async fn execute_create_mixin<S: Storage + 'static>(
         required_nodes: Vec::new(),
         initial_structure: None,
         versionable: None,
+        immutable: None,
         publishable: None,
         auditable: None,
         indexable: None,

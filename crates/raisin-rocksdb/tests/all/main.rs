@@ -19,6 +19,7 @@
 #![allow(dead_code)]
 
 mod apply_revision_capture_test;
+mod apply_revision_immutability_bypass_test;
 mod apply_revision_test;
 mod audit_attribution_test;
 mod branch_fork_index_copies_test;
@@ -36,8 +37,10 @@ mod embedding_spec_hash_test;
 mod encrypted_field_vaulting_test;
 mod fulltext_job_store_integration;
 mod hnsw_integration_test;
+mod immutable_nodetype_test;
 mod index_parity_test;
 mod integration_tests;
+mod merge_resolution_applies_test;
 mod move_copy_to_workspace_root_test;
 mod move_tree_compound_reindex_test;
 mod move_tree_readback_test;

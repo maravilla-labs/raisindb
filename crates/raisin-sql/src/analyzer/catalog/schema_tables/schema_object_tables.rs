@@ -96,6 +96,12 @@ pub(crate) fn node_types_table() -> TableDef {
                 generated: None,
             },
             ColumnDef {
+                name: "immutable".into(),
+                data_type: DataType::Boolean,
+                nullable: true,
+                generated: None,
+            },
+            ColumnDef {
                 name: "publishable".into(),
                 data_type: DataType::Boolean,
                 nullable: true,

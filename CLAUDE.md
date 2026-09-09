@@ -450,6 +450,45 @@ and still visible to `SELECT *`; `Permission::is_field_accessible` remains dead
 code; SQL DDL has no `ENCRYPTED` modifier, so secret fields must be declared in
 YAML.
 
+## `immutable` and `versionable` NodeType flags (`crate::immutability`)
+
+`NodeType.immutable: true` rejects any write that changes a node's
+`properties` after creation — scoped to properties only, so moves, renames,
+`node_type` changes and `published_at` remain writable, and delete remains
+allowed (delete tombstones, it doesn't rewrite content). `versionable: false`
+suppresses MVCC-revision minting: an update reuses the node's current
+revision instead of allocating a fresh one, so the write overwrites in place
+and `get_history` sees no new entry (for nodes rewritten on every refresh,
+e.g. a connection health check).
+
+- **One check function, every write path.** `crate::immutability::reject_if_immutable`
+  is called from both low-level UPDATE-capable write functions —
+  `put_node.rs` and the repository's `update_impl` — plus the cross-branch
+  promotion upsert (`queries/copy/cross_branch/stage.rs`), which hand-rolls
+  its own write rather than calling `update_impl`. `add_node`/`add_impl` need
+  no check: they are CREATE-only, so there is no prior state to protect.
+  Mirrors `crate::vaulting`'s "one body, every write path" reach.
+- **Fails OPEN, not closed**, when the NodeType can't be resolved — matching
+  `add_node.rs`'s `allowed_children` posture, not the vaulting gate's
+  fail-closed one. The overwhelming majority of types aren't immutable, so a
+  resolution hiccup must not become a write outage.
+- **Not enforced on the replication apply path**, for the same reason
+  vaulting isn't re-run there: a peer already accepted the write under its
+  own policy before capturing it for replication, and there is no rollback
+  story for rejecting an already-committed revision mid-apply. A compromised
+  or buggy peer can still overwrite an immutable node via replication — same
+  trust model already extended to `allowed_children`/uniqueness/`strict`.
+- **`versionable=false` revision reuse is safe against branch HEAD** only
+  because `update_head_to_batch` (repository) and the transaction commit path
+  (`transaction/commit/revision.rs`) both already have a monotonic-advance
+  guard (`new_head <= branch.head` => skip) — reusing an older revision is a
+  natural no-op there, not something this feature had to add.
+- **Known gap**: a `versionable=false` write inside a multi-node transaction
+  bypasses the transaction-wide HLC memo (`get_or_allocate_transaction_revision`)
+  for that one node, so a transaction mixing a non-versionable node with other
+  nodes will not have every write land at one shared revision. Unaffected for
+  the common case (a single-node write, e.g. a health-check refresh).
+
 ## Atomic Locks & Inventory (`raisin-locks`)
 
 Backend-pluggable acquire / tie-breaker primitive for ticket-sale-style workloads.

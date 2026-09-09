@@ -42,6 +42,7 @@ pub(crate) async fn execute_create_nodetype<S: Storage + 'static>(
         required_nodes: create.required_nodes.clone(),
         initial_structure: None, // DDL doesn't support initial_structure yet
         versionable: if create.versionable { Some(true) } else { None },
+        immutable: if create.immutable { Some(true) } else { None },
         publishable: if create.publishable { Some(true) } else { None },
         auditable: if create.auditable { Some(true) } else { None },
         indexable: if create.indexable { Some(true) } else { None },
@@ -228,6 +229,9 @@ fn apply_nodetype_alteration(
         }
         NodeTypeAlteration::SetVersionable(v) => {
             node_type.versionable = Some(*v);
+        }
+        NodeTypeAlteration::SetImmutable(v) => {
+            node_type.immutable = Some(*v);
         }
         NodeTypeAlteration::SetPublishable(v) => {
             node_type.publishable = Some(*v);

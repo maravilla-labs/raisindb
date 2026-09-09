@@ -27,6 +27,7 @@ mod group_by_json_extraction;
 mod hash_join_integration_tests;
 mod hybrid_search_query_embedder;
 mod hybrid_search_workspace;
+mod immutable_nodetype_dml_test;
 mod is_distinct_from;
 mod join_property_tests;
 mod limit_pushdown_tests;

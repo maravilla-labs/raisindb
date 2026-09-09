@@ -118,6 +118,35 @@ fn test_parse_nodetype_with_flags() {
 }
 
 #[test]
+fn test_parse_nodetype_immutable_flag() {
+    let sql = "CREATE NODETYPE 'myapp:LedgerEntry' IMMUTABLE";
+    let result = parse_ddl(sql).unwrap().unwrap();
+    match result {
+        DdlStatement::CreateNodeType(create) => {
+            assert!(create.immutable);
+            assert!(!create.versionable);
+        }
+        _ => panic!("Expected CreateNodeType"),
+    }
+}
+
+#[test]
+fn test_parse_alter_nodetype_set_immutable() {
+    let sql = "ALTER NODETYPE 'myapp:LedgerEntry' SET IMMUTABLE = true";
+    let result = parse_ddl(sql).unwrap().unwrap();
+    match result {
+        DdlStatement::AlterNodeType(alter) => {
+            assert_eq!(alter.alterations.len(), 1);
+            match &alter.alterations[0] {
+                NodeTypeAlteration::SetImmutable(v) => assert!(*v),
+                other => panic!("Expected SetImmutable, got {:?}", other),
+            }
+        }
+        _ => panic!("Expected AlterNodeType"),
+    }
+}
+
+#[test]
 fn test_parse_nodetype_with_allowed_children() {
     let sql = "CREATE NODETYPE 'myapp:Article' ALLOWED_CHILDREN ('myapp:Paragraph', 'myapp:Image')";
     let result = parse_ddl(sql).unwrap().unwrap();

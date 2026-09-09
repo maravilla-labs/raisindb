@@ -36,6 +36,7 @@ pub(super) fn build_nodetype_from_columns(
     let description = extract_optional_string_column(col_map, "description");
     let strict = extract_optional_boolean_column(col_map, "strict");
     let versionable = extract_optional_boolean_column(col_map, "versionable");
+    let immutable = extract_optional_boolean_column(col_map, "immutable");
     let publishable = extract_optional_boolean_column(col_map, "publishable");
     let auditable = extract_optional_boolean_column(col_map, "auditable");
     let indexable = extract_optional_boolean_column(col_map, "indexable");
@@ -92,6 +93,7 @@ pub(super) fn build_nodetype_from_columns(
         required_nodes,
         initial_structure,
         versionable,
+        immutable,
         publishable,
         auditable,
         indexable,
@@ -238,6 +240,7 @@ pub(super) fn apply_assignment_to_nodetype(
         "version" => node_type.version = Some(extract_number_value(&value)? as i32),
         "strict" => node_type.strict = Some(extract_boolean_value(&value)?),
         "versionable" => node_type.versionable = Some(extract_boolean_value(&value)?),
+        "immutable" => node_type.immutable = Some(extract_boolean_value(&value)?),
         "publishable" => node_type.publishable = Some(extract_boolean_value(&value)?),
         "auditable" => node_type.auditable = Some(extract_boolean_value(&value)?),
         "indexable" => node_type.indexable = Some(extract_boolean_value(&value)?),

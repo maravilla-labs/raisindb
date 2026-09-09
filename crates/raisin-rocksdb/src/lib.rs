@@ -52,6 +52,7 @@ mod error_ext;
 pub mod fractional_index;
 pub mod graph;
 pub mod hnsw_transfer;
+pub mod immutability;
 pub mod indexing;
 mod jobs;
 pub mod keys;

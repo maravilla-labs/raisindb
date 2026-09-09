@@ -539,6 +539,7 @@ async fn test_schema_replication() {
                 required_nodes: Vec::new(),
                 initial_structure: None,
                 versionable: None,
+                immutable: None,
                 publishable: None,
                 auditable: None,
                 indexable: None,

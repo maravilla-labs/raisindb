@@ -111,6 +111,35 @@ impl NodeRepositoryImpl {
             }
         };
 
+        // Reject a `properties` change onto an immutable destination node.
+        // Unlike `update_impl`, this promotion path hand-rolls its own
+        // upsert rather than calling it, so it needs its own independent
+        // check — see `crate::immutability`. Fails OPEN if the destination
+        // type can't be resolved.
+        if let Some(old) = &old_dst {
+            use raisin_storage::NodeTypeRepository as _;
+            if let Some(old_type) = self
+                .node_type_repo
+                .get(
+                    raisin_storage::BranchScope::new(
+                        scope.tenant_id,
+                        scope.repo_id,
+                        scope.target_branch,
+                    ),
+                    &old.node_type,
+                    None,
+                )
+                .await?
+            {
+                crate::immutability::reject_if_immutable(
+                    &old_type,
+                    &old.id,
+                    &old.properties,
+                    &node.properties,
+                )?;
+            }
+        }
+
         // Node blob + path/node_path/property/reference/relation/ordered
         // index entries, all at the shared revision.
         self.add_node_to_batch_with_parent_id(

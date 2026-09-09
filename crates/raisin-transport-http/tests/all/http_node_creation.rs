@@ -32,6 +32,7 @@ async fn create_test_node_type<S: Storage>(storage: &S, name: &str) {
         required_nodes: vec![],
         initial_structure: None,
         versionable: Some(true),
+        immutable: None,
         publishable: Some(true),
         auditable: Some(false),
         indexable: None,

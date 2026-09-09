@@ -165,6 +165,7 @@ fn make_node_type(name: &str, allowed_children: Vec<&str>) -> NodeType {
         required_nodes: Vec::new(),
         initial_structure: None,
         versionable: Some(true),
+        immutable: None,
         publishable: Some(true),
         auditable: Some(false),
         indexable: Some(true),

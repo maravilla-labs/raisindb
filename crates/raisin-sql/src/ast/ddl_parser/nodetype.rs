@@ -172,6 +172,14 @@ fn parse_nodetype_clauses<'a>(
         }
 
         if let Ok((new_input, _)) =
+            tag_no_case::<_, _, nom::error::Error<&str>>("IMMUTABLE").parse(remaining)
+        {
+            result.immutable = true;
+            input = new_input;
+            continue;
+        }
+
+        if let Ok((new_input, _)) =
             tag_no_case::<_, _, nom::error::Error<&str>>("PUBLISHABLE").parse(remaining)
         {
             result.publishable = true;
@@ -437,39 +445,55 @@ pub(crate) fn nodetype_alteration(input: &str) -> IResult<&str, NodeTypeAlterati
             ),
             NodeTypeAlteration::SetAuditable,
         ),
-        // SET INDEXABLE = true/false
-        map(
-            preceded(
-                (
-                    tag_no_case("SET"),
-                    multispace1,
-                    tag_no_case("INDEXABLE"),
-                    multispace0,
-                    char('='),
-                    multispace0,
+        // SET INDEXABLE = true/false, SET STRICT = true/false, SET IMMUTABLE =
+        // true/false, plus compound-index alterations: nested in their own
+        // `alt` because nom's tuple `alt` has an arity ceiling and the outer
+        // list is already at it.
+        alt((
+            map(
+                preceded(
+                    (
+                        tag_no_case("SET"),
+                        multispace1,
+                        tag_no_case("INDEXABLE"),
+                        multispace0,
+                        char('='),
+                        multispace0,
+                    ),
+                    boolean_literal,
                 ),
-                boolean_literal,
+                NodeTypeAlteration::SetIndexable,
             ),
-            NodeTypeAlteration::SetIndexable,
-        ),
-        // SET STRICT = true/false
-        map(
-            preceded(
-                (
-                    tag_no_case("SET"),
-                    multispace1,
-                    tag_no_case("STRICT"),
-                    multispace0,
-                    char('='),
-                    multispace0,
+            map(
+                preceded(
+                    (
+                        tag_no_case("SET"),
+                        multispace1,
+                        tag_no_case("STRICT"),
+                        multispace0,
+                        char('='),
+                        multispace0,
+                    ),
+                    boolean_literal,
                 ),
-                boolean_literal,
+                NodeTypeAlteration::SetStrict,
             ),
-            NodeTypeAlteration::SetStrict,
-        ),
-        // Compound-index alterations, nested in their own `alt` because nom's
-        // tuple `alt` has an arity ceiling and the outer list is already at it.
-        compound_index_alteration,
+            map(
+                preceded(
+                    (
+                        tag_no_case("SET"),
+                        multispace1,
+                        tag_no_case("IMMUTABLE"),
+                        multispace0,
+                        char('='),
+                        multispace0,
+                    ),
+                    boolean_literal,
+                ),
+                NodeTypeAlteration::SetImmutable,
+            ),
+            compound_index_alteration,
+        )),
     ))
     .parse(input)
 }

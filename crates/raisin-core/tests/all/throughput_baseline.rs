@@ -102,6 +102,7 @@ async fn bootstrap() -> (Arc<RocksDBStorage>, tempfile::TempDir) {
         required_nodes: Vec::new(),
         initial_structure: None,
         versionable: Some(true),
+        immutable: None,
         publishable: Some(false),
         auditable: Some(false),
         indexable: Some(true),

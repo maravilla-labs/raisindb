@@ -213,6 +213,7 @@ fn test_update_nodetype_serialization() {
         required_nodes: vec![],
         initial_structure: None,
         versionable: Some(true),
+        immutable: None,
         publishable: Some(false),
         auditable: Some(false),
         indexable: Some(true),

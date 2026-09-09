@@ -81,6 +81,7 @@ async fn register_lamp_type<S: raisin_storage::Storage>(storage: &S) {
         required_nodes: Vec::new(),
         initial_structure: None,
         versionable: Some(true),
+        immutable: None,
         publishable: Some(false),
         auditable: Some(false),
         indexable: Some(false),

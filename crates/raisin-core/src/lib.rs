@@ -169,6 +169,7 @@ mod tests {
             required_nodes: Vec::new(),
             initial_structure: None,
             versionable: Some(true),
+            immutable: None,
             publishable: Some(true),
             auditable: Some(false),
             indexable: None,

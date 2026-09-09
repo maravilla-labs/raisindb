@@ -210,6 +210,7 @@ mod tests {
             indexable: Some(false),
             index_types: None,
             versionable: Some(false),
+            immutable: None,
             publishable: Some(false),
             auditable: Some(false),
             initial_structure: None,

@@ -39,6 +39,8 @@ pub struct NodeType {
     pub initial_structure: Option<super::initial_structure::InitialNodeStructure>,
     #[serde(default)]
     pub versionable: Option<bool>,
+    #[serde(default)]
+    pub immutable: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub publishable: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -100,6 +102,7 @@ mod tests {
             required_nodes: None,
             initial_structure: None,
             versionable: Some(true),
+            immutable: None,
             publishable: Some(true),
             auditable: Some(true),
             created_at: Some(Utc::now()),
@@ -109,6 +112,7 @@ mod tests {
         assert!(node_type.auditable());
         let node_type2 = NodeType {
             auditable: None,
+            immutable: None,
             ..node_type.clone()
         };
         assert!(!node_type2.auditable());
@@ -131,6 +135,7 @@ mod tests {
             required_nodes: None,
             initial_structure: None,
             versionable: Some(false),
+            immutable: None,
             publishable: Some(false),
             auditable: Some(false),
             created_at: Some(Utc::now()),
@@ -166,6 +171,7 @@ mod tests {
             required_nodes: None,
             initial_structure: None,
             versionable: Some(true),
+            immutable: None,
             publishable: Some(false),
             auditable: Some(true),
             created_at: Some(Utc::now()),
@@ -197,6 +203,7 @@ mod tests {
             required_nodes: None,
             initial_structure: None,
             versionable: None,
+            immutable: None,
             publishable: None,
             auditable: None,
             created_at: None,
@@ -221,6 +228,7 @@ mod tests {
             required_nodes: None,
             initial_structure: None,
             versionable: None,
+            immutable: None,
             publishable: None,
             auditable: None,
             created_at: None,
@@ -247,6 +255,7 @@ mod tests {
             required_nodes: None,
             initial_structure: None,
             versionable: None,
+            immutable: None,
             publishable: None,
             auditable: None,
             created_at: None,
@@ -273,6 +282,7 @@ mod tests {
             required_nodes: None,
             initial_structure: None,
             versionable: None,
+            immutable: None,
             publishable: None,
             auditable: None,
             created_at: None,
@@ -299,6 +309,7 @@ mod tests {
             required_nodes: None,
             initial_structure: None,
             versionable: None,
+            immutable: None,
             publishable: None,
             auditable: None,
             created_at: None,
@@ -325,6 +336,7 @@ mod tests {
             required_nodes: None,
             initial_structure: None,
             versionable: None,
+            immutable: None,
             publishable: None,
             auditable: None,
             created_at: None,
@@ -351,6 +363,7 @@ mod tests {
             required_nodes: None,
             initial_structure: None,
             versionable: None,
+            immutable: None,
             publishable: None,
             auditable: None,
             created_at: None,
@@ -377,6 +390,7 @@ mod tests {
             required_nodes: None,
             initial_structure: None,
             versionable: None,
+            immutable: None,
             publishable: None,
             auditable: None,
             created_at: None,

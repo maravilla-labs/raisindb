@@ -755,6 +755,7 @@ async fn schema_and_workspace_events_queue_compound_index_builds() {
         required_nodes: Vec::new(),
         initial_structure: None,
         versionable: Some(true),
+        immutable: None,
         publishable: Some(true),
         auditable: Some(false),
         index_types: None,

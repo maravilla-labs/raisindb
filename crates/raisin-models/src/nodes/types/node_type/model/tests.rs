@@ -37,6 +37,7 @@ mod tests {
             initial_structure: None,
             compound_indexes: None,
             versionable: Some(true),
+            immutable: None,
             publishable: Some(true),
             auditable: Some(true),
             indexable: None,
@@ -51,6 +52,7 @@ mod tests {
         assert!(node_type.auditable());
         let node_type2 = NodeType {
             auditable: None,
+            immutable: None,
             ..node_type.clone()
         };
         assert!(!node_type2.auditable());
@@ -74,6 +76,7 @@ mod tests {
             initial_structure: None,
             compound_indexes: None,
             versionable: Some(false),
+            immutable: None,
             publishable: Some(false),
             auditable: Some(false),
             indexable: None,
@@ -115,6 +118,7 @@ mod tests {
             initial_structure: None,
             compound_indexes: None,
             versionable: Some(true),
+            immutable: None,
             publishable: Some(false),
             auditable: Some(true),
             indexable: None,
@@ -152,6 +156,7 @@ mod tests {
             initial_structure: None,
             compound_indexes: None,
             versionable: None,
+            immutable: None,
             publishable: None,
             auditable: None,
             indexable: None,
@@ -182,6 +187,7 @@ mod tests {
             initial_structure: None,
             compound_indexes: None,
             versionable: None,
+            immutable: None,
             publishable: None,
             auditable: None,
             indexable: None,

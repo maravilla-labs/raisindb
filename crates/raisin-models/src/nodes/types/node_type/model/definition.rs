@@ -75,6 +75,11 @@ pub struct NodeType {
     pub initial_structure: Option<super::super::super::initial_structure::InitialNodeStructure>,
     #[serde(default)]
     pub versionable: Option<bool>,
+    /// When true, a node of this type can never have its `properties`
+    /// changed after creation. Structural writes (path/parent/node_type,
+    /// `published_at`, etc.) remain allowed; delete remains allowed.
+    #[serde(default)]
+    pub immutable: Option<bool>,
     #[serde(default)]
     pub publishable: Option<bool>,
     #[serde(default)]
@@ -146,6 +151,7 @@ impl NodeType {
             required_nodes: Vec::new(),
             initial_structure: None,
             versionable: None,
+            immutable: None,
             publishable: None,
             auditable: None,
             indexable: None,

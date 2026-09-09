@@ -107,6 +107,12 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
     // 4a. Check RLS permission
     rls::check_put_permission(tx, &normalized_node, existing_node.as_ref(), workspace).await?;
 
+    // The existing node's resolved NodeType, looked up once and reused by
+    // both the immutable check (5-immutable, below) and the versionable
+    // revision-reuse decision (step 7) — see `crate::immutability` and the
+    // `versionable` note at step 7.
+    let mut existing_node_type: Option<raisin_models::nodes::types::NodeType> = None;
+
     // 5. Validate based on operation type
     if existing_node.is_none() {
         tracing::info!(
@@ -156,10 +162,35 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
         )
         .await?;
     } else {
-        validation::validate_update_with_existing(
-            existing_node.as_ref().unwrap(),
-            &normalized_node,
-        )?;
+        let existing = existing_node.as_ref().unwrap();
+        validation::validate_update_with_existing(existing, &normalized_node)?;
+
+        // 5-immutable. Reject a `properties` change to a node whose NodeType
+        // is `immutable: true`. Checked against the type the node was
+        // CREATED as (not any incoming `node_type` change on the same
+        // write), and only for `properties` — path/parent/node_type moves
+        // are allowed. Fails OPEN if the type can't be resolved, matching
+        // the `allowed_children` posture in `add_node.rs`. Not gated on
+        // `is_validate_schema_enabled()` — immutability is not schema
+        // shape validation.
+        use raisin_storage::NodeTypeRepository as _;
+        existing_node_type = tx
+            .node_repo
+            .node_type_repo
+            .get(
+                raisin_storage::BranchScope::new(&tenant_id, &repo_id, &branch),
+                &existing.node_type,
+                None,
+            )
+            .await?;
+        if let Some(existing_type) = existing_node_type.as_ref() {
+            crate::immutability::reject_if_immutable(
+                existing_type,
+                &existing.id,
+                &existing.properties,
+                &normalized_node.properties,
+            )?;
+        }
     }
 
     // 5a. Schema validation against NodeType/Archetype/ElementType
@@ -183,8 +214,54 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
     let (parent_changed, path_changed, old_parent, old_path) =
         validation::detect_changes(existing_node.as_ref(), &normalized_node);
 
-    // 7. Get or allocate the single transaction HLC
-    let revision = tx.get_or_allocate_transaction_revision()?;
+    // 7. Get or allocate the single transaction HLC — unless this is an
+    // update to a `versionable: Some(false)` node, in which case it reuses
+    // the node's CURRENT revision instead of minting a fresh one: the write
+    // lands at the same `{node_id}\0{~revision}` storage key, so RocksDB
+    // overwrites in place and `get_history` sees no new entry. See
+    // `nodetype_init.rs`'s "Discovery rewrites ... mints a revision per
+    // refresh, forever" for why this exists.
+    //
+    // Branch HEAD is safe either way: the commit path's HEAD advance
+    // (transaction/commit/revision.rs) already has a monotonic guard
+    // (`new_head <= branch.head` => skip), so committing at a reused,
+    // already-visible revision is naturally a no-op there.
+    //
+    // NOTE: this reuses `existing_node_type`'s lookup, but does NOT share
+    // the transaction-wide `get_or_allocate_transaction_revision` memo — a
+    // multi-node write inside one logical transaction that mixes a
+    // versionable=false node with other nodes will NOT have all writes land
+    // at one shared revision the way the rest of this codebase assumes.
+    // This is a known, unresolved edge case for transactions spanning
+    // multiple nodes; single-node writes (the common case for this flag,
+    // e.g. a connection-health refresh) are unaffected.
+    let reused_revision = if let (Some(existing), Some(existing_type)) =
+        (existing_node.as_ref(), existing_node_type.as_ref())
+    {
+        if existing_type.versionable == Some(false) {
+            tx.node_repo
+                .get_history(
+                    &tenant_id,
+                    &repo_id,
+                    &branch,
+                    workspace,
+                    &existing.id,
+                    Some(1),
+                )
+                .await?
+                .into_iter()
+                .next()
+                .map(|(hlc, _)| hlc)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let revision = match reused_revision {
+        Some(hlc) => hlc,
+        None => tx.get_or_allocate_transaction_revision()?,
+    };
 
     tracing::info!(
         "TXN put_node: node_id={}, old_path={:?}, new_path={}, path_changed={}, revision={}",

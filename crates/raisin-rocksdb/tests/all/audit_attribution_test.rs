@@ -61,6 +61,7 @@ fn node_type(name: &str, auditable: bool) -> NodeType {
         required_nodes: Vec::new(),
         initial_structure: None,
         versionable: Some(true),
+        immutable: None,
         publishable: Some(true),
         auditable: Some(auditable),
         indexable: Some(true),

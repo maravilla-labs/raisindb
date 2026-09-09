@@ -56,6 +56,9 @@ pub struct CreateNodeType {
     pub compound_indexes: Vec<CompoundIndexDef>,
     /// Whether nodes of this type can be versioned
     pub versionable: bool,
+    /// Whether nodes of this type can never have their properties changed
+    /// after creation
+    pub immutable: bool,
     /// Whether nodes of this type can be published
     pub publishable: bool,
     /// Whether changes are audited
@@ -80,6 +83,7 @@ impl Default for CreateNodeType {
             initial_structure: None,
             compound_indexes: Vec::new(),
             versionable: false,
+            immutable: false,
             publishable: false,
             auditable: false,
             indexable: true, // default to indexable
@@ -129,6 +133,8 @@ pub enum NodeTypeAlteration {
     DropMixin(String),
     /// Set versionable flag
     SetVersionable(bool),
+    /// Set immutable flag
+    SetImmutable(bool),
     /// Set publishable flag
     SetPublishable(bool),
     /// Set auditable flag

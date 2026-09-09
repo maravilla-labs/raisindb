@@ -35,6 +35,7 @@ fn build_node_type(name: &str, id: &str) -> NodeType {
         required_nodes: Vec::new(),
         initial_structure: None,
         versionable: Some(true),
+        immutable: None,
         publishable: Some(false),
         auditable: Some(true),
         indexable: None,

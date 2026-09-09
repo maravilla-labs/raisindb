@@ -245,6 +245,7 @@ mod tests {
                     required_nodes: vec![],
                     initial_structure: None,
                     versionable: None,
+                    immutable: None,
                     publishable: None,
                     auditable: None,
                     indexable: None,

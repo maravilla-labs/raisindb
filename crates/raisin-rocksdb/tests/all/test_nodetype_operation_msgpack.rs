@@ -20,6 +20,7 @@ fn test_nodetype_in_operation_msgpack() {
         required_nodes: Vec::new(),
         initial_structure: None,
         versionable: None,
+        immutable: None,
         publishable: None,
         auditable: None,
         indexable: None,

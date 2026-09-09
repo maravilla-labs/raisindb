@@ -23,6 +23,7 @@ mod helpers;
 mod cluster_social_feed_test;
 mod flow_e2e_test;
 mod geospatial_test;
+mod immutable_nodetype_ws_test;
 mod integration_node_operations;
 mod mgmt_jobs_tenant_isolation_test;
 mod mgmt_superadmin_test;

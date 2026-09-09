@@ -27,6 +27,7 @@ async fn create_test_node_type(
         required_nodes: Vec::new(),
         initial_structure: None,
         versionable: Some(true),
+        immutable: None,
         publishable: Some(true),
         auditable: Some(false),
         indexable: Some(true),

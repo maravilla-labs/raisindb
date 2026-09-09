@@ -122,6 +122,7 @@ async fn commit_with_older_revision_does_not_regress_branch_head() -> Result<()>
         required_nodes: Vec::new(),
         initial_structure: None,
         versionable: Some(true),
+        immutable: None,
         publishable: Some(true),
         auditable: Some(false),
         indexable: Some(true),
