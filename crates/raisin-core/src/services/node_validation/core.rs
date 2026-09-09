@@ -115,6 +115,22 @@ impl<S: Storage> NodeValidator<S> {
             .resolve_for_workspace(workspace, &node.node_type)
             .await?;
 
+        self.validate_against_resolved(workspace, node, &resolved)
+            .await?;
+
+        Ok(resolved)
+    }
+
+    /// The checks themselves, against an ALREADY-RESOLVED NodeType.
+    ///
+    /// Split out so the write path can resolve once and then coerce, validate
+    /// and stamp from the same resolution instead of resolving three times.
+    pub async fn validate_against_resolved(
+        &self,
+        workspace: &str,
+        node: &Node,
+        resolved: &ResolvedNodeType,
+    ) -> Result<()> {
         // Check required properties
         self.check_required_properties(node, &resolved)?;
 
@@ -134,7 +150,10 @@ impl<S: Storage> NodeValidator<S> {
         self.validate_element_types(node, &mut element_type_cache)
             .await?;
 
-        Ok(resolved)
+        // Every declared PropertyType is enforced against the value present.
+        super::property_checks::check_property_types(node, resolved)?;
+
+        Ok(())
     }
 
     /// Validate a node against its NodeType AND stamp the materialized
@@ -155,7 +174,20 @@ impl<S: Storage> NodeValidator<S> {
         node.strip_reserved_properties();
 
         self.validate_node_type_exists(&node.node_type).await?;
-        let resolved = self.validate_node_resolved(workspace, node).await?;
+
+        // ONE resolution, then: coerce, validate, stamp.
+        let resolved = self
+            .resolver
+            .resolve_for_workspace(workspace, &node.node_type)
+            .await?;
+
+        // Coercion runs FIRST. A property declared `Decimal` arrives as a
+        // string and is not yet a Decimal for the type check to accept, so
+        // validating before coercing would refuse every well-formed decimal.
+        super::property_checks::coerce_declared_decimals(node, &resolved)?;
+
+        self.validate_against_resolved(workspace, node, &resolved)
+            .await?;
 
         let supertypes = resolved.effective_supertypes();
         node.set_effective_types(resolved.resolved_mixins.clone(), supertypes);
@@ -190,6 +222,18 @@ impl<S: Storage> NodeValidator<S> {
             .await
         {
             Ok(resolved) => {
+                // Coerce declared decimals here too — storing "19.90" as a
+                // string on a Decimal property would defeat the type. Fails
+                // open, like the rest of this function: a value that cannot be
+                // coerced is left as it came rather than rejecting a write on a
+                // path that deliberately turned validation off.
+                if let Err(e) = super::property_checks::coerce_declared_decimals(node, &resolved) {
+                    tracing::debug!(
+                        node_type = %node.node_type,
+                        error = %e,
+                        "decimal coercion skipped on a validation-disabled write"
+                    );
+                }
                 let supertypes = resolved.effective_supertypes();
                 node.set_effective_types(resolved.resolved_mixins.clone(), supertypes);
             }

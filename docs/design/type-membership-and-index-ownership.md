@@ -47,27 +47,26 @@ On ~2 300 commerce nodes:
 
 ~25× slower at 2 300 rows, and the gap widens linearly.
 
-### C. Membership is stamped inconsistently, so most data is invisible to it
+### C. Membership was not stamped at all by the transaction layer (fixed on main)
 
-`validate_and_stamp` (`raisin-core/src/services/node_validation/core.rs:154`) is documented
-as "THE single validate-and-stamp function. Every write path funnels through it". But in
-`add_node.rs:120` and `put_node.rs:210` the call is gated:
+**Corrected 2026-09-09.** The first version of this note blamed
+`is_validate_schema_enabled()`. That was wrong, and the correction matters
+because it changes what still needs doing.
+
+What v0.5.3 actually did (`git show v0.5.3:…/add_node.rs`):
 
 ```rust
-if tx.is_validate_schema_enabled() { … validate_and_stamp(…) … }
+// 5a. Schema validation
+if tx.is_validate_schema_enabled() {
+    let validator = tx.create_validator();
+    validator.validate_node(workspace, &normalized_node).await?;   // validate ONLY
+}
 ```
 
-and that flag is **off by default on the SQL DML path**. Measured directly: a node created
-right now via
-
-```sql
-INSERT INTO commerce (path, node_type, properties)
-VALUES ('/zz-w0-probe','studio:Folder','{"title":"…"}'::jsonb)
-```
-
-comes back with properties `['title']` — no `$supertypes`, and `IS_A` does not match it.
-
-Coverage across the live repo:
+`validate_and_stamp` did not exist in v0.5.3 — the transaction layer validated
+and never stamped, so every node written through SQL DML, the WebSocket create
+handler or a child POST carried no membership. That is the whole explanation for
+the coverage measured on the live server:
 
 | workspace | type | `node_type =` | `IS_A()` |
 |---|---|---:|---:|
@@ -79,15 +78,24 @@ Coverage across the live repo:
 | people | `studio:Contact` | 62 | **0** |
 | events | `studio:Event` | 20 | **0** |
 
-Between 0% and 19%. A feature that answers correctly for a fifth of the data is worse than
-one that does not exist, because it fails silently.
+It was **already fixed on `main`** by the `validate_and_stamp` unification,
+before this work. Verified on a current build: schema validation IS on for SQL
+DML (a missing required property is refused), and an INSERT now stamps.
 
-**The same flag disables `allowed_children` enforcement.** `add_node.rs:138` runs the
-parent constraint check *after* stamping and deliberately depends on it ("`allows_child`
-matches the whole family through `$supertypes`, which step 5a just materialized"). With
-validation off, containment is not enforced either — which matches the separate
-2026-09-05 observation that `allowed_children` is not enforced on write. **One flag, two
-symptoms.**
+What remained, and what this change adds, is narrower: the call was still gated,
+so the paths that deliberately turn validation OFF — `engine/acl.rs`, the Cypher
+executor, bulk import, replication — still produced unstamped nodes. Membership
+is engine metadata, not user schema, so it is now stamped either way via
+`stamp_effective_types`, which fails open.
+
+The `allowed_children` consequence is likewise narrower than first stated: it
+matches the family through `$supertypes`, so it was unenforced only on those
+validation-off paths, not on ordinary SQL DML.
+
+**And it is slow.** On ~2,300 commerce nodes, `IS_A` took **160–227ms** against
+**7ms** for the equivalent `node_type` predicate — roughly 25x, and a full scan by
+construction. That half of the problem was untouched by the stamping fix and is
+what the membership index addresses.
 
 ### D. Compound-index selection ignores which NodeType owns the index
 

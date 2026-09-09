@@ -5,6 +5,7 @@
 
 use raisin_error::{Error, Result};
 use raisin_indexer::IndexQuery;
+use raisin_models::nodes::properties::schema::PropertyType;
 use raisin_models::nodes::properties::value::PropertyValue;
 use raisin_models::nodes::Node;
 use raisin_storage::{NodeRepository, Storage, StorageScope};
@@ -216,4 +217,173 @@ impl<S: Storage> NodeValidator<S> {
             _ => false,
         }
     }
+}
+
+/// The name a `PropertyValue` variant reports in an error message.
+fn value_kind(v: &PropertyValue) -> &'static str {
+    match v {
+        PropertyValue::Null => "null",
+        PropertyValue::String(_) => "String",
+        PropertyValue::Integer(_) => "Integer",
+        PropertyValue::Float(_) => "Float",
+        PropertyValue::Decimal(_) => "Decimal",
+        PropertyValue::Boolean(_) => "Boolean",
+        PropertyValue::Date(_) => "Date",
+        PropertyValue::Url(_) => "URL",
+        PropertyValue::Reference(_) => "Reference",
+        PropertyValue::Resource(_) => "Resource",
+        PropertyValue::Composite(_) => "Composite",
+        PropertyValue::Element(_) => "Element",
+        PropertyValue::Geometry(_) => "Geometry",
+        PropertyValue::Array(_) => "Array",
+        PropertyValue::Object(_) => "Object",
+        PropertyValue::Vector(_) => "Vector",
+    }
+}
+
+/// Does `value` satisfy a property declared as `declared`?
+///
+/// `Null` always passes — absence is how a property is cleared, and a declared
+/// type says what a value must look like WHEN THERE IS ONE. `required` is a
+/// separate check with its own error.
+fn value_matches(declared: &PropertyType, value: &PropertyValue) -> bool {
+    use PropertyType as T;
+    match (declared, value) {
+        (_, PropertyValue::Null) => true,
+
+        (T::String, PropertyValue::String(_)) => true,
+        // A type NAME is spelled as a string.
+        (T::NodeType, PropertyValue::String(_)) => true,
+
+        // An integer is a valid float; the reverse is not true.
+        (T::Float, PropertyValue::Float(_) | PropertyValue::Integer(_)) => true,
+        (T::Integer, PropertyValue::Integer(_)) => true,
+
+        // EXACT decimal only. A Float here would mean the value already went
+        // through an f64 — which is precisely what this type exists to prevent —
+        // and an unparsed String means coercion did not run.
+        (T::Decimal, PropertyValue::Decimal(_)) => true,
+
+        (T::Boolean, PropertyValue::Boolean(_)) => true,
+
+        // A Date accepts a STRING, and that is deliberate rather than lax.
+        //
+        // Over JSON a date IS a string, and `PropertyValue`'s untagged
+        // deserialization does not turn a plain RFC3339 string into `Date` —
+        // measured: `"2026-09-09T10:00:00Z"` arrives as `String`. Enforcing
+        // `Date` strictly therefore refuses the ordinary spelling and would
+        // break essentially every date write in every package.
+        //
+        // The real fix is to COERCE string -> Date the way declared decimals are
+        // coerced above. It is deliberately not done here: `hash_property_value`
+        // renders a Date as zero-padded nanoseconds rather than the raw string,
+        // so coercing would change the property-index entries for every existing
+        // date property and silently alter what equality and range queries
+        // match. That is a coordinated coercion-plus-reindex, and it wants its
+        // own change and its own migration.
+        (T::Date, PropertyValue::Date(_) | PropertyValue::String(_)) => true,
+        // A URL is routinely carried as a plain string, and both spellings
+        // round-trip to the same thing.
+        (T::URL, PropertyValue::Url(_) | PropertyValue::String(_)) => true,
+        (T::Reference, PropertyValue::Reference(_)) => true,
+        (T::Resource, PropertyValue::Resource(_)) => true,
+        (T::Composite, PropertyValue::Composite(_)) => true,
+        (T::Element, PropertyValue::Element(_)) => true,
+        (T::Geometry, PropertyValue::Geometry(_)) => true,
+        (T::Array, PropertyValue::Array(_)) => true,
+        // A Composite and an Element are both object-shaped; a schema that says
+        // `Object` is describing a bag, and all three satisfy that reading.
+        (
+            T::Object,
+            PropertyValue::Object(_) | PropertyValue::Composite(_) | PropertyValue::Element(_),
+        ) => true,
+
+        _ => false,
+    }
+}
+
+/// Parse the STRING spelling of every property declared `Decimal` into
+/// `PropertyValue::Decimal`, and refuse a JSON number outright.
+///
+/// A decimal arrives as a string (`"19.90"`) because a JSON number has already
+/// been through an f64 by the time any of our code sees it. Accepting one would
+/// store a value that is quietly not what the caller sent, which defeats the
+/// only reason to have the type. So the refusal is deliberate and names the
+/// property, rather than coercing and hoping.
+///
+/// Runs BEFORE the type check below, so a well-formed string is already a
+/// Decimal by the time anything inspects it.
+pub(super) fn coerce_declared_decimals(node: &mut Node, resolved: &ResolvedNodeType) -> Result<()> {
+    for prop in &resolved.resolved_properties {
+        if prop.property_type != PropertyType::Decimal {
+            continue;
+        }
+        let Some(name) = prop.name.as_deref() else {
+            continue;
+        };
+        let Some(current) = node.properties.get(name) else {
+            continue;
+        };
+
+        match current {
+            PropertyValue::String(raw) => {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                match trimmed.parse::<rust_decimal::Decimal>() {
+                    Ok(d) => {
+                        node.properties
+                            .insert(name.to_string(), PropertyValue::Decimal(d));
+                    }
+                    Err(_) => {
+                        return Err(Error::Validation(format!(
+                            "Property '{}' is declared Decimal but '{}' is not a valid decimal \
+                             number",
+                            name, raw
+                        )));
+                    }
+                }
+            }
+            PropertyValue::Float(_) | PropertyValue::Integer(_) => {
+                return Err(Error::Validation(format!(
+                    "Property '{}' is declared Decimal and must be sent as a STRING (e.g. \
+                     \"19.90\"). A JSON number has already lost precision to a float before it \
+                     reaches storage, so it is refused rather than silently rounded.",
+                    name
+                )));
+            }
+            // Already exact, or null/absent.
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Enforce every declared `PropertyType` against the value actually present.
+///
+/// Historically `type:` on a NodeType property was documentation and an editor
+/// hint — nothing compared a value against it — so this is the first check of
+/// its kind and it can refuse content that previously saved. That is the point:
+/// a `Decimal` that is really a float, or a `Date` that is really a string, is
+/// exactly the drift that makes a bookkeeping total wrong later.
+pub(super) fn check_property_types(node: &Node, resolved: &ResolvedNodeType) -> Result<()> {
+    for prop in &resolved.resolved_properties {
+        let Some(name) = prop.name.as_deref() else {
+            continue;
+        };
+        let Some(value) = node.properties.get(name) else {
+            continue;
+        };
+        if !value_matches(&prop.property_type, value) {
+            return Err(Error::Validation(format!(
+                "Property '{}' on NodeType '{}' is declared {:?} but the value is {}",
+                name,
+                node.node_type,
+                prop.property_type,
+                value_kind(value)
+            )));
+        }
+    }
+    Ok(())
 }

@@ -22,6 +22,16 @@ use sync::config::MountState;
 /// Replace one property on the mount config node.
 async fn set_mount_prop(env: &Env, key: &str, value: serde_json::Value) {
     let tx = begin(env).await;
+    // These helpers deliberately plant MALFORMED values — a `state` that is not
+    // an object, a `write_config` with a string where a list belongs — to prove
+    // the sync path records a verdict instead of failing invisibly.
+    //
+    // Schema validation now enforces declared property types, so a validated
+    // write can no longer produce that shape. Turning validation off here is
+    // faithful to what is being simulated: such a value arrives from an older
+    // version, an external writer or a hand-edit, never from a checked write.
+    use raisin_storage::transactional::TransactionalContext as _;
+    tx.set_validate_schema(false).unwrap();
     let mut node = tx
         .get_node(sync::SYSTEM_WORKSPACE, MOUNT_ID)
         .await

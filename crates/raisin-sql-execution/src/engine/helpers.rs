@@ -220,9 +220,14 @@ pub(crate) async fn load_all_compound_indexes<S: Storage>(
     let mut seen = std::collections::HashSet::new();
     let mut all: Vec<CompoundIndexDefinition> = Vec::new();
     for node_type in node_types {
+        let owner = node_type.name.clone();
         if let Some(indexes) = node_type.compound_indexes {
-            for index in indexes {
+            for mut index in indexes {
                 if seen.insert(index.name.clone()) {
+                    // Stamp the declaring type. Without it the planner matches
+                    // on property NAME alone and will happily answer one type's
+                    // query from another type's index.
+                    index.owner_node_type = Some(owner.clone());
                     all.push(index);
                 }
             }
@@ -306,7 +311,19 @@ async fn load_compound_indexes_uncached<S: Storage>(
                         indexes.len(),
                         node_type_name
                     );
-                    return Some(indexes.clone());
+                    // These are the RESOLVED indexes for this type (inheritance
+                    // already merged), so the queried type is the correct owner
+                    // even for one declared on an ancestor.
+                    return Some(
+                        indexes
+                            .iter()
+                            .cloned()
+                            .map(|mut i| {
+                                i.owner_node_type = Some(node_type_name.to_string());
+                                i
+                            })
+                            .collect(),
+                    );
                 }
             }
             None

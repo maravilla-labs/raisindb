@@ -58,7 +58,9 @@ properties:
       description: Provider change token at last sync (engine-owned)
 
   - name: __synced_at
-    type: String
+    # A real timestamp. The engine has always written PropertyValue::Date here;
+    # `String` was a legacy declaration nothing enforced.
+    type: Date
     required: false
     meta:
       label: Synced At

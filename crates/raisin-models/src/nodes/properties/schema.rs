@@ -142,8 +142,28 @@ pub fn secret_name_is_addressable(name: &str) -> bool {
 pub enum PropertyType {
     #[serde(alias = "string")]
     String,
-    #[serde(alias = "number")]
-    Number,
+    /// IEEE-754 double. `Number` is kept as an alias because every nodetype
+    /// authored before the split spells it that way, and it has always meant
+    /// exactly this.
+    #[serde(alias = "number", alias = "Number", alias = "float")]
+    Float,
+    /// A whole number. Distinct from `Float` so a count, a quantity or a money
+    /// amount in minor units can say so.
+    #[serde(alias = "integer", alias = "int", alias = "Int")]
+    Integer,
+    /// EXACT decimal, for money and anything else that must not be rounded.
+    ///
+    /// Backed by `rust_decimal`, which the storage layer has carried as
+    /// `PropertyValue::Decimal` all along — this variant is what finally lets a
+    /// nodetype DECLARE one.
+    ///
+    /// On the wire it is a STRING (`"19.90"`), and a JSON number is refused
+    /// rather than coerced: a JSON number has already passed through an f64 by
+    /// the time any of our code sees it, so accepting one would hand back a
+    /// value that is silently not what was sent. That refusal is the whole
+    /// point of the type.
+    #[serde(alias = "decimal")]
+    Decimal,
     #[serde(alias = "boolean")]
     Boolean,
     #[serde(alias = "array")]
@@ -192,6 +212,24 @@ pub struct CompoundIndexDefinition {
     /// If true, the last column is used for ordering (created_at, updated_at)
     #[serde(default)]
     pub has_order_column: bool,
+
+    /// The NodeType this definition was read off, populated at LOAD time.
+    ///
+    /// Not part of the authored declaration and never persisted (`skip`): it is
+    /// derived from the record the definition came out of. It exists because
+    /// the planner has to answer "may this index serve this query?", and until
+    /// it did, matching was on PROPERTY NAME ALONE — so a
+    /// `commerce:StockReservation` index leading with `status` was selected to
+    /// answer a `studio:Event` query in a different workspace, returning zero
+    /// rows at full speed with no error. Any common name (`status`, `code`,
+    /// `email`, `slug`) had the same hazard: the first type to index it won
+    /// every unqualified query on it, repo-wide.
+    ///
+    /// Deliberately NOT part of `definition_hash`: the owner does not change
+    /// the key bytes, so entries written before this field existed remain
+    /// valid and no rebuild is required.
+    #[serde(default, skip)]
+    pub owner_node_type: Option<String>,
 }
 
 /// A column in a compound index definition.

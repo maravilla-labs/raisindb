@@ -210,6 +210,10 @@ pub(crate) fn property_type(input: &str) -> IResult<&str, PropertyTypeDef> {
         // Simple types
         value(PropertyTypeDef::String, tag_no_case("String")),
         value(PropertyTypeDef::Number, tag_no_case("Number")),
+        value(PropertyTypeDef::Decimal, tag_no_case("Decimal")),
+        // `Integer` before `Int` so the longer spelling is not cut short.
+        value(PropertyTypeDef::Integer, tag_no_case("Integer")),
+        value(PropertyTypeDef::Integer, tag_no_case("Int")),
         value(PropertyTypeDef::Boolean, tag_no_case("Boolean")),
         value(PropertyTypeDef::Date, tag_no_case("Date")),
         value(PropertyTypeDef::URL, tag_no_case("URL")),

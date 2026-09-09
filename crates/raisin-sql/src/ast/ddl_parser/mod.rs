@@ -133,6 +133,9 @@ pub fn parse_ddl(sql: &str) -> Result<Option<DdlStatement>, DdlParseError> {
                             first_word.to_uppercase().as_str(),
                             "STRING"
                                 | "NUMBER"
+                                | "INTEGER"
+                                | "INT"
+                                | "DECIMAL"
                                 | "BOOLEAN"
                                 | "DATE"
                                 | "URL"
@@ -149,7 +152,7 @@ pub fn parse_ddl(sql: &str) -> Result<Option<DdlStatement>, DdlParseError> {
                         )
                     {
                         format!(
-                            "Invalid property type '{}'. Expected: String, Number, Boolean, Date, URL, Reference, Resource, Object, or Array",
+                            "Invalid property type '{}'. Expected: String, Number, Integer, Decimal, Boolean, Date, URL, Reference, Resource, Object, or Array",
                             first_word
                         )
                     } else {

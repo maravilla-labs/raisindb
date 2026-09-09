@@ -103,6 +103,11 @@ pub enum PropertyTypeDef {
     String,
     /// Numeric values (f64)
     Number,
+    /// Whole numbers
+    Integer,
+    /// Exact decimal — money and anything that must not be rounded.
+    /// Written on the wire as a STRING; a JSON number is refused.
+    Decimal,
     /// True/false values
     Boolean,
     /// DateTime with ISO-8601 serialization
@@ -136,6 +141,8 @@ impl std::fmt::Display for PropertyTypeDef {
         match self {
             PropertyTypeDef::String => write!(f, "String"),
             PropertyTypeDef::Number => write!(f, "Number"),
+            PropertyTypeDef::Integer => write!(f, "Integer"),
+            PropertyTypeDef::Decimal => write!(f, "Decimal"),
             PropertyTypeDef::Boolean => write!(f, "Boolean"),
             PropertyTypeDef::Date => write!(f, "Date"),
             PropertyTypeDef::URL => write!(f, "URL"),

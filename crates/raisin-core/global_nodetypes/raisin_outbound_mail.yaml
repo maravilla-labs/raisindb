@@ -155,14 +155,16 @@ properties:
         it is what makes an `unknown` ANSWERABLE — search Sent for it.
 
   - name: attempted_at
-    type: String
+    # A real timestamp — see __synced_at on raisin:VirtualNode.
+    type: Date
     required: false
     meta:
       label: Attempted at
       description: ISO 8601, stamped with the claim.
 
   - name: sent_at
-    type: String
+    # A real timestamp — see attempted_at.
+    type: Date
     required: false
     index: [Property]
     meta:

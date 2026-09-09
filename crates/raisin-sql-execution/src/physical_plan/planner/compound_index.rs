@@ -163,7 +163,34 @@ impl PhysicalPlanner {
         // matched columns win.
         let mut best: Option<(CompoundIndexMatch, bool, usize)> = None; // (match, full, count)
 
+        // The query's node type, if it pinned one. An index belongs to the
+        // NodeType that declared it, and may only answer a query scoped to that
+        // type.
+        let queried_node_type = equality_map.get("__node_type");
+
         for index in &self.compound_indexes {
+            // OWNERSHIP GATE.
+            //
+            // Index selection used to key on property NAME alone, ignoring which
+            // NodeType owned the index and even which workspace was being read.
+            // So `commerce:StockReservation`'s (status, expires_at) index was
+            // selected to answer `studio:Event` + status in the `events`
+            // workspace, and returned ZERO ROWS at full speed with no error.
+            // Any common column name — status, code, email, slug — had the same
+            // hazard: the first type to index it captured every unqualified
+            // query on it across the whole repository.
+            //
+            // An UNTYPED query cannot be served by a type-owned index at all.
+            // The entries only cover that one type, so the answer would be a
+            // silent subset. Falling back to a scan is slower and correct; that
+            // trade is not close, because the failure it replaces is invisible.
+            if let Some(owner) = index.owner_node_type.as_deref() {
+                match queried_node_type {
+                    Some(queried) if queried == owner => {}
+                    _ => continue,
+                }
+            }
+
             let equality_column_count = if index.has_order_column {
                 index.columns.len().saturating_sub(1)
             } else {

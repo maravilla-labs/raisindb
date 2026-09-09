@@ -277,7 +277,7 @@ mod tests {
         old.properties = Some(vec![create_property("count", PropertyType::String)]);
 
         let mut new = create_test_nodetype("test:Type");
-        new.properties = Some(vec![create_property("count", PropertyType::Number)]);
+        new.properties = Some(vec![create_property("count", PropertyType::Float)]);
 
         let changes = detect_nodetype_breaking_changes(&old, &new);
 

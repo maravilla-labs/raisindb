@@ -266,7 +266,7 @@ mod tests {
     fn a_type_with_no_secret_fields_short_circuits() {
         let props = vec![
             prop("title", PropertyType::String, None),
-            prop("count", PropertyType::Number, None),
+            prop("count", PropertyType::Float, None),
         ];
         let ef = EncryptedFields::from_resolved_properties(&props);
         assert_eq!(ef, EncryptedFields::None);

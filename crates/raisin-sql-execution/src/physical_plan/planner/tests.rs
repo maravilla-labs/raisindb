@@ -590,6 +590,7 @@ fn compound_index_declined_when_not_built() {
             },
         ],
         has_order_column: false,
+        owner_node_type: None,
     }]);
 
     let filter = LogicalPlan::Filter {
@@ -606,6 +607,86 @@ fn compound_index_declined_when_not_built() {
         !explain.contains("CompoundIndexScan"),
         "an unbuilt compound index must not be planned against; plan:\n{}",
         explain
+    );
+}
+
+/// An index belongs to the NodeType that declared it, and may only answer a
+/// query scoped to that type.
+///
+/// Regression for a measured fault: selection keyed on property NAME alone, so
+/// `commerce:StockReservation`'s `(status, expires_at)` index was chosen to
+/// answer a `studio:Event` query in a DIFFERENT workspace and returned zero
+/// rows at full speed, with no error anywhere. Any common column name — status,
+/// code, email, slug — carried the same hazard: the first NodeType to index it
+/// captured every unqualified query on it across the whole repository.
+#[test]
+fn a_compound_index_serves_only_its_owning_node_type() {
+    use raisin_models::nodes::properties::schema::{
+        CompoundColumnType, CompoundIndexColumn, CompoundIndexDefinition,
+    };
+
+    let owned_index = || CompoundIndexDefinition {
+        name: "reservation_status_expires".to_string(),
+        columns: vec![CompoundIndexColumn {
+            property: "status".to_string(),
+            column_type: CompoundColumnType::String,
+            ascending: None,
+        }],
+        has_order_column: false,
+        owner_node_type: Some("commerce:StockReservation".to_string()),
+    };
+
+    let plan_for = |predicate: TypedExpr| {
+        let mut planner = compound_planner(true);
+        planner.set_compound_indexes(vec![owned_index()]);
+        planner
+            .plan(&LogicalPlan::Filter {
+                input: Box::new(scan_nodes("nodes")),
+                predicate: FilterPredicate::from_expr(predicate),
+            })
+            .unwrap()
+            .explain()
+    };
+
+    // A DIFFERENT type's query must not reach it.
+    let other_type = plan_for(and(
+        col_eq(
+            "nodes",
+            "node_type",
+            Literal::Text("studio:Event".to_string()),
+        ),
+        json_eq("nodes", "status", "published"),
+    ));
+    assert!(
+        !other_type.contains("reservation_status_expires"),
+        "an index owned by commerce:StockReservation must not serve a \
+         studio:Event query; plan:\n{}",
+        other_type
+    );
+
+    // Neither must an UNTYPED one: the entries cover a single type, so the
+    // answer would be a silent subset.
+    let untyped = plan_for(json_eq("nodes", "status", "published"));
+    assert!(
+        !untyped.contains("reservation_status_expires"),
+        "a type-owned index must not serve a query with no node_type \
+         predicate; plan:\n{}",
+        untyped
+    );
+
+    // Its OWN type still gets it.
+    let owning_type = plan_for(and(
+        col_eq(
+            "nodes",
+            "node_type",
+            Literal::Text("commerce:StockReservation".to_string()),
+        ),
+        json_eq("nodes", "status", "published"),
+    ));
+    assert!(
+        owning_type.contains("reservation_status_expires"),
+        "the owning type must still use its own index; plan:\n{}",
+        owning_type
     );
 }
 
@@ -634,6 +715,7 @@ fn planner_with_compound_index() -> PhysicalPlanner {
             },
         ],
         has_order_column: true,
+        owner_node_type: None,
     }]);
     planner
 }
@@ -739,6 +821,7 @@ fn test_compound_index_declined_when_not_built_with_string_cast() {
             },
         ],
         has_order_column: false,
+        owner_node_type: None,
     }]);
 
     let filter = LogicalPlan::Filter {
@@ -1073,6 +1156,7 @@ fn planner_with_parent_path_index() -> PhysicalPlanner {
             },
         ],
         has_order_column: true,
+        owner_node_type: None,
     }]);
     planner
 }

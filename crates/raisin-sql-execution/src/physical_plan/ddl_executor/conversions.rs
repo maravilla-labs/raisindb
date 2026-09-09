@@ -120,7 +120,10 @@ pub(crate) fn convert_property(prop: &PropertyDef) -> Result<PropertyValueSchema
 fn convert_property_type(prop_type: &PropertyTypeDef) -> Result<PropertyType, Error> {
     match prop_type {
         PropertyTypeDef::String => Ok(PropertyType::String),
-        PropertyTypeDef::Number => Ok(PropertyType::Number),
+        // `Number` has always meant an f64; the model now says so out loud.
+        PropertyTypeDef::Number => Ok(PropertyType::Float),
+        PropertyTypeDef::Integer => Ok(PropertyType::Integer),
+        PropertyTypeDef::Decimal => Ok(PropertyType::Decimal),
         PropertyTypeDef::Boolean => Ok(PropertyType::Boolean),
         PropertyTypeDef::Date => Ok(PropertyType::Date),
         PropertyTypeDef::URL => Ok(PropertyType::URL),
@@ -164,6 +167,9 @@ pub(crate) fn convert_compound_indexes(
                 })
                 .collect(),
             has_order_column: idx.has_order_column,
+            // Set when the definition is LOADED off a NodeType, not when it is
+            // authored — the DDL statement does not name its own owner.
+            owner_node_type: None,
         })
         .collect()
 }
@@ -307,7 +313,14 @@ pub(crate) fn convert_field(
         PropertyTypeDef::String | PropertyTypeDef::URL => {
             FieldSchema::TextField { base, config: None }
         }
-        PropertyTypeDef::Number => FieldSchema::NumberField { base, config: None },
+        PropertyTypeDef::Number | PropertyTypeDef::Integer => {
+            FieldSchema::NumberField { base, config: None }
+        }
+        // A Decimal travels as a STRING, so the editor control that round-trips
+        // it faithfully is a text field. A NumberField would take the value
+        // through a JS number on its way back and undo the exactness the type
+        // exists to provide.
+        PropertyTypeDef::Decimal => FieldSchema::TextField { base, config: None },
         PropertyTypeDef::Boolean => FieldSchema::BooleanField { base },
         PropertyTypeDef::Date => FieldSchema::DateField { base, config: None },
         PropertyTypeDef::Reference | PropertyTypeDef::NodeType => {
