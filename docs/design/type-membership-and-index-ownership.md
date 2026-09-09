@@ -276,3 +276,54 @@ A narrower version is safe and probably worth doing first: decode only the
 header fields when no properties are projected. `StorageNode` is a serde struct
 over msgpack, so this needs care about field order rather than a new keyspace,
 and it helps every query rather than only path-only ones.
+
+---
+
+# Addendum: why a SUBTYPE must not borrow its ancestor's compound index
+
+Tried, measured, and reverted 2026-09-09. Recording it because the idea is
+intuitive, it is asked for, and it is a **1000x pessimisation** rather than the
+speedup it sounds like.
+
+The premise is reasonable: `extends` merges `compound_indexes`, so an index
+declared on `party:Person` is inherited by `party:VipPerson`, and the planner
+refusing to use it for a VipPerson query looks like a bug. It is not.
+
+**An index NAME is a workspace-global keyspace.** Every member of the family
+writes into it, so `person_status_name` holds all 16,700 Persons AND the 10
+VipPersons. `node_type` is not one of its columns, so a VipPerson query served
+from it must scan the whole family and narrow with a residual filter. Measured
+on that fixture:
+
+| plan | rows | time |
+|---|---:|---:|
+| `PropertyIndexScan __node_type=party:VipPerson` + filter | 10 | **3 ms** |
+| `CompoundIndexScan person_status_name` + residual `node_type` | 10 | **budget exceeded (400)** |
+
+The type-scoped property index goes straight to the 10 rows. The ancestor's
+compound index reads 16,700 to find them — and on this fixture it ran out of the
+scan budget before finishing, which is the only reason the regression was
+visible at all rather than merely slow.
+
+The general rule: borrowing an ancestor's index is only a win when the subtype is
+a LARGE FRACTION of the family, or when the index's leading columns are selective
+enough that the family scan is small. Here `status='active'` matched ~16,700 of
+16,760 — the index narrowed nothing, and then the residual threw away 99.94% of
+what it read.
+
+**Doing it properly needs costing, and the statistics do not exist.** The choice
+is between (index selectivity x subtype fraction) and (1 / node_type count), and
+`SchemaStats` carries the NUMBER of distinct node types, not the row count per
+type. Without per-type cardinality the planner cannot tell the good case from the
+catastrophic one, so it declines uniformly.
+
+**The modelling answer needs no engine change: declare the index on the type you
+actually query.** A name is a keyspace, so `ALTER NODETYPE 'party:VipPerson' ADD
+COMPOUND_INDEX 'vip_status_name' ON (status, display_name)` creates a keyspace
+holding only VipPersons. Inheritance of a declaration is a convenience for
+sharing a definition; it is not a promise that a query on a subtype is targeted.
+
+What IS fixed and should stay: the write path and the rebuild both resolve the
+`extends` chain, so a subtype's rows do land in an inherited index's keyspace.
+That matters for the family-level query (`IS_A(party:Person) AND …`), which is
+exactly the case the keyspace suits.
