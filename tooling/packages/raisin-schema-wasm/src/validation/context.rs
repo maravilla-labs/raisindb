@@ -18,12 +18,33 @@ lazy_static! {
         Regex::new(r"^[a-zA-Z][a-zA-Z0-9_-]*$").unwrap();
 
     /// Valid property types
+    /// KEPT IN STEP BY HAND with `raisin_models::PropertyType`, which is the
+    /// server's actual authority. This list is a SECOND copy, and it has already
+    /// drifted once: 0.6.1 added `Decimal`/`Integer`/`Float` to the enum, the
+    /// server accepted them, and every package declaring one failed to validate
+    /// in the CLI — a supported type rejected by the tool that checks it.
+    /// Deriving this from the enum would remove the class of fault.
     pub(crate) static ref VALID_PROPERTY_TYPES: HashSet<&'static str> = {
         let mut s = HashSet::new();
         s.insert("String");
         s.insert("string");
         s.insert("Number");
         s.insert("number");
+        // NUMERIC TYPES ADDED IN 0.6.1. `Number` has always meant an f64 and
+        // still parses as `Float`; `Integer` and `Decimal` are new.
+        //
+        // `Decimal` is EXACT (rust_decimal) and travels as a STRING on the wire
+        // — a JSON number is refused, because by the time it reaches us it has
+        // already been through an f64. It is what money-adjacent values (tax
+        // rates, FX, unit costs) are declared as.
+        s.insert("Float");
+        s.insert("float");
+        s.insert("Integer");
+        s.insert("integer");
+        s.insert("Int");
+        s.insert("int");
+        s.insert("Decimal");
+        s.insert("decimal");
         s.insert("Boolean");
         s.insert("boolean");
         s.insert("Array");
