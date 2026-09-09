@@ -115,6 +115,9 @@ impl NodeRepositoryImpl {
         // (updated_by cannot be resolved here: the repository layer has no
         // actor; put_node handles that where an auth context exists.)
         node.updated_at = Some(chrono::Utc::now());
+        // Bump the node's own edit counter from the STORED value, mirroring
+        // put_node. See the note there for why this is not the MVCC revision.
+        node.version = old_node.version.saturating_add(1);
         if node.created_at.is_none() {
             node.created_at = old_node.created_at;
         }

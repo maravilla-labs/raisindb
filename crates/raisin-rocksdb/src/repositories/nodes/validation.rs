@@ -203,20 +203,15 @@ impl NodeRepositoryImpl {
                 ))
             })?;
 
-        // Check allowed_children constraint
-        let allowed_children = &parent_node_type.allowed_children;
-        // Empty list means "allow all"
-        if !allowed_children.is_empty() {
-            // Check for wildcard or explicit match
-            let is_allowed = allowed_children.contains(&"*".to_string())
-                || allowed_children.contains(&node.node_type);
-
-            if !is_allowed {
-                return Err(Error::Validation(format!(
-                    "Node type '{}' not allowed as child of '{}'. Allowed types: {:?}",
-                    node.node_type, parent.node_type, allowed_children
-                )));
-            }
+        // Check the allowed_children constraint. The rule itself lives on
+        // `NodeType::allows_child` so this site and the transaction create path
+        // cannot drift; empty means no constraint, `"*"` is the wildcard, and a
+        // named entry matches the child's whole family, not just its leaf type.
+        if !parent_node_type.allows_child(node) {
+            return Err(Error::Validation(format!(
+                "Node type '{}' not allowed as child of '{}'. Allowed types: {:?}",
+                node.node_type, parent.node_type, parent_node_type.allowed_children
+            )));
         }
 
         Ok(())

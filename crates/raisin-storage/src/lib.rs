@@ -60,9 +60,9 @@ pub use tenant_init::init_tenant_nodetypes;
 
 // Re-export repository management types
 pub use repository::{
-    ArchetypeChangeInfo, BranchRepository, ElementTypeChangeInfo, GarbageCollectionRepository,
-    GarbageCollectionStats, NodeChangeInfo, NodeTypeChangeInfo, RepositoryManagementRepository,
-    RevisionMeta, RevisionRepository, TagRepository,
+    ArchetypeChangeInfo, BranchRepository, CreateBranchOptions, ElementTypeChangeInfo,
+    GarbageCollectionRepository, GarbageCollectionStats, NodeChangeInfo, NodeTypeChangeInfo,
+    RepositoryManagementRepository, RevisionMeta, RevisionRepository, TagRepository,
 };
 
 // Re-export translation types

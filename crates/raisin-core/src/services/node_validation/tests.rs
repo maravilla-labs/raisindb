@@ -888,3 +888,144 @@ async fn strict_event_accepts_the_stamped_reserved_properties_via_the_mixin() {
         "expected the strict-mode rejection to name the stamped property, got: {err}"
     );
 }
+
+/// A STRICT archetype must not reject the engine's own reserved properties.
+///
+/// The write path stamps `$mixins` / `$supertypes` onto every node, and the
+/// transaction layer then re-validates the stamped node. Archetype strict mode
+/// checked every property against the archetype's declared fields with no
+/// exemption for `$` keys — which `check_strict_mode` (NodeType strict mode)
+/// has always had — so every REST write to a strict archetype failed with
+/// "Undefined property '$mixins'". The node was unwritable through its own
+/// server.
+#[tokio::test]
+async fn strict_archetype_accepts_the_engine_stamped_reserved_properties() {
+    let storage = setup_test_storage().await;
+    let validator = NodeValidator::new(
+        storage.clone(),
+        "default".to_string(),
+        "default".to_string(),
+        "main".to_string(),
+    );
+
+    create_node_type(
+        &storage,
+        "test:Page",
+        vec![create_property_schema(
+            "hero_title",
+            PropertyType::String,
+            false,
+            false,
+        )],
+        false,
+    )
+    .await;
+
+    let archetype = Archetype {
+        id: "arch-strict".to_string(),
+        name: "test:StrictHero".to_string(),
+        extends: None,
+        icon: None,
+        title: None,
+        description: None,
+        base_node_type: Some("test:Page".to_string()),
+        fields: Some(vec![ElementFieldSchema::TextField {
+            base: make_field_base("hero_title", false, false),
+            config: None,
+        }]),
+        initial_content: None,
+        layout: None,
+        meta: None,
+        version: Some(1),
+        created_at: None,
+        updated_at: None,
+        published_at: None,
+        published_by: None,
+        publishable: Some(true),
+        strict: Some(true),
+        previous_version: None,
+    };
+
+    storage
+        .archetypes()
+        .upsert(
+            BranchScope::new("default", "default", "main"),
+            archetype,
+            CommitMetadata::system("create strict hero archetype"),
+        )
+        .await
+        .unwrap();
+
+    let mut props = HashMap::new();
+    props.insert(
+        "hero_title".to_string(),
+        PropertyValue::String("Welcome".to_string()),
+    );
+    let mut node = create_test_node("test:Page", props);
+    node.archetype = Some("test:StrictHero".to_string());
+    // Exactly what `validate_and_stamp` leaves on the node.
+    node.set_effective_types(
+        vec!["test:SomeMixin".to_string()],
+        vec!["test:Page".to_string()],
+    );
+
+    validator
+        .validate_node("ws1", &node)
+        .await
+        .expect("a strict archetype must accept the engine's own $ properties");
+
+    // An UNDECLARED ordinary property is still rejected — the exemption is for
+    // reserved keys only, not a hole in strict mode.
+    node.properties.insert(
+        "not_declared".to_string(),
+        PropertyValue::String("x".to_string()),
+    );
+    let err = validator.validate_node("ws1", &node).await.unwrap_err();
+    assert!(
+        err.to_string().contains("not_declared"),
+        "strict archetype must still reject an undeclared property, got: {err}"
+    );
+}
+
+/// `validate_and_stamp` is the shared write-path entry point: it strips
+/// client-supplied reserved keys, validates, and materializes the membership
+/// sets. Before it lived on the validator, the transaction layer only
+/// validated, so a node created by a child POST or by SQL DML carried no
+/// `$mixins` / `$supertypes` and `has_mixin()` / `is_a()` answered false.
+#[tokio::test]
+async fn validate_and_stamp_materializes_membership_and_ignores_client_supplied_sets() {
+    let storage = setup_test_storage().await;
+    let validator = NodeValidator::new(
+        storage.clone(),
+        "default".to_string(),
+        "default".to_string(),
+        "main".to_string(),
+    );
+
+    create_node_type(&storage, "test:Page", vec![], false).await;
+
+    let mut node = create_test_node("test:Page", HashMap::new());
+    // A client trying to grant itself a mixin it does not have.
+    node.properties.insert(
+        "$mixins".to_string(),
+        PropertyValue::Array(vec![PropertyValue::String("test:Forged".to_string())]),
+    );
+
+    validator
+        .validate_and_stamp("ws1", &mut node)
+        .await
+        .unwrap();
+
+    assert!(
+        !node.has_mixin("test:Forged"),
+        "a client-supplied membership set must be stripped, not trusted"
+    );
+    assert!(
+        node.is_a("test:Page"),
+        "the node's own type must be in the materialized supertype set"
+    );
+    assert!(
+        node.properties.contains_key("$supertypes"),
+        "$supertypes must be stamped"
+    );
+}

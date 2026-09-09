@@ -333,27 +333,26 @@ impl FunctionMetadata {
         self
     }
 
-    /// Get the file path component from entry_file
-    /// e.g., "index.js:handler" -> "index.js", "handler" -> "index.js" (backward compat)
+    /// Get the file path component from `entry_file`.
+    ///
+    /// e.g. `"index.js:handler"` -> `"index.js"`, `"main.wasm"` -> `"main.wasm"`,
+    /// legacy `"handler"` -> `"index.js"`.
     pub fn entry_file_path(&self) -> &str {
-        if let Some((path, _)) = self.entry_file.rsplit_once(':') {
-            path
-        } else {
-            // Backward compatibility: if no colon, assume it's just a function name
-            // and default to "code" (old hardcoded asset name) or "index.js"
-            "index.js"
-        }
+        crate::execution::entry_file::split_entry_file(&self.entry_file, self.language).0
     }
 
-    /// Get the function name component from entry_file
-    /// e.g., "index.js:handler" -> "handler", "handler" -> "handler" (backward compat)
+    /// Get the handler name component from `entry_file`.
+    ///
+    /// e.g. `"index.js:handler"` -> `"handler"`, legacy `"handler"` ->
+    /// `"handler"`, and a bare file name -> the language default (`"default"`
+    /// for wasm, `"handler"` otherwise).
+    ///
+    /// Delegates to the ONE parser in `execution::entry_file`. It used to hold
+    /// its own copy that returned the whole string when there was no colon, so
+    /// a wasm function with `entry_file = "main.wasm"` was invoked with handler
+    /// `"main.wasm"` on the sync HTTP path and `"default"` on the job path.
     pub fn entry_function_name(&self) -> &str {
-        if let Some((_, func)) = self.entry_file.rsplit_once(':') {
-            func
-        } else {
-            // Backward compatibility: if no colon, the whole string is the function name
-            &self.entry_file
-        }
+        crate::execution::entry_file::split_entry_file(&self.entry_file, self.language).1
     }
 
     /// Set resource limits

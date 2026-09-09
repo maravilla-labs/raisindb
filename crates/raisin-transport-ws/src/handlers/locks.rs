@@ -78,7 +78,10 @@ where
 fn require_owner(connection_state: &Arc<RwLock<ConnectionState>>) -> Result<String, WsError> {
     let conn = connection_state.read();
     match conn.auth_context() {
-        Some(ctx) if ctx.is_system || !ctx.is_anonymous => Ok(ctx.actor_id()),
+        // `is_anonymous_principal`, not the `is_anonymous` flag: the socket
+        // resolves an unauthenticated connection onto the physical anonymous
+        // user, whose context leaves that flag false.
+        Some(ctx) if !ctx.is_anonymous_principal() => Ok(ctx.actor_id()),
         Some(_) => Err(WsError::PermissionDenied),
         None => Err(WsError::NotAuthenticated),
     }

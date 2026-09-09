@@ -4,7 +4,7 @@
 //! based on the user's permissions. It uses REL (Raisin Expression Language) for
 //! condition evaluation.
 
-mod context;
+pub(crate) mod context;
 mod matching;
 
 use raisin_models::auth::AuthContext;
@@ -308,7 +308,9 @@ pub fn can_create_at_path(
     auth: &AuthContext,
     scope: &PermissionScope,
 ) -> bool {
-    tracing::warn!(
+    // These fire on every create, so they are debug: at warn they filled a
+    // development server's log with gigabytes of routine allow decisions.
+    tracing::debug!(
         path = path,
         node_type = node_type,
         is_system = auth.is_system,
@@ -318,20 +320,20 @@ pub fn can_create_at_path(
     );
 
     if auth.is_system {
-        tracing::warn!("RLS: system context - allowing create");
+        tracing::debug!("RLS: system context - allowing create");
         return true;
     }
 
     let permissions = match auth.permissions() {
         Some(p) => p,
         None => {
-            tracing::warn!("RLS: no permissions in auth context - denying create");
+            tracing::debug!("RLS: no permissions in auth context - denying create");
             return false;
         }
     };
 
     if permissions.is_system_admin {
-        tracing::warn!("RLS: system_admin permission - allowing create");
+        tracing::debug!("RLS: system_admin permission - allowing create");
         return true;
     }
 

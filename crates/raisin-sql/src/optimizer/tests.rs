@@ -232,6 +232,7 @@ fn test_projection_pruning() {
             | LogicalPlan::Translate { .. }
             | LogicalPlan::Relate { .. }
             | LogicalPlan::Unrelate { .. }
+            | LogicalPlan::SetOperation { .. }
             | LogicalPlan::Empty => None,
         }
     }

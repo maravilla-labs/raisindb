@@ -137,6 +137,31 @@ impl<S: Storage> NodeValidator<S> {
         Ok(resolved)
     }
 
+    /// Validate a node against its NodeType AND stamp the materialized
+    /// effective-mixin / supertype membership sets onto it.
+    ///
+    /// THE single validate-and-stamp function. Every write path funnels through
+    /// it — the service layer (`NodeService::validate_and_stamp`) and the
+    /// transaction layer's `add_node` / `put_node`, which is what SQL DML and
+    /// the WebSocket create handler reach. Before this existed the service
+    /// stamped and the transaction only validated, so a node created through a
+    /// child POST or from `psql` carried no `$mixins` / `$supertypes` and
+    /// `has_mixin()` / `is_a()` answered false for it.
+    ///
+    /// Client-supplied reserved (`$`) properties are stripped first: they are
+    /// server-computed metadata and must never be trusted from input.
+    pub async fn validate_and_stamp(&self, workspace: &str, node: &mut Node) -> Result<()> {
+        // Never trust client-supplied membership sets.
+        node.strip_reserved_properties();
+
+        self.validate_node_type_exists(&node.node_type).await?;
+        let resolved = self.validate_node_resolved(workspace, node).await?;
+
+        let supertypes = resolved.effective_supertypes();
+        node.set_effective_types(resolved.resolved_mixins.clone(), supertypes);
+        Ok(())
+    }
+
     /// Validate that the NodeType exists (without checking if published)
     /// Use this for draft content creation where unpublished NodeTypes are allowed
     pub async fn validate_node_type_exists(&self, node_type_name: &str) -> Result<()> {

@@ -31,9 +31,48 @@ impl BranchRepository for BranchRepositoryImpl {
         protected: bool,
         include_revision_history: bool,
     ) -> Result<Branch> {
-        // Capture source branch for index copying before moving upstream_branch
-        let explicit_source = upstream_branch.clone();
-        let source_branch_for_indexes = upstream_branch.as_deref().unwrap_or("main").to_string();
+        // The historical signature, expressed in terms of the options one: the
+        // upstream doubles as the fork source, which is what every caller of
+        // this form means by it.
+        self.create_branch_with_options(
+            tenant_id,
+            repo_id,
+            branch_name,
+            created_by,
+            raisin_storage::CreateBranchOptions {
+                source_branch: upstream_branch.clone(),
+                from_revision,
+                upstream_branch,
+                protected,
+                include_revision_history,
+                description: None,
+            },
+        )
+        .await
+    }
+
+    async fn create_branch_with_options(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch_name: &str,
+        created_by: &str,
+        options: raisin_storage::CreateBranchOptions,
+    ) -> Result<Branch> {
+        let raisin_storage::CreateBranchOptions {
+            source_branch,
+            from_revision,
+            upstream_branch,
+            protected,
+            include_revision_history,
+            description,
+        } = options;
+
+        // The branch to COPY FROM. Falls back to the upstream when no source was
+        // named — that is what the positional `create_branch` means — and to
+        // `main` only when neither was given.
+        let explicit_source = source_branch.clone().or_else(|| upstream_branch.clone());
+        let source_branch_for_indexes = explicit_source.as_deref().unwrap_or("main").to_string();
 
         // When no explicit revision is given but a source branch was explicitly
         // requested (e.g. `fromBranch: "main"`), fork from that branch's current
@@ -57,7 +96,7 @@ impl BranchRepository for BranchRepositoryImpl {
             created_from: effective_revision,
             upstream_branch,
             protected,
-            description: None,
+            description,
         };
 
         let key = keys::branch_key(tenant_id, repo_id, branch_name);

@@ -110,10 +110,59 @@ pub async fn add_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
     )
     .await?;
 
-    // 5a. Schema validation
+    // 5a. Schema validation AND membership stamping.
+    //
+    // Same call as `NodeService::validate_and_stamp` — deliberately, because
+    // this is the layer SQL DML and the WebSocket create handler reach without
+    // ever passing through NodeService. Validating here but stamping only up
+    // there is what left `has_mixin()` / `is_a()` answering false for every
+    // node written from `psql` or a child POST.
     if tx.is_validate_schema_enabled() {
         let validator = tx.create_validator();
-        validator.validate_node(workspace, &normalized_node).await?;
+        validator
+            .validate_and_stamp(workspace, &mut normalized_node)
+            .await?;
+    }
+
+    // 5a-bis. The parent's `allowed_children` constraint.
+    //
+    // `validate_create` above is called with parent validation OFF and must
+    // stay that way: its parent lookup goes to the repository, which cannot see
+    // a parent created earlier in THIS transaction, so an `initial_structure`
+    // child would fail with "parent not found". This check reads through the
+    // transaction's own cache instead, and treats a parent it cannot resolve as
+    // no constraint rather than an error — the constraint is a schema rule, not
+    // a referential one.
+    //
+    // It runs AFTER stamping on purpose: `allows_child` matches the whole
+    // family through `$supertypes`, which step 5a just materialized.
+    if let Some(parent_path) = normalized_node.parent_path() {
+        if parent_path != "/" {
+            if let Some(parent) =
+                super::super::super::read::get_node_by_path(tx, workspace, &parent_path).await?
+            {
+                use raisin_storage::NodeTypeRepository as _;
+                if let Some(parent_type) = tx
+                    .node_repo
+                    .node_type_repo
+                    .get(
+                        raisin_storage::BranchScope::new(&tenant_id, &repo_id, &branch),
+                        &parent.node_type,
+                        None,
+                    )
+                    .await?
+                {
+                    if !parent_type.allows_child(&normalized_node) {
+                        return Err(raisin_error::Error::Validation(format!(
+                            "Node type '{}' not allowed as child of '{}'. Allowed types: {:?}",
+                            normalized_node.node_type,
+                            parent.node_type,
+                            parent_type.allowed_children
+                        )));
+                    }
+                }
+            }
+        }
     }
 
     // 5b. Check unique property constraints

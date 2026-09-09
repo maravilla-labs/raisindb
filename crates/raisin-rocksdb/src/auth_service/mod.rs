@@ -20,6 +20,7 @@ mod oauth_tokens;
 mod password;
 mod user_crud;
 mod user_tokens;
+pub use user_tokens::TokenLifetimes;
 
 #[cfg(test)]
 mod tests;

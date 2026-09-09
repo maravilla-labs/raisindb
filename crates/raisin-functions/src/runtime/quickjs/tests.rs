@@ -2370,7 +2370,14 @@ async fn test_raisin_api_surface_snapshot() {
         ],
     );
     expect("sql", vec!["execute", "query"]);
-    expect("http", vec!["fetch"]);
+    // `request`/`get`/`post`/`put`/`patch`/`delete` are declared in
+    // `raisin.d.ts` and have always existed in Starlark; only this wrapper was
+    // missing them, so a JS function calling `raisin.http.get(...)`
+    // type-checked and then threw "not a function".
+    expect(
+        "http",
+        vec!["delete", "fetch", "get", "patch", "post", "put", "request"],
+    );
     expect("events", vec!["emit"]);
     expect(
         "ai",

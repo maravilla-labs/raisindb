@@ -26,7 +26,7 @@
 
 mod conflict_resolution;
 mod db_helpers;
-mod index_writers;
+pub(crate) mod index_writers;
 mod schema_operations;
 
 // Domain-specific operation modules

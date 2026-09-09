@@ -139,3 +139,64 @@ fn test_change_password() {
     );
     assert!(result.is_err());
 }
+
+#[test]
+fn user_token_lifetimes_follow_the_supplied_settings() {
+    use raisin_models::auth::{Identity, Session, SessionSettings};
+    use raisin_models::timestamp::StorageTimestamp;
+
+    let (_dir, service) = create_test_service();
+    let identity = Identity::new("id-1".into(), "t".into(), "a@example.com".into());
+    let session = Session::new(
+        "sid-1".into(),
+        "t".into(),
+        "id-1".into(),
+        "local".into(),
+        "fam".into(),
+        StorageTimestamp::now(),
+    );
+
+    // Default path: unchanged one hour / thirty days.
+    let tokens = service
+        .generate_user_tokens(&identity, &session, None, None)
+        .unwrap();
+    assert_eq!(tokens.expires_in, 3600);
+    assert_eq!(tokens.refresh_expires_in, Some(30 * 24 * 3600));
+    let claims = service.validate_user_token(&tokens.access_token).unwrap();
+    assert!((claims.exp - claims.iat - 3600).abs() <= 1);
+
+    // Configured path: the stored session settings decide.
+    let settings = SessionSettings {
+        access_token_duration_seconds: 600,
+        refresh_token_duration_seconds: 7200,
+        ..SessionSettings::default()
+    };
+    let lifetimes = TokenLifetimes::from_session_settings(&settings);
+    let tokens = service
+        .generate_user_tokens_with_lifetimes(&identity, &session, None, None, lifetimes)
+        .unwrap();
+    assert_eq!(tokens.expires_in, 600);
+    assert_eq!(tokens.refresh_expires_in, Some(7200));
+    let claims = service.validate_user_token(&tokens.access_token).unwrap();
+    assert!((claims.exp - claims.iat - 600).abs() <= 1);
+    let refresh = service
+        .validate_refresh_token(&tokens.refresh_token)
+        .unwrap();
+    assert!((refresh.exp - refresh.iat - 7200).abs() <= 1);
+
+    // Zero is not a lifetime: it falls back to the default instead of minting
+    // a token that is expired on arrival.
+    let zero = TokenLifetimes {
+        access_seconds: 0,
+        refresh_seconds: 0,
+    }
+    .sanitized();
+    assert_eq!(zero, TokenLifetimes::default());
+
+    // Refresh honours the same lifetimes.
+    let (refreshed, generation) = service
+        .refresh_user_tokens_with_lifetimes(&identity, &session, &refresh, None, lifetimes)
+        .unwrap();
+    assert_eq!(generation, session.token_generation + 1);
+    assert_eq!(refreshed.expires_in, 600);
+}

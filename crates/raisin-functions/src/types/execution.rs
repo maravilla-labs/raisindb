@@ -122,6 +122,20 @@ impl ExecutionContext {
         }
     }
 
+    /// Adopt an execution id that was minted by the caller.
+    ///
+    /// [`ExecutionContext::new`] mints a fresh id, which is right when this
+    /// context IS the start of the execution. It is wrong wherever the caller
+    /// has already published an id — the invoke response, the registered job,
+    /// the execution log — because the function then observes a
+    /// `raisin.context.execution_id` that matches none of them and no log line
+    /// can be tied back to a response. Callers that hold an id must thread it
+    /// through here so all four agree.
+    pub fn with_execution_id(mut self, execution_id: impl Into<String>) -> Self {
+        self.execution_id = execution_id.into();
+        self
+    }
+
     /// Set workspace
     pub fn with_workspace(mut self, workspace: impl Into<String>) -> Self {
         self.workspace_id = Some(workspace.into());

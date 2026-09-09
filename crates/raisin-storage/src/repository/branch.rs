@@ -19,6 +19,38 @@ use raisin_context::{
 use raisin_error::Result;
 use raisin_hlc::HLC;
 
+/// Everything a branch fork can be told, beyond the four identifiers.
+///
+/// `create_branch` takes these as positional arguments and conflates two of
+/// them: it derives the branch to COPY DATA FROM out of `upstream_branch`,
+/// falling back to `main`. That is fine for the callers that pass the fork
+/// source as the upstream, and wrong for a caller that has a source and an
+/// upstream that differ — SQL's `CREATE BRANCH b FROM 'a' UPSTREAM 'c'`, or
+/// `FROM 'a'` with no upstream at all, which forked from `a` and then copied
+/// `main`'s indexes over it.
+///
+/// This struct separates them, and carries the description the older signature
+/// had no room for.
+#[derive(Debug, Clone, Default)]
+pub struct CreateBranchOptions {
+    /// Branch whose data and indexes the new branch starts from.
+    ///
+    /// `None` with a `from_revision` set means `main`, preserving the older
+    /// behaviour. `None` with no revision means an empty branch.
+    pub source_branch: Option<String>,
+    /// Revision to fork at. `None` means the source branch's current HEAD.
+    pub from_revision: Option<HLC>,
+    /// Upstream branch recorded for divergence comparison. Independent of
+    /// `source_branch`: what you forked from and what you track need not match.
+    pub upstream_branch: Option<String>,
+    /// Whether the branch refuses deletion and merges into it.
+    pub protected: bool,
+    /// Whether to copy the source branch's revision history (background job).
+    pub include_revision_history: bool,
+    /// Human-readable description stored on the branch record.
+    pub description: Option<String>,
+}
+
 /// Branch management storage operations.
 ///
 /// Provides operations for managing Git-like branches within repositories.
@@ -48,6 +80,37 @@ pub trait BranchRepository: Send + Sync {
         protected: bool,
         include_revision_history: bool,
     ) -> impl std::future::Future<Output = Result<Branch>> + Send;
+
+    /// Create a branch, naming the fork source and the upstream separately and
+    /// carrying a description.
+    ///
+    /// The default body forwards to [`Self::create_branch`], which cannot honour
+    /// `source_branch` independently of `upstream_branch` and drops the
+    /// description — a backend that cares overrides this. RocksDB does.
+    fn create_branch_with_options(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch_name: &str,
+        created_by: &str,
+        options: CreateBranchOptions,
+    ) -> impl std::future::Future<Output = Result<Branch>> + Send {
+        async move {
+            self.create_branch(
+                tenant_id,
+                repo_id,
+                branch_name,
+                created_by,
+                options.from_revision,
+                options
+                    .upstream_branch
+                    .or_else(|| options.source_branch.clone()),
+                options.protected,
+                options.include_revision_history,
+            )
+            .await
+        }
+    }
 
     /// Get branch information
     ///

@@ -272,6 +272,8 @@ fn test_workspace_table_plan() {
         max_revision: None,
         branch_override: None,
         locales: vec![],
+        having: None,
+        set_operation: None,
         distinct: None,
     });
 

@@ -242,3 +242,216 @@ fn json_to_property_value(value: &serde_json::Value) -> Option<PropertyValue> {
         }
     }
 }
+
+// =============================================================================
+// FIELDS: PropertyDef -> FieldSchema
+// =============================================================================
+//
+// ElementTypes and Archetypes declare FIELDS, not PROPERTIES, and a field is a
+// tagged enum (`FieldSchema`) rather than the flat `PropertyValueSchema` a
+// NodeType property uses. Both DDL executors used to answer "FieldSchema is
+// complex" and store `fields: None` / `Vec::new()` — the statement parsed, the
+// entity was created, the server said "created", and every field the author
+// wrote was thrown away. One conversion lives here so `CREATE`, `ALTER ... ADD
+// FIELD` and `ALTER ... MODIFY FIELD` cannot disagree about what a field means.
+
+/// Convert DDL field definitions into element/archetype `FieldSchema` values.
+pub(crate) fn convert_fields(
+    fields: &[PropertyDef],
+) -> Result<Vec<raisin_models::nodes::types::element::field_types::FieldSchema>, Error> {
+    fields.iter().map(convert_field).collect()
+}
+
+/// Convert one DDL field definition into a `FieldSchema`.
+///
+/// The DDL type vocabulary is the property one, so the mapping picks the field
+/// variant that carries the same value. `Array` has no field variant of its
+/// own: a repeated field is the ELEMENT type with `multiple: true`, which is how
+/// the YAML authoring format spells it too.
+pub(crate) fn convert_field(
+    prop: &PropertyDef,
+) -> Result<raisin_models::nodes::types::element::field_types::FieldSchema, Error> {
+    use raisin_models::nodes::types::element::field_types::FieldSchema;
+
+    let (type_def, multiple) = match &prop.property_type {
+        PropertyTypeDef::Array { items } => (items.as_ref(), Some(true)),
+        other => (other, None),
+    };
+
+    let base = raisin_models::nodes::types::element::fields::base_field::FieldTypeSchema {
+        name: prop.name.clone(),
+        title: None,
+        label: prop.label.clone(),
+        required: if prop.required { Some(true) } else { None },
+        description: prop.description.clone(),
+        help_text: None,
+        default_value: prop.default.as_ref().and_then(convert_default_value),
+        validations: None,
+        is_hidden: None,
+        multiple,
+        design_value: None,
+        translatable: if prop.translatable { Some(true) } else { None },
+        index: if prop.index.is_empty() {
+            None
+        } else {
+            Some(convert_index_types(&prop.index))
+        },
+        meta: None,
+        // No `ENCRYPTED` modifier exists in the DDL grammar yet, and `None` is
+        // the safe default: not secret, stored as written. A secret field must
+        // still be declared in YAML.
+        encrypted: None,
+    };
+
+    Ok(match type_def {
+        PropertyTypeDef::String | PropertyTypeDef::URL => {
+            FieldSchema::TextField { base, config: None }
+        }
+        PropertyTypeDef::Number => FieldSchema::NumberField { base, config: None },
+        PropertyTypeDef::Boolean => FieldSchema::BooleanField { base },
+        PropertyTypeDef::Date => FieldSchema::DateField { base, config: None },
+        PropertyTypeDef::Reference | PropertyTypeDef::NodeType => {
+            FieldSchema::ReferenceField { base, config: None }
+        }
+        PropertyTypeDef::Resource => FieldSchema::MediaField { base, config: None },
+        PropertyTypeDef::Object { .. } => FieldSchema::JsonObjectField { base },
+        // An `Element` / `Composite` field holds element instances. The DDL type
+        // vocabulary carries no element-type NAME, and `allowed_element_types:
+        // None` is exactly "any element type" — the honest reading of a field
+        // declared without one. A `Composite` is the repeated form of the same
+        // thing. Erroring here instead would REJECT `FIELDS (hero Element)`,
+        // which is accepted today (and is in the published DDL reference), so
+        // the strictness would cost more than it bought.
+        PropertyTypeDef::Element => FieldSchema::SectionField {
+            base,
+            allowed_element_types: None,
+            render_as: None,
+        },
+        PropertyTypeDef::Composite => FieldSchema::SectionField {
+            base: raisin_models::nodes::types::element::fields::base_field::FieldTypeSchema {
+                multiple: Some(true),
+                ..base
+            },
+            allowed_element_types: None,
+            render_as: None,
+        },
+        // Unreachable through the parser: Array was unwrapped above and it does
+        // not nest. A field is multiple or it is not.
+        PropertyTypeDef::Array { .. } => {
+            return Err(Error::Validation(format!(
+                "field '{}': nested arrays are not supported; a repeated field is \
+                 declared as `Array<T>` of a scalar type",
+                prop.name
+            )))
+        }
+    })
+}
+
+#[cfg(test)]
+mod field_conversion_tests {
+    use super::*;
+    use raisin_models::nodes::types::element::field_types::{FieldSchema, FieldSchemaBase};
+
+    fn field(name: &str, ty: PropertyTypeDef) -> PropertyDef {
+        PropertyDef {
+            name: name.to_string(),
+            property_type: ty,
+            required: true,
+            ..Default::default()
+        }
+    }
+
+    /// The DDL executors used to answer "FieldSchema is complex" and store an
+    /// EMPTY field list. `CREATE ELEMENTTYPE 'x' FIELDS (...)` reported success
+    /// and persisted nothing, so the entity existed with no schema and the
+    /// editor rendered no form for it.
+    #[test]
+    fn ddl_field_definitions_convert_to_the_matching_field_variants() {
+        let fields = convert_fields(&[
+            field("headline", PropertyTypeDef::String),
+            field("count", PropertyTypeDef::Number),
+            field("live", PropertyTypeDef::Boolean),
+            field("published", PropertyTypeDef::Date),
+            field("author", PropertyTypeDef::Reference),
+            field("payload", PropertyTypeDef::Object { fields: vec![] }),
+        ])
+        .expect("every scalar DDL type must convert");
+
+        assert_eq!(fields.len(), 6);
+        assert_eq!(fields[0].base_name(), "headline");
+        assert!(matches!(fields[0], FieldSchema::TextField { .. }));
+        assert!(matches!(fields[1], FieldSchema::NumberField { .. }));
+        assert!(matches!(fields[2], FieldSchema::BooleanField { .. }));
+        assert!(matches!(fields[3], FieldSchema::DateField { .. }));
+        assert!(matches!(fields[4], FieldSchema::ReferenceField { .. }));
+        assert!(matches!(fields[5], FieldSchema::JsonObjectField { .. }));
+    }
+
+    /// `REQUIRED` and the other modifiers must survive the conversion, or the
+    /// schema stored is not the schema written.
+    #[test]
+    fn field_modifiers_reach_the_stored_schema() {
+        let mut def = field("headline", PropertyTypeDef::String);
+        def.label = Some("Headline".to_string());
+        def.description = Some("The big text".to_string());
+        def.translatable = true;
+
+        let converted = convert_field(&def).unwrap();
+        let FieldSchema::TextField { base, .. } = converted else {
+            panic!("String must become a TextField");
+        };
+        assert_eq!(base.name, "headline");
+        assert_eq!(base.required, Some(true));
+        assert_eq!(base.label.as_deref(), Some("Headline"));
+        assert_eq!(base.description.as_deref(), Some("The big text"));
+        assert_eq!(base.translatable, Some(true));
+        // A scalar is not multiple; only `Array<T>` sets that.
+        assert_eq!(base.multiple, None);
+    }
+
+    /// `Array<T>` is the SAME field with `multiple: true` — the spelling the
+    /// YAML authoring format uses — not a distinct array field variant.
+    #[test]
+    fn an_array_field_is_its_element_type_marked_multiple() {
+        let def = field(
+            "tags",
+            PropertyTypeDef::Array {
+                items: Box::new(PropertyTypeDef::String),
+            },
+        );
+        let FieldSchema::TextField { base, .. } = convert_field(&def).unwrap() else {
+            panic!("Array<String> must become a multiple TextField");
+        };
+        assert_eq!(base.multiple, Some(true));
+        assert_eq!(base.name, "tags");
+    }
+
+    /// `Element` and `Composite` are accepted, not rejected: `FIELDS (hero
+    /// Element)` is in the published DDL reference and writes successfully
+    /// today. With no element-type name in the grammar, `allowed_element_types:
+    /// None` — any element type — is the honest reading.
+    #[test]
+    fn element_and_composite_fields_become_open_section_fields() {
+        let FieldSchema::SectionField {
+            allowed_element_types,
+            base,
+            ..
+        } = convert_field(&field("hero", PropertyTypeDef::Element)).unwrap()
+        else {
+            panic!("Element must become a SectionField");
+        };
+        assert!(allowed_element_types.is_none());
+        assert_eq!(base.multiple, None);
+
+        let FieldSchema::SectionField { base, .. } =
+            convert_field(&field("body", PropertyTypeDef::Composite)).unwrap()
+        else {
+            panic!("Composite must become a SectionField");
+        };
+        assert_eq!(
+            base.multiple,
+            Some(true),
+            "a Composite is the repeated form of an Element field"
+        );
+    }
+}

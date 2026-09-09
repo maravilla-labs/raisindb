@@ -228,8 +228,11 @@ where
     let user_id = resolved_permissions.user_id.clone();
     conn.set_user_id(user_id.clone());
 
-    // Use AuthContext::for_user for the physical anonymous user (not anonymous())
-    conn.set_auth_context(AuthContext::for_user(&user_id).with_permissions(resolved_permissions));
+    // The physical anonymous user carries the anonymous role's permissions but
+    // must stay flagged anonymous, so anonymous-refusing gates still apply.
+    conn.set_auth_context(
+        AuthContext::anonymous_user(&user_id).with_permissions(resolved_permissions),
+    );
 
     // Generate anonymous JWT token for HTTP API calls
     let anonymous_token = state

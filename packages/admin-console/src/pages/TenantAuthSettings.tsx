@@ -200,7 +200,7 @@ export default function TenantAuthSettings() {
 
     setSaving(true)
     try {
-      await identityAuthApi.addProvider(newProvider.strategy_type, {
+      await identityAuthApi.addProvider(tenantId, newProvider.strategy_type, {
         display_name: newProvider.display_name,
         client_id: newProvider.client_id,
         client_secret: newProvider.client_secret,
@@ -232,7 +232,7 @@ export default function TenantAuthSettings() {
     }
 
     try {
-      await identityAuthApi.removeProvider(providerId)
+      await identityAuthApi.removeProvider(tenantId, providerId)
       success('Provider removed')
       await loadData()
     } catch (error) {
@@ -242,7 +242,7 @@ export default function TenantAuthSettings() {
 
   const handleToggleProvider = async (providerId: string, enabled: boolean) => {
     try {
-      await identityAuthApi.updateProvider(providerId, { enabled })
+      await identityAuthApi.updateProvider(tenantId, providerId, { enabled })
       success(enabled ? 'Provider enabled' : 'Provider disabled')
       await loadData()
     } catch (error) {

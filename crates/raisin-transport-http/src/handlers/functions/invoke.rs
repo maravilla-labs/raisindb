@@ -77,7 +77,12 @@ pub async fn invoke_function(
         ));
     }
 
-    let async_execution_id = nanoid::nanoid!();
+    // ONE id per invoke. It goes into the response, into the registered job
+    // (async) and into the ExecutionContext the function observes as
+    // `raisin.context.execution_id`, so a log line can be joined to a response.
+    // Minting it here and letting `ExecutionContext::new` mint another inside
+    // is what produced two ids for one call.
+    let execution_id = nanoid::nanoid!();
 
     if req.sync {
         // A SYNCHRONOUS invocation registers no job.
@@ -104,6 +109,7 @@ pub async fn invoke_function(
             req.input,
             req.timeout_ms,
             auth_context,
+            execution_id.clone(),
         )
         .await
         {
@@ -143,7 +149,7 @@ pub async fn invoke_function(
             &repo,
             &function_node.path,
             req.input.clone(),
-            async_execution_id.clone(),
+            execution_id.clone(),
             auth_context.as_ref(),
         )
         .await?;
@@ -179,7 +185,7 @@ pub async fn invoke_function(
             };
 
             return Ok(Json(InvokeFunctionResponse {
-                execution_id: async_execution_id,
+                execution_id: execution_id,
                 sync: false,
                 result,
                 error,
@@ -194,7 +200,7 @@ pub async fn invoke_function(
         }
 
         Ok(Json(InvokeFunctionResponse {
-            execution_id: async_execution_id,
+            execution_id: execution_id,
             sync: false,
             result: None,
             error: None,
@@ -423,6 +429,10 @@ async fn execute_function_inline(
     input: serde_json::Value,
     timeout_override: Option<u64>,
     auth_context: Option<AuthContext>,
+    // The id the caller has already published in its response. Threaded in
+    // rather than minted here so the function's own
+    // `raisin.context.execution_id` matches it.
+    execution_id: String,
 ) -> Result<InlineFunctionResult, ApiError> {
     let code = load_function_code(state, tenant_id, repo, node).await?;
     let mut loaded = build_loaded_function(node, code)?;
@@ -485,6 +495,7 @@ async fn execute_function_inline(
         .unwrap_or("system");
 
     let mut context = ExecutionContext::new(tenant_id, repo, DEFAULT_BRANCH, actor)
+        .with_execution_id(execution_id)
         .with_workspace(FUNCTIONS_WORKSPACE)
         .with_input(input)
         .with_admin_escalation(requires_admin);

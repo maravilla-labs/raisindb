@@ -87,6 +87,13 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
         // these fields, and most callers don't carry them through).
         normalized_node.updated_at = Some(chrono::Utc::now());
         normalized_node.updated_by = Some(actor);
+        // The node's own edit counter, derived from the stored value rather
+        // than trusted from input — a client that echoes back the node it read
+        // must not be able to pin or rewind it. It is NOT the MVCC revision:
+        // that lives in the storage key and is what time-travel reads and
+        // history take. `version` counts writes to THIS node, which is the
+        // number an optimistic-concurrency check wants.
+        normalized_node.version = existing.version.saturating_add(1);
         if normalized_node.created_by.is_none() {
             normalized_node.created_by = existing.created_by.clone();
         }
@@ -193,10 +200,18 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
         }
     }
 
-    // 5a. Schema validation against NodeType/Archetype/ElementType
+    // 5a. Schema validation AND membership stamping.
+    //
+    // Same call as `NodeService::validate_and_stamp` — deliberately, because
+    // this is the layer SQL DML and the WebSocket create handler reach without
+    // ever passing through NodeService. Validating here but stamping only up
+    // there is what left `has_mixin()` / `is_a()` answering false for every
+    // node written from `psql` or a child POST.
     if tx.is_validate_schema_enabled() {
         let validator = tx.create_validator();
-        validator.validate_node(workspace, &normalized_node).await?;
+        validator
+            .validate_and_stamp(workspace, &mut normalized_node)
+            .await?;
     }
 
     // 5b. Check unique property constraints

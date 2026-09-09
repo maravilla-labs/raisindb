@@ -7,11 +7,12 @@ use super::QueryEngine;
 use crate::physical_plan::executor::{Row, RowStream};
 use futures::stream;
 use raisin_error::Error;
+use raisin_hlc::HLC;
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_sql::ast::branch::{
     BranchAlteration, BranchScope, BranchStatement, MergeStrategy, SqlResolutionType,
 };
-use raisin_storage::{BranchRepository, Storage};
+use raisin_storage::{BranchRepository, RevisionRepository, Storage};
 
 impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static> QueryEngine<S> {
     /// Execute a BRANCH statement
@@ -262,32 +263,111 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         Ok(Box::pin(stream::iter(rows)))
     }
 
+    /// Resolve a `CREATE BRANCH ... AT REVISION <ref>` reference against the
+    /// branch being forked.
+    ///
+    /// `HEAD~N` walks the revision-metadata parent chain from that branch's
+    /// head, which is the same chain merge and divergence read, so `HEAD~0` is
+    /// the head and `HEAD~1` is the commit before it.
+    async fn resolve_fork_revision(
+        &self,
+        source_branch: &str,
+        revision: &raisin_sql::ast::branch::RevisionRef,
+    ) -> Result<HLC, Error> {
+        use raisin_sql::ast::branch::RevisionRef;
+
+        match revision {
+            // The parser accepts the `timestamp_counter` spelling; HLC parses
+            // `timestamp-counter`. Same normalization RESTORE does.
+            RevisionRef::Hlc(hlc_str) => {
+                let normalized = hlc_str.replace('_', "-");
+                normalized.parse::<HLC>().map_err(|e| {
+                    Error::Validation(format!("Invalid HLC timestamp '{hlc_str}': {e}"))
+                })
+            }
+            RevisionRef::HeadRelative(offset) => self.walk_back(source_branch, *offset).await,
+            RevisionRef::BranchRelative { branch, offset } => self.walk_back(branch, *offset).await,
+        }
+    }
+
+    /// Step `offset` commits back from a branch's head along the revision
+    /// metadata parent chain.
+    async fn walk_back(&self, branch: &str, offset: u32) -> Result<HLC, Error> {
+        let mut revision = self
+            .storage
+            .branches()
+            .get_head(&self.tenant_id, &self.repo_id, branch)
+            .await?;
+
+        for step in 0..offset {
+            let meta = self
+                .storage
+                .revisions()
+                .get_revision_meta(&self.tenant_id, &self.repo_id, &revision)
+                .await?
+                .ok_or_else(|| {
+                    Error::NotFound(format!(
+                        "Branch '{branch}' has no revision metadata at {revision}, \
+                         cannot resolve {branch}~{offset}"
+                    ))
+                })?;
+
+            revision = meta.parent.ok_or_else(|| {
+                Error::NotFound(format!(
+                    "Branch '{branch}' only has {step} commits before its head, \
+                     cannot go back {offset}"
+                ))
+            })?;
+        }
+
+        Ok(revision)
+    }
+
     async fn execute_create_branch(
         &self,
         create: &raisin_sql::ast::branch::CreateBranch,
     ) -> Result<RowStream, Error> {
-        let from_revision = if let Some(ref source) = create.from_branch {
-            let head = self
-                .storage
-                .branches()
-                .get_head(&self.tenant_id, &self.repo_id, source)
-                .await?;
-            Some(head)
-        } else {
-            None
+        // FROM names the branch to fork; UPSTREAM names the branch to track.
+        // They are separate on purpose — passing only the upstream down made
+        // `CREATE BRANCH b FROM 'a'` fork at `a`'s head and then copy `main`'s
+        // indexes over it, so the new branch held `a`'s data and `main`'s
+        // indexes and answered every indexed query wrongly.
+        let source_branch = create.from_branch.clone();
+
+        // AT REVISION was parsed and then dropped, so every fork happened at
+        // head no matter what the statement said.
+        let from_revision = match (&create.at_revision, &source_branch) {
+            (Some(rev), Some(source)) => Some(self.resolve_fork_revision(source, rev).await?),
+            (Some(rev), None) => {
+                // No FROM: resolve against the session's current branch, which
+                // is what an unqualified HEAD~N means.
+                let branch = self.effective_branch().await;
+                Some(self.resolve_fork_revision(&branch, rev).await?)
+            }
+            (None, Some(source)) => Some(
+                self.storage
+                    .branches()
+                    .get_head(&self.tenant_id, &self.repo_id, source)
+                    .await?,
+            ),
+            (None, None) => None,
         };
 
         self.storage
             .branches()
-            .create_branch(
+            .create_branch_with_options(
                 &self.tenant_id,
                 &self.repo_id,
                 &create.name,
                 "system",
-                from_revision,
-                create.upstream.clone(),
-                create.protected,
-                create.with_history,
+                raisin_storage::CreateBranchOptions {
+                    source_branch,
+                    from_revision,
+                    upstream_branch: create.upstream.clone(),
+                    protected: create.protected,
+                    include_revision_history: create.with_history,
+                    description: create.description.clone(),
+                },
             )
             .await?;
 

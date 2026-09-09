@@ -224,7 +224,19 @@ pub struct Node {
     )]
     pub parent: Option<String>,
 
-    /// Version number for this node (incremented on updates)
+    /// This node's own edit counter: 1 when created, +1 on every write that
+    /// updates it.
+    ///
+    /// It is NOT the MVCC revision. The revision is a Hybrid Logical Clock that
+    /// lives in the storage key, orders every write in the branch, and is what
+    /// time-travel reads (`rev/{revision}`) and `NodeService::history` take.
+    /// `version` counts writes to THIS node only, which is the number an
+    /// optimistic-concurrency check ("I read v3, reject my write if it is no
+    /// longer v3") wants and the revision is not.
+    ///
+    /// Stamped server-side at the write layers that can see the previous node —
+    /// `transaction/.../put_node.rs` and `repositories/nodes/crud/update.rs` —
+    /// never trusted from client input.
     #[serde(default = "default_version")]
     pub version: i32,
 

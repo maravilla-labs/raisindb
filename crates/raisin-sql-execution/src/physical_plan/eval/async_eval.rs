@@ -656,8 +656,10 @@ fn check_lock_permission<S: raisin_storage::Storage>(
     ctx: &crate::physical_plan::executor::ExecutionContext<S>,
 ) -> Result<(), Error> {
     match &ctx.auth_context {
-        Some(auth) if auth.is_system => Ok(()),
-        Some(auth) if !auth.is_anonymous => Ok(()),
+        // `is_anonymous_principal`, not the `is_anonymous` flag: an
+        // unauthenticated caller is resolved onto the physical anonymous user,
+        // whose context leaves that flag false.
+        Some(auth) if !auth.is_anonymous_principal() => Ok(()),
         Some(_) => Err(Error::Forbidden(
             "Anonymous users cannot perform lock operations".to_string(),
         )),

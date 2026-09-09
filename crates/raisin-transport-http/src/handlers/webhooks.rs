@@ -15,7 +15,7 @@ mod types;
 pub use types::{InvokeQuery, WebhookResponse};
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, Query, RawQuery, State},
     http::{HeaderMap, Method},
     Extension, Json,
 };
@@ -37,6 +37,7 @@ pub async fn invoke_webhook(
     method: Method,
     headers: HeaderMap,
     Query(query): Query<InvokeQuery>,
+    RawQuery(raw_query): RawQuery,
     body: Option<Json<serde_json::Value>>,
 ) -> Result<Json<WebhookResponse>, ApiError> {
     invoke_http_trigger_internal(
@@ -48,6 +49,7 @@ pub async fn invoke_webhook(
         method,
         headers,
         query,
+        raw_query,
         body,
     )
     .await
@@ -62,6 +64,7 @@ pub async fn invoke_webhook_with_path(
     method: Method,
     headers: HeaderMap,
     Query(query): Query<InvokeQuery>,
+    RawQuery(raw_query): RawQuery,
     body: Option<Json<serde_json::Value>>,
 ) -> Result<Json<WebhookResponse>, ApiError> {
     invoke_http_trigger_internal(
@@ -73,6 +76,7 @@ pub async fn invoke_webhook_with_path(
         method,
         headers,
         query,
+        raw_query,
         body,
     )
     .await
@@ -87,6 +91,7 @@ pub async fn invoke_trigger(
     method: Method,
     headers: HeaderMap,
     Query(query): Query<InvokeQuery>,
+    RawQuery(raw_query): RawQuery,
     body: Option<Json<serde_json::Value>>,
 ) -> Result<Json<WebhookResponse>, ApiError> {
     invoke_http_trigger_internal(
@@ -98,6 +103,7 @@ pub async fn invoke_trigger(
         method,
         headers,
         query,
+        raw_query,
         body,
     )
     .await
@@ -112,6 +118,7 @@ pub async fn invoke_trigger_with_path(
     method: Method,
     headers: HeaderMap,
     Query(query): Query<InvokeQuery>,
+    RawQuery(raw_query): RawQuery,
     body: Option<Json<serde_json::Value>>,
 ) -> Result<Json<WebhookResponse>, ApiError> {
     invoke_http_trigger_internal(
@@ -123,6 +130,7 @@ pub async fn invoke_trigger_with_path(
         method,
         headers,
         query,
+        raw_query,
         body,
     )
     .await
@@ -136,6 +144,7 @@ pub async fn invoke_webhook(
     _method: Method,
     _headers: HeaderMap,
     Query(_query): Query<InvokeQuery>,
+    RawQuery(_raw_query): RawQuery,
     _body: Option<Json<serde_json::Value>>,
 ) -> Result<Json<WebhookResponse>, ApiError> {
     Err(ApiError::internal(
@@ -150,6 +159,7 @@ pub async fn invoke_webhook_with_path(
     _method: Method,
     _headers: HeaderMap,
     Query(_query): Query<InvokeQuery>,
+    RawQuery(_raw_query): RawQuery,
     _body: Option<Json<serde_json::Value>>,
 ) -> Result<Json<WebhookResponse>, ApiError> {
     Err(ApiError::internal(
@@ -164,6 +174,7 @@ pub async fn invoke_trigger(
     _method: Method,
     _headers: HeaderMap,
     Query(_query): Query<InvokeQuery>,
+    RawQuery(_raw_query): RawQuery,
     _body: Option<Json<serde_json::Value>>,
 ) -> Result<Json<WebhookResponse>, ApiError> {
     Err(ApiError::internal(
@@ -178,6 +189,7 @@ pub async fn invoke_trigger_with_path(
     _method: Method,
     _headers: HeaderMap,
     Query(_query): Query<InvokeQuery>,
+    RawQuery(_raw_query): RawQuery,
     _body: Option<Json<serde_json::Value>>,
 ) -> Result<Json<WebhookResponse>, ApiError> {
     Err(ApiError::internal(

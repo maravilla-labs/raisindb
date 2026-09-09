@@ -78,7 +78,7 @@ pub mod vmount_registry;
 
 pub use admin_user_store::AdminUserStore;
 pub use api_key_store::ApiKeyStore;
-pub use auth_service::{AdminClaims, AuthService};
+pub use auth_service::{AdminClaims, AuthService, TokenLifetimes};
 pub use checkpoint::{CheckpointManager, CheckpointMetadata, CheckpointReceiver};
 pub use config::{CompressionType, ReplicationPeerConfig, RocksDBConfig, TenantLimits};
 pub use hnsw_transfer::{HnswIndexManager, HnswIndexMetadata, HnswIndexReceiver};

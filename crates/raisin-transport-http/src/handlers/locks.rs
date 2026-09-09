@@ -43,9 +43,16 @@ fn scoped(tenant: &str, repo: &str, branch: &str, name: &str) -> String {
 /// always allowed); a held lock is a denial-of-service vector, so anonymous /
 /// unauthenticated requests are rejected with 403. Mirrors
 /// `check_lock_permission` in the SQL lock functions.
+///
+/// The test is [`AuthContext::is_anonymous_principal`], NOT the `is_anonymous`
+/// flag: `optional_auth_middleware` resolves an unauthenticated request onto
+/// the physical anonymous user and builds the context with `for_user`, which
+/// leaves that flag false. Reading the flag directly let any anonymous caller
+/// take a lock, which is exactly the denial of service this gate exists to
+/// prevent.
 fn require_owner(auth: &Option<Extension<AuthContext>>) -> Result<String, ApiError> {
     match auth.as_ref().map(|Extension(ctx)| ctx) {
-        Some(ctx) if ctx.is_system || !ctx.is_anonymous => Ok(ctx.actor_id()),
+        Some(ctx) if !ctx.is_anonymous_principal() => Ok(ctx.actor_id()),
         Some(_) => Err(ApiError::from(raisin_error::Error::Forbidden(
             "Anonymous users cannot perform lock operations".to_string(),
         ))),
@@ -196,4 +203,57 @@ pub async fn release_inventory(
     let pool = scoped(tenant_info.tenant_id.as_str(), &repo, &branch, &req.pool);
     let remaining = mgr.release_claim(&pool, req.n).await?;
     Ok(Json(json!({ "remaining": remaining })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use raisin_models::permissions::ResolvedPermissions;
+
+    fn resolved_anonymous_user() -> AuthContext {
+        // Exactly what `insert_unauthenticated_context` builds when anonymous
+        // access is enabled: the physical anonymous `raisin:User` node,
+        // resolved through `AuthContext::for_user`.
+        let mut resolved = ResolvedPermissions::empty("anon-node-id");
+        resolved.direct_roles = vec!["anonymous".to_string()];
+        resolved.effective_roles = vec!["anonymous".to_string()];
+        AuthContext::for_user("anon-node-id").with_permissions(resolved)
+    }
+
+    /// The regression. A held lock is a denial-of-service vector, so an
+    /// anonymous caller must never take one — but the anonymous user's context
+    /// has `is_anonymous == false`, so the old `!ctx.is_anonymous` gate let it
+    /// acquire locks even though the doc comment said it could not.
+    #[test]
+    fn an_anonymous_caller_cannot_take_a_lock() {
+        let err = require_owner(&Some(Extension(resolved_anonymous_user())))
+            .expect_err("the anonymous user must be refused");
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn a_caller_with_no_context_at_all_is_refused() {
+        let err = require_owner(&None).expect_err("no principal must be refused");
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+
+        let err = require_owner(&Some(Extension(AuthContext::deny_all())))
+            .expect_err("a deny-all context must be refused");
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn a_signed_in_caller_owns_the_lock_under_their_own_identity() {
+        let mut resolved = ResolvedPermissions::empty("user-1");
+        resolved.effective_roles = vec!["editor".to_string()];
+        let ctx = AuthContext::for_user("user-1").with_permissions(resolved);
+
+        assert_eq!(require_owner(&Some(Extension(ctx))).unwrap(), "user-1");
+    }
+
+    #[test]
+    fn the_system_context_is_still_allowed() {
+        let owner = require_owner(&Some(Extension(AuthContext::system())))
+            .expect("system operations must keep working");
+        assert_eq!(owner, "system");
+    }
 }

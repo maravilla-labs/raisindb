@@ -32,6 +32,7 @@ mod dollar_dot;
 mod identifiers;
 mod interval;
 mod literals;
+mod special_forms;
 mod subquery;
 
 use super::{AnalyzerContext, Result};
@@ -115,6 +116,39 @@ impl<'a> AnalyzerContext<'a> {
             } => self.analyze_ilike(expr, pattern, *negated),
 
             SqlExpr::Nested(expr) => self.analyze_expr(expr),
+
+            // SQL-standard call syntax that the parser gives its own AST node.
+            // Each is lowered onto the named function that implements it, so
+            // there is one type-check and one kernel per function rather than
+            // one per spelling. See `special_forms`.
+            SqlExpr::Substring {
+                expr,
+                substring_from,
+                substring_for,
+                ..
+            } => self.analyze_substring(expr, substring_from.as_deref(), substring_for.as_deref()),
+
+            SqlExpr::Trim {
+                expr,
+                trim_where,
+                trim_what,
+                trim_characters,
+            } => self.analyze_trim(
+                expr,
+                trim_where.as_ref(),
+                trim_what.as_deref(),
+                trim_characters.as_deref(),
+            ),
+
+            SqlExpr::Extract { field, expr, .. } => self.analyze_extract(field, expr),
+
+            SqlExpr::Position { expr, r#in } => self.analyze_position(expr, r#in),
+
+            SqlExpr::Ceil { expr, field } => self.analyze_ceil_floor("CEIL", expr, field),
+
+            SqlExpr::Floor { expr, field } => self.analyze_ceil_floor("FLOOR", expr, field),
+
+            SqlExpr::TypedString(typed) => self.analyze_typed_string(typed),
 
             SqlExpr::Case {
                 operand,

@@ -374,4 +374,54 @@ mod tests {
         assert_eq!(decoded.allowed_children, node_type.allowed_children);
         assert_eq!(decoded.properties.as_ref().map(|p| p.len()), Some(5));
     }
+
+    /// `allowed_children` matches a FAMILY, not a leaf name, and an empty list
+    /// is no constraint at all. Both enforcement sites go through this one
+    /// predicate; a second copy comparing `node_type` strings would silently
+    /// reject every subtype of an allowed parent.
+    #[test]
+    fn allows_child_is_empty_means_unconstrained_and_matches_the_whole_family() {
+        use crate::nodes::Node;
+
+        let mut child = Node {
+            node_type: "app:BlogPost".to_string(),
+            ..Default::default()
+        };
+        // Exactly the shape the write path stamps: `$supertypes` is the node's
+        // own type plus every `extends` ancestor AND every effective mixin.
+        child.set_effective_types(
+            vec!["app:Timestamped".to_string()],
+            vec![
+                "app:BlogPost".to_string(),
+                "app:Content".to_string(),
+                "app:Timestamped".to_string(),
+            ],
+        );
+
+        let mut parent = NodeType::test_minimal("app:Folder");
+
+        // Empty = no constraint. Every existing NodeType ships this, so the
+        // check must be inert for them.
+        assert!(parent.allows_child(&child));
+
+        // Explicit leaf name.
+        parent.allowed_children = vec!["app:BlogPost".to_string()];
+        assert!(parent.allows_child(&child));
+
+        // A supertype the child extends.
+        parent.allowed_children = vec!["app:Content".to_string()];
+        assert!(parent.allows_child(&child));
+
+        // A mixin the child carries.
+        parent.allowed_children = vec!["app:Timestamped".to_string()];
+        assert!(parent.allows_child(&child));
+
+        // The wildcard.
+        parent.allowed_children = vec!["*".to_string()];
+        assert!(parent.allows_child(&child));
+
+        // Something unrelated.
+        parent.allowed_children = vec!["app:Product".to_string()];
+        assert!(!parent.allows_child(&child));
+    }
 }

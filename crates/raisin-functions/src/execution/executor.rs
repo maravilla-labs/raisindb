@@ -312,7 +312,14 @@ where
         .map(|s| s.as_str())
         .unwrap_or("system");
 
+    // Adopt the CALLER'S execution id rather than minting a second one.
+    // `ExecutionContext::new` mints its own, so the id this function reports in
+    // its `ExecutionResult` (and that the job registry and the invoke response
+    // carry) used to differ from the `raisin.context.execution_id` the function
+    // itself observed. One invoke, two ids, and no way to join a log line to a
+    // response.
     let mut exec_context = ExecutionContext::new(tenant_id, repo_id, branch, actor)
+        .with_execution_id(execution_id)
         .with_workspace(workspace)
         .with_input(input)
         .with_admin_escalation(requires_admin);

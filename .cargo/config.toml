@@ -21,3 +21,9 @@ rustflags = ["-C", "split-debuginfo=unpacked"]
 # (it sets them only for Windows today), this block stops applying silently.
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "force-frame-pointers=yes"]
+
+# Temporary during the multi-agent docs/fix session (2026-09-08): the machine
+# ran to 1.8 GB free with seven agents building. Incremental caches regrew to
+# ~1 GB every few minutes.
+[build]
+incremental = false

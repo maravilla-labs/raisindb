@@ -126,6 +126,20 @@ pub async fn create_node_type(
 
     let scope = BranchScope::new(tenant_id, repo_id, branch_name);
 
+    // POST to an existing name OVERWRITES it. That is deliberate — package
+    // install, the system-definition resync and every provisioning script
+    // depend on being able to re-post a NodeType — but it is not a creation,
+    // and answering 201 Created made an accidental clobber look like a fresh
+    // write. So the status tells the truth: 201 when the name was free, 200
+    // when this replaced a definition that was already there. No caller is
+    // refused, and a client that cares can tell the two apart.
+    let already_existed = state
+        .storage()
+        .node_types()
+        .get(scope, &node_type.name, None)
+        .await?
+        .is_some();
+
     let revision = state
         .storage()
         .node_types()
@@ -141,7 +155,12 @@ pub async fn create_node_type(
         .await?
         .unwrap_or(node_type);
 
-    Ok((StatusCode::CREATED, Json(stored)))
+    let status = if already_existed {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((status, Json(stored)))
 }
 
 /// List all NodeTypes

@@ -38,15 +38,46 @@ export function findPackageRoot(start: string): string | null {
   }
 }
 
-/** The content base of a package: `content/` when present, else the root. */
+/**
+ * The content base for READING an existing package: `content/` when present,
+ * else the root.
+ *
+ * The fallback exists so discovery still finds nodes in an older flat layout.
+ * It is the WRONG base to scaffold into — see {@link contentTarget}.
+ */
 export function contentBase(packageRoot: string): string {
   const nested = path.join(packageRoot, 'content');
   return fs.existsSync(nested) ? nested : packageRoot;
 }
 
+/**
+ * The content base for WRITING new files: always `content/`.
+ *
+ * `contentBase` falls back to the package root when `content/` is absent, and
+ * scaffolding through it wrote `functions/lib/...` at the root of a package
+ * that had no `content/` yet. `package create` then packed those files and the
+ * installer, which reads only `content/{workspace}/...`, found nothing — so
+ * `deploy --install` reported success and installed no function at all. Nothing
+ * failed anywhere along that chain, which is what made it hard to see.
+ */
+export function contentTarget(packageRoot: string): string {
+  return path.join(packageRoot, 'content');
+}
+
 /** The functions workspace root — the boundary an `entry_file` may not cross. */
 export function functionsRoot(packageRoot: string): string {
   return path.join(contentBase(packageRoot), 'functions');
+}
+
+/**
+ * The functions workspace root a scaffold will write into.
+ *
+ * Uses {@link contentTarget}, so the boundary check a scaffold makes is against
+ * the directory it is about to create rather than against a flat root that only
+ * looks right because `content/` does not exist yet.
+ */
+export function functionsTargetRoot(packageRoot: string): string {
+  return path.join(contentTarget(packageRoot), 'functions');
 }
 
 /** Recursively collect files named `name`, skipping build/vendor directories. */

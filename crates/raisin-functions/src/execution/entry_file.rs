@@ -34,6 +34,45 @@ pub fn default_handler_name(language: FunctionLanguage) -> &'static str {
     }
 }
 
+/// Split an `entry_file` into `(file part, handler name)` WITHOUT resolving the
+/// path.
+///
+/// This is the ONE parser for the grammar. `FunctionMetadata::entry_file_path`
+/// and `entry_function_name` call it, and so does [`resolve_entry_file`] — they
+/// used to hold their own copies, and a bare `main.wasm` therefore invoked as
+/// handler `"default"` through the job path and as handler `"main.wasm"` through
+/// the sync HTTP path, which the guest answered with
+/// `unknown handler 'main.wasm'`.
+///
+/// Three shapes, in the order they are tested:
+///
+/// 1. `file:handler` — split on the LAST colon, both parts verbatim.
+/// 2. a bare name that looks like a FILE (it has an extension) — the handler is
+///    the language default.
+/// 3. a bare name with no extension — the LEGACY `entrypoint` spelling, where
+///    the whole string was the exported function name and the asset was always
+///    `index.js`. Kept because old `raisin:Function` nodes still carry it.
+pub fn split_entry_file(entry_file: &str, language: FunctionLanguage) -> (&str, &str) {
+    match entry_file.rsplit_once(':') {
+        Some((file, handler)) if !handler.trim().is_empty() => (file.trim(), handler.trim()),
+        // A trailing bare `:` is a typo, not a nameless handler.
+        Some((file, _)) => (file.trim(), default_handler_name(language)),
+        None => {
+            let bare = entry_file.trim();
+            // A bare name is the LEGACY `entrypoint` spelling only when it looks
+            // like a plain identifier: no separator and no extension. Anything
+            // carrying a `/` or a `.` is a path, and must stay one — otherwise
+            // `../../..` would be read as a function name instead of being
+            // refused for climbing out of the workspace.
+            if bare.contains('.') || bare.contains('/') {
+                (bare, default_handler_name(language))
+            } else {
+                ("index.js", bare)
+            }
+        }
+    }
+}
+
 /// Resolve `entry_file` into `(asset path, handler name)`.
 ///
 /// The handler name is passed through **verbatim**. There is deliberately no
@@ -51,17 +90,8 @@ pub fn resolve_entry_file(
     entry_file: &str,
     language: FunctionLanguage,
 ) -> Result<(String, String)> {
-    let (file_part, handler) = match entry_file.rsplit_once(':') {
-        Some((file, handler)) if !handler.trim().is_empty() => {
-            (file.trim(), handler.trim().to_string())
-        }
-        // A trailing bare `:` is a typo, not a nameless handler.
-        Some((file, _)) => (file.trim(), default_handler_name(language).to_string()),
-        None => (
-            entry_file.trim(),
-            default_handler_name(language).to_string(),
-        ),
-    };
+    let (file_part, handler) = split_entry_file(entry_file, language);
+    let handler = handler.to_string();
 
     let joined = Path::new(function_path).join(Path::new(file_part));
     let normalized = normalize_within_root(&joined).ok_or_else(|| {
@@ -192,6 +222,56 @@ mod tests {
         // Exactly at the root is still inside it.
         let (path, _) = wasm("/lib/greet", "../../shared.wasm");
         assert_eq!(path, "/shared.wasm");
+    }
+
+    #[test]
+    fn one_parser_serves_the_metadata_accessors_and_the_resolver() {
+        use crate::types::FunctionMetadata;
+
+        // Regression: `FunctionMetadata` held its own copy of this grammar that
+        // returned the WHOLE string as the handler when there was no colon. A
+        // wasm function with `entry_file = "main.wasm"` therefore ran as handler
+        // "default" through the job path and as handler "main.wasm" through the
+        // sync HTTP path, where the guest answered
+        // `unknown handler 'main.wasm'; registered: default, shout`.
+        let mut wasm_meta = FunctionMetadata::new("greet", FunctionLanguage::Wasm);
+        wasm_meta.entry_file = "main.wasm".to_string();
+        assert_eq!(wasm_meta.entry_file_path(), "main.wasm");
+        assert_eq!(wasm_meta.entry_function_name(), "default");
+
+        let (_, resolved_handler) = wasm("/lib/greet", &wasm_meta.entry_file);
+        assert_eq!(resolved_handler, wasm_meta.entry_function_name());
+
+        // A named handler agrees on both sides too.
+        wasm_meta.entry_file = "main.wasm:shout".to_string();
+        assert_eq!(wasm_meta.entry_file_path(), "main.wasm");
+        assert_eq!(wasm_meta.entry_function_name(), "shout");
+        assert_eq!(wasm("/lib/greet", &wasm_meta.entry_file).1, "shout");
+
+        // And so does JavaScript, whose default handler is "handler".
+        let mut js_meta = FunctionMetadata::new("greet", FunctionLanguage::JavaScript);
+        js_meta.entry_file = "index.js".to_string();
+        assert_eq!(js_meta.entry_file_path(), "index.js");
+        assert_eq!(js_meta.entry_function_name(), "handler");
+        assert_eq!(js("/lib/greet", &js_meta.entry_file).1, "handler");
+    }
+
+    #[test]
+    fn a_bare_name_with_no_extension_is_the_legacy_entrypoint_spelling() {
+        use crate::types::FunctionMetadata;
+
+        // Old `raisin:Function` nodes carry `entrypoint: handler`, where the
+        // whole string is the EXPORTED FUNCTION NAME and the asset is always
+        // index.js. That has to keep working, which is why the split tests for
+        // an extension rather than assuming a bare name is a file.
+        let mut meta = FunctionMetadata::new("legacy", FunctionLanguage::JavaScript);
+        meta.entry_file = "handleUserMessage".to_string();
+        assert_eq!(meta.entry_file_path(), "index.js");
+        assert_eq!(meta.entry_function_name(), "handleUserMessage");
+
+        let (path, handler) = js("/lib/legacy", "handleUserMessage");
+        assert_eq!(path, "/lib/legacy/index.js");
+        assert_eq!(handler, "handleUserMessage");
     }
 
     #[test]

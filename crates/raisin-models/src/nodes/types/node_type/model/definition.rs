@@ -133,6 +133,31 @@ impl NodeType {
         self.publishable.unwrap_or(false)
     }
 
+    /// Whether this NodeType permits `child` directly beneath it.
+    ///
+    /// THE one implementation of the `allowed_children` rule. Both enforcement
+    /// sites — the node repository's `validate_parent_allows_child` and the
+    /// transaction create path — call this, so the two cannot drift into
+    /// disagreeing about what a parent accepts.
+    ///
+    /// Rules:
+    /// - an empty list is NO constraint (every type is allowed);
+    /// - `"*"` is an explicit wildcard;
+    /// - otherwise the child matches if the entry is its `node_type`, one of
+    ///   its `extends` ancestors, or one of its effective mixins. That last
+    ///   part is why the check reads `Node::is_a` rather than comparing
+    ///   `node_type` strings: a parent that allows `raisin:Asset` means the
+    ///   family, not the single leaf name, and the write path materializes
+    ///   that family into `$supertypes` on every node.
+    pub fn allows_child(&self, child: &crate::nodes::Node) -> bool {
+        if self.allowed_children.is_empty() {
+            return true;
+        }
+        self.allowed_children
+            .iter()
+            .any(|allowed| allowed == "*" || child.is_a(allowed))
+    }
+
     /// Create a minimal NodeType for testing with required fields only
     #[cfg(test)]
     pub fn test_minimal(name: impl Into<String>) -> Self {

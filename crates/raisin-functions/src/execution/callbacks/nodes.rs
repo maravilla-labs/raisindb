@@ -148,18 +148,26 @@ where
 
 /// Create node_query callback: `raisin.nodes.query(workspace, query)`
 ///
-/// NOTE: Stub - use SQL for complex queries.
-pub fn create_node_query<S, B>(_query_ctx: Arc<QueryContext<S, B>>) -> NodeQueryCallback
+/// Takes a small declarative FILTER OBJECT and runs it as a parameterised
+/// SELECT through the same `QueryContext` every other node callback uses, so it
+/// inherits row-level security, the transaction and the tenant scope. See
+/// [`sql_generator::generate_node_query`] for the recognised keys.
+///
+/// This returned `Node query not yet implemented` for every call while being
+/// declared in `raisin.d.ts`, so the binding type-checked and then failed at
+/// runtime. Anything the filter object cannot express is still
+/// `raisin.sql.query()`.
+pub fn create_node_query<S, B>(query_ctx: Arc<QueryContext<S, B>>) -> NodeQueryCallback
 where
     S: Storage + TransactionalStorage + 'static,
     B: BinaryStorage + 'static,
 {
-    Arc::new(move |_workspace: String, _query: Value| {
+    Arc::new(move |workspace: String, query: Value| {
+        let ctx = query_ctx.clone();
+
         Box::pin(async move {
-            Err(raisin_error::Error::Backend(
-                "Node query not yet implemented - use raisin.sql.query() for complex queries"
-                    .to_string(),
-            ))
+            let stmt = sql_generator::generate_node_query(&workspace, &query)?;
+            ctx.execute_query(&stmt).await
         })
     })
 }

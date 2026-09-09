@@ -7,6 +7,7 @@ use raisin_sql::ast::ddl::{CreateArchetype, DropArchetype};
 use raisin_storage::{ArchetypeRepository, CommitMetadata, Storage};
 use std::sync::Arc;
 
+use super::conversions::{convert_field, convert_fields};
 use super::ddl_success_stream;
 
 // =============================================================================
@@ -22,9 +23,12 @@ pub(crate) async fn execute_create_archetype<S: Storage + 'static>(
 ) -> Result<RowStream, Error> {
     tracing::info!("Creating Archetype: {}", create.name);
 
-    // For Archetypes, fields are FieldSchema which is a tagged enum
-    // For DDL simplicity, we'll store fields as None for now
-    // A future enhancement could convert PropertyDef to FieldSchema
+    let fields = if create.fields.is_empty() {
+        None
+    } else {
+        Some(convert_fields(&create.fields)?)
+    };
+
     let archetype = Archetype {
         id: nanoid::nanoid!(16),
         name: create.name.clone(),
@@ -34,7 +38,7 @@ pub(crate) async fn execute_create_archetype<S: Storage + 'static>(
         title: create.title.clone(),
         description: create.description.clone(),
         icon: create.icon.clone(),
-        fields: None, // FieldSchema is complex; DDL doesn't support full conversion yet
+        fields,
         initial_content: None,
         layout: None,
         meta: None,
@@ -117,18 +121,41 @@ fn apply_archetype_alteration(
 ) -> Result<(), Error> {
     use raisin_sql::ast::ddl::ArchetypeAlteration;
 
+    use raisin_models::nodes::types::element::field_types::FieldSchemaBase;
+
     match alteration {
-        ArchetypeAlteration::AddField(_field_def) => {
-            // FieldSchema conversion not supported yet
-            tracing::warn!("ADD FIELD not fully supported for Archetypes in DDL");
+        ArchetypeAlteration::AddField(field_def) => {
+            let field = convert_field(field_def)?;
+            // Re-declaring a field REPLACES it. See the ElementType executor
+            // for why a duplicated name is not an option.
+            let fields = archetype.fields.get_or_insert_with(Vec::new);
+            fields.retain(|f| f.base_name() != &field_def.name);
+            fields.push(field);
         }
-        ArchetypeAlteration::DropField(_name) => {
-            // FieldSchema manipulation not supported yet
-            tracing::warn!("DROP FIELD not fully supported for Archetypes in DDL");
+        ArchetypeAlteration::DropField(name) => {
+            let fields = archetype.fields.get_or_insert_with(Vec::new);
+            let before = fields.len();
+            fields.retain(|f| f.base_name() != name);
+            if fields.len() == before {
+                return Err(Error::NotFound(format!(
+                    "Field '{}' not found on Archetype '{}'",
+                    name, archetype.name
+                )));
+            }
         }
-        ArchetypeAlteration::ModifyField(_field_def) => {
-            // FieldSchema manipulation not supported yet
-            tracing::warn!("MODIFY FIELD not fully supported for Archetypes in DDL");
+        ArchetypeAlteration::ModifyField(field_def) => {
+            let field = convert_field(field_def)?;
+            let slot = archetype
+                .fields
+                .as_mut()
+                .and_then(|fs| fs.iter_mut().find(|f| f.base_name() == &field_def.name));
+            let Some(slot) = slot else {
+                return Err(Error::NotFound(format!(
+                    "Field '{}' not found on Archetype '{}'; use ADD FIELD to create it",
+                    field_def.name, archetype.name
+                )));
+            };
+            *slot = field;
         }
         ArchetypeAlteration::SetDescription(desc) => {
             archetype.description = Some(desc.clone());

@@ -155,7 +155,11 @@ async fn insert_unauthenticated_context(state: &AppState, req: &mut Request<Body
             });
 
         let user_id = resolved_permissions.user_id.clone();
-        let auth_context = AuthContext::for_user(&user_id).with_permissions(resolved_permissions);
+        // anonymous_user() keeps `is_anonymous` set, so the anonymous caller
+        // gets the anonymous role's permissions without passing gates that
+        // refuse anonymous callers (locks, ACL DDL, secret management).
+        let auth_context =
+            AuthContext::anonymous_user(&user_id).with_permissions(resolved_permissions);
         tracing::debug!(
             tenant_id = %tenant_id,
             repo_id = %repo_id,

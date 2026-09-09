@@ -169,7 +169,57 @@ impl PackageInstaller {
             content_nodes.extend(workspace_content);
         }
 
+        self.warn_about_stranded_nodes();
+
         Ok(content_nodes)
+    }
+
+    /// Warn about `node.yaml` files the installer will never read.
+    ///
+    /// Only `content/{workspace}/...` is installed. A package that ships nodes
+    /// anywhere else installs NOTHING from them and reports success, because no
+    /// step in the chain has an opinion about a file it does not look at — the
+    /// packer packs whatever it finds and the installer walks only `content/`.
+    /// That is exactly what a scaffold writing `functions/lib/...` at the
+    /// package root produced: `deploy --install` said it worked and the
+    /// function did not exist.
+    ///
+    /// A warning rather than an error: an older package may legitimately carry
+    /// unrelated top-level files, and refusing to install one would be a
+    /// regression far worse than the silence.
+    fn warn_about_stranded_nodes(&self) {
+        let Ok(entries) = self.browser.list_entries() else {
+            return;
+        };
+
+        let mut stranded: Vec<&str> = entries
+            .iter()
+            .map(|e| e.path.as_str())
+            .filter(|path| !path.starts_with("content/"))
+            .filter(|path| path.ends_with("/node.yaml") || *path == "node.yaml")
+            .collect();
+
+        if stranded.is_empty() {
+            return;
+        }
+
+        stranded.sort_unstable();
+        let shown = stranded.iter().take(5).copied().collect::<Vec<_>>();
+        let extra = stranded.len().saturating_sub(shown.len());
+
+        tracing::warn!(
+            count = stranded.len(),
+            examples = %shown.join(", "),
+            "Package ships {} node.yaml file(s) OUTSIDE content/ — none of them will be \
+             installed. Only content/{{workspace}}/... is read. Move them under content/ \
+             (e.g. functions/lib/... -> content/functions/lib/...) and repackage.{}",
+            stranded.len(),
+            if extra > 0 {
+                format!(" ({} more not listed)", extra)
+            } else {
+                String::new()
+            }
+        );
     }
 
     /// Parse content for a specific workspace

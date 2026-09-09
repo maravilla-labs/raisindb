@@ -9,7 +9,7 @@ use nom::{
     bytes::complete::tag_no_case,
     character::complete::{char, multispace0, multispace1},
     combinator::{map, opt},
-    multi::many0,
+    multi::many1,
     sequence::preceded,
     IResult, Parser,
 };
@@ -165,7 +165,13 @@ pub(crate) fn alter_archetype(input: &str) -> IResult<&str, AlterArchetype> {
     let (input, name) = schema_object_name(input)?;
     let (input, _) = multispace0.parse(input)?;
 
-    let (input, alterations) = many0(preceded(multispace0, archetype_alteration)).parse(input)?;
+    // `many1`, not `many0`: an ALTER whose only clause failed to parse used to
+    // succeed with an EMPTY alteration list, and the statement then died far
+    // away as "trailing content" naming no clause. Failing here points at the
+    // clause. The `=` in `SET <thing> = <value>` is optional for the same
+    // reason — CREATE spells the same clause without one, and requiring it in
+    // ALTER alone was the most common way to land in that dead end.
+    let (input, alterations) = many1(preceded(multispace0, archetype_alteration)).parse(input)?;
 
     Ok((
         input,
@@ -222,7 +228,7 @@ pub(crate) fn archetype_alteration(input: &str) -> IResult<&str, ArchetypeAltera
                     multispace1,
                     tag_no_case("DESCRIPTION"),
                     multispace0,
-                    char('='),
+                    opt(char('=')),
                     multispace0,
                 ),
                 quoted_string,
@@ -236,7 +242,7 @@ pub(crate) fn archetype_alteration(input: &str) -> IResult<&str, ArchetypeAltera
                     multispace1,
                     tag_no_case("TITLE"),
                     multispace0,
-                    char('='),
+                    opt(char('=')),
                     multispace0,
                 ),
                 quoted_string,
@@ -250,7 +256,7 @@ pub(crate) fn archetype_alteration(input: &str) -> IResult<&str, ArchetypeAltera
                     multispace1,
                     tag_no_case("ICON"),
                     multispace0,
-                    char('='),
+                    opt(char('=')),
                     multispace0,
                 ),
                 quoted_string,
@@ -264,7 +270,7 @@ pub(crate) fn archetype_alteration(input: &str) -> IResult<&str, ArchetypeAltera
                     multispace1,
                     tag_no_case("BASE_NODE_TYPE"),
                     multispace0,
-                    char('='),
+                    opt(char('=')),
                     multispace0,
                 ),
                 alt((
@@ -281,7 +287,7 @@ pub(crate) fn archetype_alteration(input: &str) -> IResult<&str, ArchetypeAltera
                     multispace1,
                     tag_no_case("EXTENDS"),
                     multispace0,
-                    char('='),
+                    opt(char('=')),
                     multispace0,
                 ),
                 alt((
@@ -298,7 +304,7 @@ pub(crate) fn archetype_alteration(input: &str) -> IResult<&str, ArchetypeAltera
                     multispace1,
                     tag_no_case("PUBLISHABLE"),
                     multispace0,
-                    char('='),
+                    opt(char('=')),
                     multispace0,
                 ),
                 boolean_literal,

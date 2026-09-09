@@ -115,12 +115,6 @@ impl BranchRepositoryImpl {
         // Collect all nodes that were changed (including resolved conflicts)
         let mut changed_nodes = Vec::new();
 
-        // Apply resolved properties to each conflicted node
-        let _cf_nodes = self
-            .db
-            .cf_handle("nodes")
-            .ok_or_else(|| raisin_error::Error::storage("Column family 'nodes' not found"))?;
-
         for resolution in &resolutions {
             // Validate that this node was actually in conflict
             let source_change = source_changes.get(&resolution.node_id);
@@ -172,35 +166,172 @@ impl BranchRepositoryImpl {
 
             changed_nodes.push(raisin_storage::NodeChangeInfo {
                 node_id: resolution.node_id.clone(),
-                workspace,
+                workspace: workspace.clone(),
                 operation,
                 translation_locale: resolution.translation_locale.clone(),
             });
 
-            // Based on resolution type, determine which properties to use
-            let properties_to_use = match resolution.resolution_type {
-                ResolutionType::KeepOurs | ResolutionType::KeepTheirs | ResolutionType::Manual => {
-                    // All types use the resolved_properties provided by the user
-                    &resolution.resolved_properties
+            // WRITE THE CHOSEN SIDE. Recording the resolution in the merge
+            // commit's `changed_nodes` is bookkeeping, not an outcome: the
+            // node blob and every index entry still hold whatever the two
+            // branches left behind, and `copy_branch_indexes` below then
+            // replays the SOURCE side into the target at its original
+            // revision. So without this write the newest revision simply won,
+            // which made `keep-ours` a no-op whenever the source edit was
+            // later and `keep-theirs` a no-op whenever the target edit was.
+            //
+            // The merge revision is allocated fresh above, so it is newer than
+            // either HEAD and newer than anything the copy brings over —
+            // writing the resolved value there shadows both sides whichever
+            // way the resolution went.
+            //
+            // The bound is each side's own HEAD: reading the source at
+            // `source.head` and the target at `target.head` is what makes
+            // "ours" and "theirs" mean the two branch tips a user was shown in
+            // the conflict, not whatever happens to sit newest in the keyspace.
+            match resolution.resolution_type {
+                ResolutionType::KeepOurs => {
+                    match super::apply::load_node_at(
+                        &self.db,
+                        tenant_id,
+                        repo_id,
+                        target_branch,
+                        &workspace,
+                        &resolution.node_id,
+                        &target.head,
+                    )? {
+                        Some(node) => super::apply::write_resolved_node(
+                            &self.db,
+                            tenant_id,
+                            repo_id,
+                            target_branch,
+                            &workspace,
+                            &node,
+                            &merge_revision,
+                        )?,
+                        // "Keep ours" over a node the target deleted means the
+                        // deletion is the thing being kept, and the source's
+                        // copied revision must not resurrect it.
+                        None => super::apply::write_resolved_deletion(
+                            &self.db,
+                            tenant_id,
+                            repo_id,
+                            target_branch,
+                            &workspace,
+                            &resolution.node_id,
+                            &merge_revision,
+                        )?,
+                    }
                 }
-            };
+                ResolutionType::KeepTheirs => {
+                    match super::apply::load_node_at(
+                        &self.db,
+                        tenant_id,
+                        repo_id,
+                        source_branch,
+                        &workspace,
+                        &resolution.node_id,
+                        &source.head,
+                    )? {
+                        Some(node) => super::apply::write_resolved_node(
+                            &self.db,
+                            tenant_id,
+                            repo_id,
+                            target_branch,
+                            &workspace,
+                            &node,
+                            &merge_revision,
+                        )?,
+                        None => super::apply::write_resolved_deletion(
+                            &self.db,
+                            tenant_id,
+                            repo_id,
+                            target_branch,
+                            &workspace,
+                            &resolution.node_id,
+                            &merge_revision,
+                        )?,
+                    }
+                }
+                ResolutionType::Manual => {
+                    // A null payload is DELETE, which is how SQL's
+                    // `RESOLVE ... DELETE` reaches here. Anything else is a
+                    // property map to lay over the target's node — a partial
+                    // map merges, so a caller may send only the fields under
+                    // dispute.
+                    if resolution.resolved_properties.is_null() {
+                        super::apply::write_resolved_deletion(
+                            &self.db,
+                            tenant_id,
+                            repo_id,
+                            target_branch,
+                            &workspace,
+                            &resolution.node_id,
+                            &merge_revision,
+                        )?;
+                    } else {
+                        // Deserialize straight into `PropertyValue`, the same
+                        // serde route every wire payload takes: arrays and
+                        // objects stay structured rather than being flattened
+                        // to strings, and a `null` stays `Null`.
+                        let overrides: std::collections::HashMap<
+                            String,
+                            raisin_models::nodes::properties::PropertyValue,
+                        > = serde_json::from_value(resolution.resolved_properties.clone())
+                            .map_err(|e| {
+                                raisin_error::Error::Validation(format!(
+                                    "Invalid properties for node {}: {}",
+                                    resolution.node_id, e
+                                ))
+                            })?;
 
-            // Convert JSON to HashMap for node properties
-            let _properties: std::collections::HashMap<String, serde_json::Value> =
-                serde_json::from_value(properties_to_use.clone()).map_err(|e| {
-                    raisin_error::Error::Validation(format!(
-                        "Invalid properties for node {}: {}",
-                        resolution.node_id, e
-                    ))
-                })?;
+                        // Base on the target's node when it still exists, and
+                        // fall back to the source's when the conflict is
+                        // "added on both sides" or the target deleted it.
+                        let base = super::apply::load_node_at(
+                            &self.db,
+                            tenant_id,
+                            repo_id,
+                            target_branch,
+                            &workspace,
+                            &resolution.node_id,
+                            &target.head,
+                        )?;
+                        let base = match base {
+                            Some(node) => Some(node),
+                            None => super::apply::load_node_at(
+                                &self.db,
+                                tenant_id,
+                                repo_id,
+                                source_branch,
+                                &workspace,
+                                &resolution.node_id,
+                                &source.head,
+                            )?,
+                        };
+                        let mut node = base.ok_or_else(|| {
+                            raisin_error::Error::NotFound(format!(
+                                "Node {} not found on either side of the merge",
+                                resolution.node_id
+                            ))
+                        })?;
 
-            // TODO: Update the node in the target branch with resolved properties
-            // This would require calling the node repository to update the node
-            // For now, we're just tracking the changed nodes
-            // In a complete implementation, you would:
-            // 1. Load the existing node from target branch
-            // 2. Update its properties with the resolved values
-            // 3. Store the updated node at the merge revision
+                        for (key, value) in overrides {
+                            node.properties.insert(key, value);
+                        }
+
+                        super::apply::write_resolved_node(
+                            &self.db,
+                            tenant_id,
+                            repo_id,
+                            target_branch,
+                            &workspace,
+                            &node,
+                            &merge_revision,
+                        )?;
+                    }
+                }
+            }
         }
 
         // Collect all changed nodes from source branch since common ancestor

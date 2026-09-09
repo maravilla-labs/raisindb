@@ -19,20 +19,52 @@ export interface AuthProvidersResponse {
   magic_link_enabled: boolean
 }
 
+/**
+ * One OIDC provider as `PUT /api/tenants/{tenant}/auth/config` accepts it in
+ * `oidc_providers`. The list is a full replacement; an entry that omits
+ * `client_secret` keeps the secret already stored for that `provider_id`.
+ */
 export interface OidcProviderConfig {
-  display_name: string
+  /** Slug in the login URL: /auth/oidc/{provider_id} */
+  provider_id: string
+  display_name?: string
   icon?: string
+  enabled?: boolean
+  priority?: number
   client_id: string
-  client_secret: string
-  issuer_url: string
+  /** Plaintext on the way in only; sealed at rest, never echoed back */
+  client_secret?: string
+  /** Discovery base; `{issuer_url}/.well-known/openid-configuration` is fetched */
+  issuer_url?: string
+  /** Callback URL registered with the provider, byte for byte */
+  redirect_uri?: string
   scopes?: string[]
   groups_claim?: string
+  allowed_email_domains?: string[]
   attribute_mapping?: {
     email?: string
     name?: string
     picture?: string
-    groups?: string
+    email_verified?: string
   }
+  /** Manual endpoints for a provider without discovery */
+  authorization_url?: string
+  token_url?: string
+  userinfo_url?: string
+  jwks_url?: string
+}
+
+/** One OIDC provider as the config endpoints report it. Never carries the secret. */
+export interface OidcProviderView extends Omit<OidcProviderConfig, 'client_secret'> {
+  display_name: string
+  icon: string
+  enabled: boolean
+  priority: number
+  has_client_secret: boolean
+  scopes: string[]
+  allowed_email_domains: string[]
+  /** Server-relative URL that starts a login with this provider */
+  authorize_url: string
 }
 
 export interface LocalAuthConfig {
@@ -72,6 +104,8 @@ export interface TenantAuthSettings {
   tenant_id: string
   local_auth: LocalAuthConfig
   magic_link: MagicLinkConfig
+  /** External OpenID Connect providers (read shape) */
+  oidc_providers?: OidcProviderView[]
   password_policy: PasswordPolicy
   session_settings: SessionSettings
   access_settings: AccessSettings
@@ -143,33 +177,60 @@ export const identityAuthApi = {
   },
 
   /**
-   * Add a new authentication provider
+   * Replace the OIDC provider list through the tenant config endpoint.
+   *
+   * There is no per-provider route on the server; providers are a section of
+   * `PUT /api/tenants/{tenant}/auth/config`. Existing entries are re-sent
+   * WITHOUT a secret, which tells the server to keep the one it has.
+   */
+  _replaceOidcProviders: async (
+    tenantId: string,
+    mutate: (current: OidcProviderConfig[]) => OidcProviderConfig[]
+  ): Promise<void> => {
+    const settings = await api.get<TenantAuthSettings>(`/api/tenants/${tenantId}/auth/config`)
+    const current: OidcProviderConfig[] = (settings.oidc_providers ?? []).map(
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      ({ has_client_secret, authorize_url, ...rest }) => rest
+    )
+    await api.put(`/api/tenants/${tenantId}/auth/config`, { oidc_providers: mutate(current) })
+  },
+
+  /**
+   * Add a new OIDC provider. `strategyType` is `oidc:{provider_id}`.
    */
   addProvider: async (
+    tenantId: string,
     strategyType: string,
-    config: OidcProviderConfig
+    config: Omit<OidcProviderConfig, 'provider_id'>
   ): Promise<{ provider_id: string }> => {
-    return api.post<{ provider_id: string }>('/auth/providers', {
-      strategy_type: strategyType,
-      config,
-    })
+    const provider_id = strategyType.replace(/^oidc:/, '')
+    await identityAuthApi._replaceOidcProviders(tenantId, current => [
+      ...current.filter(p => p.provider_id !== provider_id),
+      { ...config, provider_id },
+    ])
+    return { provider_id }
   },
 
   /**
-   * Update an authentication provider
+   * Update fields of an existing OIDC provider (enabled, scopes, ...).
    */
   updateProvider: async (
+    tenantId: string,
     providerId: string,
-    config: Partial<OidcProviderConfig & { enabled: boolean }>
-  ): Promise<AuthProvider> => {
-    return api.put<AuthProvider>(`/auth/providers/${providerId}`, config)
+    patch: Partial<Omit<OidcProviderConfig, 'provider_id'>>
+  ): Promise<void> => {
+    await identityAuthApi._replaceOidcProviders(tenantId, current =>
+      current.map(p => (p.provider_id === providerId ? { ...p, ...patch } : p))
+    )
   },
 
   /**
-   * Remove an authentication provider
+   * Remove an OIDC provider.
    */
-  removeProvider: async (providerId: string): Promise<void> => {
-    return api.delete(`/auth/providers/${providerId}`)
+  removeProvider: async (tenantId: string, providerId: string): Promise<void> => {
+    await identityAuthApi._replaceOidcProviders(tenantId, current =>
+      current.filter(p => p.provider_id !== providerId)
+    )
   },
 
   /**
@@ -186,7 +247,10 @@ export const identityAuthApi = {
    */
   updateSettings: async (
     tenantId: string,
-    settings: Partial<TenantAuthSettings>
+    settings: Partial<Omit<TenantAuthSettings, 'oidc_providers'>> & {
+      /** Full replacement of the OIDC provider list; secrets go in as plaintext here only */
+      oidc_providers?: OidcProviderConfig[]
+    }
   ): Promise<TenantAuthSettings> => {
     return api.put<TenantAuthSettings>(`/api/tenants/${tenantId}/auth/config`, settings)
   },

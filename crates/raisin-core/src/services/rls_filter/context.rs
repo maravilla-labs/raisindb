@@ -18,7 +18,7 @@ use std::collections::HashMap;
 /// (graph-relationship) conditions — those require [`evaluate_rel_condition_async`]
 /// with a [`RelationResolver`]. A RELATES condition reaching this path errors
 /// during evaluation and therefore denies (fail-closed).
-pub(super) fn evaluate_rel_condition(expr: &str, node: &Node, auth: &AuthContext) -> bool {
+pub(crate) fn evaluate_rel_condition(expr: &str, node: &Node, auth: &AuthContext) -> bool {
     let ctx = build_rel_context(auth, node);
     match raisin_rel::eval(expr, &ctx) {
         Ok(value) => value.is_truthy(),

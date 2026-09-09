@@ -22,7 +22,7 @@ use raisin_storage::jobs::{JobContext, JobId, JobStatus, JobType};
 
 use super::config::{find_trigger_target, parse_http_config, parse_path_params};
 use super::helpers::{
-    extract_query_params, header_as_bool, headers_to_map, property_as_bool, property_as_string,
+    header_as_bool, headers_to_map, parse_query_params, property_as_bool, property_as_string,
 };
 use super::lookup::{find_trigger_by_name, find_trigger_by_webhook_id};
 use super::types::{
@@ -40,6 +40,7 @@ pub(super) async fn invoke_http_trigger_internal(
     method: Method,
     headers: HeaderMap,
     query: InvokeQuery,
+    raw_query: Option<String>,
     body: Option<Json<serde_json::Value>>,
 ) -> Result<Json<WebhookResponse>, ApiError> {
     let rocksdb = state
@@ -102,7 +103,7 @@ pub(super) async fn invoke_http_trigger_internal(
         method: method_str.clone(),
         path: path_suffix.clone().unwrap_or_default(),
         path_params: path_params.clone(),
-        query_params: extract_query_params(&headers),
+        query_params: parse_query_params(raw_query.as_deref()),
         headers: headers_to_map(&headers),
         body: body.as_ref().map(|b| b.0.clone()),
     };
@@ -228,7 +229,10 @@ async fn execute_sync(
     )
     .await;
 
+    // The id in the response, in the registered job and inside the function
+    // must be the SAME id; `ExecutionContext::new` would mint a third.
     let context = ExecutionContext::new(tenant_id, repo, DEFAULT_BRANCH, "http-trigger")
+        .with_execution_id(&execution_id)
         .with_workspace(FUNCTIONS_WORKSPACE)
         .with_input(input.clone())
         .with_http_request(http_request);

@@ -19,8 +19,29 @@ impl<'a> AnalyzerContext<'a> {
         expr: &SqlExpr,
         target_type: &SqlDataType,
     ) -> Result<TypedExpr> {
-        let typed_expr = self.analyze_expr(expr)?;
+        // There is no DATE type: a date is a TIMESTAMPTZ at 00:00:00 UTC (see
+        // `scalar::temporal`). `CAST(x AS DATE)` therefore has to TRUNCATE, not
+        // just retype — casting to TIMESTAMPTZ alone would keep the time of day
+        // and make `CAST(created_at AS DATE) = CAST(now() AS DATE)` compare two
+        // instants that are never equal.
+        if matches!(target_type, SqlDataType::Date | SqlDataType::Date32) {
+            let instant = self.analyze_cast_to(expr, DataType::TimestampTz)?;
+            return self.analyze_scalar_call(
+                "DATE_TRUNC",
+                vec![
+                    TypedExpr::literal(crate::analyzer::typed_expr::Literal::Text("day".into())),
+                    instant,
+                ],
+            );
+        }
+
         let target = self.convert_sql_type(target_type)?;
+        self.analyze_cast_to(expr, target)
+    }
+
+    /// `CAST(expr AS target)` with the target already in internal form.
+    fn analyze_cast_to(&self, expr: &SqlExpr, target: DataType) -> Result<TypedExpr> {
+        let typed_expr = self.analyze_expr(expr)?;
 
         if typed_expr.data_type.can_cast_to(&target) {
             return Ok(TypedExpr::new(
@@ -70,14 +91,33 @@ impl<'a> AnalyzerContext<'a> {
         sql_type: &SqlDataType,
     ) -> Result<DataType> {
         match sql_type {
-            SqlDataType::Int(_) | SqlDataType::Integer(_) => Ok(DataType::Int),
+            SqlDataType::Int(_)
+            | SqlDataType::Integer(_)
+            | SqlDataType::SmallInt(_)
+            | SqlDataType::TinyInt(_) => Ok(DataType::Int),
             SqlDataType::BigInt(_) => Ok(DataType::BigInt),
-            SqlDataType::Double(_) | SqlDataType::DoublePrecision => Ok(DataType::Double),
-            SqlDataType::Boolean => Ok(DataType::Boolean),
-            SqlDataType::Text | SqlDataType::Varchar(_) | SqlDataType::String(_) => {
-                Ok(DataType::Text)
-            }
-            SqlDataType::Timestamp(_, _) => Ok(DataType::TimestampTz),
+            // NUMERIC and DECIMAL name PostgreSQL's arbitrary-precision type.
+            // RaisinDB stores a number as an f64 and has no second numeric
+            // representation, so they map onto DOUBLE rather than inventing
+            // one; precision and scale are accepted and ignored.
+            SqlDataType::Double(_)
+            | SqlDataType::DoublePrecision
+            | SqlDataType::Float(_)
+            | SqlDataType::Float4
+            | SqlDataType::Float8
+            | SqlDataType::Real
+            | SqlDataType::Numeric(_)
+            | SqlDataType::Decimal(_) => Ok(DataType::Double),
+            SqlDataType::Boolean | SqlDataType::Bool => Ok(DataType::Boolean),
+            SqlDataType::Text
+            | SqlDataType::Varchar(_)
+            | SqlDataType::String(_)
+            | SqlDataType::Char(_)
+            | SqlDataType::Character(_)
+            | SqlDataType::CharacterVarying(_) => Ok(DataType::Text),
+            SqlDataType::Timestamp(_, _) | SqlDataType::Datetime(_) => Ok(DataType::TimestampTz),
+            // A time of day has no type of its own; CURRENT_TIME is text too.
+            SqlDataType::Time(_, _) => Ok(DataType::Text),
             SqlDataType::JSON => Ok(DataType::JsonB),
             SqlDataType::JSONB => Ok(DataType::JsonB),
             SqlDataType::Custom(name, _) => {
@@ -89,6 +129,8 @@ impl<'a> AnalyzerContext<'a> {
                     .join(".");
                 match type_name.to_uppercase().as_str() {
                     "PATH" => Ok(DataType::Path),
+                    "NUMERIC" | "DECIMAL" | "REAL" | "FLOAT" => Ok(DataType::Double),
+                    "TIMESTAMPTZ" | "TIMESTAMP" => Ok(DataType::TimestampTz),
                     "JSONB" => Ok(DataType::JsonB),
                     "UUID" => Ok(DataType::Uuid),
                     "GEOMETRY" => Ok(DataType::Geometry),

@@ -1479,3 +1479,80 @@ fn test_ddl_kind_rejects_non_ddl() {
     assert!(parse_ddl("CREATE").unwrap().is_none());
     assert!(parse_ddl("").unwrap().is_none());
 }
+
+/// `ALTER ARCHETYPE ... SET DESCRIPTION 'x'` — the spelling CREATE uses, with
+/// no `=`.
+///
+/// It used to fail: the SET clauses required `=`, `many0` then produced an
+/// EMPTY alteration list, the parse "succeeded" consuming only the name, and
+/// the statement died downstream as "trailing content" naming no clause at all.
+#[test]
+fn alter_archetype_set_clauses_accept_the_equals_sign_or_omit_it() {
+    for sql in [
+        "ALTER ARCHETYPE 'myapp:Hero' SET DESCRIPTION = 'A hero'",
+        "ALTER ARCHETYPE 'myapp:Hero' SET DESCRIPTION 'A hero'",
+    ] {
+        let result = parse_ddl(sql)
+            .unwrap_or_else(|e| panic!("{sql} must parse: {e}"))
+            .unwrap_or_else(|| panic!("{sql} must produce a DDL statement"));
+        match result {
+            DdlStatement::AlterArchetype(alter) => {
+                assert_eq!(alter.name, "myapp:Hero");
+                assert_eq!(
+                    alter.alterations,
+                    vec![crate::ast::ddl::ArchetypeAlteration::SetDescription(
+                        "A hero".to_string()
+                    )],
+                    "for: {sql}"
+                );
+            }
+            other => panic!("Expected AlterArchetype for {sql}, got {other:?}"),
+        }
+    }
+}
+
+/// An ALTER whose clause list is unparseable must FAIL here, where the clause
+/// is, rather than parse to zero alterations and become "trailing content".
+#[test]
+fn alter_archetype_with_no_recognizable_clause_is_a_parse_error() {
+    let sql = "ALTER ARCHETYPE 'myapp:Hero' SET NONSENSE = 'x'";
+    let parsed = parse_ddl(sql);
+    let is_alter_with_clauses = matches!(
+        &parsed,
+        Ok(Some(DdlStatement::AlterArchetype(a))) if !a.alterations.is_empty()
+    );
+    assert!(
+        !is_alter_with_clauses,
+        "an unrecognized clause must not be silently dropped: {parsed:?}"
+    );
+}
+
+/// CREATE ELEMENTTYPE / ARCHETYPE ... FIELDS(...) must carry its fields into
+/// the AST. The executors used to discard them; the parser side is what the
+/// executor's conversion reads, so pin it.
+#[test]
+fn create_elementtype_and_archetype_carry_their_fields() {
+    let result =
+        parse_ddl("CREATE ELEMENTTYPE 'myapp:Card' FIELDS (headline String REQUIRED, body String)")
+            .unwrap()
+            .unwrap();
+    match result {
+        DdlStatement::CreateElementType(create) => {
+            assert_eq!(create.fields.len(), 2);
+            assert_eq!(create.fields[0].name, "headline");
+            assert!(create.fields[0].required);
+        }
+        other => panic!("Expected CreateElementType, got {other:?}"),
+    }
+
+    let result = parse_ddl("CREATE ARCHETYPE 'myapp:Hero' FIELDS (hero_title String REQUIRED)")
+        .unwrap()
+        .unwrap();
+    match result {
+        DdlStatement::CreateArchetype(create) => {
+            assert_eq!(create.fields.len(), 1);
+            assert_eq!(create.fields[0].name, "hero_title");
+        }
+        other => panic!("Expected CreateArchetype, got {other:?}"),
+    }
+}

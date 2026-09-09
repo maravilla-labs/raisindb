@@ -118,6 +118,18 @@ impl ResolvedPermissions {
         }
     }
 
+    /// Whether these permissions were resolved for the anonymous principal.
+    ///
+    /// The physical anonymous `raisin:User` node resolves to a real node id, so
+    /// the user id alone does not say. Its role does: the built-in anonymous
+    /// user carries the `anonymous` role, and nothing else should.
+    pub fn is_anonymous_principal(&self) -> bool {
+        self.user_id == "anonymous"
+            || self.user_id == "$deny"
+            || self.effective_roles.iter().any(|r| r == "anonymous")
+            || self.direct_roles.iter().any(|r| r == "anonymous")
+    }
+
     /// Check if the permissions cache is still valid
     pub fn is_valid(&self, ttl: Duration) -> bool {
         match self.resolved_at {

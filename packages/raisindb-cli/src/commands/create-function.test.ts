@@ -157,3 +157,59 @@ describe('create function --into — one artifact, N functions', () => {
     ).rejects.toThrow(/Known projects: greet/);
   });
 });
+
+describe('create function — a package with no content/ directory yet', () => {
+  let bare: string;
+
+  beforeEach(() => {
+    bare = fs.mkdtempSync(path.join(os.tmpdir(), 'raisin-create-fn-bare-'));
+    fs.writeFileSync(path.join(bare, 'manifest.yaml'), 'name: demo\nversion: 0.1.0\n');
+  });
+
+  afterEach(() => {
+    fs.rmSync(bare, { recursive: true, force: true });
+  });
+
+  const bareExists = (rel: string) => fs.existsSync(path.join(bare, rel));
+
+  it('scaffolds into content/, not the package root', async () => {
+    // Regression: the scaffold used the READ base, which falls back to the
+    // package root when content/ is absent. It wrote functions/lib/... beside
+    // the manifest, `package create` packed it, and the installer — which reads
+    // only content/{workspace}/... — installed nothing while reporting success.
+    await createFunction('greet', { lang: 'rust', ns: 'demo', dir: bare });
+
+    expect(bareExists('content/functions/lib/demo/greet/.node.yaml')).toBe(true);
+    expect(bareExists('functions/lib/demo/greet/.node.yaml')).toBe(false);
+  });
+
+  it('scaffolds a source-language function into content/ too', async () => {
+    await createFunction('hello', { lang: 'js', ns: 'demo', dir: bare });
+
+    expect(bareExists('content/functions/lib/demo/hello/.node.yaml')).toBe(true);
+    expect(bareExists('functions/lib/demo/hello/.node.yaml')).toBe(false);
+  });
+});
+
+describe('create function — --into and the namespace', () => {
+  it('puts the sharing node in the target project namespace, not the package name', async () => {
+    // The manifest is `demo`; the project lives under the `tools` namespace.
+    await createFunction('greet', { lang: 'rust', ns: 'tools', dir: root });
+    await createFunction('shout', { into: 'greet', dir: root });
+
+    expect(exists('content/functions/lib/tools/shout/.node.yaml')).toBe(true);
+    expect(exists('content/functions/lib/demo/shout/.node.yaml')).toBe(false);
+
+    const doc = yaml.parse(read('content/functions/lib/tools/shout/.node.yaml'));
+    expect(doc.properties.entry_file).toBe('../greet/main.wasm:shout');
+  });
+
+  it('lets an explicit --ns override the target project namespace', async () => {
+    await createFunction('greet', { lang: 'rust', ns: 'tools', dir: root });
+    await createFunction('shout', { into: 'greet', ns: 'extra', dir: root });
+
+    expect(exists('content/functions/lib/extra/shout/.node.yaml')).toBe(true);
+    const doc = yaml.parse(read('content/functions/lib/extra/shout/.node.yaml'));
+    expect(doc.properties.entry_file).toBe('../../tools/greet/main.wasm:shout');
+  });
+});

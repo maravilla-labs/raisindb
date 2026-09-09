@@ -241,19 +241,11 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
         &self,
         node: &mut raisin_models::nodes::Node,
     ) -> Result<()> {
-        // Never trust client-supplied membership sets.
-        node.strip_reserved_properties();
-
+        // One implementation, on the validator, so the transaction layer's
+        // `add_node` / `put_node` — which SQL DML and the WS create handler
+        // reach without ever passing through NodeService — run exactly this.
         self.validator
-            .validate_node_type_exists(&node.node_type)
-            .await?;
-        let resolved = self
-            .validator
-            .validate_node_resolved(&self.workspace_id, node)
-            .await?;
-
-        let supertypes = resolved.effective_supertypes();
-        node.set_effective_types(resolved.resolved_mixins.clone(), supertypes);
-        Ok(())
+            .validate_and_stamp(&self.workspace_id, node)
+            .await
     }
 }

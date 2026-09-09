@@ -18,6 +18,7 @@ mod format;
 mod hash;
 mod math;
 mod regexp;
+pub mod signature;
 mod string;
 mod string_trim;
 pub mod temporal;
@@ -31,6 +32,7 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 
 pub use args::KernelError;
+pub use signature::{resolve as resolve_signature, KernelSignature};
 pub use temporal::{format_interval, parse_timestamp};
 
 /// Result of a kernel call.

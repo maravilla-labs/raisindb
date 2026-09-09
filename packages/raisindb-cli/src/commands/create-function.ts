@@ -27,7 +27,13 @@ import {
   type WasmFnVars,
 } from '../templates/wasm/index.js';
 import { addHandler } from '../wasm-fn/add-handler.js';
-import { contentBase, discoverProjects, findPackageRoot, functionsRoot, loadProject } from '../wasm-fn/discover.js';
+import {
+  contentTarget,
+  discoverProjects,
+  findPackageRoot,
+  functionsTargetRoot,
+  loadProject,
+} from '../wasm-fn/discover.js';
 import { sourceFunctionFiles } from '../templates/source/index.js';
 import {
   isSourceLang,
@@ -80,6 +86,18 @@ function manifestNamespace(packageRoot: string): string {
     }
   }
   return 'app';
+}
+
+/**
+ * The namespace an existing wasm project's node lives under.
+ *
+ * A node dir is `<content>/functions/lib/<ns>/<slug>`, so the namespace is its
+ * parent directory's name. Returns `null` when the layout does not match, in
+ * which case the caller falls back to the package name.
+ */
+function namespaceOf(project: WasmProject): string | null {
+  const ns = path.basename(path.dirname(project.nodeDir));
+  return ns && SLUG_RE.test(ns) ? ns : null;
 }
 
 /**
@@ -195,10 +213,21 @@ export async function createFunction(
     throw new Error(`Invalid handler name "${handler}". Use letters, digits, "-" or "_".`);
   }
 
-  const ns = (options.ns || manifestNamespace(packageRoot)).toLowerCase();
+  // `--ns` always wins. Without it, `--into` takes the namespace of the project
+  // it is sharing an artifact with, and only a standalone scaffold falls back to
+  // the package name. `--into` used to ignore `--ns` and take the package name
+  // regardless, which put the new node in a different namespace from the
+  // artifact it points at — so the relative `entry_file` climbed a level it did
+  // not need to, and in a package whose manifest name differs from the project's
+  // namespace it failed the workspace-boundary check outright.
+  const ns = (options.ns || (into ? namespaceOf(into) : null) || manifestNamespace(packageRoot))
+    .toLowerCase();
   if (!SLUG_RE.test(ns)) throw new Error(`Invalid namespace "${ns}". Use lower-kebab-case.`);
 
-  const nodeDir = path.join(contentBase(packageRoot), 'functions', 'lib', ns, slug);
+  // Always `content/`, never the package root: the installer reads only
+  // `content/{workspace}/...`, so a node written beside the manifest is packed
+  // and then silently ignored at install time.
+  const nodeDir = path.join(contentTarget(packageRoot), 'functions', 'lib', ns, slug);
   const nodePath = path.relative(packageRoot, nodeDir).split(path.sep).join('/');
 
   if (isSourceLang(lang)) {
@@ -287,7 +316,7 @@ function createIntoExisting(
   const relArtifact = path.relative(nodeDir, into.artifactPath).split(path.sep).join('/');
   const entryFile = `${relArtifact}:${vars.handler}`;
   const resolved = path.resolve(nodeDir, relArtifact);
-  const root = functionsRoot(packageRoot);
+  const root = functionsTargetRoot(packageRoot);
   if (path.relative(root, resolved).startsWith('..')) {
     throw new Error(
       `entry_file "${entryFile}" would resolve outside the functions workspace (${root}); ` +

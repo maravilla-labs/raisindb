@@ -221,6 +221,22 @@ impl AuthContext {
         }
     }
 
+    /// Create a context for the *physical* anonymous user.
+    ///
+    /// When anonymous access is enabled, unauthenticated callers run as the
+    /// `raisin:User` node at `/users/system/anonymous`, which carries real
+    /// resolved permissions (attach them with `with_permissions()`). Unlike
+    /// [`Self::for_user`] this keeps `is_anonymous` set, so gates that refuse
+    /// anonymous callers (lock and inventory operations, ACL DDL, secret
+    /// management) still refuse them. [`Self::anonymous`] is the permission-less
+    /// variant used when no such user exists.
+    pub fn anonymous_user(user_id: impl Into<String>) -> Self {
+        AuthContext {
+            is_anonymous: true,
+            ..Self::for_user(user_id)
+        }
+    }
+
     /// Create an impersonated context.
     ///
     /// Used when an admin user wants to test permissions as another user.
@@ -391,6 +407,35 @@ impl AuthContext {
         agent.or_else(|| self.user_id.clone())
     }
 
+    /// Whether this context represents an UNAUTHENTICATED caller.
+    ///
+    /// Prefer this over reading [`Self::is_anonymous`] directly when gating an
+    /// operation on "a real principal did this". The flag alone is not enough:
+    /// the HTTP and WebSocket middleware resolve an unauthenticated request
+    /// onto the *physical* anonymous `raisin:User` node and build the context
+    /// with [`Self::for_user`], which leaves `is_anonymous` FALSE and hands the
+    /// context a real user id. A deny-all context is likewise not flagged. Both
+    /// used to sail straight through `!ctx.is_anonymous` gates.
+    ///
+    /// A system context is never anonymous, whatever else it carries.
+    pub fn is_anonymous_principal(&self) -> bool {
+        if self.is_system {
+            return false;
+        }
+        if self.is_anonymous {
+            return true;
+        }
+        match self.user_id.as_deref() {
+            // Deny-all, or a context whose principal was never resolved.
+            None => true,
+            Some("anonymous") | Some("$deny") => true,
+            Some(_) => self
+                .resolved_permissions
+                .as_ref()
+                .is_some_and(|p| p.is_anonymous_principal()),
+        }
+    }
+
     /// Get the user ID for audit logging
     pub fn actor_id(&self) -> String {
         if let Some(ward_id) = &self.acting_as_ward {
@@ -447,6 +492,22 @@ impl AuthContext {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn anonymous_user_keeps_is_anonymous_with_permissions() {
+        use super::*;
+        let resolved = ResolvedPermissions::anonymous(vec![]);
+        let ctx = AuthContext::anonymous_user("anon-node-id").with_permissions(resolved);
+        assert!(
+            ctx.is_anonymous,
+            "physical anonymous user must stay anonymous"
+        );
+        assert!(!ctx.is_system);
+        assert_eq!(ctx.user_id.as_deref(), Some("anon-node-id"));
+        assert!(ctx.is_resolved());
+        // for_user() is the authenticated variant and must be unchanged
+        assert!(!AuthContext::for_user("u").is_anonymous);
+    }
+
     use super::*;
 
     #[test]
@@ -500,5 +561,54 @@ mod tests {
 
         assert!(ctx.is_impersonated());
         assert_eq!(ctx.actor_id(), "admin_user:impersonating:target_user");
+    }
+
+    /// The regression: an unauthenticated HTTP or WebSocket request is resolved
+    /// onto the physical anonymous `raisin:User` node and its context is built
+    /// with `for_user`, so `is_anonymous` is FALSE. Every gate written as
+    /// `!ctx.is_anonymous` therefore let anonymous callers through — which is
+    /// how anonymous callers were taking locks.
+    #[test]
+    fn the_resolved_anonymous_user_is_still_an_anonymous_principal() {
+        use crate::permissions::ResolvedPermissions;
+
+        let mut resolved = ResolvedPermissions::empty("anon-node-id");
+        resolved.direct_roles = vec!["anonymous".to_string()];
+        resolved.effective_roles = vec!["anonymous".to_string()];
+
+        let ctx = AuthContext::for_user("anon-node-id").with_permissions(resolved);
+
+        assert!(!ctx.is_anonymous, "this is the flag that misled every gate");
+        assert!(
+            ctx.is_anonymous_principal(),
+            "the resolved anonymous user must still read as anonymous"
+        );
+    }
+
+    #[test]
+    fn deny_all_is_an_anonymous_principal() {
+        let ctx = AuthContext::deny_all();
+        assert!(!ctx.is_anonymous);
+        assert!(ctx.is_anonymous_principal());
+    }
+
+    #[test]
+    fn a_real_user_and_the_system_are_not_anonymous_principals() {
+        use crate::permissions::ResolvedPermissions;
+
+        let mut resolved = ResolvedPermissions::empty("user-1");
+        resolved.direct_roles = vec!["editor".to_string()];
+        resolved.effective_roles = vec!["editor".to_string()];
+
+        assert!(!AuthContext::for_user("user-1")
+            .with_permissions(resolved)
+            .is_anonymous_principal());
+        assert!(!AuthContext::for_user("user-1").is_anonymous_principal());
+        assert!(!AuthContext::system().is_anonymous_principal());
+    }
+
+    #[test]
+    fn the_bare_anonymous_context_is_an_anonymous_principal() {
+        assert!(AuthContext::anonymous().is_anonymous_principal());
     }
 }

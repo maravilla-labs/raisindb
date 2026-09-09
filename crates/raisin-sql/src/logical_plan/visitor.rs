@@ -433,6 +433,7 @@ mod tests {
                         LogicalPlan::Relate { .. } => plan,
                         LogicalPlan::Unrelate { .. } => plan,
                         LogicalPlan::Empty => plan,
+                        LogicalPlan::SetOperation { .. } => plan,
                         LogicalPlan::Filter { .. } => unreachable!(),
                     }
                 }

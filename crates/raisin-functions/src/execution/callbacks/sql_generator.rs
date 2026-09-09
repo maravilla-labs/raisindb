@@ -106,6 +106,166 @@ pub fn generate_select_children(
     SqlStatement::new(sql, vec![Value::String(parent_path.to_string())])
 }
 
+/// Generate SELECT for `raisin.nodes.query(workspace, query)`.
+///
+/// The `query` argument is a small declarative FILTER OBJECT, not SQL — a
+/// function that needs the full language calls `raisin.sql.query()`. Every
+/// user-supplied value becomes a bound parameter; nothing is interpolated into
+/// the statement except the workspace identifier and the sort column, which is
+/// checked against a fixed list.
+///
+/// Recognised keys (all optional, `camelCase` or `snake_case`):
+///
+/// | key | effect |
+/// |---|---|
+/// | `path` | `path = $n` |
+/// | `id` | `id = $n` |
+/// | `nodeType` | `node_type = $n` |
+/// | `childOf` | `CHILD_OF($n)` — direct children only |
+/// | `descendantOf` | `DESCENDANT_OF($n)` — the whole subtree |
+/// | `properties` | one `properties->>'k'::String = $n` per entry |
+/// | `orderBy` + `order` | `ORDER BY <col> ASC\|DESC` |
+/// | `limit`, `offset` | `LIMIT` / `OFFSET` |
+///
+/// The property predicate uses the `::String` KEY-CAST form deliberately: it
+/// evaluates as a verbatim row-level filter, so it stays correct alongside a
+/// `path` or `node_type` equality and on a workspace with compound indexes,
+/// where the bare form can be routed to an index that is unbuilt or stale and
+/// return zero rows. `->>` yields text, so a non-string value is compared as
+/// its JSON text (`true` -> `'true'`, `0` -> `'0'`).
+///
+/// # Errors
+///
+/// [`raisin_error::Error::Validation`] when `query` is not an object, when
+/// `orderBy` names a column that is not sortable, or when a property filter
+/// value is a container.
+pub fn generate_node_query(workspace: &str, query: &Value) -> raisin_error::Result<SqlStatement> {
+    let obj = query.as_object().ok_or_else(|| {
+        raisin_error::Error::Validation(
+            "raisin.nodes.query expects a filter object, e.g. { nodeType: 'article', limit: 10 }"
+                .to_string(),
+        )
+    })?;
+
+    let get = |a: &str, b: &str| obj.get(a).or_else(|| obj.get(b));
+
+    let mut clauses: Vec<String> = Vec::new();
+    let mut params: Vec<Value> = Vec::new();
+
+    let mut push_str =
+        |clauses: &mut Vec<String>, params: &mut Vec<Value>, template: &str, value: &Value| {
+            if let Some(text) = value.as_str() {
+                params.push(Value::String(text.to_string()));
+                clauses.push(template.replace("$n", &format!("${}", params.len())));
+            }
+        };
+
+    if let Some(v) = obj.get("path") {
+        push_str(&mut clauses, &mut params, "path = $n", v);
+    }
+    if let Some(v) = obj.get("id") {
+        push_str(&mut clauses, &mut params, "id = $n", v);
+    }
+    if let Some(v) = get("nodeType", "node_type") {
+        push_str(&mut clauses, &mut params, "node_type = $n", v);
+    }
+    if let Some(v) = get("childOf", "child_of") {
+        push_str(&mut clauses, &mut params, "CHILD_OF($n)", v);
+    }
+    if let Some(v) = get("descendantOf", "descendant_of") {
+        push_str(&mut clauses, &mut params, "DESCENDANT_OF($n)", v);
+    }
+
+    if let Some(props) = obj.get("properties") {
+        let props = props.as_object().ok_or_else(|| {
+            raisin_error::Error::Validation(
+                "raisin.nodes.query: `properties` must be an object of key/value filters"
+                    .to_string(),
+            )
+        })?;
+        // BTreeMap ordering: serde_json is built with `preserve_order` here, so
+        // iterate as given and keep the statement stable for one input.
+        for (key, value) in props {
+            if key.contains('\'') {
+                return Err(raisin_error::Error::Validation(format!(
+                    "raisin.nodes.query: property name '{key}' may not contain a quote"
+                )));
+            }
+            let as_text = match value {
+                Value::String(s) => s.clone(),
+                Value::Bool(b) => b.to_string(),
+                Value::Number(n) => n.to_string(),
+                Value::Null => {
+                    return Err(raisin_error::Error::Validation(format!(
+                        "raisin.nodes.query: property filter '{key}' is null; \
+                         use raisin.sql.query() to test for absence"
+                    )))
+                }
+                _ => {
+                    return Err(raisin_error::Error::Validation(format!(
+                        "raisin.nodes.query: property filter '{key}' must be a string, \
+                         number or boolean"
+                    )))
+                }
+            };
+            params.push(Value::String(as_text));
+            clauses.push(format!(
+                "properties->>'{}'::String = ${}",
+                key,
+                params.len()
+            ));
+        }
+    }
+
+    let mut sql = format!("SELECT * FROM {}", escape_identifier(workspace));
+    if !clauses.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&clauses.join(" AND "));
+    }
+
+    if let Some(order_by) = get("orderBy", "order_by").and_then(Value::as_str) {
+        // An allow-list, because this is the ONE part of the statement that is
+        // interpolated rather than bound. `__order` and `__tree_order` are the
+        // editorial-ordering columns; they are opaque sortable text and are the
+        // only correct way to reproduce drag-and-drop order (`path` sorts
+        // siblings alphabetically instead).
+        const SORTABLE: [&str; 8] = [
+            "path",
+            "name",
+            "node_type",
+            "created_at",
+            "updated_at",
+            "revision",
+            "__order",
+            "__tree_order",
+        ];
+        if !SORTABLE.contains(&order_by) {
+            return Err(raisin_error::Error::Validation(format!(
+                "raisin.nodes.query: cannot order by '{order_by}'; \
+                 allowed: {}. Use raisin.sql.query() for anything else.",
+                SORTABLE.join(", ")
+            )));
+        }
+        let descending = get("order", "direction")
+            .and_then(Value::as_str)
+            .is_some_and(|d| d.eq_ignore_ascii_case("desc"));
+        sql.push_str(&format!(
+            " ORDER BY {} {}",
+            order_by,
+            if descending { "DESC" } else { "ASC" }
+        ));
+    }
+
+    if let Some(limit) = obj.get("limit").and_then(Value::as_u64) {
+        sql.push_str(&format!(" LIMIT {}", limit));
+    }
+    if let Some(offset) = obj.get("offset").and_then(Value::as_u64) {
+        sql.push_str(&format!(" OFFSET {}", offset));
+    }
+
+    Ok(SqlStatement::new(sql, params))
+}
+
 // ============================================================================
 // WRITE OPERATIONS
 // ============================================================================
@@ -362,6 +522,132 @@ fn build_nested_property_json(property_path: &str, value: &PropertyValue) -> Val
 
 #[cfg(test)]
 mod tests {
+    // ------------------------------------------------------------------
+    // raisin.nodes.query
+    // ------------------------------------------------------------------
+
+    mod node_query {
+        use super::super::generate_node_query;
+        use serde_json::json;
+
+        #[test]
+        fn an_empty_filter_selects_the_whole_workspace() {
+            let stmt = generate_node_query("content", &json!({})).unwrap();
+            assert_eq!(stmt.sql, "SELECT * FROM content");
+            assert!(stmt.params.is_empty());
+        }
+
+        #[test]
+        fn every_value_is_bound_never_interpolated() {
+            // Regression guard for the shape of the fix: this used to be a stub
+            // returning "Node query not yet implemented", and the obvious
+            // re-implementation formats values into the string.
+            let stmt = generate_node_query(
+                "content",
+                &json!({ "nodeType": "article'; DROP TABLE x --" }),
+            )
+            .unwrap();
+            assert_eq!(stmt.sql, "SELECT * FROM content WHERE node_type = $1");
+            assert_eq!(stmt.params, vec![json!("article'; DROP TABLE x --")]);
+        }
+
+        #[test]
+        fn predicates_compose_in_a_stable_order() {
+            let stmt = generate_node_query(
+                "content",
+                &json!({
+                    "nodeType": "article",
+                    "descendantOf": "/blog",
+                    "limit": 20,
+                    "offset": 40,
+                }),
+            )
+            .unwrap();
+
+            assert_eq!(
+                stmt.sql,
+                "SELECT * FROM content WHERE node_type = $1 AND DESCENDANT_OF($2) \
+                 LIMIT 20 OFFSET 40"
+                    .replace("\\\n                 ", " ")
+            );
+            assert_eq!(stmt.params, vec![json!("article"), json!("/blog")]);
+        }
+
+        #[test]
+        fn snake_case_keys_are_accepted_too() {
+            let camel =
+                generate_node_query("ws", &json!({ "nodeType": "a", "childOf": "/x" })).unwrap();
+            let snake =
+                generate_node_query("ws", &json!({ "node_type": "a", "child_of": "/x" })).unwrap();
+            assert_eq!(camel.sql, snake.sql);
+            assert_eq!(camel.params, snake.params);
+        }
+
+        #[test]
+        fn a_property_filter_uses_the_string_cast_form() {
+            // The `::String` KEY-CAST form evaluates as a verbatim row filter,
+            // so it stays correct beside a node_type equality and on a
+            // workspace whose compound index is unbuilt. The bare form can be
+            // routed to that index and return zero rows.
+            let stmt = generate_node_query(
+                "content",
+                &json!({ "nodeType": "article", "properties": { "slug": "hello" } }),
+            )
+            .unwrap();
+
+            assert!(stmt.sql.contains("properties->>'slug'::String = $2"));
+            assert_eq!(stmt.params, vec![json!("article"), json!("hello")]);
+        }
+
+        #[test]
+        fn a_non_string_property_is_compared_as_its_json_text() {
+            // `->>` yields text, so `seq: 0` must become '0' and not 0.
+            let stmt =
+                generate_node_query("ws", &json!({ "properties": { "seq": 0, "live": true } }))
+                    .unwrap();
+            assert!(stmt.params.contains(&json!("0")));
+            assert!(stmt.params.contains(&json!("true")));
+        }
+
+        #[test]
+        fn ordering_is_restricted_to_a_known_column() {
+            let stmt = generate_node_query("ws", &json!({ "orderBy": "__order", "order": "desc" }))
+                .unwrap();
+            assert_eq!(stmt.sql, "SELECT * FROM ws ORDER BY __order DESC");
+
+            // The sort column is the one part that is interpolated, so an
+            // unknown name is an error rather than a formatted string.
+            let err = generate_node_query("ws", &json!({ "orderBy": "1; DROP TABLE x" }))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("cannot order by"), "unexpected: {err}");
+        }
+
+        #[test]
+        fn a_non_object_filter_is_refused_with_an_example() {
+            let err = generate_node_query("ws", &json!("SELECT * FROM ws"))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("filter object"), "unexpected: {err}");
+        }
+
+        #[test]
+        fn a_property_name_carrying_a_quote_is_refused() {
+            // The property NAME is interpolated into the `->>` operand, so it
+            // cannot be allowed to close the literal.
+            let err = generate_node_query("ws", &json!({ "properties": { "a'b": "x" } }))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("quote"), "unexpected: {err}");
+        }
+
+        #[test]
+        fn a_container_or_null_property_value_is_refused() {
+            assert!(generate_node_query("ws", &json!({ "properties": { "a": [1] } })).is_err());
+            assert!(generate_node_query("ws", &json!({ "properties": { "a": null } })).is_err());
+        }
+    }
+
     use super::*;
 
     #[test]

@@ -7,6 +7,7 @@ use raisin_sql::ast::ddl::{CreateElementType, DropElementType};
 use raisin_storage::{CommitMetadata, ElementTypeRepository, Storage};
 use std::sync::Arc;
 
+use super::conversions::{convert_field, convert_fields};
 use super::ddl_success_stream;
 
 // =============================================================================
@@ -32,7 +33,7 @@ pub(crate) async fn execute_create_elementtype<S: Storage + 'static>(
         title: None,
         description: create.description.clone(),
         icon: create.icon.clone(),
-        fields: Vec::new(), // FieldSchema is complex; DDL doesn't support full conversion yet
+        fields: convert_fields(&create.fields)?,
         initial_content: None,
         layout: None,
         meta: None,
@@ -115,18 +116,43 @@ fn apply_elementtype_alteration(
 ) -> Result<(), Error> {
     use raisin_sql::ast::ddl::ElementTypeAlteration;
 
+    use raisin_models::nodes::types::element::field_types::FieldSchemaBase;
+
     match alteration {
-        ElementTypeAlteration::AddField(_field_def) => {
-            // FieldSchema conversion not supported yet
-            tracing::warn!("ADD FIELD not fully supported for ElementTypes in DDL");
+        ElementTypeAlteration::AddField(field_def) => {
+            let field = convert_field(field_def)?;
+            // Re-declaring a field REPLACES it rather than duplicating the
+            // name. Two entries with one name is a schema no resolver can read
+            // consistently, and the author's intent when they re-state a field
+            // is the newer definition.
+            element_type
+                .fields
+                .retain(|f| f.base_name() != &field_def.name);
+            element_type.fields.push(field);
         }
-        ElementTypeAlteration::DropField(_name) => {
-            // FieldSchema manipulation not supported yet
-            tracing::warn!("DROP FIELD not fully supported for ElementTypes in DDL");
+        ElementTypeAlteration::DropField(name) => {
+            let before = element_type.fields.len();
+            element_type.fields.retain(|f| f.base_name() != name);
+            if element_type.fields.len() == before {
+                return Err(Error::NotFound(format!(
+                    "Field '{}' not found on ElementType '{}'",
+                    name, element_type.name
+                )));
+            }
         }
-        ElementTypeAlteration::ModifyField(_field_def) => {
-            // FieldSchema manipulation not supported yet
-            tracing::warn!("MODIFY FIELD not fully supported for ElementTypes in DDL");
+        ElementTypeAlteration::ModifyField(field_def) => {
+            let field = convert_field(field_def)?;
+            let Some(slot) = element_type
+                .fields
+                .iter_mut()
+                .find(|f| f.base_name() == &field_def.name)
+            else {
+                return Err(Error::NotFound(format!(
+                    "Field '{}' not found on ElementType '{}'; use ADD FIELD to create it",
+                    field_def.name, element_type.name
+                )));
+            };
+            *slot = field;
         }
         ElementTypeAlteration::SetDescription(desc) => {
             element_type.description = Some(desc.clone());

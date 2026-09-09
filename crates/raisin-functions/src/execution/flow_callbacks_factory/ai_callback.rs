@@ -581,21 +581,18 @@ where
 
     if let Some(tool_refs) = props.get_array("tools") {
         for tool_ref in tool_refs {
-            let tool_path = match tool_ref {
-                PropertyValue::String(path) => path.clone(),
-                PropertyValue::Reference(r) => r.path.clone(),
-                _ => continue,
+            let Some(entry) = parse_agent_tool_entry(tool_ref) else {
+                continue;
             };
 
-            if tool_path.is_empty() {
-                continue;
-            }
+            let tool_path = entry.path;
+            let workspace = entry.workspace.as_deref().unwrap_or("functions");
 
             if let Ok(Some(func_node)) = deps
                 .storage
                 .nodes()
                 .get_by_path(
-                    StorageScope::new(tenant_id, repo_id, branch, "functions"),
+                    StorageScope::new(tenant_id, repo_id, branch, workspace),
                     &tool_path,
                     None,
                 )
@@ -603,9 +600,11 @@ where
             {
                 let func_props = Properties::new(&func_node.properties);
 
-                let tool_name = func_props
-                    .get_string("name")
-                    .unwrap_or_else(|| func_node.name.clone());
+                let tool_name = entry.alias.clone().unwrap_or_else(|| {
+                    func_props
+                        .get_string("name")
+                        .unwrap_or_else(|| func_node.name.clone())
+                });
 
                 let tool_description = func_props.get_string("description").unwrap_or_default();
 
@@ -634,4 +633,139 @@ where
     }
 
     (tools, tool_path_map)
+}
+
+/// One entry of an agent's `tools` array, in any of the three shapes the
+/// property accepts.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AgentToolEntry {
+    /// Path to the function node.
+    pub path: String,
+    /// Workspace holding it. `None` means the `functions` default.
+    pub workspace: Option<String>,
+    /// Name to advertise the tool under, overriding the function's own.
+    pub alias: Option<String>,
+    /// Whether the tool requires explicit invocation.
+    pub explicit: bool,
+}
+
+/// Read one `tools` entry.
+///
+/// `raisin_agent.yaml` declares the items as OBJECTS
+/// (`{path, workspace, alias, explicit}`), but this loader only ever matched
+/// `String` and `Reference` and `continue`d on everything else — so an agent
+/// authored the way its own nodetype documents advertised NO tools, silently
+/// and with nothing logged. All three shapes are read here:
+///
+/// - `PropertyValue::String("/path")` — the bare path.
+/// - `PropertyValue::Reference` — the path it points at.
+/// - `PropertyValue::Object` — the declared shape; `path` is required, and
+///   `workspace`/`alias`/`explicit` are optional. A nested `Reference` under
+///   `path` is accepted too, since that is how a reference-typed field
+///   round-trips.
+///
+/// Returns `None` for an entry with no usable path, which is the one case the
+/// caller skips.
+pub(crate) fn parse_agent_tool_entry(value: &PropertyValue) -> Option<AgentToolEntry> {
+    let non_empty = |s: &str| {
+        let t = s.trim();
+        (!t.is_empty()).then(|| t.to_string())
+    };
+
+    match value {
+        PropertyValue::String(path) => non_empty(path).map(|path| AgentToolEntry {
+            path,
+            workspace: None,
+            alias: None,
+            explicit: false,
+        }),
+        PropertyValue::Reference(r) => non_empty(&r.path).map(|path| AgentToolEntry {
+            path,
+            workspace: None,
+            alias: None,
+            explicit: false,
+        }),
+        PropertyValue::Object(fields) => {
+            let string_field = |key: &str| match fields.get(key) {
+                Some(PropertyValue::String(s)) => non_empty(s),
+                Some(PropertyValue::Reference(r)) => non_empty(&r.path),
+                _ => None,
+            };
+
+            let path = string_field("path")?;
+
+            Some(AgentToolEntry {
+                path,
+                workspace: string_field("workspace"),
+                alias: string_field("alias"),
+                explicit: matches!(fields.get("explicit"), Some(PropertyValue::Boolean(true))),
+            })
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod agent_tool_entry_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn obj(pairs: &[(&str, PropertyValue)]) -> PropertyValue {
+        let mut map = HashMap::new();
+        for (k, v) in pairs {
+            map.insert((*k).to_string(), v.clone());
+        }
+        PropertyValue::Object(map)
+    }
+
+    #[test]
+    fn a_bare_string_is_a_path() {
+        let entry = parse_agent_tool_entry(&PropertyValue::String("/tools/greet".into())).unwrap();
+        assert_eq!(entry.path, "/tools/greet");
+        assert_eq!(entry.workspace, None);
+        assert_eq!(entry.alias, None);
+        assert!(!entry.explicit);
+    }
+
+    #[test]
+    fn the_declared_object_form_is_read() {
+        // Regression: this shape is what `raisin_agent.yaml` declares, and the
+        // loader used to skip it, so the agent advertised no tools at all.
+        let entry = parse_agent_tool_entry(&obj(&[
+            ("path", PropertyValue::String("/tools/greet".into())),
+            ("workspace", PropertyValue::String("shared".into())),
+            ("alias", PropertyValue::String("say_hello".into())),
+            ("explicit", PropertyValue::Boolean(true)),
+        ]))
+        .unwrap();
+
+        assert_eq!(entry.path, "/tools/greet");
+        assert_eq!(entry.workspace.as_deref(), Some("shared"));
+        assert_eq!(entry.alias.as_deref(), Some("say_hello"));
+        assert!(entry.explicit);
+    }
+
+    #[test]
+    fn an_object_with_only_a_path_takes_the_defaults() {
+        let entry = parse_agent_tool_entry(&obj(&[(
+            "path",
+            PropertyValue::String("/tools/greet".into()),
+        )]))
+        .unwrap();
+        assert_eq!(entry.path, "/tools/greet");
+        assert_eq!(entry.workspace, None);
+        assert_eq!(entry.alias, None);
+        assert!(!entry.explicit);
+    }
+
+    #[test]
+    fn an_entry_with_no_usable_path_is_skipped() {
+        assert!(parse_agent_tool_entry(&PropertyValue::String("   ".into())).is_none());
+        assert!(parse_agent_tool_entry(&PropertyValue::Boolean(true)).is_none());
+        assert!(parse_agent_tool_entry(&obj(&[(
+            "workspace",
+            PropertyValue::String("shared".into())
+        )]))
+        .is_none());
+    }
 }

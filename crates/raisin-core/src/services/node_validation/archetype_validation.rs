@@ -72,8 +72,16 @@ impl<S: Storage> NodeValidator<S> {
         let allowed_fields: HashSet<&str> =
             resolved.resolved_fields.iter().map(field_name).collect();
 
-        // Check each node property against allowed archetype fields
+        // Check each node property against allowed archetype fields. Reserved
+        // ($-prefixed) keys are server-computed metadata that the write path
+        // stamps onto every node ($mixins / $supertypes), so they are never
+        // declared by an archetype and must be exempt here exactly as they are
+        // in `check_strict_mode`. Without this, a strict archetype rejects
+        // every write of its own nodes.
         for key in node.properties.keys() {
+            if raisin_models::nodes::is_reserved_property_key(key) {
+                continue;
+            }
             if !allowed_fields.contains(key.as_str()) {
                 return Err(Error::Validation(format!(
                     "Undefined property '{}' in strict archetype '{}'",

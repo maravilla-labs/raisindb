@@ -174,6 +174,11 @@ impl<'a> AnalyzerContext<'a> {
             ScalarResolution::Call(signature, args) => (signature, args),
         };
 
+        // `CEILING` resolved to the `CEIL` kernel, `SUBSTRING` to `SUBSTR`:
+        // carry the canonical name forward so the executor has one name to
+        // implement per function.
+        let func_name = signature.name.clone();
+
         // Analyze FILTER clause if present (for aggregate functions)
         let filter = if let Some(filter_expr) = &func.filter {
             let analyzed_filter = self.analyze_expr(filter_expr)?;
@@ -295,14 +300,23 @@ impl<'a> AnalyzerContext<'a> {
             });
         }
 
-        let arg_expr = &args[0];
-
-        // At this point, if it was a table reference, it would have been handled early
-        // So this must be a regular column expression - just cast to JSONB
+        // NOT a cast. `CAST(x AS JSONB)` PARSES the text as JSON, so
+        // `TO_JSON('hello')` failed with "Cannot cast 'hello' to JSONB" —
+        // whereas `to_json` WRAPS a value, and `'hello'` becomes the JSON
+        // string `"hello"`. The executor's TO_JSON does exactly that for every
+        // literal kind, so the call is left standing.
         Ok(TypedExpr::new(
-            Expr::Cast {
-                expr: Box::new(arg_expr.clone()),
-                target_type: DataType::JsonB,
+            Expr::Function {
+                name: func_name.to_string(),
+                args: args.to_vec(),
+                signature: FunctionSignature {
+                    name: func_name.to_string(),
+                    params: vec![args[0].data_type.clone()],
+                    return_type: DataType::JsonB,
+                    is_deterministic: true,
+                    category: FunctionCategory::Scalar,
+                },
+                filter: None,
             },
             DataType::JsonB,
         ))

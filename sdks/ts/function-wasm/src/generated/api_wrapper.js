@@ -569,7 +569,32 @@ globalThis.raisin = {
             const method = typeof opts.method === 'string' ? opts.method : 'GET';
             const r = __call('http_request', [method, url, opts]);
             return __isErr(r) ? { error: r.message, status: 0, ok: false } : r;
-        }
+        },
+        // request/get/post/put/patch/delete are the same one host call with the
+        // method filled in. They are declared in `raisin.d.ts` and Starlark has
+        // always had them; only this wrapper was missing them, so a JavaScript
+        // function calling `raisin.http.get(...)` type-checked and then threw
+        // "not a function" at runtime.
+        //
+        // Failure semantics match `fetch` exactly — a failed request resolves
+        // to { error, status: 0, ok: false } and never throws — so a caller can
+        // move between the two without changing its error handling.
+        request: (method, url, options) => {
+            const opts = options || {};
+            const r = __call('http_request', [
+                typeof method === 'string' ? method : 'GET',
+                url,
+                opts
+            ]);
+            return __isErr(r) ? { error: r.message, status: 0, ok: false } : r;
+        },
+        get: (url, options) => globalThis.raisin.http.request('GET', url, options),
+        post: (url, options) => globalThis.raisin.http.request('POST', url, options),
+        put: (url, options) => globalThis.raisin.http.request('PUT', url, options),
+        patch: (url, options) => globalThis.raisin.http.request('PATCH', url, options),
+        // `delete` is a reserved word, so it must be a quoted key. It is
+        // reachable as `raisin.http.delete(...)` and `raisin.http['delete'](...)`.
+        'delete': (url, options) => globalThis.raisin.http.request('DELETE', url, options)
     },
     events: {
         // Returns bool; a failed emit resolves to false (never throws).

@@ -77,6 +77,31 @@ pub struct AuthProviderConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub groups_claim: Option<String>,
 
+    /// JSON Web Key Set URL (if not using discovery).
+    ///
+    /// The keys here verify the `id_token` signature. Discovery normally
+    /// supplies it; set it explicitly only for a provider that publishes no
+    /// discovery document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jwks_url: Option<String>,
+
+    /// The exact redirect URI registered with the provider.
+    ///
+    /// It must match byte for byte at both the authorization and the token
+    /// endpoint, so it is configured rather than derived from the incoming
+    /// request: a request arriving through a proxy does not reliably know the
+    /// public origin the provider was told about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_uri: Option<String>,
+
+    /// Email domains permitted to sign in through this provider.
+    ///
+    /// Empty means any domain. A non-empty list is checked against the
+    /// verified email claim, which is how a Google tenant restricts login to
+    /// its own workforce.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_email_domains: Vec<String>,
+
     /// Additional provider-specific configuration
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub extra_config: HashMap<String, serde_json::Value>,
@@ -101,6 +126,9 @@ impl AuthProviderConfig {
             scopes: Vec::new(),
             attribute_mapping: AttributeMapping::default(),
             groups_claim: None,
+            jwks_url: None,
+            redirect_uri: None,
+            allowed_email_domains: Vec::new(),
             extra_config: HashMap::new(),
         }
     }
@@ -123,6 +151,9 @@ impl AuthProviderConfig {
             scopes: Vec::new(),
             attribute_mapping: AttributeMapping::default(),
             groups_claim: None,
+            jwks_url: None,
+            redirect_uri: None,
+            allowed_email_domains: Vec::new(),
             extra_config: HashMap::new(),
         }
     }
@@ -149,13 +180,45 @@ impl AuthProviderConfig {
             ],
             attribute_mapping: AttributeMapping::default(),
             groups_claim: None,
+            jwks_url: None,
+            redirect_uri: None,
+            allowed_email_domains: Vec::new(),
             extra_config: HashMap::new(),
+        }
+    }
+
+    /// Create an OIDC provider config for an arbitrary issuer.
+    ///
+    /// `provider_id` is the slug that appears in the login URL
+    /// (`/auth/oidc/{provider_id}`) and, prefixed with `oidc:`, in
+    /// `strategy_id`. Everything else is filled in by discovery at login time.
+    pub fn oidc(provider_id: impl Into<String>, display_name: impl Into<String>) -> Self {
+        let provider_id = provider_id.into();
+        Self {
+            strategy_id: format!("oidc:{provider_id}"),
+            provider_id,
+            display_name: display_name.into(),
+            icon: "log-in".to_string(),
+            enabled: true,
+            priority: 10,
+            scopes: vec![
+                "openid".to_string(),
+                "email".to_string(),
+                "profile".to_string(),
+            ],
+            ..Self::local()
         }
     }
 
     /// Check if this is an OIDC provider
     pub fn is_oidc(&self) -> bool {
         self.strategy_id.starts_with("oidc:")
+    }
+
+    /// The provider slug an OIDC `strategy_id` names, e.g. `google` for
+    /// `oidc:google`. `None` for a non-OIDC provider.
+    pub fn oidc_provider_name(&self) -> Option<&str> {
+        self.strategy_id.strip_prefix("oidc:")
     }
 
     /// Check if this is a SAML provider

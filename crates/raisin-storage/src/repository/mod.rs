@@ -22,7 +22,7 @@ mod revision;
 mod tag;
 mod types;
 
-pub use branch::BranchRepository;
+pub use branch::{BranchRepository, CreateBranchOptions};
 pub use gc::GarbageCollectionRepository;
 pub use repo_management::RepositoryManagementRepository;
 pub use revision::RevisionRepository;

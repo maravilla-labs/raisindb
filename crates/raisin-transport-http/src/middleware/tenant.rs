@@ -137,6 +137,80 @@ mod init_memo {
     }
 }
 
+/// What the request's bearer credential says about which tenant it may act on.
+enum CredentialTenant {
+    /// The operator superadmin bearer, or an admin token flagged
+    /// `can_impersonate`. Free to name any tenant in the header.
+    MayCrossTenants,
+    /// A credential issued for exactly this tenant.
+    Bound(String),
+    /// No readable credential. The header decides, as it always did.
+    Unknown,
+}
+
+/// Read the tenant a request's bearer credential is bound to.
+///
+/// This runs BEFORE the auth middlewares (this layer is outermost), so it
+/// re-reads the token rather than waiting for an `AuthContext`. It only ever
+/// *reads*: a token that fails validation here is `Unknown` and is rejected
+/// later by whichever auth layer the route carries, so this can never turn a
+/// bad token into a 200.
+#[cfg(feature = "storage-rocksdb")]
+fn resolve_credential_tenant(state: &AppState, req: &Request<Body>) -> CredentialTenant {
+    let Some(token) = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+    else {
+        return CredentialTenant::Unknown;
+    };
+
+    // The operator superadmin bearer. Constant-time compare, same primitive as
+    // the auth middlewares use.
+    if let Ok(expected) = std::env::var("RAISIN_SUPERADMIN_TOKEN") {
+        if !expected.is_empty() && token.len() == expected.len() {
+            let mut diff: u8 = 0;
+            for (a, b) in token.as_bytes().iter().zip(expected.as_bytes().iter()) {
+                diff |= a ^ b;
+            }
+            if diff == 0 {
+                return CredentialTenant::MayCrossTenants;
+            }
+        }
+    }
+
+    let Some(auth_service) = state.auth_service() else {
+        return CredentialTenant::Unknown;
+    };
+
+    if token.starts_with("raisin_") {
+        return match auth_service.validate_api_key(token) {
+            Ok(Some(key)) => CredentialTenant::Bound(key.tenant_id),
+            _ => CredentialTenant::Unknown,
+        };
+    }
+
+    if let Ok(admin) = auth_service.validate_token(token) {
+        return if admin.access_flags.can_impersonate {
+            CredentialTenant::MayCrossTenants
+        } else {
+            CredentialTenant::Bound(admin.tenant_id)
+        };
+    }
+
+    match auth_service.validate_user_token(token) {
+        Ok(user) => CredentialTenant::Bound(user.tenant_id),
+        Err(_) => CredentialTenant::Unknown,
+    }
+}
+
+/// Without the RocksDB auth service there is no token to read.
+#[cfg(not(feature = "storage-rocksdb"))]
+fn resolve_credential_tenant(_state: &AppState, _req: &Request<Body>) -> CredentialTenant {
+    CredentialTenant::Unknown
+}
+
 ///
 /// If headers are missing, defaults to "default" tenant and "production" deployment.
 pub async fn ensure_tenant_middleware(
@@ -144,11 +218,44 @@ pub async fn ensure_tenant_middleware(
     mut req: Request<Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let tenant_id = raisin_context::resolve_tenant_id(
-        req.headers()
-            .get(raisin_context::TENANT_ID_HEADER)
-            .and_then(|v| v.to_str().ok()),
-    );
+    // The `x-tenant-id` header is a REQUEST, not an assertion. A bearer
+    // credential names the tenant it was issued for, and until this check
+    // existed nothing compared the two: any authenticated caller could reach
+    // another tenant's data by sending a different header, and an unrecognised
+    // value auto-registered a brand-new tenant as a side effect of one GET.
+    let header_tenant = req
+        .headers()
+        .get(raisin_context::TENANT_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+
+    let tenant_id = match resolve_credential_tenant(&state, &req) {
+        // The operator superadmin bearer, and an admin whose token carries
+        // `can_impersonate`, act across tenants on purpose — that is what the
+        // operator dashboard is. The header steers them, as before.
+        CredentialTenant::MayCrossTenants => raisin_context::resolve_tenant_id(header_tenant),
+        // A credential bound to one tenant. The header may agree with it or be
+        // absent; it may not overrule it.
+        CredentialTenant::Bound(token_tenant) => match header_tenant {
+            Some(h) if h != token_tenant => {
+                tracing::warn!(
+                    header_tenant = %h,
+                    token_tenant = %token_tenant,
+                    "Rejected request: x-tenant-id disagrees with the token's tenant"
+                );
+                return Err(StatusCode::FORBIDDEN);
+            }
+            // No header: the token's own tenant, not the "default" fallback.
+            // Falling back used to route a tenant's user at another tenant's
+            // data whenever a client simply forgot the header.
+            _ => token_tenant,
+        },
+        // No credential we can read (no token, an API key we cannot validate,
+        // an OAuth resource token resolved later at the resource). Unchanged:
+        // the header, or "default".
+        CredentialTenant::Unknown => raisin_context::resolve_tenant_id(header_tenant),
+    };
 
     let deployment_key = req
         .headers()
@@ -164,7 +271,18 @@ pub async fn ensure_tenant_middleware(
     let storage = state.storage();
     let current_version = calculate_nodetype_version();
 
-    if init_memo::should_check(&tenant_id, &deployment_key, &current_version) {
+    // Only a tenant that already EXISTS gets lazily initialized here.
+    // `init_tenant_nodetypes` calls `register_tenant`, so before this gate one
+    // GET carrying an unheard-of `x-tenant-id` created that tenant, seeded
+    // every embedded NodeType under it and left the registration behind.
+    // Tenants are created by the provisioning endpoints
+    // (`POST /api/registry/tenants`, repository creation), never by a header.
+    // `default` is exempt: it is the single-operator / dev tenant and the
+    // server seeds it at startup.
+    let tenant_is_known = tenant_id == raisin_context::DEFAULT_TENANT_ID
+        || matches!(storage.registry().get_tenant(&tenant_id).await, Ok(Some(_)));
+
+    if tenant_is_known && init_memo::should_check(&tenant_id, &deployment_key, &current_version) {
         match storage
             .registry()
             .get_deployment(&tenant_id, &deployment_key)

@@ -8,6 +8,56 @@ use raisin_models::auth::{
     AuthClaims, AuthTokens, GlobalFlags, Identity, RefreshClaims, Session, TokenType,
 };
 
+/// Access and refresh token lifetimes, in seconds.
+///
+/// The defaults are the values the identity endpoints have always used (one
+/// hour, thirty days). A tenant's stored `session_settings` override them via
+/// [`TokenLifetimes::from_session_settings`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenLifetimes {
+    pub access_seconds: u64,
+    pub refresh_seconds: u64,
+}
+
+impl TokenLifetimes {
+    pub const DEFAULT_ACCESS_SECONDS: u64 = 3600;
+    pub const DEFAULT_REFRESH_SECONDS: u64 = 30 * 24 * 3600;
+
+    pub fn from_session_settings(settings: &raisin_models::auth::SessionSettings) -> Self {
+        Self {
+            access_seconds: settings.access_token_duration_seconds,
+            refresh_seconds: settings.refresh_token_duration_seconds,
+        }
+        .sanitized()
+    }
+
+    /// A zero lifetime would mint a token that is expired on arrival, and a
+    /// lifetime beyond `i64::MAX` seconds cannot be represented in a claim;
+    /// both fall back to the defaults.
+    pub fn sanitized(self) -> Self {
+        let clamp = |v: u64, default: u64| {
+            if v == 0 || v > i64::MAX as u64 {
+                default
+            } else {
+                v
+            }
+        };
+        Self {
+            access_seconds: clamp(self.access_seconds, Self::DEFAULT_ACCESS_SECONDS),
+            refresh_seconds: clamp(self.refresh_seconds, Self::DEFAULT_REFRESH_SECONDS),
+        }
+    }
+}
+
+impl Default for TokenLifetimes {
+    fn default() -> Self {
+        Self {
+            access_seconds: Self::DEFAULT_ACCESS_SECONDS,
+            refresh_seconds: Self::DEFAULT_REFRESH_SECONDS,
+        }
+    }
+}
+
 impl AuthService {
     /// Generate user JWT tokens (access + refresh) for an authenticated identity.
     ///
@@ -25,9 +75,31 @@ impl AuthService {
         repository: Option<String>,
         home: Option<String>,
     ) -> Result<AuthTokens> {
+        self.generate_user_tokens_with_lifetimes(
+            identity,
+            session,
+            repository,
+            home,
+            TokenLifetimes::default(),
+        )
+    }
+
+    /// Like [`Self::generate_user_tokens`], with the access and refresh
+    /// lifetimes supplied by the caller (from the tenant's stored
+    /// `session_settings`). [`TokenLifetimes::default`] reproduces the fixed
+    /// one hour / thirty days that `generate_user_tokens` always used.
+    pub fn generate_user_tokens_with_lifetimes(
+        &self,
+        identity: &Identity,
+        session: &Session,
+        repository: Option<String>,
+        home: Option<String>,
+        lifetimes: TokenLifetimes,
+    ) -> Result<AuthTokens> {
+        let lifetimes = lifetimes.sanitized();
         let now = Utc::now();
-        let access_expiry = now + Duration::hours(1); // 1 hour access token
-        let refresh_expiry = now + Duration::days(30); // 30 days refresh token
+        let access_expiry = now + Duration::seconds(lifetimes.access_seconds as i64);
+        let refresh_expiry = now + Duration::seconds(lifetimes.refresh_seconds as i64);
 
         // Generate access token
         let access_claims = AuthClaims {
@@ -93,8 +165,8 @@ impl AuthService {
             access_token,
             refresh_token,
             token_type: "Bearer".to_string(),
-            expires_in: 3600,                         // 1 hour in seconds
-            refresh_expires_in: Some(30 * 24 * 3600), // 30 days in seconds
+            expires_in: lifetimes.access_seconds,
+            refresh_expires_in: Some(lifetimes.refresh_seconds),
         })
     }
 
@@ -181,9 +253,28 @@ impl AuthService {
         old_refresh_claims: &RefreshClaims,
         home: Option<String>,
     ) -> Result<(AuthTokens, u32)> {
+        self.refresh_user_tokens_with_lifetimes(
+            identity,
+            session,
+            old_refresh_claims,
+            home,
+            TokenLifetimes::default(),
+        )
+    }
+
+    /// Like [`Self::refresh_user_tokens`], with caller-supplied lifetimes.
+    pub fn refresh_user_tokens_with_lifetimes(
+        &self,
+        identity: &Identity,
+        session: &Session,
+        old_refresh_claims: &RefreshClaims,
+        home: Option<String>,
+        lifetimes: TokenLifetimes,
+    ) -> Result<(AuthTokens, u32)> {
+        let lifetimes = lifetimes.sanitized();
         let now = Utc::now();
-        let access_expiry = now + Duration::hours(1);
-        let refresh_expiry = now + Duration::days(30);
+        let access_expiry = now + Duration::seconds(lifetimes.access_seconds as i64);
+        let refresh_expiry = now + Duration::seconds(lifetimes.refresh_seconds as i64);
 
         // Verify the refresh token belongs to this session family
         if old_refresh_claims.family != session.token_family {
@@ -267,8 +358,8 @@ impl AuthService {
                 access_token,
                 refresh_token,
                 token_type: "Bearer".to_string(),
-                expires_in: 3600,
-                refresh_expires_in: Some(30 * 24 * 3600),
+                expires_in: lifetimes.access_seconds,
+                refresh_expires_in: Some(lifetimes.refresh_seconds),
             },
             new_generation,
         ))
