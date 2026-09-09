@@ -9,7 +9,7 @@ icon: package
 # already right; keywords existed to be searched and were reachable only by an
 # exact property predicate. Nothing else changes — `content_hash`,
 # `upload_state`, `teaser_background_url` and the rest are machine fields.
-version: 3
+version: 4
 strict: true
 indexable: true
 index_types: [Property, Fulltext]
@@ -172,8 +172,25 @@ properties:
     description: Whether this package was uploaded via large file streaming (internal flag)
     default: false
 
+  # OBJECT, NOT Resource — and the distinction is real rather than pedantic.
+  #
+  # A `PropertyValue::Resource` is an uploaded FILE: it carries a `uuid`, a
+  # `created_at` and an `updated_at`, and that is the shape `raisin:Asset.file`
+  # holds. A package archive is not one of those. `package_registration.rs`
+  # writes `{key, url, mime_type, size}` — the object-storage BLOB KEY and
+  # nothing else — and reads it straight back as an Object
+  # (`Some(PropertyValue::Object(obj)) => obj.get("key")`). There is no uuid to
+  # put in a Resource and no timestamps, so this value could never have been one.
+  #
+  # While `type:` was documentation the mismatch was invisible. Once 0.6.1
+  # enforced declared types it made the server REFUSE ITS OWN PACKAGE UPLOAD —
+  # every `raisindb deploy` failed with "Property 'resource' on NodeType
+  # 'raisin:Package' is declared Resource but the value is Object", which blocks
+  # all package installation. Declaring what is actually stored fixes it without
+  # loosening the check for everything else: measured against a live tenant,
+  # every OTHER Resource-declared property really does hold a full Resource.
   - name: resource
-    type: Resource
+    type: Object
     required: true
     title: Package Archive
     description: The .rap ZIP file containing package contents
