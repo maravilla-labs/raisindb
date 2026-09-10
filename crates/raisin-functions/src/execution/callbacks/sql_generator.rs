@@ -21,6 +21,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 /// Result type for SQL generation - includes the SQL string and parameter values
+#[derive(Debug)]
 pub struct SqlStatement {
     /// The SQL statement with $1, $2, etc. placeholders
     pub sql: String,
