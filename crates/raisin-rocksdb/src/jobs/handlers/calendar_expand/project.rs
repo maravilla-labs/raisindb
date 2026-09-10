@@ -67,14 +67,14 @@ pub fn occurrence_properties(
         "recurrence_type".into(),
         PropertyValue::String(TYPE_OCCURRENCE.into()),
     );
+    // Declared `Date` (raisin:Event v4). This projection reaches the write path
+    // directly rather than through the untagged deserializer, so writing the
+    // declared type here is what keeps it agreeing with an adapter-mapped event.
     props.insert(
         "start_utc".into(),
-        PropertyValue::String(format_utc(occ.start_utc)),
+        PropertyValue::Date(occ.start_utc.into()),
     );
-    props.insert(
-        "end_utc".into(),
-        PropertyValue::String(format_utc(occ.end_utc)),
-    );
+    props.insert("end_utc".into(), PropertyValue::Date(occ.end_utc.into()));
     props.insert(
         "start_local".into(),
         PropertyValue::String(occ.start_local.clone()),
@@ -88,7 +88,7 @@ pub fn occurrence_properties(
     // joinable on ONE column, whichever of the two a query starts from.
     props.insert(
         "original_start_utc".into(),
-        PropertyValue::String(format_utc(occ.start_utc)),
+        PropertyValue::Date(occ.start_utc.into()),
     );
     if let Some(ext) = &master.external_id {
         props.insert(

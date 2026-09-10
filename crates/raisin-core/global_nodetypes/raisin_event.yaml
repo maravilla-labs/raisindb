@@ -31,7 +31,18 @@ icon: calendar
 # bump, but classifies the `start`/`end`/`organizer` removals as BREAKING, so
 # under the default NonBreaking policy it records them pending for an explicit
 # admin apply rather than writing them.
-version: 3
+#
+# v4: the three `_utc` instants corrected from `String` to `Date`. They hold
+# RFC3339, and `PropertyValue` is untagged with `Date` ahead of `String`, so such
+# a value deserializes as `Date` and could NEVER arrive as a `String` over the
+# wire — the declaration was unsatisfiable for any client, the same defect as
+# `raisin:Integration.capabilities_checked_at` (v6). The original `String` was
+# chosen for fixed-width lexicographic ordering, but `hash_property_value`
+# already encodes a `Date` as zero-padded 20-digit nanoseconds, so ORDER BY and
+# PropertyOrderScan keep working — and stop depending on every producer spelling
+# the timestamp `YYYY-MM-DDTHH:MM:SSZ` exactly. The `_local` siblings stay
+# `String`: wall-clock with no offset is not RFC3339 and really is a string.
+version: 4
 strict: true
 indexable: true
 index_types: [Property, Fulltext, Vector]
@@ -72,18 +83,18 @@ properties:
 
   # -------------------------------------------------------------------- time
   - name: start_utc
-    type: String
+    type: Date
     required: false
     index: [Property]
     meta:
       label: Start (UTC)
       description: >-
-        RFC 3339 UTC instant, always `YYYY-MM-DDTHH:MM:SSZ` — fixed width, so
+        RFC 3339 UTC instant. Indexed as zero-padded nanoseconds, so
         lexicographic order IS chronological order and a PropertyOrderScan over
         this column is correct. All-day events use `<date>T00:00:00Z`.
 
   - name: end_utc
-    type: String
+    type: Date
     required: false
     index: [Property]
     meta:
@@ -162,7 +173,7 @@ properties:
         `__mount_id = <mount> AND __external_id = <this>`; both are indexed.
 
   - name: original_start_utc
-    type: String
+    type: Date
     required: false
     index: [Property]
     meta:

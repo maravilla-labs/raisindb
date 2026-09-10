@@ -1134,14 +1134,47 @@ async fn a_timestamp_validates_in_either_spelling_on_a_date_property() {
 /// first one. This is the cheap guard that keeps the next one from shipping.
 #[test]
 fn no_builtin_declares_a_timestamp_property_as_a_string() {
+    // Two independent detectors, because neither alone is enough. `raisin:Event`
+    // spelled its instants `_utc` and `raisin:Mail` called one simply `date`, so
+    // an `_at`-only sweep declared itself clean while both were unsatisfiable;
+    // and a description-only sweep misses any property nobody documented.
+    //
+    // `_local` is the deliberate exception: wall-clock with no offset is NOT
+    // RFC3339, loses the untagged race to `String`, and so really is one.
+    fn looks_like_a_timestamp(name: &str, description: &str) -> bool {
+        if name.ends_with("_local") {
+            return false;
+        }
+        let by_name = name.ends_with("_at")
+            || name.ends_with("_utc")
+            || name.ends_with("_time")
+            || name == "date";
+        let lower = description.to_ascii_lowercase();
+        let by_description = ["rfc 3339", "rfc3339", "iso 8601", "iso8601", "utc instant"]
+            .iter()
+            .any(|needle| lower.contains(needle));
+        by_name || by_description
+    }
+
     let offenders: Vec<String> = crate::nodetype_init::load_global_nodetypes()
         .iter()
         .flat_map(|nt| {
             let type_name = nt.name.clone();
             nt.properties.iter().flatten().filter_map(move |p| {
                 let name = p.name.as_deref()?;
-                (name.ends_with("_at") && p.property_type == PropertyType::String)
-                    .then(|| format!("{type_name}.{name}"))
+                if p.property_type != PropertyType::String {
+                    return None;
+                }
+                let description = p
+                    .meta
+                    .as_ref()
+                    .and_then(|m| m.get("description"))
+                    .and_then(|v| match v {
+                        PropertyValue::String(s) => Some(s.as_str()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                looks_like_a_timestamp(name, description).then(|| format!("{type_name}.{name}"))
             })
         })
         .collect();

@@ -37,7 +37,13 @@ icon: mail
 # Invisible until type enforcement landed; then the admin console could not save
 # an integration it had only just read. `coerce_declared_dates` parses the string
 # spelling, so values already stored as strings need no migration.
-version: 4
+# v5: `date` corrected the same way. It was missed in v4 because the sweep keyed
+# on the `_at` suffix; its own description said "ISO 8601" all along. Being the
+# canonical ORDER BY / range column it looked like the one case where `String`
+# bought something, but `hash_property_value` encodes a `Date` as zero-padded
+# 20-digit nanoseconds, so ordering is preserved and no longer depends on every
+# producer spelling the timestamp at a fixed width.
+version: 5
 
 # Global, not shipped inside one adapter package, because BOTH the Graph and the
 # IMAP connectors map onto it. A copy per package is the mirrored-definition
@@ -216,14 +222,15 @@ properties:
   # and `sent_at` are the unambiguous halves, and the presence of `sent_at`
   # without `received_at` is what distinguishes an outgoing copy.
   - name: date
-    type: String
+    type: Date
     required: false
     index: [Property]
     meta:
       label: Date
       description: >-
-        Received, or sent for an outgoing copy. ISO 8601. The canonical
-        ORDER BY / range column.
+        Received, or sent for an outgoing copy. RFC 3339. The canonical
+        ORDER BY / range column — indexed as zero-padded nanoseconds, so
+        lexicographic order IS chronological order.
 
   - name: received_at
     type: Date
