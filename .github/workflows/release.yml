@@ -107,15 +107,17 @@ jobs:
             '{os:"ubuntu-latest",target:"x86_64-unknown-linux-gnu",archive:"tar.gz",ext:"",features:$f}')
           WINDOWS=$(jq -cn --arg f "$FEATURES" \
             '{os:"windows-latest",target:"x86_64-pc-windows-msvc",archive:"zip",ext:".exe",features:$f}')
-          MACOS=$(jq -cn --arg f "$FEATURES" \
+          MACOS_ARM=$(jq -cn --arg f "$FEATURES" \
             '{os:"macos-14",target:"aarch64-apple-darwin",archive:"tar.gz",ext:"",features:$f}')
+          MACOS_INTEL=$(jq -cn --arg f "$FEATURES" \
+            '{os:"macos-13",target:"x86_64-apple-darwin",archive:"tar.gz",ext:"",features:$f}')
 
           if [[ "${TARGETS:-all}" == "linux-only" ]]; then
             MATRIX=$(jq -cn --argjson l "$LINUX" '{include:[$l]}')
             echo "Building Linux only (fast path)."
           else
-            MATRIX=$(jq -cn --argjson l "$LINUX" --argjson w "$WINDOWS" --argjson m "$MACOS" \
-              '{include:[$l,$w,$m]}')
+            MATRIX=$(jq -cn --argjson l "$LINUX" --argjson w "$WINDOWS" --argjson ma "$MACOS_ARM" --argjson mi "$MACOS_INTEL" \
+              '{include:[$l,$w,$ma,$mi]}')
             echo "Building all platforms."
           fi
           echo "$MATRIX" | jq .
