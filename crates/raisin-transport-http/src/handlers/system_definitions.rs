@@ -45,6 +45,11 @@ pub struct DefinitionOriginInfo {
     pub layer: String,
     /// Layers this definition shadows, lowest first.
     pub shadowed: Vec<String>,
+    /// Set when this definition's winning layer declares an OLDER version than
+    /// a layer it shadows — an override that is silently a downgrade. `None` on
+    /// a healthy definition.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub downgrade: Option<String>,
 }
 
 /// The server's current definition stack.
@@ -60,6 +65,15 @@ pub struct SystemDefinitionsResponse {
     pub auto_apply: String,
     /// Every resolved definition and its winning layer.
     pub definitions: Vec<DefinitionOriginInfo>,
+    /// Definitions whose winning layer is OLDER than a layer it shadows.
+    ///
+    /// Hoisted out of `definitions` deliberately: this is the one thing on this
+    /// response an operator must not have to go looking for. A stale overlay
+    /// left behind after its fix shipped in the binary serves the old schema to
+    /// every repository, and `system-updates` reports nothing pending because
+    /// the applied hash matches the overlay's own copy — so this list is the
+    /// only place the condition is visible.
+    pub stale_overrides: Vec<String>,
 }
 
 /// A configured registry, without its credentials.
@@ -113,7 +127,13 @@ pub async fn get_system_definitions(
                 name: o.name,
                 layer: o.layer,
                 shadowed: o.shadowed,
+                downgrade: o.downgrade,
             })
+            .collect(),
+        stale_overrides: resolver
+            .downgrades()
+            .into_iter()
+            .map(|o| format!("{}: {}", o.name, o.downgrade.unwrap_or_default()))
             .collect(),
     }))
 }

@@ -27,6 +27,23 @@ pub struct DefinitionOrigin {
     pub layer: String,
     /// Layers this definition shadowed, lowest first.
     pub shadowed: Vec<String>,
+    /// Set when the winning layer declares an OLDER `version:` than a layer it
+    /// shadows — i.e. this override is a downgrade. Human-readable, e.g.
+    /// `"overlay declares version 3, shadowing embedded version 4"`.
+    ///
+    /// An overlay exists so a schema fix can ship without rebuilding the
+    /// binary. Nothing retires one once the fix lands IN the binary, and from
+    /// that moment the overlay silently serves the OLD definition to every
+    /// repo — with no error, and with `system-updates` reporting nothing
+    /// pending, because the applied content hash matches the overlay's own
+    /// copy. That is not hypothetical: a frozen overlay pinned
+    /// `raisin:Package` at v3 and broke every package upload on a server whose
+    /// binary already carried the v4 fix.
+    ///
+    /// A downgrade is legitimate as a deliberate rollback, so this reports
+    /// rather than refuses — but it must be impossible to be in this state and
+    /// not know.
+    pub downgrade: Option<String>,
 }
 
 /// The stacked definition sources for this server.
@@ -93,34 +110,71 @@ impl DefinitionResolver {
     /// Where each resolved definition came from — for logging and for the
     /// admin console's system-updates view.
     pub fn origins(&self) -> Vec<DefinitionOrigin> {
-        let mut by_name: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        // `(layer name, declared version)` per resource, lowest layer first.
+        // The version is only meaningful for NodeTypes; workspaces and packages
+        // carry none, so they simply never report a downgrade.
+        let mut by_name: BTreeMap<String, Vec<(String, Option<i32>)>> = BTreeMap::new();
 
         for layer in &self.layers {
             let name = layer.layer_name().to_string();
             for (nt, _) in layer.nodetypes() {
-                by_name.entry(nt.name).or_default().push(name.clone());
+                by_name
+                    .entry(nt.name)
+                    .or_default()
+                    .push((name.clone(), nt.version));
             }
             for (ws, _) in layer.workspaces() {
-                by_name.entry(ws.name).or_default().push(name.clone());
+                by_name
+                    .entry(ws.name)
+                    .or_default()
+                    .push((name.clone(), None));
             }
             for pkg in layer.packages() {
                 by_name
                     .entry(pkg.info.manifest.name)
                     .or_default()
-                    .push(name.clone());
+                    .push((name.clone(), None));
             }
         }
 
         by_name
             .into_iter()
-            .map(|(name, mut layers)| {
-                let layer = layers.pop().unwrap_or_default();
+            .map(|(name, mut entries)| {
+                let (layer, winning_version) = entries.pop().unwrap_or_default();
+
+                // Compare against the HIGHEST version among the shadowed
+                // layers, not merely the one directly below: with three layers
+                // the newest definition may sit two down.
+                let downgrade = winning_version.and_then(|winner| {
+                    entries
+                        .iter()
+                        .filter_map(|(l, v)| v.map(|v| (l, v)))
+                        .filter(|(_, v)| *v > winner)
+                        .max_by_key(|(_, v)| *v)
+                        .map(|(shadowed_layer, shadowed_version)| {
+                            format!(
+                                "{layer} declares version {winner}, shadowing {shadowed_layer} \
+                                 version {shadowed_version}"
+                            )
+                        })
+                });
+
                 DefinitionOrigin {
                     name,
                     layer,
-                    shadowed: layers,
+                    shadowed: entries.into_iter().map(|(l, _)| l).collect(),
+                    downgrade,
                 }
             })
+            .collect()
+    }
+
+    /// Every resolved definition whose winning layer is OLDER than a layer it
+    /// shadows. Empty on a healthy server.
+    pub fn downgrades(&self) -> Vec<DefinitionOrigin> {
+        self.origins()
+            .into_iter()
+            .filter(|o| o.downgrade.is_some())
             .collect()
     }
 
@@ -130,6 +184,24 @@ impl DefinitionResolver {
     pub fn log_overrides(&self) {
         for origin in self.origins() {
             if origin.shadowed.is_empty() {
+                continue;
+            }
+            // A downgrade is the failure mode that cost a production outage —
+            // an overlay left in place after its fix landed in the binary,
+            // serving the old schema to every repo with nothing reporting it.
+            // It gets a WARN naming the fix, not an INFO in a wall of INFOs.
+            if let Some(detail) = &origin.downgrade {
+                tracing::warn!(
+                    definition = %origin.name,
+                    layer = %origin.layer,
+                    shadows = ?origin.shadowed,
+                    detail = %detail,
+                    "STALE DEFINITION OVERRIDE: a higher layer is serving an OLDER version \
+                     than the layer it shadows. Every repository resyncs from the older one, \
+                     and system-updates will report nothing pending. If this override is \
+                     obsolete, remove it from the overlay directory and POST \
+                     /api/management/system-definitions/reload"
+                );
                 continue;
             }
             tracing::info!(
@@ -258,5 +330,77 @@ mod tests {
             .unwrap();
         assert_eq!(origin.layer, "overlay");
         assert_eq!(origin.shadowed, vec!["embedded".to_string()]);
+    }
+
+    /// The outage this exists to prevent: an overlay written to hotfix a schema
+    /// is left in place after the same fix ships in the binary. From then on it
+    /// serves the OLD definition to every repository, and nothing reports it —
+    /// `system-updates` compares the applied hash against the overlay's own
+    /// copy, so it says "0 pending" while the stored schema is stale. In
+    /// production a frozen overlay pinned `raisin:Package` at v3 and refused
+    /// every package upload on a binary that already carried the v4 fix.
+    #[test]
+    fn an_overlay_older_than_the_binary_is_reported_as_a_downgrade() {
+        let embedded = DefinitionResolver::embedded_only();
+        let (mut pkg, _) = embedded
+            .nodetypes()
+            .into_iter()
+            .find(|(nt, _)| nt.name == "raisin:Package")
+            .expect("raisin:Package is embedded");
+        let embedded_version = pkg.version.expect("raisin:Package declares a version");
+
+        // A frozen copy from before the current binary.
+        pkg.version = Some(embedded_version - 1);
+
+        let resolver = DefinitionResolver::new(vec![
+            Arc::new(EmbeddedSource),
+            Arc::new(OneNodeType(pkg, "stalehash".to_string(), "overlay")),
+        ]);
+
+        let downgrades = resolver.downgrades();
+        assert_eq!(
+            downgrades.len(),
+            1,
+            "exactly the stale definition must be reported, got {downgrades:?}"
+        );
+        assert_eq!(downgrades[0].name, "raisin:Package");
+        let detail = downgrades[0]
+            .downgrade
+            .as_deref()
+            .expect("a downgrade carries its detail");
+        assert!(
+            detail.contains("overlay") && detail.contains("embedded"),
+            "the detail must name both layers so the fix is obvious: {detail}"
+        );
+    }
+
+    /// An overlay that is NEWER than the binary is the mechanism working as
+    /// intended — that is the whole point of shipping a schema fix without a
+    /// rebuild. It must not be reported.
+    #[test]
+    fn an_overlay_newer_than_the_binary_is_not_a_downgrade() {
+        let embedded = DefinitionResolver::embedded_only();
+        let (mut pkg, _) = embedded
+            .nodetypes()
+            .into_iter()
+            .find(|(nt, _)| nt.name == "raisin:Package")
+            .expect("raisin:Package is embedded");
+        pkg.version = Some(pkg.version.unwrap() + 1);
+
+        let resolver = DefinitionResolver::new(vec![
+            Arc::new(EmbeddedSource),
+            Arc::new(OneNodeType(pkg, "newhash".to_string(), "overlay")),
+        ]);
+
+        assert!(
+            resolver.downgrades().is_empty(),
+            "a newer overlay is the feature, not a fault"
+        );
+    }
+
+    /// A server with no overlay must never report one.
+    #[test]
+    fn embedded_only_has_no_downgrades() {
+        assert!(DefinitionResolver::embedded_only().downgrades().is_empty());
     }
 }
