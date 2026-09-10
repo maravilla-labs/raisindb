@@ -18,11 +18,31 @@ properties:
     description: Background color for the folder (hex code)
     required: false
     default: "#3b82f6"
+# Keep this aligned with access_control.yaml allowed_node_types. The workspace
+# says which types may exist; this list says those types may live under the ACL
+# folders shipped in the workspace's initial_structure and built-in packages.
 allowed_children:
   - raisin:User
   - raisin:Role
   - raisin:Group
   - raisin:AclFolder
+  - raisin:Folder
+  # /relation-types, /circles, /graph-config.
+  - raisin:RelationType
+  - raisin:EntityCircle
+  - raisin:GraphAlgorithmConfig
+  - raisin:StewardshipOverride
+  # /config.
+  - raisin:SecurityConfig
+  - raisin:StewardshipConfig
+  # User-owned subtrees under /users/internal/<slug>.
+  - raisin:Profile
+  - raisin:ProfileData
+  - raisin:MessageFolder
+  - raisin:Message
+  - raisin:Conversation
+  - raisin:InboxTask
+  - raisin:Notification
 versionable: true
 publishable: true
 auditable: true

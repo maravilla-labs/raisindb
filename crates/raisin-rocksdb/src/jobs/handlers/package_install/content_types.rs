@@ -47,6 +47,8 @@ pub(super) struct InstallStats {
     pub nested_packages_installed: usize,
     pub binary_files_installed: usize,
     pub package_assets_installed: usize,
+    pub migrations_applied: usize,
+    pub migrations_skipped: usize,
     pub translations_applied: usize,
     pub translations_skipped: usize,
     /// Per-entry rejections, one message each.

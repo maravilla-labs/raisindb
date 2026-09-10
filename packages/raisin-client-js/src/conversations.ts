@@ -1101,7 +1101,7 @@ export class ConversationManager {
 
   private async ensureFolderNode(workspace: string, path: string, title: string): Promise<void> {
     await this.sqlQuery(
-      `UPSERT INTO '${workspace}' (path, node_type, properties) VALUES ($1, 'raisin:Folder', $2::jsonb)`,
+      `UPSERT INTO '${workspace}' (path, node_type, properties) VALUES ($1, 'raisin:AclFolder', $2::jsonb)`,
       [path, JSON.stringify({ title })],
     );
   }

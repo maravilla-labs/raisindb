@@ -263,6 +263,12 @@ pub(crate) fn admin_routes(state: &AppState) -> Router<AppState> {
             "/api/admin/management/database/{tenant}/{repo}/reindex/start",
             post(crate::handlers::management::reindex_start),
         )
+        // PATH_INDEX reconstruction from NODE_PATH. Write-only, so it is safe
+        // to re-run and cannot deepen the damage it repairs.
+        .route(
+            "/api/admin/management/database/{tenant}/{repo}/path-index/repair",
+            post(crate::handlers::management::repair_path_index),
+        )
         // Relation index integrity
         .route(
             "/api/admin/management/database/{tenant}/{repo}/relations/verify",

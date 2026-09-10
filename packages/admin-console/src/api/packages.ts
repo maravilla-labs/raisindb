@@ -44,6 +44,24 @@ export interface PackageDetails {
   updated_at?: string
   /** Summary of the package's `sync:` policy from manifest.yaml, if any. */
   sync_policy?: SyncPolicySummary
+  /** Declarative migrations shipped by the package and/or applied during install. */
+  migrations?: PackageMigrationSummary[]
+  applied_migrations?: AppliedPackageMigration[]
+}
+
+export interface PackageMigrationSummary {
+  id: string
+  path?: string
+  title?: string
+  operations?: number
+  status?: 'pending' | 'applied' | 'failed' | string
+  hash?: string
+}
+
+export interface AppliedPackageMigration {
+  id: string
+  hash: string
+  status?: string
 }
 
 /**
@@ -244,6 +262,8 @@ export async function getPackage(
     created_at: props.created_at as string,
     updated_at: props.updated_at as string,
     sync_policy: props.sync_policy as SyncPolicySummary | undefined,
+    migrations: props.migrations as PackageMigrationSummary[] | undefined,
+    applied_migrations: props.applied_migrations as AppliedPackageMigration[] | undefined,
   }
 }
 

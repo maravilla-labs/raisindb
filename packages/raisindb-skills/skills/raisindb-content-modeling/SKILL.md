@@ -13,6 +13,42 @@ Define content schemas, page templates, and composable blocks using YAML files i
 
 Fix all errors before proceeding. Never skip validation.
 
+## Package Migrations
+
+Use `package/migrations/*.yaml` when a package release must update existing
+installed data before the new schema/content can be installed. Migrations run
+after schema/workspace patches and before content installation. They are ordered
+by filename and recorded by `id` plus file hash, so reruns are idempotent and
+changed migration files are rejected.
+
+Supported operations:
+
+- `replace_node_type` changes existing nodes from one node type to another and
+  may replace the archetype at the same time.
+- `patch_nodes` merges properties into a selected path or node type.
+- `move_node` moves an existing node tree, with `on_collision: fail` or `skip`.
+- `delete_node` deletes a node, defaulting to `if_empty: true`; recursive delete
+  is allowed only during overwrite installs.
+
+Example:
+
+```yaml
+id: 2026-09-contact-to-party-person
+title: Contact to party person
+operations:
+  - replace_node_type:
+      workspace: people
+      from: studio:Contact
+      to: party:Person
+      archetype_from: studio:ContactPage
+      archetype_to: party:PersonPage
+  - patch_nodes:
+      workspace: people
+      node_type: party:Person
+      properties:
+        status: active
+```
+
 ## 1. NodeType YAML
 
 NodeTypes define the data schema for content. Place files in `package/nodetypes/`.

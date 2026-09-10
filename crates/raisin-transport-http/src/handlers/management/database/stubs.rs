@@ -83,6 +83,11 @@ pub async fn reindex_start() -> (StatusCode, &'static str) {
 }
 
 #[cfg(not(feature = "storage-rocksdb"))]
+pub async fn repair_path_index() -> (StatusCode, &'static str) {
+    (StatusCode::NOT_IMPLEMENTED, "RocksDB feature not enabled")
+}
+
+#[cfg(not(feature = "storage-rocksdb"))]
 pub async fn verify_relation_integrity() -> (StatusCode, &'static str) {
     (StatusCode::NOT_IMPLEMENTED, "RocksDB feature not enabled")
 }

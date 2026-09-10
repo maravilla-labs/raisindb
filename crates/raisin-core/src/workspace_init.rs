@@ -197,7 +197,9 @@ pub async fn init_repository_workspaces<S: Storage>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nodetype_init::load_global_nodetypes;
     use raisin_storage_memory::InMemoryStorage;
+    use std::collections::HashSet;
 
     #[tokio::test]
     async fn test_init_repository_workspaces() {
@@ -312,5 +314,49 @@ mod tests {
         for (ws, hash) in &workspaces_with_hashes {
             println!("  - {} (hash: {}...)", ws.name, &hash[..8]);
         }
+    }
+
+    #[test]
+    fn test_access_control_workspace_matches_acl_folder_contract() {
+        let workspaces = load_global_workspaces();
+        let access_control = workspaces
+            .iter()
+            .find(|ws| ws.name == "raisin:access_control")
+            .expect("raisin:access_control workspace should exist");
+
+        assert!(
+            access_control
+                .allowed_node_types
+                .contains(&"raisin:Folder".to_string()),
+            "raisin:access_control should allow plain raisin:Folder for legacy and auto-created containers"
+        );
+
+        let nodetypes = load_global_nodetypes();
+        let acl_folder = nodetypes
+            .iter()
+            .find(|nt| nt.name == "raisin:AclFolder")
+            .expect("raisin:AclFolder NodeType should exist");
+        let user = nodetypes
+            .iter()
+            .find(|nt| nt.name == "raisin:User")
+            .expect("raisin:User NodeType should exist");
+
+        let allowed_node_types: HashSet<_> = access_control.allowed_node_types.iter().collect();
+        let acl_children: HashSet<_> = acl_folder.allowed_children.iter().collect();
+
+        assert_eq!(
+            allowed_node_types, acl_children,
+            "AclFolder.allowed_children must admit every type declared by the ACL workspace"
+        );
+
+        let user_children: HashSet<_> = user.allowed_children.iter().collect();
+        assert!(
+            user_children.contains(&"raisin:Folder".to_string()),
+            "raisin:User should allow legacy and auto-created plain folder children"
+        );
+        assert!(
+            user_children.contains(&"raisin:AclFolder".to_string()),
+            "raisin:User must allow the ACL-native notifications folder"
+        );
     }
 }

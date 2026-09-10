@@ -49,6 +49,7 @@ properties:
 allowed_children:
   - raisin:Profile
   - raisin:MessageFolder
+  - raisin:AclFolder
   - raisin:Folder
 versionable: true
 publishable: false
@@ -64,4 +65,4 @@ initial_structure:
     - name: sent
       node_type: raisin:MessageFolder
     - name: notifications
-      node_type: raisin:Folder
+      node_type: raisin:AclFolder

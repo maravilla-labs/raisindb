@@ -17,6 +17,9 @@ import type { PropertyType } from './types'
 export const PROPERTY_TYPE_ICONS: Record<PropertyType, any> = {
   String: Type,
   Number: Hash,
+  Float: Hash,
+  Integer: Hash,
+  Decimal: Hash,
   Boolean: ToggleLeft,
   Array: List,
   Object: Braces,
@@ -27,11 +30,15 @@ export const PROPERTY_TYPE_ICONS: Record<PropertyType, any> = {
   Element: Box,
   Composite: Layers,
   Resource: File,
+  Geometry: Box,
 }
 
 export const PROPERTY_TYPE_LABELS: Record<PropertyType, string> = {
   String: 'String',
   Number: 'Number',
+  Float: 'Float',
+  Integer: 'Integer',
+  Decimal: 'Decimal',
   Boolean: 'Boolean',
   Array: 'Array',
   Object: 'Object',
@@ -42,11 +49,15 @@ export const PROPERTY_TYPE_LABELS: Record<PropertyType, string> = {
   Element: 'Element',
   Composite: 'Composite',
   Resource: 'Resource',
+  Geometry: 'Geometry',
 }
 
 export const PROPERTY_TYPE_COLORS: Record<PropertyType, string> = {
   String: 'text-blue-400 bg-blue-500/20 border-blue-400/50',
   Number: 'text-green-400 bg-green-500/20 border-green-400/50',
+  Float: 'text-green-400 bg-green-500/20 border-green-400/50',
+  Integer: 'text-green-400 bg-green-500/20 border-green-400/50',
+  Decimal: 'text-green-400 bg-green-500/20 border-green-400/50',
   Boolean: 'text-purple-400 bg-purple-500/20 border-purple-400/50',
   Array: 'text-orange-400 bg-orange-500/20 border-orange-400/50',
   Object: 'text-pink-400 bg-pink-500/20 border-pink-400/50',
@@ -57,11 +68,15 @@ export const PROPERTY_TYPE_COLORS: Record<PropertyType, string> = {
   Element: 'text-red-400 bg-red-500/20 border-red-400/50',
   Composite: 'text-violet-400 bg-violet-500/20 border-violet-400/50',
   Resource: 'text-emerald-400 bg-emerald-500/20 border-emerald-400/50',
+  Geometry: 'text-lime-400 bg-lime-500/20 border-lime-400/50',
 }
 
 export const PROPERTY_TYPES: PropertyType[] = [
   'String',
   'Number',
+  'Float',
+  'Integer',
+  'Decimal',
   'Boolean',
   'Date',
   'Array',
@@ -70,6 +85,7 @@ export const PROPERTY_TYPES: PropertyType[] = [
   'Reference',
   'NodeType',
   'Resource',
+  'Geometry',
   'Element',
   'Composite',
 ]

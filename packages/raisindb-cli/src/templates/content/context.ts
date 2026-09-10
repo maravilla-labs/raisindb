@@ -94,7 +94,19 @@ compensation (rollback) support.
 2. **Validate** -- run \`raisindb package create --check .\` to catch errors early
 3. **Build** -- run \`raisindb package create .\` to produce a \`.rap\` archive
 4. **Upload** -- deploy with \`raisindb package upload <file>.rap\`
-5. **Sync** -- use \`raisindb package sync .\` during development for live reload
+5. **Install migrations** -- any \`migrations/*.yaml\` files run after schema and workspace patches and before content
+6. **Sync** -- use \`raisindb package sync .\` during development for live reload
+
+## Package Migrations
+
+Use \`migrations/*.yaml\` when a new package version has to repair existing
+installed data before stricter schema or content writes can succeed. Migrations
+are ordered by filename, recorded by \`id\` and file hash, and skipped on later
+installs once applied.
+
+Supported declarative operations are \`replace_node_type\`, \`patch_nodes\`,
+\`move_node\`, and \`delete_node\`. Prefer these over runtime scripts so installs
+remain reviewable and repeatable.
 `;
 }
 

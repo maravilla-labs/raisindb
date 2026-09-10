@@ -10,8 +10,10 @@
 
 pub(crate) mod helpers;
 mod orphan_cleanup;
+mod path_repair;
 mod rebuild;
 
 // Re-export the public API (unchanged from original single-file module)
 pub use orphan_cleanup::{cleanup_orphaned_property_indexes, OrphanedIndexCleanupStats};
+pub use path_repair::{repair_path_index, repair_path_index_all_workspaces, PathIndexRepairStats};
 pub use rebuild::rebuild_indexes;

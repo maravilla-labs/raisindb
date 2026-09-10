@@ -684,8 +684,9 @@ pub async fn ensure_user_node(
         ..Default::default()
     };
 
+    // Keep recovered ACL scaffolding on the ACL-native folder type.
     let created_node = node_service
-        .add_deep_node(users_path, user_node)
+        .add_deep_node_typed(users_path, user_node, "raisin:AclFolder")
         .await
         .map_err(|e| e.to_string())?;
 

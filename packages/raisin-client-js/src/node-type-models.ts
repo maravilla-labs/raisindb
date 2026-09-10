@@ -9,6 +9,9 @@
 export type PropertyType =
   | 'String'
   | 'Number'
+  | 'Float'
+  | 'Integer'
+  | 'Decimal'
   | 'Boolean'
   | 'Date'
   | 'Object'
@@ -18,7 +21,8 @@ export type PropertyType =
   | 'NodeType'
   | 'Element'
   | 'Composite'
-  | 'Resource';
+  | 'Resource'
+  | 'Geometry';
 
 /**
  * Property value schema definition

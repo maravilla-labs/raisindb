@@ -223,6 +223,7 @@ pub enum FileType {
     Content,
     Archetype,
     ElementType,
+    Migration,
 }
 
 /// Error codes used in validation
@@ -235,6 +236,8 @@ pub mod codes {
     pub const MISSING_REQUIRED_FIELD: &str = "MISSING_REQUIRED_FIELD";
     pub const INVALID_PACKAGE_NAME: &str = "INVALID_PACKAGE_NAME";
     pub const INVALID_VERSION: &str = "INVALID_VERSION";
+    pub const INVALID_MIGRATION_OPERATION: &str = "INVALID_MIGRATION_OPERATION";
+    pub const BROAD_MIGRATION_PATCH: &str = "BROAD_MIGRATION_PATCH";
 
     // NodeType errors
     pub const INVALID_NODE_TYPE_NAME: &str = "INVALID_NODE_TYPE_NAME";

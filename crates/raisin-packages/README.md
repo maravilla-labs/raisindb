@@ -15,6 +15,7 @@ This crate provides functionality for managing `.rap` (Raisin Archive Package) f
 - **Dependency Graph** - Topological sorting and cycle detection
 - **Content Validation** - Validate node type references and dependencies
 - **Workspace Patching** - Apply configuration patches during install
+- **Package Migrations** - Run declarative migrations before content install
 - **Bidirectional Sync** - Synchronization with conflict resolution
 - **Package Export** - Export installed content back to .rap files
 
@@ -26,6 +27,7 @@ A `.rap` file is a ZIP archive containing:
 manifest.yaml           # Package metadata and configuration
 nodetypes/              # Node type definitions (.yaml files)
 workspaces/             # Workspace configurations
+migrations/             # Declarative migrations, ordered by filename
 content/                # Content to install (nodes, assets)
   workspace1/
     path/to/node.yaml
@@ -175,6 +177,46 @@ sync:
       mode: merge
 ```
 
+## Package Migrations
+
+Packages may include ordered YAML files under `migrations/`. They run after
+schema/workspace patches and before content install, so old stored data can be
+made valid before stricter content writes are applied.
+
+```yaml
+# migrations/2026-09-contact-to-party-person.yaml
+id: 2026-09-contact-to-party-person
+title: Contact to party person
+operations:
+  - replace_node_type:
+      workspace: people
+      from: studio:Contact
+      to: party:Person
+      archetype_from: studio:ContactPage
+      archetype_to: party:PersonPage
+  - patch_nodes:
+      workspace: raisin:access_control
+      path: /roles/editors
+      properties:
+        permissions:
+          add:
+            - action: create
+              node_types: [party:Person]
+  - move_node:
+      workspace: people
+      from: /contacts
+      to: /people
+      on_collision: skip
+  - delete_node:
+      workspace: people
+      path: /legacy/tmp
+      if_empty: true
+```
+
+Applied migrations are recorded on the package node by `id` and content hash.
+Reinstall skips the same migration, and refuses a migration whose file changed
+after it was applied.
+
 ## Modules
 
 | Module | Description |
@@ -183,6 +225,7 @@ sync:
 | `browser` | Browse ZIP contents without extracting |
 | `installer` | Install/uninstall packages to repositories |
 | `patcher` | Apply workspace configuration patches |
+| `migrations` | Parse declarative package migration summaries |
 | `dependency_graph` | Dependency resolution and validation |
 | `sync_config` | Sync filter configuration |
 | `sync` | Sync status tracking and diff computation |

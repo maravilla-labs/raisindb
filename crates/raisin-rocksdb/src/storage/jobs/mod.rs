@@ -111,16 +111,131 @@ impl RocksDBStorage {
         branch: &str,
         workspace: &str,
     ) -> Result<usize> {
+        self.sweep_compound_index_builds_inner(tenant_id, repo_id, branch, workspace, None)
+            .await
+    }
+
+    /// Sweep only the indexes declared by ONE node type.
+    ///
+    /// This is what a NodeType create/update event wants. That event fires
+    /// once PER TYPE, and it used to answer by sweeping every type in every
+    /// workspace of the branch — so a package deploy upserting 223 node types
+    /// re-entered the whole sweep 223 times, each pass listing every node type
+    /// and consulting build state for every declared index in every workspace.
+    /// A change to one type can only invalidate that type's own indexes
+    /// (`invalidate_changed_compound_state` marks exactly those), so the other
+    /// 222 passes were re-deriving an answer nothing had changed.
+    ///
+    /// The narrowing means an UNRELATED index left un-ready is no longer
+    /// healed by whatever schema event happens to pass next. That is what the
+    /// boot sweep is for, and relying on a coincidence was never the design.
+    pub async fn sweep_compound_index_builds_for_type(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        node_type_name: &str,
+    ) -> Result<usize> {
+        self.sweep_compound_index_builds_inner(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            Some(node_type_name),
+        )
+        .await
+    }
+
+    async fn sweep_compound_index_builds_inner(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        only_node_type: Option<&str>,
+    ) -> Result<usize> {
         use raisin_storage::compound::CompoundStateSource;
         use raisin_storage::NodeTypeRepository;
 
-        let node_types = self
-            .node_types
-            .list(
-                raisin_storage::BranchScope::new(tenant_id, repo_id, branch),
-                None,
-            )
-            .await?;
+        // A compound index belongs to exactly ONE node type, and the build
+        // handler's `scan_nodes_by_type` matches that name EXACTLY (a
+        // subtype's nodes are not indexed by its base type's declaration).
+        // So a workspace that cannot hold the owning type has nothing to
+        // index, and queueing a build for it buys a full keyspace scan that
+        // provably finds zero rows.
+        //
+        // Skipping those is not tidiness. Measured against the studio package
+        // on 2026-09-09: 276 declared compound indexes x 37 workspaces =
+        // 10,212 build jobs per branch, against the RocksDB backend's default
+        // `max_active_jobs_per_tenant` of 5000. The sweep alone put the tenant
+        // over its job cap, and once there EVERY write was refused with
+        // "Tenant 'default' has 5000 non-terminal jobs registered" — a schema
+        // sweep taking the whole database read-write. Filtering by containment
+        // takes that same package to roughly one build per declared index.
+        //
+        // `allowed_node_types` is a DECLARATION, not a write-time constraint:
+        // a node of an unlisted type can exist. What that costs is bounded and
+        // it is not wrong answers — the planner's availability gate fails
+        // CLOSED, so a query against an unbuilt index falls back to a scan and
+        // returns the same rows more slowly, and listing the type in the
+        // workspace makes the next sweep build it. An empty list means
+        // "unrestricted"; an unreadable workspace falls open to the old
+        // behaviour.
+        let allowed_types: Option<std::collections::HashSet<String>> = {
+            use raisin_storage::{Storage, WorkspaceRepository};
+            match self
+                .workspaces()
+                .get(
+                    raisin_storage::RepoScope::new(tenant_id, repo_id),
+                    workspace,
+                )
+                .await
+            {
+                Ok(Some(ws)) if !ws.allowed_node_types.is_empty() => {
+                    Some(ws.allowed_node_types.iter().cloned().collect())
+                }
+                Ok(_) => None,
+                Err(e) => {
+                    tracing::warn!(
+                        tenant = %tenant_id,
+                        repo = %repo_id,
+                        workspace = %workspace,
+                        error = %e,
+                        "compound index sweep: could not read workspace containment; sweeping every declared index"
+                    );
+                    None
+                }
+            }
+        };
+
+        // Containment is settled from the NAME alone, so answer the "this type
+        // cannot live here" case before reading any NodeType at all. For a
+        // per-type sweep that is the whole cost in the common case: one
+        // workspace lookup and out.
+        if let Some(name) = only_node_type {
+            if allowed_types
+                .as_ref()
+                .is_some_and(|allowed| !allowed.contains(name))
+            {
+                return Ok(0);
+            }
+        }
+
+        // A point lookup when the caller named a type; the full listing only
+        // for the catch-all sweep. Listing every node type once per workspace
+        // per schema event is what made a deploy's 223 events expensive even
+        // when they queued nothing.
+        let scope = raisin_storage::BranchScope::new(tenant_id, repo_id, branch);
+        let node_types = match only_node_type {
+            Some(name) => self
+                .node_types
+                .get(scope, name, None)
+                .await?
+                .into_iter()
+                .collect::<Vec<_>>(),
+            None => self.node_types.list(scope, None).await?,
+        };
 
         let state = crate::compound_state::CompoundStateStore::new(self.db.clone());
         let mut queued = 0usize;
@@ -130,6 +245,17 @@ impl RocksDBStorage {
             let Some(indexes) = node_type.compound_indexes.as_ref() else {
                 continue;
             };
+            if allowed_types
+                .as_ref()
+                .is_some_and(|allowed| !allowed.contains(&node_type.name))
+            {
+                tracing::trace!(
+                    node_type = %node_type.name,
+                    workspace = %workspace,
+                    "compound index sweep: node type cannot live in this workspace; skipping its indexes"
+                );
+                continue;
+            }
             for definition in indexes {
                 // One keyspace per index NAME, so one build per name — even if
                 // two NodeTypes declare it. Which is itself a misconfiguration,

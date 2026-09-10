@@ -151,6 +151,26 @@ pub async fn execute_hash_aggregate<
         output_rows.push(Row::from_map(columns));
     }
 
+    // A SCALAR aggregate over an empty input still has an answer, and it is one
+    // ROW, not none: `SELECT COUNT(*) … WHERE <matches nothing>` is 0, and
+    // MIN/MAX/SUM are NULL. Only a GROUPED aggregate returns nothing, because
+    // there are no groups to report on.
+    //
+    // Emitting nothing here is a wrong answer AND an ambiguous one: the caller
+    // gets `{"columns":[],"rows":[]}`, which carries neither the count nor the
+    // projection it asked for, so "no rows matched" is indistinguishable from
+    // "this query produced no answer at all". Observed 2026-09-09 against a
+    // live tenant, where a COUNT(*) that should have said 0 said nothing.
+    if group_by.is_empty() && output_rows.is_empty() {
+        let mut columns = IndexMap::new();
+        for agg_expr in aggregates {
+            let result = Accumulator::new(agg_expr).finalize()?;
+            columns.insert(agg_expr.alias.clone(), result.clone());
+            columns.insert(generate_canonical_aggregate_name(agg_expr), result);
+        }
+        output_rows.push(Row::from_map(columns));
+    }
+
     // Convert to stream
     Ok(Box::pin(stream::iter(output_rows.into_iter().map(Ok))))
 }

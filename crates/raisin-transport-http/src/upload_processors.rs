@@ -201,6 +201,9 @@ impl UploadProcessor for PackageUploadProcessor {
         // Read the package's optional `.raisin-sync.yaml` per-path sync/install
         // policy, if it ships one at its root (beside `manifest.yaml`).
         let sync_config = read_sync_config(&mut archive)?;
+        let migrations = raisin_packages::read_migration_summaries(&mut archive).map_err(|e| {
+            ApiError::validation_failed(format!("Invalid package migrations: {}", e))
+        })?;
 
         // Build properties from manifest
         let mut properties = HashMap::new();
@@ -255,6 +258,33 @@ impl UploadProcessor for PackageUploadProcessor {
         // needing a dry run.
         if let Some(sync) = &sync_config {
             properties.insert("sync_policy".to_string(), sync_policy_summary(sync));
+        }
+        if !migrations.is_empty() {
+            properties.insert(
+                "migrations".to_string(),
+                PropertyValue::Array(
+                    migrations
+                        .into_iter()
+                        .map(|migration| {
+                            let mut item = HashMap::new();
+                            item.insert("id".to_string(), PropertyValue::String(migration.id));
+                            item.insert("path".to_string(), PropertyValue::String(migration.path));
+                            if let Some(title) = migration.title {
+                                item.insert("title".to_string(), PropertyValue::String(title));
+                            }
+                            item.insert(
+                                "operations".to_string(),
+                                PropertyValue::Integer(migration.operations as i64),
+                            );
+                            item.insert(
+                                "status".to_string(),
+                                PropertyValue::String("pending".to_string()),
+                            );
+                            PropertyValue::Object(item)
+                        })
+                        .collect(),
+                ),
+            );
         }
 
         // Status tracking

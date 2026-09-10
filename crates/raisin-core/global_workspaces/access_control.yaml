@@ -147,7 +147,7 @@ initial_structure:
               # user's own inbox; message delivery stays system-side)
               - path: "users/**/inbox/**"
                 operations: ["create"]
-                node_types: ["raisin:Folder", "raisin:Conversation"]
+                node_types: ["raisin:Folder", "raisin:AclFolder", "raisin:Conversation"]
                 workspace: "raisin:access_control"
                 condition: "node.path.startsWith(auth.home)"
 

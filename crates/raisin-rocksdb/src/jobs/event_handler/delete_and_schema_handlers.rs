@@ -117,10 +117,15 @@ impl UnifiedJobEventHandler {
                     | raisin_events::SchemaEventKind::NodeTypeUpdated
             )
         {
+            // Only THIS type's indexes: a NodeType change can invalidate no
+            // others, and `schema_id` is documented to carry the schema's NAME
+            // (`repositories/schema_events.rs`). Sweeping the whole branch here
+            // meant a deploy of 223 node types ran the whole sweep 223 times.
             self.sweep_compound_index_builds_for_branch(
                 &schema_event.tenant_id,
                 &schema_event.repository_id,
                 &schema_event.branch,
+                Some(schema_event.schema_id.as_str()),
             )
             .await;
         }
@@ -164,6 +169,7 @@ impl UnifiedJobEventHandler {
                 &workspace_event.repository_id,
                 &branch.name,
                 &workspace_event.workspace,
+                None,
             )
             .await;
         }
@@ -174,11 +180,14 @@ impl UnifiedJobEventHandler {
     /// declared indexes are not `Ready`. Errors are logged, never propagated:
     /// a failed sweep must not fail the event that triggered it, and the next
     /// schema or workspace event sweeps again.
+    /// `only_node_type` narrows the sweep to one type's declarations; `None`
+    /// sweeps every declared index in the branch.
     pub(crate) async fn sweep_compound_index_builds_for_branch(
         &self,
         tenant_id: &str,
         repo_id: &str,
         branch: &str,
+        only_node_type: Option<&str>,
     ) {
         use raisin_storage::WorkspaceRepository;
 
@@ -205,6 +214,7 @@ impl UnifiedJobEventHandler {
                 repo_id,
                 branch,
                 &workspace.name,
+                only_node_type,
             )
             .await;
         }
@@ -216,12 +226,23 @@ impl UnifiedJobEventHandler {
         repo_id: &str,
         branch: &str,
         workspace: &str,
+        only_node_type: Option<&str>,
     ) {
-        match self
-            .storage
-            .sweep_compound_index_builds(tenant_id, repo_id, branch, workspace)
-            .await
-        {
+        let swept = match only_node_type {
+            Some(name) => {
+                self.storage
+                    .sweep_compound_index_builds_for_type(
+                        tenant_id, repo_id, branch, workspace, name,
+                    )
+                    .await
+            }
+            None => {
+                self.storage
+                    .sweep_compound_index_builds(tenant_id, repo_id, branch, workspace)
+                    .await
+            }
+        };
+        match swept {
             Ok(0) => {}
             Ok(queued) => tracing::info!(
                 tenant = %tenant_id,

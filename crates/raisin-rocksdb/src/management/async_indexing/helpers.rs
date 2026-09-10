@@ -17,12 +17,47 @@ pub(crate) async fn scan_nodes(
     branch: &str,
     workspace: &str,
 ) -> Result<Vec<Node>> {
+    let (nodes, skipped) =
+        scan_nodes_counting_skips(storage, tenant_id, repo_id, branch, workspace).await?;
+    if skipped > 0 {
+        // REFUSE, rather than hand back a partial set to a caller that is
+        // about to CLEAR the keyspace it is rebuilding. Every rebuild here is
+        // clear-then-write, so a scan that lost rows does not degrade the
+        // index — it deletes it. Measured 2026-09-09 on a live tenant: a
+        // tenant-wide `rebuild` with `all` skipped 109,277 nodes for "no path
+        // in NODE_PATH", cleared PATH_INDEX and PROPERTY_INDEX, wrote back
+        // almost nothing, and left every path lookup answering
+        // NODE_NOT_FOUND against data that was plainly still there. Re-running
+        // it made it worse, because the second pass cleared what the first had
+        // managed to write.
+        //
+        // The node blobs and NODE_PATH are untouched by any of this, so the
+        // refusal costs nothing but a retry once the cause is fixed.
+        return Err(raisin_error::Error::storage(format!(
+            "refusing to rebuild indexes for {tenant_id}/{repo_id}/{branch}/{workspace}:              {skipped} node(s) could not be placed in the tree (no path in NODE_PATH at the              branch head). Clearing the keyspace now would delete entries this scan cannot              rebuild."
+        )));
+    }
+    Ok(nodes)
+}
+
+/// The scan itself, reporting how many nodes it had to drop.
+///
+/// Separated so the refusal above is stated once and cannot be forgotten by a
+/// new caller.
+async fn scan_nodes_counting_skips(
+    storage: &RocksDBStorage,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    workspace: &str,
+) -> Result<(Vec<Node>, usize)> {
     let cf_nodes = cf_handle(storage.db(), cf::NODES)?;
     let prefix = keys::workspace_prefix(tenant_id, repo_id, branch, workspace);
 
     let current_revision = get_current_revision(storage, tenant_id, repo_id, branch).await?;
 
     let mut nodes = Vec::new();
+    let mut skipped = 0usize;
     let iter = storage.db().prefix_iterator_cf(cf_nodes, &prefix);
 
     // Node keys are `…\0nodes\0{node_id}\0{~revision}` with the revision
@@ -88,6 +123,7 @@ pub(crate) async fn scan_nodes(
                                 error = %e,
                                 "Skipping node during index rebuild: no path in NODE_PATH"
                             );
+                            skipped += 1;
                             continue;
                         }
                     }
@@ -100,7 +136,7 @@ pub(crate) async fn scan_nodes(
         }
     }
 
-    Ok(nodes)
+    Ok((nodes, skipped))
 }
 
 /// Clear all path indexes for a workspace

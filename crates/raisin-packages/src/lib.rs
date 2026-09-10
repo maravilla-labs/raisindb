@@ -44,6 +44,7 @@ mod error;
 pub mod exporter;
 mod installer;
 mod manifest;
+mod migrations;
 pub mod namespace_encoding;
 mod patcher;
 pub mod sync;
@@ -61,6 +62,7 @@ pub use exporter::{
 };
 pub use installer::{ContentNode, InstallResult, PackageInstaller, UninstallResult};
 pub use manifest::{Dependency, Manifest, Provides, WorkspacePatch};
+pub use migrations::{read_migration_summaries, MigrationSummary, PackageMigration};
 pub use patcher::{PatchOperation, WorkspacePatcher};
 pub use sync::{
     compute_hash, DiffType, ExportMode, ExportOptions, FileDiff, OverallSyncStatus,

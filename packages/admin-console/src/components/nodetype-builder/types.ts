@@ -24,6 +24,9 @@ export function leafName(path: PropertyPath): string {
 export type PropertyType =
   | 'String'
   | 'Number'
+  | 'Float'
+  | 'Integer'
+  | 'Decimal'
   | 'Boolean'
   | 'Array'
   | 'Object'
@@ -34,6 +37,7 @@ export type PropertyType =
   | 'Element'
   | 'Composite'
   | 'Resource'
+  | 'Geometry'
 
 export type IndexType = 'Fulltext' | 'Vector' | 'Property'
 

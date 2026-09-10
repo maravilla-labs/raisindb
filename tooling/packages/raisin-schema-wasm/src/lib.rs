@@ -4,6 +4,7 @@
 //! - manifest.yaml - Package metadata
 //! - nodetypes/*.yaml - Node type definitions
 //! - workspaces/*.yaml - Workspace configurations
+//! - migrations/*.yaml - Declarative package migrations
 //! - content/**/*.yaml - Content nodes
 
 mod builtin_types;
@@ -334,6 +335,8 @@ fn validate_package_files(files_map: HashMap<String, String>) -> HashMap<String,
             validation::validate_workspace(content, path, &ctx)
         } else if is_content_file(path) {
             validation::validate_content(content, path, &ctx)
+        } else if is_migration_file(path) {
+            validation::validate_migration(content, path)
         } else if is_archetype_file(path) {
             validation::validate_archetype(content, path, &ctx)
         } else if is_elementtype_file(path) {
@@ -449,6 +452,11 @@ fn is_workspace_file(path: &str) -> bool {
 fn is_content_file(path: &str) -> bool {
     let lower = path.to_lowercase();
     lower.contains("content/")
+}
+
+fn is_migration_file(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    lower.starts_with("migrations/") && (lower.ends_with(".yaml") || lower.ends_with(".yml"))
 }
 
 /// Check if a path is an archetype file
@@ -674,6 +682,62 @@ properties:
             .iter()
             .any(|e| e.error_code == "INVALID_PROPERTY_TYPE");
         assert!(!has_type_error, "Geometry should be a valid property type");
+    }
+
+    #[test]
+    fn test_numeric_property_types_accepted() {
+        let yaml = r#"
+name: test:NumericNode
+properties:
+  quantity:
+    type: Integer
+  unit_price:
+    type: Decimal
+  measured_weight:
+    type: Float
+"#;
+        let ctx = ValidationContext::default();
+        let result = crate::validation::validate_nodetype(yaml, "nodetypes/numeric.yaml", &ctx);
+        let type_errors: Vec<_> = result
+            .errors
+            .iter()
+            .filter(|e| e.error_code == "INVALID_PROPERTY_TYPE")
+            .collect();
+        assert!(
+            type_errors.is_empty(),
+            "numeric property types should be valid, got: {:?}",
+            type_errors
+        );
+    }
+
+    #[test]
+    fn test_package_migration_file_is_validated() {
+        let files = HashMap::from([(
+            "migrations/2026-09-contact-to-party-person.yaml".to_string(),
+            r#"
+id: 2026-09-contact-to-party-person
+title: Contact to party person
+operations:
+  - replace_node_type:
+      workspace: people
+      from: studio:Contact
+      to: party:Person
+      archetype_from: studio:ContactPage
+      archetype_to: party:PersonPage
+  - patch_nodes:
+      workspace: people
+      node_type: party:Person
+      properties:
+        status: active
+"#
+            .to_string(),
+        )]);
+
+        let results = validate_package_files(files);
+        let result = results
+            .get("migrations/2026-09-contact-to-party-person.yaml")
+            .expect("migration file should be validated");
+        assert!(result.success, "{:?}", result.errors);
     }
 
     #[test]

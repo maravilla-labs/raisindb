@@ -180,6 +180,22 @@ impl LazyIndexManager {
                 break;
             }
 
+            // A DELETED node's revision is a tombstone marker (`b"T"`, or an
+            // empty value on some paths), not a serialized Node. Skip it
+            // quietly: the delete already wrote its own tombstone entries into
+            // the property index at a NEWER revision, so the MVCC filter hides
+            // whatever this rebuild re-adds for older revisions.
+            //
+            // It used to fall into the deserialize arm below and warn, once
+            // per deleted revision — "invalid type: integer `84`, expected
+            // struct Node", 84 being `T`. On a database with any delete
+            // history that is the dominant line in the log (measured
+            // 2026-09-09: it was most of a 5 GB server.log), and it drowned
+            // out the genuine deserialize failures this warning is for.
+            if value.is_empty() || crate::repositories::is_node_tombstone(&value) {
+                continue;
+            }
+
             // Deserialize node
             let node: Node = match rmp_serde::from_slice(&value) {
                 Ok(n) => n,

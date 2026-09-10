@@ -98,6 +98,7 @@ package/
 ├── nodetypes/              # Data schemas (NodeType YAML)
 ├── archetypes/             # Page templates (editor + frontend component mapping)
 ├── elementtypes/           # Composable content blocks (frontend components)
+├── migrations/             # Declarative install-time migrations
 ├── content/
 │   ├── {{workspace}}/      # Initial content for workspace
 │   └── functions/          # Server-side functions & triggers
@@ -110,6 +111,7 @@ package/
 - **Archetype** -- page template linking a NodeType to editor fields and a frontend component
 - **ElementType** -- composable content block placed in SectionFields, mapped to a frontend component
 - **Workspace** -- isolated content space with allowed node types
+- **Migration** -- ordered YAML operation file that updates existing installed data before content sync
 
 ## Learn More
 
@@ -154,4 +156,3 @@ const result = await db.sql\`SELECT * FROM '{{workspace}}' WHERE node_type = 'ra
 See \`../package/.agent/knowledge/sdk/\` for client SDK documentation.
 `;
 }
-

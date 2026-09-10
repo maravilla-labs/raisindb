@@ -21,6 +21,7 @@ import {
   FileArchive,
   GitCompare,
   ShieldCheck,
+  ListChecks,
 } from 'lucide-react'
 import GlassCard from '../../components/GlassCard'
 import ConfirmDialog from '../../components/ConfirmDialog'
@@ -529,6 +530,15 @@ export default function PackageDetails() {
                   <span className="text-sm font-medium">Custom Sync Policy</span>
                 </div>
               )}
+              {pkg.migrations?.length ? (
+                <div
+                  title={`${pkg.migrations.length} package migration${pkg.migrations.length === 1 ? '' : 's'}`}
+                  className="flex items-center gap-2 px-3 py-1.5 bg-amber-500/20 text-amber-300 rounded-lg inline-flex"
+                >
+                  <ListChecks className="w-4 h-4" />
+                  <span className="text-sm font-medium">Migrations</span>
+                </div>
+              ) : null}
             </div>
           </div>
         </div>
@@ -707,6 +717,50 @@ export default function PackageDetails() {
               </div>
             </GlassCard>
           )}
+
+          {/* Migrations */}
+          {pkg.migrations?.length ? (
+            <GlassCard>
+              <div className="flex items-center gap-2 mb-4">
+                <ListChecks className="w-5 h-5 text-amber-300" />
+                <h3 className="text-lg font-semibold text-white">Migrations</h3>
+              </div>
+              <div className="space-y-3">
+                {pkg.migrations.map((migration) => {
+                  const status =
+                    migration.status === 'applied' ||
+                    pkg.applied_migrations?.some((applied) => applied.id === migration.id)
+                      ? 'applied'
+                      : (migration.status || 'pending');
+
+                  return (
+                    <div key={migration.id} className="rounded-lg border border-white/10 bg-white/5 p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="text-sm font-medium text-white truncate">
+                          {migration.title || migration.id}
+                        </p>
+                        <span className={`text-xs px-2 py-0.5 rounded ${
+                          status === 'applied'
+                            ? 'bg-green-500/20 text-green-300'
+                            : 'bg-amber-500/20 text-amber-300'
+                        }`}>
+                          {status}
+                        </span>
+                      </div>
+                      {migration.path && (
+                        <p className="mt-1 text-xs text-zinc-500 font-mono truncate">{migration.path}</p>
+                      )}
+                      {typeof migration.operations === 'number' && (
+                        <p className="mt-2 text-xs text-zinc-400">
+                          {migration.operations} operation{migration.operations === 1 ? '' : 's'}
+                        </p>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </GlassCard>
+          ) : null}
 
           {/* Provides */}
           {pkg.provides && (

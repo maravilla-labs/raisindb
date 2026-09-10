@@ -18,6 +18,7 @@ mod elementtype;
 mod field_resolution;
 mod helpers;
 mod manifest;
+mod migration;
 mod nodetype;
 mod workspace;
 
@@ -27,6 +28,7 @@ pub use content::validate_content;
 pub use context::ValidationContext;
 pub use elementtype::validate_elementtype;
 pub use manifest::validate_manifest;
+pub use migration::validate_migration;
 pub use nodetype::validate_nodetype;
 pub use workspace::validate_workspace;
 

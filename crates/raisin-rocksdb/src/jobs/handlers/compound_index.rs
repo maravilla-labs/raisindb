@@ -19,6 +19,18 @@ use crate::repositories::{BranchRepositoryImpl, NodeTypeRepositoryImpl, Revision
 /// writing into the same keyspace.
 const BUILD_LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(1800);
 
+/// Just enough of a stored node to decide whether the build wants it.
+///
+/// Deliberately NOT `Node`: see the comment at its use in
+/// [`CompoundIndexJobHandler::scan_nodes_by_type`]. Every field a node
+/// carries but this does not is skipped by serde as `IgnoredAny`, which is
+/// what keeps the untagged `PropertyValue` deserializer — the expensive part —
+/// out of the scan for nodes of other types.
+#[derive(serde::Deserialize)]
+struct NodeTypeProbe {
+    node_type: String,
+}
+
 /// Handler for compound index building jobs
 ///
 /// This handler processes CompoundIndexBuild jobs by:
@@ -383,30 +395,102 @@ impl CompoundIndexJobHandler {
                 break;
             }
 
-            // Skip tombstone markers (empty value)
-            if value.is_empty() {
+            // The node id, taken from the KEY rather than from the value.
+            //
+            // Key: {tenant}\0{repo}\0{branch}\0{workspace}\0nodes\0{id}\0{~rev}.
+            // The revision is encoded DESCENDING, so the first entry seen for
+            // an id is its newest — which is what makes "first one wins"
+            // below correct, and what makes a tombstone seen first mean the
+            // node is deleted.
+            //
+            // Deliberately NOT read from the decoded value's `id`, and do not
+            // "fix" it back: reading it there means decoding EVERY revision of
+            // EVERY type just to learn which id it belongs to, which is the
+            // multiplier this scan was rebuilt to remove. The key is the
+            // addressing mechanism the whole node repository already locates
+            // nodes by, so a key/value id disagreement is corruption that
+            // would have broken reads long before it reached an index build.
+            let suffix = &key[prefix.len()..];
+            let Some(id_bytes) = suffix.split(|&b| b == 0).next() else {
+                continue;
+            };
+            let Ok(node_id) = std::str::from_utf8(id_bytes) else {
+                continue;
+            };
+
+            // A newer version of this id has already decided the matter.
+            if seen_ids.contains(node_id) {
                 continue;
             }
 
-            // Deserialize node
+            // A DELETED node. Its tombstone is the marker byte `b"T"` (and
+            // some paths write an empty value), not a serialized Node — which
+            // is why this loop used to log "Failed to deserialize node:
+            // invalid type: integer `84`, expected struct Node" once per
+            // deleted revision. 84 is `T`.
+            //
+            // The old code warned and CONTINUED, which is worse than noisy: it
+            // fell through to the next entry for the same id — the last live
+            // version — and indexed it. A deleted node therefore came back in
+            // every query the compound index answered. Claiming the id here is
+            // what makes the delete stick.
+            if value.is_empty() || crate::repositories::is_node_tombstone(&value) {
+                seen_ids.insert(node_id.to_string());
+                continue;
+            }
+
+            // Read the TYPE first, out of a two-field probe, and only decode
+            // the whole Node when it is one we are indexing.
+            //
+            // This is the difference between a build costing a core and
+            // costing nothing. A node is stored with `rmp_serde::to_vec_named`
+            // (`transaction/context/nodes/create/storage.rs:54`), so it is a
+            // msgpack MAP and serde skips the fields the probe does not name
+            // with `IgnoredAny` — a length-directed walk over the bytes. What
+            // that skips is `properties`, whose `PropertyValue` is an UNTAGGED
+            // enum: decoding one value means ATTEMPTING geojson, then
+            // RaisinUrl, then RaisinReference, and failing through each before
+            // settling. Sampling the server at 760% CPU on 2026-09-09 put
+            // 62 of 67 samples inside exactly those arms, under this function.
+            //
+            // The scan walks every node in the workspace but a build wants one
+            // type, so the overwhelming majority of that work was spent fully
+            // decoding nodes that were then dropped on the `node_type` compare
+            // one line later.
+            //
+            // The probe is an OPTIMISATION, never the arbiter of what gets
+            // indexed: it only reads a map-encoded value, so if a value were
+            // ever written some other way the probe would fail where a full
+            // decode succeeds, and skipping on it would leave the index
+            // silently short of rows. So a probe failure falls back to the
+            // full decode and lets THAT have the last word.
+            seen_ids.insert(node_id.to_string());
+
+            match rmp_serde::from_slice::<NodeTypeProbe>(&value) {
+                // Exact match: a subtype's nodes are NOT indexed by its base
+                // type's declaration.
+                Ok(probe) if probe.node_type != node_type_name => continue,
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::debug!(
+                        node_id = %node_id,
+                        "Node type probe failed; falling back to a full decode: {}",
+                        e
+                    );
+                }
+            }
+
             let node: Node = match rmp_serde::from_slice(&value) {
                 Ok(n) => n,
                 Err(e) => {
-                    tracing::warn!("Failed to deserialize node: {}", e);
+                    tracing::warn!(node_id = %node_id, "Failed to deserialize node: {}", e);
                     continue;
                 }
             };
 
-            // Filter by node_type
             if node.node_type != node_type_name {
                 continue;
             }
-
-            // Deduplicate by node_id (we only want the latest version)
-            if seen_ids.contains(&node.id) {
-                continue;
-            }
-            seen_ids.insert(node.id.clone());
 
             nodes.push(node);
         }

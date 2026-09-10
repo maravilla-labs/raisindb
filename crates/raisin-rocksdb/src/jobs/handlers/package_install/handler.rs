@@ -380,7 +380,29 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         )
         .await?;
 
-        // Phase 4: Install content nodes (70-85%)
+        // Phase 4: Run package migrations (70-75%)
+        //
+        // Migrations run after schema/workspace patches and before content so
+        // old stored nodes can be brought up to the stricter write validators
+        // before this package's own content is synced.
+        self.report_progress(&job.id, 0.68, "Running package migrations")
+            .await;
+        let cursor = Cursor::new(&zip_data);
+        let mut archive = ZipArchive::new(cursor)
+            .map_err(|e| Error::Validation(format!("Invalid ZIP file: {}", e)))?;
+        self.apply_package_migrations(
+            &mut archive,
+            &context.tenant_id,
+            &context.repo_id,
+            &context.branch,
+            package_node_id,
+            install_mode,
+            &job.id,
+            &mut stats,
+        )
+        .await?;
+
+        // Phase 5: Install content nodes (75-85%)
         self.report_progress(&job.id, 0.7, "Installing content nodes")
             .await;
         let cursor = Cursor::new(&zip_data);
@@ -399,7 +421,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         )
         .await?;
 
-        // Phase 5: Install package assets (README.md, static/) (85-90%)
+        // Phase 6: Install package assets (README.md, static/) (85-90%)
         self.report_progress(&job.id, 0.85, "Installing package assets")
             .await;
         let cursor = Cursor::new(&zip_data);
@@ -418,7 +440,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         )
         .await?;
 
-        // Phase 6: Finalize - update package node (90-100%)
+        // Phase 7: Finalize - update package node (90-100%)
         // Content entries are installed best-effort so one bad node cannot
         // silence the rest (see `is_per_node_error` in `node_installer.rs`).
         // Fail here, before `finalize_installation` flips `installed` to true —

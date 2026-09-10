@@ -51,6 +51,7 @@ mod handler;
 mod install_content;
 mod install_schema;
 mod manifest;
+mod migrations;
 mod nested;
 #[cfg(test)]
 mod role_install_tests;
@@ -59,7 +60,8 @@ mod types;
 
 pub use self::handler::PackageInstallHandler;
 pub use self::manifest::{
-    AllowedNodeTypesPatch, PackageDependency, PackageManifest, PackageProvides, WorkspacePatch,
+    AllowedNodeTypesPatch, PackageDependency, PackageManifest, PackageMigration, PackageProvides,
+    WorkspacePatch,
 };
 pub use self::types::{
     AppliedHashRecorder, BinaryDeleteCallback, BinaryRetrievalCallback, BinaryStorageCallback,
