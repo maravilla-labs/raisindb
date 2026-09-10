@@ -110,7 +110,7 @@ jobs:
           MACOS_ARM=$(jq -cn --arg f "$FEATURES" \
             '{os:"macos-14",target:"aarch64-apple-darwin",archive:"tar.gz",ext:"",features:$f}')
           MACOS_INTEL=$(jq -cn --arg f "$FEATURES" \
-            '{os:"macos-13",target:"x86_64-apple-darwin",archive:"tar.gz",ext:"",features:$f}')
+            '{os:"macos-15-intel",target:"x86_64-apple-darwin",archive:"tar.gz",ext:"",features:$f}')
 
           if [[ "${TARGETS:-all}" == "linux-only" ]]; then
             MATRIX=$(jq -cn --argjson l "$LINUX" '{include:[$l]}')
