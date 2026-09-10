@@ -1,7 +1,14 @@
 name: raisin:McpConnection
 description: An external Model Context Protocol server that RaisinDB connects to as a client
 icon: plug-zap
-version: 1
+# v2: `last_synced_at` corrected from `String` to `Date`. These always held an
+# RFC3339 timestamp, and `PropertyValue` is untagged with `Date` ahead of
+# `String`, so such a value deserializes as `Date` and could NEVER arrive as a
+# `String` over the wire — the declaration was unsatisfiable for any client.
+# Invisible until type enforcement landed; then the admin console could not save
+# an integration it had only just read. `coerce_declared_dates` parses the string
+# spelling, so values already stored as strings need no migration.
+version: 2
 strict: true
 indexable: true
 index_types: [Property]
@@ -172,7 +179,7 @@ properties:
           error_code, error }
 
   - name: last_synced_at
-    type: String
+    type: Date
     required: false
     title: Last Synced At
     description: ISO 8601 timestamp of the last successful tool discovery

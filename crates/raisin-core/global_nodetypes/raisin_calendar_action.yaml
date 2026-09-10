@@ -7,7 +7,14 @@ description: >-
   `/calendar/rsvp`, beside the `mirror` `/calendar`.
 icon: calendar-check
 
-version: 1
+# v2: `attempted_at`/`sent_at` corrected from `String` to `Date`. These always held an
+# RFC3339 timestamp, and `PropertyValue` is untagged with `Date` ahead of
+# `String`, so such a value deserializes as `Date` and could NEVER arrive as a
+# `String` over the wire — the declaration was unsatisfiable for any client.
+# Invisible until type enforcement landed; then the admin console could not save
+# an integration it had only just read. `coerce_declared_dates` parses the string
+# spelling, so values already stored as strings need no migration.
+version: 2
 
 # WHY THIS IS NOT A PROPERTY ON raisin:Event
 #
@@ -92,13 +99,13 @@ properties:
       label: Attempt ID
 
   - name: attempted_at
-    type: String
+    type: Date
     required: false
     meta:
       label: Attempted at
 
   - name: sent_at
-    type: String
+    type: Date
     required: false
     index: [Property]
     meta:

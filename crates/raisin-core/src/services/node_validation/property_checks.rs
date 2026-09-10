@@ -386,6 +386,79 @@ pub(super) fn coerce_declared_decimals(node: &mut Node, resolved: &ResolvedNodeT
     Ok(())
 }
 
+/// Parse an RFC3339 STRING on any property declared `Date` into
+/// `PropertyValue::Date`.
+///
+/// This is not a convenience — without it, a `Date` property is unwritable from
+/// anything that stores a string, and a `String` property holding a timestamp is
+/// unwritable from anything that speaks JSON. `PropertyValue` is
+/// `#[serde(untagged)]` with `Date` at slot 4, AHEAD of `String` at slot 6, so an
+/// RFC3339 string arriving over the wire always deserializes as `Date` and can
+/// never land as `String`. Meanwhile server-side code constructing
+/// `PropertyValue::String(Utc::now().to_rfc3339())` in memory never goes through
+/// that deserializer and stays a `String`. The same property therefore has two
+/// different runtime types depending on which door the write came through.
+///
+/// While `type:` was documentation nothing noticed. Once `check_property_types`
+/// enforced it, the two doors started refusing each other's values: the admin
+/// console read an integration node, PUT its properties back unchanged, and got
+///
+///     Property 'capabilities_checked_at' on NodeType 'raisin:Integration'
+///     is declared String but the value is Date
+///
+/// for a value the server itself had just written. The declarations are now
+/// `Date` (which is what these values are, and what every other `_at` property
+/// in the built-ins already says), and this pass reconciles the string spelling
+/// so both doors agree.
+///
+/// It also covers data at rest: MessagePack stores a `Date` as a `[nanos]` tuple
+/// and a `String` as a str, so values written before the declarations were
+/// corrected really are strings in the blob. They coerce on their next write
+/// instead of needing a migration.
+///
+/// Runs BEFORE the type check, for the same reason
+/// [`coerce_declared_decimals`] does. A string that is NOT a valid timestamp is
+/// refused by name rather than coerced and hoped over — same posture as the
+/// decimal case.
+pub(super) fn coerce_declared_dates(node: &mut Node, resolved: &ResolvedNodeType) -> Result<()> {
+    for prop in &resolved.resolved_properties {
+        if prop.property_type != PropertyType::Date {
+            continue;
+        }
+        let Some(name) = prop.name.as_deref() else {
+            continue;
+        };
+        let Some(PropertyValue::String(raw)) = node.properties.get(name) else {
+            // Already a Date, or null/absent/some other type the type check
+            // below will report.
+            continue;
+        };
+
+        let trimmed = raw.trim();
+        // An empty string is "unset", not a malformed timestamp. Refusing it
+        // would make clearing an optional date impossible.
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        match chrono::DateTime::parse_from_rfc3339(trimmed) {
+            Ok(dt) => {
+                let ts: raisin_models::timestamp::StorageTimestamp =
+                    dt.with_timezone(&chrono::Utc).into();
+                node.properties
+                    .insert(name.to_string(), PropertyValue::Date(ts));
+            }
+            Err(_) => {
+                return Err(Error::Validation(format!(
+                    "Property '{}' is declared Date but '{}' is not a valid RFC3339 timestamp",
+                    name, raw
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Enforce every declared `PropertyType` against the value actually present.
 ///
 /// Historically `type:` on a NodeType property was documentation and an editor

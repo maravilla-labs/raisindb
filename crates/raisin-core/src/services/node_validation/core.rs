@@ -185,6 +185,10 @@ impl<S: Storage> NodeValidator<S> {
         // string and is not yet a Decimal for the type check to accept, so
         // validating before coercing would refuse every well-formed decimal.
         super::property_checks::coerce_declared_decimals(node, &resolved)?;
+        // Same reasoning for `Date`, plus a second door: server-side code that
+        // builds `PropertyValue::String(rfc3339)` in memory bypasses the
+        // untagged deserializer that would otherwise have made it a `Date`.
+        super::property_checks::coerce_declared_dates(node, &resolved)?;
 
         self.validate_against_resolved(workspace, node, &resolved)
             .await?;
@@ -232,6 +236,17 @@ impl<S: Storage> NodeValidator<S> {
                         node_type = %node.node_type,
                         error = %e,
                         "decimal coercion skipped on a validation-disabled write"
+                    );
+                }
+                // Same treatment, same fail-open posture: a timestamp stored as
+                // a bare string on a `Date` property would defeat the type, but
+                // a value that cannot be parsed is left as it came rather than
+                // failing a write that turned validation off on purpose.
+                if let Err(e) = super::property_checks::coerce_declared_dates(node, &resolved) {
+                    tracing::debug!(
+                        node_type = %node.node_type,
+                        error = %e,
+                        "date coercion skipped on a validation-disabled write"
                     );
                 }
                 let supertypes = resolved.effective_supertypes();

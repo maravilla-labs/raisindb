@@ -24,7 +24,14 @@
 name: raisin:JobActivity
 description: Background-job activity for one repository — an ambient gauge, overwritten in place
 icon: activity
-version: 1
+# v2: `updated_at` corrected from `String` to `Date`. These always held an
+# RFC3339 timestamp, and `PropertyValue` is untagged with `Date` ahead of
+# `String`, so such a value deserializes as `Date` and could NEVER arrive as a
+# `String` over the wire — the declaration was unsatisfiable for any client.
+# Invisible until type enforcement landed; then the admin console could not save
+# an integration it had only just read. `coerce_declared_dates` parses the string
+# spelling, so values already stored as strings need no migration.
+version: 2
 strict: true
 indexable: true
 index_types: [Property]
@@ -79,7 +86,7 @@ properties:
     description: Up to a handful of node paths currently being worked on, as `workspace:/path`
 
   - name: updated_at
-    type: String
+    type: Date
     required: false
     title: Updated At
     description: RFC3339 timestamp of this snapshot

@@ -429,7 +429,16 @@ mod tests {
         // raisin:Integration is strict, so each property below must be declared or a
         // connector using it is rejected on write — and adding one is a schema change
         // that must bump the version, or existing repos never resync.
-        assert_eq!(integration.version, Some(5));
+        //
+        // A FLOOR, not an equality: pinning the exact number turns every later,
+        // unrelated bump into a failure here (v6 corrected
+        // `capabilities_checked_at` to `Date`). Same reasoning as the
+        // raisin:Asset assertion below.
+        assert!(
+            integration.version.unwrap_or(0) >= 5,
+            "adding a property is a schema change and must bump the version (got {:?})",
+            integration.version
+        );
         for prop in [
             "config_type",
             "connection_config_type",

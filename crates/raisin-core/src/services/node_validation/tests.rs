@@ -1029,3 +1029,126 @@ async fn validate_and_stamp_materializes_membership_and_ignores_client_supplied_
         "$supertypes must be stamped"
     );
 }
+
+/// The admin console read an integration node, PUT its properties back
+/// unchanged, and the save was refused:
+///
+///     Property 'capabilities_checked_at' on NodeType 'raisin:Integration'
+///     is declared String but the value is Date
+///
+/// for a value the server itself had just written. `PropertyValue` is
+/// `#[serde(untagged)]` with `Date` ahead of `String`, so a timestamp that goes
+/// out as JSON and comes back always returns as a `Date` — which made
+/// `type: String` unsatisfiable for any client, while server code building
+/// `PropertyValue::String(rfc3339)` in memory never met that deserializer.
+///
+/// The declarations are `Date` now, and this pins the round trip: a timestamp
+/// submitted in EITHER spelling validates, and both end up as the same `Date`.
+#[tokio::test]
+async fn a_timestamp_validates_in_either_spelling_on_a_date_property() {
+    let storage = setup_test_storage().await;
+    let validator = NodeValidator::new(
+        storage.clone(),
+        "default".to_string(),
+        "default".to_string(),
+        "main".to_string(),
+    );
+
+    create_node_type(
+        &storage,
+        "test:Integration",
+        vec![create_property_schema(
+            "capabilities_checked_at",
+            PropertyType::Date,
+            false,
+            false,
+        )],
+        true,
+    )
+    .await;
+
+    let stamp = "2026-09-10T23:43:51+00:00";
+
+    // The wire shape: JSON round-tripping makes it a Date before it ever
+    // reaches validation. This is what the console sends.
+    let from_json: PropertyValue =
+        serde_json::from_value(serde_json::json!(stamp)).expect("RFC3339 string parses");
+    assert!(
+        matches!(from_json, PropertyValue::Date(_)),
+        "untagged deserialization must yield Date, not String — if this fails the \
+         variant order in PropertyValue changed and the coercion below is moot"
+    );
+
+    let mut props = HashMap::new();
+    props.insert("capabilities_checked_at".to_string(), from_json);
+    let mut node = create_test_node("test:Integration", props);
+    validator
+        .validate_and_stamp("ws1", &mut node)
+        .await
+        .expect("a Date on a Date-declared property must validate");
+
+    // The in-memory shape: server code that builds the string itself, and
+    // values already at rest written before the declaration was corrected.
+    // These coerce rather than being refused, so no migration is needed.
+    let mut props = HashMap::new();
+    props.insert(
+        "capabilities_checked_at".to_string(),
+        PropertyValue::String(stamp.to_string()),
+    );
+    let mut node = create_test_node("test:Integration", props);
+    validator
+        .validate_and_stamp("ws1", &mut node)
+        .await
+        .expect("an RFC3339 string must coerce, not be refused");
+    assert!(
+        matches!(
+            node.properties.get("capabilities_checked_at"),
+            Some(PropertyValue::Date(_))
+        ),
+        "the string spelling must be coerced to Date, so both doors agree"
+    );
+
+    // A string that is not a timestamp is still refused, by name — the same
+    // posture as the decimal coercion, rather than storing a pseudo-date.
+    let mut props = HashMap::new();
+    props.insert(
+        "capabilities_checked_at".to_string(),
+        PropertyValue::String("last tuesday".to_string()),
+    );
+    let mut node = create_test_node("test:Integration", props);
+    let err = validator
+        .validate_and_stamp("ws1", &mut node)
+        .await
+        .expect_err("a non-timestamp string must not be coerced");
+    assert!(
+        err.to_string().contains("capabilities_checked_at"),
+        "the error must name the property, got: {err}"
+    );
+}
+
+/// Every built-in `_at` property must be declared `Date`.
+///
+/// Declaring one `String` is unsatisfiable over the wire (see the test above),
+/// and it stayed invisible for as long as `type:` was documentation. Seven of
+/// them had drifted across five NodeTypes before type enforcement surfaced the
+/// first one. This is the cheap guard that keeps the next one from shipping.
+#[test]
+fn no_builtin_declares_a_timestamp_property_as_a_string() {
+    let offenders: Vec<String> = crate::nodetype_init::load_global_nodetypes()
+        .iter()
+        .flat_map(|nt| {
+            let type_name = nt.name.clone();
+            nt.properties.iter().flatten().filter_map(move |p| {
+                let name = p.name.as_deref()?;
+                (name.ends_with("_at") && p.property_type == PropertyType::String)
+                    .then(|| format!("{type_name}.{name}"))
+            })
+        })
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "these timestamp properties are declared String and can never be written \
+         as one over the wire — declare them Date: {offenders:?}"
+    );
+}

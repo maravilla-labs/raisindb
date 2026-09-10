@@ -1,7 +1,14 @@
 name: raisin:Integration
 description: Tenant/repo-level configuration for an external system integration
 icon: plug
-version: 5
+# v6: `capabilities_checked_at` corrected from `String` to `Date`. These always held an
+# RFC3339 timestamp, and `PropertyValue` is untagged with `Date` ahead of
+# `String`, so such a value deserializes as `Date` and could NEVER arrive as a
+# `String` over the wire — the declaration was unsatisfiable for any client.
+# Invisible until type enforcement landed; then the admin console could not save
+# an integration it had only just read. `coerce_declared_dates` parses the string
+# spelling, so values already stored as strings need no migration.
+version: 6
 strict: true
 indexable: true
 index_types: [Property]
@@ -167,7 +174,7 @@ properties:
       false/empty, so an adapter that omits them is treated as read-only.
 
   - name: capabilities_checked_at
-    type: String
+    type: Date
     required: false
     title: Capabilities Checked At
     description: ISO 8601 timestamp of the last capabilities probe

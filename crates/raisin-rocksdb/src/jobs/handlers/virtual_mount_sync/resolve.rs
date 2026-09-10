@@ -228,9 +228,13 @@ impl VirtualMountSyncHandler {
         let caps_pv: PropertyValue = serde_json::from_value(caps_value)
             .map_err(|e| Error::Validation(format!("capabilities to PropertyValue failed: {e}")))?;
         node.properties.insert("capabilities".to_string(), caps_pv);
+        // Declared `Date` — see the note on the other writer in
+        // `raisin-transport-http`'s `cache_capabilities`. This path reaches
+        // `upsert_node` directly, so writing the declared type here is what keeps
+        // the two writers agreeing about what this property holds.
         node.properties.insert(
             "capabilities_checked_at".to_string(),
-            PropertyValue::String(Utc::now().to_rfc3339()),
+            PropertyValue::Date(raisin_models::timestamp::StorageTimestamp::now()),
         );
         tx.upsert_node(SYSTEM_WORKSPACE, &node).await?;
         tx.commit().await?;

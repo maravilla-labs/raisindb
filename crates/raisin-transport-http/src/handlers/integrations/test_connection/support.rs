@@ -235,9 +235,13 @@ pub(super) async fn cache_capabilities(
     let pv = serde_json::from_value::<PropertyValue>(value)
         .map_err(|e| ApiError::internal(format!("failed to encode capabilities: {e}")))?;
     node.properties.insert("capabilities".to_string(), pv);
+    // `Date`, not a `String` holding an RFC3339 spelling: `capabilities_checked_at`
+    // is declared `Date`, and a string written here would only survive because
+    // `coerce_declared_dates` rescues it on the way through validation. Write the
+    // declared type at the source instead of relying on the rescue.
     node.properties.insert(
         "capabilities_checked_at".to_string(),
-        PropertyValue::String(chrono::Utc::now().to_rfc3339()),
+        PropertyValue::Date(raisin_models::timestamp::StorageTimestamp::now()),
     );
     svc.update_node(node.clone()).await?;
     Ok(())

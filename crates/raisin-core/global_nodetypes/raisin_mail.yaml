@@ -30,7 +30,14 @@ icon: mail
 # propagates to existing repositories without an admin apply. It does NOT
 # retroactively embed anything: index_types decides what future writes produce,
 # and mail already synced has no vector until it is rewritten or re-embedded.
-version: 3
+# v4: `received_at`/`sent_at` corrected from `String` to `Date`. These always held an
+# RFC3339 timestamp, and `PropertyValue` is untagged with `Date` ahead of
+# `String`, so such a value deserializes as `Date` and could NEVER arrive as a
+# `String` over the wire — the declaration was unsatisfiable for any client.
+# Invisible until type enforcement landed; then the admin console could not save
+# an integration it had only just read. `coerce_declared_dates` parses the string
+# spelling, so values already stored as strings need no migration.
+version: 4
 
 # Global, not shipped inside one adapter package, because BOTH the Graph and the
 # IMAP connectors map onto it. A copy per package is the mirrored-definition
@@ -219,7 +226,7 @@ properties:
         ORDER BY / range column.
 
   - name: received_at
-    type: String
+    type: Date
     required: false
     index: [Property]
     meta:
@@ -227,7 +234,7 @@ properties:
       description: ISO 8601. Absent on a draft and on a Sent Items copy.
 
   - name: sent_at
-    type: String
+    type: Date
     required: false
     index: [Property]
     meta:
