@@ -12,8 +12,41 @@ use crate::types::{FlowCallbacks, FlowContext, FlowNode};
 
 use super::StepResult;
 
-/// Merge step config with flow-input overrides for agent_ref / agent_workspace.
+/// Resolve `${…}` templates in the step's brief against the flow context.
+///
+/// The brief (`system_prompt`) is the ONE place a chat step carries what the
+/// conversation is actually about, and it is almost always written as
+/// templates — `${steps.read.body_text}`, `${steps.__subject.subject.title}`.
+/// Every other templated field on this step is mapped (see
+/// `resolve_participant_home`, which maps `participant` the same way), but the
+/// brief was passed to the provider verbatim.
+///
+/// The failure is silent and looks like a model defect rather than a missing
+/// substitution: the agent receives the literal characters
+/// `${steps.read.body_text}`, has no case in front of it, and INVENTS one.
+/// Measured 2026-09-11 against a chat step whose brief carried a real patient
+/// mail about chest pain — three consecutive runs produced three different
+/// fabricated presentations (a urinary-tract infection, a headache with
+/// nausea, …), on two different models, because neither model was ever shown
+/// the mail. An unresolved `${…}` survives as its own text (the documented
+/// contract for a missed mapping), so nothing errors and nothing logs.
+fn resolve_brief(system_prompt: Option<String>, context: &FlowContext) -> Option<String> {
+    let raw = system_prompt?;
+    if !raw.contains("${") {
+        return Some(raw);
+    }
+    match crate::runtime::DataMapper::map(&serde_json::Value::String(raw.clone()), context) {
+        Ok(serde_json::Value::String(mapped)) => Some(mapped),
+        // A non-string mapping is not meaningful for a prompt; keep the
+        // author's text rather than dropping the brief entirely.
+        _ => Some(raw),
+    }
+}
+
+/// Merge step config with flow-input overrides for agent_ref / agent_workspace,
+/// and resolve the brief's templates against the flow context.
 pub(super) fn resolve_config(mut config: ChatConfig, context: &FlowContext) -> ChatConfig {
+    config.system_prompt = resolve_brief(config.system_prompt.take(), context);
     if config.agent_ref.is_none() {
         if let Some(agent) = context.input.get("agent").and_then(|v| v.as_str()) {
             config.agent_ref = Some(agent.to_string());
