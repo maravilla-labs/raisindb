@@ -209,8 +209,26 @@ impl OllamaProvider {
             }
         }
 
-        // Determine support based on model name
-        let supports = Self::model_supports_tools_by_name(model);
+        // ASK OLLAMA FIRST. `/api/show` reports each installed model's real
+        // template capabilities, so it stays correct as models are added and
+        // as upstream fixes their templates — which the static list below
+        // cannot. Measured 2026-09-11 against this box: the list excluded
+        // llama3.2 and did not know gemma4, yet both return proper
+        // `tool_calls`; it listed qwen2.5-coder, whose 1.5b build replies with
+        // the call as plain text. Every model the engine refused was one that
+        // worked, and the one it allowed was the one that did not.
+        //
+        // The name list stays as the FALLBACK, for an Ollama too old to report
+        // capabilities and for an endpoint that cannot be reached right now —
+        // guessing from the name is a better failure than declaring every
+        // model tool-incapable because one HTTP call failed.
+        let supports = match self.fetch_model_show(model).await {
+            Ok(show) => match show.capabilities {
+                Some(caps) => caps.iter().any(|c| c.eq_ignore_ascii_case("tools")),
+                None => Self::model_supports_tools_by_name(model),
+            },
+            Err(_) => Self::model_supports_tools_by_name(model),
+        };
 
         // Cache the result
         {

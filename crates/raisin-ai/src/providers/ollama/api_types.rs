@@ -126,6 +126,15 @@ pub(crate) struct OllamaModelDetails {
 pub(crate) struct OllamaShowResponse {
     #[serde(default)]
     pub details: Option<OllamaModelDetails>,
+    /// What this model's TEMPLATE can actually do — "completion", "tools",
+    /// "vision", "thinking", "insert". Ollama reports it per installed model,
+    /// which makes it the only answer that stays true as models are added and
+    /// as their templates are fixed upstream. A hardcoded name list cannot:
+    /// see `TOOL_CAPABLE_MODELS`, which by 2026-09-11 excluded llama3.2 and
+    /// gemma4 (both of which return real `tool_calls` today) while listing
+    /// qwen2.5-coder (whose 1.5b build answers with the call as plain text).
+    #[serde(default)]
+    pub capabilities: Option<Vec<String>>,
     /// Model info contains architecture, embedding_length, pooling_type, etc.
     /// Keys are like "general.architecture", "bert.embedding_length", "bert.pooling_type"
     #[serde(default)]

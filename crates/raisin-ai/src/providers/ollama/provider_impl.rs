@@ -330,10 +330,39 @@ impl AIProviderTrait for OllamaProvider {
             ResponseFormat::JsonSchema { schema } => Some(schema.schema.clone()),
         });
 
+        // Tools ARE supported while streaming, and withholding them here was
+        // the single reason an agent in a chat step could never finish one.
+        // Verified against Ollama on 2026-09-11: the same request with
+        // `"stream": true` returns a real `tool_calls` array on the final
+        // message, for llama3.2 and gemma4 alike.
+        //
+        // The old `tools: None` was not a no-op. Upstream, a request that
+        // CARRIES tools gets tool guidance appended to its prompt — the text
+        // that asks the model to describe the call it wants. So the chat step
+        // told the model "you have an end_session tool", the provider then
+        // dropped the tools from the wire, and the model did the only thing
+        // left: it TYPED `end_session(outcome="emergency", ...)` into the chat
+        // as prose. The flow stayed parked forever waiting for a call that had
+        // been stripped in transit, its routing edges never evaluated, and
+        // nothing anywhere reported an error.
+        let tools = request.tools.as_ref().map(|tools| {
+            tools
+                .iter()
+                .map(|tool| OllamaTool {
+                    tool_type: tool.tool_type.clone(),
+                    function: OllamaFunctionDefinition {
+                        name: tool.function.name.clone(),
+                        description: tool.function.description.clone(),
+                        parameters: tool.function.parameters.clone(),
+                    },
+                })
+                .collect()
+        });
+
         let ollama_request = OllamaChatRequest {
             model: request.model.clone(),
             messages: ollama_messages,
-            tools: None, // Tool calls are not well-supported in streaming mode
+            tools,
             stream: Some(true),
             options,
             format,
@@ -390,10 +419,31 @@ pub(super) fn parse_ollama_ndjson(text: &str) -> Vec<Result<StreamChunk>> {
             let response: OllamaChatResponse = serde_json::from_str(line).ok()?;
             let delta = response.message.content.clone();
 
+            // Ollama puts tool calls on the message of the FINAL line, not
+            // spread across deltas, so this is the one chunk that can carry
+            // them. Parsing them here is the other half of sending them: a
+            // request that offers tools and a stream that discards the answer
+            // leaves the caller believing the model declined to call anything.
+            let tool_calls = response.message.tool_calls.as_ref().map(|calls| {
+                calls
+                    .iter()
+                    .map(|call| ToolCall {
+                        id: format!("call_{}", uuid::Uuid::new_v4()),
+                        call_type: "function".to_string(),
+                        function: FunctionCall {
+                            name: call.function.name.clone(),
+                            arguments: serde_json::to_string(&call.function.arguments)
+                                .unwrap_or_default(),
+                        },
+                        index: None,
+                    })
+                    .collect()
+            });
+
             if response.done {
                 Some(Ok(StreamChunk {
                     delta,
-                    tool_calls: None,
+                    tool_calls,
                     usage: Some(Usage {
                         prompt_tokens: response.prompt_eval_count.unwrap_or(0),
                         completion_tokens: response.eval_count.unwrap_or(0),
