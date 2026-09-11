@@ -59,6 +59,17 @@ export interface WatcherOptions {
   debounceDelay?: number;
   /** Ignore patterns */
   ignorePatterns?: string[];
+  /**
+   * Extra exclusion test, applied on top of `ignorePatterns`, taking a path
+   * RELATIVE to the package dir (POSIX separators) and returning true to skip.
+   *
+   * This exists so `.rapignore` / `.gitignore` can be honoured here using the
+   * SAME reader `raisindb package create` uses, rather than restating those
+   * files as globs. Their syntax is not glob syntax — negations, directory-only
+   * patterns and anchoring all differ — so translating would quietly disagree
+   * with the packaged artifact, which is exactly the drift worth avoiding.
+   */
+  ignoreFilter?: (relativePath: string) => boolean;
   /** File extensions to watch */
   watchExtensions?: string[];
   /** Skip server watcher (push-only mode) */
@@ -80,7 +91,10 @@ export class SyncWatcher extends EventEmitter {
   private packageDir: string;
   private watchBase: string;
   private config: SyncConfig;
-  private options: Required<WatcherOptions> & { localOnly: boolean };
+  private options: Required<Omit<WatcherOptions, 'ignoreFilter'>> & {
+    localOnly: boolean;
+    ignoreFilter?: (relativePath: string) => boolean;
+  };
 
   private localWatcher: FSWatcher | null = null;
   private structuralWatcher: FSWatcher | null = null;
@@ -126,7 +140,36 @@ export class SyncWatcher extends EventEmitter {
       watchExtensions: options.watchExtensions ?? ['.yaml', '.yml', '.json', '.md'],
       localOnly: options.localOnly ?? false,
       watchStructural: options.watchStructural ?? false,
+      ignoreFilter: options.ignoreFilter,
     };
+  }
+
+  /**
+   * Is this absolute path excluded by `.rapignore` / `.gitignore`?
+   *
+   * Applied to EVENTS rather than to chokidar's `ignored`, because chokidar's
+   * types take globs or a single predicate but not a mixed array, and the glob
+   * list would have to be restated in the predicate's terms to combine them.
+   * Filtering events keeps one source of truth per mechanism.
+   *
+   * The cost of still watching an excluded file is negligible here: the watcher
+   * roots at `content/` when that layout is used, and the heavy excluded trees
+   * (studio's `wasm/`) sit at the package root, outside it.
+   */
+  private isIgnoredByRapignore(absPath: string): boolean {
+    const filter = this.options.ignoreFilter;
+    if (!filter) return false;
+    const rel = path.relative(this.packageDir, absPath);
+    // `ignore` rejects absolute paths and treats '' as invalid, so anything at
+    // or outside the package dir is simply not filtered.
+    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return false;
+    try {
+      return filter(rel.split(path.sep).join('/'));
+    } catch {
+      // Fail OPEN: a malformed pattern costs an extra sync; failing closed
+      // would silently stop watching a file the user is editing.
+      return false;
+    }
   }
 
   /**
@@ -359,6 +402,12 @@ export class SyncWatcher extends EventEmitter {
   private handleLocalChange(type: ChangeEvent['type'], filePath: string): void {
     // Get relative path from watch base (content/ dir if it exists)
     const relativePath = path.relative(this.watchBase, filePath).split(path.sep).join('/');
+
+    // Excluded from the packaged artifact => excluded from sync. Checked before
+    // anything else so an ignored file cannot enter the pending set at all.
+    if (this.isIgnoredByRapignore(filePath)) {
+      return;
+    }
 
     // Ignore changes to in-flight paths (currently being synced)
     if (this.inFlightPaths.has(relativePath)) {

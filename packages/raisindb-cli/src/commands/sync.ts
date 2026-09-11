@@ -26,6 +26,7 @@ import {
   FileChange,
   ServerFileInfo,
 } from '../sync/compare.js';
+import { createIgnoreFilter } from './package.js';
 import { SyncProgress } from '../components/SyncProgress.js';
 import { WatchMode } from '../components/WatchMode.js';
 import { SyncWatcher, ChangeEvent } from '../sync/watcher.js';
@@ -178,6 +179,79 @@ async function promptForSyncConfig(
 }
 
 /**
+ * `.rapignore` / `.gitignore` exclusion, memoised per package dir.
+ *
+ * Memoised because `createIgnoreFilter` announces which ignore files it found,
+ * and sync reads the local file list from three call sites — without this the
+ * user sees "Using .rapignore patterns" three times per run.
+ */
+const rapIgnoreCache = new Map<string, (relativePath: string) => boolean>();
+
+/**
+ * Takes a path relative to the PACKAGE dir (as `.rapignore` patterns are
+ * written, and as the watcher reports them).
+ */
+function rapIgnoreFor(packageDir: string): (relativePath: string) => boolean {
+  const cached = rapIgnoreCache.get(packageDir);
+  if (cached) return cached;
+
+  const ig = createIgnoreFilter(packageDir);
+  const filter = (relativePath: string): boolean => {
+    if (!relativePath) return false;
+    try {
+      return ig.ignores(relativePath.split(path.sep).join('/'));
+    } catch {
+      // Fail OPEN: a malformed pattern must not silently stop syncing a file.
+      return false;
+    }
+  };
+  rapIgnoreCache.set(packageDir, filter);
+  return filter;
+}
+
+/**
+ * The `content/` prefix, when that layout is in use.
+ *
+ * `getLocalFiles` returns CONTENT-relative paths ("functions/lib/..") while
+ * `.rapignore` is written package-relative ("content/functions/.."). The two
+ * must be reconciled at exactly one place or every pattern silently misses —
+ * and the watcher needs no prefix at all, since it already reports
+ * package-relative paths.
+ */
+function contentPrefix(packageDir: string): string {
+  const contentDir = path.join(packageDir, 'content');
+  return fs.existsSync(contentDir) && fs.statSync(contentDir).isDirectory() ? 'content/' : '';
+}
+
+/**
+ * The local file list, with `.rapignore` honoured.
+ *
+ * `getLocalFiles` applies only the `.raisin-sync.yaml` `ignore:` list, which is
+ * a DIFFERENT mechanism from the `.rapignore` that `raisindb package create`
+ * uses. Sync therefore used to push files the packaged artifact excludes — the
+ * two disagreeing about what belongs in a package is the whole bug.
+ */
+function getLocalFilesRespectingRapignore(
+  packageDir: string,
+  config: SyncConfig
+): ReturnType<typeof getLocalFiles> {
+  const files = getLocalFiles(packageDir, config);
+  const ignored = rapIgnoreFor(packageDir);
+  const prefix = contentPrefix(packageDir);
+  let removed = 0;
+  for (const relativePath of [...files.keys()]) {
+    if (ignored(prefix + relativePath)) {
+      files.delete(relativePath);
+      removed++;
+    }
+  }
+  if (removed > 0) {
+    console.log(`  Excluding ${removed} file(s) based on ignore patterns`);
+  }
+  return files;
+}
+
+/**
  * Run bidirectional sync
  */
 async function runBidirectionalSync(
@@ -188,7 +262,7 @@ async function runBidirectionalSync(
   console.log('Comparing local and server state...');
 
   // Get local files (returns paths like "functions/lib/weather/index.js")
-  const localFiles = getLocalFiles(packageDir, config);
+  const localFiles = getLocalFilesRespectingRapignore(packageDir, config);
   console.log(`Found ${localFiles.size} local files`);
 
   // Extract unique workspaces from local file paths
@@ -286,7 +360,7 @@ async function runPushOnly(
 ): Promise<void> {
   console.log('Pushing local changes to server...');
 
-  const localFiles = getLocalFiles(packageDir, config);
+  const localFiles = getLocalFilesRespectingRapignore(packageDir, config);
   console.log(`Found ${localFiles.size} local files`);
 
   if (options.dryRun) {
@@ -343,7 +417,7 @@ async function runPullOnly(
   console.log('Pulling changes from server...');
 
   // Get local files first to discover workspaces
-  const localFiles = getLocalFiles(packageDir, config);
+  const localFiles = getLocalFilesRespectingRapignore(packageDir, config);
   console.log(`Found ${localFiles.size} local files`);
 
   // Extract unique workspaces from local file paths
@@ -406,6 +480,10 @@ async function runWatchMode(
       '**/.env',
       '**/.env.*',
     ],
+    // `.rapignore` / `.gitignore`, read by the SAME filter `raisindb package
+    // create` uses. Without this, watch mode pushed files the packaged artifact
+    // excludes — e.g. studio's 889MB `wasm/` tree, which `.rapignore` drops.
+    ignoreFilter: (relativePath) => rapIgnoreFor(packageDir)(relativePath),
     watchExtensions: ['.yaml', '.yml', '.json', '.md', '.js', '.py', '.star'],
     localOnly: pushOnly,
     // Surface manifest/nodetype/workspace edits as re-deploy suggestions
@@ -489,7 +567,7 @@ async function runWatchMode(
   // Initial one-time sync: bring the server up to date with local state once,
   // then only changed files are pushed while watching.
   if (!options.dryRun) {
-    const localFiles = getLocalFiles(packageDir, config);
+    const localFiles = getLocalFilesRespectingRapignore(packageDir, config);
     let ok = 0;
     let fail = 0;
     for (const [filePath] of localFiles) {
