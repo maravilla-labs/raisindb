@@ -267,6 +267,16 @@ async fn check_repo(
 /// node read.
 const AUTH_RECHECK_SECS: i64 = 600;
 
+/// How often a mount latched on `misconfigured` is re-examined.
+///
+/// Same shape as [`AUTH_RECHECK_SECS`] and for the same reason: a
+/// misconfiguration cannot repair itself, so re-asking is a cheap periodic
+/// question rather than a retry. It is cheaper still than the auth one — the
+/// preflight fails before any provider call — but it is not free: each look
+/// re-reads the mount and its connector and rewrites the mount node, which
+/// mints a replicated revision.
+const MISCONFIG_RECHECK_SECS: i64 = 600;
+
 /// Whether a mount should be synced now.
 pub fn is_due(mount: &MountConfig, now: i64) -> bool {
     if !mount.enabled {
@@ -297,6 +307,27 @@ pub fn is_due(mount: &MountConfig, now: i64) -> bool {
         // failed.
         let last = mount.state.auth_recheck_at.unwrap_or(0);
         return now - last >= AUTH_RECHECK_SECS;
+    }
+    // Latched on a misconfiguration. Like `auth_required` this is WAITING, not
+    // dead: the repair is an operator action (rebind the mount's connection,
+    // recreate the target branch) and the preflight re-runs its guards on the
+    // next look, clearing the status by itself once the config resolves.
+    //
+    // This MUST stay above the webhook branch. Below it, a webhook mount had no
+    // spacing at all: that branch answers `!has_active_push(...)`, a
+    // misconfigured mount never gets as far as subscribing, so it was due on
+    // EVERY 60s tick — forever, ignoring both the attempt stamp and the
+    // exponential backoff that the polled path gets for free. Measured in
+    // production: one mount logging the same dangling-connection warning once a
+    // minute for weeks, at 42,471 consecutive failures, each tick rewriting the
+    // mount node and replicating the revision.
+    if mount.state.status.as_deref() == Some("misconfigured") {
+        // Spaced on the attempt stamp, which `preflight::mark_misconfigured`
+        // writes on every look. Unlike the auth latch this needs no separate
+        // re-check field: reaching the guard IS the whole attempt, so the stamp
+        // is honest.
+        let last = mount.state.last_attempt_at.unwrap_or(0);
+        return now - last >= MISCONFIG_RECHECK_SECS;
     }
     // The PROVIDER told us to wait. Checked above every other "due" reason —
     // including the backfill fast path below, which is the one that would
@@ -581,6 +612,59 @@ mod tests {
             is_due(&m, 1_000_000 + AUTH_RECHECK_SECS),
             "must become due again so a repaired credential can be noticed"
         );
+    }
+
+    /// A misconfigured WEBHOOK mount is the case with no spacing at all.
+    ///
+    /// The webhook branch answers `!has_active_push(...)`, and a misconfigured
+    /// mount never reaches the subscribe step, so it was due on every 60s tick
+    /// forever — the polled path's attempt stamp and exponential backoff both
+    /// sit BELOW that branch and never applied. Production ran one mount like
+    /// this for weeks.
+    #[test]
+    fn a_misconfigured_webhook_mount_is_not_due_every_tick() {
+        let mut m = mount();
+        m.sync_config.mode = "webhook".into();
+        m.state.status = Some("misconfigured".into());
+        m.state.last_error = Some("connected account `gone` no longer exists".into());
+        m.state.last_attempt_at = Some(1_000_000);
+        // No push subscription, exactly as a mount that never got that far.
+        m.state.push_expires_at = None;
+
+        assert!(
+            !is_due(&m, 1_000_000 + MISCONFIG_RECHECK_SECS - 1),
+            "a standing misconfiguration must not be re-looked at on every tick"
+        );
+        assert!(
+            is_due(&m, 1_000_000 + MISCONFIG_RECHECK_SECS),
+            "it must still be re-looked at, so a repaired config recovers by itself"
+        );
+    }
+
+    /// Same for a polled mount: the cadence replaces the backoff rather than
+    /// riding on `consecutive_failures`, which no longer grows while one verdict
+    /// stands.
+    #[test]
+    fn a_misconfigured_polled_mount_is_spaced_on_the_attempt_stamp() {
+        let mut m = mount();
+        m.state.status = Some("misconfigured".into());
+        m.state.last_attempt_at = Some(1_000_000);
+        m.state.consecutive_failures = 1;
+        assert!(!is_due(&m, 1_000_000 + MISCONFIG_RECHECK_SECS - 1));
+        assert!(is_due(&m, 1_000_000 + MISCONFIG_RECHECK_SECS));
+    }
+
+    /// An unfinished backfill must not jump the misconfigured latch: that branch
+    /// returns `true` unconditionally for a mount with `consecutive_failures ==
+    /// 0`, which is exactly a mount whose FIRST fault is a misconfiguration.
+    #[test]
+    fn a_pending_backfill_does_not_jump_the_misconfigured_latch() {
+        let mut m = mount();
+        m.state.status = Some("misconfigured".into());
+        m.state.last_attempt_at = Some(1_000_000);
+        m.state.consecutive_failures = 0;
+        m.state.backfill_cursor = Some("page-2".into());
+        assert!(!is_due(&m, 1_000_000 + 1));
     }
 
     /// Operator intent still outranks the re-check: a paused or disabled mount

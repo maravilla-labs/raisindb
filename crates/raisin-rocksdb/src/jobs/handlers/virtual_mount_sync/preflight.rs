@@ -144,7 +144,7 @@ impl VirtualMountSyncHandler {
                 // without it `last_attempt_at` never moves — and `is_due` now
                 // uses that stamp to space these re-examinations out. Omitting
                 // it turns a ten-minute question into a per-tick one.
-                self.stamp_attempt(tenant, repo, config_branch, &mount)
+                self.stamp_auth_recheck(tenant, repo, config_branch, &mount)
                     .await;
                 return Ok(Preflight::Skip("auth_required"));
             }
@@ -291,10 +291,24 @@ impl VirtualMountSyncHandler {
             .is_some_and(|refreshed| refreshed > latched_at)
     }
 
-    /// Record that this mount was looked at, without changing anything else.
+    /// Record that this latched mount was RE-CHECKED, without changing anything
+    /// else.
+    ///
+    /// Stamps `auth_recheck_at`, which is the field `check::is_due` spaces the
+    /// re-check on — and deliberately NOT `last_attempt_at`. Two reasons, and
+    /// both were live defects:
+    ///
+    ///  - Writing the other field left `auth_recheck_at` permanently unset, so
+    ///    `is_due` read `unwrap_or(0)` and every latched mount was due on every
+    ///    60s tick. The ten-minute cadence the constant describes never
+    ///    happened.
+    ///  - A skip is not an attempt. Advancing `last_attempt_at` here destroys
+    ///    the record of when the mount actually failed, which is exactly the
+    ///    value `credential_is_newer_than_failure` falls back to — so a repaired
+    ///    credential could never look newer than its own failure.
     ///
     /// Best-effort: a failed stamp costs one extra re-examination.
-    async fn stamp_attempt(
+    async fn stamp_auth_recheck(
         &self,
         tenant: &str,
         repo: &str,
@@ -302,7 +316,7 @@ impl VirtualMountSyncHandler {
         mount: &MountConfig,
     ) {
         let mut state = mount.state.clone();
-        state.last_attempt_at = Some(Utc::now().timestamp());
+        state.auth_recheck_at = Some(Utc::now().timestamp());
         if let Err(e) = persist_mount_state(
             &self.storage,
             tenant,
@@ -338,6 +352,10 @@ impl VirtualMountSyncHandler {
         state.status = None;
         state.last_error = None;
         state.auth_required_at = None;
+        // The re-check stamp belongs to the latch that is being lifted. Leaving
+        // it behind would make a NEW latch immediately due again, which is the
+        // per-tick behaviour the cadence exists to prevent.
+        state.auth_recheck_at = None;
         // The backoff was counting rejections of a credential that no longer
         // exists; a repaired one starts clean or it waits out a delay it did
         // nothing to earn.
@@ -377,17 +395,27 @@ impl VirtualMountSyncHandler {
         error: String,
     ) -> Preflight {
         let mut state = mount.state.clone();
+        // Count the FAULT, not the looks at it. A standing verdict is re-examined
+        // on a cadence (`check::MISCONFIG_RECHECK_SECS`) for as long as nobody
+        // fixes it, and incrementing here on every look turned a single broken
+        // reference into "42,471 consecutive failures" — a number that says
+        // nothing about the mount and everything about how long the console has
+        // been rendering it. A NEW verdict still counts, so a mount that fails
+        // for a second, different reason is visibly worse than one that does not.
+        let verdict_is_new = state.status.as_deref() != Some("misconfigured")
+            || state.last_error.as_deref() != Some(error.as_str());
+        if verdict_is_new {
+            state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+        }
         state.status = Some("misconfigured".to_string());
         state.last_error = Some(error);
-        // Stamp the attempt here too. This path returns BEFORE
-        // `finalize`, so without it `last_attempt_at` stays null
-        // and `is_due` keeps the mount permanently due — the
-        // same defect the backoff fix addressed, surviving in
-        // the one branch that skips finalize. Harmless for the
-        // provider (it fails before any call), but it re-scans
-        // and rewrites this node on every 60s tick forever.
+        // Stamp the attempt here too. This path returns BEFORE `finalize`, so
+        // without it `last_attempt_at` stays null and `is_due` keeps the mount
+        // permanently due — the same defect the backoff fix addressed,
+        // surviving in the one branch that skips finalize. It is also the field
+        // `check::is_due`'s misconfigured branch spaces the re-look on, so a
+        // failed write here costs one extra look, not a per-tick loop.
         state.last_attempt_at = Some(Utc::now().timestamp());
-        state.consecutive_failures = state.consecutive_failures.saturating_add(1);
         if let Err(e) = persist_mount_state(
             &self.storage,
             tenant,
