@@ -222,10 +222,21 @@ pub(super) fn account_config(node: &Node, account_id: &str) -> Value {
 }
 
 /// Persist `capabilities` + `capabilities_checked_at` onto the integration node.
+///
+/// Goes through the connector's accounts lease, which re-reads the node inside
+/// it, because the node this probe started from was loaded BEFORE a 30-second
+/// adapter round trip. Writing that snapshot back is a whole-node write: it
+/// carried `connected_accounts` with it, so a token the refresh job rotated
+/// during the probe was reverted to the value the provider had just
+/// invalidated — an `invalid_grant` loop whose only visible symptom is that the
+/// operator has to reconnect. The lease is held only for the read-modify-write;
+/// the adapter call is long since finished.
 #[cfg(feature = "storage-rocksdb")]
 pub(super) async fn cache_capabilities(
-    svc: &raisin_core::NodeService<crate::state::Store>,
-    node: &mut Node,
+    state: &crate::state::AppState,
+    tenant_id: &str,
+    repo: &str,
+    integration_path: &str,
     caps: &Capabilities,
 ) -> Result<(), crate::error::ApiError> {
     use crate::error::ApiError;
@@ -234,17 +245,28 @@ pub(super) async fn cache_capabilities(
         .map_err(|e| ApiError::internal(format!("failed to encode capabilities: {e}")))?;
     let pv = serde_json::from_value::<PropertyValue>(value)
         .map_err(|e| ApiError::internal(format!("failed to encode capabilities: {e}")))?;
-    node.properties.insert("capabilities".to_string(), pv);
-    // `Date`, not a `String` holding an RFC3339 spelling: `capabilities_checked_at`
-    // is declared `Date`, and a string written here would only survive because
-    // `coerce_declared_dates` rescues it on the way through validation. Write the
-    // declared type at the source instead of relying on the rescue.
-    node.properties.insert(
-        "capabilities_checked_at".to_string(),
-        PropertyValue::Date(raisin_models::timestamp::StorageTimestamp::now()),
-    );
-    svc.update_node(node.clone()).await?;
-    Ok(())
+
+    crate::handlers::integrations::accounts_lock::with_accounts_lock(
+        state,
+        tenant_id,
+        repo,
+        integration_path,
+        "integration-test",
+        move |node| {
+            node.properties.insert("capabilities".to_string(), pv);
+            // `Date`, not a `String` holding an RFC3339 spelling:
+            // `capabilities_checked_at` is declared `Date`, and a string written
+            // here would only survive because `coerce_declared_dates` rescues it
+            // on the way through validation. Write the declared type at the
+            // source instead of relying on the rescue.
+            node.properties.insert(
+                "capabilities_checked_at".to_string(),
+                PropertyValue::Date(raisin_models::timestamp::StorageTimestamp::now()),
+            );
+            Ok(())
+        },
+    )
+    .await
 }
 
 /// System auth context for privileged config/function reads.

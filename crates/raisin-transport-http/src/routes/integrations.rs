@@ -112,6 +112,17 @@ pub(crate) fn integration_routes(state: &AppState) -> Router<AppState> {
                 "/api/integrations/{repo}/mounts/{mount_id}/stop",
                 post(integrations::stop_mount),
             )
+            // Point a mount at a different connection on its connector.
+            //
+            // `account_ref` is engine-owned and unreachable through
+            // `sync-config`, which left a mount whose connection was
+            // disconnected with no repair short of deleting and re-importing it.
+            // Explicit rather than automatic: it decides which mailbox a path
+            // syncs.
+            .route(
+                "/api/integrations/{repo}/mounts/{mount_id}/rebind",
+                post(integrations::rebind_mount),
+            )
             // Release ONE blocked batch of deletes. Scoped to the batch by a
             // content-derived token, so confirming three deletes cannot
             // authorise the thirty that arrived since.

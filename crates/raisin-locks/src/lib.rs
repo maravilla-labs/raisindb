@@ -108,6 +108,36 @@ pub fn scoped_key(tenant_id: &str, repo_id: &str, branch: &str, name: &str) -> S
     format!("{}\0{}\0{}\0{}", tenant_id, repo_id, branch, name)
 }
 
+/// The lock that serializes a connector's `connected_accounts` array.
+///
+/// **One key, every writer.** That array is a single node property mutated by
+/// five independent paths — the OAuth callback, disconnect, the connections
+/// endpoints, the capability-cache writeback and the background token-refresh
+/// job — and node updates are a plain read-modify-write with no optimistic
+/// concurrency. Two writers that overlap both read the same array and the
+/// second write wins wholesale.
+///
+/// It lives here, in the leaf crate both sides already depend on, because the
+/// HTTP surface and the refresh job previously built *different* keys
+/// (`integration-accounts:{path}` versus `integration-token-refresh:{id}`) and
+/// therefore excluded each other not at all. The specific casualty is token
+/// rotation: a writer holding a pre-network snapshot restores the PREVIOUS
+/// refresh token, which the provider invalidated the moment it issued the new
+/// one. Every later refresh then fails `invalid_grant`, nothing surfaces it,
+/// and the account silently dies until someone reconnects by hand.
+///
+/// The branch segment is fixed: connector config always lives on the config
+/// branch (`main`), so two branches never contend for one connector, and the
+/// two sides cannot disagree about which branch to scope by.
+pub fn integration_accounts_key(tenant_id: &str, repo_id: &str, integration_path: &str) -> String {
+    scoped_key(
+        tenant_id,
+        repo_id,
+        "main",
+        &format!("integration-accounts:{integration_path}"),
+    )
+}
+
 /// Which backend to use.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,

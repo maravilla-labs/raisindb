@@ -15,7 +15,7 @@
 //!   cannot carry a bearer token — it is authenticated instead by the single-use,
 //!   TTL'd `state` parameter minted by the authenticated `start` call.
 
-mod accounts_lock;
+pub(crate) mod accounts_lock;
 mod adapter_invoke;
 mod browse;
 mod client_secret;
@@ -28,6 +28,7 @@ mod mount_content;
 mod mount_control;
 mod mount_delete;
 mod mount_events;
+mod mount_rebind;
 mod notifications;
 mod oauth_callback;
 mod oauth_start;
@@ -50,6 +51,8 @@ pub use mount_content::fetch_mount_content;
 pub use mount_control::{confirm_writeback, pause_mount, stop_mount};
 pub use mount_delete::delete_mount;
 pub use mount_events::stream_mount_events;
+#[cfg(feature = "storage-rocksdb")]
+pub use mount_rebind::rebind_mount;
 pub use notifications::notify;
 pub use oauth_callback::callback;
 pub use oauth_start::start;

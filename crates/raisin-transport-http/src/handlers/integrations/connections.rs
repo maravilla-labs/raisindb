@@ -42,8 +42,29 @@ pub struct ConnectionView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subject: Option<String>,
     pub auth_kind: String,
+    /// Unix seconds at which the ACCESS token expires — around an hour out, and
+    /// refreshed in the background long before it matters.
+    ///
+    /// This is not a measure of the connection's health and must not be
+    /// rendered as one: it always reads as "today", it says nothing about the
+    /// refresh token that actually keeps the connection alive, and an operator
+    /// watching it sees a healthy-looking clock right up to the moment a dead
+    /// grant forces a reconnect. Use `health` / `last_refresh_at` for that.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<i64>,
+    /// Whether the grant is being kept alive: `healthy`, `failing`, or
+    /// `not_applicable` (no OAuth tokens).
+    pub health: raisin_models::nodes::integrations::ConnectionHealth,
+    /// Unix seconds of the last successful refresh (or of the initial consent).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_refresh_at: Option<i64>,
+    /// The provider's or the server's own reason the last refresh failed.
+    /// Already redacted of credential material where it came from a token
+    /// endpoint (`oauth_error_detail`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_refresh_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_refresh_error_at: Option<i64>,
     /// Per-connection non-secret configuration.
     pub config: Value,
     /// Names of the secret fields that are stored.
@@ -79,6 +100,10 @@ impl From<&ConnectedAccount> for ConnectionView {
                 raisin_models::nodes::integrations::AuthKind::Config => "config".into(),
             },
             expires_at: a.expires_at,
+            health: a.health(),
+            last_refresh_at: a.last_refresh_at,
+            last_refresh_error: a.last_refresh_error.clone(),
+            last_refresh_error_at: a.last_refresh_error_at,
             config: a.config_or_empty(),
             secret_fields: a.secret_fields.clone(),
             created_at: a.created_at.clone(),
@@ -212,8 +237,12 @@ pub async fn create_connection(
                 secret_fields: secrets.field_names,
                 created_at: Some(chrono::Utc::now().to_rfc3339()),
                 // A credential connection has no OAuth grant, so it has no
-                // scopes and can never report a shortfall.
+                // scopes and can never report a shortfall — and nothing about it
+                // is ever refreshed, so it has no refresh history either.
                 scopes: Vec::new(),
+                last_refresh_at: None,
+                last_refresh_error: None,
+                last_refresh_error_at: None,
             };
 
             let view = ConnectionView::from(&account);

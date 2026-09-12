@@ -8,7 +8,7 @@ icon: plug
 # Invisible until type enforcement landed; then the admin console could not save
 # an integration it had only just read. `coerce_declared_dates` parses the string
 # spelling, so values already stored as strings need no migration.
-version: 6
+version: 7
 strict: true
 indexable: true
 index_types: [Property]
@@ -147,7 +147,10 @@ properties:
                                            #   connection_config_type
           secrets_encrypted,               # base64 AES-256-GCM { field: value }
           secret_fields: [ ... ],          # names only, for UI indicators
-          created_at
+          created_at,
+          last_refresh_at,                 # unix secs, last SUCCESSFUL refresh
+          last_refresh_error,              # why the last refresh failed
+          last_refresh_error_at
         }
 
       tokens_encrypted holds base64 AES-256-GCM of { access_token, refresh_token }.
@@ -155,6 +158,15 @@ properties:
       subject, auth_kind, config, secret_fields and expires_at stay plaintext.
       All fields beyond id are optional, so pre-existing OAuth-only entries keep
       working unchanged.
+
+      expires_at is the ACCESS token's deadline — about an hour out, and renewed
+      by the background refresh sweep long before it matters. It is NOT a measure
+      of whether the connection is alive, and presenting it as one is actively
+      misleading: it always reads as "today", and a grant whose refresh token has
+      died shows exactly the same reassuring clock as a healthy one until someone
+      is forced to reconnect. What keeps a connection alive is the refresh token
+      being exercised; last_refresh_at / last_refresh_error are the record of
+      that, and are what a UI should show.
 
   - name: capabilities
     type: Object

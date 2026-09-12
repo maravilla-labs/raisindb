@@ -83,6 +83,42 @@ pub struct ConnectedAccount {
     /// field it does not know about is silently dropped on the next save.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scopes: Vec<String>,
+    /// Unix seconds of the last SUCCESSFUL token refresh (or of the consent
+    /// that created the connection).
+    ///
+    /// `expires_at` cannot answer "is this connection healthy?": it is the
+    /// ACCESS token's deadline, roughly an hour out, so it always reads as
+    /// today and looks fine right up until the grant is dead. What actually
+    /// keeps a connection alive is the refresh token being exercised, and this
+    /// is the only record that it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_refresh_at: Option<i64>,
+    /// Why the last refresh attempt failed, cleared on the next success.
+    ///
+    /// A failing refresh is silent by construction — the sweep is a background
+    /// job, the provider's `invalid_grant` goes to a log line, and the
+    /// connection keeps rendering as connected. Meanwhile the refresh token
+    /// ages out of the provider's inactivity window (two weeks, for a
+    /// Microsoft grant that is never exercised) and the operator learns to
+    /// reconnect on a schedule instead of being told what broke.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_refresh_error: Option<String>,
+    /// Unix seconds of [`Self::last_refresh_error`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_refresh_error_at: Option<i64>,
+}
+
+/// How a connection is doing, as opposed to when its access token expires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionHealth {
+    /// Refreshing normally, or too young to have refreshed yet.
+    Healthy,
+    /// The last refresh attempt failed. The grant may still be recoverable;
+    /// the recorded error says whether reconnecting is the fix.
+    Failing,
+    /// No OAuth tokens at all (a credential-based connection, or a broken one).
+    NotApplicable,
 }
 
 impl ConnectedAccount {
@@ -94,6 +130,22 @@ impl ConnectedAccount {
             .filter(|s| !s.is_empty())
             .or(self.subject.as_deref().filter(|s| !s.is_empty()))
             .unwrap_or(&self.id)
+    }
+
+    /// Whether this connection's grant is being kept alive.
+    ///
+    /// Deliberately NOT derived from `expires_at`: an access token that expired
+    /// twenty minutes ago is the normal state of a connection between sweeps,
+    /// and reporting that as unhealthy would flag every idle connector. Only a
+    /// recorded refresh FAILURE means something is wrong.
+    pub fn health(&self) -> ConnectionHealth {
+        if self.tokens_encrypted.is_none() {
+            return ConnectionHealth::NotApplicable;
+        }
+        match self.last_refresh_error.as_deref() {
+            Some(e) if !e.is_empty() => ConnectionHealth::Failing,
+            _ => ConnectionHealth::Healthy,
+        }
     }
 
     /// This connection's config object (empty when unset).

@@ -4,21 +4,29 @@
 //!
 //! # The race this closes
 //!
-//! `connected_accounts` is a single array property on one node, and **four**
-//! independent writers mutate it: the OAuth callback (appends a connection), the
-//! disconnect handler (removes one), the connections endpoints (add/edit), and
-//! the background token-refresh job (rewrites token blobs). Node updates are a
-//! plain read-check-write with no optimistic concurrency, so two writers that
-//! overlap both read the same array and the second one's write wins wholesale —
-//! silently discarding the other's entry.
+//! `connected_accounts` is a single array property on one node, and **five**
+//! independent writers mutate it: the OAuth callback (appends or re-authorizes a
+//! connection), the disconnect handler (removes one), the connections endpoints
+//! (add/edit), the capability-cache writeback behind `Test connection`, and the
+//! background token-refresh job (rewrites token blobs). Node updates are a plain
+//! read-check-write with no optimistic concurrency, so two writers that overlap
+//! both read the same array and the second one's write wins wholesale — silently
+//! discarding the other's entry.
 //!
-//! That is not theoretical: the refresh job reads every connector node, performs
-//! *network* token exchanges taking seconds, then writes the whole node back. An
-//! admin adding a connection inside that window loses it.
+//! That is not theoretical, and the expensive casualty is not a lost connection
+//! but a lost TOKEN ROTATION. Every one of these writers does seconds of network
+//! work — a token exchange, a revoke, an adapter probe — and the ones that read
+//! the node *before* that call and write the whole thing back *after* it restore
+//! the refresh token as it was beforehand. The provider invalidated that token
+//! the moment it issued the replacement, so every later refresh fails
+//! `invalid_grant`, nothing on this side surfaces it, and the account silently
+//! dies until an operator reconnects by hand. Reconnect, and it happens again.
 //!
 //! [`with_accounts_lock`] closes the window by taking a per-connector lease and
 //! **re-reading the node inside it**, so the mutation always applies to current
-//! state.
+//! state. Every writer above now goes through it; the refresh job takes the same
+//! lease (`raisin_locks::integration_accounts_key`) for its write-back, having
+//! done its exchanges outside it.
 
 use std::time::Duration;
 
@@ -37,15 +45,13 @@ const ACQUIRE_ATTEMPTS: usize = 5;
 const ACQUIRE_BACKOFF: Duration = Duration::from_millis(120);
 
 /// Lock name for a connector's connection list.
+///
+/// Delegates to [`raisin_locks::integration_accounts_key`] rather than
+/// formatting a key here: the background refresh job in `raisin-rocksdb` must
+/// take the SAME lock, and it previously took a different one — see that
+/// function's doc for what that cost.
 fn accounts_lock_key(tenant: &str, repo: &str, integration_path: &str) -> String {
-    // Config always lives on `main` (CONFIG_BRANCH), so the branch segment is
-    // fixed — two branches never contend for the same connector.
-    raisin_locks::scoped_key(
-        tenant,
-        repo,
-        super::CONFIG_BRANCH,
-        &format!("integration-accounts:{integration_path}"),
-    )
+    raisin_locks::integration_accounts_key(tenant, repo, integration_path)
 }
 
 /// Run `mutate` against a connector node under an exclusive lease, re-reading

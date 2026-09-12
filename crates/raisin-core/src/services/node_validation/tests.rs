@@ -1126,6 +1126,71 @@ async fn a_timestamp_validates_in_either_spelling_on_a_date_property() {
     );
 }
 
+/// The MIRROR of the test above: a `Date` value on a property whose declaration
+/// still says `String`.
+///
+/// This is the direction that actually broke production, and it is the one the
+/// original coercion did not cover. The binary's declarations were corrected to
+/// `Date`, but a NodeType lives in storage PER TENANT AND REPO and only adopts a
+/// corrected declaration when it resyncs. In the window before that — or
+/// indefinitely, behind a stale definitions overlay — the server writes `Date`
+/// into a schema that still declares `String`, and the whole node write is
+/// refused.
+///
+/// The blast radius was nowhere near the property involved. On one tenant's
+/// connector it discarded completed OAuth grants (the user consented, the
+/// provider issued tokens, the node could not be saved) and failed every token
+/// refresh for hours — each attempt having already rotated the refresh token at
+/// the provider. A bookkeeping timestamp must never be able to veto a
+/// credential write.
+#[tokio::test]
+async fn a_date_value_coerces_on_a_property_still_declared_string() {
+    let storage = setup_test_storage().await;
+    let validator = NodeValidator::new(
+        storage.clone(),
+        "default".to_string(),
+        "default".to_string(),
+        "main".to_string(),
+    );
+
+    // The UNMIGRATED declaration, exactly as a repo that has not resynced still
+    // holds it.
+    create_node_type(
+        &storage,
+        "test:StaleIntegration",
+        vec![create_property_schema(
+            "capabilities_checked_at",
+            PropertyType::String,
+            false,
+            false,
+        )],
+        true,
+    )
+    .await;
+
+    let mut props = HashMap::new();
+    props.insert(
+        "capabilities_checked_at".to_string(),
+        PropertyValue::Date(raisin_models::timestamp::StorageTimestamp::now()),
+    );
+    let mut node = create_test_node("test:StaleIntegration", props);
+
+    validator
+        .validate_and_stamp("ws1", &mut node)
+        .await
+        .expect("a Date against a String declaration must coerce, not refuse the write");
+
+    match node.properties.get("capabilities_checked_at") {
+        Some(PropertyValue::String(rendered)) => {
+            assert!(
+                chrono::DateTime::parse_from_rfc3339(rendered).is_ok(),
+                "the coerced value must be a real RFC3339 timestamp, got: {rendered}"
+            );
+        }
+        other => panic!("expected a coerced String, got {other:?}"),
+    }
+}
+
 /// Every built-in `_at` property must be declared `Date`.
 ///
 /// Declaring one `String` is unsatisfiable over the wire (see the test above),

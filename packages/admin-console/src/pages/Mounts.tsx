@@ -174,6 +174,30 @@ export default function Mounts() {
     }
   }
 
+  /**
+   * Repair a mount whose `account_ref` names a connection that is gone.
+   *
+   * Deliberately operator-driven. The engine could re-point such a mount at the
+   * connector's remaining connection by itself, and on a single-connection
+   * connector that would usually be right — but "usually" is the problem: the
+   * failure mode is materialising one person's mailbox under a path that was
+   * syncing someone else's, silently. So the choice is made here, by a human who
+   * can see whose account they are picking.
+   */
+  async function handleRebind(m: VirtualMount, accountId: string) {
+    if (!repo || !m.id) return
+    try {
+      const res = await integrationsApi.rebindMount(repo, m.id, accountId)
+      showSuccess(
+        'Connection reassigned',
+        `${m.title} now syncs through ${res.label || res.account_id}. Its sync state was kept.`,
+      )
+      window.setTimeout(() => void load(true), 800)
+    } catch (e: any) {
+      showError('Could not reassign the connection', e?.message)
+    }
+  }
+
   async function confirmRemap() {
     if (!repo || !remapTarget?.id) return
     const target = remapTarget
@@ -314,6 +338,18 @@ export default function Mounts() {
                 {m.state.last_error}
               </span>
             )}
+            {/*
+              A mount pinned to a connection that no longer exists cannot be
+              repaired from anywhere else: `account_ref` is engine-owned, so the
+              sync-config form will not touch it, and re-connecting the account
+              mints a NEW id rather than reviving the old one. Without this the
+              only exit was deleting the mount and re-importing every item.
+            */}
+            <RebindPrompt
+              mount={m}
+              integration={integrationFor(m)}
+              onRebind={handleRebind}
+            />
           </div>
         )
       },
@@ -561,6 +597,64 @@ export default function Mounts() {
         onCancel={() => setRemapTarget(null)}
       />
       <ToastContainer toasts={toasts} onClose={closeToast} />
+    </div>
+  )
+}
+
+/**
+ * The repair affordance for a mount pinned to a connection that no longer
+ * exists.
+ *
+ * Renders NOTHING in every healthy case — an unset `account_ref` (meaning "this
+ * connector has one connection, use it") is a supported configuration, not a
+ * fault, and flagging it would put a warning on most mounts in most
+ * deployments. It appears only when the mount names an id the connector does
+ * not have, which is precisely the state that produces
+ * `connected account ... no longer exists on this connector` once a minute with
+ * no way out short of deleting the mount.
+ */
+function RebindPrompt({
+  mount,
+  integration,
+  onRebind,
+}: {
+  mount: VirtualMount
+  integration?: Integration
+  onRebind: (m: VirtualMount, accountId: string) => void
+}) {
+  const ref = mount.account_ref
+  const accounts = integration?.connected_accounts || []
+  // Until the connector has loaded we cannot tell a dangling reference from a
+  // live one, and guessing would flash a scary warning on a healthy row.
+  if (!ref || !integration) return null
+  if (accounts.some((a) => a.id === ref)) return null
+
+  return (
+    <div className="mt-1 flex flex-col gap-1">
+      <span className="text-[10px] text-red-400">
+        Its connection was removed — this mount cannot sync until it is reassigned.
+      </span>
+      {accounts.length === 0 ? (
+        <span className="text-[10px] text-zinc-500">
+          Connect an account on the connector first.
+        </span>
+      ) : (
+        <select
+          className="text-[10px] bg-white/5 border border-white/10 rounded px-1 py-0.5 text-zinc-200"
+          defaultValue=""
+          onChange={(e) => {
+            if (e.target.value) onRebind(mount, e.target.value)
+          }}
+          title="Pick the connection this mount should sync through"
+        >
+          <option value="">Reassign connection…</option>
+          {accounts.map((a) => (
+            <option key={a.id} value={a.id}>
+              {a.label || a.subject || a.id}
+            </option>
+          ))}
+        </select>
+      )}
     </div>
   )
 }

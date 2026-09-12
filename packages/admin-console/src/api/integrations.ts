@@ -104,8 +104,16 @@ export interface ConnectedAccount {
   label?: string
   subject?: string
   provider_type?: string
-  /** Unix seconds when the access token expires. */
+  /**
+   * Unix seconds when the ACCESS token expires — roughly an hour out and
+   * renewed in the background. Not a health signal; see `last_refresh_at`.
+   */
   expires_at?: number
+  /** Unix seconds of the last successful token refresh, or of the consent. */
+  last_refresh_at?: number
+  /** Why the last background refresh failed, cleared on the next success. */
+  last_refresh_error?: string
+  last_refresh_error_at?: number
 }
 
 /**
@@ -1383,7 +1391,31 @@ export interface Connection {
   label: string
   subject?: string
   auth_kind: 'oauth' | 'config'
+  /**
+   * Unix seconds at which the ACCESS token expires — about an hour out, and
+   * renewed in the background long before it matters.
+   *
+   * Do NOT render this as the connection's status. It always reads as "today",
+   * it says nothing about the refresh token that actually keeps the connection
+   * alive, and a dying grant shows the same reassuring clock as a healthy one
+   * until an operator is forced to reconnect. Use `health` / `last_refresh_at`.
+   */
   expires_at?: number
+  /**
+   * Whether the grant is being kept alive.
+   *
+   * `failing` means the background refresh sweep got an error from the provider
+   * (or could not decrypt the stored tokens). Left unattended that ends with the
+   * refresh token ageing out of the provider's inactivity window — two weeks for
+   * a Microsoft grant that is never exercised — and a connection that has to be
+   * reconnected by hand on a schedule, with nothing ever saying why.
+   */
+  health?: 'healthy' | 'failing' | 'not_applicable'
+  /** Unix seconds of the last successful refresh (or of the initial consent). */
+  last_refresh_at?: number
+  /** Why the last refresh failed. Already redacted of credential material. */
+  last_refresh_error?: string
+  last_refresh_error_at?: number
   /** Per-connection non-secret configuration. */
   config: Record<string, unknown>
   /** Names only of the secret fields that are stored. */
@@ -1625,11 +1657,41 @@ export const integrationsApi = {
       integration_path: integrationPath,
     }),
 
-  oauthDisconnect: (repo: string, integrationPath: string, accountId: string) =>
-    api.post<{ disconnected: boolean }>(`/api/integrations/${repo}/oauth/disconnect`, {
-      integration_path: integrationPath,
-      account_id: accountId,
-    }),
+  /**
+   * Remove a connection.
+   *
+   * Refused with 409 `CONNECTION_IN_USE` when mounts are pinned to it, because
+   * removing it breaks them on their next sync and re-connecting does NOT
+   * repair them — consent mints a new account id, so the pinned mounts stay
+   * broken while the console shows a healthy connection. Pass `force` only
+   * after the operator has been told which mounts it will orphan; the response
+   * then lists them, and each needs `rebindMount` before it syncs again.
+   */
+  oauthDisconnect: (repo: string, integrationPath: string, accountId: string, force = false) =>
+    api.post<{ disconnected: boolean; orphaned_mounts?: string[] }>(
+      `/api/integrations/${repo}/oauth/disconnect`,
+      {
+        integration_path: integrationPath,
+        account_id: accountId,
+        ...(force ? { force: true } : {}),
+      }
+    ),
+
+  /**
+   * Point a mount at a different connection on its connector.
+   *
+   * The repair for a mount whose connection was disconnected. `account_ref` is
+   * engine-owned and not reachable through `patchSyncConfig`, so before this
+   * endpoint the only way out was deleting the mount and re-importing
+   * everything. The mount keeps its cursors and backfill progress.
+   */
+  rebindMount: (repo: string, mountId: string, accountId: string) =>
+    api.post<{
+      ok: boolean
+      account_id: string
+      previous_account_id?: string
+      label?: string
+    }>(`/api/integrations/${repo}/mounts/${mountId}/rebind`, { account_id: accountId }),
 
   /**
    * Fetch the provider-side setup URLs. Omit `mountId` for the connector-level

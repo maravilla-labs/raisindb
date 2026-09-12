@@ -226,7 +226,7 @@ pub async fn callback(
 
     let master_key = state.get_master_key()?;
     let svc = super::config_service(&state, &entry.tenant_id, &entry.repo, "integration-oauth");
-    let Some(mut node) = svc.get_by_path(&entry.target_path).await? else {
+    let Some(node) = svc.get_by_path(&entry.target_path).await? else {
         return Ok(relay_page(
             &repo,
             &Outcome::failed(
@@ -401,8 +401,6 @@ pub async fn callback(
             }
         };
 
-    let mut accounts = connected_accounts(&node);
-
     // RECONNECT, not "connect a second time".
     //
     // An account is identified by the provider's own subject, so re-consenting
@@ -421,48 +419,71 @@ pub async fn callback(
     // — so those still append. Guessing which existing account an anonymous
     // grant belongs to would eventually attach someone's tokens to someone
     // else's account.
-    let existing = if subject.is_empty() {
-        None
-    } else {
-        accounts.iter().position(|a| {
-            a.get("subject").and_then(|v| v.as_str()) == Some(subject.as_str())
-                && a.get("provider_type").and_then(|v| v.as_str()) == Some(provider_type.as_str())
-        })
-    };
+    // Every mutation of the array happens INSIDE the lease, against a node
+    // re-read there — never against `node`, which was loaded before the token
+    // exchange above. Writing that stale snapshot back is what used to revert a
+    // refresh token the background job had just rotated, killing the grant.
+    let target_path = entry.target_path.clone();
+    let persisted = super::accounts_lock::with_accounts_lock(
+        &state,
+        &entry.tenant_id,
+        &entry.repo,
+        &target_path,
+        "integration-oauth",
+        move |node| {
+            let mut accounts = connected_accounts(node);
+            let existing = if subject.is_empty() {
+                None
+            } else {
+                accounts.iter().position(|a| {
+                    a.get("subject").and_then(|v| v.as_str()) == Some(subject.as_str())
+                        && a.get("provider_type").and_then(|v| v.as_str())
+                            == Some(provider_type.as_str())
+                })
+            };
 
-    let account_id = match existing {
-        Some(i) => accounts[i]
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string(),
-        None => nanoid::nanoid!(),
-    };
-    let account = json!({
-        "id": account_id,
-        "label": if subject.is_empty() { provider_type.clone() } else { subject.clone() },
-        "subject": subject,
-        "provider_type": provider_type,
-        "expires_at": now_secs() as i64 + expires_in.max(0),
-        "tokens_encrypted": tokens_encrypted,
-        "scopes": granted_scopes,
-        "connected_at": now_secs() as i64,
-    });
+            let account_id = match existing {
+                Some(i) => accounts[i]
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                None => nanoid::nanoid!(),
+            };
+            let account = json!({
+                "id": account_id,
+                "label": if subject.is_empty() { provider_type.clone() } else { subject.clone() },
+                "subject": subject,
+                "provider_type": provider_type,
+                "expires_at": now_secs() as i64 + expires_in.max(0),
+                "tokens_encrypted": tokens_encrypted,
+                "scopes": granted_scopes,
+                "connected_at": now_secs() as i64,
+                // A fresh grant starts with a clean refresh history: whatever
+                // `invalid_grant` killed the previous one is answered now, and
+                // leaving the old error in place would keep the console showing
+                // an account the operator has just fixed as broken.
+                "last_refresh_at": now_secs() as i64,
+            });
 
-    match existing {
-        Some(i) => {
-            tracing::info!(
-                integration_path = %entry.target_path,
-                account_id = %account_id,
-                "re-authorized an existing account in place; its id and every mount                  referencing it are unchanged"
-            );
-            accounts[i] = account;
-        }
-        None => accounts.push(account),
-    }
-    set_connected_accounts(&mut node, accounts)?;
-    if let Err(e) = svc.update_node(node).await {
-        tracing::error!(error = %e, integration_path = %entry.target_path,
+            match existing {
+                Some(i) => {
+                    tracing::info!(
+                        account_id = %account_id,
+                        "re-authorized an existing account in place; its id and every mount \
+                         referencing it are unchanged"
+                    );
+                    accounts[i] = account;
+                }
+                None => accounts.push(account),
+            }
+            set_connected_accounts(node, accounts)
+        },
+    )
+    .await;
+
+    if let Err(e) = persisted {
+        tracing::error!(error = %e, integration_path = %target_path,
             "failed to persist the connected account after a successful OAuth exchange");
         return Ok(relay_page(
             &repo,

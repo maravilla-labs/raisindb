@@ -160,7 +160,7 @@ pub async fn test_connection(
     let started = Instant::now();
 
     let svc = super::config_service(&state, &tenant.tenant_id, &repo, "integration-test");
-    let mut node = svc
+    let node = svc
         .get_by_path(&req.integration_path)
         .await?
         .ok_or_else(|| ApiError::node_not_found(req.integration_path.clone()))?;
@@ -243,7 +243,14 @@ pub async fn test_connection(
     // Persist resolved capabilities on success so the UI need not re-test.
     if outcome.ok {
         if let Some(caps) = &outcome.capabilities {
-            let _ = support::cache_capabilities(&svc, &mut node, caps).await;
+            let _ = support::cache_capabilities(
+                &state,
+                &tenant.tenant_id,
+                &repo,
+                &req.integration_path,
+                caps,
+            )
+            .await;
         }
     }
 

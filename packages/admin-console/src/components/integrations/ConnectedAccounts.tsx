@@ -18,6 +18,7 @@ import {
   type Connection,
 } from '../../api/integrations'
 import ConnectionEditor from './ConnectionEditor'
+import ConfirmDialog from '../ConfirmDialog'
 
 interface ConnectedAccountsProps {
   repo: string
@@ -53,14 +54,52 @@ function subtitleFor(account: ConnectedAccount, connection?: Connection): string
       .find((v) => typeof v === 'string' && v.length > 0)
     return (identity as string) || 'credential connection'
   }
-  return expiryLabel(account)
+  return refreshLabel(account, connection)
 }
 
-function expiryLabel(account: ConnectedAccount): string {
-  if (!account.expires_at) return ''
-  const when = new Date(account.expires_at * 1000)
-  const expired = account.expires_at * 1000 < Date.now()
-  return `${expired ? 'expired' : 'expires'} ${when.toLocaleString()}`
+/** "3 minutes ago" / "2 days ago" for an epoch-seconds instant. */
+function ago(seconds: number): string {
+  const mins = Math.max(0, Math.round((Date.now() - seconds * 1000) / 60000))
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins} min ago`
+  const hours = Math.round(mins / 60)
+  if (hours < 48) return `${hours} h ago`
+  return `${Math.round(hours / 24)} days ago`
+}
+
+/**
+ * What an OAuth connection's secondary line says.
+ *
+ * It used to show `expires_at`, and that was the wrong number in the most
+ * misleading possible way. `expires_at` is the ACCESS token's deadline — an
+ * hour or so out, renewed silently in the background — so it renders as a time
+ * later today whatever state the connection is in. An operator watching it sees
+ * a healthy clock tick right up to the day the grant is dead, and clicking
+ * Reconnect appears to "only change the time", because that is all it can
+ * change.
+ *
+ * What decides whether a connection survives is the REFRESH token being
+ * exercised. That is what this reports.
+ */
+function refreshLabel(account: ConnectedAccount, connection?: Connection): string {
+  // The connection projection is the better source (it carries the server's own
+  // `health` verdict), but it is only fetched for connectors that declare a
+  // `connection_config_type`. Fall back to the node's own account entry so a
+  // connector without one still reports something true rather than nothing.
+  if (isFailing(account, connection)) return 'not refreshing — see below'
+  const at = connection?.last_refresh_at ?? account.last_refresh_at
+  return at ? `token refreshed ${ago(at)}` : 'connected'
+}
+
+/** Whether the last background refresh of this connection failed. */
+function isFailing(account: ConnectedAccount, connection?: Connection): boolean {
+  if (connection) return connection.health === 'failing'
+  return !!account.last_refresh_error
+}
+
+/** The recorded reason, from whichever source carries it. */
+function failureReason(account: ConnectedAccount, connection?: Connection): string {
+  return connection?.last_refresh_error || account.last_refresh_error || 'no reason recorded'
 }
 
 /**
@@ -87,6 +126,11 @@ export default function ConnectedAccounts({
   // Read connections from the dedicated endpoint rather than off the node: the
   // node carries token/secret ciphertext, this projection does not.
   const [connections, setConnections] = useState<Connection[]>([])
+  // A disconnect the server refused because mounts are pinned to the
+  // connection, parked until the operator confirms the cost.
+  const [forceTarget, setForceTarget] = useState<
+    { account: ConnectedAccount; reason: string } | null
+  >(null)
 
   const accounts = integration.connected_accounts || []
   // "Add connection" only makes sense once the connector declares what a
@@ -201,15 +245,43 @@ export default function ConnectedAccounts({
     }
   }
 
-  async function handleDisconnect(account: ConnectedAccount) {
+  /**
+   * Disconnect, refusing to silently orphan mounts.
+   *
+   * The server answers 409 `CONNECTION_IN_USE` and names the mounts. That
+   * confirmation matters more than it looks: removing a connection does not
+   * break the mounts now, it breaks them on their next sync, and RE-CONNECTING
+   * DOES NOT FIX THEM — consent mints a new account id, so the pinned mounts
+   * keep failing against an id that will never come back while this panel shows
+   * a healthy connection. Forcing is offered, but only after being told the
+   * cost and with the repair (Mounts → Reassign connection) named.
+   */
+  async function handleDisconnect(account: ConnectedAccount, force = false) {
     if (!integration.path) return
     setDisconnecting(account.id)
     try {
-      await integrationsApi.oauthDisconnect(repo, integration.path, account.id)
-      onSuccess('Disconnected', account.label || account.id)
+      const res = await integrationsApi.oauthDisconnect(repo, integration.path, account.id, force)
+      const orphaned = res.orphaned_mounts?.length ?? 0
+      if (orphaned > 0) {
+        onSuccess(
+          'Disconnected',
+          `${orphaned} mount(s) now have no connection. Reassign them on the Mounts page — ` +
+            `reconnecting this account will NOT repair them.`,
+        )
+      } else {
+        onSuccess('Disconnected', account.label || account.id)
+      }
       onChanged()
     } catch (e: any) {
-      onError('Disconnect failed', e?.message)
+      if (e?.code === 'CONNECTION_IN_USE' || /CONNECTION_IN_USE/.test(e?.message || '')) {
+        // In-DOM dialog, never `window.confirm`: it is forbidden in any
+        // Tauri-hosted path (WKWebView returns true without showing anything,
+        // which would turn "are you sure?" into an unconditional yes), and the
+        // console already ships one everywhere else.
+        setForceTarget({ account, reason: e?.message || 'Mounts are pinned to this connection.' })
+      } else {
+        onError('Disconnect failed', e?.message)
+      }
     } finally {
       setDisconnecting(null)
     }
@@ -284,6 +356,24 @@ export default function ConnectedAccounts({
                     days after the connector's scope list was widened, and
                     nowhere near the account that needs re-consenting.
                   */}
+                  {/*
+                    A failing refresh is the one thing here that is genuinely
+                    urgent, and it used to be visible nowhere at all: the sweep
+                    logs a warning and the row keeps rendering a healthy-looking
+                    expiry. The grant then dies of inactivity at the provider's
+                    own deadline and the operator concludes that reconnecting
+                    every couple of weeks is just how this works.
+                  */}
+                  {isFailing(account, connectionFor(account.id)) && (
+                    <div className="mt-1 text-xs text-red-400">
+                      <span className="font-medium">Token refresh is failing.</span>{' '}
+                      <span className="text-red-300/90">
+                        {failureReason(account, connectionFor(account.id))}
+                      </span>{' '}
+                      Reconnect to re-authorize — left alone, this connection stops working
+                      when the provider retires its refresh token.
+                    </div>
+                  )}
                   {(connectionFor(account.id)?.missing_scopes?.length ?? 0) > 0 && (
                     <div className="mt-1 text-xs text-amber-400">
                       Missing permissions — reconnect to grant:{' '}
@@ -368,6 +458,26 @@ export default function ConnectedAccounts({
           onSuccess={onSuccess}
         />
       )}
+
+      <ConfirmDialog
+        open={forceTarget !== null}
+        title="This connection is in use"
+        message={
+          `${forceTarget?.reason || ''}\n\n` +
+          `Disconnect anyway? Those mounts stop syncing immediately and stay broken until ` +
+          `you reassign each one to another connection on the Mounts page.\n\n` +
+          `Reconnecting this account will NOT repair them: consent creates a new connection ` +
+          `with a new id, and the mounts stay pinned to the one being removed here.`
+        }
+        variant="danger"
+        confirmText="Disconnect anyway"
+        onConfirm={() => {
+          const target = forceTarget
+          setForceTarget(null)
+          if (target) void handleDisconnect(target.account, true)
+        }}
+        onCancel={() => setForceTarget(null)}
+      />
     </div>
   )
 }

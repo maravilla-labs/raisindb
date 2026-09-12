@@ -33,7 +33,9 @@ mod capabilities;
 mod config;
 mod credential;
 
-pub use account::{AccountSelection, AccountSelectionError, AuthKind, ConnectedAccount};
+pub use account::{
+    AccountSelection, AccountSelectionError, AuthKind, ConnectedAccount, ConnectionHealth,
+};
 pub use capabilities::Capabilities;
 pub use config::{merge_config, secret_field_names, IntegrationConfig};
 pub use credential::build_credential;

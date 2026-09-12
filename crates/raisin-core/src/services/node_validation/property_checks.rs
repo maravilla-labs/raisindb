@@ -456,7 +456,55 @@ pub(super) fn coerce_declared_dates(node: &mut Node, resolved: &ResolvedNodeType
             }
         }
     }
+
+    coerce_dates_declared_as_string(node, resolved);
     Ok(())
+}
+
+/// The mirror image: a `Date` VALUE against a declaration that still says
+/// `String`.
+///
+/// The pass above assumed the declarations would be corrected to `Date`
+/// everywhere, and they were — in the binary. A NodeType lives in storage per
+/// tenant and repo, though, and it only picks up a corrected declaration when it
+/// resyncs. Between a deploy and that resync — or indefinitely, if a stale
+/// definitions overlay outranks the binary — the server writes `Date` into a
+/// schema that still declares `String`, and the type check refuses the write.
+///
+/// That is not a hypothetical. It took out one tenant's connector node
+/// completely, and the damage was nowhere near the property involved:
+///
+/// - **Completed OAuth grants were discarded.** The user consented, Microsoft
+///   issued tokens, and `oauth_callback` could not persist the node — so the
+///   credential was thrown away after the irreversible half of the flow.
+/// - **Every token refresh failed to save**, once a minute for hours, AFTER
+///   performing a real token exchange at the provider. A provider that rotates
+///   refresh tokens invalidates the stored one on each of those, so a write
+///   that cannot land does not merely fail to save: it burns the credential.
+///
+/// Neither writer had touched `capabilities_checked_at`. They were refused
+/// because of a value already sitting on the node — which is the real lesson
+/// here, and why this coercion is worth having in both directions rather than
+/// relying on every NodeType in every repo being current.
+///
+/// Rendering a timestamp as RFC3339 is loss-free and is exactly what the
+/// `String` declaration meant, so there is nothing to refuse: unlike the
+/// direction above, this cannot encounter an unparseable value.
+fn coerce_dates_declared_as_string(node: &mut Node, resolved: &ResolvedNodeType) {
+    for prop in &resolved.resolved_properties {
+        if prop.property_type != PropertyType::String {
+            continue;
+        }
+        let Some(name) = prop.name.as_deref() else {
+            continue;
+        };
+        let Some(PropertyValue::Date(ts)) = node.properties.get(name) else {
+            continue;
+        };
+        let rendered = ts.as_datetime().to_rfc3339();
+        node.properties
+            .insert(name.to_string(), PropertyValue::String(rendered));
+    }
 }
 
 /// Enforce every declared `PropertyType` against the value actually present.

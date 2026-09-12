@@ -24,12 +24,28 @@ use crate::state::AppState;
 pub struct DisconnectRequest {
     pub integration_path: String,
     pub account_id: String,
+    /// Disconnect even though mounts are pinned to this connection.
+    ///
+    /// Without it, a disconnect that would orphan a mount is refused. The mounts
+    /// do not fail at disconnect time — they fail on their next sync, once a
+    /// minute, with `connected account ... no longer exists on this connector`,
+    /// and there is nothing in that message tying it back to the click that
+    /// caused it. Re-connecting does not undo it either: consent mints a NEW
+    /// account id, so the pinned mounts stay broken while the console shows a
+    /// healthy connection.
+    #[serde(default)]
+    pub force: bool,
 }
 
 /// Response for `oauth/disconnect`.
 #[derive(Debug, Serialize)]
 pub struct DisconnectResponse {
     pub disconnected: bool,
+    /// Mounts that were pinned to this connection and are now unbound. Present
+    /// only on a forced disconnect; each needs a `mounts/{id}/rebind` before it
+    /// will sync again.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub orphaned_mounts: Vec<String>,
 }
 
 /// Best-effort revoke the provider tokens for one connected account and drop the
@@ -45,22 +61,41 @@ pub async fn disconnect(
 
     let master_key = state.get_master_key().ok();
     let svc = super::config_service(&state, &tenant.tenant_id, &repo, "integration-oauth");
-    let mut node = svc
+    let node = svc
         .get_by_path(&req.integration_path)
         .await?
         .ok_or_else(|| ApiError::node_not_found(req.integration_path.clone()))?;
 
     let cfg = oauth_config(&node);
     let revoke_url = json_str(&cfg, "revoke_url");
-    let mut accounts = connected_accounts(&node);
 
     // Locate the target account (if any).
-    let target = accounts
-        .iter()
-        .find(|a| a.get("id").and_then(|v| v.as_str()) == Some(req.account_id.as_str()))
-        .cloned();
+    let target = connected_accounts(&node)
+        .into_iter()
+        .find(|a| a.get("id").and_then(|v| v.as_str()) == Some(req.account_id.as_str()));
 
-    // Best-effort provider revoke; failures never block local removal.
+    // Refuse to orphan mounts silently. Checked BEFORE the revoke, so a refused
+    // disconnect leaves the provider-side grant intact too — a half-done
+    // disconnect that revoked the tokens but kept the entry would be the worst
+    // of both.
+    let pinned = mounts_pinned_to(&state, &tenant.tenant_id, &repo, &req.account_id).await?;
+    if !pinned.is_empty() && !req.force {
+        return Err(ApiError::new(
+            axum::http::StatusCode::CONFLICT,
+            "CONNECTION_IN_USE",
+            format!(
+                "{} mount(s) are pinned to this connection and will stop syncing if it is \
+                 removed ({}). Rebind them to another connection first, or repeat with \
+                 force to disconnect anyway.",
+                pinned.len(),
+                pinned.join(", ")
+            ),
+        ));
+    }
+
+    // Best-effort provider revoke; failures never block local removal. Done
+    // BEFORE the lease is taken — it is a network round trip, and the lease
+    // exists to cover a read-modify-write, not an HTTP call.
     if let (Some(revoke_url), Some(account), Some(key)) = (revoke_url, target, master_key) {
         if let Some(token) = access_token_for(&account, &key) {
             let _ = reqwest::Client::new()
@@ -71,18 +106,62 @@ pub async fn disconnect(
         }
     }
 
-    let before = accounts.len();
-    accounts.retain(|a| a.get("id").and_then(|v| v.as_str()) != Some(req.account_id.as_str()));
-    let removed = accounts.len() != before;
+    // Removal re-reads inside the lease: `node` above predates the revoke call,
+    // and writing it back would restore any token blob the refresh job rotated
+    // meanwhile onto the OTHER connections of this connector.
+    let account_id = req.account_id.clone();
+    let removed = super::accounts_lock::with_accounts_lock(
+        &state,
+        &tenant.tenant_id,
+        &repo,
+        &req.integration_path,
+        "integration-oauth",
+        move |node| {
+            let mut accounts = connected_accounts(node);
+            let before = accounts.len();
+            accounts.retain(|a| a.get("id").and_then(|v| v.as_str()) != Some(account_id.as_str()));
+            let removed = accounts.len() != before;
+            if removed {
+                set_connected_accounts(node, accounts)?;
+            }
+            Ok(removed)
+        },
+    )
+    .await?;
 
-    if removed {
-        set_connected_accounts(&mut node, accounts)?;
-        svc.update_node(node).await?;
+    if removed && !pinned.is_empty() {
+        tracing::warn!(
+            account_id = %req.account_id,
+            orphaned = pinned.len(),
+            "forced disconnect orphaned mounts; they need rebinding before they sync again"
+        );
     }
 
     Ok(Json(DisconnectResponse {
         disconnected: removed,
+        orphaned_mounts: if removed { pinned } else { Vec::new() },
     }))
+}
+
+/// Mount ids whose `account_ref` pins them to `account_id`.
+///
+/// Only EXPLICIT references count. A mount with no `account_ref` resolves to the
+/// connector's single connection, so removing that connection breaks it too —
+/// but it is equally repaired by connecting another, needs no rebind, and
+/// blocking on it would make the last connection undeletable.
+async fn mounts_pinned_to(
+    state: &AppState,
+    tenant_id: &str,
+    repo: &str,
+    account_id: &str,
+) -> Result<Vec<String>, ApiError> {
+    let svc = super::config_service(state, tenant_id, repo, "integration-oauth");
+    let mounts = svc.list_by_type("raisin:VirtualMount").await?;
+    Ok(mounts
+        .into_iter()
+        .filter(|m| super::json_prop(m, "account_ref").as_str() == Some(account_id))
+        .map(|m| m.id)
+        .collect())
 }
 
 /// Decrypt just the access token from an account's `tokens_encrypted` blob.
