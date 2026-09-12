@@ -99,7 +99,19 @@ impl VirtualMountSyncHandler {
             // run is owed to it, and if it is still bad this latches again with
             // a fresh stamp — so a genuinely dead grant still retries once per
             // repair, not once per minute.
-            if self.credential_is_newer_than_failure(&svc, &mount).await {
+            // When the latch predates the stamp, fall back to the last attempt
+            // — which IS when it last failed. Without this, every mount latched
+            // by an older build stays latched forever: escaping needs a stamp,
+            // and the stamp is only written by a NEW failure, which needs a run.
+            // That is the same deadlock this change exists to break, one level
+            // down, and it would have left every currently-broken mount exactly
+            // as broken.
+            let latched_at = mount.state.auth_required_at.or(mount.state.last_attempt_at);
+
+            if self
+                .credential_is_newer_than_failure(&svc, &mount, latched_at)
+                .await
+            {
                 tracing::info!(
                     mount_id = %mount_id,
                     "the connection was re-authorized after this mount latched \
@@ -225,6 +237,9 @@ impl VirtualMountSyncHandler {
     /// successful background refresh and a fresh consent, which is exactly the
     /// set of events that can repair a rejected credential.
     ///
+    /// `latched_at` is when the credential is known to have failed — the
+    /// latch stamp, or the last attempt when the latch predates that stamp.
+    ///
     /// Fails CLOSED: anything unreadable (no integration node, no resolvable
     /// account, no stamp) answers `false` and the mount stays latched. The cost
     /// of a false negative is that an operator reconnects and waits for the next
@@ -234,10 +249,11 @@ impl VirtualMountSyncHandler {
         &self,
         svc: &NodeService<RocksDBStorage>,
         mount: &MountConfig,
+        latched_at: Option<i64>,
     ) -> bool {
-        let Some(latched_at) = mount.state.auth_required_at else {
-            // Latched by a build that did not stamp it. One clean way out:
-            // treat it as un-latchable and let the next failure re-stamp it.
+        let Some(latched_at) = latched_at else {
+            // Nothing to compare against at all — no stamp and no recorded
+            // attempt. Stay latched; the next failure records one.
             return false;
         };
         let Ok(Some(integ_node)) = self.load_integration_node(svc, mount).await else {
@@ -424,5 +440,28 @@ mod auth_latch_tests {
         assert!(!unlatches(Some(1_000), None), "no credential stamp");
         assert!(!unlatches(None, Some(1_001)), "no latch stamp");
         assert!(!unlatches(None, None));
+    }
+
+    /// A mount latched by a build that never stamped `auth_required_at` must
+    /// still be able to escape, or the fix helps only mounts that break in
+    /// future — leaving every currently-broken one exactly as broken. The last
+    /// ATTEMPT is when it last failed, so it is the right fallback.
+    #[test]
+    fn a_latch_older_than_the_stamp_falls_back_to_the_last_attempt() {
+        let effective = |auth_required_at: Option<i64>, last_attempt_at: Option<i64>| {
+            auth_required_at.or(last_attempt_at)
+        };
+
+        // Latched yesterday by an older build; reconnected since.
+        let latched = effective(None, Some(1_000));
+        assert!(unlatches(latched, Some(1_500)), "the reconnect is newer");
+
+        // Once backfilled, the stamp wins — so the attempt stamp, which this
+        // very skip path keeps moving forward, cannot chase its own tail.
+        let latched = effective(Some(1_000), Some(9_999));
+        assert!(
+            unlatches(latched, Some(1_500)),
+            "must compare against the latch, not the moving attempt stamp"
+        );
     }
 }
