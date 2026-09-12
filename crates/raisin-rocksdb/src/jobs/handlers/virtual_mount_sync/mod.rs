@@ -91,6 +91,13 @@ use state_store::{persist_state, StateWrite};
 /// Handler for the two virtual-mount job types.
 pub struct VirtualMountSyncHandler {
     storage: Arc<RocksDBStorage>,
+    /// Latched mounts this PROCESS has already re-examined once.
+    ///
+    /// See the "one free look" note in `preflight`: it is what rescues a mount
+    /// whose recorded failure time is wrong, which no timestamp comparison can
+    /// do. Process-scoped on purpose — it must not persist, or it would grant
+    /// exactly one retry ever.
+    auth_first_look: std::sync::Mutex<std::collections::HashSet<String>>,
     invoker: Option<AdapterInvokerHandle>,
     materializer: Arc<dyn NodeMaterializer>,
     lock_manager: Option<LockManagerHandle>,
@@ -136,6 +143,7 @@ impl VirtualMountSyncHandler {
             binary_delete: None,
             binary_retrieval: None,
             instance_id: nanoid::nanoid!(8),
+            auth_first_look: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 

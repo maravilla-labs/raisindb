@@ -108,14 +108,32 @@ impl VirtualMountSyncHandler {
             // as broken.
             let latched_at = mount.state.auth_required_at.or(mount.state.last_attempt_at);
 
-            if self
-                .credential_is_newer_than_failure(&svc, &mount, latched_at)
-                .await
+            // One free look per mount per process, on top of the timestamp rule.
+            //
+            // Timestamps cannot rescue a mount whose recorded history is wrong,
+            // and an earlier build wrote exactly that: it spaced the re-check on
+            // `last_attempt_at`, so the record of when the mount failed advanced
+            // every ten minutes until it was newer than the credential that had
+            // already repaired it. No comparison against that value can ever
+            // come out true.
+            //
+            // So each mount gets ONE attempt per process regardless. It is
+            // self-limiting — one adapter call, not a loop — and if the
+            // credential really is still rejected the mount latches again with
+            // an honest stamp, after which the precise rule governs. This also
+            // heals any mount latched before the stamp existed, without
+            // archaeology on its run history.
+            let first_look = self.claim_first_look(&mount.mount_id);
+            if first_look
+                || self
+                    .credential_is_newer_than_failure(&svc, &mount, latched_at)
+                    .await
             {
                 tracing::info!(
                     mount_id = %mount_id,
-                    "the connection was re-authorized after this mount latched \
-                     auth_required; clearing it and trying once"
+                    first_look,
+                    "clearing auth_required and trying once — either the connection was \
+                     re-authorized since it latched, or this process has not tried it yet"
                 );
                 self.clear_auth_required(tenant, repo, config_branch, &mount)
                     .await;
@@ -223,13 +241,16 @@ impl VirtualMountSyncHandler {
         })
     }
 
-    /// Mark the mount misconfigured, stamp the attempt, persist, and skip.
-    ///
-    /// The single exit for every pre-flight guard that gives up BEFORE
-    /// `finalize` runs. There used to be two of these and they disagreed: the
-    /// target-branch guard set only `status` + `last_error`, so it never got
-    /// the attempt stamp below and every mount it caught stayed permanently
-    /// due.
+    /// Whether this process has yet to look at this latched mount, claiming the
+    /// look if so. Returns `true` at most once per mount per process.
+    fn claim_first_look(&self, mount_id: &str) -> bool {
+        match self.auth_first_look.lock() {
+            Ok(mut seen) => seen.insert(mount_id.to_string()),
+            // A poisoned lock must not hand out an unbounded retry.
+            Err(_) => false,
+        }
+    }
+
     /// Whether this mount's credential has been written since it latched
     /// `auth_required`.
     ///
@@ -340,6 +361,13 @@ impl VirtualMountSyncHandler {
         }
     }
 
+    /// Mark the mount misconfigured, stamp the attempt, persist, and skip.
+    ///
+    /// The single exit for every pre-flight guard that gives up BEFORE
+    /// `finalize` runs. There used to be two of these and they disagreed: the
+    /// target-branch guard set only `status` + `last_error`, so it never got
+    /// the attempt stamp below and every mount it caught stayed permanently
+    /// due.
     async fn mark_misconfigured(
         &self,
         tenant: &str,

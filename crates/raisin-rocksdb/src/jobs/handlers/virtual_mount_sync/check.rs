@@ -292,7 +292,10 @@ pub fn is_due(mount: &MountConfig, now: i64) -> bool {
     // cheap periodic question ("has anything changed?"), one node read, every
     // ten minutes per latched mount.
     if mount.state.status.as_deref() == Some("auth_required") {
-        let last = mount.state.last_attempt_at.unwrap_or(0);
+        // Spaced on the re-check stamp, NOT on `last_attempt_at`: a skip is not
+        // an attempt, and overloading that field erased when the mount really
+        // failed.
+        let last = mount.state.auth_recheck_at.unwrap_or(0);
         return now - last >= AUTH_RECHECK_SECS;
     }
     // The PROVIDER told us to wait. Checked above every other "due" reason —
@@ -565,7 +568,10 @@ mod tests {
     fn a_latched_mount_is_re_examined_on_a_slow_cadence() {
         let mut m = mount();
         m.state.status = Some("auth_required".into());
-        m.state.last_attempt_at = Some(1_000_000);
+        m.state.auth_recheck_at = Some(1_000_000);
+        // The ATTEMPT stamp must not affect the cadence: overloading it is what
+        // destroyed the record of when the mount actually failed.
+        m.state.last_attempt_at = Some(0);
 
         assert!(
             !is_due(&m, 1_000_000 + AUTH_RECHECK_SECS - 1),
@@ -583,13 +589,13 @@ mod tests {
     fn pausing_still_beats_the_auth_recheck() {
         let mut m = mount();
         m.state.status = Some("auth_required".into());
-        m.state.last_attempt_at = Some(0);
+        m.state.auth_recheck_at = Some(0);
         m.state.paused = true;
         assert!(!is_due(&m, 9_999_999));
 
         let mut m = mount();
         m.state.status = Some("auth_required".into());
-        m.state.last_attempt_at = Some(0);
+        m.state.auth_recheck_at = Some(0);
         m.enabled = false;
         assert!(!is_due(&m, 9_999_999));
     }

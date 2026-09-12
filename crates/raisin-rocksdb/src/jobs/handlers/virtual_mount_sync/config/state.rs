@@ -377,6 +377,17 @@ pub struct MountState {
     /// not been tried yet, so it deserves one run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_required_at: Option<i64>,
+    /// Unix seconds of the last `auth_required` RE-CHECK — the cheap "has the
+    /// credential been repaired?" question, which does not call the provider.
+    ///
+    /// Deliberately not `last_attempt_at`. Spacing the re-check on that field
+    /// overloaded it: a skip is not an attempt, and advancing it every ten
+    /// minutes destroyed the record of when the mount actually last failed —
+    /// the very value the un-latch comparison falls back to. It cost a release
+    /// to notice, because the corruption looks exactly like a mount that simply
+    /// has not been repaired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_recheck_at: Option<i64>,
     /// Total items the current walk expects to materialize, when the provider
     /// reports it. The denominator for "37 of 500"; `None` when unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
