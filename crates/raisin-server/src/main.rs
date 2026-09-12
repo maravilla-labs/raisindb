@@ -921,18 +921,31 @@ async fn main() {
             // handler picks up and dispatches to the finder above. Best-effort
             // — failures are logged but don't break the loop.
             //
-            // TODO(cluster-coordination): in a multi-node cluster every node
-            // currently runs this loop independently. Without a leader-election
-            // or single-fire guarantee, a cron-fired side effect (e.g. "send
-            // reminder email" function) will execute N times — once per node.
-            // We need to decide on the architecture before scheduled triggers
-            // are safe in clustered deployments. Options on the table:
-            //   - Leader election (one node owns the enqueuer; others sit out).
-            //   - Distributed lock per minute-tick keyed on the wall-clock
-            //     minute, claimed via the existing job registry.
-            //   - Run the enqueuer on every node but make ScheduledTriggerCheck
-            //     itself a singleton job (registry-side dedup by trigger+minute).
-            // Hold a separate session to pick one. Until then, only run with
+            // CLUSTER COORDINATION: settled, and deliberately NOT leader
+            // election. Every node runs this loop independently — the loop is
+            // cheap and finding no work is the common case — and the single-fire
+            // guarantee sits where it belongs, immediately before the SIDE
+            // EFFECT: `ScheduledTriggerHandler::claim_tick` takes a lease keyed
+            // on (trigger, wall-clock minute) and fires only if it wins. A node
+            // that cannot take the lease knows another node has the tick and
+            // does nothing; losing is the normal outcome for N-1 nodes, not an
+            // error worth logging above debug.
+            //
+            // The lease is taken and NEVER RELEASED — a held lease IS the
+            // "already fired" marker, and its TTL retires it once the tick can
+            // no longer recur. Same idiom as the authorization server's one-shot
+            // code redemption, and the same shape as the per-integration lease
+            // in the OAuth refresh sweep.
+            //
+            // Leader election was rejected: it needs failure detection and
+            // fencing of its own, and it would make one node's health decide
+            // whether anyone's cron runs at all. This way a node can die
+            // mid-minute and the next minute is claimed by whoever is up.
+            //
+            // A cluster therefore needs `[locks]` with `backend = "redis"` —
+            // the same requirement ticket inventory and token refresh already
+            // carry. With the in-process backend, or none, coordination is
+            // within one node only, which is correct for
             // a single raisindb node in production.
             {
                 let registry_for_loop = storage.job_registry().clone();
@@ -942,6 +955,11 @@ async fn main() {
                     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                     // Wait one tick so we don't fire immediately at boot.
                     interval.tick().await;
+                    // Buckets this process has already enqueued for, so a
+                    // 10-minute job is not re-enqueued on all ten of the 60s
+                    // ticks inside its window. See the note at each use.
+                    let mut last_refresh_bucket: Option<u64> = None;
+                    let mut last_mcp_bucket: Option<u64> = None;
                     loop {
                         interval.tick().await;
                         let job_type = raisin_storage::jobs::JobType::ScheduledTriggerCheck {
@@ -981,20 +999,36 @@ async fn main() {
                         }
 
                         // Integration OAuth token refresh: enqueue at most once
-                        // per 10-minute window. The dedup key collapses every
-                        // 60s tick inside the same window to a single job, so
-                        // this effectively fires every 10 minutes.
+                        // per 10-minute window.
+                        //
+                        // The bucket is tracked HERE, not left to the registry's
+                        // dedup key. That key only suppresses a registration
+                        // while the previous job is still Scheduled/Running/
+                        // Executing, and this sweep finishes in well under a
+                        // second — so by the next 60s tick the old job had
+                        // completed, the key no longer matched anything active,
+                        // and a fresh sweep was enqueued. Ten per window, not
+                        // one, for as long as the comment here claimed
+                        // otherwise.
+                        //
+                        // That was not merely wasteful. Each sweep performs real
+                        // token exchanges, and a provider that rotates refresh
+                        // tokens invalidates the stored one on every exchange —
+                        // so when a connector's write-back was failing, running
+                        // ten times more often destroyed the credential ten
+                        // times faster (see PERSIST_COOLDOWN).
                         //
                         // Per PROCESS, not per cluster: `JobRegistry`'s dedup
                         // map is an in-memory HashMap with no storage behind
-                        // it, so every node runs its own sweep. (This comment
-                        // used to claim otherwise.) Cross-node safety is the
-                        // per-integration lease the handler takes, which needs
-                        // [locks] backend=redis to span nodes.
+                        // it, so every node runs its own sweep. Cross-node
+                        // safety is the per-integration lease the handler takes,
+                        // which needs [locks] backend=redis to span nodes.
                         //
                         // Idempotent registration needs the context stored
                         // first, keyed by the same job id.
                         let now_secs = chrono::Utc::now().timestamp().max(0) as u64;
+                        let refresh_bucket = now_secs / 600;
+                        let refresh_due = last_refresh_bucket != Some(refresh_bucket);
                         let dedup_key = raisin_rocksdb::token_refresh_dedup_key(now_secs);
                         let refresh_job = raisin_storage::jobs::JobType::IntegrationTokenRefresh {
                             tenant_id: None,
@@ -1008,7 +1042,9 @@ async fn main() {
                             revision: raisin_hlc::HLC::now(),
                             metadata: std::collections::HashMap::new(),
                         };
-                        if let Err(e) =
+                        if !refresh_due {
+                            // Already enqueued for this window.
+                        } else if let Err(e) =
                             job_data_store_for_loop.put(&refresh_job_id, &refresh_context)
                         {
                             tracing::warn!(error = %e, "Failed to store IntegrationTokenRefresh job context");
@@ -1023,6 +1059,11 @@ async fn main() {
                             .await
                         {
                             tracing::warn!(error = %e, "Failed to register IntegrationTokenRefresh job");
+                        } else {
+                            // Only on a successful enqueue: a failed one must be
+                            // retried on the next tick rather than skipped until
+                            // the window rolls over.
+                            last_refresh_bucket = Some(refresh_bucket);
                         }
 
                         // MCP tool discovery scan: enqueue discovery for any
@@ -1032,7 +1073,14 @@ async fn main() {
                         // node runs the scan. That is fine: the scan only
                         // ENQUEUES, and the per-connection lease inside the
                         // discovery job is what keeps the writes single-fire.
-                        let mcp_dedup = format!("mcp-discovery-check:{}", now_secs / 600);
+                        //
+                        // Windowed the same way as the refresh above, and for
+                        // the same reason: the registry's dedup key lapses as
+                        // soon as the previous scan completes, so this fired on
+                        // every 60s tick rather than every tenth.
+                        let mcp_bucket = now_secs / 600;
+                        let mcp_due = last_mcp_bucket != Some(mcp_bucket);
+                        let mcp_dedup = format!("mcp-discovery-check:{mcp_bucket}");
                         let mcp_job =
                             raisin_storage::jobs::JobType::McpDiscoveryCheck { tenant_id: None };
                         let mcp_job_id = raisin_storage::jobs::JobId::new();
@@ -1044,7 +1092,11 @@ async fn main() {
                             revision: raisin_hlc::HLC::now(),
                             metadata: std::collections::HashMap::new(),
                         };
-                        if let Err(e) = job_data_store_for_loop.put(&mcp_job_id, &mcp_context) {
+                        if !mcp_due {
+                            // Already enqueued for this window.
+                        } else if let Err(e) =
+                            job_data_store_for_loop.put(&mcp_job_id, &mcp_context)
+                        {
                             tracing::warn!(error = %e, "Failed to store McpDiscoveryCheck job context");
                         } else if let Err(e) = registry_for_loop
                             .register_job_with_id_idempotent(
@@ -1057,6 +1109,8 @@ async fn main() {
                             .await
                         {
                             tracing::warn!(error = %e, "Failed to register McpDiscoveryCheck job");
+                        } else {
+                            last_mcp_bucket = Some(mcp_bucket);
                         }
 
                         // Virtual-mount sync check: scan every ~60s for mounts

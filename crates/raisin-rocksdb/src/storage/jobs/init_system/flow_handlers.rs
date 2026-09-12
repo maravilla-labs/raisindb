@@ -202,9 +202,11 @@ pub fn create_scheduled_trigger_handler(
     job_data_store: Arc<JobDataStore>,
     dispatcher: Arc<JobDispatcher>,
     scheduled_trigger_finder: Option<ScheduledTriggerFinderCallback>,
+    lock_manager: Option<raisin_locks::LockManagerHandle>,
 ) -> Arc<crate::jobs::ScheduledTriggerHandler> {
     let mut builder =
-        crate::jobs::ScheduledTriggerHandler::new(job_registry, job_data_store, dispatcher);
+        crate::jobs::ScheduledTriggerHandler::new(job_registry, job_data_store, dispatcher)
+            .with_lock_manager(lock_manager);
     if let Some(finder) = scheduled_trigger_finder {
         builder = builder.with_trigger_finder(finder);
     }

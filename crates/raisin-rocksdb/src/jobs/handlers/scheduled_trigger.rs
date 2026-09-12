@@ -30,6 +30,14 @@ use crate::jobs::data_store::JobDataStore;
 use crate::jobs::dispatcher::JobDispatcher;
 
 /// A scheduled trigger that matches the current time
+/// How long a fired tick stays claimed.
+///
+/// Only needs to outlive the spread between nodes reaching the same tick — a
+/// sweep plus a trigger scan — while retiring well before the same wall-clock
+/// minute could come round again. Minutes, not hours: an over-long TTL just
+/// accumulates dead keys in Redis.
+const SCHEDULED_TICK_TTL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
 #[derive(Debug, Clone)]
 pub struct ScheduledTriggerMatch {
     /// Path to the function to execute
@@ -76,6 +84,8 @@ pub struct ScheduledTriggerHandler {
     dispatcher: Arc<JobDispatcher>,
     /// Optional callback to find scheduled triggers (set by transport layer)
     trigger_finder: Option<ScheduledTriggerFinderCallback>,
+    /// Cluster-wide single-fire guard. See [`Self::claim_tick`].
+    lock_manager: Option<raisin_locks::LockManagerHandle>,
 }
 
 impl ScheduledTriggerHandler {
@@ -90,7 +100,17 @@ impl ScheduledTriggerHandler {
             job_data_store,
             dispatcher,
             trigger_finder: None,
+            lock_manager: None,
         }
+    }
+
+    /// Provide the lock manager that makes a fire single-shot across the cluster.
+    pub fn with_lock_manager(
+        mut self,
+        lock_manager: Option<raisin_locks::LockManagerHandle>,
+    ) -> Self {
+        self.lock_manager = lock_manager;
+        self
     }
 
     /// Set the trigger finder callback
@@ -100,6 +120,69 @@ impl ScheduledTriggerHandler {
     pub fn with_trigger_finder(mut self, finder: ScheduledTriggerFinderCallback) -> Self {
         self.trigger_finder = Some(finder);
         self
+    }
+
+    /// Claim one trigger's one tick, cluster-wide.
+    ///
+    /// Returns `true` if THIS node should fire it.
+    ///
+    /// **The lease is taken and never released** — a held lease IS the "already
+    /// fired" marker, and its TTL retires it once the tick can no longer be
+    /// re-fired. Releasing it would reopen the window for a slower node still
+    /// working through its own copy of the match list. Same idiom as the
+    /// authorization server's one-shot code redemption (`claim_once`).
+    ///
+    /// The key is per trigger AND per tick, so two different triggers never
+    /// contend and the same trigger fires again next minute.
+    ///
+    /// With no lock manager, or with the in-process backend, this coordinates
+    /// within ONE node only — which is exactly right for a single-node
+    /// deployment and is why that was the previous supported configuration. A
+    /// cluster needs `[locks]` with `backend = "redis"`, the same requirement
+    /// ticket inventory and OAuth refresh already carry.
+    async fn claim_tick(&self, trigger_match: &ScheduledTriggerMatch, now: i64) -> bool {
+        let Some(locks) = self.lock_manager.as_ref() else {
+            // No locks subsystem: single-node semantics, fire it.
+            return true;
+        };
+
+        // Cron granularity is the minute, so the minute IS the tick identity.
+        // Anything finer would let two nodes a few seconds apart both claim.
+        let tick = now / 60;
+        let key = raisin_locks::scoped_key(
+            &trigger_match.tenant_id,
+            &trigger_match.repo_id,
+            &trigger_match.branch,
+            &format!("scheduled-trigger:{}:{}", trigger_match.trigger_name, tick),
+        );
+
+        match locks
+            .try_acquire(&key, "scheduled-trigger", SCHEDULED_TICK_TTL)
+            .await
+        {
+            Ok(Some(_guard)) => true,
+            Ok(None) => {
+                tracing::debug!(
+                    trigger = %trigger_match.trigger_name,
+                    tick,
+                    "another node claimed this tick; skipping"
+                );
+                false
+            }
+            Err(e) => {
+                // Degrade to firing rather than silently dropping a scheduled
+                // job: a lock backend outage must not stop every cron in the
+                // system. The cost of the other choice is an email that never
+                // goes out and no record of why; the cost of this one is a
+                // duplicate during an outage.
+                tracing::warn!(
+                    error = %e,
+                    trigger = %trigger_match.trigger_name,
+                    "lock backend error claiming a scheduled tick; firing anyway (may duplicate)"
+                );
+                true
+            }
+        }
     }
 
     /// Handle scheduled trigger check job
@@ -162,6 +245,16 @@ impl ScheduledTriggerHandler {
 
         // Enqueue FunctionExecution jobs for each match
         for trigger_match in matches {
+            // EVERY node runs this loop, and that is the design — no leader
+            // election, no "only run one node in production". What must happen
+            // once is the SIDE EFFECT, so the claim sits immediately before it:
+            // whichever node claims the tick fires it, and every other node
+            // finds the claim taken and quietly does nothing. Losing the race is
+            // the normal, correct outcome for N-1 nodes, not an error.
+            if !self.claim_tick(&trigger_match, current_time).await {
+                continue;
+            }
+
             let execution_id = nanoid::nanoid!();
 
             let function_job_type = JobType::FunctionExecution {
@@ -396,5 +489,124 @@ mod tests {
         assert!(cron_matches("*/15 * * * *", 1699920900)); // minute 15
         assert!(cron_matches("*/15 * * * *", 1699921800)); // minute 30
         assert!(!cron_matches("*/15 * * * *", 1699920600)); // minute 10
+    }
+
+    fn a_match(trigger: &str) -> ScheduledTriggerMatch {
+        ScheduledTriggerMatch {
+            function_path: "/functions/nightly".to_string(),
+            trigger_name: trigger.to_string(),
+            tenant_id: "t".to_string(),
+            repo_id: "r".to_string(),
+            branch: "main".to_string(),
+            workspace: "ws".to_string(),
+        }
+    }
+
+    /// The key every node computes for one trigger's one tick.
+    ///
+    /// Reproduced here rather than reached into, because what matters is that
+    /// the SHAPE is stable: two nodes deriving different keys both fire, which
+    /// is precisely the duplicate-side-effect bug this guards against.
+    fn key_for(m: &ScheduledTriggerMatch, now: i64) -> String {
+        raisin_locks::scoped_key(
+            &m.tenant_id,
+            &m.repo_id,
+            &m.branch,
+            &format!("scheduled-trigger:{}:{}", m.trigger_name, now / 60),
+        )
+    }
+
+    /// One node fires; every other finds the tick claimed and skips. A
+    /// cron-fired side effect — "send the reminder email" — must happen once
+    /// per tick, not once per node.
+    #[tokio::test]
+    async fn only_one_node_claims_a_tick() {
+        let locks: raisin_locks::LockManagerHandle =
+            std::sync::Arc::new(raisin_locks::InProcessLockManager::new());
+        let key = key_for(&a_match("nightly-digest"), 1_000_000);
+
+        assert!(locks
+            .try_acquire(&key, "node-a", SCHEDULED_TICK_TTL)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(
+            locks
+                .try_acquire(&key, "node-b", SCHEDULED_TICK_TTL)
+                .await
+                .unwrap()
+                .is_none(),
+            "a second node must not fire the same tick"
+        );
+    }
+
+    /// The NEXT minute is a different tick, or one claim would suppress the
+    /// whole schedule for as long as its TTL.
+    #[tokio::test]
+    async fn the_next_minute_is_a_new_tick() {
+        let locks: raisin_locks::LockManagerHandle =
+            std::sync::Arc::new(raisin_locks::InProcessLockManager::new());
+        let m = a_match("nightly-digest");
+
+        assert!(locks
+            .try_acquire(&key_for(&m, 1_000_000), "node-a", SCHEDULED_TICK_TTL)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(
+            locks
+                .try_acquire(&key_for(&m, 1_000_060), "node-a", SCHEDULED_TICK_TTL)
+                .await
+                .unwrap()
+                .is_some(),
+            "claiming one minute must not suppress the next"
+        );
+    }
+
+    /// Seconds inside one minute are the SAME tick. Nodes do not reach a
+    /// trigger at the same instant, and a finer granularity would let two of
+    /// them seconds apart both claim.
+    ///
+    /// The minute is also exactly the granularity the CRON MATCH uses, which is
+    /// what makes the boundary safe rather than merely likely to work: a node
+    /// evaluating at 12:00:59 matches minute 12:00 and claims that tick; one
+    /// evaluating at 12:01:00 is asking a different question — does this cron
+    /// fire at 12:01 — and for anything but `* * * * *` the answer is no, so it
+    /// never reaches the claim. Two nodes straddling the boundary therefore
+    /// cannot double-fire one occurrence.
+    #[test]
+    fn seconds_within_one_minute_are_one_tick() {
+        let m = a_match("nightly-digest");
+        // A real minute boundary: 16_666 * 60.
+        let minute_start = 999_960;
+        assert_eq!(key_for(&m, minute_start), key_for(&m, minute_start + 59));
+        assert_ne!(key_for(&m, minute_start), key_for(&m, minute_start + 60));
+    }
+
+    /// Two different triggers must never contend, or one would suppress the
+    /// other every minute.
+    #[tokio::test]
+    async fn different_triggers_do_not_contend() {
+        let locks: raisin_locks::LockManagerHandle =
+            std::sync::Arc::new(raisin_locks::InProcessLockManager::new());
+
+        assert!(locks
+            .try_acquire(
+                &key_for(&a_match("one"), 1_000_000),
+                "n",
+                SCHEDULED_TICK_TTL
+            )
+            .await
+            .unwrap()
+            .is_some());
+        assert!(locks
+            .try_acquire(
+                &key_for(&a_match("two"), 1_000_000),
+                "n",
+                SCHEDULED_TICK_TTL
+            )
+            .await
+            .unwrap()
+            .is_some());
     }
 }

@@ -453,10 +453,17 @@ pub(super) fn parse_ollama_ndjson(text: &str) -> Vec<Result<StreamChunk>> {
                     stop_reason: Some("stop".to_string()),
                     model: Some(response.model),
                 }))
-            } else if !delta.is_empty() {
+            } else if !delta.is_empty() || tool_calls.is_some() {
+                // `tool_calls.is_some()` matters as much as the text here.
+                // Ollama announces a tool call on its own NDJSON line, with
+                // `done: false` and an EMPTY content delta, before the final
+                // line arrives. Gating this branch on text alone dropped that
+                // line on the floor, so the call never reached the tool loop
+                // and the conversation waited forever for a decision the model
+                // had already made.
                 Some(Ok(StreamChunk {
                     delta,
-                    tool_calls: None,
+                    tool_calls,
                     usage: None,
                     stop_reason: None,
                     model: None,

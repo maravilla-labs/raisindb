@@ -171,6 +171,7 @@ impl RocksDBStorage {
             self.job_data_store.clone(),
             dispatcher.clone(),
             scheduled_trigger_finder,
+            lock_manager.clone(),
         );
 
         let scheduled_invocation_handler = flow_handlers::create_scheduled_invocation_handler(
