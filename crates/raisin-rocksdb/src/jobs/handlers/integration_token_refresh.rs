@@ -509,26 +509,15 @@ impl IntegrationTokenRefreshHandler {
         // `auth_expired`, and the operator reconnects — which works, briefly,
         // and teaches them that reconnecting periodically is normal.
         //
-        // `skipped_reason` is recorded at INFO rather than WARN for the states
-        // that are legitimately fine (a credential-only connector has no OAuth
-        // config and never will), and the per-account ones are ALSO written onto
-        // the account so the console can show them.
-        let token_url = non_empty(string_prop(&node.properties, "oauth_config", "token_url"));
-        let client_id = non_empty(string_prop(&node.properties, "oauth_config", "client_id"));
-        let (Some(token_url), Some(client_id)) = (token_url, client_id) else {
-            // A managed connector whose client the control plane has not minted
-            // yet lands here, and so does a half-configured BYO one. Both are
-            // invisible without this line.
-            tracing::info!(
-                node_path = %node.path,
-                has_token_url = string_prop(&node.properties, "oauth_config", "token_url").is_some(),
-                has_client_id = string_prop(&node.properties, "oauth_config", "client_id").is_some(),
-                "token-refresh: connector has no usable oauth_config; nothing can be refreshed"
-            );
-            return Ok(0);
-        };
-        let client_secret = decrypt_client_secret(&node.properties, secret_box);
-
+        // CONNECTIONS FIRST, config second. The order is the difference between
+        // a useful line and 125 of them per sweep.
+        //
+        // Every connector PACKAGE ships a template node under `/connectors/`
+        // with `client_id: ""` — unprovisioned by definition, holding no
+        // connections, and never going to refresh anything. Complaining about
+        // its config said nothing an operator could act on and buried the one
+        // connector that genuinely was misconfigured. A connector with no
+        // connections has nothing to refresh; that is the whole statement.
         let accounts = match node.properties.get("connected_accounts") {
             Some(pv) => match serde_json::to_value(pv) {
                 Ok(Value::Array(a)) => a,
@@ -546,6 +535,37 @@ impl IntegrationTokenRefreshHandler {
                 return Ok(0);
             }
         };
+        if accounts.is_empty() {
+            tracing::debug!(node_path = %node.path, "token-refresh: no connections");
+            return Ok(0);
+        }
+
+        let raw_token_url = string_prop(&node.properties, "oauth_config", "token_url");
+        let raw_client_id = string_prop(&node.properties, "oauth_config", "client_id");
+        let (Some(token_url), Some(client_id)) = (
+            non_empty(raw_token_url.clone()),
+            non_empty(raw_client_id.clone()),
+        ) else {
+            // Now genuinely actionable: someone connected an account to a
+            // connector that cannot renew it, so it will die at its first
+            // expiry. A managed connector whose client the control plane has
+            // not minted yet lands here, and so does a half-configured BYO one.
+            //
+            // Reported as PRESENT-BUT-EMPTY rather than missing, because that is
+            // the state a managed connector is actually in and the two want
+            // different fixes. An `is_some()` here read `true` for the empty
+            // string and said the opposite of what the code had just decided.
+            tracing::warn!(
+                node_path = %node.path,
+                connections = accounts.len(),
+                token_url = ?describe_field(raw_token_url.as_deref()),
+                client_id = ?describe_field(raw_client_id.as_deref()),
+                "token-refresh: connector has connections but no usable oauth_config; \
+                 they cannot be renewed and will need reconnecting when they expire"
+            );
+            return Ok(0);
+        };
+        let client_secret = decrypt_client_secret(&node.properties, secret_box);
 
         // One result per account we touched. Collected from the snapshot WITHOUT
         // holding it for the write: the exchanges below are network round trips
@@ -950,6 +970,20 @@ fn patch_accounts(current: &mut [Value], results: Vec<AccountOutcome>, now_secs:
     Patched { applied, touched }
 }
 
+/// How a config field is populated, for a log line that must not lie.
+///
+/// "missing" and "empty" are different faults with different fixes — an
+/// unprovisioned managed connector has an EMPTY `client_id`, not an absent one —
+/// and collapsing them into a bool reported `true` for a value the code had just
+/// rejected.
+fn describe_field(value: Option<&str>) -> &'static str {
+    match value {
+        None => "missing",
+        Some("") => "empty",
+        Some(_) => "set",
+    }
+}
+
 /// Treat an empty string as absent.
 ///
 /// A managed connector ships `client_id: ""` until the control plane mints one,
@@ -1260,6 +1294,17 @@ mod tests {
             cooldown.remaining("node-1").is_none(),
             "a successful write must lift the cooldown"
         );
+    }
+
+    /// "missing" and "empty" are different faults wanting different fixes, and
+    /// the bool that preceded this reported `true` for a value the code had just
+    /// rejected — production printed `has_client_id=true` on the very connector
+    /// it was skipping for having no client id.
+    #[test]
+    fn a_field_report_distinguishes_missing_from_empty() {
+        assert_eq!(describe_field(None), "missing");
+        assert_eq!(describe_field(Some("")), "empty");
+        assert_eq!(describe_field(Some("abc")), "set");
     }
 
     #[test]
