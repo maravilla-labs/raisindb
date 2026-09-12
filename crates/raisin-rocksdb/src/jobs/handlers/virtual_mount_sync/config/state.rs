@@ -357,6 +357,26 @@ pub struct MountState {
     /// `"ok" | "syncing" | "auth_required" | "degraded" | "misconfigured"`.
     #[serde(default)]
     pub status: Option<String>,
+    /// Unix seconds when `status` was latched to `auth_required`.
+    ///
+    /// `auth_required` is the one status the preflight refuses to run THROUGH:
+    /// it skips before the adapter is ever called, which is right — hammering a
+    /// provider with a credential known to be rejected earns a rate limit.
+    ///
+    /// But without this it is a latch with no exit. The credential can be
+    /// repaired — an operator reconnects, or the background refresh recovers
+    /// it — and the mount never finds out, because finding out requires a run
+    /// and a run is exactly what the latch prevents. Observed in production: a
+    /// mount whose "Test connection" reported `auth: valid` and listed ten
+    /// items, sitting on a day-old `auth_expired`, with "Sync now" enqueueing a
+    /// job the preflight silently discarded. The operator reconnects, nothing
+    /// changes, and there is nothing anywhere saying why.
+    ///
+    /// Comparing this against the credential's own `last_refresh_at` is what
+    /// lets the mount un-latch itself: a credential newer than the failure has
+    /// not been tried yet, so it deserves one run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_required_at: Option<i64>,
     /// Total items the current walk expects to materialize, when the provider
     /// reports it. The denominator for "37 of 500"; `None` when unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]

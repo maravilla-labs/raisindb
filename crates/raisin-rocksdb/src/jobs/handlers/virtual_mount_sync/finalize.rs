@@ -115,6 +115,11 @@ impl VirtualMountSyncHandler {
             Err(AdapterError::AuthExpired) => {
                 state.status = Some("auth_required".to_string());
                 state.last_error = Some("auth_expired".to_string());
+                // Stamped so the preflight can tell a credential that has been
+                // repaired since from the one that actually failed. Without it
+                // this status is a latch nothing can clear — see
+                // `MountState::auth_required_at`.
+                state.auth_required_at = Some(now);
                 run.finish(now, "auth_required", Some("auth_expired".to_string()));
                 None
             }

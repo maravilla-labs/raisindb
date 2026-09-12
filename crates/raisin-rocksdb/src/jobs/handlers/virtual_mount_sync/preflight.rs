@@ -84,8 +84,33 @@ impl VirtualMountSyncHandler {
             return Ok(Preflight::Skip("paused"));
         }
         if mount.state.status.as_deref() == Some("auth_required") {
-            tracing::debug!(mount_id = %mount_id, "mount paused (auth_required); skipping");
-            return Ok(Preflight::Skip("auth_required"));
+            // Skip — UNLESS the credential has been repaired since it failed.
+            //
+            // Holding here is right in the steady state: retrying a rejected
+            // credential every minute earns a rate limit and fixes nothing. But
+            // the only way out of this status is a successful run, and a
+            // successful run is exactly what this returns before. So a
+            // reconnected account stayed dead, "Sync now" enqueued jobs that
+            // were discarded here without a word above debug, and the operator
+            // reconnected again. That is the whole "I reconnect and nothing
+            // happens" complaint.
+            //
+            // A credential written AFTER the failure has never been tried. One
+            // run is owed to it, and if it is still bad this latches again with
+            // a fresh stamp — so a genuinely dead grant still retries once per
+            // repair, not once per minute.
+            if self.credential_is_newer_than_failure(&svc, &mount).await {
+                tracing::info!(
+                    mount_id = %mount_id,
+                    "the connection was re-authorized after this mount latched \
+                     auth_required; clearing it and trying once"
+                );
+                self.clear_auth_required(tenant, repo, config_branch, &mount)
+                    .await;
+            } else {
+                tracing::debug!(mount_id = %mount_id, "mount paused (auth_required); skipping");
+                return Ok(Preflight::Skip("auth_required"));
+            }
         }
 
         // Validate the materialization target branch exists. A misconfigured
@@ -186,6 +211,82 @@ impl VirtualMountSyncHandler {
     /// target-branch guard set only `status` + `last_error`, so it never got
     /// the attempt stamp below and every mount it caught stayed permanently
     /// due.
+    /// Whether this mount's credential has been written since it latched
+    /// `auth_required`.
+    ///
+    /// Reads `last_refresh_at` off the resolved connection — stamped by BOTH a
+    /// successful background refresh and a fresh consent, which is exactly the
+    /// set of events that can repair a rejected credential.
+    ///
+    /// Fails CLOSED: anything unreadable (no integration node, no resolvable
+    /// account, no stamp) answers `false` and the mount stays latched. The cost
+    /// of a false negative is that an operator reconnects and waits for the next
+    /// tick; the cost of a false positive is hammering a provider that is
+    /// already rejecting us.
+    async fn credential_is_newer_than_failure(
+        &self,
+        svc: &NodeService<RocksDBStorage>,
+        mount: &MountConfig,
+    ) -> bool {
+        let Some(latched_at) = mount.state.auth_required_at else {
+            // Latched by a build that did not stamp it. One clean way out:
+            // treat it as un-latchable and let the next failure re-stamp it.
+            return false;
+        };
+        let Ok(Some(integ_node)) = self.load_integration_node(svc, mount).await else {
+            return false;
+        };
+        let Ok(cfg) = IntegrationConfig::from_node(&integ_node) else {
+            return false;
+        };
+        let Ok(account) = cfg.account_for(mount.account_ref.as_deref()) else {
+            return false;
+        };
+        account
+            .last_refresh_at
+            .is_some_and(|refreshed| refreshed > latched_at)
+    }
+
+    /// Clear the `auth_required` latch so this run can proceed.
+    ///
+    /// Best-effort: if the state write fails the run still goes ahead, because
+    /// the point is to TRY the repaired credential. A failure here means the
+    /// mount latches again on the next rejection, which is the correct
+    /// behaviour anyway.
+    async fn clear_auth_required(
+        &self,
+        tenant: &str,
+        repo: &str,
+        config_branch: &str,
+        mount: &MountConfig,
+    ) {
+        let mut state = mount.state.clone();
+        state.status = None;
+        state.last_error = None;
+        state.auth_required_at = None;
+        // The backoff was counting rejections of a credential that no longer
+        // exists; a repaired one starts clean or it waits out a delay it did
+        // nothing to earn.
+        state.consecutive_failures = 0;
+        state.retry_after = None;
+        if let Err(e) = persist_mount_state(
+            &self.storage,
+            tenant,
+            repo,
+            config_branch,
+            &mount.mount_id,
+            &mut state,
+        )
+        .await
+        {
+            tracing::warn!(
+                mount_id = %mount.mount_id,
+                error = %e,
+                "could not clear auth_required; the run proceeds anyway"
+            );
+        }
+    }
+
     async fn mark_misconfigured(
         &self,
         tenant: &str,
@@ -234,4 +335,57 @@ impl VirtualMountSyncHandler {
 /// no trace.
 pub(super) fn skip_result(reason: &str) -> Value {
     json!({ "outcome": "skipped", "reason": reason })
+}
+
+#[cfg(test)]
+mod auth_latch_tests {
+    use raisin_models::nodes::integrations::ConnectedAccount;
+
+    /// The rule `credential_is_newer_than_failure` applies, isolated from the
+    /// storage round trip it needs in production.
+    fn unlatches(latched_at: Option<i64>, last_refresh_at: Option<i64>) -> bool {
+        let account = ConnectedAccount {
+            id: "a1".into(),
+            last_refresh_at,
+            ..Default::default()
+        };
+        match latched_at {
+            None => false,
+            Some(latched) => account
+                .last_refresh_at
+                .is_some_and(|refreshed| refreshed > latched),
+        }
+    }
+
+    /// THE fix. A reconnect (or a recovered background refresh) stamps
+    /// `last_refresh_at`, and a credential written after the failure has never
+    /// been tried — so the mount owes it one run.
+    ///
+    /// Without this the status is a latch with no exit: escaping it requires a
+    /// successful run, and the preflight refuses to run. Production had a mount
+    /// whose Test connection reported `auth: valid` sitting on a day-old
+    /// `auth_expired`, discarding every "Sync now" in silence.
+    #[test]
+    fn a_credential_repaired_after_the_failure_unlatches() {
+        assert!(unlatches(Some(1_000), Some(1_001)));
+    }
+
+    /// The steady state must still hold. Retrying a credential that has not
+    /// changed since it was rejected earns a rate limit and fixes nothing.
+    #[test]
+    fn an_unchanged_credential_stays_latched() {
+        assert!(!unlatches(Some(1_000), Some(999)));
+        assert!(!unlatches(Some(1_000), Some(1_000)));
+    }
+
+    /// Fails CLOSED on missing information: an account with no stamp at all, or
+    /// a latch from a build that did not record when it happened. The cost of a
+    /// false negative is one tick of delay after a reconnect; the cost of a
+    /// false positive is hammering a provider already rejecting us.
+    #[test]
+    fn missing_information_keeps_the_mount_latched() {
+        assert!(!unlatches(Some(1_000), None), "no credential stamp");
+        assert!(!unlatches(None, Some(1_001)), "no latch stamp");
+        assert!(!unlatches(None, None));
+    }
 }
