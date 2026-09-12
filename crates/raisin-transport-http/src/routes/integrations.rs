@@ -123,6 +123,18 @@ pub(crate) fn integration_routes(state: &AppState) -> Router<AppState> {
                 "/api/integrations/{repo}/mounts/{mount_id}/rebind",
                 post(integrations::rebind_mount),
             )
+            // The same repair for a GROUP of mounts. Disconnecting one
+            // connection orphans every mount pinned to it — six on a mail
+            // connector — and repairing them one at a time is one decision
+            // typed six times, with a half-repaired connector in between.
+            //
+            // Registered BEFORE the `{mount_id}` routes would be ambiguous:
+            // `mounts/rebind` is a literal segment, so it must not be read as a
+            // mount whose id is "rebind".
+            .route(
+                "/api/integrations/{repo}/mounts/rebind",
+                post(integrations::rebind_mounts),
+            )
             // Release ONE blocked batch of deletes. Scoped to the batch by a
             // content-derived token, so confirming three deletes cannot
             // authorise the thirty that arrived since.

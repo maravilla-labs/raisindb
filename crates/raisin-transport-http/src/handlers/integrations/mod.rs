@@ -52,7 +52,7 @@ pub use mount_control::{confirm_writeback, pause_mount, stop_mount};
 pub use mount_delete::delete_mount;
 pub use mount_events::stream_mount_events;
 #[cfg(feature = "storage-rocksdb")]
-pub use mount_rebind::rebind_mount;
+pub use mount_rebind::{rebind_mount, rebind_mounts};
 pub use notifications::notify;
 pub use oauth_callback::callback;
 pub use oauth_start::start;

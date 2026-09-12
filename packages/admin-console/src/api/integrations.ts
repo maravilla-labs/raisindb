@@ -1694,6 +1694,40 @@ export const integrationsApi = {
     }>(`/api/integrations/${repo}/mounts/${mountId}/rebind`, { account_id: accountId }),
 
   /**
+   * Point a GROUP of mounts at one connection, in a single call.
+   *
+   * Disconnecting one connection orphans every mount pinned to it, which on a
+   * mail connector is the inbox, sent, drafts, outbox and calendars at once —
+   * five or six identical repairs that are really one decision. They were all
+   * bound to the SAME id, so they were all the same mailbox, and one choice is
+   * therefore safe for the whole group.
+   *
+   * Group by the DANGLING id, never by "everything broken": mounts that pointed
+   * at different removed connections were different mailboxes, and one dropdown
+   * over the lot is how one person's mail ends up under another's path.
+   *
+   * Partial success is normal and returns 200 — read `results`, not the status.
+   */
+  rebindMounts: (repo: string, accountId: string, mountIds: string[]) =>
+    api.post<{
+      ok: boolean
+      account_id: string
+      label?: string
+      rebound: number
+      failed: number
+      results: {
+        mount_id: string
+        ok: boolean
+        previous_account_id?: string
+        label?: string
+        error?: string
+      }[]
+    }>(`/api/integrations/${repo}/mounts/rebind`, {
+      account_id: accountId,
+      mount_ids: mountIds,
+    }),
+
+  /**
    * Fetch the provider-side setup URLs. Omit `mountId` for the connector-level
    * variant (OAuth redirect URI only); pass a mount node id for the per-mount
    * variant that also returns the push notification URL (minting its token).

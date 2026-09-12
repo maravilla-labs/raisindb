@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSL-1.1
 
-//! `POST /api/integrations/{repo}/mounts/{mount_id}/rebind` — point a mount at
-//! a different connection on its connector.
+//! `POST /api/integrations/{repo}/mounts/{mount_id}/rebind` (one mount) and
+//! `POST /api/integrations/{repo}/mounts/rebind` (a group of them) — point
+//! mounts at a different connection on their connector.
 //!
 //! # Why this exists
 //!
@@ -35,6 +36,23 @@
 //! person's mailbox under a path that was syncing another's, with no record that
 //! the subject changed. Failing loudly and making the repair one call is the
 //! trade this takes.
+//!
+//! # Why there is a BATCH form
+//!
+//! Disconnecting one connection orphans every mount pinned to it, and in
+//! practice that is never one mount: a Microsoft 365 connector carries an inbox,
+//! a sent folder, drafts, an outbox and two calendars, all pinned to the SAME
+//! account id. Six identical repairs is not six decisions — it is one decision
+//! typed six times, and an operator halfway through has a connector whose mounts
+//! disagree about which mailbox they sync.
+//!
+//! So the batch form takes ONE `account_id` and a list of mounts, and it is
+//! deliberately keyed that way rather than as "repair everything broken": mounts
+//! that pointed at DIFFERENT removed connections were different mailboxes, and
+//! collapsing them into one choice is exactly the wrong-mailbox failure this
+//! endpoint exists to avoid. Grouping by the dangling id is the caller's job and
+//! the console does it; the server just refuses anything that does not resolve.
+//!
 
 #![cfg(feature = "storage-rocksdb")]
 
@@ -61,6 +79,47 @@ const MOUNT_NODE_TYPE: &str = "raisin:VirtualMount";
 pub struct RebindMountRequest {
     /// The connection to bind to. Must already exist on the mount's connector.
     pub account_id: String,
+}
+
+/// Body for the batch rebind.
+#[derive(Debug, Deserialize)]
+pub struct RebindMountsRequest {
+    /// The connection every listed mount should bind to.
+    pub account_id: String,
+    /// The mounts to repair. The caller groups these — see the module docs.
+    pub mount_ids: Vec<String>,
+}
+
+/// Upper bound on one batch, so a malformed caller cannot walk every node in
+/// the repo inside one request.
+const MAX_BATCH: usize = 100;
+
+/// What happened to one mount in a batch.
+#[derive(Debug, Serialize)]
+pub struct RebindMountOutcome {
+    pub mount_id: String,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_account_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Why this one failed. Present exactly when `ok` is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Result of a batch rebind.
+#[derive(Debug, Serialize)]
+pub struct RebindMountsResponse {
+    /// Every mount in the batch succeeded. A batch that repaired five of six
+    /// still returns 200 — read `results`.
+    pub ok: bool,
+    pub account_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub rebound: usize,
+    pub failed: usize,
+    pub results: Vec<RebindMountOutcome>,
 }
 
 /// Result of a rebind.
@@ -95,10 +154,128 @@ pub async fn rebind_mount(
     }
 
     let svc = super::config_service(&state, &tenant.tenant_id, &repo, ACTOR);
+    let outcome = rebind_one(&svc, &mount_id, &account_id).await?;
+
+    Ok(Json(RebindMountResponse {
+        ok: true,
+        account_id,
+        previous_account_id: outcome.previous_account_id,
+        label: outcome.label,
+    }))
+}
+
+/// `POST /api/integrations/{repo}/mounts/rebind`
+///
+/// One connection, many mounts. Every mount is validated against ITS OWN
+/// connector, so a list that accidentally spans two connectors fails per mount
+/// rather than binding some of them to a connection that is not theirs.
+///
+/// # Partial success is reported, not hidden
+///
+/// The mounts are repaired one at a time and the response carries a per-mount
+/// verdict. There is deliberately no transaction: each mount is an independent
+/// node write, and the alternative — refusing the whole batch because one mount
+/// was deleted while the console page was open — would leave five repairable
+/// mounts broken to punish the sixth. `ok` is therefore "every mount in this
+/// batch succeeded", and the caller must read `results` rather than trusting a
+/// 200.
+pub async fn rebind_mounts(
+    State(state): State<AppState>,
+    Path(repo): Path<String>,
+    Extension(tenant): Extension<TenantInfo>,
+    auth: Option<Extension<AuthContext>>,
+    Json(req): Json<RebindMountsRequest>,
+) -> Result<Json<RebindMountsResponse>, ApiError> {
+    require_admin(auth.as_deref())?;
+
+    let account_id = req.account_id.trim().to_string();
+    if account_id.is_empty() {
+        return Err(ApiError::validation_failed("account_id is required"));
+    }
+    if req.mount_ids.is_empty() {
+        return Err(ApiError::validation_failed("mount_ids is required"));
+    }
+    if req.mount_ids.len() > MAX_BATCH {
+        return Err(ApiError::validation_failed(format!(
+            "at most {MAX_BATCH} mounts can be rebound in one call, got {}",
+            req.mount_ids.len()
+        )));
+    }
+
+    let svc = super::config_service(&state, &tenant.tenant_id, &repo, ACTOR);
+
+    let mut results = Vec::with_capacity(req.mount_ids.len());
+    let mut label = None;
+    let mut rebound = 0usize;
+    // De-duplicate: the console builds this list from a rendered table, and a
+    // repeated id would otherwise be reported twice with the second look
+    // showing the FIRST repair as its "previous" value — which reads as if the
+    // mount had been bound to the new connection all along.
+    let mut seen = std::collections::HashSet::new();
+    for mount_id in req.mount_ids.iter().filter(|id| seen.insert(id.as_str())) {
+        match rebind_one(&svc, mount_id, &account_id).await {
+            Ok(outcome) => {
+                rebound += 1;
+                label = label.or(outcome.label.clone());
+                results.push(RebindMountOutcome {
+                    mount_id: mount_id.clone(),
+                    ok: true,
+                    previous_account_id: outcome.previous_account_id,
+                    label: outcome.label,
+                    error: None,
+                });
+            }
+            Err(e) => results.push(RebindMountOutcome {
+                mount_id: mount_id.clone(),
+                ok: false,
+                previous_account_id: None,
+                label: None,
+                error: Some(e.into_message()),
+            }),
+        }
+    }
+
+    let failed = results.len() - rebound;
+    tracing::info!(
+        repo = %repo,
+        to = %account_id,
+        rebound,
+        failed,
+        "rebound a group of mounts to one connection"
+    );
+
+    Ok(Json(RebindMountsResponse {
+        ok: failed == 0,
+        account_id,
+        label,
+        rebound,
+        failed,
+        results,
+    }))
+}
+
+/// What one successful rebind produced, for whichever response shape wraps it.
+struct RebindOutcome {
+    previous_account_id: Option<String>,
+    label: Option<String>,
+}
+
+/// Rebind ONE mount, validating the target against that mount's own connector.
+///
+/// The single and batch routes share this body rather than each doing their own
+/// lookups: the checks below are the whole safety of the operation, and a batch
+/// path that reimplemented them loosely — skipping the node-type guard, or
+/// validating against the first mount's connector — would be a bulk version of
+/// exactly the wrong-mailbox failure the endpoint exists to prevent.
+async fn rebind_one(
+    svc: &raisin_core::NodeService<crate::state::Store>,
+    mount_id: &str,
+    account_id: &str,
+) -> Result<RebindOutcome, ApiError> {
     let mut node = svc
-        .get(&mount_id)
+        .get(mount_id)
         .await?
-        .ok_or_else(|| ApiError::node_not_found(mount_id.clone()))?;
+        .ok_or_else(|| ApiError::node_not_found(mount_id.to_string()))?;
 
     if node.node_type != MOUNT_NODE_TYPE {
         return Err(ApiError::validation_failed(format!(
@@ -118,14 +295,14 @@ pub async fn rebind_mount(
             ApiError::validation_failed(format!("mount `{mount_id}` has no integration_ref"))
         })?;
 
-    let connector = load_connector(&svc, &integration_ref)
+    let connector = load_connector(svc, &integration_ref)
         .await?
         .ok_or_else(|| ApiError::node_not_found(integration_ref.clone()))?;
 
     let connections = super::connected_accounts(&connector);
     let target = connections
         .iter()
-        .find(|a| a.get("id").and_then(|v| v.as_str()) == Some(account_id.as_str()))
+        .find(|a| a.get("id").and_then(|v| v.as_str()) == Some(account_id))
         .ok_or_else(|| {
             // Name what IS available. An operator repairing a dangling reference
             // has, by definition, an id that does not exist; telling them only
@@ -167,9 +344,19 @@ pub async fn rebind_mount(
         .filter(|s| !s.is_empty())
         .map(str::to_string);
 
+    // Already bound: report success without a write. A group repair re-run
+    // after a partial failure would otherwise mint a node revision — replicated
+    // — for every mount that was already fine.
+    if previous.as_deref() == Some(account_id) {
+        return Ok(RebindOutcome {
+            previous_account_id: previous,
+            label,
+        });
+    }
+
     node.properties.insert(
         "account_ref".to_string(),
-        raisin_models::nodes::properties::PropertyValue::String(account_id.clone()),
+        raisin_models::nodes::properties::PropertyValue::String(account_id.to_string()),
     );
 
     // The mount keeps its `state`, and that is the point of repairing rather
@@ -186,12 +373,10 @@ pub async fn rebind_mount(
         "mount rebound to a different connection"
     );
 
-    Ok(Json(RebindMountResponse {
-        ok: true,
-        account_id,
+    Ok(RebindOutcome {
         previous_account_id: previous,
         label,
-    }))
+    })
 }
 
 /// Load the connector a mount references, by node id first and then by path.

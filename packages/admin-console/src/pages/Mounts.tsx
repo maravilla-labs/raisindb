@@ -44,6 +44,20 @@ export default function Mounts() {
   const [loadError, setLoadError] = useState<string | null>(null)
   const { toasts, error: showError, success: showSuccess, info: showInfo, closeToast } = useToast()
 
+  /**
+   * Orphaned mounts, grouped by the removed connection they name.
+   *
+   * Computed on every render rather than memoized: the list is tiny (only
+   * BROKEN mounts appear), and a stale group after a repair would keep offering
+   * a dropdown for mounts that are already fixed.
+   */
+  const orphanGroups = danglingGroups(mounts, integrations)
+  /** Groups of two or more get one card; a lone orphan keeps its row dropdown. */
+  const repairableGroups = orphanGroups.filter((g) => g.mounts.length > 1)
+  const groupedOrphans = new Set(
+    repairableGroups.flatMap((g) => g.mounts.map((m) => m.id || '')),
+  )
+
   /** The connector node backing a mount (matched by integration_ref path). */
   const integrationFor = (m: VirtualMount) => integrations.find((i) => i.path === m.integration_ref)
 
@@ -192,6 +206,42 @@ export default function Mounts() {
         'Connection reassigned',
         `${m.title} now syncs through ${res.label || res.account_id}. Its sync state was kept.`,
       )
+      window.setTimeout(() => void load(true), 800)
+    } catch (e: any) {
+      showError('Could not reassign the connection', e?.message)
+    }
+  }
+
+  /**
+   * Repair a whole group of orphaned mounts with one choice.
+   *
+   * Reports the honest outcome: the endpoint repairs each mount independently
+   * and returns 200 even when some failed, so a green "all done" on a partial
+   * repair would leave the operator believing a still-broken mount was fixed.
+   */
+  async function handleRebindGroup(
+    group: DanglingGroup,
+    mountIds: string[],
+    accountId: string,
+  ) {
+    if (!repo || mountIds.length === 0) return
+    try {
+      const res = await integrationsApi.rebindMounts(repo, accountId, mountIds)
+      const who = res.label || res.account_id
+      if (res.failed === 0) {
+        showSuccess(
+          'Connection reassigned',
+          `${res.rebound} mount${res.rebound === 1 ? '' : 's'} on ${
+            group.integration.title || group.integrationRef
+          } now sync through ${who}. Their sync state was kept.`,
+        )
+      } else {
+        const first = res.results.find((r) => !r.ok)
+        showError(
+          `Reassigned ${res.rebound}, ${res.failed} failed`,
+          first?.error || 'Some mounts could not be reassigned.',
+        )
+      }
       window.setTimeout(() => void load(true), 800)
     } catch (e: any) {
       showError('Could not reassign the connection', e?.message)
@@ -349,6 +399,10 @@ export default function Mounts() {
               mount={m}
               integration={integrationFor(m)}
               onRebind={handleRebind}
+              /* Suppressed when a group card above already offers the repair:
+                 one decision must have one control, or an operator can pick two
+                 different mailboxes for mounts that were the same one. */
+              suppressPicker={groupedOrphans.has(m.id || '')}
             />
           </div>
         )
@@ -432,6 +486,14 @@ export default function Mounts() {
           </button>
         </div>
       </div>
+
+      {/* The group repair sits ABOVE the table, not inside it: it is a
+          connector-level fault (one connection went away and took six mounts
+          with it), and six identical red rows do not say that. */}
+      {!loading &&
+        repairableGroups.map((g) => (
+          <DanglingGroupCard key={g.key} group={g} onRebindGroup={handleRebindGroup} />
+        ))}
 
       {/* First load only. Once the table exists it stays on screen through
           every refresh — see `load(silent)`. */}
@@ -602,6 +664,157 @@ export default function Mounts() {
 }
 
 /**
+ * The mounts that name a connection their connector does not have, grouped by
+ * the connection they named.
+ *
+ * Grouping by the DANGLING id is the whole safety argument for repairing them
+ * together. Mounts that shared an `account_ref` were, by construction, syncing
+ * the same mailbox, so one replacement is right for all of them. Mounts that
+ * named DIFFERENT removed connections were different mailboxes, and offering a
+ * single dropdown over the lot is precisely how one person's mail ends up
+ * materialised under a path that was syncing another's — the failure the rebind
+ * endpoint is manual to avoid. So they never share a group, however tempting a
+ * "repair all" button is.
+ *
+ * A connector that has not loaded yet yields nothing: until its connections are
+ * known, a live reference is indistinguishable from a dangling one.
+ */
+export function danglingGroups(
+  mounts: VirtualMount[],
+  integrations: Integration[],
+): DanglingGroup[] {
+  const byKey = new Map<string, DanglingGroup>()
+  for (const m of mounts) {
+    const ref = m.account_ref
+    if (!ref || !m.integration_ref) continue
+    const integration = integrations.find((i) => i.path === m.integration_ref)
+    if (!integration) continue
+    const accounts = integration.connected_accounts || []
+    if (accounts.some((a) => a.id === ref)) continue
+    const key = `${m.integration_ref}\u0000${ref}`
+    const group = byKey.get(key) || {
+      key,
+      integrationRef: m.integration_ref,
+      integration,
+      accountRef: ref,
+      mounts: [],
+    }
+    group.mounts.push(m)
+    byKey.set(key, group)
+  }
+  return [...byKey.values()]
+}
+
+/** One removed connection and every mount left pointing at it. */
+export type DanglingGroup = {
+  key: string
+  integrationRef: string
+  integration: Integration
+  accountRef: string
+  mounts: VirtualMount[]
+}
+
+/**
+ * Repair a whole group of orphaned mounts in one choice.
+ *
+ * Shown only for groups of two or more; a lone orphan keeps the dropdown on its
+ * own row (see [`RebindPrompt`]), because two affordances for one repair on the
+ * same screen is worse than either alone.
+ *
+ * Every mount is listed with a checkbox, checked by default. The list is not
+ * decoration: "these six paths are about to sync that mailbox" is the fact the
+ * operator has to agree with, and a bare count would hide a mount that ought to
+ * be excluded — one that was pinned to the old account by mistake, say.
+ */
+function DanglingGroupCard({
+  group,
+  onRebindGroup,
+}: {
+  group: DanglingGroup
+  onRebindGroup: (group: DanglingGroup, mountIds: string[], accountId: string) => void
+}) {
+  const accounts = group.integration.connected_accounts || []
+  const [excluded, setExcluded] = useState<Set<string>>(new Set())
+  const selected = group.mounts.filter((m) => m.id && !excluded.has(m.id)).map((m) => m.id!)
+
+  return (
+    <div className="mb-4 rounded-lg border border-red-500/30 bg-red-500/5 p-4">
+      <div className="flex items-start gap-2">
+        <AlertTriangle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
+        <div className="flex-1">
+          <p className="text-sm text-white">
+            {group.mounts.length} mounts on{' '}
+            <span className="font-medium">{group.integration.title || group.integrationRef}</span>{' '}
+            point at a connection that no longer exists.
+          </p>
+          <p className="text-xs text-zinc-400 mt-0.5">
+            They were all bound to <code className="text-zinc-300">{group.accountRef}</code>, so one
+            choice repairs the group. Each keeps its cursors and backfill progress — nothing is
+            re-imported.
+          </p>
+
+          <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1">
+            {group.mounts.map((m) => (
+              <label
+                key={m.id}
+                className="flex items-center gap-1.5 text-xs text-zinc-300 cursor-pointer"
+                title={m.mount_path}
+              >
+                <input
+                  type="checkbox"
+                  className="accent-primary-500"
+                  checked={!!m.id && !excluded.has(m.id)}
+                  onChange={(e) => {
+                    if (!m.id) return
+                    setExcluded((prev) => {
+                      const next = new Set(prev)
+                      if (e.target.checked) next.delete(m.id!)
+                      else next.add(m.id!)
+                      return next
+                    })
+                  }}
+                />
+                {m.title || m.mount_path}
+              </label>
+            ))}
+          </div>
+
+          <div className="mt-3 flex items-center gap-2">
+            {accounts.length === 0 ? (
+              <span className="text-xs text-zinc-500">
+                Connect an account on this connector first, then reassign.
+              </span>
+            ) : (
+              <select
+                className="text-xs bg-white/5 border border-white/10 rounded px-2 py-1 text-zinc-200 disabled:opacity-50"
+                defaultValue=""
+                disabled={selected.length === 0}
+                onChange={(e) => {
+                  if (e.target.value) onRebindGroup(group, selected, e.target.value)
+                  e.target.value = ''
+                }}
+                title="Pick the connection these mounts should sync through"
+              >
+                <option value="">
+                  {selected.length === group.mounts.length
+                    ? `Reassign all ${selected.length} to…`
+                    : `Reassign ${selected.length} selected to…`}
+                </option>
+                {accounts.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.label || a.subject || a.id}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
  * The repair affordance for a mount pinned to a connection that no longer
  * exists.
  *
@@ -617,10 +830,13 @@ function RebindPrompt({
   mount,
   integration,
   onRebind,
+  suppressPicker = false,
 }: {
   mount: VirtualMount
   integration?: Integration
   onRebind: (m: VirtualMount, accountId: string) => void
+  /** A group card above the table already offers this mount's repair. */
+  suppressPicker?: boolean
 }) {
   const ref = mount.account_ref
   const accounts = integration?.connected_accounts || []
@@ -634,7 +850,12 @@ function RebindPrompt({
       <span className="text-[10px] text-red-400">
         Its connection was removed — this mount cannot sync until it is reassigned.
       </span>
-      {accounts.length === 0 ? (
+      {/* The warning still shows on the row — the row is where an operator
+          looking at one mount reads its status — but the CONTROL lives in one
+          place per decision. */}
+      {suppressPicker ? (
+        <span className="text-[10px] text-zinc-500">Reassign it with the group above.</span>
+      ) : accounts.length === 0 ? (
         <span className="text-[10px] text-zinc-500">
           Connect an account on the connector first.
         </span>
