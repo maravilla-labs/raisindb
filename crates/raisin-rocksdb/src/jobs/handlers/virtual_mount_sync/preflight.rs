@@ -109,6 +109,13 @@ impl VirtualMountSyncHandler {
                     .await;
             } else {
                 tracing::debug!(mount_id = %mount_id, "mount paused (auth_required); skipping");
+                // Stamp the attempt, exactly as `mark_misconfigured` does and
+                // for the same reason: this path returns BEFORE `finalize`, so
+                // without it `last_attempt_at` never moves — and `is_due` now
+                // uses that stamp to space these re-examinations out. Omitting
+                // it turns a ten-minute question into a per-tick one.
+                self.stamp_attempt(tenant, repo, config_branch, &mount)
+                    .await;
                 return Ok(Preflight::Skip("auth_required"));
             }
         }
@@ -245,6 +252,36 @@ impl VirtualMountSyncHandler {
         account
             .last_refresh_at
             .is_some_and(|refreshed| refreshed > latched_at)
+    }
+
+    /// Record that this mount was looked at, without changing anything else.
+    ///
+    /// Best-effort: a failed stamp costs one extra re-examination.
+    async fn stamp_attempt(
+        &self,
+        tenant: &str,
+        repo: &str,
+        config_branch: &str,
+        mount: &MountConfig,
+    ) {
+        let mut state = mount.state.clone();
+        state.last_attempt_at = Some(Utc::now().timestamp());
+        if let Err(e) = persist_mount_state(
+            &self.storage,
+            tenant,
+            repo,
+            config_branch,
+            &mount.mount_id,
+            &mut state,
+        )
+        .await
+        {
+            tracing::debug!(
+                mount_id = %mount.mount_id,
+                error = %e,
+                "could not stamp the auth_required re-check"
+            );
+        }
     }
 
     /// Clear the `auth_required` latch so this run can proceed.

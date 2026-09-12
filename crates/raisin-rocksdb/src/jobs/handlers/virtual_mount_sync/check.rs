@@ -259,6 +259,14 @@ async fn check_repo(
     Ok(enqueued)
 }
 
+/// How often a mount latched on `auth_required` is re-examined.
+///
+/// Not a retry interval: the preflight still refuses to call the provider with
+/// a credential that has not changed. This is only how often the question "has
+/// the credential been repaired since?" gets asked, and the answer costs one
+/// node read.
+const AUTH_RECHECK_SECS: i64 = 600;
+
 /// Whether a mount should be synced now.
 pub fn is_due(mount: &MountConfig, now: i64) -> bool {
     if !mount.enabled {
@@ -270,8 +278,22 @@ pub fn is_due(mount: &MountConfig, now: i64) -> bool {
     if mount.state.paused {
         return false;
     }
+    // An `auth_required` mount is not dead, it is WAITING — for someone to
+    // reconnect, or for the background refresh to recover the grant. Returning
+    // a flat `false` here meant the scheduler never looked at it again, so the
+    // only thing that could ever revive it was an operator clicking Sync now.
+    // Combined with the preflight refusing to run it, a repaired credential had
+    // no path back at all.
+    //
+    // So it becomes due again on a slow cadence, and the PREFLIGHT makes the
+    // real decision: it compares the connection's `last_refresh_at` against
+    // when the latch was set and only proceeds if the credential is genuinely
+    // newer. This is therefore not a retry of a rejected credential — it is a
+    // cheap periodic question ("has anything changed?"), one node read, every
+    // ten minutes per latched mount.
     if mount.state.status.as_deref() == Some("auth_required") {
-        return false;
+        let last = mount.state.last_attempt_at.unwrap_or(0);
+        return now - last >= AUTH_RECHECK_SECS;
     }
     // The PROVIDER told us to wait. Checked above every other "due" reason —
     // including the backfill fast path below, which is the one that would
@@ -526,13 +548,49 @@ mod tests {
     }
 
     #[test]
-    fn disabled_and_auth_required_mounts_are_never_due() {
+    fn a_disabled_mount_is_never_due() {
         let mut m = mount();
         m.enabled = false;
+        assert!(!is_due(&m, 9_999_999));
+    }
+
+    /// An `auth_required` mount is WAITING, not dead.
+    ///
+    /// It used to be flatly never due, and the preflight refused to run it, so
+    /// a credential repaired by a reconnect or by the background refresh had no
+    /// path back — only an operator clicking Sync now. It is re-examined on a
+    /// slow cadence instead, and the preflight decides whether anything
+    /// actually changed.
+    #[test]
+    fn a_latched_mount_is_re_examined_on_a_slow_cadence() {
+        let mut m = mount();
+        m.state.status = Some("auth_required".into());
+        m.state.last_attempt_at = Some(1_000_000);
+
+        assert!(
+            !is_due(&m, 1_000_000 + AUTH_RECHECK_SECS - 1),
+            "must not be re-examined every tick"
+        );
+        assert!(
+            is_due(&m, 1_000_000 + AUTH_RECHECK_SECS),
+            "must become due again so a repaired credential can be noticed"
+        );
+    }
+
+    /// Operator intent still outranks the re-check: a paused or disabled mount
+    /// stays put whatever its auth status says.
+    #[test]
+    fn pausing_still_beats_the_auth_recheck() {
+        let mut m = mount();
+        m.state.status = Some("auth_required".into());
+        m.state.last_attempt_at = Some(0);
+        m.state.paused = true;
         assert!(!is_due(&m, 9_999_999));
 
         let mut m = mount();
         m.state.status = Some("auth_required".into());
+        m.state.last_attempt_at = Some(0);
+        m.enabled = false;
         assert!(!is_due(&m, 9_999_999));
     }
 }
