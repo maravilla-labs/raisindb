@@ -78,19 +78,35 @@ impl TantivyManagement {
         // Count documents
         let total_docs = searcher.num_docs();
 
-        // Check for corruption (attempt to read all segments)
-        let mut corrupted = 0u64;
-        let mut issues = Vec::new();
+        // Real integrity: Tantivy's own per-file checksums. The previous check
+        // flagged every segment whose `alive_bitset()` was `None` — but `None`
+        // simply means the segment has no deletes, the normal state of a fresh
+        // segment, so a healthy index reported "corrupted segments" and invited
+        // a needless rebuild (2026-09-13).
+        let damaged_files = index
+            .validate_checksum()
+            .map_err(|e| Error::storage(format!("Failed to validate index checksums: {}", e)))?;
 
-        for segment_reader in searcher.segment_readers() {
-            // alive_bitset() returns Option, not Result
-            // If it's None, the segment might be corrupted
-            if segment_reader.alive_bitset().is_none() {
-                corrupted += segment_reader.num_docs() as u64;
-                issues.push(format!(
-                    "Corrupted segment {:?}: missing alive bitset",
-                    segment_reader.segment_id(),
-                ));
+        let mut corrupted = 0u64;
+        let mut issues: Vec<String> = damaged_files
+            .iter()
+            .map(|f| format!("Checksum mismatch in {}", f.display()))
+            .collect();
+        issues.sort();
+
+        if !damaged_files.is_empty() {
+            // Segment files are named `<segment uuid>.<ext>`; attribute the
+            // damaged files to their segments to size the damage in documents.
+            for segment_reader in searcher.segment_readers() {
+                let id = segment_reader.segment_id().uuid_string();
+                let hit = damaged_files.iter().any(|f| {
+                    f.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with(&id))
+                });
+                if hit {
+                    corrupted += segment_reader.num_docs() as u64;
+                }
             }
         }
 
@@ -100,7 +116,11 @@ impl TantivyManagement {
             1.0
         };
 
-        let status = if health_score >= 0.99 {
+        let status = if !damaged_files.is_empty() && corrupted == 0 {
+            // A damaged file outside any searchable segment (meta, a stale
+            // segment): the index still answers, but it is not healthy.
+            IndexStatus::Degraded
+        } else if health_score >= 0.99 && damaged_files.is_empty() {
             IndexStatus::Healthy
         } else if health_score >= 0.75 {
             IndexStatus::Degraded

@@ -27,7 +27,7 @@ pub(super) async fn export_all_repository_nodes(
     let prefix = keys::repo_prefix(tenant_id, repo_id);
 
     let mut nodes = Vec::new();
-    let iter = storage.db().prefix_iterator_cf(cf_nodes, &prefix);
+    let iter = crate::prefix_scan(storage.db(), cf_nodes, &prefix);
 
     for item in iter {
         let (key, value) =
@@ -65,7 +65,7 @@ pub(super) async fn export_branches(
         .build_prefix();
 
     let mut branches = Vec::new();
-    let iter = storage.db().prefix_iterator_cf(cf_branches, &prefix);
+    let iter = crate::prefix_scan(storage.db(), cf_branches, &prefix);
 
     for item in iter {
         let (_, value) =
@@ -93,7 +93,7 @@ pub(super) async fn export_workspaces(
         .build_prefix();
 
     let mut workspaces = Vec::new();
-    let iter = storage.db().prefix_iterator_cf(cf_workspaces, &prefix);
+    let iter = crate::prefix_scan(storage.db(), cf_workspaces, &prefix);
 
     for item in iter {
         let (_, value) =
@@ -121,7 +121,7 @@ pub(super) async fn export_revisions(
         .build_prefix();
 
     let mut revisions = Vec::new();
-    let iter = storage.db().prefix_iterator_cf(cf_revisions, &prefix);
+    let iter = crate::prefix_scan(storage.db(), cf_revisions, &prefix);
 
     for item in iter {
         let (_, value) =
@@ -149,7 +149,7 @@ pub(super) async fn export_nodetypes(
         .build_prefix();
 
     let mut nodetypes = Vec::new();
-    let iter = storage.db().prefix_iterator_cf(cf_nodetypes, &prefix);
+    let iter = crate::prefix_scan(storage.db(), cf_nodetypes, &prefix);
 
     for item in iter {
         let (_, value) =
@@ -177,7 +177,7 @@ pub(super) async fn export_trees(
         .build_prefix();
 
     let mut trees = Vec::new();
-    let iter = storage.db().prefix_iterator_cf(cf_trees, &prefix);
+    let iter = crate::prefix_scan(storage.db(), cf_trees, &prefix);
 
     for item in iter {
         let (key, value) =

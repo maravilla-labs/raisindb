@@ -84,7 +84,7 @@ async fn get_node_revisions(
         .build_prefix();
 
     let mut revisions = Vec::new();
-    let iter = storage.db().prefix_iterator_cf(cf_nodes, &prefix);
+    let iter = crate::prefix_scan(storage.db(), cf_nodes, &prefix);
 
     for item in iter {
         let (key, value) =
@@ -135,7 +135,7 @@ async fn delete_node_revision(
         .push(repo_id)
         .build_prefix();
 
-    let iter = storage.db().prefix_iterator_cf(cf_nodes, &prefix);
+    let iter = crate::prefix_scan(storage.db(), cf_nodes, &prefix);
 
     for item in iter {
         let (key, _) =

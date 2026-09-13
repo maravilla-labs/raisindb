@@ -18,7 +18,7 @@ pub(super) async fn list_repositories_for_tenant(
         .build_prefix();
 
     let mut repos = Vec::new();
-    let iter = storage.db().prefix_iterator_cf(cf_registry, &prefix);
+    let iter = crate::prefix_scan(storage.db(), cf_registry, &prefix);
 
     for item in iter {
         let (key, _) =
@@ -64,7 +64,7 @@ pub(super) async fn list_branches_for_repo(
         .build_prefix();
 
     let mut branches = Vec::new();
-    let iter = storage.db().prefix_iterator_cf(cf_branches, &prefix);
+    let iter = crate::prefix_scan(storage.db(), cf_branches, &prefix);
 
     for item in iter {
         let (key, _) =
@@ -99,7 +99,7 @@ pub(super) async fn list_workspaces_for_repo(
         .build_prefix();
 
     let mut workspaces = Vec::new();
-    let iter = storage.db().prefix_iterator_cf(cf_workspaces, &prefix);
+    let iter = crate::prefix_scan(storage.db(), cf_workspaces, &prefix);
 
     for item in iter {
         let (key, _) =
@@ -128,7 +128,7 @@ pub(super) async fn list_all_tenants(storage: &RocksDBStorage) -> Result<Vec<Str
         .build_prefix();
 
     let mut tenants = Vec::new();
-    let iter = storage.db().prefix_iterator_cf(cf_registry, &prefix);
+    let iter = crate::prefix_scan(storage.db(), cf_registry, &prefix);
 
     for item in iter {
         let (key, _) =

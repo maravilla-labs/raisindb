@@ -738,3 +738,38 @@ pub async fn require_superadmin_token_middleware(
     }
     Ok(next.run(req).await)
 }
+
+/// Tenant scope for `/api/admin/management/database/{tenant}/{repo}/…` routes.
+///
+/// Runs AFTER [`require_admin_auth_middleware`] and refuses the request unless
+/// the `{tenant}` in the URL is the tenant the caller authenticated for. Without
+/// it a tenant's admin could name ANOTHER tenant in the path and verify, rebuild
+/// or purge that tenant's indexes. The superadmin bearer is scoped the same way
+/// — to the tenant its `x-tenant-id` names — so an operator tool (Groundcrew)
+/// always states which tenant it is repairing.
+pub async fn require_path_tenant_scope(
+    req: Request<Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let path_tenant = req
+        .uri()
+        .path()
+        .split_once("/management/database/")
+        .and_then(|(_, rest)| rest.split('/').next())
+        .map(str::to_string)
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let claims_tenant = req
+        .extensions()
+        .get::<raisin_rocksdb::AdminClaims>()
+        .map(|c| c.tenant_id.clone())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    if path_tenant != claims_tenant {
+        tracing::warn!(
+            path_tenant = %path_tenant,
+            claims_tenant = %claims_tenant,
+            "refused database management call for a tenant the caller is not scoped to"
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(next.run(req).await)
+}

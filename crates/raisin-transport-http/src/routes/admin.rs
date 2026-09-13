@@ -169,64 +169,153 @@ pub(crate) fn admin_routes(state: &AppState) -> Router<AppState> {
         )
         .route(
             "/api/admin/management/database/{tenant}/{repo}/fulltext/verify",
-            post(crate::handlers::management::verify_fulltext_index),
+            post(crate::handlers::management::verify_fulltext_index)
+                .layer(axum::middleware::from_fn(
+                    crate::middleware::require_path_tenant_scope,
+                ))
+                .layer(from_fn_with_state(
+                    state.clone(),
+                    crate::middleware::require_admin_auth_middleware,
+                )),
         )
         .route(
             "/api/admin/management/database/{tenant}/{repo}/fulltext/rebuild",
-            post(crate::handlers::management::rebuild_fulltext_index),
+            post(crate::handlers::management::rebuild_fulltext_index)
+                .layer(axum::middleware::from_fn(
+                    crate::middleware::require_path_tenant_scope,
+                ))
+                .layer(from_fn_with_state(
+                    state.clone(),
+                    crate::middleware::require_admin_auth_middleware,
+                )),
         )
         .route(
             "/api/admin/management/database/{tenant}/{repo}/fulltext/reconcile",
-            post(crate::handlers::management::reconcile_fulltext_index),
+            post(crate::handlers::management::reconcile_fulltext_index)
+                .layer(axum::middleware::from_fn(
+                    crate::middleware::require_path_tenant_scope,
+                ))
+                .layer(from_fn_with_state(
+                    state.clone(),
+                    crate::middleware::require_admin_auth_middleware,
+                )),
         )
         .route(
             "/api/admin/management/database/{tenant}/{repo}/fulltext/optimize",
-            post(crate::handlers::management::optimize_fulltext_index),
+            post(crate::handlers::management::optimize_fulltext_index)
+                .layer(axum::middleware::from_fn(
+                    crate::middleware::require_path_tenant_scope,
+                ))
+                .layer(from_fn_with_state(
+                    state.clone(),
+                    crate::middleware::require_admin_auth_middleware,
+                )),
         )
         .route(
             "/api/admin/management/database/{tenant}/{repo}/fulltext/purge",
-            post(crate::handlers::management::purge_fulltext_index),
+            post(crate::handlers::management::purge_fulltext_index)
+                .layer(axum::middleware::from_fn(
+                    crate::middleware::require_path_tenant_scope,
+                ))
+                .layer(from_fn_with_state(
+                    state.clone(),
+                    crate::middleware::require_admin_auth_middleware,
+                )),
         )
         .route(
             "/api/admin/management/database/{tenant}/{repo}/fulltext/health",
-            get(crate::handlers::management::get_fulltext_health),
+            get(crate::handlers::management::get_fulltext_health)
+                .layer(axum::middleware::from_fn(
+                    crate::middleware::require_path_tenant_scope,
+                ))
+                .layer(from_fn_with_state(
+                    state.clone(),
+                    crate::middleware::require_admin_auth_middleware,
+                )),
         )
         .route(
             "/api/admin/management/database/{tenant}/{repo}/fulltext/errors",
             get(crate::handlers::management::get_fulltext_errors)
-                .delete(crate::handlers::management::clear_fulltext_errors),
+                .delete(crate::handlers::management::clear_fulltext_errors)
+                .layer(axum::middleware::from_fn(
+                    crate::middleware::require_path_tenant_scope,
+                ))
+                .layer(from_fn_with_state(
+                    state.clone(),
+                    crate::middleware::require_admin_auth_middleware,
+                )),
         )
         .route(
             "/api/admin/management/database/{tenant}/{repo}/vector/verify",
-            post(crate::handlers::management::verify_vector_index),
+            post(crate::handlers::management::verify_vector_index)
+                .layer(axum::middleware::from_fn(
+                    crate::middleware::require_path_tenant_scope,
+                ))
+                .layer(from_fn_with_state(
+                    state.clone(),
+                    crate::middleware::require_admin_auth_middleware,
+                )),
         )
         .route(
             "/api/admin/management/database/{tenant}/{repo}/vector/rebuild",
-            post(crate::handlers::management::rebuild_vector_index),
+            post(crate::handlers::management::rebuild_vector_index)
+                .layer(axum::middleware::from_fn(
+                    crate::middleware::require_path_tenant_scope,
+                ))
+                .layer(from_fn_with_state(
+                    state.clone(),
+                    crate::middleware::require_admin_auth_middleware,
+                )),
         )
         .route(
             "/api/admin/management/database/{tenant}/{repo}/vector/regenerate",
-            post(crate::handlers::management::regenerate_vector_embeddings),
+            post(crate::handlers::management::regenerate_vector_embeddings)
+                .layer(axum::middleware::from_fn(
+                    crate::middleware::require_path_tenant_scope,
+                ))
+                .layer(from_fn_with_state(
+                    state.clone(),
+                    crate::middleware::require_admin_auth_middleware,
+                )),
         )
         .route(
             "/api/admin/management/database/{tenant}/{repo}/vector/optimize",
-            post(crate::handlers::management::optimize_vector_index),
+            post(crate::handlers::management::optimize_vector_index)
+                .layer(axum::middleware::from_fn(
+                    crate::middleware::require_path_tenant_scope,
+                ))
+                .layer(from_fn_with_state(
+                    state.clone(),
+                    crate::middleware::require_admin_auth_middleware,
+                )),
         )
         .route(
             "/api/admin/management/database/{tenant}/{repo}/vector/restore",
-            post(crate::handlers::management::restore_vector_index),
+            post(crate::handlers::management::restore_vector_index)
+                .layer(axum::middleware::from_fn(
+                    crate::middleware::require_path_tenant_scope,
+                ))
+                .layer(from_fn_with_state(
+                    state.clone(),
+                    crate::middleware::require_admin_auth_middleware,
+                )),
         )
         .route(
             "/api/admin/management/database/{tenant}/{repo}/vector/health",
-            get(crate::handlers::management::get_vector_health),
+            get(crate::handlers::management::get_vector_health)
+                .layer(axum::middleware::from_fn(
+                    crate::middleware::require_path_tenant_scope,
+                ))
+                .layer(from_fn_with_state(
+                    state.clone(),
+                    crate::middleware::require_admin_auth_middleware,
+                )),
         )
         // ----------------------------------------------------------------
         // Spatial (geohash) index management.
         //
-        // Unlike the fulltext/vector blocks above, these five carry an EXPLICIT
-        // `require_admin_auth_middleware` layer. The blocks above have no auth layer
-        // in this router at all, so their rebuild/purge endpoints are reachable
-        // unauthenticated — a pre-existing gap that is reported rather than copied.
+        // These carry the admin-auth layer; the fulltext/vector blocks above
+        // additionally carry `require_path_tenant_scope`.
         // ----------------------------------------------------------------
         .route(
             "/api/admin/management/database/{tenant}/{repo}/spatial/config",

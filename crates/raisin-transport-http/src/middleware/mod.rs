@@ -19,7 +19,10 @@ pub use tenant::ensure_tenant_middleware;
 pub use types::{RaisinContext, TenantInfo};
 
 #[cfg(feature = "storage-rocksdb")]
-pub use auth::{optional_auth_middleware, require_admin_auth_middleware, require_auth_middleware};
+pub use auth::{
+    optional_auth_middleware, require_admin_auth_middleware, require_auth_middleware,
+    require_path_tenant_scope,
+};
 
 #[cfg(feature = "storage-rocksdb")]
 pub use cors::{repo_auth_cors_middleware, unified_cors_middleware};

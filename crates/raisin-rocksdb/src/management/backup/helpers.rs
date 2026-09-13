@@ -49,7 +49,7 @@ pub(super) async fn list_repositories(
         .build_prefix();
 
     let mut repos = Vec::new();
-    let iter = storage.db().prefix_iterator_cf(cf_registry, &prefix);
+    let iter = crate::prefix_scan(storage.db(), cf_registry, &prefix);
 
     for item in iter {
         let (key, _) =

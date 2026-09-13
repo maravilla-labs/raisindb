@@ -77,7 +77,7 @@ pub async fn cleanup_orphaned_property_indexes(
             .push(tag)
             .build_prefix();
 
-        let iter = storage.db().prefix_iterator_cf(cf_prop, &prefix);
+        let iter = crate::prefix_scan(storage.db(), cf_prop, &prefix);
 
         for item in iter {
             let (key, value) = match item {

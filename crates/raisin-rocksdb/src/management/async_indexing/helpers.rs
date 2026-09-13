@@ -60,7 +60,7 @@ pub(crate) async fn scan_nodes_counting_skips(
 
     let mut nodes = Vec::new();
     let mut skipped = 0usize;
-    let iter = storage.db().prefix_iterator_cf(cf_nodes, &prefix);
+    let iter = crate::prefix_scan(storage.db(), cf_nodes, &prefix);
 
     // Node keys are `…\0nodes\0{node_id}\0{~revision}` with the revision
     // encoded DESCENDING, so the FIRST key per node id is the newest. Keep
@@ -260,7 +260,7 @@ fn delete_with_prefix(
     cf: &rocksdb::ColumnFamily,
     prefix: &[u8],
 ) -> Result<()> {
-    let iter = storage.db().prefix_iterator_cf(cf, prefix);
+    let iter = crate::prefix_scan(storage.db(), cf, prefix);
     let mut batch = WriteBatch::default();
     let mut count = 0;
 

@@ -98,9 +98,7 @@ pub async fn repair_path_index(
         .push("node_path")
         .build_prefix();
 
-    let iter = storage
-        .db()
-        .prefix_iterator_cf(cf_node_path, prefix.clone());
+    let iter = crate::prefix_scan(storage.db(), cf_node_path, prefix.clone());
 
     // Entries for one node id are contiguous and the revision is encoded
     // DESCENDING, so the first entry seen for an id is its newest and decides

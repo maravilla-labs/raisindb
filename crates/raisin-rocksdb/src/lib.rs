@@ -526,6 +526,52 @@ pub fn open_db_with_config(config: &config::RocksDBConfig) -> Result<DB> {
 }
 
 /// Helper to get a column family handle
+/// Iterate exactly the keys of `cf` that start with `prefix` — and nothing after.
+///
+/// `DB::prefix_iterator_cf` does NOT do this. It only sets
+/// `prefix_same_as_start`, which RocksDB honours solely on a column family with
+/// a prefix extractor, and most of ours have none (see `prefix_transform`). On
+/// those it iterates from `prefix` to the END of the column family, through
+/// every later workspace, repository and TENANT. A caller that forgets its own
+/// `starts_with` check silently reads — or, in a delete loop, deletes — other
+/// tenants' data. Measured 2026-09-13: a one-tenant fulltext rebuild indexed
+/// other tenants' nodes into that tenant's search index.
+///
+/// Here the bound is RocksDB's own `iterate_upper_bound` at the prefix's
+/// successor, so the iterator ends at the prefix whatever the caller does, and
+/// total-order seek keeps a CF with a prefix extractor correct for a prefix
+/// shorter than the extractor's.
+pub(crate) fn prefix_scan<'a>(
+    db: &'a DB,
+    cf: &impl rocksdb::AsColumnFamilyRef,
+    prefix: impl AsRef<[u8]>,
+) -> rocksdb::DBIteratorWithThreadMode<'a, DB> {
+    let prefix = prefix.as_ref();
+    let mut opts = rocksdb::ReadOptions::default();
+    opts.set_total_order_seek(true);
+    if let Some(upper) = prefix_successor(prefix) {
+        opts.set_iterate_upper_bound(upper);
+    }
+    db.iterator_cf_opt(
+        cf,
+        opts,
+        rocksdb::IteratorMode::From(prefix, rocksdb::Direction::Forward),
+    )
+}
+
+/// The smallest key greater than every key starting with `prefix`, or `None`
+/// when no such key exists (empty or all-0xFF prefix: scan to the end).
+pub(crate) fn prefix_successor(prefix: &[u8]) -> Option<Vec<u8>> {
+    let mut upper = prefix.to_vec();
+    while let Some(last) = upper.pop() {
+        if last < 0xFF {
+            upper.push(last + 1);
+            return Some(upper);
+        }
+    }
+    None
+}
+
 pub(crate) fn cf_handle<'a>(db: &'a DB, name: &str) -> Result<&'a ColumnFamily> {
     db.cf_handle(name)
         .ok_or_else(|| raisin_error::Error::storage(format!("Column family '{}' not found", name)))

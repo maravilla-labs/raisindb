@@ -80,7 +80,7 @@ async fn get_all_trees(
         .build_prefix();
 
     let mut trees = Vec::new();
-    let iter = storage.db().prefix_iterator_cf(cf_trees, &prefix);
+    let iter = crate::prefix_scan(storage.db(), cf_trees, &prefix);
 
     for item in iter {
         let (key, _) =

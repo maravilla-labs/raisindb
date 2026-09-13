@@ -73,7 +73,7 @@ pub fn get_repository_size(
 
     for cf_name in crate::all_column_families() {
         if let Ok(cf) = cf_handle(storage.db(), cf_name) {
-            let iter = storage.db().prefix_iterator_cf(cf, &prefix);
+            let iter = crate::prefix_scan(storage.db(), cf, &prefix);
 
             for (key, value) in iter.flatten() {
                 total_size += key.len() as u64 + value.len() as u64;
@@ -111,7 +111,7 @@ pub(super) async fn list_all_node_ids(
     let prefix = keys::repo_prefix(tenant_id, repo_id);
 
     let mut node_ids = std::collections::HashSet::new();
-    let iter = storage.db().prefix_iterator_cf(cf_nodes, &prefix);
+    let iter = crate::prefix_scan(storage.db(), cf_nodes, &prefix);
 
     for item in iter {
         let (key, _) =
@@ -146,7 +146,7 @@ pub(super) async fn list_repositories(
         .build_prefix();
 
     let mut repos = Vec::new();
-    let iter = storage.db().prefix_iterator_cf(cf_registry, &prefix);
+    let iter = crate::prefix_scan(storage.db(), cf_registry, &prefix);
 
     for item in iter {
         let (key, _) =

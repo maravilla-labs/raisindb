@@ -229,7 +229,7 @@ async fn scan_nodes(
     let prefix = keys::workspace_prefix(tenant_id, repo_id, branch, workspace);
 
     let mut nodes = Vec::new();
-    let iter = storage.db().prefix_iterator_cf(cf_nodes, &prefix);
+    let iter = crate::prefix_scan(storage.db(), cf_nodes, &prefix);
 
     for item in iter {
         let (key, value) =
@@ -279,7 +279,7 @@ async fn verify_path_index(
         keys::path_index_key_prefix(tenant_id, repo_id, branch, workspace, &node.path);
 
     // Try to find any entry with this path
-    let mut iter = storage.db().prefix_iterator_cf(cf_path, &path_prefix);
+    let mut iter = crate::prefix_scan(storage.db(), cf_path, &path_prefix);
 
     if let Some(item) = iter.next() {
         let (_, indexed_id_bytes) =
@@ -318,7 +318,7 @@ async fn list_branches(
         .build_prefix();
 
     let mut branches = Vec::new();
-    let iter = storage.db().prefix_iterator_cf(cf_branches, &prefix);
+    let iter = crate::prefix_scan(storage.db(), cf_branches, &prefix);
 
     for item in iter {
         let (key, _) =
@@ -354,7 +354,7 @@ async fn list_workspaces(
         .build_prefix();
 
     let mut workspaces = Vec::new();
-    let iter = storage.db().prefix_iterator_cf(cf_workspaces, &prefix);
+    let iter = crate::prefix_scan(storage.db(), cf_workspaces, &prefix);
 
     for item in iter {
         let (key, _) =
@@ -385,7 +385,7 @@ async fn list_repositories(storage: &RocksDBStorage, tenant_id: &str) -> Result<
         .build_prefix();
 
     let mut repos = Vec::new();
-    let iter = storage.db().prefix_iterator_cf(cf_registry, &prefix);
+    let iter = crate::prefix_scan(storage.db(), cf_registry, &prefix);
 
     for item in iter {
         let (key, _) =
