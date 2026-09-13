@@ -464,7 +464,10 @@ impl JobType {
             JobType::IntegrityScan => 600,
             JobType::IndexRebuild => 600,
             JobType::IndexVerify => 600,
-            JobType::FulltextRebuild => 600,
+            // Rebuild tears the Tantivy directory down FIRST, so a watchdog
+            // abort leaves the tenant with no search at all. A large tenant's
+            // node scan alone runs for minutes; give it room to finish.
+            JobType::FulltextRebuild => 3600,
             JobType::FulltextVerify => 600,
             JobType::FulltextPurge => 600,
             // The documented mitigation for a Tantivy merge storm, and the one

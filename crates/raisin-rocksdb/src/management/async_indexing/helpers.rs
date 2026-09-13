@@ -43,8 +43,10 @@ pub(crate) async fn scan_nodes(
 /// The scan itself, reporting how many nodes it had to drop.
 ///
 /// Separated so the refusal above is stated once and cannot be forgotten by a
-/// new caller.
-async fn scan_nodes_counting_skips(
+/// new caller. Only a caller whose target is ALREADY gone may use this directly
+/// — the fulltext rebuild tears the Tantivy directory down before it scans, so
+/// refusing there protects nothing and leaves an empty index.
+pub(crate) async fn scan_nodes_counting_skips(
     storage: &RocksDBStorage,
     tenant_id: &str,
     repo_id: &str,

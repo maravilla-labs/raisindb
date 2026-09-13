@@ -24,7 +24,7 @@
 
 use crate::jobs::handlers::fulltext::{resolve_index_plan, IndexPlanCache};
 use crate::jobs::IndexKey;
-use crate::management::async_indexing::helpers::scan_nodes;
+use crate::management::async_indexing::helpers::scan_nodes_counting_skips;
 use crate::management::helpers::{list_branches, list_workspaces};
 use crate::storage::RocksDBStorage;
 use raisin_error::{Error, Result};
@@ -229,8 +229,28 @@ async fn reindex_all_workspaces(
     let plan_cache = IndexPlanCache::new();
 
     for workspace in &workspaces {
-        let nodes = match scan_nodes(storage, tenant_id, repo_id, branch, workspace).await {
-            Ok(n) => n,
+        // Index what can be placed; do NOT refuse the workspace. `scan_nodes`
+        // refuses when nodes cannot be placed in the tree because its callers
+        // clear a RocksDB keyspace AFTER scanning. Here the Tantivy directory
+        // is already torn down (rebuild) or never cleared (reconcile), so a
+        // refusal leaves the workspace unsearchable instead of protecting it
+        // — measured 2026-09-13: a tenant rebuild ended with 0 entries because
+        // every workspace refused over 52 unplaceable nodes. The skipped nodes
+        // are counted as errors so the job result says the index is partial.
+        let nodes = match scan_nodes_counting_skips(storage, tenant_id, repo_id, branch, workspace)
+            .await
+        {
+            Ok((n, skipped)) => {
+                if skipped > 0 {
+                    tracing::error!(
+                        workspace,
+                        skipped,
+                        "fulltext rebuild: nodes with no path in NODE_PATH at the branch head were not indexed"
+                    );
+                    total_errors += skipped;
+                }
+                n
+            }
             Err(e) => {
                 tracing::error!(
                     workspace, error = %e,
