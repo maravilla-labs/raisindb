@@ -32,4 +32,5 @@ raisin-hlc = { version = "0.1.0", path = "../raisin-hlc" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+libc = "0.2"
 rand = "0.8"

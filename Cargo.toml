@@ -96,3 +96,11 @@ incremental = false
 
 [profile.test.package."*"]
 debug = false
+
+# usearch 2.26.1 with one fix: memory_mapped_file_t defaulted its descriptor to 0,
+# so close() after a failed view (and every second close) called ::close(0) and
+# closed whatever raisindb held on fd 0 -- in production, the RocksDB WAL, which
+# stops every write with "Bad file descriptor" until restart (2026-09-13).
+# Drop this once upstream ships the fix (still present on unum-cloud/usearch main).
+[patch.crates-io]
+usearch = { path = "third_party/usearch" }

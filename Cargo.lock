@@ -7298,6 +7298,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bincode",
+ "libc",
  "moka",
  "raisin-error",
  "raisin-hlc",
@@ -10994,8 +10995,6 @@ checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 [[package]]
 name = "usearch"
 version = "2.26.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "884002b91c545f43b67e9eadbef70834502ad14c32df1ce8d72bdb56ab7d8be3"
 dependencies = [
  "cxx",
  "cxx-build",
