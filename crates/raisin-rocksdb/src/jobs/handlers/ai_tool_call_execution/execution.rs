@@ -19,7 +19,6 @@ use raisin_models::nodes::Node;
 use raisin_storage::{ListOptions, NodeRepository, Storage, StorageScope};
 use std::collections::HashMap;
 
-use super::types::json_to_property_value;
 use super::AIToolCallExecutionHandler;
 use crate::jobs::handlers::function_execution::FunctionExecutionResult;
 
@@ -113,7 +112,7 @@ impl<S: Storage + 'static> AIToolCallExecutionHandler<S> {
         let mut properties = HashMap::new();
 
         if let Some(r) = result {
-            properties.insert("result".to_string(), json_to_property_value(r)?);
+            properties.insert("result".to_string(), PropertyValue::from_json(&r));
         }
 
         if let Some(e) = error {

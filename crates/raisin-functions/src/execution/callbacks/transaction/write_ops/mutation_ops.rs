@@ -18,14 +18,13 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
+use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
 use raisin_storage::transactional::TransactionalStorage;
 use raisin_storage::Storage;
 use serde_json::Value;
 
-use super::super::helpers::{
-    apply_node_updates, json_to_property_value, row_to_json_object, substitute_params,
-};
+use super::super::helpers::{apply_node_updates, row_to_json_object, substitute_params};
 use super::super::store::TransactionStore;
 use crate::api::{TxUpdateCallback, TxUpdatePropertyCallback};
 use crate::execution::callbacks::sql_generator;
@@ -118,7 +117,7 @@ where
                 })?;
 
                 // Convert JSON value to PropertyValue
-                let prop_value = json_to_property_value(value)?;
+                let prop_value = PropertyValue::from_json(&value);
 
                 let stmt = sql_generator::generate_update_single_property(
                     &workspace,

@@ -78,32 +78,3 @@ pub(super) fn property_value_to_json(pv: &PropertyValue) -> serde_json::Value {
         PropertyValue::Geometry(g) => serde_json::to_value(g).unwrap_or(serde_json::Value::Null),
     }
 }
-
-/// Convert JSON Value to PropertyValue
-pub(super) fn json_to_property_value(value: serde_json::Value) -> Result<PropertyValue> {
-    match value {
-        serde_json::Value::Null => Ok(PropertyValue::Null),
-        serde_json::Value::Bool(b) => Ok(PropertyValue::Boolean(b)),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(PropertyValue::Integer(i))
-            } else if let Some(f) = n.as_f64() {
-                Ok(PropertyValue::Float(f))
-            } else {
-                Err(Error::Validation("Invalid number".to_string()))
-            }
-        }
-        serde_json::Value::String(s) => Ok(PropertyValue::String(s)),
-        serde_json::Value::Array(arr) => {
-            let items: Result<Vec<_>> = arr.into_iter().map(json_to_property_value).collect();
-            Ok(PropertyValue::Array(items?))
-        }
-        serde_json::Value::Object(obj) => {
-            let mut map = HashMap::new();
-            for (k, v) in obj {
-                map.insert(k, json_to_property_value(v)?);
-            }
-            Ok(PropertyValue::Object(map))
-        }
-    }
-}

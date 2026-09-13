@@ -1,6 +1,6 @@
 //! Aggregation logic: collecting results, atomic counting, and creating aggregated nodes.
 
-use super::helpers::{json_to_property_value, property_value_to_json};
+use super::helpers::property_value_to_json;
 use super::AIToolResultAggregationHandler;
 use raisin_error::{Error, Result};
 use raisin_models::nodes::properties::PropertyValue;
@@ -179,7 +179,7 @@ impl<S: Storage + 'static> AIToolResultAggregationHandler<S> {
         let mut properties = HashMap::new();
         properties.insert(
             "results".to_string(),
-            json_to_property_value(serde_json::Value::Array(results.clone()))?,
+            PropertyValue::from_json(&serde_json::Value::Array(results.clone())),
         );
         properties.insert(
             "result_count".to_string(),

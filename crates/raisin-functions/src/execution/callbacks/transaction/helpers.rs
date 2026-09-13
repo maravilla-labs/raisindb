@@ -105,7 +105,7 @@ pub(crate) fn parse_node_create_data(parent_path: &str, data: Value) -> raisin_e
     if let Some(props) = data.get("properties").and_then(|v| v.as_object()) {
         for (key, value) in props {
             node.properties
-                .insert(key.clone(), json_to_property_value(value.clone())?);
+                .insert(key.clone(), PropertyValue::from_json(value));
         }
     }
 
@@ -151,7 +151,7 @@ pub(crate) fn parse_node_full_data(data: Value) -> raisin_error::Result<Node> {
     if let Some(props) = data.get("properties").and_then(|v| v.as_object()) {
         for (key, value) in props {
             node.properties
-                .insert(key.clone(), json_to_property_value(value.clone())?);
+                .insert(key.clone(), PropertyValue::from_json(value));
         }
     }
 
@@ -163,41 +163,9 @@ pub(crate) fn apply_node_updates(node: &mut Node, data: Value) -> raisin_error::
     if let Some(props) = data.get("properties").and_then(|v| v.as_object()) {
         for (key, value) in props {
             node.properties
-                .insert(key.clone(), json_to_property_value(value.clone())?);
+                .insert(key.clone(), PropertyValue::from_json(value));
         }
     }
     node.updated_at = Some(chrono::Utc::now());
     Ok(())
-}
-
-/// Convert a JSON Value to a PropertyValue.
-pub(crate) fn json_to_property_value(value: Value) -> raisin_error::Result<PropertyValue> {
-    match value {
-        Value::Null => Ok(PropertyValue::Null),
-        Value::Bool(b) => Ok(PropertyValue::Boolean(b)),
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(PropertyValue::Integer(i))
-            } else if let Some(f) = n.as_f64() {
-                Ok(PropertyValue::Float(f))
-            } else {
-                Err(raisin_error::Error::Validation(
-                    "Invalid number".to_string(),
-                ))
-            }
-        }
-        Value::String(s) => Ok(PropertyValue::String(s)),
-        Value::Array(arr) => {
-            let items: raisin_error::Result<Vec<_>> =
-                arr.into_iter().map(json_to_property_value).collect();
-            Ok(PropertyValue::Array(items?))
-        }
-        Value::Object(obj) => {
-            let mut map = std::collections::HashMap::new();
-            for (k, v) in obj {
-                map.insert(k, json_to_property_value(v)?);
-            }
-            Ok(PropertyValue::Object(map))
-        }
-    }
 }

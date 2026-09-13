@@ -7,7 +7,6 @@
 
 use parking_lot::RwLock;
 use raisin_core::NodeService;
-use raisin_models::nodes::properties::value::Element;
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_storage::transactional::TransactionalStorage;
 use std::sync::Arc;
@@ -15,56 +14,6 @@ use std::sync::Arc;
 use crate::{
     connection::ConnectionState, error::WsError, handler::WsState, protocol::RequestEnvelope,
 };
-
-/// Convert serde_json::Value to PropertyValue (from request payload)
-pub(crate) fn json_to_property_value(value: &serde_json::Value) -> PropertyValue {
-    match value {
-        serde_json::Value::String(s) => PropertyValue::String(s.clone()),
-        serde_json::Value::Number(n) => {
-            // Check if the number is an integer or float
-            if n.is_i64() || n.is_u64() {
-                PropertyValue::Integer(n.as_i64().unwrap_or(0))
-            } else {
-                PropertyValue::Float(n.as_f64().unwrap_or(0.0))
-            }
-        }
-        serde_json::Value::Bool(b) => PropertyValue::Boolean(*b),
-        serde_json::Value::Array(arr) => {
-            PropertyValue::Array(arr.iter().map(json_to_property_value).collect())
-        }
-        serde_json::Value::Object(obj) => {
-            // Flat maps carrying element_type are Elements — mirrors the
-            // canonical serde deserializer so SectionField content written
-            // over WS survives archetype validation.
-            if let Some(serde_json::Value::String(element_type)) = obj.get("element_type") {
-                let uuid = obj
-                    .get("uuid")
-                    .and_then(|u| u.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let content = obj
-                    .iter()
-                    .filter(|(k, _)| k.as_str() != "element_type" && k.as_str() != "uuid")
-                    .map(|(k, v)| (k.clone(), json_to_property_value(v)))
-                    .collect();
-                return PropertyValue::Element(Element {
-                    uuid,
-                    element_type: element_type.clone(),
-                    content,
-                });
-            }
-            PropertyValue::Object(
-                obj.iter()
-                    .map(|(k, v)| (k.clone(), json_to_property_value(v)))
-                    .collect(),
-            )
-        }
-        // Preserve explicit nulls. The HTTP path deserializes JSON null to
-        // PropertyValue::Null via serde; coercing to "" here silently
-        // corrupted null-valued properties written over WS.
-        serde_json::Value::Null => PropertyValue::Null,
-    }
-}
 
 /// Validated context extracted from a request envelope.
 pub(crate) struct RequestContext<'a> {
@@ -153,7 +102,7 @@ mod tests {
     #[test]
     fn null_maps_to_property_value_null_not_empty_string() {
         let value = serde_json::Value::Null;
-        let converted = json_to_property_value(&value);
+        let converted = PropertyValue::from_json(&value);
         assert!(
             matches!(converted, PropertyValue::Null),
             "JSON null must map to PropertyValue::Null, got {:?}",
@@ -164,7 +113,7 @@ mod tests {
     #[test]
     fn null_round_trips_through_json() {
         // Null must survive WS write -> PropertyValue -> JSON response.
-        let converted = json_to_property_value(&serde_json::Value::Null);
+        let converted = PropertyValue::from_json(&serde_json::Value::Null);
         let back = serde_json::to_value(&converted).expect("serialize");
         assert_eq!(back, serde_json::Value::Null);
     }
@@ -175,7 +124,7 @@ mod tests {
             "assignee": null,
             "tags": [null, "a"],
         });
-        let converted = json_to_property_value(&value);
+        let converted = PropertyValue::from_json(&value);
         match converted {
             PropertyValue::Object(obj) => {
                 assert!(matches!(obj.get("assignee"), Some(PropertyValue::Null)));

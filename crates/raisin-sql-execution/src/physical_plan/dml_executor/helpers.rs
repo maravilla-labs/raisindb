@@ -11,8 +11,7 @@
 use crate::physical_plan::executor::Row;
 use indexmap::IndexMap;
 use raisin_error::Error;
-use raisin_models::nodes::properties::value::Element;
-use raisin_models::nodes::properties::{GeoJson, PropertyValue, RaisinReference};
+use raisin_models::nodes::properties::{GeoJson, PropertyValue};
 use raisin_sql::analyzer::{DataType, Expr, Literal, TypedExpr};
 
 /// Extract the 'name' value from a WHERE clause filter.
@@ -153,13 +152,15 @@ pub(super) fn literal_to_property_value(lit: &Literal) -> Result<PropertyValue, 
         Literal::Double(f) => Ok(PropertyValue::Float(*f)),
         Literal::Text(s) => Ok(PropertyValue::String(s.clone())),
         Literal::JsonB(j) => {
-            // Convert JSON to PropertyValue::Object if it's an object
+            // The top level is the property bag itself; each value goes through
+            // the one shared converter, so a stored Resource/Reference/Element
+            // that round-tripped through a JSONB merge keeps its type.
             if let serde_json::Value::Object(map) = j {
-                let mut prop_map = std::collections::HashMap::new();
-                for (k, v) in map {
-                    prop_map.insert(k.clone(), json_value_to_property_value(v)?);
-                }
-                Ok(PropertyValue::Object(prop_map))
+                Ok(PropertyValue::Object(
+                    map.iter()
+                        .map(|(k, v)| (k.clone(), PropertyValue::from_json(v)))
+                        .collect(),
+                ))
             } else {
                 Err(Error::Validation(
                     "JSONB values must be objects for PropertyValue conversion".to_string(),
@@ -184,107 +185,6 @@ pub(super) fn literal_to_property_value(lit: &Literal) -> Result<PropertyValue, 
             "Cannot convert literal {:?} to PropertyValue",
             lit
         ))),
-    }
-}
-
-/// Convert serde_json::Value to PropertyValue.
-pub(super) fn json_value_to_property_value(v: &serde_json::Value) -> Result<PropertyValue, Error> {
-    match v {
-        serde_json::Value::Bool(b) => Ok(PropertyValue::Boolean(*b)),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(PropertyValue::Integer(i))
-            } else if let Some(f) = n.as_f64() {
-                Ok(PropertyValue::Float(f))
-            } else {
-                Err(Error::Validation("Invalid number in JSON".to_string()))
-            }
-        }
-        serde_json::Value::String(s) => Ok(PropertyValue::String(s.clone())),
-        serde_json::Value::Array(arr) => {
-            let mut values = Vec::new();
-            for item in arr {
-                values.push(json_value_to_property_value(item)?);
-            }
-            Ok(PropertyValue::Array(values))
-        }
-        serde_json::Value::Object(map) => {
-            // Check if this is a RaisinReference
-            if let (Some(ref_val), Some(ws_val)) =
-                (map.get("raisin:ref"), map.get("raisin:workspace"))
-            {
-                if let (serde_json::Value::String(ref_str), serde_json::Value::String(ws_str)) =
-                    (ref_val, ws_val)
-                {
-                    let path_str = map
-                        .get("raisin:path")
-                        .and_then(|p| p.as_str())
-                        .unwrap_or("")
-                        .to_string();
-
-                    return Ok(PropertyValue::Reference(RaisinReference {
-                        id: ref_str.clone(),
-                        workspace: ws_str.clone(),
-                        path: path_str,
-                    }));
-                }
-            }
-
-            // Check if this is an Element (flat map carrying element_type) —
-            // mirrors the canonical serde deserializer so SectionField content
-            // written via SQL survives archetype validation.
-            if let Some(serde_json::Value::String(element_type)) = map.get("element_type") {
-                let uuid = map
-                    .get("uuid")
-                    .and_then(|u| u.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let mut content = std::collections::HashMap::new();
-                for (k, v) in map {
-                    if k == "element_type" || k == "uuid" {
-                        continue;
-                    }
-                    content.insert(k.clone(), json_value_to_property_value(v)?);
-                }
-                return Ok(PropertyValue::Element(Element {
-                    uuid,
-                    element_type: element_type.clone(),
-                    content,
-                }));
-            }
-
-            // Check if this is a GeoJSON geometry.
-            //
-            // This arm is what makes SQL a first-class geometry write surface. Its
-            // absence was a silent data-loss bug: `PropertyValue`'s canonical
-            // `#[serde(untagged)]` ladder tries `Geometry` (slot 9) BEFORE `Object`
-            // (slot 11), but this hand-rolled converter — which every DML path
-            // funnels through, single INSERT and bulk alike — jumped straight to the
-            // object fallback. A geometry written with `INSERT`/`UPDATE` therefore
-            // reached the low-level write functions as `PropertyValue::Object`, the
-            // type-driven spatial index hook never fired, and `ST_DWITHIN` returned
-            // nothing. No error anywhere: the node stored and read back correctly,
-            // because deserialising the stored blob DOES go through the canonical
-            // ladder and yields `Geometry`. Only the index was missing.
-            //
-            // Delegating to `GeoJson`'s own deserializer rather than sniffing for a
-            // `type` key is deliberate — it is the same code the canonical ladder
-            // runs, so "is this a geometry?" cannot drift between the two, and the
-            // optional `srid` member and the optional altitude ordinate come along
-            // for free. A malformed geometry-ish object still falls through to
-            // `Object`, exactly as it does on the canonical path.
-            if let Ok(geometry) = serde_json::from_value::<GeoJson>(v.clone()) {
-                return Ok(PropertyValue::Geometry(geometry));
-            }
-
-            // Fallback: regular object
-            let mut prop_map = std::collections::HashMap::new();
-            for (k, v) in map {
-                prop_map.insert(k.clone(), json_value_to_property_value(v)?);
-            }
-            Ok(PropertyValue::Object(prop_map))
-        }
-        serde_json::Value::Null => Ok(PropertyValue::Null),
     }
 }
 

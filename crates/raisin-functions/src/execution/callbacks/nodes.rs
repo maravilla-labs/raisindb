@@ -20,7 +20,6 @@ use std::sync::Arc;
 
 use raisin_binary::BinaryStorage;
 use raisin_models::auth::AuthContext;
-use raisin_models::nodes::properties::value::RaisinReference;
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
 use raisin_storage::transactional::TransactionalStorage;
@@ -300,7 +299,7 @@ where
 
             Box::pin(async move {
                 // Convert JSON value to PropertyValue
-                let prop_value = json_to_property_value(value)?;
+                let prop_value = PropertyValue::from_json(&value);
 
                 tracing::debug!(
                     workspace = %workspace,
@@ -612,7 +611,7 @@ pub fn parse_node_create_data(parent_path: &str, data: Value) -> raisin_error::R
     if let Some(props) = data.get("properties").and_then(|v| v.as_object()) {
         for (key, value) in props {
             node.properties
-                .insert(key.clone(), json_to_property_value(value.clone())?);
+                .insert(key.clone(), PropertyValue::from_json(value));
         }
     }
 
@@ -625,7 +624,7 @@ pub fn apply_node_updates(node: &mut Node, data: Value) -> raisin_error::Result<
     if let Some(props) = data.get("properties").and_then(|v| v.as_object()) {
         for (key, value) in props {
             node.properties
-                .insert(key.clone(), json_to_property_value(value.clone())?);
+                .insert(key.clone(), PropertyValue::from_json(value));
         }
     }
 
@@ -633,56 +632,4 @@ pub fn apply_node_updates(node: &mut Node, data: Value) -> raisin_error::Result<
     node.updated_at = Some(chrono::Utc::now());
 
     Ok(())
-}
-
-/// Convert a JSON Value to a PropertyValue.
-pub fn json_to_property_value(value: Value) -> raisin_error::Result<PropertyValue> {
-    match value {
-        Value::Null => Ok(PropertyValue::Null),
-        Value::Bool(b) => Ok(PropertyValue::Boolean(b)),
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(PropertyValue::Integer(i))
-            } else if let Some(f) = n.as_f64() {
-                Ok(PropertyValue::Float(f))
-            } else {
-                Err(raisin_error::Error::Validation(
-                    "Invalid number".to_string(),
-                ))
-            }
-        }
-        Value::String(s) => Ok(PropertyValue::String(s)),
-        Value::Array(arr) => {
-            let items: raisin_error::Result<Vec<_>> =
-                arr.into_iter().map(json_to_property_value).collect();
-            Ok(PropertyValue::Array(items?))
-        }
-        Value::Object(obj) => {
-            // Treat objects with raisin:ref as references
-            if let Some(id) = obj.get("raisin:ref").and_then(|v| v.as_str()) {
-                let workspace = obj
-                    .get("raisin:workspace")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let path = obj
-                    .get("raisin:path")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-
-                return Ok(PropertyValue::Reference(RaisinReference {
-                    id: id.to_string(),
-                    workspace,
-                    path,
-                }));
-            }
-
-            let mut map = std::collections::HashMap::new();
-            for (k, v) in obj {
-                map.insert(k, json_to_property_value(v)?);
-            }
-            Ok(PropertyValue::Object(map))
-        }
-    }
 }

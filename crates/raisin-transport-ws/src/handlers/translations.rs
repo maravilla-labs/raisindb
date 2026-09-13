@@ -22,31 +22,6 @@ use crate::{
     },
 };
 
-/// Convert serde_json::Value to PropertyValue (from request payload)
-fn json_to_property_value(value: &serde_json::Value) -> PropertyValue {
-    match value {
-        serde_json::Value::String(s) => PropertyValue::String(s.clone()),
-        serde_json::Value::Number(n) => {
-            // Check if the number is an integer or float
-            if n.is_i64() || n.is_u64() {
-                PropertyValue::Integer(n.as_i64().unwrap_or(0))
-            } else {
-                PropertyValue::Float(n.as_f64().unwrap_or(0.0))
-            }
-        }
-        serde_json::Value::Bool(b) => PropertyValue::Boolean(*b),
-        serde_json::Value::Array(arr) => {
-            PropertyValue::Array(arr.iter().map(json_to_property_value).collect())
-        }
-        serde_json::Value::Object(obj) => PropertyValue::Object(
-            obj.iter()
-                .map(|(k, v)| (k.clone(), json_to_property_value(v)))
-                .collect(),
-        ),
-        serde_json::Value::Null => PropertyValue::String(String::new()),
-    }
-}
-
 /// Handle translation update operation
 pub async fn handle_translation_update<S, B>(
     state: &Arc<WsState<S, B>>,
@@ -82,7 +57,7 @@ where
         let pointer = JsonPointer::parse(format!("/{}", property_name)).map_err(|e| {
             WsError::InvalidRequest(format!("Invalid property name '{}': {}", property_name, e))
         })?;
-        let property_value = json_to_property_value(&value);
+        let property_value = PropertyValue::from_json(&value);
         translations.insert(pointer, property_value);
     }
 

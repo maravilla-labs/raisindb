@@ -13,7 +13,8 @@ use crate::{
     protocol::{PropertyGetPayload, PropertyUpdatePayload, RequestEnvelope, ResponseEnvelope},
 };
 
-use super::helpers::{build_node_service, extract_context, json_to_property_value};
+use super::helpers::{build_node_service, extract_context};
+use raisin_models::nodes::properties::PropertyValue;
 
 /// Handle get property by path operation
 pub async fn handle_property_get<S, B>(
@@ -53,7 +54,7 @@ where
     let ctx = extract_context(&request)?;
     let node_service = build_node_service(state, connection_state, &ctx);
 
-    let property_value = json_to_property_value(&payload.value);
+    let property_value = PropertyValue::from_json(&payload.value);
 
     node_service
         .update_property_by_path(&payload.node_path, &payload.property_path, property_value)

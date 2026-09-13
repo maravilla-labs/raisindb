@@ -3,11 +3,14 @@
 // RaisinDB - Git-like hierarchical multi model database
 // Copyright (C) 2019-2025 SOLUTAS GmbH, Switzerland
 
-//! Unit cover for the DML value converter's geometry handling.
+//! Unit cover for the DML value converter's domain-type handling.
 //!
-//! # The regression these pin
+//! The conversion itself is `PropertyValue::from_json` in `raisin-models`, shared
+//! by every write path; these pin what SQL DML relies on it for.
 //!
-//! `json_value_to_property_value` is a hand-rolled mirror of `PropertyValue`'s
+//! # The regressions these pin
+//!
+//! The DML path used to carry a hand-rolled mirror of `PropertyValue`'s
 //! canonical `#[serde(untagged)]` ladder, and it was missing the `Geometry` arm
 //! that sits at slot 9 of that ladder — ahead of `Object` at slot 11. Every SQL
 //! write path funnels through it, so a geometry written with `INSERT` or `UPDATE`
@@ -21,7 +24,7 @@
 //! `raisin-server/tests/all/spatial_index_lifecycle_test.rs`; these are the cheap
 //! guards that fail in seconds rather than minutes.
 
-use super::helpers::{json_value_to_property_value, literal_to_property_value};
+use super::helpers::literal_to_property_value;
 use raisin_models::nodes::properties::{GeoJson, PropertyValue};
 use raisin_sql::analyzer::Literal;
 use serde_json::json;
@@ -29,7 +32,7 @@ use serde_json::json;
 #[test]
 fn a_geojson_object_becomes_geometry_not_object() {
     let value = json!({ "type": "Point", "coordinates": [8.5402, 47.3782] });
-    match json_value_to_property_value(&value).expect("conversion") {
+    match PropertyValue::from_json(&value) {
         PropertyValue::Geometry(GeoJson::Point { coordinates, .. }) => {
             assert_eq!(coordinates.x, 8.5402);
             assert_eq!(coordinates.y, 47.3782);
@@ -46,7 +49,7 @@ fn altitude_and_srid_survive_the_converter() {
         "coordinates": [8.5402, 47.3782, 100.0],
         "srid": 4326
     });
-    match json_value_to_property_value(&value).expect("conversion") {
+    match PropertyValue::from_json(&value) {
         PropertyValue::Geometry(geometry) => {
             assert_eq!(geometry.z_range(), Some((100.0, 100.0)));
         }
@@ -72,10 +75,7 @@ fn every_geometry_type_converts() {
         json!({ "type": "GeometryCollection", "geometries": [] }),
     ] {
         assert!(
-            matches!(
-                json_value_to_property_value(&value),
-                Ok(PropertyValue::Geometry(_))
-            ),
+            matches!(PropertyValue::from_json(&value), PropertyValue::Geometry(_)),
             "must convert to Geometry: {value}"
         );
     }
@@ -89,15 +89,15 @@ fn a_malformed_geometry_still_falls_through_to_object() {
     // declared `PropertyType::Geometry` is in scope.
     let value = json!({ "type": "Point", "coordinates": "nonsense" });
     assert!(matches!(
-        json_value_to_property_value(&value),
-        Ok(PropertyValue::Object(_))
+        PropertyValue::from_json(&value),
+        PropertyValue::Object(_)
     ));
 
     // A plain object that merely has a `type` key is untouched.
     let value = json!({ "type": "invoice", "total": 12 });
     assert!(matches!(
-        json_value_to_property_value(&value),
-        Ok(PropertyValue::Object(_))
+        PropertyValue::from_json(&value),
+        PropertyValue::Object(_)
     ));
 }
 
@@ -130,4 +130,38 @@ fn a_nested_geometry_inside_the_properties_object_converts() {
         "the nested geometry must be Geometry, or the spatial index hook never fires"
     );
     assert!(matches!(map.get("floor"), Some(PropertyValue::String(_))));
+}
+
+#[test]
+fn a_stored_resource_survives_a_jsonb_merge() {
+    // `UPDATE 'assets' SET properties = properties || $1::jsonb` evaluates the
+    // whole bag to JSON, stored `file` included. Before the shared converter the
+    // DML copy had no Resource arm, handed `file` back as Object, and the write
+    // was refused: "Property 'file' on NodeType 'raisin:Asset' is declared
+    // Resource but the value is Object" — for a patch that only set `title`.
+    let literal = Literal::JsonB(json!({
+        "title": "same as before",
+        "file": {
+            "uuid": "u-1",
+            "name": "a.mp3",
+            "size": 42,
+            "mime_type": "audio/mpeg",
+            "url": null,
+            "metadata": null,
+            "is_loaded": true,
+            "is_external": false,
+            "created_at": "2026-09-13T07:21:55.141394+00:00",
+            "updated_at": "2026-09-13T07:21:55.141394+00:00"
+        }
+    }));
+    let PropertyValue::Object(map) = literal_to_property_value(&literal).expect("conversion")
+    else {
+        panic!("the properties column must convert to an object");
+    };
+    assert!(
+        matches!(map.get("file"), Some(PropertyValue::Resource(_))),
+        "a stored Resource must stay Resource, got {:?}",
+        map.get("file")
+    );
+    assert!(matches!(map.get("title"), Some(PropertyValue::String(_))));
 }

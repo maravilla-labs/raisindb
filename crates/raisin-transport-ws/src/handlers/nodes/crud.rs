@@ -21,7 +21,7 @@ use crate::{
     },
 };
 
-use super::helpers::{build_node_service, extract_context, json_to_property_value, RequestContext};
+use super::helpers::{build_node_service, extract_context, RequestContext};
 
 /// Handle node creation
 pub async fn handle_node_create<S, B>(
@@ -98,7 +98,7 @@ fn build_create_node(
     // Convert properties from HashMap<String, serde_json::Value> to HashMap<String, PropertyValue>
     let properties: HashMap<String, PropertyValue> = properties
         .into_iter()
-        .map(|(k, v)| (k, json_to_property_value(&v)))
+        .map(|(k, v)| (k, PropertyValue::from_json(&v)))
         .collect();
 
     let mut node = Node {
@@ -143,7 +143,7 @@ fn build_create_node(
     // If content is provided, add it to properties
     if let Some(content) = content {
         node.properties
-            .insert("content".to_string(), json_to_property_value(&content));
+            .insert("content".to_string(), PropertyValue::from_json(&content));
     }
 
     Ok((parent_path.to_string(), node))
@@ -246,13 +246,14 @@ where
 
     // Update properties - convert from JSON to PropertyValue
     for (key, value) in payload.properties {
-        node.properties.insert(key, json_to_property_value(&value));
+        node.properties
+            .insert(key, PropertyValue::from_json(&value));
     }
 
     // Update content if provided
     if let Some(content) = payload.content {
         node.properties
-            .insert("content".to_string(), json_to_property_value(&content));
+            .insert("content".to_string(), PropertyValue::from_json(&content));
     }
 
     // Update timestamp
