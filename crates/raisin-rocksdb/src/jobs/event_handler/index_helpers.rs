@@ -20,6 +20,20 @@ pub(crate) struct IndexSettings {
     pub vector: bool,
 }
 
+/// A function's SOURCE: a `raisin:Asset` in the `functions` workspace.
+///
+/// A function's code lives in child asset nodes (`index.js`, `lib.rs`, a test
+/// file), and `raisin:Asset` declares `Fulltext` + `Vector` because an uploaded
+/// document should be searchable. Code is not a document: `raisin:Function`
+/// indexes its title and description and says outright that the code is not
+/// indexed. Without this gate every package install rewrote hundreds of source
+/// files and each one queued text extraction plus an embedding — ~16,000
+/// embedding jobs on one tenant for one Studio update (2026-09-13), which is
+/// load, embedder spend and search noise with no reader.
+pub(crate) fn is_function_source(workspace_id: &str, node_type: &str) -> bool {
+    workspace_id == "functions" && node_type == "raisin:Asset"
+}
+
 impl UnifiedJobEventHandler {
     /// Check if embeddings are enabled for a tenant
     pub(crate) async fn embeddings_enabled(&self, tenant_id: &str) -> Result<bool> {
@@ -108,6 +122,14 @@ impl UnifiedJobEventHandler {
             }
         };
 
+        if is_function_source(workspace_id, &node.node_type) {
+            tracing::trace!(
+                node_id = %node_id,
+                "Function source file: not indexed (fulltext or vector)"
+            );
+            return IndexSettings::default();
+        }
+
         // Fetch the NodeType definition (1 DB read)
         let node_type_def = match self
             .storage
@@ -172,5 +194,19 @@ impl UnifiedJobEventHandler {
         );
 
         IndexSettings { fulltext, vector }
+    }
+}
+
+#[cfg(test)]
+mod function_source_tests {
+    use super::is_function_source;
+
+    #[test]
+    fn only_assets_in_the_functions_workspace_are_function_source() {
+        assert!(is_function_source("functions", "raisin:Asset"));
+        // The function node itself keeps its title/description index.
+        assert!(!is_function_source("functions", "raisin:Function"));
+        // An uploaded document anywhere else is still searchable.
+        assert!(!is_function_source("assets", "raisin:Asset"));
     }
 }

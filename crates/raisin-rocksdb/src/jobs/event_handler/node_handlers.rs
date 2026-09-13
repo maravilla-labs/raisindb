@@ -314,6 +314,15 @@ impl UnifiedJobEventHandler {
         context: &JobContext,
         node_from_metadata: Option<&raisin_models::nodes::Node>,
     ) {
+        // Function source is code, not a document: no extraction (see
+        // `is_function_source`).
+        let node_type = node_from_metadata
+            .map(|n| n.node_type.as_str())
+            .or(node_event.node_type.as_deref())
+            .unwrap_or("");
+        if super::index_helpers::is_function_source(&node_event.workspace_id, node_type) {
+            return;
+        }
         if let Some(node) = node_from_metadata {
             self.enqueue_asset_processing_if_needed(node_event, context, node)
                 .await;
