@@ -84,7 +84,9 @@ impl MaintenanceJobHandler {
                 let index_type = index_type_of(context)?;
                 to_value(storage.rebuild_indexes(tenant, index_type).await?)
             }
-            JobType::OrphanCleanup => json!({ "removed": storage.cleanup_orphans(tenant).await? }),
+            JobType::OrphanCleanup => {
+                json!({ "found": storage.cleanup_orphans(tenant).await?, "note": "orphaned nodes are reported, not deleted" })
+            }
             JobType::Compaction => to_value(storage.compact(Some(tenant)).await?),
             JobType::Repair => self.repair(tenant).await?,
             JobType::VectorVerify | JobType::VectorRebuild => {
@@ -98,6 +100,21 @@ impl MaintenanceJobHandler {
                     return Err(Error::Validation(
                         "vector maintenance needs a repository and branch".to_string(),
                     ));
+                }
+                // A tenant without embeddings has no vector index to verify or
+                // rebuild; that is an answer, not a failure.
+                use raisin_embeddings::storage::TenantEmbeddingConfigStore;
+                let configured = storage
+                    .tenant_embedding_config_repository()
+                    .get_config(tenant)
+                    .ok()
+                    .flatten()
+                    .is_some();
+                if !configured {
+                    return Ok(Some(json!({
+                        "status": "not_configured",
+                        "detail": "embeddings are not configured for this tenant"
+                    })));
                 }
                 if matches!(job.job_type, JobType::VectorVerify) {
                     to_value(management.verify_index(tenant, repo, branch).await?)
@@ -147,10 +164,15 @@ impl MaintenanceJobHandler {
             );
         }
         if orphans > 0 {
-            let removed = storage.cleanup_orphans(tenant).await?;
-            actions.push(
-                json!({ "action": "cleanup_orphans", "for_issues": orphans, "removed": removed }),
-            );
+            // `cleanup_orphans` reports orphans; it deletes nothing (deleting a
+            // node on the word of one scan is not a repair). Say so.
+            let found = storage.cleanup_orphans(tenant).await?;
+            actions.push(json!({
+                "action": "orphans_reported",
+                "for_issues": orphans,
+                "found": found,
+                "note": "orphaned nodes are reported, not deleted"
+            }));
         }
 
         let after = if actions.is_empty() {

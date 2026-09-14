@@ -217,7 +217,16 @@ pub async fn check_tenant(storage: &RocksDBStorage, tenant_id: &str) -> Result<I
 // Helper Functions
 // ============================================================================
 
-/// Scan all nodes in a repository + workspace using prefix iteration
+/// The live nodes of one workspace: newest revision per node, tombstones
+/// dropped, path materialized from NODE_PATH.
+///
+/// This used to be its own raw scan, written before node keys carried a
+/// revision and before node blobs stopped carrying their path. It returned
+/// EVERY stored revision (a tenant with ~1,700 live nodes reported 49,075
+/// "nodes"), kept tombstones (stored as `T`, not as an empty value), and gave
+/// every node an empty path — so the path checks reported nearly every node as
+/// a duplicate or missing path, and a repair acted on noise. The index rebuild's
+/// scan already does all three correctly; use it.
 async fn scan_nodes(
     storage: &RocksDBStorage,
     tenant_id: &str,
@@ -225,39 +234,20 @@ async fn scan_nodes(
     branch: &str,
     workspace: &str,
 ) -> Result<Vec<Node>> {
-    let cf_nodes = cf_handle(storage.db(), cf::NODES)?;
-    let prefix = keys::workspace_prefix(tenant_id, repo_id, branch, workspace);
-
-    let mut nodes = Vec::new();
-    let iter = crate::prefix_scan(storage.db(), cf_nodes, &prefix);
-
-    for item in iter {
-        let (key, value) =
-            item.map_err(|e| raisin_error::Error::storage(format!("Iterator error: {}", e)))?;
-
-        // Only process keys with "nodes" component
-        let key_str = String::from_utf8_lossy(&key);
-        if !key_str.contains("\0nodes\0") {
-            continue;
-        }
-
-        if !value.is_empty() {
-            // Skip tombstones
-            match rmp_serde::from_slice::<Node>(&value) {
-                Ok(node) => nodes.push(node),
-                Err(e) => {
-                    // Extract node ID from key if possible
-                    let parts: Vec<&str> = key_str.split('\0').collect();
-                    let node_id = parts.last().unwrap_or(&"<unknown>");
-
-                    tracing::error!("Failed to deserialize node {}: {}", node_id, e);
-                    // This is a data corruption issue - we should still report it
-                    // but we can't add the full node to the list
-                }
-            }
-        }
+    let (nodes, skipped) = crate::management::async_indexing::helpers::scan_nodes_counting_skips(
+        storage, tenant_id, repo_id, branch, workspace,
+    )
+    .await?;
+    if skipped > 0 {
+        tracing::warn!(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            skipped,
+            "integrity scan: nodes with no path in NODE_PATH were not checked"
+        );
     }
-
     Ok(nodes)
 }
 
