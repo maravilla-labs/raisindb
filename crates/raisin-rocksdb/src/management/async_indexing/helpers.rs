@@ -215,6 +215,7 @@ pub(super) async fn clear_reference_indexes(
 }
 
 /// Clear all child order indexes for a workspace
+#[allow(dead_code)] // ORDER_INDEX is no longer read or rebuilt; kept for tenant tooling
 pub(super) async fn clear_order_indexes(
     storage: &RocksDBStorage,
     tenant_id: &str,

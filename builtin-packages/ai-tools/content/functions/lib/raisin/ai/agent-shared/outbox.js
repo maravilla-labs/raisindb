@@ -100,10 +100,27 @@ function hashDedupeKey(input) {
   return (hash >>> 0).toString(16);
 }
 
+/**
+ * The outbox is not provisioned with the agent's home, so create it on first
+ * use. A message created under a missing folder is stored but never listed.
+ */
+async function ensureOutboxFolder(workspace, agentHomePath) {
+  const outboxPath = agentHomePath + '/outbox';
+  if (await raisin.nodes.get(workspace, outboxPath)) return outboxPath;
+  try {
+    await raisin.nodes.create(workspace, agentHomePath, {
+      slug: 'outbox', name: 'outbox', node_type: 'raisin:Folder', properties: { title: 'Outbox' },
+    });
+  } catch (e) {
+    if (!String(e?.message || '').includes('already exists')) throw e;
+  }
+  return outboxPath;
+}
+
 async function sendAgentOutboxMessage(workspace, outboxCtx, content, messageType, data, options = {}) {
   log.debug('outbox', 'Sending outbox message', { type: messageType, recipient: outboxCtx.senderId });
 
-  const outboxPath = outboxCtx.agentHomePath + '/outbox';
+  const outboxPath = await ensureOutboxFolder(workspace, outboxCtx.agentHomePath);
   const dedupeKey = typeof options?.dedupe_key === 'string' && options.dedupe_key.trim()
     ? options.dedupe_key.trim()
     : null;

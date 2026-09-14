@@ -470,7 +470,10 @@ async function copyToSentFolder(workspace, node) {
 
   const entityName = parts[2];
   const messageSlug = parts[4];
-  const sentPath = `/${entityType}/${entityName}/sent`;
+  // The sent folder is not provisioned with the entity's home, so ensure it
+  // before writing: a node created under a missing parent is stored but never
+  // listed as a child of anything.
+  const sentPath = await ensureFolderExists(workspace, `/${entityType}/${entityName}`, 'sent', 'Sent');
 
   const sentProps = { ...(node.properties ?? {}) };
   sentProps.status = 'sent';

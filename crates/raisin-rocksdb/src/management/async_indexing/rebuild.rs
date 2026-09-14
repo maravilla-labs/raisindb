@@ -15,8 +15,8 @@ use raisin_storage::{IndexType, RebuildStats};
 use rocksdb::WriteBatch;
 
 use super::helpers::{
-    clear_compound_indexes, clear_order_indexes, clear_path_indexes, clear_property_indexes,
-    clear_reference_indexes, extract_references, get_current_revision, scan_nodes,
+    clear_compound_indexes, clear_path_indexes, clear_property_indexes, clear_reference_indexes,
+    extract_references, get_current_revision, scan_nodes,
 };
 
 /// Rebuild indexes for a repository + workspace
@@ -791,7 +791,20 @@ async fn declared_compound_indexes(
     Ok(out)
 }
 
-/// Rebuild child order indexes for all nodes in a workspace
+/// Repair child ordering for a workspace: register every live node under its
+/// parent in ORDERED_CHILDREN if it is missing there.
+///
+/// This used to clear and rebuild ORDER_INDEX from legacy `children` arrays —
+/// a column family nothing reads any more (listings and `CHILD_OF` use
+/// ORDERED_CHILDREN), so "rebuild child order" could not attach anything.
+/// Measured 2026-09-14: agent messages written under `/agents/x/sent` before
+/// that folder existed stayed out of every listing after the folder was
+/// created, because no ordered-child entry was ever written for them.
+///
+/// Additive only: an existing entry (and so an author's chosen order) is never
+/// touched and nothing is deleted, so the repair is safe to re-run. A missing
+/// child is appended after its parent's current last child, with the same
+/// label format and "last child" metadata a normal create writes.
 async fn rebuild_order_indexes(
     storage: &RocksDBStorage,
     tenant_id: &str,
@@ -800,52 +813,82 @@ async fn rebuild_order_indexes(
     workspace: &str,
     stats: &mut RebuildStats,
 ) -> Result<()> {
-    tracing::info!("Rebuilding child order indexes");
+    tracing::info!(
+        tenant_id,
+        repo_id,
+        branch,
+        workspace,
+        "Repairing child ordering"
+    );
 
-    // 1. Get all nodes
-    let nodes = scan_nodes(storage, tenant_id, repo_id, branch, workspace).await?;
+    let (nodes, _skipped) =
+        super::helpers::scan_nodes_counting_skips(storage, tenant_id, repo_id, branch, workspace)
+            .await?;
+    let revision = get_current_revision(storage, tenant_id, repo_id, branch).await?;
+    use std::collections::HashMap;
+    let id_by_path: HashMap<&str, &str> = nodes
+        .iter()
+        .map(|n| (n.path.as_str(), n.id.as_str()))
+        .collect();
 
-    // 2. Clear existing order indexes for this workspace
-    clear_order_indexes(storage, tenant_id, repo_id, branch, workspace).await?;
-
-    // 3. Rebuild from parent.children arrays
+    let cf_ordered = cf_handle(storage.db(), cf::ORDERED_CHILDREN)?;
     let mut batch = WriteBatch::default();
-    let cf_order = cf_handle(storage.db(), cf::ORDER_INDEX)?;
+    // Labels assigned in this run, per parent, so siblings appended together
+    // get increasing labels.
+    let mut last_label: HashMap<String, String> = HashMap::new();
 
-    for node in nodes {
-        if !node.children.is_empty() {
-            stats.items_processed += 1;
-
-            // Store the ordered list of children for this parent
-            let children_json = rmp_serde::to_vec(&node.children).unwrap_or_default();
-
-            let key = keys::KeyBuilder::new()
-                .push(tenant_id)
-                .push(repo_id)
-                .push(branch)
-                .push(workspace)
-                .push("order")
-                .push(&node.id)
-                .build();
-
-            batch.put_cf(cf_order, key, children_json);
-
-            // Commit batch every 1000 items
-            if stats.items_processed % 1000 == 0 {
-                storage.db().write(batch).map_err(|e| {
-                    raisin_error::Error::storage(format!("Batch write failed: {}", e))
-                })?;
-                batch = WriteBatch::default();
-            }
+    for node in &nodes {
+        let Some((parent_path, _)) = node.path.rsplit_once('/') else {
+            continue;
+        };
+        if parent_path.is_empty() {
+            continue; // root-level node: its ordering is not a parent's
         }
+        let Some(parent_id) = id_by_path.get(parent_path).copied() else {
+            continue; // no parent node: an orphan by path, nothing to attach to
+        };
+        if storage
+            .nodes
+            .get_order_label_for_child(tenant_id, repo_id, branch, workspace, parent_id, &node.id)?
+            .is_some()
+        {
+            continue;
+        }
+
+        let previous = match last_label.get(parent_id) {
+            Some(label) => Some(label.clone()),
+            None => storage
+                .nodes
+                .get_last_order_label(tenant_id, repo_id, branch, workspace, parent_id)?,
+        };
+        let fractional = match &previous {
+            Some(last) => {
+                crate::fractional_index::inc(crate::fractional_index::extract_fractional(last))?
+            }
+            None => crate::fractional_index::first(),
+        };
+        let label = crate::fractional_index::format_label(&fractional, &revision);
+
+        let key = keys::ordered_child_key_versioned(
+            tenant_id, repo_id, branch, workspace, parent_id, &label, &revision, &node.id,
+        );
+        batch.put_cf(cf_ordered, key, node.name.as_bytes());
+        let meta = keys::last_child_metadata_key(tenant_id, repo_id, branch, workspace, parent_id);
+        batch.put_cf(cf_ordered, meta, label.as_bytes());
+        last_label.insert(parent_id.to_string(), label);
+        stats.items_processed += 1;
     }
 
-    // Commit remaining items
     if !batch.is_empty() {
-        storage.db().write(batch).map_err(|e| {
-            raisin_error::Error::storage(format!("Final batch write failed: {}", e))
-        })?;
+        storage
+            .db()
+            .write(batch)
+            .map_err(|e| raisin_error::Error::storage(format!("child ordering repair: {}", e)))?;
     }
-
+    tracing::info!(
+        workspace,
+        attached = stats.items_processed,
+        "Child ordering repair finished"
+    );
     Ok(())
 }
