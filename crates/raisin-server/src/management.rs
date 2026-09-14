@@ -18,6 +18,7 @@ mod health;
 mod integrity;
 mod jobs;
 mod maintenance;
+mod queue_job;
 mod router;
 mod types;
 

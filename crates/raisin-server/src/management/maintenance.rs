@@ -88,31 +88,19 @@ where
 pub async fn start_compaction(
     State(state): State<ManagementState<raisin_rocksdb::RocksDBStorage>>,
 ) -> Result<Json<ApiResponse<String>>, StatusCode> {
-    use raisin_storage::jobs::{global_registry, JobType};
+    use raisin_storage::jobs::JobType;
 
     tracing::info!("Starting async compaction");
 
-    let job_id = match global_registry()
-        // tenant unknown for global compaction op; phase G will tighten
-        .register_job(JobType::Compaction, String::new(), None, None, None)
-        .await
-    {
-        Ok(id) => id,
-        Err(e) => {
-            tracing::error!("Failed to register compaction job: {}", e);
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-    };
-
-    let storage = state.storage.clone();
-    let job_id_clone = job_id.clone();
-    tokio::spawn(async move {
-        // TODO: Re-implement when background jobs are available
-        if false {
-            let e: anyhow::Error = anyhow::anyhow!("Not implemented");
-            tracing::error!("Compaction job failed: {}", e);
-        }
-    });
+    // Empty tenant = every tenant; only reachable under the superadmin subtree.
+    let job_id = super::queue_job::queue_maintenance_job(
+        &state.storage,
+        JobType::Compaction,
+        "",
+        std::collections::HashMap::new(),
+    )
+    .await?;
+    tracing::info!(job_id = %job_id, "global compaction queued");
 
     Ok(Json(ApiResponse::ok(job_id.0)))
 }
@@ -138,48 +126,18 @@ pub async fn start_tenant_compaction(
     State(state): State<ManagementState<raisin_rocksdb::RocksDBStorage>>,
     ScopedTenant(tenant): ScopedTenant,
 ) -> Result<Json<ApiResponse<String>>, StatusCode> {
-    use raisin_storage::jobs::{global_registry, JobType};
+    use raisin_storage::jobs::JobType;
 
     tracing::info!(tenant = %tenant, "Starting async compaction for tenant");
 
-    let job_id = match global_registry()
-        .register_job(JobType::Compaction, tenant.clone(), None, None, None)
-        .await
-    {
-        Ok(id) => id,
-        Err(e) => {
-            tracing::error!(
-                tenant = %tenant,
-                "Failed to register tenant compaction job: {}",
-                e
-            );
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-    };
-
-    let storage = state.storage.clone();
-    let job_id_clone = job_id.clone();
-    let tenant_for_task = tenant.clone();
-    tokio::spawn(async move {
-        match storage.compact(Some(&tenant_for_task)).await {
-            Ok(stats) => {
-                tracing::info!(
-                    tenant = %tenant_for_task,
-                    job_id = %job_id_clone,
-                    "Tenant compaction completed: {:?}",
-                    stats
-                );
-            }
-            Err(e) => {
-                tracing::error!(
-                    tenant = %tenant_for_task,
-                    job_id = %job_id_clone,
-                    "Tenant compaction job failed: {}",
-                    e
-                );
-            }
-        }
-    });
+    let job_id = super::queue_job::queue_maintenance_job(
+        &state.storage,
+        JobType::Compaction,
+        &tenant,
+        std::collections::HashMap::new(),
+    )
+    .await?;
+    tracing::info!(tenant = %tenant, job_id = %job_id, "tenant compaction queued");
 
     Ok(Json(ApiResponse::ok(job_id.0)))
 }

@@ -100,6 +100,10 @@ pub fn init_hnsw_management(
 
     tracing::info!("HNSW management initialized");
 
+    // Vector verify/rebuild jobs run under the worker pool, which starts
+    // before this exists; hand it over now.
+    raisin_rocksdb::install_vector_management(management.clone());
+
     management
 }
 

@@ -20,6 +20,7 @@ pub mod fulltext;
 pub mod function_execution;
 pub mod huggingface_model;
 pub mod integration_token_refresh;
+pub mod maintenance;
 pub mod mcp_connection_refresh;
 pub mod mcp_tool_discovery;
 pub mod node_delete_cleanup;
@@ -80,6 +81,7 @@ pub use function_execution::{
 };
 pub use huggingface_model::HuggingFaceModelHandler;
 pub use integration_token_refresh::{token_refresh_dedup_key, IntegrationTokenRefreshHandler};
+pub use maintenance::{install_vector_management, MaintenanceJobHandler};
 pub use mcp_tool_discovery::{McpDiscoveryDeps, McpToolDiscoveryHandler};
 pub use node_delete_cleanup::NodeDeleteCleanupHandler;
 pub use oplog_compaction::OpLogCompactionHandler;
@@ -181,6 +183,9 @@ pub struct JobHandlerRegistry {
     /// non-recurring events — attached explicitly so that is a deployment
     /// decision rather than an accident.
     pub calendar_expand: Option<Arc<CalendarExpandHandler>>,
+    /// Operator-triggered tenant maintenance (integrity, index rebuild/verify,
+    /// orphan cleanup, compaction, repair, vector verify/rebuild).
+    pub maintenance: Option<Arc<MaintenanceJobHandler>>,
 }
 
 #[allow(deprecated)] // Contains AssetProcessingHandler which is deprecated but still used
@@ -229,6 +234,7 @@ impl JobHandlerRegistry {
             // server binary has.
             mcp_tool_discovery: None,
             calendar_expand: None,
+            maintenance: None,
             auth_magic_link_send: None,
             fulltext,
             embedding,
@@ -284,6 +290,12 @@ impl JobHandlerRegistry {
     /// lock manager, which is assembled in the server binary.
     pub fn with_calendar_expand(mut self, handler: Arc<CalendarExpandHandler>) -> Self {
         self.calendar_expand = Some(handler);
+        self
+    }
+
+    /// Attach the tenant maintenance handler.
+    pub fn with_maintenance(mut self, handler: Arc<MaintenanceJobHandler>) -> Self {
+        self.maintenance = Some(handler);
         self
     }
 
@@ -587,6 +599,13 @@ impl JobHandlerRegistry {
                     Ok(None)
                 }
             }
+            job_type if MaintenanceJobHandler::handles(job_type) => match &self.maintenance {
+                Some(handler) => handler.handle(job, context).await,
+                None => Err(raisin_error::Error::storage(
+                    "maintenance job dispatched but no maintenance handler is registered"
+                        .to_string(),
+                )),
+            },
             _ => {
                 // Other job types will be handled by management operations
                 Err(raisin_error::Error::Validation(format!(

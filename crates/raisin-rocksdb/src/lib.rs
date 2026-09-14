@@ -187,6 +187,9 @@ pub use jobs::wasm_validator::{
 // rebuild is not observable from outside the crate without either running the whole
 // job system or driving the handler directly — so an integration test that has to
 // prove what a REAL rebuild writes (entry revisions, precision sets) needs this.
+pub use jobs::handlers::maintenance::{
+    install_vector_management, MaintenanceJobHandler, META_INDEX_TYPE,
+};
 pub use jobs::handlers::spatial_index::{SpatialBuildReport, SpatialIndexJobHandler};
 
 // Re-exported for the same reason as the spatial handler above: whether a

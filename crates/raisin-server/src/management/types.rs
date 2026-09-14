@@ -45,6 +45,8 @@ pub struct ScheduleIntegrityRequest {
 
 #[derive(Deserialize)]
 pub struct RepairRequest {
+    /// Ignored by the job (it re-scans); optional so `{}` is a valid body.
+    #[serde(default)]
     pub issues: Vec<raisin_storage::Issue>,
 }
 

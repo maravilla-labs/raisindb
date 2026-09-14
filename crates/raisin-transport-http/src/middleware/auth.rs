@@ -507,6 +507,26 @@ pub async fn require_admin_auth_middleware(
         }
     };
 
+    // An admin JWT is issued for ONE tenant. Without this check a tenant's
+    // admin could name another tenant in `x-tenant-id` (and in a `{tenant}`
+    // path, which `ScopedTenant` only compares to that header) and run that
+    // tenant's management operations: integrity, rebuilds, cleanup, compaction.
+    // The superadmin bearer above is scoped to the request's tenant by design.
+    let request_tenant = req
+        .extensions()
+        .get::<TenantInfo>()
+        .map(|t| t.tenant_id.as_str())
+        .unwrap_or("default");
+    if admin_claims.tenant_id != request_tenant {
+        tracing::warn!(
+            admin_user = %admin_claims.sub,
+            token_tenant = %admin_claims.tenant_id,
+            request_tenant = %request_tenant,
+            "Admin token used for a different tenant"
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+
     tracing::debug!(
         admin_user = %admin_claims.sub,
         tenant_id = %admin_claims.tenant_id,

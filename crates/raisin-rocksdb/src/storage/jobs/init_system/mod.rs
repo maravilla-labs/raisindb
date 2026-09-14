@@ -315,7 +315,10 @@ impl RocksDBStorage {
             virtual_mount_sync_handler,
         )
         .with_spatial_index(spatial_index_handler)
-        .with_calendar_expand(calendar_expand_handler);
+        .with_calendar_expand(calendar_expand_handler)
+        .with_maintenance(Arc::new(crate::jobs::handlers::MaintenanceJobHandler::new(
+            self.clone(),
+        )));
         // Same reason as the MCP attach below: the registry is not Clone, so
         // an optional handler has to be folded in before it is wrapped.
         let registry = match auth_magic_link_send_handler {

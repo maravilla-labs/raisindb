@@ -60,37 +60,15 @@ where
 /// Returns immediately with a job ID that can be monitored via SSE.
 #[cfg(feature = "storage-rocksdb")]
 pub async fn start_backup(
-    State(state): State<ManagementState<raisin_rocksdb::RocksDBStorage>>,
+    State(_state): State<ManagementState<raisin_rocksdb::RocksDBStorage>>,
     Json(req): Json<BackupRequest>,
 ) -> Result<Json<ApiResponse<String>>, StatusCode> {
-    use raisin_storage::jobs::{global_registry, JobType};
-
-    let backup_path = std::path::PathBuf::from(&req.path);
-    tracing::info!("Starting async backup to path: {:?}", backup_path);
-
-    let job_id = match global_registry()
-        // tenant unknown for global backup op; phase G will tighten
-        .register_job(JobType::Backup, String::new(), None, None, None)
-        .await
-    {
-        Ok(id) => id,
-        Err(e) => {
-            tracing::error!("Failed to register backup job: {}", e);
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-    };
-
-    let storage = state.storage.clone();
-    let job_id_clone = job_id.clone();
-    tokio::spawn(async move {
-        // TODO: Re-implement when background jobs are available
-        if false {
-            let e: anyhow::Error = anyhow::anyhow!("Not implemented");
-            tracing::error!("Backup job failed: {}", e);
-        }
-    });
-
-    Ok(Json(ApiResponse::ok(job_id.0)))
+    // This never ran: it registered a job on a registry no worker reads and
+    // returned its id. Say so instead of handing out a job that never
+    // completes. The synchronous `/management/admin/backup/all` (what the
+    // nightly backup timer calls) is unaffected.
+    tracing::warn!(path = %req.path, "async full backup is not implemented; use /management/admin/backup/all");
+    Err(StatusCode::NOT_IMPLEMENTED)
 }
 
 #[cfg(not(feature = "storage-rocksdb"))]
@@ -118,35 +96,24 @@ pub async fn start_repair(
     ScopedTenant(tenant): ScopedTenant,
     Json(req): Json<RepairRequest>,
 ) -> Result<Json<ApiResponse<String>>, StatusCode> {
-    use raisin_storage::jobs::{global_registry, JobType};
+    use raisin_storage::jobs::JobType;
 
+    // The job repairs what a fresh server-side scan finds, not this list:
+    // accepted for compatibility, never trusted.
     tracing::info!(
-        "Starting async repair for tenant '{}' with {} issues",
-        tenant,
-        req.issues.len()
+        tenant = %tenant,
+        client_issues = req.issues.len(),
+        "Starting repair (issues are re-scanned server-side)"
     );
 
-    let job_id = match global_registry()
-        .register_job(JobType::Repair, tenant.clone(), None, None, None)
-        .await
-    {
-        Ok(id) => id,
-        Err(e) => {
-            tracing::error!("Failed to register repair job: {}", e);
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-    };
-
-    let storage = state.storage.clone();
-    let job_id_clone = job_id.clone();
-    let issues = req.issues;
-    tokio::spawn(async move {
-        // TODO: Re-implement when background jobs are available
-        if false {
-            let e: anyhow::Error = anyhow::anyhow!("Not implemented");
-            tracing::error!("Repair job failed: {}", e);
-        }
-    });
+    let job_id = super::queue_job::queue_maintenance_job(
+        &state.storage,
+        JobType::Repair,
+        &tenant,
+        std::collections::HashMap::new(),
+    )
+    .await?;
+    tracing::info!(job_id = %job_id, "repair queued");
 
     Ok(Json(ApiResponse::ok(job_id.0)))
 }

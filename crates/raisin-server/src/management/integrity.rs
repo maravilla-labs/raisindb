@@ -39,12 +39,12 @@ pub async fn start_integrity_check(
     State(state): State<ManagementState<raisin_rocksdb::RocksDBStorage>>,
     ScopedTenant(tenant): ScopedTenant,
 ) -> Result<Json<ApiResponse<String>>, StatusCode> {
-    use raisin_storage::jobs::{global_registry, JobStatus, JobType};
+    use raisin_storage::jobs::{JobStatus, JobType};
 
     tracing::info!("Starting async integrity check for tenant: {}", tenant);
 
     // Check if an integrity check is already running for this tenant
-    let jobs = global_registry().list_jobs().await;
+    let jobs = state.storage.job_registry().list_jobs().await;
     for job in jobs {
         if matches!(job.job_type, JobType::IntegrityScan)
             && job.tenant == tenant
@@ -62,27 +62,14 @@ pub async fn start_integrity_check(
     }
 
     // Register the job
-    let job_id = match global_registry()
-        .register_job(JobType::IntegrityScan, tenant.clone(), None, None, None)
-        .await
-    {
-        Ok(id) => id,
-        Err(e) => {
-            tracing::error!("Failed to register integrity check job: {}", e);
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-    };
-
-    // Spawn the job in the background
-    let storage = state.storage.clone();
-    let job_id_clone = job_id.clone();
-    tokio::spawn(async move {
-        // TODO: Re-implement when background jobs are available
-        if false {
-            let e: anyhow::Error = anyhow::anyhow!("Not implemented");
-            tracing::error!("Integrity check job failed: {}", e);
-        }
-    });
+    let job_id = super::queue_job::queue_maintenance_job(
+        &state.storage,
+        JobType::IntegrityScan,
+        &tenant,
+        std::collections::HashMap::new(),
+    )
+    .await?;
+    tracing::info!(job_id = %job_id, "integrity scan queued");
 
     Ok(Json(ApiResponse::ok(job_id.0)))
 }
@@ -127,30 +114,18 @@ pub async fn start_verify_indexes(
     State(state): State<ManagementState<raisin_rocksdb::RocksDBStorage>>,
     ScopedTenant(tenant): ScopedTenant,
 ) -> Result<Json<ApiResponse<String>>, StatusCode> {
-    use raisin_storage::jobs::{global_registry, JobType};
+    use raisin_storage::jobs::JobType;
 
     tracing::info!("Starting async index verification for tenant '{}'", tenant);
 
-    let job_id = match global_registry()
-        .register_job(JobType::IndexVerify, tenant.clone(), None, None, None)
-        .await
-    {
-        Ok(id) => id,
-        Err(e) => {
-            tracing::error!("Failed to register index verify job: {}", e);
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-    };
-
-    let storage = state.storage.clone();
-    let job_id_clone = job_id.clone();
-    tokio::spawn(async move {
-        // TODO: Re-implement when background jobs are available
-        if false {
-            let e: anyhow::Error = anyhow::anyhow!("Not implemented");
-            tracing::error!("Index verify job failed: {}", e);
-        }
-    });
+    let job_id = super::queue_job::queue_maintenance_job(
+        &state.storage,
+        JobType::IndexVerify,
+        &tenant,
+        std::collections::HashMap::new(),
+    )
+    .await?;
+    tracing::info!(job_id = %job_id, "index verify queued");
 
     Ok(Json(ApiResponse::ok(job_id.0)))
 }
@@ -201,7 +176,7 @@ pub async fn start_rebuild_indexes(
     ScopedTenant(tenant): ScopedTenant,
     Json(req): Json<RebuildRequest>,
 ) -> Result<Json<ApiResponse<String>>, StatusCode> {
-    use raisin_storage::jobs::{global_registry, JobType};
+    use raisin_storage::jobs::JobType;
 
     let index_type = match parse_index_type(&req.index_type) {
         Ok(t) => t,
@@ -214,26 +189,17 @@ pub async fn start_rebuild_indexes(
         index_type
     );
 
-    let job_id = match global_registry()
-        .register_job(JobType::IndexRebuild, tenant.clone(), None, None, None)
-        .await
-    {
-        Ok(id) => id,
-        Err(e) => {
-            tracing::error!("Failed to register index rebuild job: {}", e);
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-    };
-
-    let storage = state.storage.clone();
-    let job_id_clone = job_id.clone();
-    tokio::spawn(async move {
-        // TODO: Re-implement when background jobs are available
-        if false {
-            let e: anyhow::Error = anyhow::anyhow!("Not implemented");
-            tracing::error!("Index rebuild job failed: {}", e);
-        }
-    });
+    let job_id = super::queue_job::queue_maintenance_job(
+        &state.storage,
+        JobType::IndexRebuild,
+        &tenant,
+        std::collections::HashMap::from([(
+            raisin_rocksdb::META_INDEX_TYPE.to_string(),
+            serde_json::json!(req.index_type),
+        )]),
+    )
+    .await?;
+    tracing::info!(job_id = %job_id, "index rebuild queued");
 
     Ok(Json(ApiResponse::ok(job_id.0)))
 }
@@ -278,30 +244,18 @@ pub async fn start_cleanup_orphans(
     State(state): State<ManagementState<raisin_rocksdb::RocksDBStorage>>,
     ScopedTenant(tenant): ScopedTenant,
 ) -> Result<Json<ApiResponse<String>>, StatusCode> {
-    use raisin_storage::jobs::{global_registry, JobType};
+    use raisin_storage::jobs::JobType;
 
     tracing::info!("Starting async orphan cleanup for tenant '{}'", tenant);
 
-    let job_id = match global_registry()
-        .register_job(JobType::OrphanCleanup, tenant.clone(), None, None, None)
-        .await
-    {
-        Ok(id) => id,
-        Err(e) => {
-            tracing::error!("Failed to register orphan cleanup job: {}", e);
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-    };
-
-    let storage = state.storage.clone();
-    let job_id_clone = job_id.clone();
-    tokio::spawn(async move {
-        // TODO: Re-implement when background jobs are available
-        if false {
-            let e: anyhow::Error = anyhow::anyhow!("Not implemented");
-            tracing::error!("Orphan cleanup job failed: {}", e);
-        }
-    });
+    let job_id = super::queue_job::queue_maintenance_job(
+        &state.storage,
+        JobType::OrphanCleanup,
+        &tenant,
+        std::collections::HashMap::new(),
+    )
+    .await?;
+    tracing::info!(job_id = %job_id, "orphan cleanup queued");
 
     Ok(Json(ApiResponse::ok(job_id.0)))
 }
