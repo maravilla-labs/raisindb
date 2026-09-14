@@ -186,7 +186,7 @@ impl BranchRepositoryImpl {
             .push(node_id)
             .build_prefix();
 
-        let iter = self.db.prefix_iterator_cf(cf_nodes, prefix.clone());
+        let iter = crate::prefix_scan(&self.db, cf_nodes, prefix.clone());
 
         for item in iter {
             let (key, bytes) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
@@ -247,9 +247,7 @@ impl BranchRepositoryImpl {
         )
         .into_bytes();
 
-        let iter = self
-            .db
-            .prefix_iterator_cf(cf_translation_data, prefix.clone());
+        let iter = crate::prefix_scan(&self.db, cf_translation_data, prefix.clone());
 
         for item in iter {
             let (key, bytes) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;

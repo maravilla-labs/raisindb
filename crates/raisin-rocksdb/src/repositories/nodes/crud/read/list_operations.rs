@@ -28,7 +28,7 @@ impl NodeRepositoryImpl {
 
         let cf = cf_handle(&self.db, cf::NODES)?;
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        let iter = crate::prefix_scan(&self.db, cf, prefix);
 
         let mut nodes_map: HashMap<String, Node> = HashMap::new();
         let mut deleted_nodes: HashSet<String> = HashSet::new();
@@ -185,7 +185,7 @@ impl NodeRepositoryImpl {
 
         let cf = cf_handle(&self.db, cf::NODES)?;
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        let iter = crate::prefix_scan(&self.db, cf, prefix);
 
         let mut seen_nodes = HashSet::new();
         let mut count = 0usize;

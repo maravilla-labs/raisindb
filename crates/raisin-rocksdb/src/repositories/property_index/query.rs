@@ -55,7 +55,7 @@ pub(super) async fn find_by_property(
 
     let cf = cf_handle(db, cf::PROPERTY_INDEX)?;
     let prefix_clone = prefix.clone();
-    let iter = db.prefix_iterator_cf(cf, prefix);
+    let iter = crate::prefix_scan(&db, cf, prefix);
 
     // Use HashSet to deduplicate node IDs
     // (same node may appear at multiple revisions)
@@ -160,7 +160,7 @@ pub(super) async fn find_by_property_with_limit(
 
     let cf = cf_handle(db, cf::PROPERTY_INDEX)?;
     let prefix_clone = prefix.clone();
-    let iter = db.prefix_iterator_cf(cf, prefix);
+    let iter = crate::prefix_scan(&db, cf, prefix);
 
     // Use HashSet to deduplicate node IDs
     let mut node_ids = std::collections::HashSet::new();
@@ -247,7 +247,7 @@ pub(super) async fn count_by_property(
 
     let cf = cf_handle(db, cf::PROPERTY_INDEX)?;
     let prefix_clone = prefix.clone();
-    let iter = db.prefix_iterator_cf(cf, prefix);
+    let iter = crate::prefix_scan(&db, cf, prefix);
 
     // Use HashSet to deduplicate node IDs (same node may appear at multiple revisions)
     let mut unique_nodes = std::collections::HashSet::new();
@@ -311,7 +311,7 @@ pub(super) async fn find_nodes_with_property(
 
     let cf = cf_handle(db, cf::PROPERTY_INDEX)?;
     let prefix_clone = prefix.clone();
-    let iter = db.prefix_iterator_cf(cf, prefix);
+    let iter = crate::prefix_scan(&db, cf, prefix);
 
     // Use HashSet to deduplicate node IDs
     // (same node may appear at multiple revisions with different values)

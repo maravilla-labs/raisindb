@@ -98,7 +98,7 @@ impl TagRepositoryImpl {
                 IteratorMode::From(&source_prefix_clone, rocksdb::Direction::Forward),
             )
         } else {
-            self.db.prefix_iterator_cf(&cf, source_prefix)
+            crate::prefix_scan(&self.db, &cf, source_prefix)
         };
 
         let mut copied_count = 0;
@@ -289,7 +289,7 @@ impl TagRepository for TagRepositoryImpl {
 
         let cf = cf_handle(&self.db, cf::TAGS)?;
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        let iter = crate::prefix_scan(&self.db, cf, prefix);
 
         let mut tags = Vec::new();
 

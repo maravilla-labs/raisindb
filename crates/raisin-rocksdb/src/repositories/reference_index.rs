@@ -224,7 +224,7 @@ impl ReferenceIndexRepository for ReferenceIndexRepositoryImpl {
 
         let cf = cf_handle(&self.db, cf::REFERENCE_INDEX)?;
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        let iter = crate::prefix_scan(&self.db, cf, prefix);
 
         // Reverse keys are `…\0{source_id}\0{property_path}\0{~revision}` with
         // the revision encoded DESCENDING, so within one (source, property)
@@ -295,7 +295,7 @@ impl ReferenceIndexRepository for ReferenceIndexRepositoryImpl {
 
         let cf = cf_handle(&self.db, cf::REFERENCE_INDEX)?;
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        let iter = crate::prefix_scan(&self.db, cf, prefix);
 
         // Forward keys are `…/{node_id}/{property_path}/{~revision}` with the
         // revision encoded DESCENDING, so under each property_path prefix the

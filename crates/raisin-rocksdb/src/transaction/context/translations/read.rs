@@ -83,7 +83,7 @@ pub async fn get_translation(
     );
 
     let cf_translation_data = cf_handle(&tx.db, cf::TRANSLATION_DATA)?;
-    let iter = tx.db.prefix_iterator_cf(cf_translation_data, &prefix);
+    let iter = crate::prefix_scan(&tx.db, cf_translation_data, &prefix);
 
     // Find the first (newest) non-tombstone entry
     for item in iter {
@@ -164,7 +164,7 @@ pub async fn list_translations_for_node(
     );
 
     let cf_translation_data = cf_handle(&tx.db, cf::TRANSLATION_DATA)?;
-    let iter = tx.db.prefix_iterator_cf(cf_translation_data, &prefix);
+    let iter = crate::prefix_scan(&tx.db, cf_translation_data, &prefix);
 
     let mut locales = HashSet::new();
 

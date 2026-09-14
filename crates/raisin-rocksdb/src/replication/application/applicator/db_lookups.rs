@@ -100,7 +100,7 @@ impl OperationApplicator {
             .push(path)
             .build_prefix();
         let prefix_clone = prefix.clone();
-        let mut iter = self.db.prefix_iterator_cf(cf_path, &prefix);
+        let mut iter = crate::prefix_scan(&self.db, cf_path, &prefix);
 
         if let Some(Ok((key, value))) = iter.next() {
             if key.starts_with(&prefix_clone) && !is_tombstone(&value) {
@@ -173,7 +173,7 @@ impl OperationApplicator {
         let prefix =
             keys::ordered_children_prefix(tenant_id, repo_id, branch, workspace, parent_id);
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf_ordered, prefix);
+        let iter = crate::prefix_scan(&self.db, cf_ordered, prefix);
 
         let mut last_label: Option<String> = None;
         let mut highest_revision = HLC::new(0, 0);
@@ -247,7 +247,7 @@ impl OperationApplicator {
         let cf_relation = cf_handle(&self.db, cf::RELATION_INDEX)?;
         let prefix = keys::relation_reverse_prefix(tenant_id, repo_id, branch, workspace, node_id);
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf_relation, &prefix);
+        let iter = crate::prefix_scan(&self.db, cf_relation, &prefix);
 
         let mut relations = Vec::new();
         let mut seen = HashSet::new();
@@ -290,7 +290,7 @@ impl OperationApplicator {
         let cf_relation = cf_handle(&self.db, cf::RELATION_INDEX)?;
         let prefix = keys::relation_forward_prefix(tenant_id, repo_id, branch, workspace, node_id);
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf_relation, &prefix);
+        let iter = crate::prefix_scan(&self.db, cf_relation, &prefix);
 
         let mut relations = Vec::new();
         let mut seen = HashSet::new();
@@ -343,7 +343,7 @@ impl OperationApplicator {
         )
         .into_bytes();
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf_translation, &prefix);
+        let iter = crate::prefix_scan(&self.db, cf_translation, &prefix);
         let mut locales = HashSet::new();
 
         for item in iter {

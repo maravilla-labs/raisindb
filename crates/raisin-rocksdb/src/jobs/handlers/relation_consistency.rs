@@ -97,7 +97,7 @@ impl RelationConsistencyHandler {
         let prefix = format!("{}\0{}\0{}\0rel_global\0", tenant_id, repo_id, branch);
         let prefix_bytes = prefix.as_bytes();
 
-        let iter = self.db.prefix_iterator_cf(cf_relation, prefix_bytes);
+        let iter = crate::prefix_scan(&self.db, cf_relation, prefix_bytes);
 
         for item in iter {
             let (key, value) = match item {
@@ -229,7 +229,7 @@ impl RelationConsistencyHandler {
         let prefix_bytes = prefix.as_bytes();
 
         // Use prefix iterator to find the latest version
-        let iter = self.db.prefix_iterator_cf(cf_nodes, prefix_bytes);
+        let iter = crate::prefix_scan(&self.db, cf_nodes, prefix_bytes);
 
         for item in iter {
             let (key, value) = match item {

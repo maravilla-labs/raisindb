@@ -45,7 +45,7 @@ pub(super) fn load_node_at(
     let cf_nodes = cf_handle(db, cf::NODES)?;
     let prefix = keys::node_key_prefix(tenant_id, repo_id, branch, workspace, node_id);
 
-    for item in db.prefix_iterator_cf(cf_nodes, &prefix) {
+    for item in crate::prefix_scan(&db, cf_nodes, &prefix) {
         let (key, value) =
             item.map_err(|e| raisin_error::Error::storage(format!("Iterator error: {e}")))?;
 

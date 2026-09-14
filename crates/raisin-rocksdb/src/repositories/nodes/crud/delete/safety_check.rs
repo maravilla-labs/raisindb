@@ -89,7 +89,7 @@ impl NodeRepositoryImpl {
                 tenant_id, repo_id, branch, workspace, workspace, &node.id, published,
             );
 
-            let iter = self.db.prefix_iterator_cf(cf_reference, &ref_prefix);
+            let iter = crate::prefix_scan(&self.db, cf_reference, &ref_prefix);
 
             let mut seen_sources = HashSet::new();
 
@@ -170,7 +170,7 @@ impl NodeRepositoryImpl {
         let rel_prefix =
             keys::relation_reverse_prefix(tenant_id, repo_id, branch, workspace, node_id);
 
-        let iter = self.db.prefix_iterator_cf(cf_relation, &rel_prefix);
+        let iter = crate::prefix_scan(&self.db, cf_relation, &rel_prefix);
 
         let mut seen_sources = HashSet::new();
 

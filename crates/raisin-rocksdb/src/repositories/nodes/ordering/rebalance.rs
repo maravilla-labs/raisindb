@@ -50,7 +50,7 @@ impl NodeRepositoryImpl {
             keys::ordered_children_prefix(tenant_id, repo_id, branch, workspace, parent_id);
         let cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf_ordered, prefix);
+        let iter = crate::prefix_scan(&self.db, cf_ordered, prefix);
 
         // Track (label, child_id) to skip older revisions, and child_id to skip
         // a child already emitted at an earlier (lower) label.

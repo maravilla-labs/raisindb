@@ -362,7 +362,7 @@ impl NodeTypeRepository for NodeTypeRepositoryImpl {
         let cf = cf_handle(&self.db, cf::NODE_TYPES)?;
         let prefix = keys::nodetype_branch_prefix(tenant_id, repo_id, branch);
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        let iter = crate::prefix_scan(&self.db, cf, prefix);
 
         let mut seen = std::collections::HashSet::new();
         let mut result = Vec::new();

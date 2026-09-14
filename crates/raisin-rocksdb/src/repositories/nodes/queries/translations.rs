@@ -128,7 +128,7 @@ impl NodeRepositoryImpl {
         let cf_translation_data = cf_handle(&self.db, cf::TRANSLATION_DATA)?;
         let prefix = Self::translation_data_prefix(tenant_id, repo_id, branch, workspace, node_id);
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf_translation_data, prefix);
+        let iter = crate::prefix_scan(&self.db, cf_translation_data, prefix);
 
         let mut seen_locales = HashSet::new();
         let mut translations = Vec::new();
@@ -210,7 +210,7 @@ impl NodeRepositoryImpl {
         let cf_block_trans = cf_handle(&self.db, cf::BLOCK_TRANSLATIONS)?;
         let prefix = Self::block_translation_prefix(tenant_id, repo_id, branch, workspace, node_id);
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf_block_trans, prefix);
+        let iter = crate::prefix_scan(&self.db, cf_block_trans, prefix);
 
         let mut seen = HashSet::new();
         let mut translations = Vec::new();

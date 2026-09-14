@@ -151,7 +151,7 @@ impl RevisionHistoryCopyHandler {
 
         let cf = cf_handle(&self.db, cf::REVISIONS)?;
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        let iter = crate::prefix_scan(&self.db, cf, prefix);
 
         let mut revisions = Vec::new();
         let mut skipped = 0;

@@ -242,7 +242,7 @@ pub async fn remove_relation(
     let mut relations_to_remove = Vec::new();
 
     // Scan to find all relations from source to target
-    let iter = tx.db.prefix_iterator_cf(cf_relation, &prefix);
+    let iter = crate::prefix_scan(&tx.db, cf_relation, &prefix);
     for item in iter {
         let (key, value) =
             item.map_err(|e| Error::storage(format!("Failed to iterate relations: {}", e)))?;

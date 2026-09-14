@@ -190,7 +190,7 @@ impl IdentityRepository {
         let cf = self.cf_identities()?;
         let prefix = keys::identity_prefix(tenant_id);
 
-        let iter = self.db.prefix_iterator_cf(cf, &prefix);
+        let iter = crate::prefix_scan(&self.db, cf, &prefix);
 
         let mut identities = Vec::new();
         let mut count = 0;

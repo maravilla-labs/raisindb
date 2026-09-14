@@ -41,7 +41,7 @@ impl NodeRepositoryImpl {
 
         let cf_path = cf_handle(&self.db, cf::PATH_INDEX)?;
         let prefix_clone = prefix.clone();
-        let mut iter = self.db.prefix_iterator_cf(cf_path, prefix);
+        let mut iter = crate::prefix_scan(&self.db, cf_path, prefix);
 
         // MVCC semantics with time-travel support:
         // Keys are sorted by revision descending (newest first)
@@ -141,7 +141,7 @@ impl NodeRepositoryImpl {
 
         let cf_path = cf_handle(&self.db, cf::PATH_INDEX)?;
         let prefix_clone = prefix.clone();
-        let mut iter = self.db.prefix_iterator_cf(cf_path, prefix);
+        let mut iter = crate::prefix_scan(&self.db, cf_path, prefix);
 
         // MVCC semantics with time-travel support:
         // Keys are sorted by revision descending (newest first)

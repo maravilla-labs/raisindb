@@ -133,7 +133,7 @@ impl RegistryRepository for RegistryRepositoryImpl {
 
         let cf = cf_handle(&self.db, cf::REGISTRY)?;
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        let iter = crate::prefix_scan(&self.db, cf, prefix);
 
         let mut tenants = Vec::new();
 
@@ -243,7 +243,7 @@ impl RegistryRepository for RegistryRepositoryImpl {
 
         let cf = cf_handle(&self.db, cf::REGISTRY)?;
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        let iter = crate::prefix_scan(&self.db, cf, prefix);
 
         let mut deployments = Vec::new();
 

@@ -201,7 +201,7 @@ pub(super) async fn apply_revoke_all_identity_sessions(
     let cf = cf_handle(&applicator.db, cf::SESSIONS)?;
     let prefix = keys::identity_sessions_prefix(tenant_id, identity_id);
 
-    let iter = applicator.db.prefix_iterator_cf(cf, &prefix);
+    let iter = crate::prefix_scan(&applicator.db, cf, &prefix);
 
     for (key, _) in iter.flatten() {
         if !key.starts_with(&prefix) {

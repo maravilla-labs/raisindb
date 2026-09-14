@@ -187,7 +187,7 @@ impl CompoundStateStore {
             format!("compound_index\0{tenant_id}\0{repo_id}\0{branch}\0{workspace}\0").into_bytes();
 
         let mut out = Vec::new();
-        for item in self.db.prefix_iterator_cf(cf, &prefix) {
+        for item in crate::prefix_scan(&self.db, cf, &prefix) {
             let (key, value) =
                 item.map_err(|e| Error::storage(format!("Failed to list compound state: {}", e)))?;
             if !key.starts_with(&prefix) {

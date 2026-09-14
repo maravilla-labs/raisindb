@@ -61,6 +61,7 @@ impl MaintenanceJobHandler {
                 | JobType::Repair
                 | JobType::VectorVerify
                 | JobType::VectorRebuild
+                | JobType::VectorOptimize
         )
     }
 
@@ -89,6 +90,12 @@ impl MaintenanceJobHandler {
             }
             JobType::Compaction => to_value(storage.compact(Some(tenant)).await?),
             JobType::Repair => self.repair(tenant).await?,
+            // HNSW needs no optimisation pass; the job exists so the endpoint's
+            // job-id contract holds. Say what happened.
+            JobType::VectorOptimize => json!({
+                "status": "no_op",
+                "detail": "HNSW indexes need no optimisation"
+            }),
             JobType::VectorVerify | JobType::VectorRebuild => {
                 let management = VECTOR_MANAGEMENT.get().ok_or_else(|| {
                     Error::storage(

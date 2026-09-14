@@ -459,7 +459,7 @@ impl SpatialIndexJobHandler {
         let mut out: Vec<(Node, HLC)> = Vec::new();
         let mut current_id: Option<String> = None;
 
-        for item in self.db.prefix_iterator_cf(cf_nodes, &prefix) {
+        for item in crate::prefix_scan(&self.db, cf_nodes, &prefix) {
             let (key, value) =
                 item.map_err(|e| Error::storage(format!("Failed to scan nodes: {}", e)))?;
             if !key.starts_with(&prefix) {

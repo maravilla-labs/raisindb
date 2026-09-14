@@ -59,7 +59,7 @@ pub(super) async fn scan_property(
     let mut keys_skipped_prefix_mismatch = 0usize;
 
     if ascending {
-        let iter = db.prefix_iterator_cf(cf, prefix);
+        let iter = crate::prefix_scan(&db, cf, prefix);
 
         for item in iter {
             keys_iterated += 1;

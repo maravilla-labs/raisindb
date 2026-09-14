@@ -120,7 +120,7 @@ impl ArchetypeRepositoryImpl {
         let cf = cf_handle(&self.db, cf::ARCHETYPES)?;
         let prefix = keys::archetype_name_prefix(tenant_id, repo_id, branch, name);
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        let iter = crate::prefix_scan(&self.db, cf, prefix);
 
         for item in iter {
             let (key, value) = item.map_err(|e| RaisinError::storage(e.to_string()))?;

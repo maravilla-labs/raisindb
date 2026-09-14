@@ -361,7 +361,7 @@ impl GraphComputeTask {
         // Prefix for all entries in this branch
         let prefix = graph_cache_branch_prefix(tenant_id, repo_id, branch_id);
 
-        let iter = db.prefix_iterator_cf(cf, &prefix);
+        let iter = crate::prefix_scan(&db, cf, &prefix);
         let mut batch = WriteBatch::default();
         let mut count = 0;
 

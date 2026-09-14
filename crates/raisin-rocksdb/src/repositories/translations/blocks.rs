@@ -34,7 +34,7 @@ pub(super) async fn get_block_translation(
         locale.as_str(),
     );
 
-    let mut iter = db.prefix_iterator_cf(&cf, &prefix);
+    let mut iter = crate::prefix_scan(&db, &cf, &prefix);
 
     if let Some(Ok((_key, value))) = iter.next() {
         let overlay = serialization::deserialize_overlay(&value)?;
@@ -142,7 +142,7 @@ pub(super) async fn list_block_translations_for_node(
         keys::block_translations_node_prefix(tenant_id, repo_id, branch, workspace, node_id);
 
     let mut found = std::collections::HashSet::new();
-    for item in db.prefix_iterator_cf(&cf, &prefix) {
+    for item in crate::prefix_scan(&db, &cf, &prefix) {
         let (key, _value) = item.rocksdb_err()?;
         // `prefix_iterator_cf` can run past the prefix; stop when it does.
         let Some(suffix) = key.strip_prefix(prefix.as_slice()) else {

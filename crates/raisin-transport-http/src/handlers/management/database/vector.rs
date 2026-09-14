@@ -10,7 +10,6 @@ use axum::{
     http::StatusCode,
     response::Json,
 };
-use std::sync::Arc;
 
 use raisin_storage::jobs::JobType;
 
@@ -144,31 +143,6 @@ pub async fn optimize_vector_index(
     Path((tenant, repo)): Path<(String, String)>,
     Query(params): Query<DatabaseOpQuery>,
 ) -> Result<Json<JobResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let hnsw_mgmt = match &state.hnsw_management {
-        Some(mgmt) => mgmt,
-        None => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "HNSW management not initialized".to_string(),
-                }),
-            ));
-        }
-    };
-
-    let rocksdb_storage = match &state.rocksdb_storage {
-        Some(storage) => storage,
-        None => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "RocksDB storage not initialized".to_string(),
-                }),
-            ));
-        }
-    };
-
-    let job_registry = rocksdb_storage.job_registry();
     let branch = get_branch_name(&state, &tenant, &repo, params.branch).await?;
 
     tracing::info!(
@@ -178,53 +152,7 @@ pub async fn optimize_vector_index(
         branch
     );
 
-    let job_id = job_registry
-        .register_job(JobType::VectorOptimize, tenant.clone(), None, None, None)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Failed to register job: {}", e),
-                }),
-            )
-        })?;
-
-    let mgmt = Arc::clone(hnsw_mgmt);
-    let job_registry_clone = Arc::clone(job_registry);
-    let job_id_clone = job_id.clone();
-    let tenant_clone = tenant.clone();
-    let repo_clone = repo.clone();
-    let branch_clone = branch.clone();
-    tokio::spawn(async move {
-        let _ = job_registry_clone.mark_running(&job_id_clone).await;
-
-        match mgmt
-            .optimize_index(&tenant_clone, &repo_clone, &branch_clone)
-            .await
-        {
-            Ok(stats) => {
-                let result_json = serde_json::to_value(&stats).unwrap_or_default();
-                let _ = job_registry_clone
-                    .set_result(&job_id_clone, result_json)
-                    .await;
-                let _ = job_registry_clone.mark_completed(&job_id_clone).await;
-
-                tracing::info!(
-                    "Vector optimization completed (no-op) for {}/{}/{}",
-                    tenant_clone,
-                    repo_clone,
-                    branch_clone
-                );
-            }
-            Err(e) => {
-                let _ = job_registry_clone
-                    .mark_failed(&job_id_clone, e.to_string())
-                    .await;
-                tracing::error!("Vector optimization failed: {}", e);
-            }
-        }
-    });
+    let job_id = queue_vector_job(&state, JobType::VectorOptimize, &tenant, &repo, &branch).await?;
 
     Ok(Json(JobResponse {
         job_id: job_id.0,
@@ -251,31 +179,6 @@ pub async fn restore_vector_index(
     Path((tenant, repo)): Path<(String, String)>,
     Query(params): Query<DatabaseOpQuery>,
 ) -> Result<Json<JobResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let hnsw_mgmt = match &state.hnsw_management {
-        Some(mgmt) => mgmt,
-        None => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "HNSW management not initialized".to_string(),
-                }),
-            ));
-        }
-    };
-
-    let rocksdb_storage = match &state.rocksdb_storage {
-        Some(storage) => storage,
-        None => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "RocksDB storage not initialized".to_string(),
-                }),
-            ));
-        }
-    };
-
-    let job_registry = rocksdb_storage.job_registry();
     let branch = get_branch_name(&state, &tenant, &repo, params.branch).await?;
 
     tracing::info!(
@@ -285,59 +188,7 @@ pub async fn restore_vector_index(
         branch
     );
 
-    let job_id = job_registry
-        .register_job(JobType::VectorRebuild, tenant.clone(), None, None, None)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Failed to register job: {}", e),
-                }),
-            )
-        })?;
-
-    let mgmt = Arc::clone(hnsw_mgmt);
-    let job_registry_clone = Arc::clone(job_registry);
-    let job_id_clone = job_id.clone();
-    let tenant_clone = tenant.clone();
-    let repo_clone = repo.clone();
-    let branch_clone = branch.clone();
-    tokio::spawn(async move {
-        let _ = job_registry_clone.mark_running(&job_id_clone).await;
-
-        match mgmt
-            .rebuild_index(
-                &tenant_clone,
-                &repo_clone,
-                &branch_clone,
-                Some(job_id_clone.clone()),
-            )
-            .await
-        {
-            Ok(stats) => {
-                let result_json = serde_json::to_value(&stats).unwrap_or_default();
-                let _ = job_registry_clone
-                    .set_result(&job_id_clone, result_json)
-                    .await;
-                let _ = job_registry_clone.mark_completed(&job_id_clone).await;
-
-                tracing::info!(
-                    "Vector restore completed for {}/{}/{}: {} items processed",
-                    tenant_clone,
-                    repo_clone,
-                    branch_clone,
-                    stats.items_processed
-                );
-            }
-            Err(e) => {
-                let _ = job_registry_clone
-                    .mark_failed(&job_id_clone, e.to_string())
-                    .await;
-                tracing::error!("Vector restore failed: {}", e);
-            }
-        }
-    });
+    let job_id = queue_vector_job(&state, JobType::VectorRebuild, &tenant, &repo, &branch).await?;
 
     Ok(Json(JobResponse {
         job_id: job_id.0,

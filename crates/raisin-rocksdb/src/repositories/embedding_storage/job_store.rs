@@ -71,7 +71,7 @@ impl EmbeddingJobStore for RocksDBEmbeddingJobStore {
     fn dequeue(&self, limit: usize) -> Result<Vec<EmbeddingJob>> {
         let cf = cf_handle(&self.db, cf::EMBEDDING_JOBS)?;
         let prefix = Self::state_prefix("pending");
-        let iter = self.db.prefix_iterator_cf(cf, &prefix);
+        let iter = crate::prefix_scan(&self.db, cf, &prefix);
 
         let mut jobs = Vec::new();
         let mut batch = WriteBatch::default();
@@ -198,7 +198,7 @@ impl EmbeddingJobStore for RocksDBEmbeddingJobStore {
     fn list_pending(&self) -> Result<Vec<EmbeddingJob>> {
         let cf = cf_handle(&self.db, cf::EMBEDDING_JOBS)?;
         let prefix = Self::state_prefix("pending");
-        let iter = self.db.prefix_iterator_cf(cf, &prefix);
+        let iter = crate::prefix_scan(&self.db, cf, &prefix);
 
         let mut jobs = Vec::new();
 
@@ -220,7 +220,7 @@ impl EmbeddingJobStore for RocksDBEmbeddingJobStore {
     fn count_pending(&self) -> Result<usize> {
         let cf = cf_handle(&self.db, cf::EMBEDDING_JOBS)?;
         let prefix = Self::state_prefix("pending");
-        let iter = self.db.prefix_iterator_cf(cf, &prefix);
+        let iter = crate::prefix_scan(&self.db, cf, &prefix);
 
         let count = iter
             .take_while(|result| {

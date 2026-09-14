@@ -144,7 +144,7 @@ impl SystemUpdateRepository for SystemUpdateRepositoryImpl {
         let prefix = Self::make_prefix(tenant_id, repo_id);
         let mut results = Vec::new();
 
-        let iter = self.db.prefix_iterator_cf(cf, &prefix);
+        let iter = crate::prefix_scan(&self.db, cf, &prefix);
         for item in iter {
             let (key, value) = item.map_err(|e| {
                 raisin_error::Error::storage(format!("RocksDB iterator error: {}", e))

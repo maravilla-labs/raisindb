@@ -111,7 +111,7 @@ impl NodeDeleteCleanupHandler {
         let cf_relation = get_relation_cf(&self.db)?;
         let prefix = relation_forward_prefix(tenant_id, repo_id, branch, workspace, node_id);
 
-        let iter = self.db.prefix_iterator_cf(cf_relation, &prefix);
+        let iter = crate::prefix_scan(&self.db, cf_relation, &prefix);
         for item in iter {
             let (key, value) = item.map_err(|e| {
                 Error::storage(format!("Failed to iterate outgoing relations: {}", e))
@@ -185,7 +185,7 @@ impl NodeDeleteCleanupHandler {
         let cf_relation = get_relation_cf(&self.db)?;
         let prefix = relation_reverse_prefix(tenant_id, repo_id, branch, workspace, node_id);
 
-        let iter = self.db.prefix_iterator_cf(cf_relation, &prefix);
+        let iter = crate::prefix_scan(&self.db, cf_relation, &prefix);
         for item in iter {
             let (key, value) = item.map_err(|e| {
                 Error::storage(format!("Failed to iterate incoming relations: {}", e))

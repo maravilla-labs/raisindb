@@ -28,7 +28,7 @@ pub(super) async fn get_translation_meta(
         locale.as_str(),
     );
 
-    let mut iter = db.prefix_iterator_cf(&cf, &prefix);
+    let mut iter = crate::prefix_scan(&db, &cf, &prefix);
 
     // First entry is the most recent (descending revision)
     if let Some(Ok((_key, value))) = iter.next() {

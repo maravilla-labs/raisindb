@@ -55,7 +55,7 @@ pub(super) async fn scan_relations_global(
     let mut stats = ScanStats::default();
 
     // Scan global index
-    let iter = db.prefix_iterator_cf(cf_relation, &prefix);
+    let iter = crate::prefix_scan(&db, cf_relation, &prefix);
     for item in iter {
         stats.scanned_keys += 1;
 

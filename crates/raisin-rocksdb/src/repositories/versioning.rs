@@ -67,7 +67,7 @@ impl VersioningRepository for VersioningRepositoryImpl {
 
         let cf = cf_handle(&self.db, cf::VERSIONS)?;
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        let iter = crate::prefix_scan(&self.db, cf, prefix);
 
         let mut versions = Vec::new();
 
@@ -122,7 +122,7 @@ impl VersioningRepository for VersioningRepositoryImpl {
 
         let cf = cf_handle(&self.db, cf::VERSIONS)?;
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        let iter = crate::prefix_scan(&self.db, cf, prefix);
 
         let mut count = 0;
 

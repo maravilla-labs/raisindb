@@ -353,7 +353,7 @@ impl ArchetypeRepository for ArchetypeRepositoryImpl {
         let cf = cf_handle(&self.db, cf::ARCHETYPES)?;
         let prefix = keys::archetype_branch_prefix(tenant_id, repo_id, branch);
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf, prefix.clone());
+        let iter = crate::prefix_scan(&self.db, cf, prefix.clone());
 
         let mut results = Vec::new();
         let mut seen = HashSet::new();

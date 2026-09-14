@@ -33,7 +33,7 @@ pub(super) async fn get_translation(
         locale.as_str(),
     );
 
-    let mut iter = db.prefix_iterator_cf(&cf, &prefix);
+    let mut iter = crate::prefix_scan(&db, &cf, &prefix);
 
     // First key will be the most recent (descending revision order)
     if let Some(Ok((key, value))) = iter.next() {
@@ -164,7 +164,7 @@ pub(super) async fn list_translations_for_node(
     .into_bytes();
 
     let mut locales = std::collections::HashSet::new();
-    let iter = db.prefix_iterator_cf(&cf, &prefix);
+    let iter = crate::prefix_scan(&db, &cf, &prefix);
 
     for item in iter {
         let (key, _value) = item.rocksdb_err()?;

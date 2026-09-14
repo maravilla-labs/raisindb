@@ -67,7 +67,7 @@ impl RevisionRepository for RevisionRepositoryImpl {
 
         let cf = cf_handle(&self.db, cf::REVISIONS)?;
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        let iter = crate::prefix_scan(&self.db, cf, prefix);
 
         let mut revisions = Vec::new();
 
@@ -298,7 +298,7 @@ impl RevisionRepository for RevisionRepositoryImpl {
 
         let cf = cf_handle(&self.db, cf::REVISIONS)?;
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        let iter = crate::prefix_scan(&self.db, cf, prefix);
 
         let mut revisions = Vec::new();
 
@@ -338,7 +338,7 @@ impl RevisionRepository for RevisionRepositoryImpl {
 
         let cf = cf_handle(&self.db, cf::REVISIONS)?;
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        let iter = crate::prefix_scan(&self.db, cf, prefix);
 
         let mut revisions = Vec::new();
 
@@ -375,7 +375,7 @@ impl RevisionRepository for RevisionRepositoryImpl {
 
         let cf = cf_handle(&self.db, cf::REVISIONS)?;
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        let iter = crate::prefix_scan(&self.db, cf, prefix);
 
         let mut revisions = Vec::new();
 
@@ -412,7 +412,7 @@ impl RevisionRepository for RevisionRepositoryImpl {
 
         let cf = cf_handle(&self.db, cf::REVISIONS)?;
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        let iter = crate::prefix_scan(&self.db, cf, prefix);
 
         let mut revisions = Vec::new();
 
@@ -482,7 +482,7 @@ impl RevisionRepository for RevisionRepositoryImpl {
 
         let cf = cf_handle(&self.db, cf::REVISIONS)?;
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        let iter = crate::prefix_scan(&self.db, cf, prefix);
 
         for item in iter {
             let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
@@ -559,7 +559,7 @@ impl RevisionRepository for RevisionRepositoryImpl {
 
         let cf = cf_handle(&self.db, cf::REVISIONS)?;
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        let iter = crate::prefix_scan(&self.db, cf, prefix);
 
         for item in iter {
             let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;

@@ -374,7 +374,7 @@ impl NodeRepositoryImpl {
             .build_prefix();
 
         let cf_nodes = cf_handle(&self.db, cf::NODES)?;
-        let iter = self.db.prefix_iterator_cf(cf_nodes, prefix);
+        let iter = crate::prefix_scan(&self.db, cf_nodes, prefix);
 
         // Iterate through versions (newest first due to descending revision encoding)
         // Use iter.next() pattern which is proven to work reliably

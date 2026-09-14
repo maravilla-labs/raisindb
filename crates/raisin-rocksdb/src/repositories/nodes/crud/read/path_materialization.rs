@@ -31,7 +31,7 @@ impl NodeRepositoryImpl {
         let prefix = keys::node_path_key_prefix(tenant_id, repo_id, branch, workspace, node_id);
         let cf = cf_handle(&self.db, cf::NODE_PATH)?;
 
-        let iter = self.db.prefix_iterator_cf(cf, prefix.clone());
+        let iter = crate::prefix_scan(&self.db, cf, prefix.clone());
 
         for item in iter {
             let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;

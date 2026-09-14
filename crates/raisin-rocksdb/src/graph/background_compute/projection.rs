@@ -60,7 +60,7 @@ impl GraphComputeTask {
                 .build_prefix();
 
             let cf = cf_handle(db, cf::NODES)?;
-            let iter = db.prefix_iterator_cf(cf, &prefix);
+            let iter = crate::prefix_scan(&db, cf, &prefix);
 
             // Track which node IDs we've seen to only process the latest version
             let mut seen_nodes = HashSet::new();

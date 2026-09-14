@@ -109,7 +109,7 @@ pub fn load_all(db: &DB) -> Result<HashMap<String, u32>> {
     let cf = cf_handle(db, cf::REGISTRY)?;
     let mut out = HashMap::new();
 
-    for item in db.prefix_iterator_cf(cf, &prefix) {
+    for item in crate::prefix_scan(&db, cf, &prefix) {
         let (key, value) = item.map_err(|e| Error::storage(e.to_string()))?;
         // `prefix_iterator_cf` may run past the prefix; stop, don't decode.
         if !key.starts_with(&prefix[..]) {

@@ -152,7 +152,7 @@ impl GraphProjectionStore {
             .map_err(|e| format!("Failed to get GRAPH_PROJECTION CF: {}", e))?;
 
         let prefix = graph_projection_branch_prefix(tenant_id, repo_id, branch);
-        let iter = db.prefix_iterator_cf(cf, &prefix);
+        let iter = crate::prefix_scan(&db, cf, &prefix);
         let mut batch = WriteBatch::default();
         let mut count = 0;
 

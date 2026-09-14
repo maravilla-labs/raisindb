@@ -145,7 +145,7 @@ impl NodeTypeRepositoryImpl {
         let cf = cf_handle(&self.db, cf::NODE_TYPES)?;
         let prefix = keys::nodetype_name_prefix(tenant_id, repo_id, branch, name);
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        let iter = crate::prefix_scan(&self.db, cf, prefix);
 
         for item in iter {
             let (key, value) = item.map_err(|e| RaisinError::storage(e.to_string()))?;
@@ -366,7 +366,7 @@ impl NodeTypeRepositoryImpl {
         let cf = cf_handle(db, cf::INDEX_STATUS)?;
         let prefix = format!("compound_index\0{tenant_id}\0{repo_id}\0{branch}\0").into_bytes();
         let mut out = std::collections::BTreeSet::new();
-        for item in db.prefix_iterator_cf(cf, &prefix) {
+        for item in crate::prefix_scan(&db, cf, &prefix) {
             let (key, _) = item
                 .map_err(|e| RaisinError::storage(format!("compound state scan failed: {}", e)))?;
             if !key.starts_with(&prefix) {

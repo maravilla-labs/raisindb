@@ -139,7 +139,7 @@ impl RocksDBStorage {
             .build_prefix();
 
         let cf = crate::cf_handle(&self.db, cf::WORKSPACE_DELTAS)?;
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        let iter = crate::prefix_scan(&self.db, cf, prefix);
 
         for item in iter {
             let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
@@ -201,7 +201,7 @@ impl RocksDBStorage {
             .build_prefix();
 
         let cf = crate::cf_handle(&self.db, cf::WORKSPACE_DELTAS)?;
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        let iter = crate::prefix_scan(&self.db, cf, prefix);
 
         let mut deltas = Vec::new();
 
@@ -262,7 +262,7 @@ impl RocksDBStorage {
             .build_prefix();
 
         let cf = crate::cf_handle(&self.db, cf::WORKSPACE_DELTAS)?;
-        let iter = self.db.prefix_iterator_cf(cf, prefix.clone());
+        let iter = crate::prefix_scan(&self.db, cf, prefix.clone());
 
         let mut keys_to_delete = Vec::new();
         for item in iter {

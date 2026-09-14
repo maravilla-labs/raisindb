@@ -39,7 +39,7 @@ impl JobMetadataStore {
 
         let prefix = tenant_filter.map(job_tenant_prefix);
         let iter = if let Some(ref p) = prefix {
-            self.db.prefix_iterator_cf(cf_metadata, p.as_slice())
+            crate::prefix_scan(&self.db, cf_metadata, p.as_slice())
         } else {
             self.db
                 .iterator_cf(cf_metadata, rocksdb::IteratorMode::Start)
@@ -268,7 +268,7 @@ impl JobMetadataStore {
 
         let prefix = tenant_filter.map(job_tenant_prefix);
         let iter = if let Some(ref p) = prefix {
-            self.db.prefix_iterator_cf(cf_metadata, p.as_slice())
+            crate::prefix_scan(&self.db, cf_metadata, p.as_slice())
         } else {
             self.db
                 .iterator_cf(cf_metadata, rocksdb::IteratorMode::Start)

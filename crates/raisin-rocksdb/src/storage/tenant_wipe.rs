@@ -252,7 +252,7 @@ mod tests {
     fn tenant_keys_remaining(db: &Arc<DB>, cf_name: &str, tenant: &str) -> usize {
         let cf = cf_handle(db, cf_name).unwrap();
         let prefix = job_tenant_prefix(tenant);
-        let iter = db.prefix_iterator_cf(cf, &prefix);
+        let iter = crate::prefix_scan(&db, cf, &prefix);
         let mut count = 0;
         for item in iter {
             let (key, _) = item.unwrap();

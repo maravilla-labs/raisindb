@@ -34,7 +34,7 @@ impl NodeRepositoryImpl {
         let prefix =
             keys::ordered_children_prefix(tenant_id, repo_id, branch, workspace, parent_id);
         let cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
-        let iter = self.db.prefix_iterator_cf(cf_ordered, prefix.clone());
+        let iter = crate::prefix_scan(&self.db, cf_ordered, prefix.clone());
 
         // Track seen (order_label, child_id) pairs to handle MVCC properly.
         // With descending HLC, newer entries come first - we want the most
@@ -133,7 +133,7 @@ impl NodeRepositoryImpl {
         // a parent or after cache invalidation.
         let prefix =
             keys::ordered_children_prefix(tenant_id, repo_id, branch, workspace, parent_id);
-        let iter = self.db.prefix_iterator_cf(cf_ordered, prefix.clone());
+        let iter = crate::prefix_scan(&self.db, cf_ordered, prefix.clone());
 
         let mut last_label: Option<String> = None;
         let mut highest_revision = HLC::new(0, 0);
@@ -186,7 +186,7 @@ impl NodeRepositoryImpl {
         let prefix =
             keys::ordered_children_prefix(tenant_id, repo_id, branch, workspace, parent_id);
         let cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
-        let iter = self.db.prefix_iterator_cf(cf_ordered, prefix.clone());
+        let iter = crate::prefix_scan(&self.db, cf_ordered, prefix.clone());
 
         let mut seen_labels = HashSet::new();
 
@@ -263,7 +263,7 @@ impl NodeRepositoryImpl {
         let prefix =
             keys::ordered_children_prefix(tenant_id, repo_id, branch, workspace, parent_id);
         let cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
-        let iter = self.db.prefix_iterator_cf(cf_ordered, prefix.clone());
+        let iter = crate::prefix_scan(&self.db, cf_ordered, prefix.clone());
 
         for item in iter {
             let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;

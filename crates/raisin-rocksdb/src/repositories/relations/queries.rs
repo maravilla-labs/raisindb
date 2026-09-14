@@ -82,7 +82,7 @@ pub(super) async fn scan_outgoing_relations(
     );
 
     // Scan all relations with this prefix
-    let iter = db.prefix_iterator_cf(cf_relation, &prefix);
+    let iter = crate::prefix_scan(&db, cf_relation, &prefix);
     for item in iter {
         let (key, value) =
             item.map_err(|e| Error::storage(format!("Failed to iterate relations: {}", e)))?;
@@ -165,7 +165,7 @@ pub(super) async fn get_incoming_relations(
     let mut seen_sources = HashSet::new();
 
     // Scan all relations with this prefix
-    let iter = db.prefix_iterator_cf(cf_relation, &prefix);
+    let iter = crate::prefix_scan(&db, cf_relation, &prefix);
     for item in iter {
         let (key, value) =
             item.map_err(|e| Error::storage(format!("Failed to iterate relations: {}", e)))?;

@@ -71,7 +71,7 @@ impl NodeRepositoryImpl {
 
         let cf = cf_handle(&self.db, cf::NODES)?;
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        let iter = crate::prefix_scan(&self.db, cf, prefix);
 
         // Iterate through revisions (newest first due to descending encoding)
         for item in iter {
@@ -137,7 +137,7 @@ impl NodeRepositoryImpl {
 
         let cf_path = cf_handle(&self.db, cf::PATH_INDEX)?;
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf_path, prefix);
+        let iter = crate::prefix_scan(&self.db, cf_path, prefix);
 
         for item in iter {
             let (key, val) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
@@ -236,7 +236,7 @@ impl NodeRepositoryImpl {
 
         let cf = cf_handle(&self.db, cf::NODES)?;
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        let iter = crate::prefix_scan(&self.db, cf, prefix);
 
         let mut history = Vec::new();
 
@@ -303,7 +303,7 @@ impl NodeRepositoryImpl {
 
         let cf = cf_handle(&self.db, cf::NODES)?;
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        let iter = crate::prefix_scan(&self.db, cf, prefix);
 
         let mut nodes_map: HashMap<String, Option<Node>> = HashMap::new();
 
@@ -369,7 +369,7 @@ impl NodeRepositoryImpl {
             keys::ordered_children_prefix(tenant_id, repo_id, branch, workspace, parent_id);
         let cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf_ordered, prefix);
+        let iter = crate::prefix_scan(&self.db, cf_ordered, prefix);
 
         let mut seen_labels = HashSet::new();
         let mut child_ids = Vec::new();

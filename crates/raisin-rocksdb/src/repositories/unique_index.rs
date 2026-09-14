@@ -86,7 +86,7 @@ impl UniqueIndexManager {
         );
 
         // Prefix iterator returns newest revision first (due to descending HLC encoding)
-        let mut iter = self.db.prefix_iterator_cf(cf, prefix.clone());
+        let mut iter = crate::prefix_scan(&self.db, cf, prefix.clone());
 
         if let Some(item) = iter.next() {
             let (key, value) = item.map_err(|e| Error::storage(e.to_string()))?;
@@ -244,7 +244,7 @@ impl UniqueIndexManager {
             value_hash,
         );
 
-        let mut iter = self.db.prefix_iterator_cf(cf, prefix.clone());
+        let mut iter = crate::prefix_scan(&self.db, cf, prefix.clone());
 
         if let Some(item) = iter.next() {
             let (key, value) = item.map_err(|e| Error::storage(e.to_string()))?;

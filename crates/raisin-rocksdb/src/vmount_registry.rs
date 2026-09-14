@@ -160,7 +160,7 @@ pub fn list_entries(db: &DB, tenant: &str) -> Result<Vec<RegistryEntry>> {
     let prefix = tenant_prefix(tenant);
 
     let mut out = Vec::new();
-    for item in db.prefix_iterator_cf(cf_registry, &prefix) {
+    for item in crate::prefix_scan(&db, cf_registry, &prefix) {
         let (key, _) =
             item.map_err(|e| raisin_error::Error::storage(format!("Iterator error: {}", e)))?;
         // `prefix_iterator_cf` is bounded by the CF's prefix extractor, not by

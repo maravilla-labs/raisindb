@@ -378,7 +378,7 @@ impl SpatialStateStore {
         .into_bytes();
 
         let mut out = Vec::new();
-        for item in self.db.prefix_iterator_cf(cf, &prefix) {
+        for item in crate::prefix_scan(&self.db, cf, &prefix) {
             let (key, value) =
                 item.map_err(|e| Error::storage(format!("Failed to list spatial state: {}", e)))?;
             if !key.starts_with(&prefix) {

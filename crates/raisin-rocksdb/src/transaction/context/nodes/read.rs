@@ -48,7 +48,7 @@ fn materialize_path(
     let prefix = keys::node_path_key_prefix(tenant_id, repo_id, branch, workspace, node_id);
     let cf = cf_handle(db, cf::NODE_PATH)?;
 
-    let iter = db.prefix_iterator_cf(cf, prefix.clone());
+    let iter = crate::prefix_scan(&db, cf, prefix.clone());
 
     for item in iter {
         let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
@@ -248,7 +248,7 @@ async fn get_node_bounded(
     let prefix = keys::node_key_prefix(&tenant_id, &repo_id, &branch, workspace, node_id);
 
     // 4. Iterate to find latest version <= HEAD
-    let iter = tx.db.prefix_iterator_cf(cf_nodes, &prefix);
+    let iter = crate::prefix_scan(&tx.db, cf_nodes, &prefix);
 
     for item in iter {
         let (key, value) =
@@ -462,7 +462,7 @@ async fn get_node_by_path_bounded(
     let cf_path = cf_handle(&tx.db, cf::PATH_INDEX)?;
     let prefix = keys::path_index_key_prefix(&tenant_id, &repo_id, &branch, workspace, path);
 
-    let iter = tx.db.prefix_iterator_cf(cf_path, &prefix);
+    let iter = crate::prefix_scan(&tx.db, cf_path, &prefix);
 
     tracing::debug!(
         "TX get_node_by_path: workspace={}, path={}, prefix_len={}, head_revision={}",

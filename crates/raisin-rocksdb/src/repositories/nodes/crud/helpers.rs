@@ -41,7 +41,7 @@ impl NodeRepositoryImpl {
             .build_prefix();
 
         let cf = cf_handle(&self.db, cf::NODES)?;
-        let mut iter = self.db.prefix_iterator_cf(cf, prefix);
+        let mut iter = crate::prefix_scan(&self.db, cf, prefix);
 
         // Due to descending revision encoding, the first item is the newest
         if let Some(item) = iter.next() {
@@ -92,7 +92,7 @@ impl NodeRepositoryImpl {
             .build_prefix();
 
         let cf = cf_handle(&self.db, cf::NODES)?;
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        let iter = crate::prefix_scan(&self.db, cf, prefix);
 
         // Iterate through revisions (newest first due to descending encoding)
         // Return the first revision that is <= target_revision
@@ -155,7 +155,7 @@ impl NodeRepositoryImpl {
         let prefix_clone = prefix.clone();
 
         let cf = cf_handle(&self.db, cf::RELATION_INDEX)?;
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        let iter = crate::prefix_scan(&self.db, cf, prefix);
 
         let mut relations = Vec::new();
         let mut seen: HashSet<(String, String)> = HashSet::new(); // (target_node_id, relation_type)
@@ -224,7 +224,7 @@ impl NodeRepositoryImpl {
         let prefix_clone = prefix.clone();
 
         let cf = cf_handle(&self.db, cf::RELATION_INDEX)?;
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        let iter = crate::prefix_scan(&self.db, cf, prefix);
 
         let mut relations = Vec::new();
         let mut seen: HashSet<(String, String)> = HashSet::new(); // (source, type)
@@ -291,7 +291,7 @@ impl NodeRepositoryImpl {
         );
 
         let cf = cf_handle(&self.db, cf::TRANSLATION_DATA)?;
-        let iter = self.db.prefix_iterator_cf(cf, prefix.as_bytes());
+        let iter = crate::prefix_scan(&self.db, cf, prefix.as_bytes());
 
         let mut locales = HashSet::new();
 

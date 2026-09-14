@@ -106,7 +106,7 @@ fn collect_outgoing_relations(
     let outgoing_prefix = relation_forward_prefix(tenant_id, repo_id, branch, workspace, node_id);
     let mut outgoing_to_remove = Vec::new();
 
-    let iter = db.prefix_iterator_cf(cf_relation, &outgoing_prefix);
+    let iter = crate::prefix_scan(&db, cf_relation, &outgoing_prefix);
     for item in iter {
         let (key, value) = item
             .map_err(|e| Error::storage(format!("Failed to iterate outgoing relations: {}", e)))?;
@@ -150,7 +150,7 @@ pub(crate) fn collect_incoming_relations(
     let incoming_prefix = relation_reverse_prefix(tenant_id, repo_id, branch, workspace, node_id);
     let mut incoming_to_remove = Vec::new();
 
-    let iter = db.prefix_iterator_cf(cf_relation, &incoming_prefix);
+    let iter = crate::prefix_scan(&db, cf_relation, &incoming_prefix);
     for item in iter {
         let (key, value) = item
             .map_err(|e| Error::storage(format!("Failed to iterate incoming relations: {}", e)))?;

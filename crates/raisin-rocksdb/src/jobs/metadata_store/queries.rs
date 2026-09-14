@@ -178,7 +178,7 @@ impl JobMetadataStore {
         let prefix = job_tenant_prefix(tenant);
         let mut results = Vec::new();
 
-        let iter = self.db.prefix_iterator_cf(cf, &prefix);
+        let iter = crate::prefix_scan(&self.db, cf, &prefix);
         for item in iter {
             let (key_bytes, value_bytes) = item.map_err(|e| {
                 raisin_error::Error::storage(format!("Failed to iterate job metadata: {}", e))
@@ -250,7 +250,7 @@ impl JobMetadataStore {
         let mut total = 0;
         let mut orphaned = 0;
 
-        let iter = self.db.prefix_iterator_cf(cf_metadata, &prefix);
+        let iter = crate::prefix_scan(&self.db, cf_metadata, &prefix);
         for item in iter {
             let (key_bytes, value_bytes) = item.map_err(|e| {
                 raisin_error::Error::storage(format!("Failed to iterate job metadata: {}", e))
@@ -304,7 +304,7 @@ impl JobMetadataStore {
         let mut newest: BinaryHeap<Reverse<(chrono::DateTime<chrono::Utc>, Vec<u8>)>> =
             BinaryHeap::new();
 
-        let iter = self.db.prefix_iterator_cf(cf, &prefix);
+        let iter = crate::prefix_scan(&self.db, cf, &prefix);
         for item in iter {
             let (key_bytes, value_bytes) = item.map_err(|e| {
                 raisin_error::Error::storage(format!("Failed to iterate job metadata: {}", e))

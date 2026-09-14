@@ -105,7 +105,7 @@ impl RocksDBExcerptFetcher {
 
         // Build prefix for this workspace
         let prefix = Self::build_source_prefix(tenant_id, repo_id, branch, workspace_id);
-        let iter = self.db.prefix_iterator_cf(cf, &prefix);
+        let iter = crate::prefix_scan(&self.db, cf, &prefix);
 
         // Scan for matching source_id and chunk_index
         // We take the first match (latest revision) since revisions are in descending order

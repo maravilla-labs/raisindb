@@ -109,7 +109,7 @@ pub(super) async fn get_hash_records(
     );
 
     let mut records = HashMap::new();
-    let iter = db.prefix_iterator_cf(&cf, &prefix);
+    let iter = crate::prefix_scan(&db, &cf, &prefix);
 
     for item in iter {
         let (key, value) = item.rocksdb_err()?;
@@ -168,7 +168,7 @@ pub(super) async fn delete_hash_records(
     );
 
     let mut batch = rocksdb::WriteBatch::default();
-    let iter = db.prefix_iterator_cf(&cf, &prefix);
+    let iter = crate::prefix_scan(&db, &cf, &prefix);
 
     for item in iter {
         let (key, _) = item.rocksdb_err()?;

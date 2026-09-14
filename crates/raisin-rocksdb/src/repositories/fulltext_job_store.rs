@@ -75,7 +75,7 @@ impl FullTextJobStore for RocksDbJobStore {
     fn dequeue(&self, count: usize) -> Result<Vec<FullTextIndexJob>> {
         let cf = cf_handle(&self.db, cf::FULLTEXT_JOBS)?;
         let prefix = Self::state_prefix("pending");
-        let iter = self.db.prefix_iterator_cf(cf, &prefix);
+        let iter = crate::prefix_scan(&self.db, cf, &prefix);
 
         let mut jobs = Vec::new();
         let mut batch = WriteBatch::default();

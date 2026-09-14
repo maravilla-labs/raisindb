@@ -174,7 +174,7 @@ impl SpatialIndexRepository {
                 std::collections::HashSet::new();
             let mut visited_in_cell = 0usize;
 
-            for item in self.db.prefix_iterator_cf(cf, &prefix) {
+            for item in crate::prefix_scan(&self.db, cf, &prefix) {
                 let (key, value) = item.map_err(|e| Error::storage(e.to_string()))?;
 
                 if !key.starts_with(&prefix) {

@@ -123,7 +123,7 @@ pub async fn get_block_translation(
     );
 
     let cf_block = cf_handle(&tx.db, cf::BLOCK_TRANSLATIONS)?;
-    for item in tx.db.prefix_iterator_cf(cf_block, &prefix) {
+    for item in crate::prefix_scan(&tx.db, cf_block, &prefix) {
         let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
         if !key.starts_with(prefix.as_bytes()) {
             break;
@@ -156,7 +156,7 @@ pub async fn list_block_translations_for_node(
     let cf_block = cf_handle(&tx.db, cf::BLOCK_TRANSLATIONS)?;
     let mut found = std::collections::HashSet::new();
 
-    for item in tx.db.prefix_iterator_cf(cf_block, &prefix) {
+    for item in crate::prefix_scan(&tx.db, cf_block, &prefix) {
         let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
         if !key.starts_with(prefix.as_bytes()) {
             break;

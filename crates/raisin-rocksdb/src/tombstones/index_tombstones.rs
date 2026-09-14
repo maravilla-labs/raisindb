@@ -252,7 +252,7 @@ pub(super) fn tombstone_relation_indexes(
     );
 
     let mut seen_edges = std::collections::HashSet::new();
-    let iter = db.prefix_iterator_cf(cfs.relation_index, &relation_prefix);
+    let iter = crate::prefix_scan(&db, cfs.relation_index, &relation_prefix);
     for item in iter {
         let (key, value) = item.map_err(|e| {
             raisin_error::Error::storage(format!("Failed to iterate relations: {}", e))
@@ -431,7 +431,7 @@ pub(super) fn tombstone_compound_indexes(
             is_published,
         );
 
-        let iter = db.prefix_iterator_cf(cfs.compound_index, &prefix);
+        let iter = crate::prefix_scan(&db, cfs.compound_index, &prefix);
         for item in iter {
             let (key, _) = item.map_err(|e| {
                 raisin_error::Error::storage(format!("Failed to iterate compound index: {}", e))
@@ -547,7 +547,7 @@ pub(super) fn tombstone_translation_data(
     )
     .into_bytes();
 
-    let iter = db.prefix_iterator_cf(cfs.translation_data, &translation_prefix);
+    let iter = crate::prefix_scan(&db, cfs.translation_data, &translation_prefix);
     for item in iter {
         let (key, value) = item.map_err(|e| {
             raisin_error::Error::storage(format!("Failed to iterate translations: {}", e))

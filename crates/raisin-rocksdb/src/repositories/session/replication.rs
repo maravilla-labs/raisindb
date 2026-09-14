@@ -71,7 +71,7 @@ impl SessionRepository {
         let cf = self.cf_sessions()?;
         let prefix = keys::identity_sessions_prefix(tenant_id, identity_id);
 
-        let iter = self.db.prefix_iterator_cf(cf, &prefix);
+        let iter = crate::prefix_scan(&self.db, cf, &prefix);
 
         for (key, _) in iter.flatten() {
             if !key.starts_with(&prefix) {

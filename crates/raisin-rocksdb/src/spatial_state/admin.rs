@@ -92,7 +92,7 @@ impl SpatialAdminStore {
         let mut per_precision: BTreeMap<usize, u64> = BTreeMap::new();
         let mut hashes: BTreeSet<u64> = BTreeSet::new();
 
-        for item in self.db.prefix_iterator_cf(cf, &prefix) {
+        for item in crate::prefix_scan(&self.db, cf, &prefix) {
             let (key, value) =
                 item.map_err(|e| Error::storage(format!("Failed to scan spatial index: {}", e)))?;
             if !key.starts_with(&prefix) {
@@ -156,7 +156,7 @@ impl SpatialAdminStore {
         let prefix = keys::spatial_index_workspace_prefix(tenant_id, repo_id, branch, workspace);
 
         let mut out = BTreeSet::new();
-        for item in self.db.prefix_iterator_cf(cf, &prefix) {
+        for item in crate::prefix_scan(&self.db, cf, &prefix) {
             let (key, _) =
                 item.map_err(|e| Error::storage(format!("Failed to scan spatial index: {}", e)))?;
             if !key.starts_with(&prefix) {

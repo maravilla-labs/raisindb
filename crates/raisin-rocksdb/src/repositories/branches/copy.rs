@@ -132,7 +132,7 @@ impl BranchRepositoryImpl {
                 IteratorMode::From(&source_prefix_clone, rocksdb::Direction::Forward),
             )
         } else {
-            db.prefix_iterator_cf(&cf, source_prefix)
+            crate::prefix_scan(&db, &cf, source_prefix)
         };
 
         let mut copied_count = 0;

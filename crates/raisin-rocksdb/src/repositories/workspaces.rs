@@ -173,7 +173,7 @@ impl WorkspaceRepository for WorkspaceRepositoryImpl {
 
         let cf = cf_handle(&self.db, cf::WORKSPACES)?;
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        let iter = crate::prefix_scan(&self.db, cf, prefix);
 
         let mut workspaces = Vec::new();
 

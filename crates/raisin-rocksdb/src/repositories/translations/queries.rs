@@ -24,7 +24,7 @@ pub(super) async fn list_nodes_with_translation(
     let prefix = keys::translation_index_prefix(tenant_id, repo_id, locale.as_str());
 
     let mut node_ids = HashSet::new();
-    let iter = db.prefix_iterator_cf(&cf, &prefix);
+    let iter = crate::prefix_scan(&db, &cf, &prefix);
 
     for item in iter {
         let (key, _value) = item.rocksdb_err()?;
@@ -77,7 +77,7 @@ pub(super) async fn get_translations_batch(
             locale.as_str(),
         );
 
-        let mut iter = db.prefix_iterator_cf(&cf, &prefix);
+        let mut iter = crate::prefix_scan(&db, &cf, &prefix);
 
         // Iterate to find the first (most recent) translation at or before requested revision
         while let Some(Ok((key, value))) = iter.next() {

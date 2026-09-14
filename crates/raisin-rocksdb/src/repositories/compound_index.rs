@@ -140,7 +140,7 @@ impl CompoundIndexRepository for CompoundIndexRepositoryImpl {
             );
 
             let prefix_clone = prefix.clone();
-            let iter = self.db.prefix_iterator_cf(cf, prefix);
+            let iter = crate::prefix_scan(&self.db, cf, prefix);
 
             for item in iter {
                 let (key, _) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
@@ -224,7 +224,7 @@ impl CompoundIndexRepository for CompoundIndexRepositoryImpl {
                 published,
             );
             let prefix_clone = prefix.clone();
-            for item in self.db.prefix_iterator_cf(cf, prefix) {
+            for item in crate::prefix_scan(&self.db, cf, prefix) {
                 let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
                 if !key.starts_with(&prefix_clone) {
                     break;
@@ -325,7 +325,7 @@ impl CompoundIndexRepository for CompoundIndexRepositoryImpl {
             );
 
             let prefix_clone = prefix.clone();
-            let iter = self.db.prefix_iterator_cf(cf, prefix);
+            let iter = crate::prefix_scan(&self.db, cf, prefix);
 
             for item in iter {
                 let (key, _) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;

@@ -273,7 +273,7 @@ impl BranchRepository for BranchRepositoryImpl {
 
         let cf = cf_handle(&self.db, cf::BRANCHES)?;
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        let iter = crate::prefix_scan(&self.db, cf, prefix);
 
         let mut branches = Vec::new();
 

@@ -37,7 +37,7 @@ impl NodeRepositoryImpl {
 
         let cf_property = cf_handle(&self.db, cf::PROPERTY_INDEX)?;
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf_property, prefix);
+        let iter = crate::prefix_scan(&self.db, cf_property, prefix);
 
         let mut node_ids = std::collections::HashSet::new();
 
@@ -102,7 +102,7 @@ impl NodeRepositoryImpl {
 
         let cf_property = cf_handle(&self.db, cf::PROPERTY_INDEX)?;
         let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf_property, prefix);
+        let iter = crate::prefix_scan(&self.db, cf_property, prefix);
 
         let mut node_ids = std::collections::HashSet::new();
 

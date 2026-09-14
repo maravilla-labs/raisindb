@@ -71,7 +71,7 @@ pub(super) async fn unindex_properties(
 
     for prefix in [prefix_draft, prefix_pub] {
         let prefix_clone = prefix.clone();
-        let iter = db.prefix_iterator_cf(cf, prefix);
+        let iter = crate::prefix_scan(&db, cf, prefix);
 
         for item in iter {
             let (key, _) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
