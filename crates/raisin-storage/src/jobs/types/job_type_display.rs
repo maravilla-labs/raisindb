@@ -36,6 +36,7 @@ impl fmt::Display for JobType {
             Self::VectorRebuild => write!(f, "VectorRebuild"),
             Self::VectorOptimize => write!(f, "VectorOptimize"),
             Self::VectorRestore => write!(f, "VectorRestore"),
+            Self::VectorRegenerate => write!(f, "VectorRegenerate"),
             Self::FulltextIndex { node_id, operation } => {
                 write!(f, "FulltextIndex({}, {:?})", node_id, operation)
             }

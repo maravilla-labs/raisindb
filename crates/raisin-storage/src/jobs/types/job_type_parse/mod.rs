@@ -68,6 +68,7 @@ impl std::str::FromStr for JobType {
             "VectorRebuild" => return Ok(Self::VectorRebuild),
             "VectorOptimize" => return Ok(Self::VectorOptimize),
             "VectorRestore" => return Ok(Self::VectorRestore),
+            "VectorRegenerate" => return Ok(Self::VectorRegenerate),
             _ => {}
         }
         if let Some(r) = parse_tree_snapshot(s)? {

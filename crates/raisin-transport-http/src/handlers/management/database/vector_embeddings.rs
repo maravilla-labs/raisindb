@@ -2,16 +2,16 @@
 
 //! Vector embedding regeneration handler.
 //!
-//! Handles scanning existing embeddings for dimension mismatches and queuing
-//! regeneration jobs via the unified job system. Implements API-level locking
-//! to prevent concurrent regeneration operations.
+//! Queues a `VectorRegenerate` job; `MaintenanceJobHandler` scans the tenant's
+//! stored embeddings for dimension mismatches and queues an `EmbeddingGenerate`
+//! job per node. The handler used to register a `Custom` job and run the scan
+//! in a detached task, which the worker pool then failed for having no handler.
 
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::Json,
 };
-use std::sync::Arc;
 
 use crate::state::AppState;
 
@@ -21,127 +21,78 @@ use super::types::{get_branch_name, DatabaseOpQuery, ErrorResponse, JobResponse}
 ///
 /// POST /api/admin/management/database/:tenant/:repo/vector/regenerate
 ///
-/// This operation:
-/// 1. Scans embeddings in RocksDB for dimension mismatches
-/// 2. Queues EmbeddingJobs to call the embedding provider API
-/// 3. Reports progress via JobRegistry
-/// 4. Implements API-level locking to prevent concurrent operations
+/// `?force=true` re-embeds every node, not only mismatched ones. One
+/// regeneration per tenant at a time.
 #[cfg(feature = "storage-rocksdb")]
 pub async fn regenerate_vector_embeddings(
     State(state): State<AppState>,
     Path((tenant, repo)): Path<(String, String)>,
     Query(params): Query<DatabaseOpQuery>,
 ) -> Result<Json<JobResponse>, (StatusCode, Json<ErrorResponse>)> {
+    use raisin_storage::jobs::JobType;
     use raisin_storage::JobStatus;
 
-    let rocksdb_storage = match &state.rocksdb_storage {
-        Some(storage) => storage,
-        None => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "RocksDB storage not initialized".to_string(),
-                }),
-            ));
-        }
-    };
-
-    let embedding_storage = match &state.embedding_storage {
-        Some(storage) => storage,
-        None => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Embedding storage not initialized".to_string(),
-                }),
-            ));
-        }
-    };
-
-    let job_data_store = rocksdb_storage.job_data_store();
-    let job_registry = rocksdb_storage.job_registry();
+    let rocksdb_storage = state.rocksdb_storage.as_ref().ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "RocksDB storage not initialized".to_string(),
+            }),
+        )
+    })?;
 
     let branch = get_branch_name(&state, &tenant, &repo, params.branch).await?;
 
-    // API-LEVEL LOCKING: Check for existing running regeneration jobs
-    tracing::info!("Checking for existing embedding regeneration jobs...");
-    let existing_jobs = job_registry.list_jobs().await;
-
-    for job in existing_jobs {
-        if let raisin_storage::JobType::Custom(ref name) = job.job_type {
-            if name == "EmbeddingRegeneration"
-                && matches!(job.status, JobStatus::Running | JobStatus::Executing)
+    let already_running = rocksdb_storage
+        .job_registry()
+        .list_jobs()
+        .await
+        .into_iter()
+        .any(|job| {
+            job.job_type == JobType::VectorRegenerate
                 && job.tenant == tenant
-            {
-                tracing::warn!(
-                    "Embedding regeneration already running for tenant '{}' (job: {})",
-                    tenant,
-                    job.id.0
-                );
-                return Err((
-                    StatusCode::CONFLICT,
-                    Json(ErrorResponse {
-                        error: format!(
-                            "Embedding regeneration already running for tenant '{}'. \
-                             Please wait for the current operation to complete.",
-                            tenant
-                        ),
-                    }),
-                ));
-            }
-        }
+                && matches!(
+                    job.status,
+                    JobStatus::Scheduled | JobStatus::Running | JobStatus::Executing
+                )
+        });
+    if already_running {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: format!(
+                    "Embedding regeneration already running for tenant '{}'. \
+                     Please wait for the current operation to complete.",
+                    tenant
+                ),
+            }),
+        ));
     }
 
     tracing::info!(
-        "Starting embedding regeneration for {}/{}/{}",
+        "Queueing embedding regeneration for {}/{}/{} (force: {})",
         tenant,
         repo,
-        branch
+        branch,
+        params.force
     );
 
-    let job_id = job_registry
-        .register_job(
-            raisin_storage::JobType::Custom("EmbeddingRegeneration".to_string()),
-            tenant.clone(),
-            None,
-            None,
-            None,
-        )
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Failed to register job: {}", e),
-                }),
-            )
-        })?;
-
-    // Clone dependencies for async task
-    let job_id_clone = job_id.clone();
-    let emb_storage = Arc::clone(embedding_storage);
-    let job_data_store = Arc::clone(job_data_store);
-    let job_registry_clone = Arc::clone(job_registry);
-    let config_repo = rocksdb_storage.tenant_embedding_config_repository();
-    let tenant_clone = tenant.clone();
-    let repo_clone = repo.clone();
-    let branch_clone = branch.clone();
-    let force = params.force;
-
-    tokio::spawn(async move {
-        run_embedding_regeneration(
-            job_id_clone,
-            emb_storage,
-            job_data_store,
-            job_registry_clone,
-            config_repo,
-            tenant_clone,
-            repo_clone,
-            branch_clone,
-            force,
-        )
-        .await;
-    });
+    let mut metadata = std::collections::HashMap::new();
+    if params.force {
+        metadata.insert(
+            raisin_rocksdb::META_FORCE.to_string(),
+            serde_json::Value::Bool(true),
+        );
+    }
+    let job_id = super::vector::queue_vector_job(
+        &state,
+        JobType::VectorRegenerate,
+        &tenant,
+        &repo,
+        &branch,
+        metadata,
+    )
+    .await?;
 
     Ok(Json(JobResponse {
         job_id: job_id.0,
@@ -151,265 +102,4 @@ pub async fn regenerate_vector_embeddings(
             tenant, repo, branch
         ),
     }))
-}
-
-/// Background task that scans embeddings and queues regeneration jobs.
-#[cfg(feature = "storage-rocksdb")]
-async fn run_embedding_regeneration(
-    job_id: raisin_storage::JobId,
-    emb_storage: Arc<raisin_rocksdb::RocksDBEmbeddingStorage>,
-    job_data_store: Arc<raisin_rocksdb::JobDataStore>,
-    job_registry: Arc<raisin_storage::jobs::JobRegistry>,
-    config_repo: raisin_rocksdb::TenantEmbeddingConfigRepository,
-    tenant: String,
-    repo: String,
-    branch: String,
-    force: bool,
-) {
-    use raisin_embeddings::storage::TenantEmbeddingConfigStore;
-    use raisin_embeddings::EmbeddingStorage;
-    use raisin_storage::jobs::{JobContext, JobType};
-    use std::collections::HashMap;
-
-    let _ = job_registry.mark_running(&job_id).await;
-
-    tracing::info!(
-        "Regeneration task started for {}/{}/{}",
-        tenant,
-        repo,
-        branch
-    );
-
-    // Get tenant config for expected dimensions
-    let config_result = config_repo.get_config(&tenant);
-    let expected_dims = match config_result {
-        Ok(Some(config)) => {
-            if !config.enabled {
-                tracing::error!("Embeddings are disabled for tenant '{}'", tenant);
-                let _ = job_registry
-                    .mark_failed(
-                        &job_id,
-                        "Embeddings are disabled for this tenant".to_string(),
-                    )
-                    .await;
-                return;
-            }
-            config.dimensions
-        }
-        Ok(None) => {
-            tracing::error!("No embedding config found for tenant '{}'", tenant);
-            let _ = job_registry
-                .mark_failed(&job_id, "No embedding config found".to_string())
-                .await;
-            return;
-        }
-        Err(e) => {
-            tracing::error!("Failed to get config: {}", e);
-            let _ = job_registry
-                .mark_failed(&job_id, format!("Failed to get config: {}", e))
-                .await;
-            return;
-        }
-    };
-
-    tracing::info!("Expected dimensions: {}", expected_dims);
-
-    // List all embeddings, across EVERY workspace on the branch.
-    //
-    // This used to list from a workspace named by the literal `"staff"`, and
-    // then stamp that same literal into the JobContext of every regeneration
-    // job it queued. The embedding job writes under the workspace the NODE
-    // lives in, so on any deployment whose content is not in a workspace
-    // called "staff" this scan found nothing and reported success over zero
-    // rows. `list_workspaces` is the shared way to discover the real set —
-    // `HnswManagement::rebuild_index` and SQL's `REBUILD VECTOR INDEX` go
-    // through it too.
-    let workspaces = match emb_storage.list_workspaces(&tenant, &repo, &branch) {
-        Ok(ws) => ws,
-        Err(e) => {
-            tracing::error!("Failed to list workspaces: {}", e);
-            let _ = job_registry
-                .mark_failed(&job_id, format!("Failed to list workspaces: {}", e))
-                .await;
-            return;
-        }
-    };
-
-    tracing::info!(
-        "Scanning {} workspace(s): {:?}",
-        workspaces.len(),
-        workspaces
-    );
-
-    // Each entry carries the workspace it came from, so the embedding is read
-    // back from — and requeued into — the workspace it actually lives in.
-    let mut embeddings_list = Vec::new();
-    for workspace in &workspaces {
-        match emb_storage.list_embeddings(&tenant, &repo, &branch, workspace) {
-            Ok(list) => {
-                for (node_id, revision) in list {
-                    embeddings_list.push((workspace.clone(), node_id, revision));
-                }
-            }
-            Err(e) => {
-                tracing::error!("Failed to list embeddings: {}", e);
-                let _ = job_registry
-                    .mark_failed(&job_id, format!("Failed to list embeddings: {}", e))
-                    .await;
-                return;
-            }
-        }
-    }
-
-    let total_embeddings = embeddings_list.len();
-    tracing::info!("Found {} embeddings to check", total_embeddings);
-
-    if total_embeddings == 0 {
-        tracing::info!("No embeddings found, nothing to regenerate");
-        let result_json = serde_json::json!({
-            "queued": 0,
-            "skipped": 0,
-            "errors": 0,
-        });
-        let _ = job_registry.set_result(&job_id, result_json).await;
-        let _ = job_registry.mark_completed(&job_id).await;
-        return;
-    }
-
-    let mut queued = 0;
-    let mut skipped = 0;
-    let mut errors = 0;
-
-    for (idx, (workspace, node_id, revision)) in embeddings_list.iter().enumerate() {
-        match emb_storage.get_embedding(&tenant, &repo, &branch, workspace, node_id, Some(revision))
-        {
-            Ok(Some(embedding_data)) => {
-                if force || embedding_data.vector.len() != expected_dims {
-                    if force && embedding_data.vector.len() == expected_dims {
-                        tracing::info!(
-                            "Force regeneration for {} (dimensions already match: {})",
-                            node_id,
-                            expected_dims
-                        );
-                    } else {
-                        tracing::info!(
-                            "Dimension mismatch for {}: expected {}, got {} - queuing job",
-                            node_id,
-                            expected_dims,
-                            embedding_data.vector.len()
-                        );
-                    }
-
-                    // Store the context BEFORE registering so dispatch can
-                    // never observe the job without its context.
-                    //
-                    // `force` has to travel WITH the job. The handler now skips
-                    // a node whose stored embedding matches the current spec
-                    // exactly — which is what makes a periodic re-embed pass
-                    // free — and without this flag an operator's explicit
-                    // "regenerate everything" would queue thousands of jobs that
-                    // each decided to do nothing.
-                    let mut metadata = HashMap::new();
-                    if force {
-                        metadata.insert(
-                            raisin_embeddings::FORCE_REEMBED_KEY.to_string(),
-                            serde_json::Value::Bool(true),
-                        );
-                    }
-                    let context = JobContext {
-                        tenant_id: tenant.clone(),
-                        repo_id: repo.clone(),
-                        branch: branch.clone(),
-                        workspace_id: workspace.clone(),
-                        revision: *revision,
-                        metadata,
-                    };
-
-                    let embedding_job_id = raisin_storage::JobId::new();
-                    if let Err(e) = job_data_store.put(&embedding_job_id, &context) {
-                        tracing::error!(
-                            "Failed to store context for job {}: {}",
-                            embedding_job_id,
-                            e
-                        );
-                        errors += 1;
-                    } else {
-                        match job_registry
-                            .register_job_with_id(
-                                embedding_job_id.clone(),
-                                JobType::EmbeddingGenerate {
-                                    node_id: node_id.clone(),
-                                },
-                                tenant.clone(),
-                                None,
-                                None,
-                                None,
-                            )
-                            .await
-                        {
-                            Ok(_) => {
-                                tracing::debug!(
-                                    "Queued embedding job {} for node {} (revision {})",
-                                    embedding_job_id,
-                                    node_id,
-                                    revision
-                                );
-                                queued += 1;
-                            }
-                            Err(e) => {
-                                tracing::error!("Failed to register job for {}: {}", node_id, e);
-                                errors += 1;
-                            }
-                        }
-                    }
-                } else {
-                    skipped += 1;
-                }
-            }
-            Ok(None) => {
-                tracing::warn!(
-                    "Embedding not found for node {}, revision {}",
-                    node_id,
-                    revision
-                );
-                errors += 1;
-            }
-            Err(e) => {
-                tracing::error!("Failed to fetch embedding for {}: {}", node_id, e);
-                errors += 1;
-            }
-        }
-
-        // Report progress every 10 items or on last item
-        if idx % 10 == 0 || idx == total_embeddings - 1 {
-            let progress = (idx as f32 + 1.0) / total_embeddings as f32;
-            let _ = job_registry.update_progress(&job_id, progress).await;
-
-            tracing::debug!(
-                "Regeneration progress: {}/{} ({:.1}%) - {} queued, {} skipped, {} errors",
-                idx + 1,
-                total_embeddings,
-                progress * 100.0,
-                queued,
-                skipped,
-                errors
-            );
-        }
-    }
-
-    tracing::info!(
-        "Embedding regeneration scan completed: {} jobs queued, {} skipped, {} errors",
-        queued,
-        skipped,
-        errors
-    );
-
-    let result_json = serde_json::json!({
-        "queued": queued,
-        "skipped": skipped,
-        "errors": errors,
-    });
-
-    let _ = job_registry.set_result(&job_id, result_json).await;
-    let _ = job_registry.mark_completed(&job_id).await;
 }

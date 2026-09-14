@@ -25,12 +25,13 @@ use super::types::{get_branch_name, DatabaseOpQuery, ErrorResponse, JobResponse}
 /// found no context and marked it failed (verify), or the task's status raced
 /// the worker's (rebuild). `MaintenanceJobHandler` now runs it.
 #[cfg(feature = "storage-rocksdb")]
-async fn queue_vector_job(
+pub(super) async fn queue_vector_job(
     state: &AppState,
     job_type: JobType,
     tenant: &str,
     repo: &str,
     branch: &str,
+    metadata: std::collections::HashMap<String, serde_json::Value>,
 ) -> Result<raisin_storage::jobs::JobId, (StatusCode, Json<ErrorResponse>)> {
     use raisin_storage::jobs::{JobContext, JobId};
 
@@ -54,7 +55,7 @@ async fn queue_vector_job(
         branch: branch.to_string(),
         workspace_id: String::new(),
         revision: raisin_hlc::HLC::new(0, 0),
-        metadata: Default::default(),
+        metadata,
     };
     let job_id = JobId::new();
     rocksdb_storage
@@ -94,7 +95,15 @@ pub async fn verify_vector_index(
         branch
     );
 
-    let job_id = queue_vector_job(&state, JobType::VectorVerify, &tenant, &repo, &branch).await?;
+    let job_id = queue_vector_job(
+        &state,
+        JobType::VectorVerify,
+        &tenant,
+        &repo,
+        &branch,
+        Default::default(),
+    )
+    .await?;
 
     Ok(Json(JobResponse {
         job_id: job_id.0,
@@ -123,7 +132,15 @@ pub async fn rebuild_vector_index(
         branch
     );
 
-    let job_id = queue_vector_job(&state, JobType::VectorRebuild, &tenant, &repo, &branch).await?;
+    let job_id = queue_vector_job(
+        &state,
+        JobType::VectorRebuild,
+        &tenant,
+        &repo,
+        &branch,
+        Default::default(),
+    )
+    .await?;
 
     Ok(Json(JobResponse {
         job_id: job_id.0,
@@ -152,7 +169,15 @@ pub async fn optimize_vector_index(
         branch
     );
 
-    let job_id = queue_vector_job(&state, JobType::VectorOptimize, &tenant, &repo, &branch).await?;
+    let job_id = queue_vector_job(
+        &state,
+        JobType::VectorOptimize,
+        &tenant,
+        &repo,
+        &branch,
+        Default::default(),
+    )
+    .await?;
 
     Ok(Json(JobResponse {
         job_id: job_id.0,
@@ -188,7 +213,15 @@ pub async fn restore_vector_index(
         branch
     );
 
-    let job_id = queue_vector_job(&state, JobType::VectorRebuild, &tenant, &repo, &branch).await?;
+    let job_id = queue_vector_job(
+        &state,
+        JobType::VectorRebuild,
+        &tenant,
+        &repo,
+        &branch,
+        Default::default(),
+    )
+    .await?;
 
     Ok(Json(JobResponse {
         job_id: job_id.0,

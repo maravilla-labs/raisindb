@@ -188,7 +188,7 @@ pub use jobs::wasm_validator::{
 // job system or driving the handler directly — so an integration test that has to
 // prove what a REAL rebuild writes (entry revisions, precision sets) needs this.
 pub use jobs::handlers::maintenance::{
-    install_vector_management, MaintenanceJobHandler, META_INDEX_TYPE,
+    install_vector_management, MaintenanceJobHandler, META_FORCE, META_INDEX_TYPE,
 };
 pub use jobs::handlers::spatial_index::{SpatialBuildReport, SpatialIndexJobHandler};
 

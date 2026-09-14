@@ -36,6 +36,7 @@ impl JobType {
             Self::VectorRebuild => "vector_rebuild".to_string(),
             Self::VectorOptimize => "vector_optimize".to_string(),
             Self::VectorRestore => "vector_restore".to_string(),
+            Self::VectorRegenerate => "vector_regenerate".to_string(),
             Self::TreeSnapshot { revision } => format!("tree_snapshot:{}", revision.timestamp_ms),
             Self::FulltextIndex { node_id, operation } => {
                 format!("fulltext_index:{}:{:?}", node_id, operation)
@@ -419,6 +420,7 @@ impl JobType {
             | Self::VectorRebuild
             | Self::VectorOptimize
             | Self::VectorRestore
+            | Self::VectorRegenerate
             | Self::PropertyIndexBuild { .. }
             | Self::CompoundIndexBuild { .. }
             | Self::SpatialIndexBuild { .. }
@@ -500,6 +502,7 @@ impl JobType {
             | Self::VectorRebuild
             | Self::VectorOptimize
             | Self::VectorRestore
+            | Self::VectorRegenerate
             | Self::PropertyIndexBuild { .. }
             | Self::CompoundIndexBuild { .. }
             | Self::SpatialIndexBuild { .. }

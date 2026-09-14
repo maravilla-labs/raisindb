@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSL-1.1
 
 //! Operator-triggered tenant maintenance: integrity scan, index verify and
-//! rebuild, orphan cleanup, compaction, repair, and vector verify/rebuild.
+//! rebuild, orphan cleanup, compaction, repair, and vector verify/rebuild/
+//! regenerate.
 //!
 //! Same shape, and the same reason, as fulltext maintenance
 //! (`fulltext/maintenance.rs`): the `/management/*/start` endpoints used to
@@ -24,7 +25,10 @@ use raisin_storage::{IndexType, Issue, ManagementOps};
 use serde_json::{json, Value};
 
 use crate::management::HnswManagement;
+
+mod vector_regenerate;
 use crate::RocksDBStorage;
+pub use vector_regenerate::META_FORCE;
 
 /// Metadata key: which RocksDB indexes an `IndexRebuild` job rebuilds
 /// (`property` | `reference` | `child_order` | `all`; default `all`).
@@ -62,6 +66,7 @@ impl MaintenanceJobHandler {
                 | JobType::VectorVerify
                 | JobType::VectorRebuild
                 | JobType::VectorOptimize
+                | JobType::VectorRegenerate
         )
     }
 
@@ -96,6 +101,9 @@ impl MaintenanceJobHandler {
                 "status": "no_op",
                 "detail": "HNSW indexes need no optimisation"
             }),
+            JobType::VectorRegenerate => {
+                vector_regenerate::regenerate(storage, job, context).await?
+            }
             JobType::VectorVerify | JobType::VectorRebuild => {
                 let management = VECTOR_MANAGEMENT.get().ok_or_else(|| {
                     Error::storage(

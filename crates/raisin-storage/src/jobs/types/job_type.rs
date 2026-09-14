@@ -41,6 +41,9 @@ pub enum JobType {
     VectorRebuild,
     VectorOptimize,
     VectorRestore,
+    /// Re-queue embedding generation for nodes whose stored vectors do not
+    /// match the tenant's configured dimensions (or all of them, forced).
+    VectorRegenerate,
     FulltextIndex {
         node_id: String,
         operation: IndexOperation,
@@ -477,6 +480,9 @@ impl JobType {
             // abort the very operation an operator started to end an incident.
             JobType::FulltextOptimize => 1800,
             JobType::VectorRebuild => 600,
+            // Reads every stored vector to compare dimensions; it queues the
+            // re-embeds rather than running them.
+            JobType::VectorRegenerate => 600,
             // A full-workspace spatial backfill pages through every node; it
             // checkpoints its resume cursor so a timeout resumes rather than
             // restarts.
