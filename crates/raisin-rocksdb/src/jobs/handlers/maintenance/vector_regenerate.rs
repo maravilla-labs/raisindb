@@ -69,63 +69,59 @@ pub(super) async fn regenerate(
     // workspace the node lives in, so each entry keeps its own.
     let mut entries = Vec::new();
     for workspace in embeddings.list_workspaces(tenant, repo, branch)? {
-        for (node_id, revision) in embeddings.list_embeddings(tenant, repo, branch, &workspace)? {
-            entries.push((workspace.clone(), node_id, revision));
+        for (node_id, revision, dims) in
+            embeddings.list_embedding_dimensions(tenant, repo, branch, &workspace)?
+        {
+            entries.push((workspace.clone(), node_id, revision, dims));
         }
     }
 
     let total = entries.len();
     let (mut queued, mut skipped, mut errors) = (0usize, 0usize, 0usize);
-    for (idx, (workspace, node_id, revision)) in entries.iter().enumerate() {
-        match embeddings.get_embedding(tenant, repo, branch, workspace, node_id, Some(revision)) {
-            Ok(Some(data)) if force || data.vector.len() != expected_dims => {
-                // `force` travels with the job: the embedding handler skips a
-                // node whose stored vector already matches the current spec.
-                let mut metadata = HashMap::new();
-                if force {
-                    metadata.insert(
-                        raisin_embeddings::FORCE_REEMBED_KEY.to_string(),
-                        Value::Bool(true),
-                    );
-                }
-                let embed_context = JobContext {
-                    tenant_id: tenant.to_string(),
-                    repo_id: repo.to_string(),
-                    branch: branch.to_string(),
-                    workspace_id: workspace.clone(),
-                    revision: *revision,
-                    metadata,
-                };
-                // Context first, so dispatch never sees the job without it.
-                let embed_job = JobId::new();
-                let queued_ok = storage
-                    .job_data_store()
-                    .put(&embed_job, &embed_context)
-                    .is_ok()
-                    && registry
-                        .register_job_with_id(
-                            embed_job,
-                            JobType::EmbeddingGenerate {
-                                node_id: node_id.clone(),
-                            },
-                            tenant.to_string(),
-                            None,
-                            None,
-                            None,
-                        )
-                        .await
-                        .is_ok();
-                if queued_ok {
-                    queued += 1;
-                } else {
-                    tracing::error!(node_id = %node_id, "failed to queue embedding regeneration");
-                    errors += 1;
-                }
+    for (idx, (workspace, node_id, revision, dims)) in entries.iter().enumerate() {
+        if !force && *dims == expected_dims {
+            skipped += 1;
+        } else {
+            // `force` travels with the job: the embedding handler skips a
+            // node whose stored vector already matches the current spec.
+            let mut metadata = HashMap::new();
+            if force {
+                metadata.insert(
+                    raisin_embeddings::FORCE_REEMBED_KEY.to_string(),
+                    Value::Bool(true),
+                );
             }
-            Ok(Some(_)) => skipped += 1,
-            Ok(None) => errors += 1,
-            Err(e) => {
-                tracing::error!(node_id = %node_id, error = %e, "failed to read embedding");
+            let embed_context = JobContext {
+                tenant_id: tenant.to_string(),
+                repo_id: repo.to_string(),
+                branch: branch.to_string(),
+                workspace_id: workspace.clone(),
+                revision: *revision,
+                metadata,
+            };
+            // Context first, so dispatch never sees the job without it.
+            let embed_job = JobId::new();
+            let queued_ok = storage
+                .job_data_store()
+                .put(&embed_job, &embed_context)
+                .is_ok()
+                && registry
+                    .register_job_with_id(
+                        embed_job,
+                        JobType::EmbeddingGenerate {
+                            node_id: node_id.clone(),
+                        },
+                        tenant.to_string(),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+                    .is_ok();
+            if queued_ok {
+                queued += 1;
+            } else {
+                tracing::error!(node_id = %node_id, "failed to queue embedding regeneration");
                 errors += 1;
             }
         }

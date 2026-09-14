@@ -298,6 +298,58 @@ impl RocksDBEmbeddingStorage {
         })
     }
 
+    /// Every source in a workspace with its newest stored revision and that
+    /// row's vector length, in ONE pass over the workspace prefix.
+    ///
+    /// The dimension check behind vector regenerate used to call
+    /// `list_embeddings` and then `get_embedding` per source; for the v2 key
+    /// layout `get_embedding` scans the whole workspace to find one source, so
+    /// the check was quadratic and timed out on a 20k-vector tenant. A value is
+    /// decoded only when its row is newer than the one already recorded.
+    pub fn list_embedding_dimensions(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace_id: &str,
+    ) -> Result<Vec<(String, HLC, usize)>> {
+        let cf = cf_handle(&self.db, cf::EMBEDDINGS)?;
+        let prefix = Self::workspace_prefix(tenant_id, repo_id, branch, workspace_id);
+        let mut results: Vec<(String, HLC, usize)> = Vec::new();
+        let mut position: HashMap<String, usize> = HashMap::new();
+
+        for result in self.scan_from(cf, &prefix) {
+            let (key, value) = result.map_err(|e| {
+                raisin_error::Error::storage(format!("Failed to iterate embeddings: {}", e))
+            })?;
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            let Some((_, _, source_id, _, _)) = Self::parse_key(&key) else {
+                continue;
+            };
+            if key.len() < 16 {
+                continue;
+            }
+            let revision = HLC::decode_descending(&key[key.len() - 16..]).map_err(|e| {
+                raisin_error::Error::storage(format!("Invalid HLC encoding: {}", e))
+            })?;
+            match position.get(&source_id) {
+                Some(&index) if revision <= results[index].1 => {}
+                Some(&index) => {
+                    let dims = Self::deserialize(&value)?.vector.len();
+                    results[index] = (source_id, revision, dims);
+                }
+                None => {
+                    let dims = Self::deserialize(&value)?.vector.len();
+                    position.insert(source_id.clone(), results.len());
+                    results.push((source_id, revision, dims));
+                }
+            }
+        }
+        Ok(results)
+    }
+
     /// Read ONE chunk row, addressed exactly.
     ///
     /// `EmbeddingStorage::get_embedding` cannot do this. It takes no embedder,
