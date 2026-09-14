@@ -119,6 +119,7 @@ impl MaintenanceJobHandler {
     /// The issue list is the server's own fresh scan, never a client-supplied
     /// list: a repair acts only on what this tenant's data actually shows.
     async fn repair(&self, tenant: &str) -> Result<Value> {
+        let started = std::time::Instant::now();
         let storage = self.storage.as_ref();
         let before = storage.check_integrity(tenant).await?;
 
@@ -157,23 +158,51 @@ impl MaintenanceJobHandler {
         } else {
             storage.check_integrity(tenant).await?
         };
-        let unrepaired: Vec<&'static str> = {
-            let mut kinds: Vec<&'static str> = after.issues_found.iter().map(issue_kind).collect();
-            kinds.sort_unstable();
-            kinds.dedup();
-            kinds
+        let count_by_kind = |issues: &[Issue]| {
+            let mut m = std::collections::HashMap::<String, usize>::new();
+            for i in issues {
+                *m.entry(issue_kind(i).to_string()).or_default() += 1;
+            }
+            m
         };
+        let (by_kind_before, by_kind_after) = (
+            count_by_kind(&before.issues_found),
+            count_by_kind(&after.issues_found),
+        );
+        // What went away, per kind. The same shape the admin console renders.
+        let repairs_by_type: std::collections::HashMap<String, usize> = by_kind_before
+            .iter()
+            .filter_map(|(kind, n)| {
+                let left = by_kind_after.get(kind).copied().unwrap_or(0);
+                (n > &left).then(|| (kind.clone(), n - left))
+            })
+            .collect();
+        // Kinds with no automatic repair (corrupted data, broken references,
+        // duplicate children, missing workspaces) need an operator decision.
+        let mut errors: Vec<String> = by_kind_after
+            .iter()
+            .map(|(kind, n)| format!("{kind}: {n} issue(s) not repaired automatically"))
+            .collect();
+        errors.sort();
 
-        Ok(json!({
-            "issues_before": before.issues_found.len(),
-            "health_before": before.health_score,
-            "actions": actions,
-            "issues_after": after.issues_found.len(),
-            "health_after": after.health_score,
-            // Kinds with no automatic repair (corrupted data, broken references,
-            // duplicate children, missing workspaces) need an operator decision.
-            "unrepaired_kinds": unrepaired,
-        }))
+        let result = raisin_storage::RepairResult {
+            tenant: tenant.to_string(),
+            issues_repaired: before
+                .issues_found
+                .len()
+                .saturating_sub(after.issues_found.len()),
+            issues_failed: after.issues_found.len(),
+            repairs_by_type,
+            duration_ms: started.elapsed().as_millis() as u64,
+            errors,
+        };
+        let mut value = to_value(result);
+        if let Value::Object(map) = &mut value {
+            map.insert("actions".into(), json!(actions));
+            map.insert("health_before".into(), json!(before.health_score));
+            map.insert("health_after".into(), json!(after.health_score));
+        }
+        Ok(value)
     }
 }
 

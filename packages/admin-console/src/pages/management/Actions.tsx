@@ -81,8 +81,11 @@ export default function Actions() {
   const [propertyIndexCleanupResult, setPropertyIndexCleanupResult] = useState<any>(null)
 
   // Load last report and check for running jobs when workspace changes
+  // Integrity, index and orphan operations are TENANT-level: they always run
+  // against the tenant this admin is signed in to (the server refuses any
+  // other). The workspace selector below only scopes the relation tools.
   useEffect(() => {
-    if (!selectedWorkspace) {
+    if (!tenantId) {
       setIntegrityResult(null)
       return
     }
@@ -90,7 +93,7 @@ export default function Actions() {
     const loadLastReport = async () => {
       try {
         // Try to fetch the last report
-        const reportResponse = await managementApi.getLastIntegrityReport(selectedWorkspace)
+        const reportResponse = await managementApi.getLastIntegrityReport(tenantId)
         if (reportResponse.success && reportResponse.data) {
           setIntegrityResult({ type: 'success', data: reportResponse.data })
         }
@@ -106,7 +109,7 @@ export default function Actions() {
           const runningJob = jobsResponse.data.find(
             (job) =>
               job.job_type === 'IntegrityScan' &&
-              job.tenant === selectedWorkspace &&
+              job.tenant === tenantId &&
               (job.status === 'Running' || job.status === 'Scheduled')
           )
 
@@ -122,7 +125,7 @@ export default function Actions() {
     }
 
     loadLastReport()
-  }, [selectedWorkspace])
+  }, [tenantId])
 
   const handleTriggerCompaction = async () => {
     setCompactLoading(true)
@@ -461,7 +464,7 @@ export default function Actions() {
   }, [compactJobId, verifyJobId, cleanupJobId, backupJobId, repairJobId, rebuildJobIds, relationVerifyJobId, relationRepairJobId])
 
   const handleCheckIntegrity = async () => {
-    if (!selectedWorkspace) {
+    if (!tenantId) {
       setIntegrityResult({ type: 'warning', message: 'Please select a workspace' })
       return
     }
@@ -472,7 +475,7 @@ export default function Actions() {
 
     try {
       // Start the background job
-      const response = await managementApi.startIntegrityCheck(selectedWorkspace)
+      const response = await managementApi.startIntegrityCheck(tenantId)
       if (response.success && response.data) {
         setIntegrityJobId(response.data)
         // Job started successfully, now SSE will handle updates
@@ -500,42 +503,24 @@ export default function Actions() {
     }
   }
 
-  const handleRepairSelected = async () => {
-    if (!selectedWorkspace || !integrityResult || selectedIssues.size === 0) return
-
-    const issuesToRepair = integrityResult.data.issues_found.filter((_: any, idx: number) => selectedIssues.has(idx))
-
-    setRepairLoading(true)
-    setRepairResult(null)
-    setRepairProgress(0)
-
-    try {
-      const response = await managementApi.startRepair(selectedWorkspace, issuesToRepair)
-      if (response.success && response.data) {
-        setRepairJobId(response.data)
-        // Job started successfully, now SSE will handle updates
-      } else {
-        setRepairResult({ type: 'error', message: response.error || 'Failed to start repair' })
-        setRepairLoading(false)
-      }
-    } catch (error) {
-      setRepairResult({ type: 'error', message: error instanceof Error ? error.message : 'Unknown error' })
-      setRepairLoading(false)
-    }
-  }
-
   const handleRepairAll = async () => {
-    if (!selectedWorkspace || !integrityResult) return
+    if (!tenantId || !integrityResult) return
 
     setRepairAllConfirm({
-      message: `Are you sure you want to auto-repair all ${integrityResult.data.issues_found.length} issues?\n\nThis will:\n- Delete orphaned nodes\n- Rebuild child order indexes\n- Remove broken references\n- Remove duplicate children\n\nThis operation cannot be undone.`,
+      message: `Repair ${tenantId}?
+
+The server re-scans this tenant and then:
+- rebuilds its indexes if the scan finds missing or inconsistent index entries
+- removes orphaned nodes if it finds any
+
+It scans again afterwards. Issues with no automatic repair (corrupted data, broken references, duplicate children, missing workspaces) are reported, not changed.`,
       onConfirm: async () => {
         setRepairLoading(true)
         setRepairResult(null)
         setRepairProgress(0)
 
         try {
-          const response = await managementApi.startRepair(selectedWorkspace, integrityResult.data.issues_found)
+          const response = await managementApi.startRepair(tenantId, integrityResult.data.issues_found)
           if (response.success && response.data) {
             setRepairJobId(response.data)
             // Job started successfully, now SSE will handle updates
@@ -587,7 +572,7 @@ export default function Actions() {
   }
 
   const handleVerifyIndexes = async () => {
-    if (!selectedWorkspace) {
+    if (!tenantId) {
       setVerifyResult({ type: 'warning', message: 'Please select a workspace' })
       return
     }
@@ -597,7 +582,7 @@ export default function Actions() {
     setVerifyProgress(0)
 
     try {
-      const response = await managementApi.startVerifyIndexes(selectedWorkspace)
+      const response = await managementApi.startVerifyIndexes(tenantId)
       if (response.success && response.data) {
         setVerifyJobId(response.data)
         // Job started successfully, now SSE will handle updates
@@ -661,7 +646,7 @@ export default function Actions() {
   }
 
   const handleRebuildIndexes = async () => {
-    if (!selectedWorkspace) {
+    if (!tenantId) {
       setRebuildResult({ type: 'warning', message: 'Please select a workspace' })
       return
     }
@@ -677,7 +662,7 @@ export default function Actions() {
     setRebuildResult(null)
 
     try {
-      const response = await managementApi.startRebuildIndexes(selectedWorkspace, indexType)
+      const response = await managementApi.startRebuildIndexes(tenantId, indexType)
       if (response.success && response.data) {
         setRebuildJobIds(prev => new Map(prev).set(indexType, response.data!))
         setRebuildProgress(prev => new Map(prev).set(indexType, 0))
@@ -716,7 +701,7 @@ export default function Actions() {
   }
 
   const handleCleanupOrphans = async () => {
-    if (!selectedWorkspace) {
+    if (!tenantId) {
       setCleanupResult({ type: 'warning', message: 'Please select a workspace' })
       return
     }
@@ -726,7 +711,7 @@ export default function Actions() {
     setCleanupProgress(0)
 
     try {
-      const response = await managementApi.startCleanupOrphans(selectedWorkspace)
+      const response = await managementApi.startCleanupOrphans(tenantId)
       if (response.success && response.data) {
         setCleanupJobId(response.data)
         // Job started successfully, now SSE will handle updates
@@ -757,7 +742,7 @@ export default function Actions() {
   // Property Index Orphan Cleanup - removes index entries pointing to non-existent nodes
   // This fixes issues where LIMIT queries return 0 rows due to orphaned index entries
   const handlePropertyIndexCleanup = async () => {
-    if (!selectedWorkspace) {
+    if (!tenantId) {
       setPropertyIndexCleanupResult({ type: 'warning', message: 'Please select a workspace' })
       return
     }
@@ -766,7 +751,7 @@ export default function Actions() {
     setPropertyIndexCleanupResult(null)
 
     try {
-      const response = await managementApi.cleanupPropertyIndexOrphans(selectedWorkspace)
+      const response = await managementApi.cleanupPropertyIndexOrphans(tenantId)
       if (response.success && response.data) {
         const stats = response.data
         setPropertyIndexCleanupResult({
@@ -1159,16 +1144,6 @@ export default function Actions() {
 
                           {/* Repair Action Buttons */}
                           <div className="mt-4 flex gap-3">
-                            <ActionButton
-                              onClick={handleRepairSelected}
-                              loading={repairLoading}
-                              icon={Wrench}
-                              variant="secondary"
-                              disabled={selectedIssues.size === 0}
-                            >
-                              Repair Selected ({selectedIssues.size})
-                            </ActionButton>
-
                             <ActionButton
                               onClick={handleRepairAll}
                               loading={repairLoading}
