@@ -277,4 +277,54 @@ mod tests {
             "cross-tenant connection must NOT receive another tenant's event"
         );
     }
+
+    /// End of one subscription, others in the same workspace keep delivering.
+    ///
+    /// A connection appears in a workspace's routing index ONCE however many
+    /// subscriptions it holds there, so giving the entry up on the first
+    /// unsubscribe stopped the connection being considered for that workspace
+    /// at all — the remaining subscriptions still matched the event, but the
+    /// event was never offered to them. A client that subscribes and
+    /// unsubscribes as its views come and go went silent on the first teardown
+    /// and only recovered by reconnecting.
+    #[tokio::test]
+    async fn a_remaining_subscription_still_receives_after_a_sibling_unsubscribes() {
+        let registry = Arc::new(ConnectionRegistry::new());
+
+        let conn = ConnectionState::new("tenant-a".to_string(), None, 4, 100);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        conn.set_event_channel(tx);
+        let connection_id = conn.connection_id.clone();
+        let workspace = "raisin:access_control";
+        for (id, path) in [("sub-keep", "/**"), ("sub-drop", "/folder/**")] {
+            conn.add_subscription(
+                id.to_string(),
+                SubscriptionFilters {
+                    workspace: Some(workspace.to_string()),
+                    path: Some(path.to_string()),
+                    event_types: None,
+                    node_type: None,
+                    include_node: false,
+                },
+            );
+            registry.add_workspace_subscription(&connection_id, Some(workspace));
+        }
+        registry.register(Arc::new(RwLock::new(conn.clone())));
+
+        // One view closes: its subscription goes, the other stays.
+        assert!(conn.remove_subscription("sub-drop"));
+        registry.remove_workspace_subscription(&connection_id, Some(workspace));
+
+        let storage = Arc::new(InMemoryStorage::default());
+        let handler = WsEventHandler::new(Arc::clone(&registry), storage);
+        handler
+            .handle(&Event::Node(node_event_for_tenant("tenant-a")))
+            .await
+            .expect("event handling failed");
+
+        assert!(
+            rx.try_recv().is_ok(),
+            "the subscription that is still open must still receive the event"
+        );
+    }
 }

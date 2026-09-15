@@ -38,21 +38,21 @@ where
     let workspace_filter = payload.filters.workspace.clone();
 
     // Add subscription to connection state (returns existing ID if duplicate)
-    let (connection_id, actual_id, is_new) = {
+    let (connection_id, actual_id) = {
         let conn = connection_state.write();
         let conn_id = conn.connection_id.clone();
-        let actual_id = conn.add_subscription(candidate_id.clone(), payload.filters);
-        let is_new = actual_id == candidate_id;
-        (conn_id, actual_id, is_new)
+        let actual_id = conn.add_subscription(candidate_id, payload.filters);
+        (conn_id, actual_id)
     };
 
-    // Only update workspace subscription index for NEW subscriptions
-    // Duplicates already have their workspace indexed
-    if is_new {
-        state
-            .connection_registry
-            .add_workspace_subscription(&connection_id, workspace_filter.as_deref());
-    }
+    // Index the workspace for EVERY subscribe, deduplicated or not. The call is
+    // idempotent, and skipping it for a duplicate assumes the index still holds
+    // this connection — which it need not, since the entry is shared with the
+    // subscription the duplicate matched and only that one's removal gives it
+    // up. Re-indexing unconditionally makes a subscribe self-healing.
+    state
+        .connection_registry
+        .add_workspace_subscription(&connection_id, workspace_filter.as_deref());
 
     let response = SubscriptionResponse {
         subscription_id: actual_id,
