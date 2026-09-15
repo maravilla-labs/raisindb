@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSL-1.1
 
 import { useEffect, useMemo, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { X, Loader2, Info } from 'lucide-react'
 import SchemaForm from '../PropertyFields/SchemaForm'
 import { nodeTypesApi, type ResolvedNodeType } from '../../api/nodetypes'
@@ -98,6 +99,12 @@ export default function ConnectionEditor({
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
+    // This dialog renders inside the connector editor's own <form>, and React
+    // bubbles `submit` through the component tree. Without this the editor's
+    // save runs too: it re-reads the integration and PUTs its whole property
+    // map while the connection is still being created, which can overwrite
+    // `connected_accounts` and lose the new connection without an error.
+    e.stopPropagation()
     if (!integration.path) return
     setSaving(true)
     try {
@@ -128,7 +135,11 @@ export default function ConnectionEditor({
 
   const storedSecrets = connection?.secret_fields || []
 
-  return (
+  // Rendered through a portal, like every other dialog here (ConfirmDialog,
+  // AlertDialog, CopyNodeModal). It matters more for this one: its <form> would
+  // otherwise be a DOM descendant of the connector editor's <form>, and nested
+  // forms are invalid HTML whose submit behaviour differs between browsers.
+  return createPortal(
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
       <div className="bg-zinc-900 border border-white/10 rounded-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between px-6 py-4 border-b border-white/10">
@@ -207,6 +218,7 @@ export default function ConnectionEditor({
           </div>
         </form>
       </div>
-    </div>
+    </div>,
+    document.body
   )
 }
