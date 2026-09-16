@@ -127,6 +127,16 @@ pub async fn handle_large_multipart_upload(
 
             // Create initial properties for the processing package
             let mut props = std::collections::HashMap::new();
+            // `name` is REQUIRED by raisin:Package, and as a PROPERTY — the
+            // struct field of the same name does not satisfy validation. Without
+            // it the node is refused with "Missing required property 'name'",
+            // and only after the entire body has been streamed into storage.
+            // This path was unreachable below a 100MB body, so the omission
+            // stayed invisible until ordinary packages began to stream.
+            props.insert(
+                "name".to_string(),
+                raisin_models::nodes::properties::PropertyValue::String(temp_name.clone()),
+            );
             props.insert(
                 "title".to_string(),
                 raisin_models::nodes::properties::PropertyValue::String(temp_name.clone()),

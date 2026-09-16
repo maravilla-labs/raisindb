@@ -30,14 +30,19 @@ use super::assets::{
     SignAssetRequest,
 };
 
-/// Above this, a multipart upload is streamed to disk instead of being
-/// collected into memory first (8MB).
+/// Above this, a multipart upload is streamed to storage instead of being
+/// collected into memory first (100MB).
 ///
-/// It used to be 100MB, which meant a 90MB package was held whole in RAM on
-/// the way in — per concurrent upload. Multipart is the package path, and a
-/// package that size is ordinary once it carries media, so the streaming path
-/// is the one that should run.
-const BUFFER_THRESHOLD: u64 = 8 * 1024 * 1024;
+/// Lowering this to 8MB looked like a free win — no 90MB package held whole in
+/// RAM per concurrent upload — and instead moved every ordinary package onto a
+/// path that had never carried one: the streaming handler omitted the required
+/// `name` property, so a 92MB package was refused AFTER its entire body had
+/// been stored. The two paths are not interchangeable; the streaming one is
+/// also asynchronous, answering with a job id instead of the finished package.
+///
+/// So the threshold stays where the well-trodden path ends. Move it only with
+/// evidence that the streaming path handles what is being moved onto it.
+const BUFFER_THRESHOLD: u64 = 100 * 1024 * 1024;
 
 /// POST handler for creating nodes at the root level.
 #[axum::debug_handler]
