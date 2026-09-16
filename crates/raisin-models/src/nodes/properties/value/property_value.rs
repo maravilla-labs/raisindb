@@ -17,7 +17,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::nodes::properties::utils::{deserialize_raisin_reference, deserialize_raisin_url};
+use crate::nodes::properties::utils::{
+    deserialize_guarded_string, deserialize_raisin_reference, deserialize_raisin_url,
+    deserialize_tagged_decimal, serialize_guarded_string, serialize_tagged_decimal,
+};
 use crate::timestamp::StorageTimestamp;
 
 use super::domain_types::{RaisinReference, RaisinUrl, Resource};
@@ -110,9 +113,29 @@ pub enum PropertyValue {
 
     /// 128-bit decimal for financial/exact calculations
     /// Serialized as string "123.456789" to preserve precision
+    ///
+    /// Written as `{"raisin:decimal": "19.90"}` in every format — see
+    /// [`serialize_tagged_decimal`]. A decimal used to serialize as a bare
+    /// string, identical to a `String` on the wire, so this variant (which the
+    /// untagged ladder tries first) ate every numeric-looking string on the way
+    /// OUT of storage and `"05"` came back as `5`. A legacy bare string is
+    /// still read, but only when it spells itself back exactly.
+    #[serde(
+        serialize_with = "serialize_tagged_decimal",
+        deserialize_with = "deserialize_tagged_decimal"
+    )]
     Decimal(Decimal),
 
     /// UTF-8 string
+    ///
+    /// Written bare, EXCEPT when a decimal would steal its spelling — `"76133"`
+    /// goes out as `{"raisin:string": "76133"}` so it cannot come back a
+    /// `Decimal`. Tagging `Decimal` alone would not have been enough: a bare
+    /// str is ambiguous in both directions.
+    #[serde(
+        serialize_with = "serialize_guarded_string",
+        deserialize_with = "deserialize_guarded_string"
+    )]
     String(String),
 
     // === DOMAIN-SPECIFIC TYPES (detected by raisin:* keys) ===

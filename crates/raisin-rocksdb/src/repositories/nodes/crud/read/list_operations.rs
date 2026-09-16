@@ -328,7 +328,9 @@ impl NodeRepositoryImpl {
 #[cfg(test)]
 mod count_all_tests {
     use raisin_models::nodes::Node;
-    use raisin_storage::{CreateNodeOptions, NodeRepository, Storage, StorageScope};
+    use raisin_storage::{
+        BranchRepository, CreateNodeOptions, NodeRepository, Storage, StorageScope,
+    };
     use std::collections::HashMap;
 
     fn node(id: &str, path: &str) -> Node {
@@ -367,6 +369,13 @@ mod count_all_tests {
     async fn count_all_counts_only_the_named_workspace() {
         let tmp = tempfile::TempDir::new().unwrap();
         let storage = crate::RocksDBStorage::new(tmp.path()).unwrap();
+        // Without the branch every `create` below fails `Branch 'main' not
+        // found`, which is what had this test red.
+        storage
+            .branches()
+            .create_branch("t", "r", "main", "test", None, None, false, false)
+            .await
+            .expect("create branch");
 
         for id in ["a1", "a2"] {
             create(&storage, "aaa", id).await;

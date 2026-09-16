@@ -1248,3 +1248,359 @@ fn test_element_field_named_content() {
         ))
     );
 }
+
+// ---------------------------------------------------------------------------
+// Numeric-looking STRINGS survive a round trip
+//
+// A decimal and a string are the same thing on the wire, and `Decimal` sits
+// ahead of `String` in the untagged ladder, so the ladder used to claim every
+// numeric-looking string — including on the way OUT of storage. `String("05")`
+// was written as the str `05` and read back as `Decimal(5)`: a lost leading
+// zero, on exactly the values that are strings because their spelling matters.
+// ---------------------------------------------------------------------------
+
+/// Storage is MessagePack, so this is the round trip that actually happens to
+/// every stored node on every read.
+fn msgpack_round_trip(value: &PropertyValue) -> PropertyValue {
+    let bytes = rmp_serde::to_vec(value).expect("serialize");
+    rmp_serde::from_slice(&bytes).expect("deserialize")
+}
+
+fn json_round_trip(value: &PropertyValue) -> PropertyValue {
+    let text = serde_json::to_string(value).expect("serialize");
+    serde_json::from_str(&text).expect("deserialize")
+}
+
+#[test]
+fn a_leading_zero_is_not_lost_to_the_decimal_variant() {
+    // The one that started it: "05" came back as 5.
+    for raw in ["05", "007", "0900", "00"] {
+        let original = PropertyValue::String(raw.to_string());
+        assert_eq!(
+            msgpack_round_trip(&original),
+            original,
+            "MessagePack lost the leading zero on {raw:?}"
+        );
+        assert_eq!(
+            json_round_trip(&original),
+            original,
+            "JSON lost the leading zero on {raw:?}"
+        );
+    }
+}
+
+#[test]
+fn a_string_whose_spelling_would_change_stays_a_string() {
+    // Each of these parses as a decimal but renders back differently, so the
+    // variant would be lossy and must be refused.
+    for raw in [
+        "1e3",                                       // -> 1000
+        "+7",                                        // -> 7
+        " 42",                                       // leading space
+        "42 ",                                       // trailing space
+        "1_000",                                     // does not parse at all
+        "0x1f",                                      // does not parse at all
+        "99999999999999999999999999999999999999999", // beyond 96 bits
+    ] {
+        let original = PropertyValue::String(raw.to_string());
+        assert_eq!(
+            msgpack_round_trip(&original),
+            original,
+            "{raw:?} did not survive as a string"
+        );
+    }
+}
+
+#[test]
+fn a_real_decimal_still_round_trips_as_a_decimal() {
+    // The guard must not cost the type it is guarding: an exact decimal, scale
+    // and sign included, still comes back as `Decimal`.
+    for raw in ["19.90", "-19.90", "0.00", "123.456789", "1000"] {
+        let original = PropertyValue::Decimal(raw.parse().expect("a decimal"));
+        assert_eq!(
+            msgpack_round_trip(&original),
+            original,
+            "a real decimal {raw:?} stopped round-tripping"
+        );
+        assert_eq!(json_round_trip(&original), original);
+    }
+}
+
+#[test]
+fn a_canonical_all_digit_string_is_no_longer_indistinguishable() {
+    // This test used to pin the RESIDUAL: "76133" and Decimal(76133) were the
+    // same bytes and nothing could tell them apart, so a canonical all-digit
+    // string came back a Decimal and the declaration had to settle it later.
+    //
+    // The encoder no longer throws that away. A decimal writes itself as
+    // `{"raisin:decimal": ...}` and an ambiguous string as
+    // `{"raisin:string": ...}`, so each comes back as what it went in as — and
+    // the ~100 sites that match strictly on `PropertyValue::String` are correct
+    // for anything written from now on.
+    let string = PropertyValue::String("76133".to_string());
+    assert_eq!(msgpack(&string), string);
+
+    let decimal = PropertyValue::Decimal("76133".parse().unwrap());
+    assert_eq!(msgpack(&decimal), decimal);
+
+    // Distinct in STORAGE, which is where the ladder reads them back. Over JSON
+    // both still render as "76133" — that is the long-standing API contract,
+    // and JSON input never reaches the ladder.
+    assert_ne!(
+        rmp_serde::to_vec(&string).unwrap(),
+        rmp_serde::to_vec(&decimal).unwrap()
+    );
+}
+
+#[test]
+fn numbers_are_still_numbers() {
+    // Nothing above may turn a genuine number into a string.
+    for original in [
+        PropertyValue::Integer(5),
+        PropertyValue::Integer(-42),
+        PropertyValue::Float(2.5),
+        PropertyValue::Boolean(true),
+        PropertyValue::Null,
+    ] {
+        assert_eq!(msgpack_round_trip(&original), original);
+    }
+}
+
+#[test]
+fn a_numeric_string_nested_in_an_array_or_object_is_also_preserved() {
+    // The guard lives on the VARIANT, so it applies at every depth the ladder
+    // reaches — a value inside an array of objects is deserialized by the same
+    // ladder as a top-level one. Reported from the field as "nesting escapes the
+    // coercion", which is true only for canonical values (they render back
+    // identically either way); a leading zero inside a nested object was lost
+    // exactly as it was at the top level.
+    let mut inner = std::collections::HashMap::new();
+    inner.insert(
+        "number".to_string(),
+        PropertyValue::String("05".to_string()),
+    );
+    inner.insert("vat".to_string(), PropertyValue::String("1e3".to_string()));
+    let original = PropertyValue::Array(vec![PropertyValue::Object(inner)]);
+
+    let bytes = rmp_serde::to_vec(&original).expect("serialize");
+    let back: PropertyValue = rmp_serde::from_slice(&bytes).expect("deserialize");
+    assert_eq!(back, original, "a nested numeric string was rewritten");
+}
+
+// ---------------------------------------------------------------------------
+// Decimal is self-describing on the wire
+//
+// A decimal used to serialize as a bare string, identical to a `String`, so the
+// untagged ladder claimed every numeric-looking string coming OUT of storage.
+// It now writes `{"raisin:decimal": "19.90"}` in both formats, and still reads
+// the legacy bare form under the losslessness rule so nothing stored changes
+// meaning.
+// ---------------------------------------------------------------------------
+
+fn msgpack(value: &PropertyValue) -> PropertyValue {
+    let bytes = rmp_serde::to_vec(value).expect("serialize");
+    rmp_serde::from_slice(&bytes).expect("deserialize")
+}
+
+fn json(value: &PropertyValue) -> PropertyValue {
+    let text = serde_json::to_string(value).expect("serialize");
+    serde_json::from_str(&text).expect("deserialize")
+}
+
+#[test]
+fn a_decimal_round_trips_in_both_formats() {
+    // The values the shipped schema actually declares Decimal for: money and
+    // stock quantities across commerce, inventory and procurement (87
+    // declarations over 34 node types). Scale and sign must survive exactly.
+    for raw in [
+        "19.90",
+        "-19.90",
+        "0.00",
+        "0.000001",
+        "123.456789",
+        "1000",
+        "-0.01",
+        "79228162514264337593543950335", // Decimal::MAX
+    ] {
+        let original = PropertyValue::Decimal(raw.parse().expect("a decimal"));
+        assert_eq!(msgpack(&original), original, "MessagePack lost {raw}");
+    }
+}
+
+#[test]
+fn a_decimal_is_tagged_in_storage_and_bare_over_the_api() {
+    let d = PropertyValue::Decimal("19.90".parse().unwrap());
+    // JSON is a rendering surface: clients keep seeing a plain string, which is
+    // the contract every consumer already implements by hand.
+    assert_eq!(serde_json::to_string(&d).unwrap(), r#""19.90""#);
+    // MessagePack is storage, and storage is where the ambiguity bites.
+    let bytes = rmp_serde::to_vec(&d).unwrap();
+    assert!(
+        String::from_utf8_lossy(&bytes).contains("raisin:decimal"),
+        "the stored form must be tagged"
+    );
+}
+
+#[test]
+fn a_numeric_string_is_no_longer_claimed_by_decimal() {
+    // The whole point: these are strings and they stay strings, at every depth.
+    for raw in [
+        "05",
+        "76133",
+        "123456789",
+        "+41442345678",
+        "19.90",
+        "1e3",
+        "007",
+    ] {
+        let original = PropertyValue::String(raw.to_string());
+        assert_eq!(msgpack(&original), original, "MessagePack rewrote {raw:?}");
+    }
+}
+
+#[test]
+fn a_legacy_bare_decimal_is_still_read_under_the_losslessness_rule() {
+    // Everything written before the tag existed is a bare string and genuinely
+    // ambiguous. Today's behaviour is preserved exactly: canonical spellings
+    // read as Decimal, everything else stays a String.
+    let mut canonical = vec![0xa5u8];
+    canonical.extend_from_slice(b"19.90");
+    assert_eq!(
+        rmp_serde::from_slice::<PropertyValue>(&canonical).unwrap(),
+        PropertyValue::Decimal("19.90".parse().unwrap())
+    );
+
+    let mut leading_zero = vec![0xa2u8];
+    leading_zero.extend_from_slice(b"05");
+    assert_eq!(
+        rmp_serde::from_slice::<PropertyValue>(&leading_zero).unwrap(),
+        PropertyValue::String("05".to_string())
+    );
+}
+
+#[test]
+fn the_decimal_tag_is_matched_strictly() {
+    // The risk of a map form: if matching is loose it starts eating ordinary
+    // objects that must reach `Object`. Only the exact one-key shape is a
+    // decimal; everything else falls through untouched.
+    let decimal: PropertyValue = serde_json::from_str(r#"{"raisin:decimal":"19.90"}"#).unwrap();
+    assert!(
+        matches!(decimal, PropertyValue::Decimal(_)),
+        "the exact tag must be a decimal"
+    );
+
+    for not_a_decimal in [
+        r#"{"raisin:decimal":"19.90","note":"x"}"#, // tag among others
+        r#"{"decimal":"19.90"}"#,                   // wrong key
+        r#"{"$other":"x"}"#,                        // unrelated single key
+        r#"{"raisin:decimal":19.90}"#,              // tag, but not a string
+        r#"{}"#,                                    // empty
+    ] {
+        let v: PropertyValue = serde_json::from_str(not_a_decimal).unwrap();
+        assert!(
+            matches!(v, PropertyValue::Object(_)),
+            "{not_a_decimal} must reach Object, got {v:?}"
+        );
+    }
+}
+
+#[test]
+fn no_map_shaped_variant_can_swallow_an_arbitrary_map() {
+    // Placement regression. `Decimal` sits ahead of every map-shaped variant, so
+    // the tagged form gets first refusal — but that is only safe while none of
+    // `Resource`, `Composite` or `Element` can claim an arbitrary map. They
+    // cannot today, because each carries a REQUIRED non-Option field (`uuid`,
+    // `element_type`, `items`). A future variant with all-optional fields sitting
+    // between `String` and `Object` would reintroduce exactly the class of bug
+    // this change exists to remove, and this test is what would catch it.
+    for arbitrary in [
+        r#"{"a":1}"#,
+        r#"{"title":"x","count":2}"#,
+        r#"{"uuid":"u"}"#,
+        r#"{"nested":{"deep":true}}"#,
+    ] {
+        let v: PropertyValue = serde_json::from_str(arbitrary).unwrap();
+        assert!(
+            matches!(v, PropertyValue::Object(_)),
+            "{arbitrary} must reach Object, got {v:?}"
+        );
+    }
+}
+
+#[test]
+fn a_tagged_decimal_survives_a_replication_shaped_round_trip() {
+    // Replication re-encodes the whole operation with `to_vec_named` rather than
+    // shipping stored bytes, which is precisely what would have dropped a
+    // MessagePack ext type. A map travels.
+    let original = PropertyValue::Decimal("19.90".parse().unwrap());
+    let bytes = rmp_serde::to_vec_named(&original).expect("serialize");
+    let back: PropertyValue = rmp_serde::from_slice(&bytes).expect("deserialize");
+    assert_eq!(back, original);
+}
+
+#[test]
+fn a_decimal_nested_in_an_array_or_object_round_trips() {
+    let mut inner = std::collections::HashMap::new();
+    inner.insert(
+        "price".to_string(),
+        PropertyValue::Decimal("19.90".parse().unwrap()),
+    );
+    inner.insert("sku".to_string(), PropertyValue::String("0091".to_string()));
+    let original = PropertyValue::Array(vec![PropertyValue::Object(inner)]);
+    assert_eq!(msgpack(&original), original);
+}
+
+#[test]
+fn a_schema_default_keeps_its_spelling() {
+    // The DEFINITIONS are data too. `PropertyValueSchema.default`, `.value`,
+    // `.constraints` and `.meta` are all `PropertyValue`, so a String field
+    // declaring `default: "05"` went through the same ladder as any node
+    // property and came back `Decimal(5)` — a schema silently changing the
+    // default it hands to every node created from it.
+    use crate::nodes::properties::schema::{PropertyType, PropertyValueSchema};
+
+    let mut constraints = std::collections::HashMap::new();
+    constraints.insert(
+        "pattern".to_string(),
+        PropertyValue::String("007".to_string()),
+    );
+
+    let schema = PropertyValueSchema {
+        name: Some("jersey_number".to_string()),
+        property_type: PropertyType::String,
+        required: Some(false),
+        unique: Some(false),
+        default: Some(PropertyValue::String("05".to_string())),
+        constraints: Some(constraints),
+        structure: None,
+        items: None,
+        value: Some(PropertyValue::String("76133".to_string())),
+        meta: None,
+        is_translatable: None,
+        allow_additional_properties: None,
+        index: None,
+        spatial: None,
+        encrypted: None,
+    };
+
+    // `to_vec_named`, which is how this codebase stores structs (`to_vec` is
+    // positional and misaligns against `skip_serializing_if` fields).
+    let bytes = rmp_serde::to_vec_named(&schema).expect("serialize");
+    let back: PropertyValueSchema = rmp_serde::from_slice(&bytes).expect("deserialize");
+
+    assert_eq!(
+        back.default,
+        Some(PropertyValue::String("05".to_string())),
+        "a String field's default lost its leading zero"
+    );
+    assert_eq!(
+        back.value,
+        Some(PropertyValue::String("76133".to_string())),
+        "a fixed schema value was turned into a decimal"
+    );
+    assert_eq!(
+        back.constraints.as_ref().and_then(|c| c.get("pattern")),
+        Some(&PropertyValue::String("007".to_string())),
+        "a constraint value was turned into a decimal"
+    );
+}

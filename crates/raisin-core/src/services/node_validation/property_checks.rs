@@ -383,7 +383,78 @@ pub(super) fn coerce_declared_decimals(node: &mut Node, resolved: &ResolvedNodeT
             _ => {}
         }
     }
+
+    coerce_undeclared_decimals_and_string_numbers(node, resolved);
     Ok(())
+}
+
+/// The mirror image, and the invariant that keeps a GUESS from being recorded
+/// as a FACT: a `Decimal` is only ever stored where a declaration says
+/// `Decimal`, and a number on a `String` property is rendered rather than
+/// refused.
+///
+/// Two different problems, one pass, because both are "this value is a number
+/// and the schema says it should not be".
+///
+/// **A number on a `String` property.** Postal codes, jersey numbers, DUNS and
+/// company numbers, E.164 phones — strings whose spelling is the point. They
+/// arrive as numbers either from a caller that sent a JSON number
+/// (`{"postal_code": 76133}` is an `Integer` before our code sees it) or from a
+/// legacy bare string in storage that the losslessness rule classified as a
+/// `Decimal`. Refusing them was wrong: rendering a number as its own string is
+/// LOSS-FREE and is exactly what the declaration asked for.
+///
+/// **A `Decimal` with no `Decimal` declaration behind it.** This is the subtler
+/// half. The legacy read rule has to stay — packages author decimals as plain
+/// quoted YAML strings (`rate: '10'`), so an install depends on
+/// bare-str → losslessness → `Decimal` to classify them against the
+/// declaration. But that rule is a HEURISTIC, and once values are written in
+/// the self-describing form, storing its output would write the guess down as
+/// though it were known: an undeclared `"76133"` read as a `Decimal` and
+/// re-saved would come back tagged `raisin:decimal` forever, no longer
+/// ambiguous but confidently wrong.
+///
+/// So the heuristic's output is trusted only where a declaration confirms it.
+/// Anything still a `Decimal` here without a `Decimal` declaration is rendered
+/// back to the string it was spelled as — which is byte-identical (that is what
+/// losslessness means) and is also exactly what the write doors produce for the
+/// same input, since `PropertyValue::from_json` never guesses. The invariant
+/// that falls out is worth stating on its own: **a `Decimal` in storage means a
+/// schema said `Decimal`.**
+///
+/// Nothing is lost either way. A property that later gains a `Decimal`
+/// declaration is converted by [`coerce_declared_decimals`] on its next write;
+/// one that gains a `String` declaration is converted here.
+fn coerce_undeclared_decimals_and_string_numbers(node: &mut Node, resolved: &ResolvedNodeType) {
+    use std::collections::HashMap;
+    let declared: HashMap<&str, PropertyType> = resolved
+        .resolved_properties
+        .iter()
+        .filter_map(|p| p.name.as_deref().map(|n| (n, p.property_type.clone())))
+        .collect();
+
+    let mut rendered: Vec<(String, String)> = Vec::new();
+    for (name, value) in &node.properties {
+        let declared_type = declared.get(name.as_str());
+        let wants_string = matches!(declared_type, Some(PropertyType::String));
+        let is_declared_decimal = matches!(declared_type, Some(PropertyType::Decimal));
+        let text = match value {
+            // `Decimal::to_string` keeps the exact spelling, scale included:
+            // `19.90` stays `19.90` rather than collapsing to `19.9`.
+            PropertyValue::Decimal(d) if wants_string || !is_declared_decimal => d.to_string(),
+            PropertyValue::Integer(i) if wants_string => i.to_string(),
+            // `f64::to_string` is the shortest form that parses back to the same
+            // bits, so no value is lost — only a trailing `.0` of spelling the
+            // caller never sent.
+            PropertyValue::Float(f) if wants_string => f.to_string(),
+            _ => continue,
+        };
+        rendered.push((name.clone(), text));
+    }
+
+    for (name, text) in rendered {
+        node.properties.insert(name, PropertyValue::String(text));
+    }
 }
 
 /// Parse an RFC3339 STRING on any property declared `Date` into

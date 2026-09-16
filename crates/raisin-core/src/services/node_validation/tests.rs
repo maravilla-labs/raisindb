@@ -1250,3 +1250,269 @@ fn no_builtin_declares_a_timestamp_property_as_a_string() {
          as one over the wire — declare them Date: {offenders:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// A String-declared property that holds a number
+//
+// Postal codes, jersey numbers, article numbers and phone numbers are strings
+// whose spelling is the point. They still reach the validator as numbers — read
+// back from storage as a `Decimal` (a decimal and a string are the same bytes on
+// the wire), or sent as a JSON number by a caller. Refusing them with
+//
+//     Property 'postal_code' on NodeType 'party:Address'
+//     is declared String but the value is Decimal
+//
+// was the wrong answer: rendering a number as its own string loses nothing and
+// is exactly what the declaration asked for.
+// ---------------------------------------------------------------------------
+
+fn resolved_with(
+    properties: Vec<PropertyValueSchema>,
+) -> crate::services::node_type_resolver::ResolvedNodeType {
+    crate::services::node_type_resolver::ResolvedNodeType {
+        node_type: raisin_models::nodes::types::NodeType {
+            id: Some("party:Address".to_string()),
+            name: "party:Address".to_string(),
+            strict: None,
+            extends: None,
+            mixins: Vec::new(),
+            overrides: None,
+            description: None,
+            icon: None,
+            version: Some(1),
+            properties: None,
+            allowed_children: Vec::new(),
+            required_nodes: Vec::new(),
+            initial_structure: None,
+            versionable: Some(true),
+            immutable: None,
+            publishable: Some(true),
+            auditable: Some(false),
+            indexable: Some(true),
+            index_types: None,
+            created_at: None,
+            updated_at: None,
+            published_at: None,
+            published_by: None,
+            previous_version: None,
+            compound_indexes: None,
+            is_mixin: None,
+        },
+        resolved_properties: properties,
+        resolved_allowed_children: vec![],
+        resolved_mixins: vec![],
+        resolved_indexable: true,
+        resolved_index_types: vec![],
+        resolved_compound_indexes: vec![],
+        inheritance_chain: vec!["party:Address".to_string()],
+    }
+}
+
+/// Coerce, then type-check — the order `NodeValidator` itself uses.
+fn coerce_and_check(
+    properties: HashMap<String, PropertyValue>,
+    schema: Vec<PropertyValueSchema>,
+) -> Result<raisin_models::nodes::Node, String> {
+    let mut node = create_test_node("party:Address", properties);
+    let resolved = resolved_with(schema);
+    super::property_checks::coerce_declared_decimals(&mut node, &resolved)
+        .map_err(|e| e.to_string())?;
+    super::property_checks::coerce_declared_dates(&mut node, &resolved)
+        .map_err(|e| e.to_string())?;
+    super::property_checks::check_property_types(&node, &resolved).map_err(|e| e.to_string())?;
+    Ok(node)
+}
+
+#[test]
+fn a_numeric_postal_code_is_accepted_on_a_string_property() {
+    let schema = vec![create_property_schema(
+        "postal_code",
+        PropertyType::String,
+        false,
+        false,
+    )];
+
+    // As it comes back from storage, and as a caller may send it.
+    for value in [
+        PropertyValue::Decimal("76133".parse().unwrap()),
+        PropertyValue::Integer(76133),
+        PropertyValue::String("76133".to_string()),
+    ] {
+        let mut properties = HashMap::new();
+        properties.insert("postal_code".to_string(), value.clone());
+        let node = coerce_and_check(properties, schema.clone())
+            .unwrap_or_else(|e| panic!("{value:?} was refused: {e}"));
+        assert_eq!(
+            node.properties.get("postal_code"),
+            Some(&PropertyValue::String("76133".to_string())),
+            "{value:?} did not land as the string 76133"
+        );
+    }
+}
+
+#[test]
+fn a_jersey_number_keeps_its_spelling() {
+    let schema = vec![create_property_schema(
+        "jersey_number",
+        PropertyType::String,
+        false,
+        false,
+    )];
+    let mut properties = HashMap::new();
+    // "05" never becomes a Decimal any more (the variant refuses a spelling it
+    // would change), so it arrives here still a string and must stay one.
+    properties.insert(
+        "jersey_number".to_string(),
+        PropertyValue::String("05".to_string()),
+    );
+    let node = coerce_and_check(properties, schema).expect("accepted");
+    assert_eq!(
+        node.properties.get("jersey_number"),
+        Some(&PropertyValue::String("05".to_string())),
+        "the leading zero was lost"
+    );
+}
+
+#[test]
+fn a_decimal_keeps_its_scale_when_rendered_onto_a_string_property() {
+    let schema = vec![create_property_schema(
+        "price_label",
+        PropertyType::String,
+        false,
+        false,
+    )];
+    let mut properties = HashMap::new();
+    properties.insert(
+        "price_label".to_string(),
+        PropertyValue::Decimal("19.90".parse().unwrap()),
+    );
+    let node = coerce_and_check(properties, schema).expect("accepted");
+    assert_eq!(
+        node.properties.get("price_label"),
+        Some(&PropertyValue::String("19.90".to_string())),
+        "the trailing zero of the scale was dropped"
+    );
+}
+
+#[test]
+fn a_declared_decimal_is_untouched_by_the_string_coercion() {
+    let schema = vec![create_property_schema(
+        "amount",
+        PropertyType::Decimal,
+        false,
+        false,
+    )];
+    let mut properties = HashMap::new();
+    properties.insert(
+        "amount".to_string(),
+        PropertyValue::String("19.90".to_string()),
+    );
+    let node = coerce_and_check(properties, schema).expect("accepted");
+    assert_eq!(
+        node.properties.get("amount"),
+        Some(&PropertyValue::Decimal("19.90".parse().unwrap())),
+        "a declared Decimal must still become a Decimal"
+    );
+}
+
+#[test]
+fn numbers_on_number_properties_are_left_alone() {
+    let schema = vec![
+        create_property_schema("count", PropertyType::Integer, false, false),
+        create_property_schema("ratio", PropertyType::Float, false, false),
+    ];
+    let mut properties = HashMap::new();
+    properties.insert("count".to_string(), PropertyValue::Integer(5));
+    properties.insert("ratio".to_string(), PropertyValue::Float(2.5));
+    let node = coerce_and_check(properties, schema).expect("accepted");
+    assert_eq!(
+        node.properties.get("count"),
+        Some(&PropertyValue::Integer(5))
+    );
+    assert_eq!(
+        node.properties.get("ratio"),
+        Some(&PropertyValue::Float(2.5))
+    );
+}
+
+#[test]
+fn a_declared_decimal_still_refuses_a_json_number() {
+    // The existing guarantee this change must not weaken: a JSON number has
+    // already been through an f64, so it is refused rather than rounded.
+    let schema = vec![create_property_schema(
+        "amount",
+        PropertyType::Decimal,
+        false,
+        false,
+    )];
+    let mut properties = HashMap::new();
+    properties.insert("amount".to_string(), PropertyValue::Float(19.90));
+    let err = coerce_and_check(properties, schema).expect_err("must be refused");
+    assert!(err.contains("must be sent as a STRING"), "got: {err}");
+}
+
+#[test]
+fn a_decimal_is_only_stored_where_a_declaration_says_decimal() {
+    // The invariant that stops a guess being recorded as a fact. The legacy
+    // read rule has to classify a package-authored `rate: '10'` as a Decimal,
+    // but its output is only trusted where a declaration confirms it.
+    let schema = vec![
+        create_property_schema("rate", PropertyType::Decimal, false, false),
+        create_property_schema("postal_code", PropertyType::String, false, false),
+    ];
+
+    let mut properties = HashMap::new();
+    // Declared Decimal: stays a Decimal (this is the package-install path).
+    properties.insert("rate".to_string(), PropertyValue::String("10".to_string()));
+    // Declared String: rendered back.
+    properties.insert(
+        "postal_code".to_string(),
+        PropertyValue::Decimal("76133".parse().unwrap()),
+    );
+    // UNDECLARED, holding a Decimal the heuristic produced: rendered back to the
+    // string it was spelled as, rather than cemented as a decimal.
+    properties.insert(
+        "legacy_ref".to_string(),
+        PropertyValue::Decimal("00123".parse().unwrap_or_else(|_| "123".parse().unwrap())),
+    );
+
+    let node = coerce_and_check(properties, schema).expect("accepted");
+    assert_eq!(
+        node.properties.get("rate"),
+        Some(&PropertyValue::Decimal("10".parse().unwrap())),
+        "a package-authored decimal must still classify against its declaration"
+    );
+    assert_eq!(
+        node.properties.get("postal_code"),
+        Some(&PropertyValue::String("76133".to_string()))
+    );
+    assert_eq!(
+        node.properties.get("legacy_ref"),
+        Some(&PropertyValue::String("123".to_string())),
+        "an undeclared Decimal must not be recorded as a fact"
+    );
+}
+
+#[test]
+fn a_package_authored_decimal_string_still_becomes_a_decimal() {
+    // Regression guard for the install path: packages write `rate: '10'` as a
+    // plain quoted YAML string, so bare-str -> losslessness -> Decimal is
+    // load-bearing and permanent, not a transition measure.
+    let schema = vec![create_property_schema(
+        "rate",
+        PropertyType::Decimal,
+        false,
+        false,
+    )];
+    for raw in ["0", "2.6", "3.8", "7", "8.1", "10", "19", "20"] {
+        let mut properties = HashMap::new();
+        properties.insert("rate".to_string(), PropertyValue::String(raw.to_string()));
+        let node = coerce_and_check(properties, schema.clone())
+            .unwrap_or_else(|e| panic!("package decimal {raw:?} refused: {e}"));
+        assert_eq!(
+            node.properties.get("rate"),
+            Some(&PropertyValue::Decimal(raw.parse().unwrap())),
+            "{raw:?} must classify as a Decimal against its declaration"
+        );
+    }
+}

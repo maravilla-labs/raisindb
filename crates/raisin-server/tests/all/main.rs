@@ -27,6 +27,7 @@ mod immutable_nodetype_ws_test;
 mod integration_node_operations;
 mod mgmt_jobs_tenant_isolation_test;
 mod mgmt_superadmin_test;
+mod numeric_string_property_test;
 mod package_upload_test;
 mod pgq_adjacency_scope_e2e_test;
 mod pgq_path_e2e_test;
