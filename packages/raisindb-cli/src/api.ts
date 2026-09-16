@@ -2,6 +2,10 @@ import { getToken } from './auth.js';
 import { getServer } from './config.js';
 import { EventSource as EventSourcePolyfill } from 'eventsource';
 import { computeHash, ServerFileInfo } from './sync/compare.js';
+import { createReadStream } from 'node:fs';
+import { stat } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
+import { Readable } from 'node:stream';
 
 export interface SqlResult {
   columns: string[];
@@ -200,55 +204,145 @@ export async function listPackages(repo: string): Promise<PackageSummary[]> {
  * @param branch - Target branch (defaults to "main").
  */
 export async function uploadPackage(repo: string, fileContent: Buffer, fileName: string, targetPath?: string, branch = 'main'): Promise<PackageUploadResult> {
+  return sendPackage(repo, fileName, fileContent.length, () => Readable.from([fileContent]), targetPath, branch);
+}
+
+/**
+ * Upload a package FROM DISK, streamed.
+ *
+ * A media-heavy package is hundreds of megabytes and can be gigabytes; the
+ * buffered path above has to hold all of it twice (Buffer plus Blob copy) and
+ * dies long before that — a Buffer cannot exceed ~2 GB at all, and the memory
+ * spike alone is what turns a slow connection into `fetch failed`.
+ *
+ * Here the file is read in chunks and written straight onto the request, so the
+ * memory cost is one chunk whatever the package weighs. `onProgress` reports
+ * bytes actually handed to the socket, which is what makes the progress bar the
+ * truth rather than a timer.
+ */
+export async function uploadPackageFile(
+  repo: string,
+  filePath: string,
+  fileName: string,
+  targetPath?: string,
+  branch = 'main',
+  onProgress?: (sent: number, total: number) => void,
+): Promise<PackageUploadResult> {
+  const { size } = await stat(filePath);
+  return sendPackage(
+    repo,
+    fileName,
+    size,
+    () => createReadStream(filePath, { highWaterMark: 4 * 1024 * 1024 }),
+    targetPath,
+    branch,
+    onProgress,
+  );
+}
+
+/** Network failures worth a second attempt: the request never reached a handler. */
+const TRANSIENT = new Set(['ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT']);
+
+/** `fetch failed` says nothing. The cause underneath names the actual fault. */
+function describeNetworkError(error: unknown): { message: string; code?: string } {
+  const cause = (error as { cause?: { code?: string; message?: string } })?.cause;
+  const code = cause?.code;
+  const detail = cause?.message ?? (error as Error)?.message ?? String(error);
+  return { message: code ? `${detail} (${code})` : detail, code };
+}
+
+/**
+ * POST one package as multipart, with its own boundary and a real
+ * `Content-Length`.
+ *
+ * The length is not a formality: the server decides from it whether to stream
+ * the body to storage or buffer it in memory, and `FormData` with a stream
+ * inside sets none. Building the envelope by hand is what keeps a large upload
+ * on the streaming path.
+ */
+async function sendPackage(
+  repo: string,
+  fileName: string,
+  fileSize: number,
+  openBody: () => Readable,
+  targetPath: string | undefined,
+  branch: string,
+  onProgress?: (sent: number, total: number) => void,
+): Promise<PackageUploadResult> {
   const baseUrl = getBaseUrl();
-
-  // Extract package name from filename (remove .rap extension)
   const packageName = fileName.replace(/\.rap$/, '');
-
-  // Use targetPath if provided, otherwise default to package name
-  // Remove leading slash if present since we add it in the URL
-  const nodePath = targetPath
-    ? targetPath.replace(/^\//, '')
-    : packageName;
-
-  // Use unified endpoint with nodeType parameter (camelCase per RepoQuery struct)
+  const nodePath = targetPath ? targetPath.replace(/^\//, '') : packageName;
   const url = `${baseUrl}/api/repository/${repo}/${branch}/head/packages/${encodeURIComponent(nodePath)}?nodeType=raisin:Package`;
 
-  const formData = new FormData();
-  formData.append('file', new Blob([fileContent]), fileName);
-
   const token = getToken();
-  const headers: Record<string, string> = {};
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
+  const boundary = `----raisindb${randomBytes(16).toString('hex')}`;
+  const head = Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName.replace(/"/g, '')}"\r\n` +
+      `Content-Type: application/octet-stream\r\n\r\n`,
+  );
+  const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
+
+  const attempts = 3;
+  for (let attempt = 1; ; attempt++) {
+    let sent = 0;
+    // A stream is consumed once, so every attempt opens the file again.
+    const body = Readable.from(
+      (async function* () {
+        yield head;
+        for await (const chunk of openBody()) {
+          sent += (chunk as Buffer).length;
+          onProgress?.(sent, fileSize);
+          yield chunk;
+        }
+        yield tail;
+      })(),
+    );
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+          'Content-Length': String(head.length + fileSize + tail.length),
+        },
+        body: Readable.toWeb(body) as ReadableStream,
+        // Required by undici whenever the body is a stream.
+        duplex: 'half',
+      } as RequestInit & { duplex: 'half' });
+
+      if (!response.ok) {
+        const errorData = (await response.json().catch(() => ({ message: response.statusText }))) as { message?: string };
+        throw new Error(errorData.message || `Failed to upload package: ${response.status}`);
+      }
+
+      const result = (await response.json()) as {
+        storedKey: string;
+        url: string;
+        node_id?: string;
+        job_id?: string;
+        status?: string;
+      };
+
+      return {
+        name: packageName,
+        version: 'processing', // Will be updated by background job
+        job_id: result.job_id,
+        node_id: result.node_id,
+        status: result.status,
+      };
+    } catch (error) {
+      const { message, code } = describeNetworkError(error);
+      // A server that answered has decided; only a broken connection is retried.
+      const retriable = code ? TRANSIENT.has(code) : /fetch failed|socket hang up|terminated/i.test(message);
+      if (!retriable || attempt >= attempts) {
+        throw new Error(
+          `Failed to upload package (${(fileSize / 1048576).toFixed(1)} MB, attempt ${attempt}/${attempts}): ${message}`,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+    }
   }
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers,
-    body: formData,
-  });
-
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({ message: response.statusText })) as { message?: string };
-    throw new Error(errorData.message || `Failed to upload package: ${response.status}`);
-  }
-
-  const result = await response.json() as {
-    storedKey: string;
-    url: string;
-    node_id?: string;
-    job_id?: string;
-    status?: string;
-  };
-
-  return {
-    name: packageName,
-    version: 'processing', // Will be updated by background job
-    job_id: result.job_id,
-    node_id: result.node_id,
-    status: result.status,
-  };
 }
 
 /**

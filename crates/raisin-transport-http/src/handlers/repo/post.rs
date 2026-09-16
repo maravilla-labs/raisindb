@@ -30,8 +30,14 @@ use super::assets::{
     SignAssetRequest,
 };
 
-/// Threshold for switching from buffered to streaming upload (100MB)
-const BUFFER_THRESHOLD: u64 = 100 * 1024 * 1024;
+/// Above this, a multipart upload is streamed to disk instead of being
+/// collected into memory first (8MB).
+///
+/// It used to be 100MB, which meant a 90MB package was held whole in RAM on
+/// the way in — per concurrent upload. Multipart is the package path, and a
+/// package that size is ordinary once it carries media, so the streaming path
+/// is the one that should run.
+const BUFFER_THRESHOLD: u64 = 8 * 1024 * 1024;
 
 /// POST handler for creating nodes at the root level.
 #[axum::debug_handler]

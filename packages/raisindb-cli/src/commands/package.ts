@@ -9,7 +9,7 @@ import { getServer, getDefaultRepo } from '../config.js';
 import { getToken } from '../auth.js';
 import {
   type PackageInstallMode,
-  uploadPackage as apiUploadPackage,
+  uploadPackageFile as apiUploadPackageFile,
   listPackages as apiListPackages,
   installPackage as apiInstallPackage,
   getJobInfo as apiGetJobInfo,
@@ -529,19 +529,28 @@ export async function uploadPackage(filePath: string, serverUrl?: string, repo?:
   };
 
   try {
-    // Read the package file as binary Buffer
-    const fileContent = fs.readFileSync(resolvedFile);
-    const fileSize = fileContent.length;
+    // Streamed from disk: a media-heavy package runs into gigabytes, and reading
+    // it into memory first is what ended in "fetch failed" long before the
+    // server saw a byte.
+    const fileSize = fs.statSync(resolvedFile).size;
+    const mb = (bytes: number) => (bytes / 1048576).toFixed(1);
+    updateProgress({ progress: 0, message: `Uploading ${mb(fileSize)} MB…` });
 
-    // Simulate upload progress (actual progress would need stream tracking)
-    updateProgress({ progress: 10, message: 'Reading file...' });
-
-    // Small delay to show the animation
-    await new Promise(resolve => setTimeout(resolve, 200));
-    updateProgress({ progress: 30, message: 'Uploading to server...' });
-
-    // Use the api.ts uploadPackage function
-    const result = await apiUploadPackage(targetRepo, fileContent, fileName, targetPath, branch);
+    let shown = -1;
+    const result = await apiUploadPackageFile(
+      targetRepo,
+      resolvedFile,
+      fileName,
+      targetPath,
+      branch,
+      (sent, total) => {
+        // Whole percents only: a redraw per chunk costs more than it says.
+        const percent = total ? Math.min(99, Math.floor((sent / total) * 100)) : 0;
+        if (percent === shown) return;
+        shown = percent;
+        updateProgress({ progress: percent, message: `Uploading ${mb(sent)} / ${mb(total)} MB` });
+      },
+    );
 
     updateProgress({ progress: 60, message: 'Upload received by server' });
 

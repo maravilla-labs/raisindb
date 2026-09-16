@@ -13,7 +13,7 @@ import {
   listRepositories,
   listPackages,
   installPackage as apiInstallPackage,
-  uploadPackage as apiUploadPackage,
+  uploadPackageFile as apiUploadPackageFile,
   getAuthProviders,
   getAuthSessions,
   revokeSession,
@@ -171,10 +171,16 @@ const App: React.FC<AppProps> = ({ serverUrl, database }) => {
           }
 
           const fileName = path.basename(resolvedFile);
-          const fileContent = fs.readFileSync(resolvedFile);
 
-          const result = await apiUploadPackage(state.currentDatabase, fileContent, fileName);
-          return { type: 'success', message: `Package uploaded: ${result.name} v${result.version}` };
+          // Streamed from disk rather than read into memory: a media-heavy
+          // package runs into gigabytes, and the buffer is what used to fail
+          // before the first byte reached the server.
+          const result = await apiUploadPackageFile(state.currentDatabase, resolvedFile, fileName);
+          // A streamed upload is unpacked by a background job, so the server
+          // answers with a job id and a temporary name, not the final version.
+          return result.job_id
+            ? { type: 'success', message: `Package uploaded — the server is processing it (job ${result.job_id})` }
+            : { type: 'success', message: `Package uploaded: ${result.name} v${result.version}` };
         } catch (error) {
           return { type: 'error', message: `Failed to upload: ${error instanceof Error ? error.message : String(error)}` };
         }
