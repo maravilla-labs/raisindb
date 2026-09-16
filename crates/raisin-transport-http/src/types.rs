@@ -71,6 +71,11 @@ pub struct RepoQuery {
     pub sig: Option<String>, // HMAC signature for raisin:download/display commands
     #[serde(default)]
     pub exp: Option<u64>, // Expiry timestamp (Unix seconds)
+    // Scoped access grant for raisin:download/display — one token covering every
+    // asset under a path prefix, in place of sig/exp. It rides in the query
+    // string because an `<img>` tag can carry nothing else.
+    #[serde(default)]
+    pub grant: Option<String>,
 }
 
 #[derive(Deserialize, Default)]

@@ -1,10 +1,24 @@
 // SPDX-License-Identifier: BSL-1.1
 
-//! Asset binary access with signed URLs.
+//! Asset binary access with signed URLs and scoped access grants.
 //!
 //! Provides functions for parsing asset commands from URL paths,
-//! generating signed URLs for asset downloads/displays, and
-//! serving asset content with signature validation.
+//! generating signed URLs for asset downloads/displays, minting scoped grants,
+//! and serving asset content with credential validation.
+//!
+//! Two credential forms reach [`handle_asset_command_internal`], and they differ
+//! in WHERE the authority lives:
+//!
+//! * `?sig=…&exp=…` — a per-asset signature. The signature IS the authority:
+//!   [`sign_asset_url_internal`] checked access when it minted, so the read runs
+//!   unfiltered. This is the machine-to-machine form and is unchanged.
+//! * `?grant=…` — a scoped grant naming a SUBJECT. It is not authority; it says
+//!   which subject and which subtree, and the read is then performed AS that
+//!   subject under their row-level security. That is what makes a grant unable
+//!   to return anything its subject could not fetch directly.
+//!
+//! Both go through one verifier, [`raisin_core::authorize_asset_read`], so the
+//! two cannot drift into a 401 that no log line explains.
 
 use axum::{
     body::Body,
@@ -39,6 +53,50 @@ pub(crate) fn parse_sign_command_from_path(path: &str) -> Option<String> {
     None
 }
 
+/// Parse the grant command from a path.
+///
+/// Returns the PREFIX the grant is being asked for if the path ends with
+/// `/raisin:grant`. Unlike `raisin:sign`, what precedes it is a subtree rather
+/// than one asset — `/photos/raisin:grant` asks to cover everything under
+/// `/photos`.
+pub(crate) fn parse_grant_command_from_path(path: &str) -> Option<String> {
+    if let Some(idx) = path.rfind("/raisin:grant") {
+        return Some(path[..idx].to_string());
+    }
+    None
+}
+
+/// Turn a refusal from the shared verifier into the HTTP answer for it.
+///
+/// The body never says more than the code: a caller learns that it must
+/// re-authorize, not which part of its token was wrong.
+///
+/// A request that presented NO grant gets the answer it has always got —
+/// `401 INVALID_SIGNATURE` — whatever the underlying reason. Existing clients
+/// key on that code, and telling them apart "expired" from "wrong" is a
+/// distinction the per-asset form never made and does not need: its remedy is
+/// the same either way.
+///
+/// For a grant the codes are finer, because the client's retry contract depends
+/// on them. 401 means "ask again" — the clock ran out, or this is not a
+/// credential the deployment minted. 403 means the grant is valid but was minted
+/// for a different subtree, which re-minting the SAME grant will not fix.
+fn credential_error(err: raisin_core::AssetAuthError, presented_grant: bool) -> ApiError {
+    if !presented_grant {
+        return ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "INVALID_SIGNATURE",
+            "Invalid or expired signature",
+        );
+    }
+
+    let status = match err {
+        raisin_core::AssetAuthError::OutOfScope => StatusCode::FORBIDDEN,
+        _ => StatusCode::UNAUTHORIZED,
+    };
+    ApiError::new(status, err.code(), err.to_string())
+}
+
 /// Internal implementation of asset command handling.
 pub(crate) async fn handle_asset_command_internal(
     state: &AppState,
@@ -51,6 +109,8 @@ pub(crate) async fn handle_asset_command_internal(
     property_path: Option<&str>,
     sig: &str,
     exp: u64,
+    // The scoped grant, when the caller presented one instead of a signature.
+    grant: Option<&str>,
     // The raw `Range` header, threaded down from the request. Without it a
     // `<video>` served from here has a dead scrub bar — see `http_range`.
     range_header: Option<&str>,
@@ -72,40 +132,53 @@ pub(crate) async fn handle_asset_command_internal(
     // Get property name - default to "file" if not specified
     let prop_name = property_path.unwrap_or("file");
 
-    // The signed string comes from the SHARED composer, never rebuilt here: a
-    // verifier that spells the grammar itself is how a minter and a verifier
-    // drift into a permanent 401 that no log line can explain.
-    let full_path = raisin_core::signed_asset_path(repo, branch, ws, &node_path, prop_name);
-
-    // Verify signature - include property_path in verification
+    // ONE verifier for both credential forms. The path grammar and the HMAC live
+    // in `raisin-core` with the minters that produce them; a verifier that
+    // spelled either itself is how a minter and a verifier drift into a
+    // permanent 401 that no log line can explain.
     let signing_secret = state.get_signing_secret()?;
-    if !raisin_core::verify_asset_signature(
-        &signing_secret,
+    let scope = raisin_core::AssetReadScope {
         tenant_id,
-        &full_path,
+        repo,
+        branch,
+        workspace: ws,
+        node_path: &node_path,
+        property: prop_name,
         command,
-        raisin_core::signature_property(prop_name),
-        exp,
-        sig,
-    ) {
-        return Err(ApiError::new(
-            StatusCode::UNAUTHORIZED,
-            "INVALID_SIGNATURE",
-            "Invalid or expired signature",
-        ));
-    }
+    };
+    let presented_grant = grant.is_some_and(|g| !g.is_empty());
+    let credential = raisin_core::AssetCredential::from_query(Some(sig), Some(exp), grant)
+        .map_err(|e| credential_error(e, presented_grant))?;
+    let authorization = raisin_core::authorize_asset_read(&signing_secret, scope, credential)
+        .map_err(|e| credential_error(e, presented_grant))?;
 
-    // Get node (tenant comes from request context — signature already validated access)
-    let node = state
-        .storage()
-        .nodes()
-        .get_by_path(
-            StorageScope::new(tenant_id, repo, branch, ws),
-            &node_path,
-            None,
-        )
-        .await?
-        .ok_or_else(|| ApiError::not_found("Node not found"))?;
+    // WHERE the node is read from is the security difference between the two
+    // forms, and it is the only difference.
+    //
+    // A signature was minted for this one asset after its minter checked access,
+    // so the read is unfiltered — that is the historical behaviour and the
+    // machine-to-machine contract.
+    //
+    // A grant is not authority. It names a subject, and the read runs as that
+    // subject with row-level security applied, resolved NOW. So the grant can
+    // never return a node its subject could not fetch directly, and withdrawing
+    // the subject's access stops the grant working without anything having to
+    // revoke the token itself.
+    let node = match &authorization {
+        raisin_core::AssetAuthorization::Signature => state
+            .storage()
+            .nodes()
+            .get_by_path(
+                StorageScope::new(tenant_id, repo, branch, ws),
+                &node_path,
+                None,
+            )
+            .await?
+            .ok_or_else(|| ApiError::not_found("Node not found"))?,
+        raisin_core::AssetAuthorization::Grant(grant) => {
+            read_as_grant_subject(state, tenant_id, repo, branch, ws, &node_path, grant).await?
+        }
+    };
 
     // A mounted file whose bytes are not held right now is NOT a missing
     // property — it is a cache miss on a file that still exists at the provider.
@@ -255,6 +328,73 @@ pub(crate) async fn handle_asset_command_internal(
     Ok(response.expect("valid response with valid headers"))
 }
 
+/// Read a node AS a grant's subject, with row-level security applied.
+///
+/// The subject's permissions are resolved HERE rather than carried in the token.
+/// That costs a lookup on the read path — cached, like every other request's —
+/// and buys the property the grant rests on: what the grant opens is exactly
+/// what the subject may read at the moment of the read, so access withdrawn
+/// mid-session closes the grant with it.
+///
+/// `email` and `home` come from the token because they are identity claims the
+/// subject's own session asserted, and row-level security conditions may
+/// reference them. They were copied from the minting principal's authenticated
+/// context, never from the mint request.
+///
+/// A node the subject may not read is reported as missing, not as forbidden: the
+/// existence of a node at a path is itself something row-level security is
+/// entitled to hide.
+async fn read_as_grant_subject(
+    state: &AppState,
+    tenant_id: &str,
+    repo: &str,
+    branch: &str,
+    ws: &str,
+    node_path: &str,
+    grant: &raisin_core::AssetGrant,
+) -> Result<raisin_models::nodes::Node, ApiError> {
+    use raisin_core::PermissionService;
+    use raisin_models::auth::AuthContext;
+
+    let permissions = state
+        .permission_service
+        .resolve_for_identity_id(tenant_id, repo, "main", &grant.subject)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                subject = %grant.subject,
+                error = %e,
+                "Could not resolve permissions for an asset grant's subject"
+            );
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "PERMISSION_RESOLUTION_FAILED",
+                "Could not resolve access for this grant",
+            )
+        })?;
+
+    // Built exactly as the auth middleware builds a live session's context, so
+    // the grant read and the session read evaluate the same conditions. A
+    // subject with no permissions in this repository gets a context with none —
+    // which denies, because row-level security denies by default.
+    let mut auth = AuthContext::for_user(&grant.subject);
+    if let Some(email) = &grant.email {
+        auth = auth.with_email(email);
+    }
+    if let Some(home) = &grant.home {
+        auth = auth.with_home(home);
+    }
+    if let Some(permissions) = permissions {
+        auth = auth.with_permissions(permissions);
+    }
+
+    state
+        .node_service_for_context(tenant_id, repo, branch, ws, Some(auth))
+        .get_by_path(node_path)
+        .await?
+        .ok_or_else(|| ApiError::not_found("Node not found"))
+}
+
 /// Request body for signing an asset URL
 #[derive(Debug, serde::Deserialize)]
 pub struct SignAssetRequest {
@@ -276,6 +416,130 @@ pub struct SignAssetResponse {
     pub url: String,
     /// When the URL expires (ISO 8601)
     pub expires_at: String,
+}
+
+/// Request body for minting a scoped asset grant.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct GrantAssetRequest {
+    /// Requested lifetime in seconds. Clamped to
+    /// [`raisin_core::MAX_GRANT_LIFETIME_SECS`]; a grant is meant to be renewed,
+    /// not to be long.
+    #[serde(default)]
+    pub expires_in: Option<u64>,
+}
+
+/// Response carrying a minted grant and the scope it covers.
+#[derive(Debug, serde::Serialize)]
+pub struct GrantAssetResponse {
+    /// The opaque token to append to asset URLs as `?grant=…`.
+    pub grant: String,
+    /// The normalized path prefix the grant covers.
+    pub prefix: String,
+    /// When the grant expires (ISO 8601). The client renews before or on 401.
+    pub expires_at: String,
+    /// Unix seconds, for a client that would rather not parse a date.
+    pub expires: u64,
+}
+
+/// Mint a scoped asset grant for the authenticated caller.
+///
+/// The grant's SUBJECT is the caller, taken from their authenticated context and
+/// never from the request body. That is the property that makes a grant
+/// incapable of escalation: a caller can only ask for a token that says "read as
+/// me", and every read it authorizes is then performed under the caller's own
+/// row-level security.
+///
+/// Two principals are refused, both deliberately:
+///
+/// * **Anonymous.** A grant bound to nobody is a plain bearer token for whatever
+///   anonymous may read, which public asset delivery already covers better.
+/// * **System / admin.** Their context bypasses row-level security, so a grant
+///   naming them would be a standing key to a subtree with no filtering behind
+///   it — exactly the thing the design refuses to mint. These callers already
+///   have per-asset signing, which is the right instrument for them.
+pub(crate) async fn mint_asset_grant_internal(
+    state: &AppState,
+    auth: Option<&raisin_models::auth::AuthContext>,
+    tenant_id: &str,
+    repo: &str,
+    branch: &str,
+    ws: &str,
+    prefix: &str,
+    request: GrantAssetRequest,
+) -> Result<Json<GrantAssetResponse>, ApiError> {
+    let auth = auth.ok_or_else(|| {
+        ApiError::unauthorized("A scoped asset grant requires an authenticated session")
+    })?;
+
+    if auth.is_anonymous || auth.is_system {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "GRANT_REQUIRES_USER",
+            "A scoped asset grant must name a user; anonymous and system callers use per-asset signing",
+        ));
+    }
+
+    let subject = auth.user_id.clone().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::FORBIDDEN,
+            "GRANT_REQUIRES_USER",
+            "A scoped asset grant must name a user; this credential names none",
+        )
+    })?;
+
+    // Normalized once, here, and stored normalized — so the token carries the
+    // one spelling the segment matcher will later compare against.
+    let prefix = raisin_core::normalize_path(prefix)
+        .ok_or_else(|| ApiError::validation_failed("Grant prefix is not a valid node path"))?;
+
+    // The prefix must be something the caller can actually see. Every read the
+    // grant authorizes is filtered again anyway, so this is not what makes the
+    // grant safe — it is what stops a caller probing for the existence of
+    // subtrees by minting grants over them.
+    if prefix != "/" {
+        state
+            .node_service_for_context(tenant_id, repo, branch, ws, Some(auth.clone()))
+            .get_by_path(&prefix)
+            .await?
+            .ok_or_else(|| ApiError::not_found("Node not found"))?;
+    }
+
+    let lifetime = raisin_core::clamp_grant_lifetime(
+        request
+            .expires_in
+            .unwrap_or(raisin_core::DEFAULT_GRANT_LIFETIME_SECS),
+    );
+    let expires = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        + lifetime;
+
+    let grant = raisin_core::AssetGrant {
+        tenant_id: tenant_id.to_string(),
+        repo: repo.to_string(),
+        branch: branch.to_string(),
+        workspace: ws.to_string(),
+        prefix: prefix.clone(),
+        subject,
+        email: auth.email.clone(),
+        home: auth.home.clone(),
+        expires,
+    };
+
+    let signing_secret = state.get_signing_secret()?;
+    let token = raisin_core::mint_asset_grant(&signing_secret, &grant);
+
+    let expires_at = chrono::DateTime::from_timestamp(expires as i64, 0)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    Ok(Json(GrantAssetResponse {
+        grant: token,
+        prefix,
+        expires_at,
+        expires,
+    }))
 }
 
 /// Internal implementation of sign URL generation.

@@ -45,6 +45,12 @@ pub use asset_urls::{
     build_signed_asset_url, configured_public_base_url, is_valid_asset_command, signature_property,
     signed_asset_path, SignedAssetUrl, DEFAULT_ASSET_PROPERTY,
 };
+pub mod asset_grants;
+pub use asset_grants::{
+    authorize_asset_read, clamp_grant_lifetime, mint_asset_grant, normalize_path, prefix_covers,
+    AssetAuthError, AssetAuthorization, AssetCredential, AssetGrant, AssetReadScope,
+    DEFAULT_GRANT_LIFETIME_SECS, MAX_GRANT_LIFETIME_SECS,
+};
 pub mod connection;
 pub mod replication;
 pub mod traits;

@@ -17,6 +17,7 @@
 // Helpers are shared per-module, so unused ones in a given module are expected.
 #![allow(dead_code)]
 
+mod http_asset_grants;
 mod http_audit_logs;
 mod http_branches_tags;
 mod http_collisions;

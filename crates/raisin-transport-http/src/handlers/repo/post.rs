@@ -25,7 +25,10 @@ use crate::{
     types::{CommandBody, RepoQuery},
 };
 
-use super::assets::{parse_sign_command_from_path, SignAssetRequest};
+use super::assets::{
+    parse_grant_command_from_path, parse_sign_command_from_path, GrantAssetRequest,
+    SignAssetRequest,
+};
 
 /// Threshold for switching from buffered to streaming upload (100MB)
 const BUFFER_THRESHOLD: u64 = 100 * 1024 * 1024;
@@ -157,6 +160,42 @@ pub async fn repo_post(
         .await?;
         return Ok((StatusCode::OK, Json(serde_json::to_value(response.0)?)));
     }
+
+    // Check for the raisin:grant command in the path. What precedes it is a
+    // PREFIX, not one asset: the caller is asking for a single token covering
+    // the subtree it is about to render.
+    if let Some(prefix) = parse_grant_command_from_path(&ctx.cleaned_path) {
+        let body_bytes = request
+            .into_body()
+            .collect()
+            .await
+            .map_err(|e| ApiError::validation_failed(format!("Failed to read body: {}", e)))?
+            .to_bytes();
+
+        // Every field is optional, so no body at all is a valid request for a
+        // grant with the default lifetime.
+        let grant_request: GrantAssetRequest = if body_bytes.is_empty() {
+            GrantAssetRequest::default()
+        } else {
+            serde_json::from_slice(&body_bytes)
+                .map_err(|e| ApiError::validation_failed(format!("Invalid JSON: {}", e)))?
+        };
+
+        let auth_context = auth.map(|Extension(ctx)| ctx);
+        let response = super::assets::mint_asset_grant_internal(
+            &state,
+            auth_context.as_ref(),
+            tenant_id,
+            &repo,
+            &branch,
+            &ws,
+            &prefix,
+            grant_request,
+        )
+        .await?;
+        return Ok((StatusCode::OK, Json(serde_json::to_value(response.0)?)));
+    }
+
     let auth_context = auth.map(|Extension(ctx)| ctx);
     let nodes_svc =
         state.node_service_for_context(tenant_id, &repo, &branch, &ws, auth_context.clone());

@@ -269,6 +269,7 @@ pub async fn repo_get(
             property_path,
             sig,
             exp,
+            q.grant.as_deref(),
             headers.get(header::RANGE).and_then(|v| v.to_str().ok()),
         )
         .await;
