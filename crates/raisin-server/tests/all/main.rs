@@ -48,6 +48,7 @@ mod spatial_sql_write_test;
 mod spatial_srid_index_test;
 mod spatial_transport_parity_test;
 mod st_conformance;
+mod subscription_workspace_index_test;
 mod three_node_mesh_test;
 mod two_node_replication_test;
 mod wasm_run_file_test;
