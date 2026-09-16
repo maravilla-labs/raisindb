@@ -62,6 +62,27 @@ impl From<PendingUpdatesSummary> for PendingUpdatesResponse {
     }
 }
 
+/// Which branch a system-update call inspects or repairs.
+///
+/// The type registry is PER BRANCH, so "this repository is up to date" is only
+/// ever true of one branch. `publish` forks from `main` and keeps the registry
+/// as it stood then, so every builtin type added since exists on main alone —
+/// and a package install onto `publish` fails with `NodeType 'raisin:Package'
+/// not found`, the type that delivers types being the one that is missing.
+///
+/// Until this existed the branch was hardcoded to `main`, so no amount of
+/// applying updates could repair any other branch.
+#[derive(Debug, Deserialize)]
+pub struct BranchQuery {
+    pub branch: Option<String>,
+}
+
+impl BranchQuery {
+    pub fn branch(&self) -> &str {
+        self.branch.as_deref().unwrap_or("main")
+    }
+}
+
 /// Request to apply system updates
 #[derive(Debug, Deserialize)]
 pub struct ApplyUpdatesRequest {

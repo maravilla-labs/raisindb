@@ -11,7 +11,8 @@ mod types;
 
 pub use get_pending::get_pending_updates;
 pub use types::{
-    ApplyUpdatesRequest, ApplyUpdatesResponse, PendingUpdateInfo, PendingUpdatesResponse,
+    ApplyUpdatesRequest, ApplyUpdatesResponse, BranchQuery, PendingUpdateInfo,
+    PendingUpdatesResponse,
 };
 
 /// Map a storage error to an `ApiError`, preserving `NotFound → 404` via the
@@ -26,7 +27,7 @@ pub(super) fn map_storage_err(context: &str, err: raisin_error::Error) -> ApiErr
 }
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
@@ -58,6 +59,7 @@ use crate::{error::ApiError, state::AppState};
 pub async fn apply_updates(
     State(state): State<AppState>,
     Path((tenant_id, repo_id)): Path<(String, String)>,
+    Query(q): Query<BranchQuery>,
     Json(req): Json<ApplyUpdatesRequest>,
 ) -> Result<(StatusCode, Json<ApplyUpdatesResponse>), ApiError> {
     let rocksdb = state
@@ -66,7 +68,8 @@ pub async fn apply_updates(
         .ok_or_else(|| ApiError::internal("RocksDB storage not available"))?;
 
     let system_update_repo = SystemUpdateRepositoryImpl::new(rocksdb.db().clone());
-    let branch = "main";
+    // Per branch, not per repository — see `BranchQuery`.
+    let branch = q.branch();
 
     // First, check for pending updates to identify what needs to be applied
     let definitions = state.definitions().await;

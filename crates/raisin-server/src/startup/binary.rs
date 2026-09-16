@@ -118,6 +118,9 @@ pub async fn resync_system_definitions(
     policy: raisin_core::system_updates::AutoApplyPolicy,
 ) {
     use raisin_core::system_updates::{resync_repository_definitions, ResyncOutcome};
+    // `list_branches` lives on this trait; without it in scope the resync can
+    // only ever see the default branch.
+    use raisin_storage::BranchRepository;
 
     if policy == raisin_core::system_updates::AutoApplyPolicy::Off {
         tracing::info!("System definition resync disabled (auto_apply = off)");
@@ -138,31 +141,65 @@ pub async fn resync_system_definitions(
     let mut total = ResyncOutcome::default();
 
     for repo_info in repos {
-        let branch = repo_info.config.default_branch.clone();
-        match resync_repository_definitions(
-            storage.clone(),
-            &system_update_repo,
-            &repo_info.tenant_id,
-            &repo_info.repo_id,
-            &branch,
-            &nodetypes,
-            &workspaces,
-            policy,
-        )
-        .await
+        // EVERY branch, not only the default one.
+        //
+        // The type registry is per branch while builtin types are global, so a
+        // resync that reached `main` alone left every other branch frozen at the
+        // definitions it was forked with. `publish` is the branch that matters:
+        // each release installs a content-less package onto it to register
+        // types, and that install needs `raisin:Package` to exist there. It did
+        // not — so the step failed with `NodeType 'raisin:Package' not found` on
+        // every project on every run, swallowed by the pipelines' `|| echo`.
+        // Confirmed on two unrelated repositories on 2026-09-16.
+        //
+        // If branches cannot be listed the default one is still tried, so a
+        // storage backend without branch listing behaves exactly as before.
+        let branches = match storage
+            .branches()
+            .list_branches(&repo_info.tenant_id, &repo_info.repo_id)
+            .await
         {
-            Ok(outcome) => {
-                total.applied += outcome.applied;
-                total.pending += outcome.pending;
-                total.unchanged += outcome.unchanged;
+            Ok(list) if !list.is_empty() => {
+                list.into_iter().map(|b| b.name).collect::<Vec<String>>()
             }
-            Err(e) => tracing::warn!(
-                tenant_id = %repo_info.tenant_id,
-                repo_id = %repo_info.repo_id,
-                branch = %branch,
-                error = %e,
-                "System definition resync failed for repository"
-            ),
+            Ok(_) => vec![repo_info.config.default_branch.clone()],
+            Err(e) => {
+                tracing::warn!(
+                    tenant_id = %repo_info.tenant_id,
+                    repo_id = %repo_info.repo_id,
+                    error = %e,
+                    "System definition resync: could not list branches, using the default branch"
+                );
+                vec![repo_info.config.default_branch.clone()]
+            }
+        };
+
+        for branch in branches {
+            match resync_repository_definitions(
+                storage.clone(),
+                &system_update_repo,
+                &repo_info.tenant_id,
+                &repo_info.repo_id,
+                &branch,
+                &nodetypes,
+                &workspaces,
+                policy,
+            )
+            .await
+            {
+                Ok(outcome) => {
+                    total.applied += outcome.applied;
+                    total.pending += outcome.pending;
+                    total.unchanged += outcome.unchanged;
+                }
+                Err(e) => tracing::warn!(
+                    tenant_id = %repo_info.tenant_id,
+                    repo_id = %repo_info.repo_id,
+                    branch = %branch,
+                    error = %e,
+                    "System definition resync failed for repository"
+                ),
+            }
         }
     }
 
