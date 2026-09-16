@@ -101,11 +101,6 @@ pub async fn resync_nodetypes<S: Storage, R: SystemUpdateRepository>(
             .get_applied(tenant_id, repo_id, ResourceType::NodeType, &nodetype.name)
             .await?;
 
-        if applied.as_ref().map(|a| a.content_hash.as_str()) == Some(hash.as_str()) {
-            outcome.unchanged += 1;
-            continue;
-        }
-
         // A definition that has never been recorded as applied may still exist
         // in the repo (written by the pre-hash-tracking init paths). Compare
         // against what is actually stored so a first-ever hash record does not
@@ -118,6 +113,25 @@ pub async fn resync_nodetypes<S: Storage, R: SystemUpdateRepository>(
                 None,
             )
             .await?;
+
+        // The applied-hash record is keyed by tenant and repository, with NO
+        // branch in it — while the registry it describes is PER BRANCH. So the
+        // hash alone says "this repository has seen this definition", not "this
+        // branch has it". Trusting it on its own is what left `publish` without
+        // `raisin:Package` even after the resync started visiting every branch:
+        // `main` had recorded the hash, so every other branch counted as
+        // unchanged and was skipped before anything looked at the registry.
+        //
+        // Hence: a hash match only settles it when the definition is actually
+        // present on THIS branch. The extra read costs one lookup per
+        // definition per branch at boot and is what makes a forked branch
+        // self-heal.
+        if current.is_some()
+            && applied.as_ref().map(|a| a.content_hash.as_str()) == Some(hash.as_str())
+        {
+            outcome.unchanged += 1;
+            continue;
+        }
 
         let breaking = match &current {
             Some(existing) => detect_nodetype_breaking_changes(existing, nodetype),
@@ -410,6 +424,79 @@ mod tests {
             .await
             .unwrap()
             .expect("test:Thing should be stored")
+    }
+
+    /// A SECOND branch gets the definition even though the repository has
+    /// already recorded the very same hash as applied.
+    ///
+    /// The applied-hash record is keyed by tenant and repo with no branch in
+    /// it, while the registry it describes is per branch. So after `main` is
+    /// resynced, `publish` matches on hash and used to be skipped — leaving it
+    /// without `raisin:Package`, which is the type a package install needs on
+    /// the target branch. Every release's "register types on publish" step
+    /// failed with `NodeType 'raisin:Package' not found`, on every project,
+    /// for weeks.
+    #[tokio::test]
+    async fn test_a_forked_branch_gets_definitions_already_applied_on_main() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let repo = MemoryUpdateRepo::default();
+        let defs = vec![(nodetype(vec![prop("title", true)]), "hash-v1".to_string())];
+
+        let outcome = resync_nodetypes(
+            storage.clone(),
+            &repo,
+            TENANT,
+            REPO,
+            BRANCH,
+            &defs,
+            AutoApplyPolicy::NonBreaking,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.applied, 1, "main gets it the first time");
+
+        // Same repository, same hash, different branch — and nothing in its
+        // registry yet.
+        let outcome = resync_nodetypes(
+            storage.clone(),
+            &repo,
+            TENANT,
+            REPO,
+            "publish",
+            &defs,
+            AutoApplyPolicy::NonBreaking,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            outcome.applied, 1,
+            "the forked branch must receive it, not count as unchanged"
+        );
+
+        storage
+            .node_types()
+            .get(
+                BranchScope::new(TENANT, REPO, "publish"),
+                "test:Thing",
+                None,
+            )
+            .await
+            .unwrap()
+            .expect("test:Thing must exist on the forked branch");
+
+        // Now that it is really there, a further pass is a no-op.
+        let outcome = resync_nodetypes(
+            storage.clone(),
+            &repo,
+            TENANT,
+            REPO,
+            "publish",
+            &defs,
+            AutoApplyPolicy::NonBreaking,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.unchanged, 1, "second pass changes nothing");
     }
 
     /// The whole point of the hash gate: an edit propagates even though the
