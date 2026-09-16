@@ -164,18 +164,25 @@ pub async fn browse(
             )))
         }
     };
-    let credential =
-        match super::test_connection::resolve_credential(&state, &node, &provider_type, account_id)
-        {
-            Some(c) => Some(c),
-            None => {
-                return Ok(Json(BrowseResponse::empty(
-                    true,
-                    "missing_credential",
-                    "no decryptable token for the requested account",
-                )))
-            }
-        };
+    let credential = match super::test_connection::resolve_credential(
+        &state,
+        &tenant.tenant_id,
+        &repo,
+        &node,
+        &provider_type,
+        account_id,
+    )
+    .await
+    {
+        Some(c) => Some(c),
+        None => {
+            return Ok(Json(BrowseResponse::empty(
+                true,
+                "missing_credential",
+                "no decryptable token for the requested account",
+            )))
+        }
+    };
 
     let adapter_node = match load_adapter_node(
         &state,

@@ -39,27 +39,6 @@ pub(super) fn probe_from_list(value: &Value) -> Probe {
     }
 }
 
-/// Build the adapter `credential` object. **The `refresh_token` is never
-/// included.** `username` (the connected account's verified email) is included
-/// when present so token-based mechanisms like IMAP XOAUTH2 can auto-fill it —
-/// mirrors the sync engine's `build_credential`.
-pub(super) fn build_credential(
-    provider_type: &str,
-    account_id: &str,
-    username: Option<&str>,
-    tokens: &Value,
-) -> Value {
-    let mut cred = json!({
-        "access_token": tokens.get("access_token").and_then(|v| v.as_str()).unwrap_or(""),
-        "account_id": account_id,
-        "provider_type": provider_type,
-    });
-    if let Some(u) = username {
-        cred["username"] = Value::String(u.to_string());
-    }
-    cred
-}
-
 /// Map an adapter error message to a stable diagnostic `code`. Mirrors the sync
 /// engine's `AdapterError::classify` reserved codes.
 pub(in crate::handlers::integrations) fn adapter_error_code(msg: &str) -> &'static str {
@@ -113,33 +92,128 @@ pub(super) fn string_prop(node: &Node, key: &str) -> Option<String> {
     }
 }
 
-/// Decrypt an account's tokens and build the §4.1 `credential` — **without the
-/// refresh_token**. Returns `None` when the account is absent or has no
-/// decryptable access token.
+/// Decrypt a connection into the adapter `credential`.
+///
+/// Both connection shapes reach this: OAuth (a `tokens_encrypted` blob) and
+/// credential-based (a `secrets_encrypted` map — an API key, an IMAP app
+/// password). The previous implementation read only `tokens_encrypted` and
+/// required an `access_token` in it, so **every** connection made through
+/// `Add connection` failed the probe with `missing_credential` no matter what
+/// the operator typed. The sync engine had the same bug and was fixed; this
+/// copy was not, which is how a connector could sync while Test connection
+/// insisted the credential was missing.
+///
+/// Assembly is delegated to the engine's own `build_credential`, so the probe
+/// and a real sync build the credential from the same code — including the
+/// structural guarantee that no `refresh_token` reaches an adapter.
+///
+/// Returns `None` when the account is absent, when nothing decrypts, or when
+/// what decrypted cannot authenticate anything: no `access_token` and no
+/// secrets. Credential-flagged *config* alone (a username with no password) is
+/// not a usable credential.
 #[cfg(feature = "storage-rocksdb")]
-pub(in crate::handlers::integrations) fn resolve_credential(
+pub(in crate::handlers::integrations) async fn resolve_credential(
     state: &crate::state::AppState,
+    tenant_id: &str,
+    repo: &str,
     node: &Node,
     provider_type: &str,
     account_id: &str,
 ) -> Option<Value> {
     use raisin_crypto::SecretBox;
+    use raisin_models::nodes::integrations::{build_credential, ConnectedAccount};
+
     let key = state.get_master_key().ok()?;
-    let accounts = crate::handlers::integrations::connected_accounts(node);
-    let account = accounts
-        .iter()
-        .find(|a| a.get("id").and_then(|v| v.as_str()) == Some(account_id))?;
-    let enc = account.get("tokens_encrypted").and_then(|v| v.as_str())?;
-    let tokens = SecretBox::new(&key).decrypt_json(enc).ok()?;
-    // Require a decryptable access token; otherwise the account is unusable.
-    tokens.get("access_token").and_then(|v| v.as_str())?;
-    let username = account.get("subject").and_then(|v| v.as_str());
+    let secret_box = SecretBox::new(&key);
+
+    let account: ConnectedAccount = crate::handlers::integrations::connected_accounts(node)
+        .into_iter()
+        .filter_map(|v| serde_json::from_value::<ConnectedAccount>(v).ok())
+        .find(|a| a.id == account_id)?;
+
+    // Either half may be absent — that is the whole point. A connection with
+    // neither is unusable.
+    let tokens = account
+        .tokens_encrypted
+        .as_deref()
+        .and_then(|enc| secret_box.decrypt_json(enc).ok());
+    let secrets = account
+        .secrets_encrypted
+        .as_deref()
+        .and_then(|enc| secret_box.decrypt_json(enc).ok());
+
+    let has_token = tokens
+        .as_ref()
+        .and_then(|t| t.get("access_token"))
+        .and_then(|v| v.as_str())
+        .is_some_and(|t| !t.is_empty());
+    let has_secret = matches!(secrets.as_ref(), Some(Value::Object(m)) if !m.is_empty());
+    if !has_token && !has_secret {
+        return None;
+    }
+
+    let fields = credential_fields(state, tenant_id, repo, node).await;
     Some(build_credential(
         provider_type,
-        account_id,
-        username,
-        &tokens,
+        &account,
+        tokens.as_ref(),
+        secrets.as_ref(),
+        &fields,
     ))
+}
+
+/// The connection-config fields the connector marks `meta.credential: true`.
+///
+/// These are the non-secret halves of a credential — an IMAP username beside
+/// its encrypted password. Resolved through [`NodeTypeResolver`] so `extends`
+/// and mixins are honoured, exactly as the sync engine resolves them: a probe
+/// built from a different field set is a probe that can report success on a
+/// login the sync would never make.
+///
+/// Empty when the connector declares no `connection_config_type`, or when that
+/// type cannot be resolved — a misconfiguration worth a log line, not a reason
+/// to refuse a credential that may not need those fields at all.
+#[cfg(feature = "storage-rocksdb")]
+async fn credential_fields(
+    state: &crate::state::AppState,
+    tenant_id: &str,
+    repo: &str,
+    node: &Node,
+) -> Vec<String> {
+    use raisin_core::services::node_type_resolver::NodeTypeResolver;
+    use raisin_models::nodes::properties::PropertyValue;
+
+    let Some(type_name) = string_prop(node, "connection_config_type") else {
+        return Vec::new();
+    };
+    let branch = crate::handlers::integrations::config_branch(state, tenant_id, repo).await;
+    let resolver = NodeTypeResolver::new(
+        state.storage().clone(),
+        tenant_id.to_string(),
+        repo.to_string(),
+        branch,
+    );
+    match resolver.resolve(&type_name).await {
+        Ok(resolved) => resolved
+            .resolved_properties
+            .iter()
+            .filter(|p| {
+                p.meta
+                    .as_ref()
+                    .and_then(|m| m.get("credential"))
+                    .is_some_and(|v| matches!(v, PropertyValue::Boolean(true)))
+            })
+            .filter_map(|p| p.name.clone())
+            .collect(),
+        Err(e) => {
+            tracing::warn!(
+                config_type = %type_name,
+                error = %e,
+                "could not resolve connection config type; credential fields unavailable"
+            );
+            Vec::new()
+        }
+    }
 }
 
 /// Read-only `mount` snapshot for a one-off adapter invocation (the connection
@@ -282,10 +356,19 @@ mod tests {
     use super::super::Capabilities;
     use super::*;
 
+    use raisin_models::nodes::integrations::{build_credential, ConnectedAccount};
+
+    fn account(id: &str) -> ConnectedAccount {
+        ConnectedAccount {
+            id: id.to_string(),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn credential_never_contains_refresh_token() {
         let tokens = json!({ "access_token": "at-123", "refresh_token": "rt-secret" });
-        let cred = build_credential("google-drive", "acct-1", None, &tokens);
+        let cred = build_credential("google-drive", &account("acct-1"), Some(&tokens), None, &[]);
         assert_eq!(cred.get("access_token").unwrap(), "at-123");
         assert!(cred.get("refresh_token").is_none());
         assert_eq!(cred.get("account_id").unwrap(), "acct-1");
@@ -299,9 +382,31 @@ mod tests {
     #[test]
     fn credential_carries_username_when_present() {
         let tokens = json!({ "access_token": "at-123", "refresh_token": "rt-secret" });
-        let cred = build_credential("gmail", "acct-1", Some("alice@example.com"), &tokens);
+        let mut acct = account("acct-1");
+        acct.subject = Some("alice@example.com".to_string());
+        let cred = build_credential("gmail", &acct, Some(&tokens), None, &[]);
         assert_eq!(cred.get("username").unwrap(), "alice@example.com");
         assert!(!cred.to_string().contains("rt-secret"));
+    }
+
+    /// A connection made through `Add connection` has no token blob at all —
+    /// its API key lives in `secrets_encrypted`. The probe used to demand an
+    /// `access_token` and so refused every one of them.
+    #[test]
+    fn a_connection_with_only_secrets_still_builds_a_credential() {
+        let secrets = json!({ "api_key": "k-123" });
+        let mut acct = account("acct-1");
+        acct.config = Some(json!({ "username": "ops@example.com" }));
+        let cred = build_credential(
+            "http-json",
+            &acct,
+            None,
+            Some(&secrets),
+            &["username".to_string()],
+        );
+        assert_eq!(cred.get("api_key").unwrap(), "k-123");
+        assert_eq!(cred.get("username").unwrap(), "ops@example.com");
+        assert!(cred.get("access_token").is_none());
     }
 
     /// An integration node carrying connector-level `config`, an `api_config`

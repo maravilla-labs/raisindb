@@ -185,7 +185,16 @@ pub async fn test_connection(
             )));
         }
         None => (None, "not_required"),
-        Some(id) => match support::resolve_credential(&state, &node, &provider_type, id) {
+        Some(id) => match support::resolve_credential(
+            &state,
+            &tenant.tenant_id,
+            &repo,
+            &node,
+            &provider_type,
+            id,
+        )
+        .await
+        {
             Some(cred) => (Some(cred), "valid"),
             None => {
                 return Ok(Json(fail(

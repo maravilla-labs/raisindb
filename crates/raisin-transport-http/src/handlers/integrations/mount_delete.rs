@@ -180,8 +180,15 @@ async fn unsubscribe(
             return false;
         }
     };
-    let credential =
-        super::test_connection::resolve_credential(state, &integ_node, &provider_type, &account_id);
+    let credential = super::test_connection::resolve_credential(
+        state,
+        tenant_id,
+        repo,
+        &integ_node,
+        &provider_type,
+        &account_id,
+    )
+    .await;
     if credential.is_none() {
         tracing::warn!(
             mount_id = %mount.id,
