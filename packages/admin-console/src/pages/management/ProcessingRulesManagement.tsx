@@ -37,6 +37,7 @@ import {
   PipelinePlan,
   BlockedTask,
 } from '../../api/processing-rules'
+import { DEFAULT_CHUNKING_SETTINGS } from '../../api/ai'
 import { ApiError } from '../../api/client'
 import { pluginsApi, PluginsResponse } from '../../api/plugins'
 import { sqlApi } from '../../api/sql'
@@ -1399,7 +1400,7 @@ function RuleEditor({
                       setSettings({
                         ...settings,
                         chunking: e.target.checked
-                          ? { chunk_size: 256, overlap: { type: 'Tokens', value: 64 }, splitter: 'recursive' }
+                          ? { ...DEFAULT_CHUNKING_SETTINGS }
                           : undefined,
                       })
                     }
@@ -1424,7 +1425,8 @@ function RuleEditor({
                             ...settings,
                             chunking: {
                               ...settings.chunking!,
-                              chunk_size: parseInt(e.target.value) || 256,
+                              chunk_size:
+                                parseInt(e.target.value) || DEFAULT_CHUNKING_SETTINGS.chunk_size,
                             },
                           })
                         }

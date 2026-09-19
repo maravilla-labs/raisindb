@@ -61,11 +61,26 @@ export interface ChunkingSettings {
   tokenizer_id?: string
 }
 
-// Default chunking settings
+/**
+ * What the UI seeds when someone turns chunking on.
+ *
+ * `tokenizer_id` is NOT optional in practice, whatever the type says. Sizes are
+ * counted in TOKENS only when one is set; without it the engine counts
+ * CHARACTERS, so a form labelled "Chunk Size (tokens)" showing 256 silently
+ * produced 256-character chunks — roughly a sentence and a half, and worse than
+ * the 512-token default a document body gets when nobody touches this at all.
+ *
+ * The name is a counting proxy and does not have to match the embedder the
+ * tenant actually uses; it has to be a name tiktoken recognises. It matches
+ * `ChunkingConfig::for_documents()` on the server, so turning the override on
+ * and changing nothing reproduces the engine's own default instead of quietly
+ * degrading it.
+ */
 export const DEFAULT_CHUNKING_SETTINGS: ChunkingSettings = {
-  chunk_size: 256,
+  chunk_size: 512,
   overlap: { type: 'Tokens', value: 64 },
   splitter: 'recursive',
+  tokenizer_id: 'text-embedding-3-small',
 }
 
 // Embedding settings
