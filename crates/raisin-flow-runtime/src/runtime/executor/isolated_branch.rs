@@ -168,15 +168,21 @@ async fn execute_step_in_isolated_branch(
 /// Handle successful step execution in an isolated branch by merging back
 async fn handle_branch_success(
     step: &FlowNode,
-    _instance: &mut FlowInstance,
+    instance: &mut FlowInstance,
     branch_name: &str,
     original_branch: Option<&str>,
     callbacks: &dyn FlowCallbacks,
     result: FlowResult<StepResult>,
 ) -> FlowResult<StepResult> {
+    let merge_strategy = step
+        .properties
+        .get("branch_merge_strategy")
+        .and_then(|value| value.as_str())
+        .unwrap_or("auto");
+
     info!(
-        "Step {} succeeded in isolated branch, attempting merge",
-        step.id
+        "Step {} succeeded in isolated branch (strategy: {})",
+        step.id, merge_strategy
     );
 
     // Switch back to original branch first
@@ -188,6 +194,44 @@ async fn handle_branch_success(
                 orig, e
             )));
         }
+    }
+
+    if merge_strategy == "review" {
+        if let serde_json::Value::Object(ref mut vars) = instance.variables {
+            vars.insert(
+                "__review_branch".to_string(),
+                serde_json::json!(branch_name),
+            );
+            vars.insert(
+                "__review_base_branch".to_string(),
+                serde_json::json!(original_branch),
+            );
+        }
+        info!(
+            "Preserving isolated branch '{}' for review after step {}",
+            branch_name, step.id
+        );
+        return Ok(annotate_review_result(
+            result?,
+            branch_name,
+            original_branch,
+        ));
+    }
+
+    if merge_strategy == "discard" {
+        callbacks.delete_branch(branch_name).await?;
+        info!(
+            "Discarded isolated branch '{}' after step {}",
+            branch_name, step.id
+        );
+        return result;
+    }
+
+    if merge_strategy != "auto" {
+        return Err(FlowError::InvalidDefinition(format!(
+            "Unknown branch_merge_strategy '{}' on step '{}'; expected auto, review, or discard",
+            merge_strategy, step.id
+        )));
     }
 
     // Check for conflicts
@@ -241,4 +285,78 @@ async fn handle_branch_success(
     }
 
     result
+}
+
+fn annotate_review_result(
+    result: StepResult,
+    branch_name: &str,
+    base_branch: Option<&str>,
+) -> StepResult {
+    fn annotate(
+        mut output: serde_json::Value,
+        branch_name: &str,
+        base_branch: Option<&str>,
+    ) -> serde_json::Value {
+        let review = serde_json::json!({
+            "status": "awaiting_review",
+            "branch": branch_name,
+            "base_branch": base_branch,
+        });
+        match &mut output {
+            serde_json::Value::Object(object) => {
+                object.insert("branch_review".to_string(), review);
+                output
+            }
+            _ => serde_json::json!({ "result": output, "branch_review": review }),
+        }
+    }
+
+    match result {
+        StepResult::Continue {
+            next_node_id,
+            output,
+        } => StepResult::Continue {
+            next_node_id,
+            output: annotate(output, branch_name, base_branch),
+        },
+        StepResult::Complete { output } => StepResult::Complete {
+            output: annotate(output, branch_name, base_branch),
+        },
+        other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn review_annotation_preserves_agent_output_and_names_branch() {
+        let result = StepResult::Complete {
+            output: serde_json::json!({ "content": "done" }),
+        };
+
+        let annotated = annotate_review_result(result, "flow-step-1-build", Some("main"));
+        let StepResult::Complete { output } = annotated else {
+            panic!("expected complete result");
+        };
+        assert_eq!(output["content"], "done");
+        assert_eq!(output["branch_review"]["status"], "awaiting_review");
+        assert_eq!(output["branch_review"]["branch"], "flow-step-1-build");
+        assert_eq!(output["branch_review"]["base_branch"], "main");
+    }
+
+    #[test]
+    fn review_annotation_wraps_scalar_output() {
+        let result = StepResult::Complete {
+            output: serde_json::json!("done"),
+        };
+        let StepResult::Complete { output } =
+            annotate_review_result(result, "review-branch", Some("main"))
+        else {
+            panic!("expected complete result");
+        };
+        assert_eq!(output["result"], "done");
+        assert_eq!(output["branch_review"]["branch"], "review-branch");
+    }
 }

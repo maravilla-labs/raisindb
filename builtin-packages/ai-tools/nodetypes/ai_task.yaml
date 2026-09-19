@@ -53,4 +53,69 @@ properties:
         - label: Urgent
           value: urgent
 
+  - name: delegation_id
+    title: Delegation ID
+    type: string
+    readonly: true
+
+  - name: delegation_status
+    title: Delegation Status
+    type: string
+    readonly: true
+
+  - name: delegated_agent_ref
+    title: Delegated Agent
+    type: Reference
+    readonly: true
+
+  - name: delegation_flow_instance_id
+    title: Delegated Flow Instance
+    type: string
+    readonly: true
+
+  - name: delegation_objective
+    title: Delegation Objective
+    type: string
+    readonly: true
+
+  - name: delegated_at
+    title: Delegated At
+    type: Date
+    readonly: true
+
+  - name: delegated_completed_at
+    title: Delegation Completed At
+    type: Date
+    readonly: true
+
+  - name: delegation_branch
+    title: Review Branch
+    type: string
+    readonly: true
+
+  - name: delegation_base_branch
+    title: Base Branch
+    type: string
+    readonly: true
+
+  - name: delegation_result
+    title: Delegation Result
+    type: Object
+    readonly: true
+
+  - name: delegation_error
+    title: Delegation Error
+    type: string
+    readonly: true
+
+  - name: delegation_review_action
+    title: Delegation Review Action
+    type: string
+    readonly: true
+
+  - name: delegation_reviewed_at
+    title: Delegation Reviewed At
+    type: Date
+    readonly: true
+
 allowed_children: []

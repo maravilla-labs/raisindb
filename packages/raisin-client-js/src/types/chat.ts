@@ -30,6 +30,19 @@ export interface PlanTask {
   title: string;
   /** Task status */
   status: string;
+  /** Durable child-agent delegation state, when this task was delegated. */
+  delegation?: PlanTaskDelegation;
+}
+
+export interface PlanTaskDelegation {
+  id: string;
+  status: string;
+  agentRef?: string;
+  flowInstanceId?: string;
+  branch?: string;
+  baseBranch?: string;
+  result?: unknown;
+  error?: string;
 }
 
 /** Child record attached to a message (thought, tool call detail, plan, cost) */

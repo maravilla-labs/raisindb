@@ -785,6 +785,18 @@ export class ConversationManager {
           id: row.id,
           title: row.properties?.title ?? row.name,
           status: row.properties?.status ?? 'pending',
+          delegation: row.properties?.delegation_id ? {
+            id: row.properties.delegation_id,
+            status: row.properties.delegation_status ?? 'unknown',
+            agentRef: row.properties.delegated_agent_ref?.['raisin:path']
+              ?? row.properties.delegated_agent_ref?.['raisin:ref']
+              ?? (typeof row.properties.delegated_agent_ref === 'string' ? row.properties.delegated_agent_ref : undefined),
+            flowInstanceId: row.properties.delegation_flow_instance_id ?? undefined,
+            branch: row.properties.delegation_branch ?? undefined,
+            baseBranch: row.properties.delegation_base_branch ?? undefined,
+            result: row.properties.delegation_result,
+            error: row.properties.delegation_error ?? undefined,
+          } : undefined,
         });
         tasksByPlan.set(planPath, tasks);
         continue;

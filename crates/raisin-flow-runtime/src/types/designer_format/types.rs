@@ -247,6 +247,11 @@ pub struct DesignerStepProperties {
     #[serde(default)]
     pub isolated_branch: bool,
 
+    /// What to do with a successful isolated branch: auto (merge and delete),
+    /// review (preserve and return its name), or discard.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch_merge_strategy: Option<String>,
+
     /// Execution identity mode for permission handling (FR-028)
     /// - agent: Use AI agent's service account identity
     /// - caller: Use triggering user's identity for attribution

@@ -926,6 +926,12 @@ fn convert_step_node(
     if properties.isolated_branch {
         props.insert("isolated_branch".to_string(), Value::Bool(true));
     }
+    if let Some(strategy) = &properties.branch_merge_strategy {
+        props.insert(
+            "branch_merge_strategy".to_string(),
+            Value::String(strategy.clone()),
+        );
+    }
 
     // Human task properties. The runtime requires `title`; the designer's
     // step label (`action`) doubles as the task title.

@@ -64,21 +64,27 @@ impl StepHandler for AgentStepHandler {
             .await;
 
         // Get agent reference
-        let agent_ref = step
-            .get_string_property("agent_ref")
+        let agent_ref_value = step.get_property("agent_ref").cloned().ok_or_else(|| {
+            FlowError::MissingProperty(format!(
+                "Agent step '{}' missing required property: agent_ref",
+                step.id
+            ))
+        })?;
+        let resolved_agent_ref = DataMapper::map(&agent_ref_value, context)?;
+        let agent_ref = resolved_agent_ref
+            .as_str()
+            .map(String::from)
             .or_else(|| {
-                step.get_property("agent_ref")
-                    .and_then(|v| v.as_object())
-                    .and_then(|obj| {
-                        obj.get("raisin:path")
-                            .or_else(|| obj.get("raisin:ref"))
-                            .and_then(|v| v.as_str())
-                            .map(String::from)
-                    })
+                resolved_agent_ref.as_object().and_then(|obj| {
+                    obj.get("raisin:path")
+                        .or_else(|| obj.get("raisin:ref"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                })
             })
             .ok_or_else(|| {
-                FlowError::MissingProperty(format!(
-                    "Agent step '{}' missing required property: agent_ref",
+                FlowError::InvalidDefinition(format!(
+                    "Agent step '{}' resolved agent_ref to an invalid value",
                     step.id
                 ))
             })?;

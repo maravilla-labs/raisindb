@@ -1,0 +1,24 @@
+node_type: raisin:Function
+properties:
+  name: get-delegation-status
+  title: Get Delegation Status
+  description: Read the durable state, result, and review branch of a delegated plan task.
+  execution_mode: inline
+  category: planning
+  enabled: true
+  language: javascript
+  entry_file: index.js:handler
+  input_schema:
+    type: object
+    additionalProperties: false
+    required: [task_id]
+    properties:
+      task_id: { type: string }
+  output_schema:
+    type: object
+    properties:
+      found: { type: boolean }
+      task_id: { type: string }
+      status: { type: string }
+      branch: { type: string }
+      result: {}

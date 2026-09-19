@@ -49,6 +49,16 @@ async function handler(input) {
     description: task.properties?.description || '',
     status: task.properties?.status || 'pending',
     priority: task.properties?.priority || 'normal',
+    delegation: task.properties?.delegation_id ? {
+      id: task.properties.delegation_id,
+      status: task.properties.delegation_status || 'unknown',
+      agent_ref: task.properties.delegated_agent_ref || null,
+      flow_instance_id: task.properties.delegation_flow_instance_id || null,
+      branch: task.properties.delegation_branch || null,
+      base_branch: task.properties.delegation_base_branch || null,
+      result: task.properties.delegation_result || null,
+      error: task.properties.delegation_error || null,
+    } : null,
   }));
 
   const pending = taskList.filter(t => t.status === 'pending');

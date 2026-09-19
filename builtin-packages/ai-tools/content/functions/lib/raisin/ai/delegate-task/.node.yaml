@@ -1,0 +1,37 @@
+node_type: raisin:Function
+properties:
+  name: delegate-task
+  title: Delegate Plan Task
+  description: >
+    Delegate one approved plan task to an installed agent. The child runs in an
+    isolated content branch which is preserved for review instead of merged.
+  execution_mode: inline
+  category: planning
+  enabled: true
+  language: javascript
+  entry_file: index.js:handler
+  input_schema:
+    type: object
+    additionalProperties: false
+    required: [task_id, agent_ref, objective]
+    properties:
+      task_id: { type: string, description: "ID of a task in the current conversation plan" }
+      agent_ref: { type: string, description: "Installed agent path, for example /agents/security-reviewer" }
+      objective: { type: string, description: "Bounded objective and expected result for the child agent" }
+      context:
+        type: object
+        description: "Only the structured context the child needs"
+      max_tool_iterations:
+        type: integer
+        minimum: 1
+        maximum: 12
+        default: 6
+  output_schema:
+    type: object
+    properties:
+      success: { type: boolean }
+      delegation_id: { type: string }
+      flow_instance_id: { type: string }
+      task_id: { type: string }
+      agent_ref: { type: string }
+      status: { type: string }

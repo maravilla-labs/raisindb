@@ -12,6 +12,16 @@ export interface PlanProjectionTask {
   status: string;
   description?: string;
   priority?: string;
+  delegation?: {
+    id?: string;
+    status: string;
+    agentRef?: string;
+    flowInstanceId?: string;
+    branch?: string;
+    baseBranch?: string;
+    result?: unknown;
+    error?: string;
+  };
 }
 
 export interface PlanProjection {
@@ -47,12 +57,23 @@ export function parsePlanTasks(rawTasks: unknown): PlanProjectionTask[] {
       }
       const task = asRecord(rawTask);
       if (!task) return null;
+      const delegation = asRecord(task.delegation);
       return {
         taskId: asString(task.task_id) ?? asString(task.id),
         title: asString(task.title) ?? `Task ${index + 1}`,
         status: asString(task.status) ?? 'pending',
         description: asString(task.description),
         priority: asString(task.priority),
+        delegation: delegation ? {
+          id: asString(delegation.id),
+          status: asString(delegation.status) ?? 'unknown',
+          agentRef: asString(delegation.agent_ref) ?? asString(delegation.agentRef),
+          flowInstanceId: asString(delegation.flow_instance_id) ?? asString(delegation.flowInstanceId),
+          branch: asString(delegation.branch),
+          baseBranch: asString(delegation.base_branch) ?? asString(delegation.baseBranch),
+          result: delegation.result,
+          error: asString(delegation.error),
+        } : undefined,
       } satisfies PlanProjectionTask;
     })
     .filter((task): task is PlanProjectionTask => task !== null);
@@ -197,6 +218,16 @@ export function projectPlansFromMessages(messages: ChatMessage[]): PlanProjectio
             taskId: task.id,
             title: task.title,
             status: task.status,
+            delegation: task.delegation ? {
+              id: task.delegation.id,
+              status: task.delegation.status,
+              agentRef: task.delegation.agentRef,
+              flowInstanceId: task.delegation.flowInstanceId,
+              branch: task.delegation.branch,
+              baseBranch: task.delegation.baseBranch,
+              result: task.delegation.result,
+              error: task.delegation.error,
+            } : undefined,
           }));
         }
       }
