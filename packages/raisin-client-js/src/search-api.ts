@@ -58,16 +58,44 @@ export interface SearchPassage {
   score: number;
 }
 
+/**
+ * Which workspaces a retrieval may read, as one string.
+ *
+ * | Form | Example | Behaviour |
+ * |---|---|---|
+ * | One name | `'stories'` | Exact |
+ * | A list | `'stories, handbook, policies'` | Exact, each name; spaces are trimmed |
+ * | A glob | `'content-*'` | Pattern — one token, never mixed into a list |
+ * | Everything | `'ALL READABLE'` | Every workspace the caller may read |
+ *
+ * **A name is an assertion; a glob is a question.** A listed name that does not
+ * resolve is an ERROR — you meant that workspace, so a typo is reported rather
+ * than silently searching the rest. A glob that matches nothing is fine and
+ * simply returns no rows; you only hoped for a pattern.
+ *
+ * `'*'` and `'ALL'` are rejected on purpose. `'*'` reads as "unscoped" and the
+ * eye slides past it in review, while two uppercase words appear in no other
+ * context — so "which of our queries go repo-wide?" stays answerable with one
+ * grep.
+ *
+ * Row-level security applies to the results either way: a caller never sees a
+ * node it may not read. The scope is not a security boundary, it is an
+ * INTENT — it decides which corpus the answer is drawn from. On a public site
+ * those differ sharply: the visitor's identity may legitimately read published
+ * pages, and a chatbot scoped to everything readable will happily quote an
+ * internal handbook at them because nothing said not to.
+ */
+export type WorkspaceScope = string;
+
 export interface SearchOptions {
   /**
-   * Where to look: a workspace name, a comma-separated list, a glob such as
-   * `content-*`, or `'ALL READABLE'` for everything the caller may read.
+   * Where to look. See {@link WorkspaceScope} for the forms.
    *
-   * Required by the engine and deliberately not defaulted here for a public
-   * surface: an unscoped search on a website is how draft content reaches a
-   * visitor. Pass `'ALL READABLE'` explicitly when that is what you mean.
+   * Required, and deliberately not defaulted: an unscoped search on a website
+   * is how content nobody meant to publish reaches a visitor. Pass
+   * `'ALL READABLE'` when that really is what you mean.
    */
-  workspaces: string;
+  workspaces: WorkspaceScope;
   /** How many passages. Defaults to 8. */
   limit?: number;
   /** Optional vector-distance ceiling, to tighten precision. */
@@ -108,8 +136,16 @@ export interface Citation {
 }
 
 export interface AskOptions {
-  /** Where to look. Defaults to everything the caller may read. */
-  workspaces?: string;
+  /**
+   * Where the answer may be drawn from. See {@link WorkspaceScope}.
+   *
+   * Required, exactly as it is on {@link SearchApi.search}, and for a sharper
+   * reason: an answer is quoted back to whoever asked. A chatbot on a public
+   * page left at "everything readable" will paraphrase an internal document
+   * the moment a visitor's question happens to match it — fluently, with a
+   * citation, and with nothing to show it was never meant for them.
+   */
+  workspaces: WorkspaceScope;
   /** How many passages to ground the answer in. Defaults to 8. */
   limit?: number;
   /** Model id, as `slug:model`. Defaults to the tenant's configured chat model. */
@@ -206,14 +242,21 @@ export class SearchApi {
    * Retrieves, judges whether what came back answers the question, rewrites the
    * query once if it does not, and answers from those passages only.
    */
-  async ask(question: string, options: AskOptions = {}): Promise<Answer> {
+  async ask(question: string, options: AskOptions): Promise<Answer> {
     if (!question || !question.trim()) {
       throw new Error('ask(question) requires a non-empty question');
+    }
+    if (!options || !options.workspaces || !options.workspaces.trim()) {
+      throw new Error(
+        "ask() requires `workspaces` — name a workspace, a list, a glob, or " +
+          "'ALL READABLE'. An answer is quoted back to whoever asked, so the " +
+          'corpus it may be drawn from is stated, never assumed.',
+      );
     }
 
     const raw = (await this.runFunction(ASK_FUNCTION, {
       question: question.trim(),
-      workspaces: options.workspaces,
+      workspaces: options.workspaces.trim(),
       limit: options.limit,
       model: options.model,
       use_graph: options.useGraph,

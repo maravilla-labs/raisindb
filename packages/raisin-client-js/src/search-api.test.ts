@@ -145,7 +145,7 @@ describe('ask', () => {
       },
     });
 
-    const result = await api.ask('How much notice?');
+    const result = await api.ask('How much notice?', { workspaces: 'stories' });
 
     expect(result.answer).toBe('Thirty days [1].');
     expect(result.grounded).toBe(true);
@@ -166,19 +166,62 @@ describe('ask', () => {
     // showing an answer to a stranger.
     const { api } = harness({ answer: { answer: 'something' } });
 
-    expect((await api.ask('q')).grounded).toBe(false);
+    expect((await api.ask('q', { workspaces: 'stories' })).grounded).toBe(false);
   });
 
   it('throws when the function reports an error instead of answering', async () => {
     const { api } = harness({ answer: { error: 'no chat model configured' } });
 
-    await expect(api.ask('q')).rejects.toThrow(/no chat model configured/);
+    await expect(
+      api.ask('q', { workspaces: 'stories' }),
+    ).rejects.toThrow(/no chat model configured/);
   });
 
   it('rejects an empty question before spending a model call', async () => {
     const { api, calls } = harness();
 
-    await expect(api.ask('   ')).rejects.toThrow(/non-empty/);
+    await expect(api.ask('   ', { workspaces: 'stories' })).rejects.toThrow(/non-empty/);
     expect(calls.fn).toHaveLength(0);
+  });
+});
+
+describe('the workspace scope', () => {
+  it('ask requires it too — an answer is quoted back to whoever asked', async () => {
+    const { api, calls } = harness();
+
+    await expect(
+      api.ask('what is our refund window?', { workspaces: '' }),
+    ).rejects.toThrow(/workspaces/);
+    expect(calls.fn, 'no model call for a question with no stated corpus').toHaveLength(0);
+  });
+
+  it('passes a multi-workspace list through verbatim', async () => {
+    const { api, calls } = harness({ answer: { answer: 'a', grounded: true } });
+
+    await api.ask('q', { workspaces: 'stories, handbook, policies' });
+
+    expect(calls.fn[0][1]).toMatchObject({
+      workspaces: 'stories, handbook, policies',
+    });
+  });
+
+  it('passes a list to search as one bound parameter', async () => {
+    const { api, calls } = harness();
+
+    await api.search('q', { workspaces: 'stories, handbook' });
+
+    // The engine parses the list; the client does not split it. Splitting here
+    // would mean two parsers for one grammar, and they would drift.
+    expect(calls.params[0][1]).toBe('stories, handbook');
+  });
+
+  it('accepts a glob and ALL READABLE unchanged', async () => {
+    const { api, calls } = harness();
+
+    await api.search('q', { workspaces: 'content-*' });
+    await api.search('q', { workspaces: 'ALL READABLE' });
+
+    expect(calls.params[0][1]).toBe('content-*');
+    expect(calls.params[1][1]).toBe('ALL READABLE');
   });
 });

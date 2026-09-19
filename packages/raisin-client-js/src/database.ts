@@ -379,6 +379,11 @@ export class Database {
    * `grounded` before showing the answer: when it is false nothing relevant was
    * found and the model was never asked.
    *
+   * `workspaces` is required, the same as on {@link search}: an answer is
+   * quoted back to whoever asked, so the corpus it may be drawn from is stated
+   * rather than assumed. One name, a comma-separated list, a glob, or
+   * `'ALL READABLE'`.
+   *
    * A method rather than `functions().invoke('ask', ...)` on purpose — see the
    * note at the top of `search-api.ts`. `invoke` is the escape hatch for
    * functions YOU wrote.
@@ -387,11 +392,11 @@ export class Database {
    * ```typescript
    * const { answer, citations, grounded } = await db.ask(
    *   'How much notice do we have to give?',
-   *   { workspaces: 'stories' },
+   *   { workspaces: 'stories, handbook' },   // one name, a list, a glob, or 'ALL READABLE'
    * );
    * ```
    */
-  async ask(question: string, options?: AskOptions): Promise<Answer> {
+  async ask(question: string, options: AskOptions): Promise<Answer> {
     return this.searchApi().ask(question, options);
   }
 

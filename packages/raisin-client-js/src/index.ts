@@ -29,6 +29,7 @@ export type {
   Citation,
   SearchOptions,
   SearchPassage,
+  WorkspaceScope,
 } from './search-api';
 
 // Main client
