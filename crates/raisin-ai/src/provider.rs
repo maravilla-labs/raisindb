@@ -4,7 +4,7 @@
 //! as well as common utilities for working with providers.
 
 use crate::model_cache::ModelInfo;
-use crate::types::{CompletionRequest, CompletionResponse, StreamChunk};
+use crate::types::{CompletionRequest, CompletionResponse, Message, StreamChunk};
 use async_trait::async_trait;
 use futures::stream::Stream;
 use std::pin::Pin;
@@ -51,6 +51,103 @@ pub enum ProviderError {
 }
 
 pub type Result<T> = std::result::Result<T, ProviderError>;
+
+const TOOL_REPAIR_MAX_ERROR_CHARS: usize = 4000;
+
+/// Build one provider-independent correction turn for a rejected tool call.
+/// Authentication, transport, quota, and ordinary generation errors are not
+/// repairable here and pass through unchanged.
+pub fn tool_validation_repair_request(
+    request: &CompletionRequest,
+    error: &ProviderError,
+) -> Option<CompletionRequest> {
+    let ProviderError::RequestFailed(message) = error else {
+        return None;
+    };
+    if request.tools.as_ref().is_none_or(Vec::is_empty) {
+        return None;
+    }
+
+    let lower = message.to_ascii_lowercase();
+    let names_tool_call = lower.contains("tool call") || lower.contains("function call");
+    let names_schema_problem = [
+        "validation failed",
+        "did not match schema",
+        "invalid arguments",
+        "invalid parameters",
+        "schema validation",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+    if !names_tool_call || !names_schema_problem {
+        return None;
+    }
+
+    let failed = message
+        .split_once(crate::providers::http_helpers::FAILED_GENERATION_MARKER)
+        .map(|(_, generation)| generation.trim())
+        .unwrap_or("");
+    let failed: String = failed.chars().take(TOOL_REPAIR_MAX_ERROR_CHARS).collect();
+    let summary = message
+        .split(crate::providers::http_helpers::FAILED_GENERATION_MARKER)
+        .next()
+        .unwrap_or(message);
+
+    let mut retry = request.clone();
+    retry.messages.push(Message::user(format!(
+        "The previous tool call was rejected because its arguments did not match the tool's JSON schema. \
+         Correct the arguments using the tool definitions already provided and call the intended tool again. \
+         Do not explain the correction and do not add undeclared arguments.\n\
+         Validation error: {summary}\n\
+         Rejected call: {}",
+        if failed.is_empty() { "unavailable" } else { &failed },
+    )));
+    Some(retry)
+}
+
+/// Complete with at most one self-correction pass for tool-schema rejection.
+pub async fn complete_with_tool_repair(
+    provider: &dyn AIProviderTrait,
+    request: CompletionRequest,
+) -> Result<CompletionResponse> {
+    match provider.complete(request.clone()).await {
+        Ok(response) => Ok(response),
+        Err(error) => {
+            let Some(repair) = tool_validation_repair_request(&request, &error) else {
+                return Err(error);
+            };
+            tracing::warn!(
+                provider = provider.provider_name(),
+                model = %request.model,
+                "tool call failed schema validation; retrying once with validation feedback"
+            );
+            provider.complete(repair).await
+        }
+    }
+}
+
+/// Start a stream with the same bounded repair used for normal completions.
+/// Tool validation errors occur before a provider returns its stream, so no
+/// partial user-visible response is discarded by this retry.
+pub async fn stream_complete_with_tool_repair(
+    provider: &dyn AIProviderTrait,
+    request: CompletionRequest,
+) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
+    match provider.stream_complete(request.clone()).await {
+        Ok(stream) => Ok(stream),
+        Err(error) => {
+            let Some(repair) = tool_validation_repair_request(&request, &error) else {
+                return Err(error);
+            };
+            tracing::warn!(
+                provider = provider.provider_name(),
+                model = %request.model,
+                "streamed tool call failed schema validation; retrying once with validation feedback"
+            );
+            provider.stream_complete(repair).await
+        }
+    }
+}
 
 /// Refuse a request that carries images when this provider cannot send them.
 ///
@@ -296,7 +393,8 @@ pub type ProviderResult<T> = Result<T>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Message;
+    use crate::types::{Message, ToolDefinition};
+    use std::sync::Mutex;
 
     struct MockProvider;
 
@@ -353,5 +451,97 @@ mod tests {
         // Invalid model
         let result = provider.validate_model("invalid-model");
         assert!(matches!(result, Err(ProviderError::InvalidModel(_))));
+    }
+
+    fn tool_request() -> CompletionRequest {
+        CompletionRequest::new("any-model".to_string(), vec![Message::user("Create it")])
+            .with_tools(vec![ToolDefinition::function(
+                "draft-function".to_string(),
+                "Draft it".to_string(),
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "slug": { "type": "string" } },
+                    "required": ["slug"],
+                    "additionalProperties": false
+                }),
+            )])
+    }
+
+    struct RepairingProvider {
+        requests: Mutex<Vec<CompletionRequest>>,
+        always_fail: bool,
+    }
+
+    #[async_trait]
+    impl AIProviderTrait for RepairingProvider {
+        async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse> {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(request.clone());
+            if requests.len() == 1 || self.always_fail {
+                return Err(ProviderError::RequestFailed(
+                    concat!(
+                        "Tool call validation failed: parameters did not match schema",
+                        "\nFailed generation: ",
+                        r#"{"name":"draft-function","arguments":{"slug":"demo","model":"x"}}"#
+                    )
+                    .to_string(),
+                ));
+            }
+            Ok(CompletionResponse {
+                message: Message::assistant("repaired"),
+                model: request.model,
+                usage: None,
+                stop_reason: Some("stop".to_string()),
+            })
+        }
+
+        fn provider_name(&self) -> &str {
+            "provider-neutral-test"
+        }
+    }
+
+    #[tokio::test]
+    async fn test_shared_completion_repairs_tool_validation_once() {
+        let provider = RepairingProvider {
+            requests: Mutex::new(Vec::new()),
+            always_fail: false,
+        };
+        let response = complete_with_tool_repair(&provider, tool_request())
+            .await
+            .unwrap();
+        assert_eq!(response.message.content, "repaired");
+
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let feedback = &requests[1].messages.last().unwrap().content;
+        assert!(feedback.contains("did not match"));
+        assert!(feedback.contains("do not add undeclared arguments"));
+        assert!(feedback.contains("draft-function"));
+        assert_eq!(requests[1].tools.as_ref().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_shared_completion_stops_after_one_failed_repair() {
+        let provider = RepairingProvider {
+            requests: Mutex::new(Vec::new()),
+            always_fail: true,
+        };
+        assert!(complete_with_tool_repair(&provider, tool_request())
+            .await
+            .is_err());
+        assert_eq!(provider.requests.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_tool_repair_ignores_unrelated_errors() {
+        assert!(
+            tool_validation_repair_request(&tool_request(), &ProviderError::RateLimitExceeded,)
+                .is_none()
+        );
+        assert!(tool_validation_repair_request(
+            &tool_request(),
+            &ProviderError::RequestFailed("Authentication failed".to_string()),
+        )
+        .is_none());
     }
 }

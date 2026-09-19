@@ -26,6 +26,12 @@ const SUMMARIZE_SYSTEM_PROMPT =
   + 'name, number, decision, and open question stated by either side, even '
   + 'ones that seem trivial. Respond with the summary only, no preamble.';
 
+function tokensSinceLatestCompaction(totalTokens, compaction) {
+  const total = Math.max(0, Number(totalTokens) || 0);
+  const checkpoint = Math.max(0, Number(compaction?.properties?.token_checkpoint) || 0);
+  return Math.max(0, total - checkpoint);
+}
+
 function extractText(props) {
   if (!props) return '';
   if (typeof props.content === 'string' && props.content.trim()) return props.content.trim();
@@ -63,7 +69,7 @@ async function getLatestCompaction(workspace, chatPath) {
  * Never throws — on any failure the previous compaction state is returned and
  * the turn proceeds with uncompacted history.
  */
-async function maybeCompactConversation(workspace, chatPath, agentProps, modelId) {
+async function maybeCompactConversation(workspace, chatPath, agentProps, modelId, options = {}) {
   if (agentProps?.auto_compact !== true) return null;
 
   let existing = null;
@@ -91,12 +97,16 @@ async function maybeCompactConversation(workspace, chatPath, agentProps, modelId
       if (idx >= 0) active = messages.slice(idx + 1);
     }
 
-    if (active.length <= threshold) return existing;
+    const force = options.force === true;
+    if (!force && active.length <= threshold) return existing;
 
     const keepFloor = Number(agentProps.compact_keep_messages) > 0
       ? Math.floor(Number(agentProps.compact_keep_messages))
       : Math.max(2, Math.floor(threshold / 3));
-    const keep = Math.max(keepFloor, Math.floor(active.length / 3));
+    const desiredKeep = Math.max(keepFloor, Math.floor(active.length / 3));
+    const keep = force
+      ? Math.min(desiredKeep, Math.max(1, active.length - 1))
+      : desiredKeep;
     const toCompact = active.slice(0, active.length - keep);
     if (toCompact.length === 0) return existing;
 
@@ -140,6 +150,7 @@ async function maybeCompactConversation(workspace, chatPath, agentProps, modelId
         summary_preview: summary.slice(0, 200),
         cutoff_message_path: cutoff.path,
         cutoff_created_at: cutoff.created_at || cutoff.properties?.created_at || null,
+        token_checkpoint: Number(options.tokenCheckpoint) || 0,
         created_at: new Date().toISOString(),
       },
     });
@@ -166,4 +177,5 @@ async function maybeCompactConversation(workspace, chatPath, agentProps, modelId
 export {
   getLatestCompaction,
   maybeCompactConversation,
+  tokensSinceLatestCompaction,
 };

@@ -107,7 +107,10 @@ pub use crypto::{ApiKeyEncryptor, CryptoError};
 pub use model_cache::{
     ModelCache, ModelCapabilities, ModelInfo, ModelProfile, SchemaTransformerType,
 };
-pub use provider::AIProviderTrait;
+pub use provider::{
+    complete_with_tool_repair, stream_complete_with_tool_repair, tool_validation_repair_request,
+    AIProviderTrait,
+};
 pub use providers::{
     AnthropicProvider, AzureOpenAIProvider, BedrockProvider, GeminiProvider, GroqProvider,
     OllamaProvider, OpenAIProvider, OpenRouterProvider,

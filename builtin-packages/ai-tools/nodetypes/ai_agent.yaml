@@ -224,11 +224,10 @@ properties:
     type: Number
     required: false
     description: |
-      Token budget per conversation. The running total (total_tokens_used on
-      the agent-side conversation node, accumulated from all cost records
-      including compaction calls) is checked at turn start; when reached, the
-      agent replies with a budget-exceeded message (finish_reason
-      budget_exceeded) without calling the AI.
+      Token budget between compactions. With auto_compact enabled, the agent
+      compacts at 80% pressure and begins a fresh token window from the saved
+      checkpoint. If compaction is disabled or cannot make progress, reaching
+      the limit produces a budget-exceeded response without calling the AI.
     validation:
       min: 1
 

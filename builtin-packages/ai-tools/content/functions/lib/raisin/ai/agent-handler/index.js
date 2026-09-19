@@ -22,7 +22,11 @@
 
 import { log, setContext } from '../agent-shared/logger.js';
 import { buildHistoryFromChat } from '../agent-shared/history.js';
-import { maybeCompactConversation } from '../agent-shared/compaction.js';
+import {
+  getLatestCompaction,
+  maybeCompactConversation,
+  tokensSinceLatestCompaction,
+} from '../agent-shared/compaction.js';
 import {
   resolveToolsParallel,
   normalizeToolCalls,
@@ -261,20 +265,45 @@ export async function handleUserMessage(context) {
     }
   }
 
-  // ── 4b. Conversation token budget guard ──────────────────────────────────
-  // When max_conversation_tokens is set on the agent and the running total
-  // (total_tokens_used, maintained by createCostRecord) has reached it,
-  // refuse the turn without calling the AI.
+  const modelId = agentProps.provider
+    ? `${agentProps.provider}:${agentProps.model}`
+    : agentProps.model;
+
+  // ── 4b. Conversation token-pressure guard ────────────────────────────────
+  // With auto-compaction enabled, the budget is a rolling window. Compact at
+  // 80% pressure and measure subsequent usage from the persisted checkpoint.
+  // Refusal remains the fallback when compaction cannot make progress.
 
   const maxConversationTokens = Number(agentProps.max_conversation_tokens) || 0;
   if (maxConversationTokens > 0) {
     const tokensUsed = Number(chat.properties?.total_tokens_used) || 0;
-    if (tokensUsed >= maxConversationTokens) {
+    let latestCompaction = null;
+    try {
+      latestCompaction = await getLatestCompaction(workspace, chatPath);
+    } catch (err) {
+      log.warn('handler', 'Could not read compaction checkpoint', {
+        error: err?.message || String(err),
+      });
+    }
+    let activeTokens = tokensSinceLatestCompaction(tokensUsed, latestCompaction);
+
+    if (agentProps.auto_compact === true && activeTokens >= maxConversationTokens * 0.8) {
+      latestCompaction = await maybeCompactConversation(
+        workspace,
+        chatPath,
+        agentProps,
+        modelId,
+        { force: true, tokenCheckpoint: tokensUsed },
+      );
+      activeTokens = tokensSinceLatestCompaction(tokensUsed, latestCompaction);
+    }
+
+    if (activeTokens >= maxConversationTokens) {
       log.warn('handler', 'Conversation token budget exceeded', {
-        used: tokensUsed,
+        used: activeTokens,
         limit: maxConversationTokens,
       });
-      const content = `This conversation has reached its token budget (${tokensUsed} used / ${maxConversationTokens} limit). Please start a new conversation.`;
+      const content = `This conversation has reached its token budget (${activeTokens} used / ${maxConversationTokens} limit). Please start a new conversation.`;
       let budgetMsg;
       try {
         budgetMsg = await raisin.nodes.create(workspace, chatPath, {
@@ -381,10 +410,6 @@ export async function handleUserMessage(context) {
   }
 
   // ── 7. Build history and call AI completion ───────────────────────────────
-
-  const modelId = agentProps.provider
-    ? `${agentProps.provider}:${agentProps.model}`
-    : agentProps.model;
 
   // Auto-compaction: summarize older messages once the threshold is crossed.
   // The persisted raisin:AICompaction node is picked up by the history builder.

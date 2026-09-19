@@ -113,7 +113,7 @@ behavior is unchanged.
 | `auto_compact` | boolean | `false` | Enable conversation auto-compaction. |
 | `compact_threshold_messages` | number | 30 | Active (non-compacted) message count that triggers compaction at turn start. |
 | `compact_keep_messages` | number | max(2, threshold/3) | Floor of most recent messages kept verbatim when compacting. |
-| `max_conversation_tokens` | number | — | Per-conversation token budget; when reached the agent refuses the turn with `finish_reason: budget_exceeded` and makes no AI call. |
+| `max_conversation_tokens` | number | — | Token budget between compactions. With auto-compaction, compaction runs at 80% pressure and starts a fresh window; otherwise reaching the limit refuses the turn. |
 
 ### How compaction works
 
@@ -136,12 +136,14 @@ are recorded as a `raisin:AICostRecord` under the compaction node.
 
 ### Token accounting
 
-Every AI call writes a `raisin:AICostRecord` and increments a running
-`total_tokens_used` property on the agent-side conversation node. The
-`max_conversation_tokens` budget is checked against this total at turn start;
-a budget-exceeded turn creates a normal assistant reply ("This conversation
-has reached its token budget (X used / Y limit)…") and emits the standard
-`done` event so clients terminate cleanly — no provider call is made.
+Every AI call writes a `raisin:AICostRecord` and increments a lifetime
+`total_tokens_used` property on the agent-side conversation node. When
+auto-compaction is enabled, `max_conversation_tokens` acts as a rolling
+window: at 80% pressure the handler summarizes older messages and stores the
+current lifetime total as `token_checkpoint` on the compaction. Later turns
+measure usage from that checkpoint. If compaction is disabled or cannot make
+progress, reaching the limit creates a normal budget-exceeded assistant reply
+and emits the standard `done` event without making the main provider call.
 
 ## Configuration
 

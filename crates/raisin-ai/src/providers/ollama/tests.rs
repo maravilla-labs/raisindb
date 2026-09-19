@@ -134,6 +134,7 @@ fn test_embedding_model_detection() {
     // Test BERT architecture detection (all-minilm, nomic-embed-text)
     let bert_show = OllamaShowResponse {
         details: None,
+        capabilities: None,
         model_info: Some(HashMap::from([
             (
                 "general.architecture".to_string(),
@@ -148,6 +149,7 @@ fn test_embedding_model_detection() {
     // Test nomic-bert architecture
     let nomic_bert_show = OllamaShowResponse {
         details: None,
+        capabilities: None,
         model_info: Some(HashMap::from([
             (
                 "general.architecture".to_string(),
@@ -165,6 +167,7 @@ fn test_embedding_model_detection() {
     // Test XLM-RoBERTa architecture (multilingual embeddings)
     let xlm_show = OllamaShowResponse {
         details: None,
+        capabilities: None,
         model_info: Some(HashMap::from([(
             "general.architecture".to_string(),
             serde_json::json!("xlm-roberta"),
@@ -175,6 +178,7 @@ fn test_embedding_model_detection() {
     // Test model with only pooling_type (should detect as embedding)
     let pooling_only = OllamaShowResponse {
         details: None,
+        capabilities: None,
         model_info: Some(HashMap::from([
             (
                 "general.architecture".to_string(),
@@ -188,6 +192,7 @@ fn test_embedding_model_detection() {
     // Test LLaMA architecture (NOT an embedding model)
     let llama_show = OllamaShowResponse {
         details: None,
+        capabilities: None,
         model_info: Some(HashMap::from([(
             "general.architecture".to_string(),
             serde_json::json!("llama"),
@@ -198,6 +203,7 @@ fn test_embedding_model_detection() {
     // Test mistral architecture (NOT an embedding model)
     let mistral_show = OllamaShowResponse {
         details: None,
+        capabilities: None,
         model_info: Some(HashMap::from([(
             "general.architecture".to_string(),
             serde_json::json!("mistral"),
@@ -208,6 +214,7 @@ fn test_embedding_model_detection() {
     // Test empty model_info
     let empty_show = OllamaShowResponse {
         details: None,
+        capabilities: None,
         model_info: None,
     };
     assert!(!OllamaProvider::is_embedding_model(&empty_show));

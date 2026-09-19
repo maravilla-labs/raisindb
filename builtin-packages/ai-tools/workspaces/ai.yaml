@@ -9,6 +9,8 @@ allowed_node_types:
   - raisin:AIPrompt
   - raisin:AIConversation
   - raisin:AIMessage
+  - raisin:Conversation
+  - raisin:Message
   - raisin:AIModel
   - raisin:AIAgent
   - raisin:AIThought
@@ -16,8 +18,13 @@ allowed_node_types:
   - raisin:AIPlan
   - raisin:AIToolCall
   - raisin:AIToolResult
+  - raisin:AIToolSingleCallResult
+  - raisin:AIToolResultAggregator
   - raisin:AICostRecord
+  - raisin:AICompaction
   - raisin:AgentUserContext
+  - raisin:Notification
+  - raisin:InboxTask
 
 allowed_root_node_types:
   - raisin:Folder

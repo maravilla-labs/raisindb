@@ -216,8 +216,7 @@ where
                 .await
                 .map_err(|e| format!("Failed to create AI provider: {}", e))?;
 
-                let response = provider
-                    .complete(request)
+                let response = raisin_ai::complete_with_tool_repair(provider.as_ref(), request)
                     .await
                     .map_err(|e| format!("AI completion failed: {}", e))?;
 
@@ -268,10 +267,10 @@ where
                 .await
                 .map_err(|e| format!("Failed to create AI provider: {}", e))?;
 
-                let mut stream = provider
-                    .stream_complete(request)
-                    .await
-                    .map_err(|e| format!("Stream AI completion failed: {}", e))?;
+                let mut stream =
+                    raisin_ai::stream_complete_with_tool_repair(provider.as_ref(), request)
+                        .await
+                        .map_err(|e| format!("Stream AI completion failed: {}", e))?;
 
                 let (tx, rx) = tokio::sync::mpsc::channel::<serde_json::Value>(32);
 

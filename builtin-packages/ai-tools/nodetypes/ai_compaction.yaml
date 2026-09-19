@@ -4,6 +4,9 @@ description: Records when conversation history was compacted
 icon: archive
 color: "#6b7280"
 
+allowed_children:
+  - raisin:AICostRecord
+
 properties:
   - name: messages_compacted
     title: Messages Compacted
@@ -48,6 +51,12 @@ properties:
     type: String
     required: false
     description: created_at of the cutoff message (fallback matching)
+
+  - name: token_checkpoint
+    title: Token Checkpoint
+    type: Number
+    required: false
+    description: Lifetime conversation token total when this compaction began
 
 versionable: false
 publishable: false

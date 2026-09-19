@@ -19,6 +19,7 @@ use std::time::Instant;
 
 use futures::StreamExt;
 use raisin_ai::{
+    complete_with_tool_repair, stream_complete_with_tool_repair,
     streaming::{self, StreamEvent},
     types::CompletionRequest,
     TenantAIConfigStore,
@@ -169,9 +170,11 @@ pub fn create_ai_completion(
                             "Disabling streaming for tool-enabled turn (provider limitation)"
                         );
 
-                        let response = provider.complete(api_request).await.map_err(|e| {
-                            raisin_error::Error::Backend(format!("AI completion failed: {}", e))
-                        })?;
+                        let response = complete_with_tool_repair(provider.as_ref(), api_request)
+                            .await
+                            .map_err(|e| {
+                                raisin_error::Error::Backend(format!("AI completion failed: {}", e))
+                            })?;
 
                         // Preserve realtime UX by emitting one final chunk when routing is set.
                         if let Some(key) = &conversation_event_key {
@@ -216,9 +219,14 @@ pub fn create_ai_completion(
                         r
                     };
 
-                    let stream = provider.stream_complete(api_request).await.map_err(|e| {
-                        raisin_error::Error::Backend(format!("Stream AI completion failed: {}", e))
-                    })?;
+                    let stream = stream_complete_with_tool_repair(provider.as_ref(), api_request)
+                        .await
+                        .map_err(|e| {
+                            raisin_error::Error::Backend(format!(
+                                "Stream AI completion failed: {}",
+                                e
+                            ))
+                        })?;
 
                     // Forward stream chunks through mpsc channel
                     let (tx, mut rx) = tokio::sync::mpsc::channel::<Value>(32);
@@ -309,9 +317,15 @@ pub fn create_ai_completion(
                             content_empty = content_empty,
                             "Streaming response missing expected tool calls — falling back to non-streaming call"
                         );
-                        let fallback = provider.complete(fallback_request).await.map_err(|e| {
-                            raisin_error::Error::Backend(format!("AI fallback failed: {}", e))
-                        })?;
+                        let fallback =
+                            complete_with_tool_repair(provider.as_ref(), fallback_request)
+                                .await
+                                .map_err(|e| {
+                                    raisin_error::Error::Backend(format!(
+                                        "AI fallback failed: {}",
+                                        e
+                                    ))
+                                })?;
 
                         let mut resp = serde_json::json!({
                             "content": fallback.message.content,
@@ -366,9 +380,11 @@ pub fn create_ai_completion(
                         "Provider does not support streaming, using non-streaming fallback"
                     );
 
-                    let response = provider.complete(api_request).await.map_err(|e| {
-                        raisin_error::Error::Backend(format!("AI completion failed: {}", e))
-                    })?;
+                    let response = complete_with_tool_repair(provider.as_ref(), api_request)
+                        .await
+                        .map_err(|e| {
+                            raisin_error::Error::Backend(format!("AI completion failed: {}", e))
+                        })?;
 
                     // Emit full text as single TextChunk if conversation routing is set
                     if let Some(key) = &conversation_event_key {
@@ -404,9 +420,11 @@ pub fn create_ai_completion(
                 }
             } else {
                 // ---- Non-streaming path (unchanged) ----
-                let response = provider.complete(api_request).await.map_err(|e| {
-                    raisin_error::Error::Backend(format!("AI completion failed: {}", e))
-                })?;
+                let response = complete_with_tool_repair(provider.as_ref(), api_request)
+                    .await
+                    .map_err(|e| {
+                        raisin_error::Error::Backend(format!("AI completion failed: {}", e))
+                    })?;
 
                 let elapsed = start.elapsed().as_millis() as u64;
                 let has_tool_calls = response

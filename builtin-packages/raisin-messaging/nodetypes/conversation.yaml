@@ -3,7 +3,7 @@ title: Conversation
 description: A container for a conversation thread. Messages are stored as child nodes.
 icon: chat
 color: "#10b981"
-version: 1
+version: 2
 
 properties:
   - name: subject
@@ -36,6 +36,7 @@ properties:
 
 allowed_children:
   - raisin:Message
+  - raisin:AICompaction
 
 versionable: false
 publishable: false
