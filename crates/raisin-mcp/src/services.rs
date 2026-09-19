@@ -72,6 +72,16 @@ pub type SharedFunctionInvoker = Arc<dyn FunctionInvoker>;
 // ---------------------------------------------------------------------------
 
 /// Mode of a [`SearchProvider`] query.
+///
+/// # Why `Fulltext` is still the default when `Hybrid` is the better answer
+///
+/// A mode picks a leg by zeroing the other's weight, and a zero weight SKIPS
+/// that leg entirely — including the embedding-provider resolution. So
+/// `Fulltext` works on a tenant with no embedder configured, and `Hybrid` does
+/// not: it would turn a working `search_nodes` into an error for every such
+/// tenant, on upgrade, with no change on their side. Breadth is opt-in here for
+/// the same reason `kind` defaults to `Text` in the search engine rather than
+/// `All`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchMode {
@@ -80,6 +90,11 @@ pub enum SearchMode {
     Fulltext,
     /// Vector (semantic) similarity search.
     Vector,
+    /// Both legs, fused by reciprocal rank — the same engine `HYBRID_SEARCH`
+    /// runs. The best default for retrieval, and the one to ask for when the
+    /// tenant has an embedder: a lexical leg finds the exact term, a vector leg
+    /// finds the paraphrase, and neither alone is reliable.
+    Hybrid,
 }
 
 /// A normalized search query, independent of the underlying engine.

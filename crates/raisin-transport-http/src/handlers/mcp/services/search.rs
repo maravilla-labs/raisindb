@@ -65,6 +65,9 @@ impl HttpSearchProvider {
         let (fulltext_weight, vector_weight) = match query.mode {
             SearchMode::Fulltext => (1.0, 0.0),
             SearchMode::Vector => (0.0, 1.0),
+            // Both legs carry full weight; fusion is by rank, so the weights
+            // are a leg selector here and not a tuning knob.
+            SearchMode::Hybrid => (1.0, 1.0),
         };
 
         let granularity = match query.granularity.as_deref() {

@@ -23,7 +23,7 @@ pub(super) async fn insert_embedding_field<S: Storage>(
 ) -> Result<(), Error> {
     use raisin_models::nodes::properties::PropertyValue;
 
-    if let Some(embedding_storage) = &ctx.embedding_storage {
+    if let Some(embedding_storage) = &ctx.resolve_embedding_storage() {
         tracing::debug!(
             node_id = %node.id,
             tenant = %ctx.tenant_id,

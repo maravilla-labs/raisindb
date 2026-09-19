@@ -246,3 +246,62 @@ async fn a_breaker_for_a_different_upstream_does_not_park_the_job() {
         "expected an unrelated breaker to be ignored, got: {err}"
     );
 }
+
+/// Which chunking each spec gets when the tenant configured none.
+///
+/// The pairing is the point: a document body must never fall through to "one
+/// vector for forty pages", and the node's own authored fields must never start
+/// being split. Both halves are silent failures — the job succeeds either way —
+/// so they are pinned here.
+mod chunking_per_spec {
+    use super::super::handler::EXTRACTED_TEXT_SPEC;
+    use crate::EmbeddingJobHandler;
+    use raisin_ai::config::{ChunkingConfig, OverlapConfig, SplitterType};
+
+    #[test]
+    fn a_document_body_chunks_even_with_nothing_configured() {
+        let resolved = EmbeddingJobHandler::chunking_for_spec(Some(EXTRACTED_TEXT_SPEC), None);
+
+        let chunking = resolved.expect(
+            "the doc spec must fall back to a document default; without it a \
+             40-page PDF becomes one vector and retrieval silently degrades",
+        );
+        assert_eq!(
+            chunking.chunk_size,
+            ChunkingConfig::for_documents().chunk_size
+        );
+        assert!(
+            chunking.tokenizer_id.is_some(),
+            "the fallback must count TOKENS; counting characters makes 512 mean \
+             about a paragraph"
+        );
+    }
+
+    #[test]
+    fn the_default_spec_is_left_unchunked() {
+        assert!(
+            EmbeddingJobHandler::chunking_for_spec(None, None).is_none(),
+            "the default spec is a title and a caption; splitting it makes every \
+             fragment match everything"
+        );
+    }
+
+    #[test]
+    fn an_explicit_configuration_wins_for_both_specs() {
+        let configured = ChunkingConfig {
+            chunk_size: 1024,
+            overlap: OverlapConfig::Tokens(128),
+            splitter: SplitterType::Recursive,
+            tokenizer_id: None,
+        };
+
+        for spec in [Some(EXTRACTED_TEXT_SPEC), None] {
+            let resolved = EmbeddingJobHandler::chunking_for_spec(spec, Some(&configured))
+                .expect("a configured value applies to every spec");
+            assert_eq!(
+                resolved.chunk_size, 1024,
+                "spec {spec:?} ignored the configured chunk size"
+            );
+        }
+    }
+}

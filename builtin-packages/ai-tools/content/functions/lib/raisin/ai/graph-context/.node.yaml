@@ -1,0 +1,67 @@
+node_type: "raisin:Function"
+properties:
+  title: "Graph Context"
+  description: |
+    Finds what a question is about, then follows the links out from there and
+    returns the connected neighbourhood.
+
+    Use it when an answer depends on how things relate rather than on the words
+    in one document: who is involved, what a thing belongs to, what else refers
+    to it. Use search-documents instead when the answer is a passage of text.
+
+    Seeds come from hybrid search unless you pass `seeds` yourself. Expansion
+    follows references in both directions, breadth-first, to `hops` levels.
+  execution_mode: "async"
+  enabled: true
+  language: "javascript"
+  entry_file: "index.js:handler"
+  version: 1
+  input_schema:
+    type: "object"
+    additionalProperties: false
+    properties:
+      query:
+        type: "string"
+        description: "What to find the neighbourhood of, in natural language. Ignored when `seeds` is given."
+      seeds:
+        type: "array"
+        description: "Explicit starting points as 'workspace:/path'. Skips the search step."
+        items:
+          type: "string"
+      workspaces:
+        type: "string"
+        description: "Where to search for seeds. Defaults to 'ALL READABLE'."
+      hops:
+        type: "integer"
+        description: "How many levels of links to follow. 1 is direct neighbours. Defaults to 1, maximum 3."
+      seed_limit:
+        type: "integer"
+        description: "How many search hits to use as starting points. Defaults to 3."
+    required: []
+  output_schema:
+    type: "object"
+    additionalProperties: false
+    properties:
+      seeds:
+        type: "array"
+        description: "The starting points actually used."
+        items:
+          type: "object"
+      nodes:
+        type: "array"
+        description: "The connected neighbourhood, nearest first. `hop` is the distance from a seed."
+        items:
+          type: "object"
+          properties:
+            path: { type: "string" }
+            node_id: { type: "string" }
+            name: { type: "string" }
+            node_type: { type: "string" }
+            hop: { type: "integer" }
+            via: { type: "string" }
+            from: { type: "string" }
+      count:
+        type: "integer"
+      truncated:
+        type: "boolean"
+        description: "True when the expansion hit its budget and stopped early."

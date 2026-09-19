@@ -1,0 +1,62 @@
+node_type: "raisin:Function"
+properties:
+  title: "Extract Entities"
+  description: |
+    Reads a document's extracted text, asks a model which entities it names and
+    how they relate, and writes those entities into the graph as nodes linked
+    back to the document.
+
+    This is the index-time half of graph retrieval: once entities exist,
+    graph-context can walk from a document to the people, organisations and
+    things it mentions, and from those to every other document that mentions
+    them.
+
+    It is idempotent. Running it twice on an unchanged document writes nothing.
+  execution_mode: "async"
+  enabled: true
+  language: "javascript"
+  entry_file: "index.js:handler"
+  version: 1
+  input_schema:
+    type: "object"
+    additionalProperties: false
+    properties:
+      path:
+        type: "string"
+        description: "Path of the document node to read."
+      workspace:
+        type: "string"
+        description: "Workspace holding the document. Defaults to 'content'."
+      entity_workspace:
+        type: "string"
+        description: "Workspace to write entities into. Defaults to the document's workspace."
+      model:
+        type: "string"
+        description: "Optional model id. Defaults to the tenant's configured chat model."
+      force:
+        type: "boolean"
+        description: "Re-extract even when the document is unchanged since the last run."
+    required:
+      - path
+  output_schema:
+    type: "object"
+    additionalProperties: false
+    properties:
+      skipped:
+        type: "boolean"
+        description: "True when the document was unchanged and nothing was written."
+      entities:
+        type: "array"
+        items:
+          type: "object"
+          properties:
+            name: { type: "string" }
+            type: { type: "string" }
+            path: { type: "string" }
+            created: { type: "boolean" }
+      relations:
+        type: "array"
+        items:
+          type: "object"
+      count:
+        type: "integer"

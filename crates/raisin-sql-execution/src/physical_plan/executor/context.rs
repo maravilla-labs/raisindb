@@ -218,6 +218,30 @@ impl<S: Storage> ExecutionContext<S> {
         self
     }
 
+    /// The stored-vector reader for this statement.
+    ///
+    /// Prefer this over reading [`Self::embedding_storage`] directly, for
+    /// exactly the reason [`Self::resolve_embedding_provider`] gives about the
+    /// provider: that field is only populated by an explicit
+    /// `with_embedding_storage` call, which three of the six SQL surfaces made
+    /// — so reading the field asks "did an HTTP handler build this engine?",
+    /// not "can this server read stored vectors?".
+    ///
+    /// `raisin-functions` was one of the surfaces that did not, which meant
+    /// every `HYBRID_SEARCH` issued from a function, trigger or agent tool
+    /// ranked correctly and then reported `chunk_text` as `unavailable` on
+    /// every row — an empty answer for any caller that skips textless passages.
+    ///
+    /// Resolution order: an explicitly wired store first (tests, and the
+    /// handlers that already build one), then the process-wide store installed
+    /// at server startup.
+    pub fn resolve_embedding_storage(&self) -> Option<Arc<dyn EmbeddingStorage>> {
+        if let Some(storage) = &self.embedding_storage {
+            return Some(storage.clone());
+        }
+        raisin_embeddings::embedding_store().cloned()
+    }
+
     /// Set the maximum revision for point-in-time queries
     /// None = HEAD (latest), Some(rev) = specific revision
     pub fn with_max_revision(mut self, max_revision: Option<raisin_hlc::HLC>) -> Self {

@@ -121,11 +121,22 @@ impl PhysicalPlanner {
                 None => None,
             };
 
-            // Allow "workspace:/path" literal to override workspace for path-based traversal
+            // Allow "workspace:/path" literal to override workspace for path-based traversal.
+            //
+            // Split on ':' and NOT on ":/". `split_once(":/")` consumes the
+            // slash, so the remainder is `entities/dana-weber` and the
+            // `starts_with('/')` guard below could never be true — the whole
+            // branch was unreachable, and a caller writing the documented
+            // `NEIGHBORS('library:/entities/dana', 'BOTH', NULL)` got the
+            // DEFAULT workspace and a source id of the entire literal
+            // `library:/entities/dana`, which resolves to no node and therefore
+            // to zero neighbours. Silently: an empty traversal reads as "this
+            // node has no relations", which is a statement about the data, so
+            // nothing looks broken.
             let mut workspace_name = workspace
                 .clone()
                 .unwrap_or_else(|| self.default_workspace.to_string());
-            if let Some((ws, p)) = start_id.split_once(":/") {
+            if let Some((ws, p)) = start_id.split_once(':') {
                 if !ws.is_empty() && p.starts_with('/') {
                     workspace_name = ws.to_string();
                     start_id = p.to_string();
@@ -162,5 +173,70 @@ impl PhysicalPlanner {
                 filter: filter.clone(),
             })
         }
+    }
+}
+
+/// The `workspace:/path` start form of `NEIGHBORS`.
+///
+/// This is a pure-string property, tested directly rather than through a
+/// planner fixture, because the bug it guards was a pure-string bug:
+/// `split_once(":/")` consumes the slash, so the remainder never satisfies a
+/// `starts_with('/')` guard and the whole workspace-override branch is
+/// unreachable. The symptom is not an error — it is a traversal that silently
+/// returns nothing, which reads as "this node has no relations".
+#[cfg(test)]
+mod neighbors_start_ref_tests {
+    /// The parse under test, kept byte-identical to the planner's.
+    fn split_start_ref(start: &str) -> Option<(String, String)> {
+        start.split_once(':').and_then(|(ws, p)| {
+            if !ws.is_empty() && p.starts_with('/') {
+                Some((ws.to_string(), p.to_string()))
+            } else {
+                None
+            }
+        })
+    }
+
+    #[test]
+    fn a_workspace_prefixed_path_keeps_its_leading_slash() {
+        let (ws, path) = split_start_ref("library:/entities/dana-weber")
+            .expect("the documented form must parse");
+        assert_eq!(ws, "library");
+        assert_eq!(
+            path, "/entities/dana-weber",
+            "the path must keep its leading slash; without it `get_by_path` \
+             finds no node and the traversal silently returns zero rows"
+        );
+    }
+
+    #[test]
+    fn the_old_split_on_colon_slash_could_never_match() {
+        // Exactly what the code did before: the delimiter ate the slash.
+        let (_, remainder) = "library:/entities/dana-weber".split_once(":/").unwrap();
+        assert!(
+            !remainder.starts_with('/'),
+            "this is why the branch was dead — if this ever starts passing, the \
+             old spelling has been reintroduced"
+        );
+    }
+
+    #[test]
+    fn a_bare_path_is_left_alone() {
+        assert_eq!(split_start_ref("/entities/dana-weber"), None);
+    }
+
+    #[test]
+    fn a_bare_node_id_is_left_alone() {
+        assert_eq!(
+            split_start_ref("76783652-094a-4903-a243-8cd4448428b7"),
+            None
+        );
+    }
+
+    /// A relation type is not a workspace. `a:b` with no slash must not be
+    /// mistaken for a scope.
+    #[test]
+    fn a_colon_without_a_path_is_not_a_workspace_override() {
+        assert_eq!(split_start_ref("raisin:Function"), None);
     }
 }

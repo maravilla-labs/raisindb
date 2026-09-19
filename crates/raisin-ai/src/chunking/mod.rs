@@ -32,6 +32,13 @@
 use crate::config::ChunkingConfig;
 use text_splitter::{ChunkConfig, ChunkSizer, TextSplitter};
 
+/// Rule-of-thumb characters per token for English prose.
+///
+/// Used in two places, and they must agree: converting a token budget into a
+/// character budget when no tokenizer is available, and estimating a chunk's
+/// token count for reporting.
+const CHARS_PER_TOKEN: usize = 4;
+
 /// Represents a single text chunk with metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextChunk {
@@ -137,7 +144,7 @@ impl TextChunker {
                     Self::estimate_token_count(&content)
                 } else {
                     // Rough estimate: ~4 chars per token
-                    content.len() / 4
+                    content.len() / CHARS_PER_TOKEN
                 };
 
                 TextChunk {
@@ -166,13 +173,32 @@ impl TextChunker {
     ) -> Result<Vec<(usize, String)>, ChunkingError> {
         use tiktoken_rs::get_bpe_from_model;
 
-        // Load the tokenizer
-        let tokenizer = get_bpe_from_model(tokenizer_id).map_err(|e| {
-            ChunkingError::TokenizerError(format!(
-                "Failed to load tokenizer '{}': {}",
-                tokenizer_id, e
-            ))
-        })?;
+        // Load the tokenizer.
+        //
+        // A tokenizer that will not load falls back to CHARACTER-based
+        // chunking, not to no chunking. The caller treats `Err` as "chunking
+        // failed" and embeds the whole text as one vector, so returning an
+        // error here for an unrecognised model name — `nomic-embed-text`, any
+        // Ollama or Voyage model, a typo — would turn a forty-page document
+        // into a single near-useless vector, logged at warn and otherwise
+        // silent. Chunking at a rougher size is strictly better than not
+        // chunking, so convert the budget and carry on.
+        let tokenizer = match get_bpe_from_model(tokenizer_id) {
+            Ok(tokenizer) => tokenizer,
+            Err(e) => {
+                tracing::warn!(
+                    tokenizer_id = %tokenizer_id,
+                    error = %e,
+                    "Tokenizer could not be loaded; chunking by characters instead \
+                     (sizes converted at ~{CHARS_PER_TOKEN} chars/token)"
+                );
+                return Self::chunk_char_based(
+                    text,
+                    chunk_size * CHARS_PER_TOKEN,
+                    overlap * CHARS_PER_TOKEN,
+                );
+            }
+        };
 
         // Create a custom sizer
         let sizer = TiktokenSizer { tokenizer };
@@ -251,7 +277,7 @@ impl TextChunker {
         // More sophisticated estimation could be added here
         // For now, use a simple heuristic
         let char_count = text.chars().count();
-        (char_count / 4).max(1)
+        (char_count / CHARS_PER_TOKEN).max(1)
     }
 }
 
@@ -545,6 +571,91 @@ mod offset_tests {
         assert!(
             chunks.len() > 1,
             "expected several chunks, got {}",
+            chunks.len()
+        );
+    }
+}
+
+/// The document default must actually chunk, and must not be able to fail
+/// closed into "one vector for the whole document".
+///
+/// That failure mode is invisible in production — the job succeeds, the index
+/// reports healthy, and retrieval just returns the wrong document — so it is
+/// worth pinning here rather than discovering it from a support ticket.
+#[cfg(test)]
+mod document_default_tests {
+    use super::*;
+    use crate::config::{ChunkingConfig, COUNTING_TOKENIZER};
+
+    /// Roughly forty paragraphs of prose — a small document body.
+    fn document() -> String {
+        (1..=40)
+            .map(|i| {
+                format!(
+                    "Section {i}. The parties agree that the obligations described in this \
+                     clause survive termination of the agreement and remain enforceable \
+                     for a period of three years from the effective date.\n\n"
+                )
+            })
+            .collect()
+    }
+
+    /// The tokenizer the default names must LOAD. If it does not, chunking
+    /// falls back to characters and the 512 below silently means 512
+    /// characters — a quarter of the intended passage.
+    #[test]
+    #[cfg(feature = "tiktoken-rs")]
+    fn the_counting_tokenizer_resolves() {
+        assert!(
+            tiktoken_rs::get_bpe_from_model(COUNTING_TOKENIZER).is_ok(),
+            "{COUNTING_TOKENIZER} must be a name tiktoken accepts, or every \
+             document silently chunks by characters instead of tokens"
+        );
+    }
+
+    #[test]
+    fn a_document_body_is_split_into_several_chunks() {
+        let text = document();
+        let chunks = TextChunker::chunk_text(&text, &ChunkingConfig::for_documents())
+            .expect("chunking must succeed");
+
+        assert!(
+            chunks.len() > 1,
+            "a {}-byte document produced {} chunk(s); one vector over a whole \
+             document is close to every query and specific to none",
+            text.len(),
+            chunks.len()
+        );
+
+        for chunk in &chunks {
+            assert_eq!(
+                &text[chunk.start_offset..chunk.end_offset],
+                chunk.content,
+                "chunk {} does not slice back to itself",
+                chunk.index
+            );
+        }
+    }
+
+    /// A tokenizer name tiktoken has never heard of — `nomic-embed-text`, any
+    /// Ollama or Voyage model, a typo. It must still chunk, by characters.
+    /// Returning an error here means the caller embeds the whole document as
+    /// one vector.
+    #[test]
+    fn an_unknown_tokenizer_still_chunks() {
+        let text = document();
+        let config = ChunkingConfig {
+            tokenizer_id: Some("nomic-embed-text".to_string()),
+            ..ChunkingConfig::for_documents()
+        };
+
+        let chunks = TextChunker::chunk_text(&text, &config)
+            .expect("an unknown tokenizer must not fail the chunking");
+
+        assert!(
+            chunks.len() > 1,
+            "unknown tokenizer produced {} chunk(s) — it fell back to no \
+             chunking instead of to character counting",
             chunks.len()
         );
     }

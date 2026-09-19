@@ -1,0 +1,80 @@
+node_type: "raisin:Function"
+properties:
+  title: "Ask Documents"
+  description: |
+    Answers a question from the repository's own content: retrieves the relevant
+    passages, then writes an answer grounded in them, with citations.
+
+    This is the whole retrieve-then-answer round trip in one call. Use it when
+    someone asks a question the stored content should answer. Use
+    search-documents instead when you want the passages themselves and intend to
+    reason over them yourself.
+
+    The answer is drawn ONLY from what was retrieved. When nothing relevant is
+    found it says so rather than answering from general knowledge.
+
+    If the first retrieval does not answer the question, the query is rewritten
+    in the documents' own vocabulary and tried once more before giving up.
+
+    Example: ask(question="how much notice do we have to give to terminate?")
+  execution_mode: "async"
+  enabled: true
+  language: "javascript"
+  entry_file: "index.js:handler"
+  version: 1
+  input_schema:
+    type: "object"
+    additionalProperties: false
+    properties:
+      question:
+        type: "string"
+        description: "The question to answer, in natural language."
+      workspaces:
+        type: "string"
+        description: "Where to look: a workspace name, a comma-separated list, a glob, or 'ALL READABLE'. Defaults to 'ALL READABLE'."
+      limit:
+        type: "integer"
+        description: "How many passages to ground the answer in. Defaults to 8."
+      model:
+        type: "string"
+        description: "Optional model id, as 'slug:model'. Defaults to the tenant's configured chat model."
+      use_graph:
+        type: "boolean"
+        description: "Also include the graph neighbourhood of the question's subject. Costs a graph walk; off by default."
+    required:
+      - question
+  output_schema:
+    type: "object"
+    additionalProperties: false
+    description: "The answer and the passages it was drawn from."
+    properties:
+      answer:
+        type: "string"
+      grounded:
+        type: "boolean"
+        description: "False when nothing relevant was retrieved, in which case `answer` says so and cites nothing."
+      citations:
+        type: "array"
+        description: "The passages given to the model, in the order they were numbered in the prompt. Citation [1] is the first entry."
+        items:
+          type: "object"
+          properties:
+            marker:
+              type: "integer"
+            path:
+              type: "string"
+            node_id:
+              type: "string"
+            title:
+              type: "string"
+            chunk_index:
+              type: "integer"
+            text_is_exact:
+              type: "boolean"
+      attempts:
+        type: "array"
+        description: "One entry per retrieval attempt, with the query used. A second entry means the first retrieval was graded insufficient and the query rewritten."
+        items:
+          type: "object"
+      model:
+        type: "string"

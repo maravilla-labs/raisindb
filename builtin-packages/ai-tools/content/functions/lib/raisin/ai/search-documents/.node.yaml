@@ -1,0 +1,68 @@
+node_type: "raisin:Function"
+properties:
+  title: "Search Documents"
+  description: |
+    Searches the repository's content by MEANING and by keyword at once, and
+    returns the matching PASSAGES — not whole documents — so the result can be
+    pasted straight into an answer with citations.
+
+    Use it whenever a question might be answered by something stored here:
+    documents, pages, uploaded PDFs and Word files, notes, records. Prefer it
+    over guessing, and prefer it over listing nodes by path when you do not
+    already know where the answer lives.
+
+    Each result carries `path`, `node_id` and `chunk_index`, which together
+    identify the passage — quote those when citing.
+
+    Example: search-documents(query="what is the notice period for termination")
+  execution_mode: "async"
+  enabled: true
+  language: "javascript"
+  entry_file: "index.js:handler"
+  version: 1
+  input_schema:
+    type: "object"
+    additionalProperties: false
+    properties:
+      query:
+        type: "string"
+        description: "What to look for, in natural language. A question works better than a single keyword."
+      workspaces:
+        type: "string"
+        description: "Where to look: a workspace name, a comma-separated list, a glob such as 'content-*', or 'ALL READABLE' for everything the caller may read. Defaults to 'ALL READABLE'."
+      limit:
+        type: "integer"
+        description: "How many passages to return. Defaults to 8; 20 is a sensible maximum for filling a context window."
+      max_distance:
+        type: "number"
+        description: "Optional vector-distance ceiling. Leave unset unless you are deliberately tightening precision."
+    required:
+      - query
+  output_schema:
+    type: "object"
+    additionalProperties: false
+    description: "The matching passages, best first."
+    properties:
+      results:
+        type: "array"
+        description: "One entry per passage. Empty when nothing matched — which is an answer, not an error."
+        items:
+          type: "object"
+          properties:
+            path:
+              type: "string"
+            node_id:
+              type: "string"
+            title:
+              type: "string"
+            chunk_index:
+              type: "integer"
+            text:
+              type: "string"
+            text_is_exact:
+              type: "boolean"
+              description: "False when only a short preview of the passage was available, so do not quote it verbatim."
+            score:
+              type: "number"
+      count:
+        type: "integer"

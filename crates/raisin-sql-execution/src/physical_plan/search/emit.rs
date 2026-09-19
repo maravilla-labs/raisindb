@@ -387,7 +387,7 @@ pub async fn execute_parsed<S: Storage + 'static>(
     // Cloned out of the context BEFORE the stream, like every other dependency
     // the loop uses. VECTOR_OF reads `cf::EMBEDDINGS` through the trait object,
     // not through a second key builder on this side.
-    let embedding_storage = ctx.embedding_storage.clone();
+    let embedding_storage = ctx.resolve_embedding_storage();
     let auth_context = ctx.auth_context.clone();
     let max_revision = ctx.max_revision;
     let residual_conjuncts: Vec<TypedExpr> = residual.map(split_and).unwrap_or_default();

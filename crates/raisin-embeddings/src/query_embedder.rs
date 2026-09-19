@@ -94,3 +94,49 @@ pub fn configure_query_embedder(embedder: Arc<dyn TenantQueryEmbedder>) -> bool 
 pub fn query_embedder() -> Option<&'static Arc<dyn TenantQueryEmbedder>> {
     QUERY_EMBEDDER.get()
 }
+
+// ---------------------------------------------------------------------------
+// The stored-vector READER, installed the same way and for the same reason
+// ---------------------------------------------------------------------------
+
+/// The process-wide [`EmbeddingStorage`](crate::EmbeddingStorage), installed at
+/// server startup.
+///
+/// # Why this is here and not a seventh `with_embedding_storage(...)` call
+///
+/// This module already documents how the *provider* came to have one call site
+/// and five surfaces. The stored-vector READER had exactly the same shape, one
+/// layer down: `QueryEngine::with_embedding_storage` was wired by the HTTP
+/// `/api/sql` handler, the hybrid-search endpoint and the MCP search service —
+/// and NOT by `raisin-functions`, which is what `raisin.sql()` inside every
+/// function, trigger and agent tool executes on.
+///
+/// The failure was silent in the worst way. The vector leg worked (the provider
+/// is installed process-wide, so the query embedded fine) and rows came back
+/// ranked correctly — but `chunk_text` needs the stored chunk row to slice the
+/// passage out of the document, so every hit reported its text as `unavailable`.
+/// A RAG function that asked for passages therefore received rows with no text
+/// in them, and a caller that skips textless passages — which is the only
+/// sensible thing to do with them — saw an EMPTY RESULT SET. No error, no log
+/// line, and a `SELECT` that returned three rows from `psql` returned nothing
+/// at all from a function.
+///
+/// So it is installed once, and every surface inherits it, including the ones
+/// that do not exist yet. An explicitly wired store still wins.
+static EMBEDDING_STORE: OnceLock<Arc<dyn crate::EmbeddingStorage>> = OnceLock::new();
+
+/// Install the process-wide stored-vector reader. Called once, from startup.
+///
+/// Returns `false` if one was already installed — a startup-ordering bug for
+/// the caller to log, not a reason to refuse to boot.
+pub fn configure_embedding_store(store: Arc<dyn crate::EmbeddingStorage>) -> bool {
+    EMBEDDING_STORE.set(store).is_ok()
+}
+
+/// The installed stored-vector reader, if server startup installed one.
+///
+/// `None` in unit tests and in any binary that never calls
+/// [`configure_embedding_store`].
+pub fn embedding_store() -> Option<&'static Arc<dyn crate::EmbeddingStorage>> {
+    EMBEDDING_STORE.get()
+}

@@ -51,15 +51,17 @@ impl Tool for SearchNodesTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor::new(
             "search_nodes",
-            "Search nodes in a workspace by full-text or vector similarity.",
+            "Search nodes in a workspace. `hybrid` fuses keyword and meaning and is \
+             the best mode for answering a question; `fulltext` is the default and \
+             needs no embedder configured.",
             json!({
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "Search query text." },
                     "mode": {
                         "type": "string",
-                        "enum": ["fulltext", "vector"],
-                        "description": "Search mode: lexical (default) or semantic."
+                        "enum": ["fulltext", "vector", "hybrid"],
+                        "description": "Search mode: lexical (default), semantic, or hybrid (both, fused by rank). Use hybrid when looking for an answer rather than an exact term; it requires an embedder to be configured."
                     },
                     "node_type": { "type": "string", "description": "Restrict to an exact node type." },
                     "limit": { "type": "integer", "minimum": 1, "maximum": MAX_LIMIT, "description": "Maximum hits to return." },
@@ -81,9 +83,10 @@ impl Tool for SearchNodesTool {
         let mode = match args.get("mode").and_then(Value::as_str) {
             None | Some("fulltext") => SearchMode::Fulltext,
             Some("vector") => SearchMode::Vector,
+            Some("hybrid") => SearchMode::Hybrid,
             Some(other) => {
                 return Err(McpError::invalid_params(format!(
-                    "unknown search mode `{other}` (expected `fulltext` or `vector`)"
+                    "unknown search mode `{other}` (expected `fulltext`, `vector` or `hybrid`)"
                 )))
             }
         };

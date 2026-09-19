@@ -1,5 +1,5 @@
 name: ai-tools
-version: 1.0.27
+version: 1.0.30
 title: AI Tools Package
 description: >
   Provides AI-powered node types and tools for RaisinDB.
@@ -52,6 +52,10 @@ provides:
     - /functions/lib/raisin/ai/forget
     - /functions/lib/raisin/ai/weather
     - /functions/lib/raisin/ai/plan-approval-handler
+    - /functions/lib/raisin/ai/search-documents
+    - /functions/lib/raisin/ai/ask
+    - /functions/lib/raisin/ai/graph-context
+    - /functions/lib/raisin/ai/extract-entities
   triggers:
     - /functions/triggers/raisin/ai/on-user-message
     - /functions/triggers/raisin/ai/on-tool-result
@@ -83,6 +87,10 @@ sync:
         - "forget/**"
         - "weather/**"
         - "plan-approval-handler/**"
+        - "search-documents/**"
+        - "ask/**"
+        - "graph-context/**"
+        - "extract-entities/**"
       mode: merge
 
     # Flow definitions

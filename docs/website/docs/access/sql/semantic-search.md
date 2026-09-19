@@ -668,12 +668,22 @@ POST /api/tenants/{tenant_id}/embeddings/config
 
 | Field | Values | Default |
 |---|---|---|
-| `chunk_size` | target chunk size in **tokens** | 256 |
+| `chunk_size` | target chunk size — in **tokens** when `tokenizer_id` is set, in **characters** when it is not | 256 |
 | `overlap` | `{"type":"Tokens","value":n}` or `{"type":"Percentage","value":0.2}` (clamped to 0.5) | 64 tokens |
 | `splitter` | `recursive` (paragraphs → sentences → words), `fixed_size`, `markdown`, `code` | `recursive` |
-| `tokenizer_id` | optional; defaults from the embedding model | — |
+| `tokenizer_id` | optional; a tiktoken model name, e.g. `text-embedding-3-small`. Absent means sizes are counted in characters | — |
 
-Omitting `chunking` entirely disables it: one embedding per node, whatever its length.
+Omitting `chunking` disables it for a node's own authored fields — a title and a
+caption are short, and splitting them makes every fragment match everything.
+
+**A document BODY is chunked either way.** Text extracted out of a PDF, or handed
+back by a converter plugin, is embedded under its own spec (`doc`) and falls back to
+512 tokens with 64 of overlap when nothing is configured. That fallback is not a
+default you can switch off: without it a forty-page contract becomes one vector, which
+is close to every query and specific to none, and nothing anywhere reports a fault —
+the job succeeds and `SHOW VECTOR INDEX HEALTH` stays green. Configure `chunking` to
+choose different sizes; a processing rule can set it per path, workspace, node type or
+mimetype.
 `quantization` (`F32` \| `F16` \| `Int8`) is on the same payload and takes effect on
 the next index build — the scalar kind is baked into the graph, so an existing index
 keeps the precision it was written with until a rebuild.
@@ -755,8 +765,32 @@ The HTTP hybrid-search endpoint and the MCP `search_nodes` tool build their call
 through the same `SearchArgs` constructor the SQL parser produces, so they share the
 scope resolver, the leg dispatch, the fusion and the RLS pass — a scope string means
 the same thing wherever it is written. They expose less of it: `search_nodes` takes one
-workspace and a `mode` of `fulltext` or `vector`, with no hybrid mode and no weights.
-For fused ranking or a multi-workspace scope, use SQL.
+workspace and no explicit weights. Its `mode` is `fulltext` (the default), `vector`,
+or `hybrid` — which runs both legs and fuses them, the same ranking SQL produces.
+`fulltext` stays the default because a zero vector weight skips embedding-provider
+resolution entirely, so it keeps working on a tenant with no embedder configured,
+while `hybrid` does not. For weights or a multi-workspace scope, use SQL.
+
+## Answering a question, not just finding documents
+
+Retrieval is the engine's half. Turning passages into an answer is a model call with a
+prompt behind it, so it lives in a function rather than in SQL — two of them ship in
+the `ai-tools` package, and both are ordinary `raisin:Function` nodes you can read,
+copy or replace:
+
+| Function | What it does |
+|---|---|
+| `/lib/raisin/ai/search-documents` | Wraps `HYBRID_SEARCH(..., granularity => 'chunk')` and returns passages with `path`, `node_id` and `chunk_index` as citation handles |
+| `/lib/raisin/ai/ask` | Calls the above, then answers from those passages only, returning the numbered citations it was given |
+
+Both work as agent tools: list the path in an agent's `tools:` array.
+
+`ask` does not call the model at all when retrieval returned nothing — it answers
+`grounded: false` instead. That is deliberate: a model asked to answer from an empty
+context answers from its own weights, fluently, and nothing in the output says so.
+
+Neither is exposed to external MCP clients by default. Add `mcp: { enabled: true }` to
+the function node to promote it to a tool on your MCP servers.
 
 ## See also
 

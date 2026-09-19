@@ -270,12 +270,16 @@ impl EmbeddingJobHandler {
         let chunking = self.resolve_chunking(&node, &config, context).await;
 
         for task in &tasks {
+            // Per-spec, because the two specs are not the same kind of text.
+            // See `chunking_for_spec`.
+            let spec_chunking = Self::chunking_for_spec(task.spec, chunking.as_ref());
+
             self.embed_one_spec(
                 node_id,
                 task,
                 &config,
                 &embedder_id,
-                chunking.as_ref(),
+                spec_chunking.as_deref(),
                 provider.as_ref(),
                 &upstream,
                 context,
@@ -1298,6 +1302,56 @@ impl EmbeddingJobHandler {
         );
 
         Ok(())
+    }
+
+    /// The chunking ONE spec gets, given what the node resolved to.
+    ///
+    /// # Why the default spec and the `doc` spec cannot share an answer
+    ///
+    /// The default spec is the node's own authored fields — a title, a caption,
+    /// a description. It is short by construction, and splitting it makes every
+    /// fragment match everything, so "no chunking" is the right answer and stays
+    /// the right answer.
+    ///
+    /// The `doc` spec is the body of a document: a PDF the extractor read, or
+    /// text a converter plugin handed back through
+    /// `raisin.assets.setExtractedText`. It is routinely forty pages. With
+    /// `TenantEmbeddingConfig::chunking` defaulting to `None` — which it does,
+    /// and which every install that never opened the embedding settings still
+    /// has — that document became ONE vector. Nothing errored: the job
+    /// succeeded, `SHOW VECTOR INDEX HEALTH` was green, and retrieval simply
+    /// returned the wrong document, because one vector averaged over forty
+    /// pages is close to every query and specific to none.
+    ///
+    /// So an explicit configuration always wins, for both specs; but where none
+    /// exists, a document body falls back to [`ChunkingConfig::for_documents`]
+    /// rather than to "don't chunk". Opting a document body OUT of chunking is
+    /// not expressible, deliberately — it is never what anyone wants, and it is
+    /// what the old default silently did.
+    ///
+    /// # This moves spec hashes, once
+    ///
+    /// `EmbeddingSpec` hashes the chunking config, so on first run after this
+    /// change every `doc` spec on an install with no chunking configured is
+    /// stale and re-embeds — once, at the cost of one embedder call per chunk,
+    /// after which the hash is stable again. Nothing else re-embeds: the
+    /// default spec's answer is unchanged, and an install that had configured
+    /// chunking keeps the value it configured.
+    pub(super) fn chunking_for_spec<'a>(
+        spec: Option<&str>,
+        resolved: Option<&'a raisin_ai::config::ChunkingConfig>,
+    ) -> Option<std::borrow::Cow<'a, raisin_ai::config::ChunkingConfig>> {
+        if let Some(configured) = resolved {
+            return Some(std::borrow::Cow::Borrowed(configured));
+        }
+
+        if spec == Some(EXTRACTED_TEXT_SPEC) {
+            return Some(std::borrow::Cow::Owned(
+                raisin_ai::config::ChunkingConfig::for_documents(),
+            ));
+        }
+
+        None
     }
 
     /// Resolve the chunking configuration for one node.

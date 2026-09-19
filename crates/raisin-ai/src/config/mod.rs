@@ -11,7 +11,7 @@ mod provider;
 #[cfg(test)]
 mod tests;
 
-pub use chunking::{ChunkingConfig, OverlapConfig, SplitterType};
+pub use chunking::{ChunkingConfig, OverlapConfig, SplitterType, COUNTING_TOKENIZER};
 pub use embedder::{EmbedderId, EmbeddingKind, EmbeddingPartition, EmbeddingSettings};
 pub use processing::{ProcessingDefaults, DEFAULT_CAPTION_MODEL, DEFAULT_IMAGE_EMBEDDING_MODEL};
 pub use provider::{

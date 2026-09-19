@@ -444,6 +444,23 @@ async fn main() {
         } else {
             tracing::warn!("Query embedder was already installed; keeping the first one");
         }
+
+        // The READER half, installed here for the same reason and against the
+        // same failure. `with_embedding_storage` was wired by /api/sql, the
+        // hybrid-search endpoint and the MCP search service — but not by
+        // `raisin-functions`, so a `HYBRID_SEARCH` issued from a function,
+        // trigger or agent tool ranked its hits correctly and then reported
+        // `chunk_text` as `unavailable` on every one of them. A RAG function
+        // that asks for passages and skips the textless ones therefore got an
+        // EMPTY result set from a query that returns rows in `psql`.
+        let store = std::sync::Arc::new(raisin_rocksdb::RocksDBEmbeddingStorage::new(
+            storage.db().clone(),
+        ));
+        if raisin_embeddings::configure_embedding_store(store) {
+            tracing::info!("Stored-vector reader installed for all SQL surfaces");
+        } else {
+            tracing::warn!("Stored-vector reader was already installed; keeping the first one");
+        }
     }
 
     // ========================================================================

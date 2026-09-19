@@ -70,7 +70,10 @@ pub use provider::{
     create_provider, create_provider_full, create_provider_with_url,
     EmbeddingProvider as EmbeddingProviderTrait, OllamaProvider, OpenAIProvider, VoyageProvider,
 };
-pub use query_embedder::{configure_query_embedder, query_embedder, TenantQueryEmbedder};
+pub use query_embedder::{
+    configure_embedding_store, configure_query_embedder, embedding_store, query_embedder,
+    TenantQueryEmbedder,
+};
 // `EmbeddingData` has PUBLIC fields of these two types, so anyone who can
 // construct or read one already needs to name them. They live in
 // `raisin_ai::config` (this crate cannot hold them — see `raisin-hnsw`'s
