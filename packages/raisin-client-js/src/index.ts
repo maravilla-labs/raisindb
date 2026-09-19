@@ -22,6 +22,15 @@
  * ```
  */
 
+// Retrieval: passages, and answers with citations.
+export type {
+  Answer,
+  AskOptions,
+  Citation,
+  SearchOptions,
+  SearchPassage,
+} from './search-api';
+
 // Main client
 export { RaisinClient } from './client';
 export type {

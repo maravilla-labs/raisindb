@@ -48,7 +48,13 @@ function asString(value: unknown): string | undefined {
 export function parsePlanTasks(rawTasks: unknown): PlanProjectionTask[] {
   if (!Array.isArray(rawTasks)) return [];
   return rawTasks
-    .map((rawTask, index) => {
+    // The return type is ANNOTATED, not inferred. `satisfies` on each branch
+    // checks that branch but does not widen it, so without this the array is a
+    // union of two object literals plus null — and `PlanProjectionTask` is not
+    // assignable to that union (`taskId` is optional in the interface and
+    // required in the inferred literal), which makes the type predicate below
+    // illegal and fails the DTS build for the whole package.
+    .map((rawTask, index): PlanProjectionTask | null => {
       if (typeof rawTask === 'string') {
         return {
           title: rawTask,

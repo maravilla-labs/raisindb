@@ -14,6 +14,13 @@ import { SchedulerApi } from './scheduler';
 import { Tags } from './tags';
 import { FlowsApi } from './flows';
 import { FunctionsApi } from './functions-api';
+import { SearchApi } from './search-api';
+import type {
+  Answer,
+  AskOptions,
+  SearchOptions,
+  SearchPassage,
+} from './search-api';
 import { ConversationManager } from './conversations';
 import { FlowClient } from './flow-client';
 import { InboxApi } from './inbox';
@@ -48,6 +55,7 @@ export class Database {
   private workspaceManager?: WorkspaceManager;
   private sqlQuery?: SqlQuery;
   private sqlHandler?: (strings: TemplateStringsArray, ...values: unknown[]) => Promise<SqlResult>;
+  private _searchApi?: SearchApi;
   private branch?: string;
   private revision?: string;
   private getUploadManager?: () => UploadManager;
@@ -318,6 +326,73 @@ export class Database {
       );
     }
     return this._functionsApi;
+  }
+
+  /**
+   * The retrieval implementation behind {@link search} and {@link ask}.
+   *
+   * Private: callers get the two verbs, not the object, so how retrieval is
+   * served stays ours to change.
+   */
+  private searchApi(): SearchApi {
+    if (!this._searchApi) {
+      this._searchApi = new SearchApi(
+        (sql, params) => this.executeSql(sql, params),
+        async (name, input) => {
+          const run = await this.functions().invoke(name, input, {
+            waitForResult: true,
+          });
+          // `invoke` reports the job; the function's own return value is the
+          // `result` it carries once it has completed.
+          return (run as { result?: unknown })?.result ?? run;
+        },
+      );
+    }
+    return this._searchApi;
+  }
+
+  /**
+   * Find the passages matching a query, by meaning and by keyword at once.
+   *
+   * No model is involved — this is the call for a search box or for assembling
+   * your own context. Returns one entry per PASSAGE, so several may come from
+   * one document.
+   *
+   * @example
+   * ```typescript
+   * const passages = await db.search('how much notice to terminate', {
+   *   workspaces: 'stories',
+   * });
+   * passages[0].text;        // the passage itself
+   * passages[0].chunkIndex;  // where in the document it came from
+   * ```
+   */
+  async search(query: string, options: SearchOptions): Promise<SearchPassage[]> {
+    return this.searchApi().search(query, options);
+  }
+
+  /**
+   * Answer a question from the stored content, with citations.
+   *
+   * Retrieves, judges whether what came back answers the question, rewrites the
+   * query once if it does not, and answers from those passages only. Check
+   * `grounded` before showing the answer: when it is false nothing relevant was
+   * found and the model was never asked.
+   *
+   * A method rather than `functions().invoke('ask', ...)` on purpose — see the
+   * note at the top of `search-api.ts`. `invoke` is the escape hatch for
+   * functions YOU wrote.
+   *
+   * @example
+   * ```typescript
+   * const { answer, citations, grounded } = await db.ask(
+   *   'How much notice do we have to give?',
+   *   { workspaces: 'stories' },
+   * );
+   * ```
+   */
+  async ask(question: string, options?: AskOptions): Promise<Answer> {
+    return this.searchApi().ask(question, options);
   }
 
   /**
