@@ -189,6 +189,9 @@ impl<S: Storage> NodeValidator<S> {
         // builds `PropertyValue::String(rfc3339)` in memory bypasses the
         // untagged deserializer that would otherwise have made it a `Date`.
         super::property_checks::coerce_declared_dates(node, &resolved)?;
+        // And the create-then-upload placeholder: an asset node has to exist
+        // before there are any bytes to point its `file` property at.
+        super::property_checks::clear_empty_resource_placeholders(node, &resolved);
 
         self.validate_against_resolved(workspace, node, &resolved)
             .await?;
@@ -249,6 +252,8 @@ impl<S: Storage> NodeValidator<S> {
                         "date coercion skipped on a validation-disabled write"
                     );
                 }
+                // Cannot fail, so there is nothing to fall open on.
+                super::property_checks::clear_empty_resource_placeholders(node, &resolved);
                 let supertypes = resolved.effective_supertypes();
                 node.set_effective_types(resolved.resolved_mixins.clone(), supertypes);
             }

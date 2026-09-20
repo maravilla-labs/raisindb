@@ -578,6 +578,60 @@ fn coerce_dates_declared_as_string(node: &mut Node, resolved: &ResolvedNodeType)
     }
 }
 
+/// An EMPTY STRING on a declared `Resource` property means "no bytes yet".
+///
+/// A Resource is a pointer to stored bytes — storage key, size, mime type. It
+/// cannot be constructed before the bytes exist, so creating an asset is
+/// necessarily two steps: create the node, then upload into its `file`
+/// property. Both first-party clients do exactly that, and both spell the
+/// placeholder the same way:
+///
+/// - `packages/raisindb-cli/src/sync/operations.ts` (`pushCodeInline`, the
+///   404 branch) POSTs `{ title, file: '', code }`;
+/// - `packages/admin-console/.../FunctionExplorer.tsx` creates
+///   `{ title, file: '' }` and then uploads the blob.
+///
+/// Once `check_property_types` enforced declarations, that placeholder was
+/// refused with
+///
+/// ```text
+/// Property 'file' on NodeType 'raisin:Asset' is declared Resource but the value is String
+/// ```
+///
+/// and because only the CREATE path sends it, the symptom was specific and
+/// misleading: pushing a NEW function's `index.js` failed through both
+/// `raisin sync --push` and `raisin deploy`, while every existing function
+/// updated fine — those take the read-modify-write branch, where `file`
+/// already holds a real Resource.
+///
+/// `value_matches` already accepts `Null` for any declared type, so the empty
+/// string is normalised to `Null` rather than special-cased in the matcher:
+/// "absent" is what it means, and that is the one spelling the rest of the
+/// system already understands. This mirrors [`coerce_declared_dates`], where
+/// an empty string is likewise "unset" rather than a malformed value.
+///
+/// A NON-empty string is left alone and still refused. There is no reading of
+/// `"/some/path"` on a Resource property that is safe to guess at: it carries
+/// no storage key, no size and no mime type, and inventing one would put a
+/// node in the database pointing at bytes that do not exist.
+pub(super) fn clear_empty_resource_placeholders(node: &mut Node, resolved: &ResolvedNodeType) {
+    for prop in &resolved.resolved_properties {
+        if prop.property_type != PropertyType::Resource {
+            continue;
+        }
+        let Some(name) = prop.name.as_deref() else {
+            continue;
+        };
+        let Some(PropertyValue::String(raw)) = node.properties.get(name) else {
+            continue;
+        };
+        if raw.trim().is_empty() {
+            node.properties
+                .insert(name.to_string(), PropertyValue::Null);
+        }
+    }
+}
+
 /// Enforce every declared `PropertyType` against the value actually present.
 ///
 /// Historically `type:` on a NodeType property was documentation and an editor

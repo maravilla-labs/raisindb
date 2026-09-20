@@ -1319,6 +1319,7 @@ fn coerce_and_check(
         .map_err(|e| e.to_string())?;
     super::property_checks::coerce_declared_dates(&mut node, &resolved)
         .map_err(|e| e.to_string())?;
+    super::property_checks::clear_empty_resource_placeholders(&mut node, &resolved);
     super::property_checks::check_property_types(&node, &resolved).map_err(|e| e.to_string())?;
     Ok(node)
 }
@@ -1515,4 +1516,90 @@ fn a_package_authored_decimal_string_still_becomes_a_decimal() {
             "{raw:?} must classify as a Decimal against its declaration"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The create-then-upload placeholder on a Resource property
+// ---------------------------------------------------------------------------
+
+/// Pushing a NEW function's `index.js` failed through both `raisin sync --push`
+/// and `raisin deploy`, while every existing function updated fine. The CLI's
+/// create branch sends `file: ''` because a Resource cannot be built before the
+/// bytes it points at exist; the read-modify-write branch that existing
+/// functions take already carries a real Resource, which is why the failure
+/// looked like it was about new functions rather than about assets.
+#[test]
+fn an_empty_placeholder_on_a_resource_property_is_accepted_as_unset() {
+    let schema = vec![create_property_schema(
+        "file",
+        PropertyType::Resource,
+        false,
+        false,
+    )];
+
+    for placeholder in ["", "   "] {
+        let mut properties = HashMap::new();
+        properties.insert(
+            "file".to_string(),
+            PropertyValue::String(placeholder.to_string()),
+        );
+
+        let node = coerce_and_check(properties, schema.clone())
+            .unwrap_or_else(|e| panic!("placeholder {placeholder:?} was refused: {e}"));
+
+        // Normalised to Null rather than left as an empty string: "absent" is
+        // what it means, and it is the spelling the rest of the system reads.
+        assert_eq!(
+            node.properties.get("file"),
+            Some(&PropertyValue::Null),
+            "the placeholder should become Null, not stay a string"
+        );
+    }
+}
+
+/// The narrowness is the point. A path-looking string carries no storage key,
+/// no size and no mime type; accepting it would put a node in the database
+/// pointing at bytes that do not exist.
+#[test]
+fn a_non_empty_string_on_a_resource_property_is_still_refused() {
+    let schema = vec![create_property_schema(
+        "file",
+        PropertyType::Resource,
+        false,
+        false,
+    )];
+
+    let mut properties = HashMap::new();
+    properties.insert(
+        "file".to_string(),
+        PropertyValue::String("/uploads/index.js".to_string()),
+    );
+
+    let error = coerce_and_check(properties, schema)
+        .expect_err("a non-empty string is not a Resource and must not be guessed at");
+    assert!(
+        error.contains("declared Resource"),
+        "unexpected error: {error}"
+    );
+}
+
+/// An empty string on any OTHER declared type keeps whatever behaviour it had:
+/// this pass looks only at `Resource`.
+#[test]
+fn an_empty_string_on_a_string_property_is_untouched() {
+    let schema = vec![create_property_schema(
+        "title",
+        PropertyType::String,
+        false,
+        false,
+    )];
+
+    let mut properties = HashMap::new();
+    properties.insert("title".to_string(), PropertyValue::String(String::new()));
+
+    let node = coerce_and_check(properties, schema).expect("an empty title is fine");
+    assert_eq!(
+        node.properties.get("title"),
+        Some(&PropertyValue::String(String::new()))
+    );
 }
