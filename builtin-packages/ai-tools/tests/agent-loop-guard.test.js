@@ -115,3 +115,35 @@ test('a call with no arguments still compares by name', () => {
   const none = { role: 'assistant', tool_calls: [{ function: { name: 'get-plan-status' } }] };
   assert.equal(mod.detectToolLoop(history(none, none, none)), 'get-plan-status');
 });
+
+/**
+ * The caller WITHDRAWS the tools this names, rather than taking every tool
+ * away, so the names must be complete and must not carry arguments.
+ *
+ * Stripping everything made the agent's own instructions unsatisfiable at the
+ * moment they mattered: `update-task` went with the rest, so "close every task
+ * you open" became impossible and every guard trip left its tasks in_progress
+ * by construction.
+ */
+test('a looping round names every tool in it, and only the names', () => {
+  const pair = {
+    role: 'assistant',
+    tool_calls: [
+      { function: { name: 'find-nodes', arguments: '{"q":"a"}' } },
+      { function: { name: 'discover-capabilities', arguments: '{"query":"b"}' } },
+    ],
+  };
+  const names = mod.detectToolLoop(history(pair, pair, pair));
+  assert.deepEqual(names.split(',').sort(), ['discover-capabilities', 'find-nodes']);
+  assert.ok(!names.includes('{'), 'arguments must not leak into the withdrawn-tool names');
+  assert.ok(!names.includes(':'), 'a signature must not leak into the withdrawn-tool names');
+});
+
+test('a single looping tool names exactly itself', () => {
+  const h = history(
+    round('discover-capabilities', { query: 'x' }),
+    round('discover-capabilities', { query: 'x' }),
+    round('discover-capabilities', { query: 'x' }),
+  );
+  assert.equal(mod.detectToolLoop(h), 'discover-capabilities');
+});

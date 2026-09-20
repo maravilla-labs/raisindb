@@ -372,9 +372,14 @@ function detectToolLoop(history) {
     }
   }
   if (rounds.length >= TOOL_LOOP_THRESHOLD && rounds.every(r => r === rounds[0])) {
-    // The NAME is what the operator and the fallback message need; the
-    // signature carries arguments that may be long and are not worth showing.
-    return rounds[0].split('|')[0].split(':')[0] || rounds[0];
+    // NAMES, not signatures: the caller shows them to the user and withdraws
+    // exactly these tools, and the arguments are neither displayable nor
+    // useful for either job.
+    return rounds[0]
+      .split('|')
+      .map((sig) => sig.split(':')[0])
+      .filter(Boolean)
+      .join(',');
   }
   return null;
 }
@@ -676,8 +681,42 @@ async function handleToolResult(ctx) {
     ? `${agent.properties.provider}:${agent.properties.model}`
     : agent.properties.model;
 
-  const toolsEnabled = !toolLoopDetected && !forceFinalText && toolDefinitions.length > 0;
-  if (!toolsEnabled) {
+  /* WITHDRAW THE TOOL THAT LOOPED, NOT EVERY TOOL.
+   *
+   * Taking all of them away made the agent's own instructions unsatisfiable at
+   * the moment they mattered most. `update-task` went with the rest, so
+   * "close every task you open" became physically impossible and EVERY guard
+   * trip left its tasks `in_progress` by construction — which is most of why
+   * no plan in this instance had ever reached a terminal status.
+   *
+   * It also removed the only safety net: the auto-retry below is gated on
+   * `toolsEnabled`, so the one branch that notices "stopped with work left"
+   * could never fire on the turn that needed it.
+   *
+   * Withdrawing just the repeated tool stops the loop — the model cannot call
+   * what it is not offered — while leaving it able to finish, to record what
+   * happened, and to reach the same end by another route. If that leaves
+   * nothing at all, we are back to the old behaviour, which is then correct.
+   */
+  const loopedNames = new Set(loopedToolNames ? loopedToolNames.split(',') : []);
+  const offeredTools = toolLoopDetected
+    ? toolDefinitions.filter((t) => !loopedNames.has(t?.function?.name))
+    : toolDefinitions;
+  const toolsEnabled = !forceFinalText && offeredTools.length > 0;
+
+  if (toolLoopDetected && toolsEnabled) {
+    history = [
+      ...history,
+      {
+        role: 'system',
+        content:
+          `You called ${loopedToolNames} ${TOOL_LOOP_THRESHOLD} times with the same arguments and ` +
+          'got the same answer, so it has been withdrawn for this turn. Asking it again is not ' +
+          'the way forward. Use what you already have, or say what you need from the user. Your ' +
+          'other tools still work — if you opened a task, close it before you finish.',
+      },
+    ];
+  } else if (!toolsEnabled) {
     // A loop is a different situation from "no tools this turn", and saying only
     // the latter is why a detected loop used to end the turn silently: the model
     // was told to stop calling functions but not what had gone wrong, and
@@ -702,7 +741,7 @@ async function handleToolResult(ctx) {
       messages: history,
       model: modelId,
       temperature: agent.properties.temperature,
-      tools: toolsEnabled ? toolDefinitions : undefined,
+      tools: toolsEnabled ? offeredTools : undefined,
       stream: true,
       conversation_path: chatPath,
       conversation_channel: streamChannel || undefined,

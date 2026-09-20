@@ -14,10 +14,17 @@
 
 import { log } from './logger.js';
 import { createCostRecord } from './utils.js';
+import { stripInternalContext } from './history.js';
 
 const DEFAULT_COMPACT_THRESHOLD = 30;
 /** Max chars of a single message fed into the summarization transcript. */
 const TRANSCRIPT_MESSAGE_CHAR_LIMIT = 1500;
+/* A tool line is a REMINDER that the work happened and roughly what came back,
+ * not a replay of it. Kept short deliberately: a catalogue search can return
+ * hundreds of rows, and the summarizer needs "searched for X, found Y and Z",
+ * not the rows. */
+const TOOL_ARGS_CHAR_LIMIT = 300;
+const TOOL_RESULT_CHAR_LIMIT = 600;
 
 const SUMMARIZE_SYSTEM_PROMPT =
   'You are an AI assistant compacting your own conversation memory. '
@@ -78,14 +85,44 @@ async function maybeCompactConversation(workspace, chatPath, agentProps, modelId
       ? Math.floor(Number(agentProps.compact_threshold_messages))
       : DEFAULT_COMPACT_THRESHOLD;
 
+    /* DESCENDANTS, and every node type a turn is made of.
+     *
+     * This asked for `CHILD_OF` + `raisin:Message` only. Tool calls and their
+     * results are `raisin:AIToolCall` / `raisin:AIToolResult` nodes parented to
+     * the assistant message, so the summarizer never saw a single one —
+     * compare `history.js`, which has always used `DESCENDANT_OF` and the full
+     * list. The originals are DELETED behind the cutoff, so everything the
+     * agent had discovered was replaced by a summary that never contained it.
+     * An agent that searched the catalogue last turn genuinely could not
+     * remember doing it, which is one of the ways it ends up searching again. */
     const rows = await raisin.sql.query(`
-      SELECT path, properties, created_at
+      SELECT path, properties, created_at, node_type
       FROM '${workspace}'
-      WHERE CHILD_OF($1)
-        AND node_type = 'raisin:Message'
+      WHERE DESCENDANT_OF($1)
+        AND node_type IN ('raisin:Message', 'raisin:AIToolCall', 'raisin:AIToolResult', 'raisin:AIToolSingleCallResult')
       ORDER BY created_at ASC
     `, [chatPath]);
-    const messages = Array.isArray(rows) ? rows : [];
+    const all = Array.isArray(rows) ? rows : [];
+
+    // The threshold and the cutoff are about MESSAGES, as they always were.
+    const messages = all.filter(
+      (n) => n.node_type === 'raisin:Message'
+        && n.path.split('/').slice(0, -1).join('/') === chatPath,
+    );
+
+    // Tool nodes, indexed by the message they hang under, so a message's own
+    // tool work can be folded into its transcript line.
+    const toolsByMessage = new Map();
+    for (const node of all) {
+      if (node.node_type === 'raisin:Message') continue;
+      // A result hangs under its call, which hangs under the message.
+      const parent = node.path.split('/').slice(0, -1).join('/');
+      const owner = node.node_type === 'raisin:AIToolCall'
+        ? parent
+        : parent.split('/').slice(0, -1).join('/');
+      if (!toolsByMessage.has(owner)) toolsByMessage.set(owner, []);
+      toolsByMessage.get(owner).push(node);
+    }
 
     existing = await getLatestCompaction(workspace, chatPath);
 
@@ -120,6 +157,36 @@ async function maybeCompactConversation(workspace, chatPath, agentProps, modelId
       const role = m.properties?.role || 'user';
       const text = extractText(m.properties);
       if (text) lines.push(`${role}: ${text.slice(0, TRANSCRIPT_MESSAGE_CHAR_LIMIT)}`);
+
+      /* WHAT THE TURN ACTUALLY DID.
+       *
+       * An assistant message that only made a tool call has empty content, so
+       * the line above skipped it and a tool-calling round compacted to
+       * literally nothing — the most important turns summarised to the least.
+       * The call and what came back are the part worth keeping: it is the
+       * difference between "I looked that up" and looking it up again. */
+      const toolNodes = toolsByMessage.get(m.path) || [];
+      const calls = toolNodes.filter((n) => n.node_type === 'raisin:AIToolCall');
+      for (const call of calls) {
+        const props = call.properties || {};
+        const ref = props.function_ref;
+        const name = props.function_name
+          || (typeof ref === 'object' ? String(ref['raisin:path'] || '').split('/').pop() : ref)
+          || 'tool';
+        const args = JSON.stringify(stripInternalContext(props.arguments || {}));
+        const result = toolNodes.find(
+          (n) => n.path.startsWith(`${call.path}/`)
+            && (n.node_type === 'raisin:AIToolResult' || n.node_type === 'raisin:AIToolSingleCallResult'),
+        );
+        const rp = result?.properties || {};
+        const outcome = rp.error
+          ? `error: ${String(rp.error)}`
+          : JSON.stringify(rp.result ?? '');
+        lines.push(
+          `${role} called ${name}(${args.slice(0, TOOL_ARGS_CHAR_LIMIT)}) -> `
+            + String(outcome).slice(0, TOOL_RESULT_CHAR_LIMIT),
+        );
+      }
     }
 
     const t0 = log.time();
