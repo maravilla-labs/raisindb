@@ -135,7 +135,11 @@ where
         source_id: node_id.clone(),
         chunk_index: 0,
         total_chunks: 1,
-        chunk_content: Some(text.chars().take(100).collect::<String>()),
+        chunk_content: Some(
+            text.chars()
+                .take(raisin_embeddings::CHUNK_PREVIEW_CHARS)
+                .collect::<String>(),
+        ),
         generated_at: chrono::Utc::now(),
         text_hash: hash_text(&text),
         // Legacy fields (deprecated)

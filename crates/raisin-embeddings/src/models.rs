@@ -7,6 +7,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::EmbeddingProvider;
 
+/// How much of a chunk's text is kept as [`EmbeddingData::chunk_content`].
+///
+/// ONE declaration, shared by every writer. It was previously an inline `200` in
+/// the RocksDB job handler and an inline `100` in the legacy server worker, so
+/// the same query returned a different amount of text depending on which path
+/// had embedded the node, and neither number appeared anywhere a reader could
+/// find it.
+///
+/// This is a fallback preview, not the passage: it is only read when
+/// `chunk_span` cannot recover the exact text. 200 characters cut most passages
+/// mid-sentence, which is precisely the wrong place for text that gets quoted
+/// back to a person. 1000 covers a default 512-token chunk in full in the common
+/// case while still bounding what a chunk can cost in RocksDB.
+pub const CHUNK_PREVIEW_CHARS: usize = 1000;
+
 /// Stored embedding data for a node at a specific revision.
 ///
 /// This structure is stored in both:
@@ -69,8 +84,15 @@ pub struct EmbeddingData {
     /// For images, this is always 1
     pub total_chunks: usize,
 
-    /// Optional text excerpt from this chunk for display/debugging
-    /// None for image embeddings
+    /// A stored PREFIX of this chunk's text, not the chunk itself.
+    ///
+    /// Truncated to [`CHUNK_PREVIEW_CHARS`] at write time. Readers reach it only
+    /// when the exact text cannot be recovered from `chunk_span` — see
+    /// [`Self::chunk_span`] — and when they do, `chunk_text_source` reports
+    /// `excerpt` rather than `exact`, so nothing downstream has to guess whether
+    /// it is holding a whole passage.
+    ///
+    /// `None` for image embeddings.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chunk_content: Option<String>,
 

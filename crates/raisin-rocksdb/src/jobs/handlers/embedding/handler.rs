@@ -697,7 +697,12 @@ impl EmbeddingJobHandler {
                 source_id: source_id.clone(),
                 chunk_index: *chunk_index,
                 total_chunks,
-                chunk_content: Some(chunk_content.chars().take(200).collect()),
+                chunk_content: Some(
+                    chunk_content
+                        .chars()
+                        .take(raisin_embeddings::CHUNK_PREVIEW_CHARS)
+                        .collect(),
+                ),
                 generated_at: chrono::Utc::now(),
                 // Per-chunk text hash: unchanged meaning, a debugging aid.
                 text_hash: hash_text(chunk_content),
