@@ -17,7 +17,18 @@ Full-text and vector are **one engine**. `HYBRID_SEARCH` runs both and fuses by
 rank; `KNN` is that engine with the lexical leg off; `FULLTEXT_SEARCH` with the
 vector leg off. Learn the arguments once and all three follow.
 
-Requires server **v0.6.34+** and, for the SDK methods, **@raisindb/client 0.5.4+**.
+Versions, because these are recent and the answer changes:
+
+| Feature | Needs |
+|---|---|
+| Automatic document chunking, `granularity => 'chunk'`, the built-in functions, `NEIGHBORS('ws:/path', …)` | server **v0.6.34+** |
+| `db.search()` / `db.ask()` on the WebSocket client | **@raisindb/client 0.5.4+** |
+| `db.search()` / `db.ask()` on the Node-safe HTTP client | **@raisindb/client 0.5.5+** |
+
+The last row matters more than it looks: a route handler — where retrieval
+belongs, because the browser must not hold a repository credential — is exactly
+where the HTTP client is used. On 0.5.4 those methods exist on the WebSocket
+client only, so code written against the advice fails on the client it names.
 
 ## 1. What gets indexed
 
@@ -206,10 +217,11 @@ hatch for functions *you* wrote: it names the callee in a string resolved at run
 time, makes every call site rebuild the arguments by hand, and freezes the
 transport. These methods are typed and own their shapes.
 
-Both clients have them — the WebSocket `Database` and the Node-safe
-`HttpDatabase` — because the credential stays server-side. A browser cannot hold
-a key that reads the repository, so retrieval runs in a route handler (which
-typically uses the HTTP client) and the browser calls that route.
+Both clients have them from **0.5.5** — the WebSocket `Database` and the
+Node-safe `HttpDatabase` (0.5.4 has the WebSocket one only). The credential
+stays server-side either way: a browser cannot hold a key that reads the
+repository, so retrieval runs in a route handler and the browser calls that
+route.
 
 ## 6. A chatbot is an agent with these tools
 
