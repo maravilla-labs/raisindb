@@ -182,3 +182,46 @@ test('nonsense falls back rather than granting an unbounded turn', () => {
 test('a fractional budget floors rather than rounding up', () => {
   assert.equal(mod.continuationBudget({ max_tool_rounds: 20.9 }), 20);
 });
+
+// ── Budget measured from progress ────────────────────────────────────────
+/**
+ * The arithmetic the depth check does, spelled out.
+ *
+ * The cap defends against a model going round in circles. A turn ticking tasks
+ * off a plan is demonstrably not doing that, so counting its rounds against a
+ * flat per-turn budget punishes the work for taking the steps it takes — an
+ * eight-task plan spent its allowance on task five and stopped, and the user
+ * typed "go ahead", which starts a new base message and hands back a full
+ * budget for nothing. A limit any reply resets is theatre.
+ */
+const since = (nextCount, progressDepth) =>
+  (Number.isFinite(progressDepth) && progressDepth > 0 ? nextCount - progressDepth : nextCount);
+
+test('with no progress the budget is the whole turn', () => {
+  assert.equal(since(21, 0), 21, 'never progressed: every round counts');
+  assert.equal(since(21, undefined), 21);
+});
+
+test('a completed task moves the start line', () => {
+  // Task finished at round 18; round 21 is the third round since.
+  assert.equal(since(21, 18), 3);
+});
+
+/**
+ * The guard on the guard: an agent that loops WITHOUT finishing anything still
+ * runs out in exactly the budget, because the mark only moves on a real
+ * completion.
+ */
+test('looping without finishing anything still runs out', () => {
+  const budget = 20;
+  // Last real progress at round 5, then nothing but spinning.
+  assert.equal(since(25, 5) > budget, false, '20 rounds after progress is still inside');
+  assert.equal(since(26, 5) > budget, true, 'the 21st is not');
+});
+
+test('progress right before the wall buys exactly one full budget more', () => {
+  const budget = 20;
+  assert.equal(since(20, 20) > budget, false);
+  assert.equal(since(40, 20) > budget, false, 'a full budget after the mark');
+  assert.equal(since(41, 20) > budget, true);
+});

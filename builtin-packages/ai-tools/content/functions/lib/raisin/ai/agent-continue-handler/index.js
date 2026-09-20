@@ -538,6 +538,25 @@ async function handleToolResult(ctx) {
    * again below, so nothing is read twice. */
   const chatForBudget = await raisin.nodes.get(workspace, chatPath);
   let depthBudget = MAX_CONTINUATION_DEPTH;
+  /* THE BUDGET IS PER STRETCH WITHOUT PROGRESS, NOT PER TURN.
+   *
+   * The cap defends against a model going round in circles. A turn that is
+   * TICKING TASKS OFF A PLAN is demonstrably not doing that, and counting its
+   * rounds against the same flat budget punishes the work for taking the
+   * number of steps it takes: an eight-task plan spent its allowance on task
+   * five and stopped, and the user typed "go ahead" — which starts a new base
+   * message and hands back a full budget for nothing. A limit that any reply
+   * resets is theatre; a limit that resets on real progress is a limit.
+   *
+   * So the count is measured from the last completed task rather than from the
+   * start of the turn. No progress, no reset: a model looping without
+   * finishing anything still runs out in exactly `depthBudget` rounds. */
+  const progressDepth = Number(
+    (chatForBudget && chatForBudget.properties && chatForBudget.properties.plan_progress_depth) || 0,
+  );
+  const sinceProgress = Number.isFinite(progressDepth) && progressDepth > 0
+    ? nextCount - progressDepth
+    : nextCount;
   try {
     const ref = chatForBudget && chatForBudget.properties && chatForBudget.properties.agent_ref;
     if (ref) {
@@ -552,9 +571,13 @@ async function handleToolResult(ctx) {
     // unbounded one.
   }
 
-  if (nextCount > depthBudget) {
-    log.warn('continue', 'Max continuation depth reached', { depth: depthBudget });
-    const depthMsg = `I've reached the maximum number of tool continuation steps (${depthBudget}). Please send a new message to continue.`;
+  if (sinceProgress > depthBudget) {
+    log.warn('continue', 'Max continuation depth reached', {
+      depth: depthBudget,
+      total_rounds: nextCount,
+      since_progress: sinceProgress,
+    });
+    const depthMsg = `I've gone ${sinceProgress} tool steps without finishing a task, which is my limit (${depthBudget}). Tell me what to do next and I'll carry on.`;
     await raisin.nodes.create(workspace, chatPath, {
       name: `continue-${nextCount}-${baseName}`,
       node_type: 'raisin:Message',
@@ -571,7 +594,7 @@ async function handleToolResult(ctx) {
         ...(planActionId ? { plan_action_id: planActionId } : {}),
         parent_message_path: assistantMsgPath,
         continuation_depth: nextCount,
-        error_details: { type: 'max_depth', depth: depthBudget },
+        error_details: { type: 'max_depth', depth: depthBudget, since_progress: sinceProgress },
       },
     });
     await emitConversationEvent('conversation:done', {
@@ -676,6 +699,32 @@ async function handleToolResult(ctx) {
   const completedPlan = extractCompletedPlanInfo(aggregatedToolResults);
   const planProgress = extractPlanProgressInfo(aggregatedToolResults);
   const forceFinalText = !!completedPlan;
+
+  /* MARK THE PROGRESS, so the budget above can measure from it.
+   *
+   * Written only when the completed count actually RISES — not on every
+   * `get_plan_status`, which would let an agent refresh the plan forever and
+   * keep buying itself rounds. The high-water mark is the whole guard: a
+   * number that only moves when a task genuinely finishes cannot be gamed by
+   * asking about it. */
+  if (planProgress && Number(planProgress.completed_tasks) > 0) {
+    const seen = Number(
+      (chatForBudget && chatForBudget.properties && chatForBudget.properties.plan_tasks_done) || 0,
+    );
+    if (Number(planProgress.completed_tasks) > seen) {
+      try {
+        await raisin.nodes.updateProperty(workspace, chatPath, 'plan_tasks_done', Number(planProgress.completed_tasks));
+        await raisin.nodes.updateProperty(workspace, chatPath, 'plan_progress_depth', nextCount);
+        log.debug('continue', 'Plan progressed; budget measured from here', {
+          completed: planProgress.completed_tasks,
+          at_depth: nextCount,
+        });
+      } catch (e) {
+        // A mark we could not write costs the agent budget, never grants it.
+        log.debug('continue', 'Could not record plan progress depth');
+      }
+    }
+  }
 
   let systemPrompt = agent.properties.system_prompt;
   if (hasPlanningTools && !forceFinalText) {
