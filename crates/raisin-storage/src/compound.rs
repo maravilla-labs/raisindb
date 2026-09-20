@@ -203,6 +203,7 @@ mod tests {
                 })
                 .collect(),
             has_order_column: false,
+            owner_node_type: None,
         }
     }
 

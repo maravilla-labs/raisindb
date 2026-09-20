@@ -60,6 +60,7 @@ fn message_type() -> NodeType {
                 },
             ],
             has_order_column: true,
+            owner_node_type: None,
         }]),
         extends: None,
         mixins: Vec::new(),
