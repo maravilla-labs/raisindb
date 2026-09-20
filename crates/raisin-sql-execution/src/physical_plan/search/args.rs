@@ -22,6 +22,7 @@
 //! and the pgwire extended-query paths), so an agent building a workspace list
 //! in its host language binds it and this sees a plain literal.
 
+use raisin_hnsw::DEFAULT_MAX_DISTANCE;
 use raisin_sql::analyzer::{Expr, Literal, TableFunctionArg, TypedExpr};
 
 use crate::physical_plan::executor::ExecutionError;
@@ -328,7 +329,7 @@ impl SearchArgs {
             language,
             fulltext_weight,
             vector_weight,
-            max_distance: max_distance.unwrap_or(0.6),
+            max_distance: max_distance.unwrap_or(DEFAULT_MAX_DISTANCE),
             kind,
             granularity,
         })
@@ -336,10 +337,18 @@ impl SearchArgs {
 }
 
 /// Parse and validate one call.
+///
+/// `default_max_distance` is the tenant's configured cutoff
+/// (`ALTER EMBEDDING CONFIG SET DEFAULT_MAX_DISTANCE`), threaded in the same way
+/// as `default_language`. It used to be read by nothing at all: the setting was
+/// stored, echoed back by `SHOW EMBEDDING CONFIG`, and then ignored by every
+/// query, so a tenant could tighten the cutoff, see it accepted, and get
+/// identical rows back. `None` here means the tenant never set one.
 pub fn parse_search_args(
     function: SearchFunction,
     args: &[TableFunctionArg],
     default_language: &str,
+    default_max_distance: Option<f32>,
 ) -> Result<SearchArgs, ExecutionError> {
     let name = function.name();
 
@@ -554,8 +563,9 @@ pub fn parse_search_args(
             }
             d as f32
         }
-        // Unchanged from the engine default, so nothing moves unless asked.
-        None => 0.6,
+        // The tenant's configured cutoff, or the engine default when it never
+        // set one. An explicit `max_distance =>` still wins over both.
+        None => default_max_distance.unwrap_or(DEFAULT_MAX_DISTANCE),
     };
 
     // ---- kind ---------------------------------------------------------------
@@ -774,7 +784,7 @@ mod tests {
     }
 
     fn hybrid(args: Vec<TableFunctionArg>) -> Result<SearchArgs, ExecutionError> {
-        parse_search_args(SearchFunction::Hybrid, &args, "en")
+        parse_search_args(SearchFunction::Hybrid, &args, "en", None)
     }
 
     /// The whole point: the name has to survive analysis and be READ.
@@ -948,6 +958,7 @@ mod tests {
                 TableFunctionArg::named("kind", text("image")),
             ],
             "en",
+            None,
         )
         .expect("KNN accepts kind");
         assert_eq!(knn.kind, EmbeddingKindFilter::Image);
@@ -961,6 +972,7 @@ mod tests {
                 TableFunctionArg::named("kind", text("text")),
             ],
             "en",
+            None,
         )
         .unwrap_err()
         .to_string();
@@ -980,6 +992,46 @@ mod tests {
         assert_eq!(a.limit, 10);
     }
 
+    /// The tenant's cutoff has to REACH the query.
+    ///
+    /// It was stored, echoed back by `SHOW EMBEDDING CONFIG`, and then read by
+    /// nothing: a tenant could tighten it, see the ALTER succeed, and get byte
+    /// identical rows back. A test that only checked the 0.6 default passed
+    /// throughout, because 0.6 was also the hardcoded literal.
+    #[test]
+    fn tenant_default_max_distance_is_used_when_the_query_omits_one() {
+        let args = vec![
+            TableFunctionArg::positional(text("q")),
+            TableFunctionArg::named("workspaces", text("library")),
+        ];
+        let a = parse_search_args(SearchFunction::Hybrid, &args, "en", Some(0.42)).unwrap();
+        assert_eq!(a.max_distance, 0.42);
+    }
+
+    /// ...and an explicit argument still beats it, or `max_distance =>` would
+    /// silently stop working the day a tenant set a default.
+    #[test]
+    fn an_explicit_max_distance_beats_the_tenant_default() {
+        let args = vec![
+            TableFunctionArg::positional(text("q")),
+            TableFunctionArg::named("workspaces", text("library")),
+            TableFunctionArg::named("max_distance", dbl(0.9)),
+        ];
+        let a = parse_search_args(SearchFunction::Hybrid, &args, "en", Some(0.42)).unwrap();
+        assert_eq!(a.max_distance, 0.9);
+    }
+
+    /// No tenant setting means the engine default, not zero.
+    #[test]
+    fn no_tenant_default_falls_back_to_the_engine_constant() {
+        let args = vec![
+            TableFunctionArg::positional(text("q")),
+            TableFunctionArg::named("workspaces", text("library")),
+        ];
+        let a = parse_search_args(SearchFunction::Hybrid, &args, "en", None).unwrap();
+        assert_eq!(a.max_distance, DEFAULT_MAX_DISTANCE);
+    }
+
     #[test]
     fn language_must_be_iso_639_1() {
         let err = parse_search_args(
@@ -990,6 +1042,7 @@ mod tests {
                 TableFunctionArg::named("workspaces", text("library")),
             ],
             "en",
+            None,
         )
         .unwrap_err()
         .to_string();
@@ -1007,6 +1060,7 @@ mod tests {
                 TableFunctionArg::positional(text("library")),
             ],
             "en",
+            None,
         )
         .unwrap_err()
         .to_string();
@@ -1024,6 +1078,7 @@ mod tests {
                     TableFunctionArg::named(bad, text("x")),
                 ],
                 "en",
+                None,
             )
             .unwrap_err()
             .to_string();
@@ -1043,6 +1098,7 @@ mod tests {
                 TableFunctionArg::named("workspaces", text("library")),
             ],
             "en",
+            None,
         )
         .unwrap();
         assert!(matches!(a.query, QueryInput::Vector(ref v) if v.len() == 2));
@@ -1057,6 +1113,7 @@ mod tests {
                 TableFunctionArg::named("workspaces", text("library")),
             ],
             "en",
+            None,
         )
     }
 

@@ -325,6 +325,23 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         self
     }
 
+    /// The tenant's configured vector-distance cutoff, read fresh per statement.
+    ///
+    /// `None` when no embedding config store is wired up or the tenant never set
+    /// one; the search path then falls back to
+    /// `raisin_hnsw::DEFAULT_MAX_DISTANCE`.
+    ///
+    /// Read here rather than cached on the engine so that
+    /// `ALTER EMBEDDING CONFIG SET DEFAULT_MAX_DISTANCE` takes effect on the next
+    /// statement instead of the next restart. A read failure is deliberately not
+    /// fatal: a search at the engine default beats a query that will not run.
+    pub(crate) fn tenant_default_max_distance(&self) -> Option<f32> {
+        self.embedding_config_store
+            .as_ref()
+            .and_then(|store| store.get_config(&self.tenant_id).ok().flatten())
+            .and_then(|config| config.default_max_distance)
+    }
+
     /// Wire the tenant AI config store, so `ai_provider_ref` resolves here the
     /// same way it does on the write path.
     pub fn with_ai_config_store(
@@ -693,6 +710,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         );
 
         ctx.default_language = Arc::from(self.default_language.as_str());
+        ctx.default_max_distance = self.tenant_default_max_distance();
         ctx = ctx.with_max_revision(max_revision);
         ctx.locales = Arc::from(locales);
 

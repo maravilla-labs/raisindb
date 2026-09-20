@@ -181,7 +181,12 @@ pub async fn plan_search<S: Storage + 'static>(
     residual: Option<&TypedExpr>,
     ctx: &ExecutionContext<S>,
 ) -> Result<(SearchArgs, WorkspaceSet, SearchPlanNote), ExecutionError> {
-    let parsed = parse_search_args(function, args, &ctx.default_language)?;
+    let parsed = parse_search_args(
+        function,
+        args,
+        &ctx.default_language,
+        ctx.default_max_distance,
+    )?;
     let (scope, note) = plan_resolved(&parsed, residual, ctx).await?;
     Ok((parsed, scope, note))
 }
@@ -276,7 +281,12 @@ pub async fn execute_search<S: Storage + 'static>(
     table_name: String,
     ctx: &ExecutionContext<S>,
 ) -> Result<RowStream, ExecutionError> {
-    let parsed = parse_search_args(function, args, &ctx.default_language)?;
+    let parsed = parse_search_args(
+        function,
+        args,
+        &ctx.default_language,
+        ctx.default_max_distance,
+    )?;
     execute_parsed(parsed, residual, table_name, ctx).await
 }
 

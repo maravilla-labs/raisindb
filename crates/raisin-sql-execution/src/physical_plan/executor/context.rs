@@ -65,6 +65,13 @@ pub struct ExecutionContext<S: Storage> {
     /// Used when no locale is specified in the query (fallback for empty locales vec)
     /// (Arc for cheap cloning in async streams)
     pub default_language: Arc<str>,
+    /// The tenant's configured vector-distance cutoff
+    /// (`ALTER EMBEDDING CONFIG SET DEFAULT_MAX_DISTANCE`), or `None` when the
+    /// tenant never set one.
+    ///
+    /// Read at query time rather than cached on the engine, so an `ALTER` takes
+    /// effect on the next statement instead of the next restart.
+    pub default_max_distance: Option<f32>,
     /// Storage for materialized Common Table Expressions (CTEs)
     ///
     /// Maps CTE names to their materialized result sets, which may be
@@ -133,6 +140,7 @@ impl<S: Storage> ExecutionContext<S> {
             locale: None,                   // Default: no translation, use base language
             locales: Arc::from(Vec::new()), // Default: no locale filtering
             default_language: Arc::from("en"), // Default fallback, should be set by QueryEngine
+            default_max_distance: None,     // Set by QueryEngine from the embedding config
             cte_storage: Arc::new(RwLock::new(HashMap::new())),
             cte_config: CTEConfig::default(),
             temp_files: Arc::new(RwLock::new(Vec::new())),
@@ -349,6 +357,7 @@ impl<S: Storage> Clone for ExecutionContext<S> {
             locale: self.locale.clone(), // Clone locale for translation resolution
             locales: self.locales.clone(), // Clone locales for multi-locale support
             default_language: self.default_language.clone(), // Clone default language
+            default_max_distance: self.default_max_distance,
             cte_storage: Arc::new(RwLock::new(HashMap::new())), // Note: CTEs are not cloned, each clone gets empty storage
             cte_config: self.cte_config.clone(),
             temp_files: Arc::new(RwLock::new(Vec::new())), // Note: temp_files are not shared across clones

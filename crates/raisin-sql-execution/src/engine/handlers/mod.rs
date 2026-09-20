@@ -456,6 +456,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         );
 
         ctx.default_language = Arc::from(self.default_language.as_str());
+        ctx.default_max_distance = self.tenant_default_max_distance();
         ctx = ctx.with_max_revision(max_revision);
         ctx.locales = Arc::from(locales.as_slice());
 
