@@ -53,7 +53,31 @@ import {
   updateOrchestrationState,
 } from '../agent-shared/utils.js';
 
+/**
+ * How many TOOL ROUNDS one user message may take, by default.
+ *
+ * A "continuation" is one round trip: the model calls tools, they run, and it
+ * is asked again. Twenty is plenty for a conversation and not much for a job —
+ * an agent that builds something, checks its work and fixes what it finds
+ * spends rounds on each of those, and a five-task plan can use the budget
+ * before the last task starts. It is a floor on cost, not a statement about
+ * how much work is reasonable, so it is a DEFAULT and an agent that does long
+ * jobs can raise it.
+ */
 const MAX_CONTINUATION_DEPTH = 20;
+/* A ceiling on the override, because the budget is also the only thing
+ * standing between a confused agent and an unbounded bill. */
+const MAX_CONTINUATION_DEPTH_LIMIT = 200;
+
+/**
+ * The round budget for this agent: `max_tool_rounds` on the raisin:AIAgent,
+ * clamped, falling back to the default when unset or nonsense.
+ */
+function continuationBudget(agentProps) {
+  const raw = Number(agentProps && agentProps.max_tool_rounds);
+  if (!Number.isFinite(raw) || raw < 1) return MAX_CONTINUATION_DEPTH;
+  return Math.min(Math.floor(raw), MAX_CONTINUATION_DEPTH_LIMIT);
+}
 const TOOL_LOOP_THRESHOLD = 3;
 
 // ─────────────────────────────────────────────────
@@ -506,9 +530,31 @@ async function handleToolResult(ctx) {
   const prevCount = getContinuationCount(assistantMsgName);
   const nextCount = prevCount + 1;
 
-  if (nextCount > MAX_CONTINUATION_DEPTH) {
-    log.warn('continue', 'Max continuation depth reached', { depth: MAX_CONTINUATION_DEPTH });
-    const depthMsg = `I've reached the maximum number of tool continuation steps (${MAX_CONTINUATION_DEPTH}). Please send a new message to continue.`;
+  /* The agent's own budget, read before the check rather than after.
+   *
+   * The cap used to be a module constant compared before the agent node was
+   * loaded, so there was nowhere for an agent to say "this job takes more
+   * rounds than a chat does". Two cheap reads buy that; the values are used
+   * again below, so nothing is read twice. */
+  const chatForBudget = await raisin.nodes.get(workspace, chatPath);
+  let depthBudget = MAX_CONTINUATION_DEPTH;
+  try {
+    const ref = chatForBudget && chatForBudget.properties && chatForBudget.properties.agent_ref;
+    if (ref) {
+      const aPath = typeof ref === 'string' ? ref : ref['raisin:path'];
+      const aWs = typeof ref === 'object' ? (ref['raisin:workspace'] || 'functions') : 'functions';
+      const aNode = await raisin.nodes.get(aWs, aPath);
+      depthBudget = continuationBudget(aNode && aNode.properties);
+    }
+  } catch (e) {
+    // Unreadable agent: the default stands. A budget we cannot read is not a
+    // reason to refuse the turn, and it is certainly not a reason to grant an
+    // unbounded one.
+  }
+
+  if (nextCount > depthBudget) {
+    log.warn('continue', 'Max continuation depth reached', { depth: depthBudget });
+    const depthMsg = `I've reached the maximum number of tool continuation steps (${depthBudget}). Please send a new message to continue.`;
     await raisin.nodes.create(workspace, chatPath, {
       name: `continue-${nextCount}-${baseName}`,
       node_type: 'raisin:Message',
@@ -525,7 +571,7 @@ async function handleToolResult(ctx) {
         ...(planActionId ? { plan_action_id: planActionId } : {}),
         parent_message_path: assistantMsgPath,
         continuation_depth: nextCount,
-        error_details: { type: 'max_depth', depth: MAX_CONTINUATION_DEPTH },
+        error_details: { type: 'max_depth', depth: depthBudget },
       },
     });
     await emitConversationEvent('conversation:done', {
@@ -1257,4 +1303,4 @@ async function handleToolResult(ctx) {
 // `detectToolLoop` and its helpers are pure and exported for the loop-guard
 // test (builtin-packages/ai-tools/tests/agent-loop-guard.test.js). Nothing in
 // the runtime should call them but this file.
-export { handleToolResult, detectToolLoop, toolCallSignature, stableStringify };
+export { handleToolResult, detectToolLoop, toolCallSignature, stableStringify, continuationBudget };

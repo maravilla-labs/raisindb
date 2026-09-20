@@ -231,4 +231,24 @@ properties:
     validation:
       min: 1
 
+  - name: max_tool_rounds
+    title: Max Tool Rounds
+    type: Number
+    required: false
+    description: |
+      How many TOOL ROUNDS one user message may take. A round is one trip:
+      the agent calls tools, they run, and it is asked again.
+
+      Defaults to 20, which is plenty for a conversation and not much for a
+      job. An agent that builds something, validates it and fixes what it
+      finds spends rounds on each, and a multi-step plan can exhaust the
+      default before its last task starts — the turn then ends with
+      "I've reached the maximum number of tool continuation steps", mid-work.
+      Raise it for agents that do long jobs; 80 is a reasonable figure for a
+      builder. Capped at 200, because this budget is also the only thing
+      between a confused agent and an unbounded bill.
+    validation:
+      min: 1
+      max: 200
+
 allowed_children: []

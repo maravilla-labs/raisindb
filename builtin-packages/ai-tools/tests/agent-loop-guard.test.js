@@ -147,3 +147,38 @@ test('a single looping tool names exactly itself', () => {
   );
   assert.equal(mod.detectToolLoop(h), 'discover-capabilities');
 });
+
+// ── The tool-round budget ────────────────────────────────────────────────
+/**
+ * A build is not a chat. Twenty rounds is generous for a conversation and thin
+ * for a job: discover, propose, create, materialize, validate, fix,
+ * re-materialize, re-validate is eight before any retry. An agent that runs
+ * out ends its turn mid-work with "I've reached the maximum number of tool
+ * continuation steps" and leaves half a thing behind, so an agent that does
+ * long jobs can say so.
+ */
+test('an agent with no opinion gets the default', () => {
+  assert.equal(mod.continuationBudget(undefined), 20);
+  assert.equal(mod.continuationBudget({}), 20);
+  assert.equal(mod.continuationBudget({ max_tool_rounds: null }), 20);
+});
+
+test('an agent that asks for more rounds gets them', () => {
+  assert.equal(mod.continuationBudget({ max_tool_rounds: 80 }), 80);
+  assert.equal(mod.continuationBudget({ max_tool_rounds: '80' }), 80, 'a number from YAML may arrive as a string');
+});
+
+/** The budget is also the only thing between a confused agent and a bill. */
+test('the override is capped', () => {
+  assert.equal(mod.continuationBudget({ max_tool_rounds: 5000 }), 200);
+});
+
+test('nonsense falls back rather than granting an unbounded turn', () => {
+  for (const bad of [0, -1, 'lots', NaN, {}, []]) {
+    assert.equal(mod.continuationBudget({ max_tool_rounds: bad }), 20, `${JSON.stringify(bad)} should fall back`);
+  }
+});
+
+test('a fractional budget floors rather than rounding up', () => {
+  assert.equal(mod.continuationBudget({ max_tool_rounds: 20.9 }), 20);
+});
