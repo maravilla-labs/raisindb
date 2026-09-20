@@ -613,6 +613,22 @@ pub mod date {
         crate::wire::decode_string(&raw)
     }
 
+    /// `raisin.date.fromZone` — registry method `date_fromZone`.
+    pub fn from_zone(year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64, time_zone: &str) -> crate::Result<i64> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(year)?,
+            ::serde_json::to_value(month)?,
+            ::serde_json::to_value(day)?,
+            ::serde_json::to_value(hour)?,
+            ::serde_json::to_value(minute)?,
+            ::serde_json::to_value(second)?,
+            ::serde_json::to_value(time_zone)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("date_fromZone", &args)?;
+        crate::wire::decode_i64(&raw)
+    }
+
     /// `raisin.date.now` — registry method `date_now`.
     pub fn now() -> crate::Result<String> {
         let args = "[]".to_string();
@@ -643,6 +659,29 @@ pub mod date {
         let args = "[]".to_string();
         let raw = crate::host::call("date_timestampMillis", &args)?;
         crate::wire::decode_i64(&raw)
+    }
+
+    /// `raisin.date.toZone` — registry method `date_toZone`.
+    pub fn to_zone(timestamp: i64, time_zone: &str) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(timestamp)?,
+            ::serde_json::to_value(time_zone)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("date_toZone", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `to_zone`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn to_zone_as<T: ::serde::de::DeserializeOwned>(timestamp: i64, time_zone: &str) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(timestamp)?,
+            ::serde_json::to_value(time_zone)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("date_toZone", &args)?;
+        crate::wire::decode_json_as(&raw)
     }
 
 }

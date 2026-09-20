@@ -77,6 +77,30 @@ impl RaisinFunctionApi {
         (ts2 - ts1) / 86400
     }
 
+    /// Wall-clock fields of an instant in a named IANA zone.
+    pub(crate) fn impl_date_to_zone(
+        &self,
+        timestamp: i64,
+        time_zone: &str,
+    ) -> raisin_error::Result<serde_json::Value> {
+        crate::api::date_zone::to_zone(timestamp, time_zone)
+    }
+
+    /// The UTC instant for a wall-clock time in a named IANA zone.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn impl_date_from_zone(
+        &self,
+        year: i64,
+        month: i64,
+        day: i64,
+        hour: i64,
+        minute: i64,
+        second: i64,
+        time_zone: &str,
+    ) -> raisin_error::Result<i64> {
+        crate::api::date_zone::from_zone(year, month, day, hour, minute, second, time_zone)
+    }
+
     // ========== Logging ==========
 
     pub(crate) fn impl_log(&self, level: &str, message: &str) {

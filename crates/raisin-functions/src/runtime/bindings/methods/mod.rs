@@ -291,7 +291,7 @@ mod tests {
             // Admin SQL operations (2)
             "admin_sql_query",
             "admin_sql_execute",
-            // Date/time operations (7)
+            // Date/time operations (9)
             "date_now",
             "date_timestamp",
             "date_timestamp_millis",
@@ -299,6 +299,11 @@ mod tests {
             "date_format",
             "date_add_days",
             "date_diff_days",
+            // Zone conversion is NOT on the JS not-exposed list below: QuickJS
+            // has no Intl, so native Date cannot do IANA zones at all. These two
+            // are the only way a function can say "09:00 Europe/Zurich".
+            "date_to_zone",
+            "date_from_zone",
             // Lock / inventory operations (5)
             "lock_acquire",
             "lock_release",
@@ -397,6 +402,8 @@ mod tests {
             .replace("timestampMillis", "timestamp_millis")
             .replace("addDays", "add_days")
             .replace("diffDays", "diff_days")
+            .replace("toZone", "to_zone")
+            .replace("fromZone", "from_zone")
             .to_lowercase();
 
         // Handle special cases where order matters:

@@ -784,6 +784,26 @@ globalThis.raisin = {
         if (r && r.error) throw new Error(r.message || r.error);
         return r;
     },
+    // The rest of the date surface is deliberately absent: JS has a native
+    // Date. These two are not, because QuickJS ships without Intl, so there
+    // is no way in the sandbox to ask what 09:00 in Europe/Zurich is — and
+    // that question is exactly what a cron trigger has to answer twice a
+    // year, on either side of a DST transition.
+    date: {
+        // toZone(timestampSeconds, ianaZone) ->
+        //   { year, month, day, hour, minute, second, weekday, offset_minutes, zone }
+        // weekday is 0=Sunday. Throws on an unknown zone name.
+        toZone: (timestamp, zone) => {
+            const r = __call('date_toZone', [timestamp, zone]);
+            if (r && r.error) throw new Error(r.message || r.error);
+            return r;
+        },
+        // fromZone(year, month, day, hour, minute, second, ianaZone) -> unix seconds.
+        // A wall time that occurs twice (autumn fold) resolves to the EARLIER
+        // instant; one that never occurs (spring gap) shifts forward an hour.
+        fromZone: (year, month, day, hour, minute, second, zone) =>
+            __call('date_fromZone', [year, month, day, hour, minute, second, zone])
+    },
     crypto: {
         uuid: () => __call('crypto_uuid', []),
         // verifyJwt(token, opts?) -> { valid, claims?, error? }

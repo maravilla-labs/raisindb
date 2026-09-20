@@ -58,10 +58,12 @@ declare namespace raisin {
     function addDays(timestamp: number, days: number): Promise<number>;
     function diffDays(ts1: number, ts2: number): Promise<number>;
     function format(timestamp: number, format?: string | null): Promise<string>;
+    function fromZone(year: number, month: number, day: number, hour: number, minute: number, second: number, timeZone: string): Promise<number>;
     function now(): Promise<string>;
     function parse(dateStr: string, format?: string | null): Promise<number>;
     function timestamp(): Promise<number>;
     function timestampMillis(): Promise<number>;
+    function toZone(timestamp: number, timeZone: string): Promise<any>;
   }
 
   namespace email {

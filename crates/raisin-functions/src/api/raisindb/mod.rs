@@ -512,6 +512,23 @@ impl FunctionApi for RaisinFunctionApi {
         self.impl_date_diff_days(ts1, ts2)
     }
 
+    fn date_to_zone(&self, timestamp: i64, time_zone: &str) -> Result<Value> {
+        self.impl_date_to_zone(timestamp, time_zone)
+    }
+
+    fn date_from_zone(
+        &self,
+        year: i64,
+        month: i64,
+        day: i64,
+        hour: i64,
+        minute: i64,
+        second: i64,
+        time_zone: &str,
+    ) -> Result<i64> {
+        self.impl_date_from_zone(year, month, day, hour, minute, second, time_zone)
+    }
+
     fn log(&self, level: &str, message: &str) {
         self.impl_log(level, message);
     }

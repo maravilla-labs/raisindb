@@ -679,6 +679,27 @@ impl FunctionApi for MockFunctionApi {
         (ts2 - ts1) / 86400
     }
 
+    // Zone conversion is real even in the mock: it is pure arithmetic over the
+    // tz database with no backend behind it, and a stub here would make the
+    // sandbox tests pass against something that is not what functions run.
+    fn date_to_zone(&self, timestamp: i64, time_zone: &str) -> Result<serde_json::Value> {
+        crate::api::date_zone::to_zone(timestamp, time_zone)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn date_from_zone(
+        &self,
+        year: i64,
+        month: i64,
+        day: i64,
+        hour: i64,
+        minute: i64,
+        second: i64,
+        time_zone: &str,
+    ) -> Result<i64> {
+        crate::api::date_zone::from_zone(year, month, day, hour, minute, second, time_zone)
+    }
+
     fn log(&self, level: &str, message: &str) {
         self.logs
             .lock()

@@ -223,6 +223,11 @@ export namespace date {
     return call("date_format", argsOf([timestamp.toString(), jsonStringOrNull(format)]));
   }
 
+  /** `raisin.date.fromZone` — registry method `date_fromZone`. Returns raw JSON. */
+  export function fromZone(year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64, timeZone: string): string {
+    return call("date_fromZone", argsOf([year.toString(), month.toString(), day.toString(), hour.toString(), minute.toString(), second.toString(), jsonString(timeZone)]));
+  }
+
   /** `raisin.date.now` — registry method `date_now`. Returns raw JSON. */
   export function now(): string {
     return call("date_now", "[]");
@@ -241,6 +246,11 @@ export namespace date {
   /** `raisin.date.timestampMillis` — registry method `date_timestampMillis`. Returns raw JSON. */
   export function timestampMillis(): string {
     return call("date_timestampMillis", "[]");
+  }
+
+  /** `raisin.date.toZone` — registry method `date_toZone`. Returns raw JSON. */
+  export function toZone(timestamp: i64, timeZone: string): string {
+    return call("date_toZone", argsOf([timestamp.toString(), jsonString(timeZone)]));
   }
 
 }

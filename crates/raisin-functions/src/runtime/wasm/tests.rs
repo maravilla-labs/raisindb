@@ -373,3 +373,79 @@ async fn the_assemblyscript_sdk_surface_reaches_the_host() {
         "log.info from the SDK did not reach the execution logs"
     );
 }
+
+/// The WASM guests reach `raisin.date.toZone` / `fromZone` through the same
+/// generic gateway as everything else — `host::call(method, args_json)` looks
+/// the method up in the shared registry and invokes it. The committed fixtures
+/// predate these two methods, so rather than rebuild them this pins the layer
+/// the gateway delegates to, with the exact wire shape it passes: a positional
+/// JSON array in, a JSON string out. A missing registry entry, a wrong argument
+/// order or a non-JSON return all fail here.
+#[tokio::test]
+async fn the_gateway_can_reach_the_zone_methods_the_generated_sdks_call() {
+    use crate::runtime::bindings::methods::registry;
+
+    let api = mock_api(json!({"tenant_id": "tenant1"}));
+
+    let from_zone = registry()
+        .find_by_internal_name("date_fromZone")
+        .expect("date_fromZone must be in the registry — the Go/Rust/AssemblyScript SDKs emit a call to exactly this name");
+    let to_zone = registry()
+        .find_by_internal_name("date_toZone")
+        .expect("date_toZone must be in the registry");
+
+    // 09:00 Europe/Zurich on a winter Tuesday, as `Date().FromZone(...)` sends it.
+    let winter = (from_zone.invoker)(
+        api.clone(),
+        vec![
+            json!(2026),
+            json!(1),
+            json!(20),
+            json!(9),
+            json!(0),
+            json!(0),
+            json!("Europe/Zurich"),
+        ],
+    )
+    .await
+    .expect("from_zone invoked")
+    .to_json_string();
+    let winter: i64 = winter.parse().expect("from_zone returns a bare number");
+
+    let utc = (to_zone.invoker)(api.clone(), vec![json!(winter), json!("UTC")])
+        .await
+        .expect("to_zone invoked")
+        .to_json_string();
+    let utc: serde_json::Value = serde_json::from_str(&utc).expect("to_zone returns JSON");
+    assert_eq!(utc["hour"], 8, "09:00 Zurich in January is 08:00 UTC");
+
+    // And the summer instant is a different offset — the reason this exists.
+    let summer = (from_zone.invoker)(
+        api.clone(),
+        vec![
+            json!(2026),
+            json!(7),
+            json!(21),
+            json!(9),
+            json!(0),
+            json!(0),
+            json!("Europe/Zurich"),
+        ],
+    )
+    .await
+    .expect("from_zone invoked")
+    .to_json_string();
+    let summer: i64 = summer.parse().unwrap();
+    let utc_summer: serde_json::Value = serde_json::from_str(
+        &(to_zone.invoker)(api.clone(), vec![json!(summer), json!("UTC")])
+            .await
+            .expect("to_zone invoked")
+            .to_json_string(),
+    )
+    .unwrap();
+    assert_eq!(utc_summer["hour"], 7, "09:00 Zurich in July is 07:00 UTC");
+
+    // An unknown zone is an Err the guest can handle, not a trap or a silent UTC.
+    let bad = (to_zone.invoker)(api, vec![json!(0), json!("Mars/Olympus")]).await;
+    assert!(bad.is_err(), "an unknown zone must be an error: {bad:?}");
+}

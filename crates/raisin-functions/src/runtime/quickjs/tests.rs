@@ -2262,6 +2262,7 @@ async fn test_raisin_api_surface_snapshot() {
                 platform: names(raisin.platform),
                 tasks: names(raisin.tasks),
                 crypto: names(raisin.crypto),
+                date: names(raisin.date),
                 locks: names(raisin.locks),
                 inventory: names(raisin.inventory),
                 integrations: names(raisin.integrations),
@@ -2323,6 +2324,7 @@ async fn test_raisin_api_surface_snapshot() {
             "capabilities",
             "context",
             "crypto",
+            "date",
             "email",
             "events",
             "flows",
@@ -2391,6 +2393,8 @@ async fn test_raisin_api_surface_snapshot() {
     );
     expect("functions", vec!["call", "execute"]);
     expect("flows", vec!["run"]);
+    // Only the two zone methods: the rest of date lives on the native Date.
+    expect("date", vec!["fromZone", "toZone"]);
     expect("branches", vec!["compare", "copyNodes", "diff"]);
     expect("scheduler", vec!["cancel", "get", "list", "schedule"]);
     expect("platform", vec!["hook"]);
@@ -3399,5 +3403,89 @@ async fn a_missing_entrypoint_is_still_reported() {
     assert!(
         reported.contains("handler"),
         "the error must name the entrypoint it looked for: {reported}"
+    );
+}
+
+/// QuickJS ships without `Intl`, so a function cannot ask the native Date
+/// what 09:00 in Europe/Zurich is — and that is exactly the question a cron
+/// trigger has to answer. This proves the two zone methods work from JS,
+/// across a DST transition, in the sandbox a real function runs in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_raisin_date_zone_bindings_work_across_dst() {
+    let runtime = QuickJsRuntime::new();
+
+    let code = r#"
+        function handler(input) {
+            // The premise: there is no Intl to fall back on.
+            const hasIntl = typeof Intl !== "undefined";
+
+            // 09:00 Zurich on a winter Tuesday and a summer Tuesday.
+            const winter = raisin.date.fromZone(2026, 1, 20, 9, 0, 0, "Europe/Zurich");
+            const summer = raisin.date.fromZone(2026, 7, 21, 9, 0, 0, "Europe/Zurich");
+
+            const winterUtc = raisin.date.toZone(winter, "UTC");
+            const summerUtc = raisin.date.toZone(summer, "UTC");
+            const winterLocal = raisin.date.toZone(winter, "Europe/Zurich");
+
+            let unknownZoneError = null;
+            try {
+                raisin.date.toZone(0, "Mars/Olympus");
+            } catch (e) {
+                unknownZoneError = String(e.message || e);
+            }
+
+            return {
+                hasIntl,
+                winterUtcHour: winterUtc.hour,
+                summerUtcHour: summerUtc.hour,
+                winterOffset: winterLocal.offset_minutes,
+                winterWeekday: winterLocal.weekday,
+                zone: winterLocal.zone,
+                unknownZoneError,
+            };
+        }
+    "#;
+
+    let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+        .with_input(serde_json::json!({}));
+    let metadata = FunctionMetadata::javascript("date_zone_test");
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+
+    let result = runtime
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    assert!(result.success, "function errored: {:?}", result.error);
+    let output = result.output.unwrap();
+
+    assert_eq!(
+        output["hasIntl"], false,
+        "Intl appeared — this binding exists because it does not"
+    );
+    // The same wall clock, an hour apart in UTC. Fixed-offset arithmetic
+    // would report the same hour twice and be wrong half the year.
+    assert_eq!(output["winterUtcHour"], 8);
+    assert_eq!(output["summerUtcHour"], 7);
+    assert_eq!(output["winterOffset"], 60);
+    assert_eq!(
+        output["winterWeekday"], 2,
+        "2026-01-20 is a Tuesday (0 = Sunday)"
+    );
+    assert_eq!(output["zone"], "Europe/Zurich");
+    assert!(
+        output["unknownZoneError"]
+            .as_str()
+            .unwrap()
+            .contains("Unknown time zone"),
+        "an unknown zone must throw, not silently mean UTC: {:?}",
+        output["unknownZoneError"]
     );
 }

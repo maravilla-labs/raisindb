@@ -594,6 +594,52 @@ pub trait FunctionApi: Send + Sync {
     /// Get difference in days between two timestamps
     fn date_diff_days(&self, ts1: i64, ts2: i64) -> i64;
 
+    /// Wall-clock fields of an instant, in a named IANA zone.
+    ///
+    /// The sandbox has no `Intl` — measured, it is simply `undefined` — so a
+    /// function cannot convert between UTC and a zone on its own, and anything
+    /// scheduled "at 09:00" was really being scheduled at 09:00 UTC. That is
+    /// wrong by an hour or two for most of the world and wrong TWICE A YEAR by a
+    /// different amount, which is the part a fixed stored offset cannot fix.
+    ///
+    /// The host already depends on `chrono-tz` for exactly this (calendar
+    /// recurrence expands "every Tuesday 09:00 Europe/Zurich" correctly across
+    /// DST); this exposes the same knowledge to functions.
+    ///
+    /// Returns `{ year, month, day, hour, minute, second, weekday,
+    /// offset_minutes }` — `weekday` 0=Sunday, `offset_minutes` east of UTC.
+    fn date_to_zone(&self, _timestamp: i64, _time_zone: &str) -> Result<Value> {
+        Err(raisin_error::Error::internal(
+            "date.toZone is not available in this runtime",
+        ))
+    }
+
+    /// The UTC instant for a wall-clock time in a named IANA zone.
+    ///
+    /// The inverse of [`Self::date_to_zone`], and the half a scheduler needs:
+    /// "the next 09:00 in Europe/Zurich" is a wall-clock intention that only
+    /// becomes an instant once the zone's offset on THAT DATE is known.
+    ///
+    /// A wall-clock time that does not exist (the hour skipped when clocks go
+    /// forward) resolves to the instant the clock jumps to; one that happens
+    /// twice (the repeated hour in autumn) resolves to the FIRST occurrence.
+    /// Both are choices rather than errors: a daily rule must fire on the day
+    /// the clocks change, not refuse.
+    fn date_from_zone(
+        &self,
+        _year: i64,
+        _month: i64,
+        _day: i64,
+        _hour: i64,
+        _minute: i64,
+        _second: i64,
+        _time_zone: &str,
+    ) -> Result<i64> {
+        Err(raisin_error::Error::internal(
+            "date.fromZone is not available in this runtime",
+        ))
+    }
+
     // ========== Logging ==========
 
     /// Log a message

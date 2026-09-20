@@ -160,6 +160,54 @@ def handler(input):
         assert_eq!(output["released"], true);
     }
 
+    /// Parity with the QuickJS `test_raisin_date_zone_bindings_work_across_dst`.
+    /// Starlark has no zone-aware date library of its own either, so the same
+    /// two methods must be reachable here, under their snake_case names, and
+    /// must agree with the QuickJS side instant for instant.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_date_zone_bindings() {
+        let runtime = StarlarkRuntime::new();
+        let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+
+        let code = r#"
+def handler(input):
+    winter = raisin.date.from_zone(2026, 1, 20, 9, 0, 0, "Europe/Zurich")
+    summer = raisin.date.from_zone(2026, 7, 21, 9, 0, 0, "Europe/Zurich")
+    winter_local = raisin.date.to_zone(winter, "Europe/Zurich")
+    return {
+        "winterUtcHour": raisin.date.to_zone(winter, "UTC")["hour"],
+        "summerUtcHour": raisin.date.to_zone(summer, "UTC")["hour"],
+        "winterOffset": winter_local["offset_minutes"],
+        "winterWeekday": winter_local["weekday"],
+        "zone": winter_local["zone"],
+    }
+"#;
+
+        let context = create_test_context();
+        let metadata = FunctionMetadata::starlark("test-date-zone");
+
+        let result = runtime
+            .execute(
+                &FunctionCode::from(code),
+                "handler",
+                context,
+                &metadata,
+                api,
+                HashMap::new(),
+            )
+            .await
+            .expect("execution ok");
+        assert!(result.success, "function errored: {:?}", result.error);
+        let output = result.output.unwrap();
+        // The same wall clock, an hour apart in UTC — identical to the values
+        // the QuickJS test pins.
+        assert_eq!(output["winterUtcHour"], 8);
+        assert_eq!(output["summerUtcHour"], 7);
+        assert_eq!(output["winterOffset"], 60);
+        assert_eq!(output["winterWeekday"], 2);
+        assert_eq!(output["zone"], "Europe/Zurich");
+    }
+
     /// Parity with the QuickJS `test_secrets_bindings`: `raisin.secrets.*` is
     /// exposed via the shared registry (Starlark auto-generates the namespace
     /// from the descriptor `category`) and behaves identically — same names,

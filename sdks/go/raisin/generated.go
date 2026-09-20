@@ -203,6 +203,11 @@ func (DateAPI) Format(timestamp int64, format *string) (string, error) {
 	return callString("date_format", []any{timestamp, format})
 }
 
+// FromZone calls the RaisinDB registry method "date_fromZone".
+func (DateAPI) FromZone(year int64, month int64, day int64, hour int64, minute int64, second int64, timeZone string) (int64, error) {
+	return callInt64("date_fromZone", []any{year, month, day, hour, minute, second, timeZone})
+}
+
 // Now calls the RaisinDB registry method "date_now".
 func (DateAPI) Now() (string, error) {
 	return callString("date_now", nil)
@@ -221,6 +226,11 @@ func (DateAPI) Timestamp() (int64, error) {
 // TimestampMillis calls the RaisinDB registry method "date_timestampMillis".
 func (DateAPI) TimestampMillis() (int64, error) {
 	return callInt64("date_timestampMillis", nil)
+}
+
+// ToZone calls the RaisinDB registry method "date_toZone".
+func (DateAPI) ToZone(timestamp int64, timeZone string) (json.RawMessage, error) {
+	return callJSON("date_toZone", []any{timestamp, timeZone})
 }
 
 // EmailAPI is the `raisin.email` namespace.

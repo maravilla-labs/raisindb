@@ -140,6 +140,67 @@ pub fn methods() -> Vec<ApiMethodDescriptor> {
                 })
             },
         },
+        // date.toZone(timestamp, timeZone) -> wall-clock fields in that zone.
+        // The sandbox has no `Intl`, so without this a function cannot tell what
+        // the clock says anywhere but UTC.
+        ApiMethodDescriptor {
+            internal_name: "date_toZone",
+            js_name: "toZone",
+            py_name: "to_zone",
+            category: "date",
+            args: vec![
+                ArgSpec::new("timestamp", ArgType::I64),
+                ArgSpec::new("timeZone", ArgType::String),
+            ],
+            return_type: ReturnType::Json,
+            invoker: |api: Arc<dyn FunctionApi>,
+                      args: Vec<Value>|
+             -> BoxFuture<'static, Result<InvokeResult>> {
+                Box::pin(async move {
+                    let mut parser = ArgParser::new(&args);
+                    let timestamp = parser.i64()?;
+                    let time_zone = parser.string()?;
+                    let result = api.date_to_zone(timestamp, &time_zone)?;
+                    Ok(InvokeResult::Json(result))
+                })
+            },
+        },
+        // date.fromZone(year, month, day, hour, minute, second, timeZone) -> i64
+        // The half a scheduler needs: a wall-clock intention becomes an instant
+        // only once the zone's offset ON THAT DATE is known.
+        ApiMethodDescriptor {
+            internal_name: "date_fromZone",
+            js_name: "fromZone",
+            py_name: "from_zone",
+            category: "date",
+            args: vec![
+                ArgSpec::new("year", ArgType::I64),
+                ArgSpec::new("month", ArgType::I64),
+                ArgSpec::new("day", ArgType::I64),
+                ArgSpec::new("hour", ArgType::I64),
+                ArgSpec::new("minute", ArgType::I64),
+                ArgSpec::new("second", ArgType::I64),
+                ArgSpec::new("timeZone", ArgType::String),
+            ],
+            return_type: ReturnType::I64,
+            invoker: |api: Arc<dyn FunctionApi>,
+                      args: Vec<Value>|
+             -> BoxFuture<'static, Result<InvokeResult>> {
+                Box::pin(async move {
+                    let mut parser = ArgParser::new(&args);
+                    let year = parser.i64()?;
+                    let month = parser.i64()?;
+                    let day = parser.i64()?;
+                    let hour = parser.i64()?;
+                    let minute = parser.i64()?;
+                    let second = parser.i64()?;
+                    let time_zone = parser.string()?;
+                    let result =
+                        api.date_from_zone(year, month, day, hour, minute, second, &time_zone)?;
+                    Ok(InvokeResult::I64(result))
+                })
+            },
+        },
         // date.diffDays(ts1, ts2) -> i64 (difference in days between timestamps)
         ApiMethodDescriptor {
             internal_name: "date_diffDays",
