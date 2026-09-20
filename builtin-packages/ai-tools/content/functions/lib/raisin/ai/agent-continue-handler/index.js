@@ -627,7 +627,17 @@ async function handleToolResult(ctx) {
 
   const toolsEnabled = !toolLoopDetected && !forceFinalText && toolDefinitions.length > 0;
   if (!toolsEnabled) {
-    history = [...history, { role: 'system', content: 'Tools are unavailable for this turn. Respond with plain text only. Do not call any function.' }];
+    // A loop is a different situation from "no tools this turn", and saying only
+    // the latter is why a detected loop used to end the turn silently: the model
+    // was told to stop calling functions but not what had gone wrong, and
+    // returned nothing at all. Name the tool it repeated and ask for the one
+    // thing still worth having — an account of where it got to.
+    const instruction = toolLoopDetected
+      ? `You called ${loopedToolNames} repeatedly without making progress, so tools are now ` +
+        'unavailable for this turn. Do not call any function. In plain text, tell the user what ' +
+        'you were trying to establish, what you learned, and what you need from them to continue.'
+      : 'Tools are unavailable for this turn. Respond with plain text only. Do not call any function.';
+    history = [...history, { role: 'system', content: instruction }];
   }
 
   // ── Step 4: AI completion ──
@@ -648,9 +658,23 @@ async function handleToolResult(ctx) {
     });
     response = normalizeCompletionResponse(raw);
 
+    const emptyTurn =
+      (!response.content || !response.content.trim()) &&
+      (!response.tool_calls || response.tool_calls.length === 0);
+
     // Only inject fallback for forced-final summaries.
-    if (forceFinalText && (!response.content || !response.content.trim()) && (!response.tool_calls || response.tool_calls.length === 0)) {
+    if (forceFinalText && emptyTurn) {
       response.content = `Completed ${completedPlan?.title || 'the plan'} (${completedPlan?.completed_tasks || 0}/${completedPlan?.total_tasks || 0} tasks).`;
+      response.finish_reason = response.finish_reason || 'stop';
+    } else if (toolLoopDetected && emptyTurn) {
+      // The generic terminal fallback ("I could not generate a complete
+      // response") is the worst possible answer here: the cause IS known, and a
+      // user who is told only to try again will reissue the same request and
+      // watch it loop a second time. Say which tool ran away with the turn.
+      response.content =
+        `I stopped because I kept calling ${loopedToolNames} without getting anywhere, and I ` +
+        'could not finish the step from what it returned. Tell me which existing piece to use, ' +
+        'or ask me to build the missing one directly, and I will carry on from there.';
       response.finish_reason = response.finish_reason || 'stop';
     }
   } catch (err) {
