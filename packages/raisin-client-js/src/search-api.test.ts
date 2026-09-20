@@ -225,3 +225,28 @@ describe('the workspace scope', () => {
     expect(calls.params[1][1]).toBe('ALL READABLE');
   });
 });
+
+describe('one implementation, both transports', () => {
+  it('the HTTP client exposes search and ask, like the WebSocket one', async () => {
+    // A route handler is where retrieval belongs on a public site, and a route
+    // handler reaches for the HTTP client. When only the WebSocket Database had
+    // these methods, following that advice led to a client that did not have
+    // them — so this pins both surfaces to the same API.
+    const { HttpDatabase } = await import('./http-client');
+    for (const method of ['search', 'ask']) {
+      assertHasMethod(HttpDatabase.prototype, method);
+    }
+
+    const { Database } = await import('./database');
+    for (const method of ['search', 'ask']) {
+      assertHasMethod(Database.prototype, method);
+    }
+  });
+});
+
+function assertHasMethod(proto: object, name: string) {
+  expect(
+    typeof (proto as Record<string, unknown>)[name],
+    `${proto.constructor?.name ?? 'prototype'} is missing ${name}()`,
+  ).toBe('function');
+}

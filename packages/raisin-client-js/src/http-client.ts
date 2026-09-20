@@ -7,6 +7,8 @@
  */
 
 import { EventEmitter } from 'events';
+import { SearchApi } from './search-api';
+import type { Answer, AskOptions, SearchOptions, SearchPassage } from './search-api';
 import { AuthManager, Credentials, AdminCredentials, isJwtCredentials, TokenStorage } from './auth';
 import {
   RequestContext,
@@ -1277,6 +1279,8 @@ export class HttpDatabase {
    * const result = await staging.executeSql('SELECT * FROM content');
    * ```
    */
+  private _searchApi?: SearchApi;
+
   onBranch(branch: string): HttpDatabase {
     return new HttpDatabase(this.repository, this.client, branch);
   }
@@ -1329,6 +1333,66 @@ export class HttpDatabase {
       (repo, name, input, options) => this.client.invokeFunction(repo, name, input, options),
       (repo, name, input) => this.client.invokeFunctionSync(repo, name, input),
     );
+  }
+
+  /**
+   * The retrieval implementation behind {@link search} and {@link ask}.
+   *
+   * The SAME `SearchApi` the WebSocket client uses, handed this transport's SQL
+   * and function runners. Retrieval is one behaviour — the query shape, the
+   * limit clamp, the required scope, the `grounded` fail-closed mapping — and a
+   * second copy written against HTTP would drift from the first the moment
+   * either is touched. Only the two runners differ.
+   */
+  private searchApi(): SearchApi {
+    if (!this._searchApi) {
+      this._searchApi = new SearchApi(
+        (sql, params) => this.executeSql(sql, params),
+        async (name, input) => {
+          const run = await this.functions().invoke(name, input, {
+            waitForResult: true,
+          });
+          return (run as { result?: unknown })?.result ?? run;
+        },
+      );
+    }
+    return this._searchApi;
+  }
+
+  /**
+   * Find the passages matching a query, by meaning and by keyword at once.
+   *
+   * Available on this HTTP client as well as the WebSocket one, because this is
+   * the client a server-side route handler reaches for — and a route handler is
+   * exactly where retrieval belongs when the page is public: the browser must
+   * not hold a credential that can read the repository.
+   *
+   * @example
+   * ```typescript
+   * const passages = await db.search('how much notice to terminate', {
+   *   workspaces: 'stories',
+   * });
+   * ```
+   */
+  async search(query: string, options: SearchOptions): Promise<SearchPassage[]> {
+    return this.searchApi().search(query, options);
+  }
+
+  /**
+   * Answer a question from the stored content, with citations.
+   *
+   * Check `grounded` before showing the answer: when it is false nothing
+   * relevant was retrieved and the model was never asked.
+   *
+   * @example
+   * ```typescript
+   * const { answer, citations, grounded } = await db.ask(question, {
+   *   workspaces: 'stories, handbook',
+   * });
+   * ```
+   */
+  async ask(question: string, options: AskOptions): Promise<Answer> {
+    return this.searchApi().ask(question, options);
   }
 
   /**
