@@ -307,15 +307,64 @@ async function emitToolResultsToOutbox(workspace, outboxCtx, assistantMsgPath, t
 }
 
 /**
+ * Key order must not decide whether two calls are "the same".
+ * `{"query":"a","limit":5}` and `{"limit":5,"query":"a"}` are one call.
+ */
+function stableStringify(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  const keys = Object.keys(value).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(',')}}`;
+}
+
+/**
+ * ONE TOOL CALL, INCLUDING WHAT IT WAS ASKED.
+ *
+ * The name alone is not the call. `discover-capabilities("draft reply agent")`
+ * and `discover-capabilities("inbox trigger")` are two different questions with
+ * two different answers, and a signature that sees only the name cannot tell
+ * them apart.
+ */
+function toolCallSignature(call) {
+  const name = call?.function?.name || '';
+  const raw = call?.function?.arguments;
+  if (raw === undefined || raw === null) return name;
+  if (typeof raw === 'string') {
+    try {
+      return `${name}:${stableStringify(JSON.parse(raw))}`;
+    } catch {
+      // Not JSON — compare the string as sent rather than giving up and
+      // falling back to the name, which is the bug this function exists to fix.
+      return `${name}:${raw}`;
+    }
+  }
+  return `${name}:${stableStringify(raw)}`;
+}
+
+/**
  * Detect tool loops: if the most recent N assistant messages all issued
  * the exact same set of tool calls, the model is stuck.
+ *
+ * THE ARGUMENTS ARE PART OF THE CALL, and leaving them out is why this fired
+ * on agents that were working correctly. The signature used to be
+ * `tc.function.name` only, so three consecutive rounds of a SEARCH tool —
+ * `discover-capabilities` keyed on a free-text `query` — looked identical no
+ * matter what was searched for. An agent working a five-task plan that looks up
+ * one capability per task is doing exactly the right thing and tripped this on
+ * task three; every one of those calls had returned `success: true`. Nothing was
+ * stuck, and the guard both stripped the tools and ended the turn, so the user
+ * got "I stopped because I kept calling discover-capabilities without getting
+ * anywhere" for an agent that had been getting somewhere each time.
+ *
+ * With arguments included, three IDENTICAL calls still trip it — which is the
+ * real stuck case, and the one the threshold was chosen for.
  */
 function detectToolLoop(history) {
   const rounds = [];
   for (let i = history.length - 1; i >= 0 && rounds.length < TOOL_LOOP_THRESHOLD + 1; i--) {
     const msg = history[i];
     if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
-      rounds.unshift(msg.tool_calls.map(tc => tc.function?.name || '').sort().join(','));
+      rounds.unshift(msg.tool_calls.map(toolCallSignature).sort().join('|'));
     } else if (msg.role === 'tool') {
       continue; // skip tool result entries
     } else {
@@ -323,7 +372,9 @@ function detectToolLoop(history) {
     }
   }
   if (rounds.length >= TOOL_LOOP_THRESHOLD && rounds.every(r => r === rounds[0])) {
-    return rounds[0];
+    // The NAME is what the operator and the fallback message need; the
+    // signature carries arguments that may be long and are not worth showing.
+    return rounds[0].split('|')[0].split(':')[0] || rounds[0];
   }
   return null;
 }
@@ -1164,4 +1215,7 @@ async function handleToolResult(ctx) {
   }
 }
 
-export { handleToolResult };
+// `detectToolLoop` and its helpers are pure and exported for the loop-guard
+// test (builtin-packages/ai-tools/tests/agent-loop-guard.test.js). Nothing in
+// the runtime should call them but this file.
+export { handleToolResult, detectToolLoop, toolCallSignature, stableStringify };
