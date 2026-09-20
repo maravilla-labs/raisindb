@@ -24,6 +24,7 @@ npx skills add maravilla-labs/raisindb/packages/raisindb-skills
 | **raisindb-access-control** | Roles, permissions, groups, row-level security |
 | **raisindb-functions-triggers** | Server-side functions (JavaScript, Starlark, and WebAssembly components in Rust/Go/TypeScript) and event-driven triggers |
 | **raisindb-workflows** | Durable workflows: designer format, loops, human approval tasks, saga compensation |
+| **raisindb-retrieval** | Search and RAG: hybrid full-text + vector search, chunking, the built-in `ask`/`search-documents`/`graph-context` functions, `db.search()`/`db.ask()`, citations and grounding, knowledge-graph retrieval |
 | **raisindb-messaging-agents** | AI agents with tools, chat pipeline, proactive user coordination, token safeguards |
 | **raisindb-mcp-servers** | Expose data and functions as Model Context Protocol (MCP) servers: `raisin:McpServer`, auto data tools, custom function tools, auth, connecting a client |
 | **raisindb-mcp-ui-widgets** | Attach interactive HTML widgets (MCP-UI) to MCP tools: `raisin:StaticSiteFolder`, `ui: { mode, entry }`, html vs uri-list, `#fragment` SPA routes, `@raisindb/mcp-ui-client`, widget-initiated tool calls |
@@ -36,4 +37,4 @@ npx skills add maravilla-labs/raisindb/packages/raisindb-skills
 3. **Build frontend** → `raisindb-frontend-sveltekit` or `raisindb-frontend-react`
 4. **Query data** → `raisindb-sql`
 
-Then as needed: `translations`, `auth`, `file-uploads`, `functions-triggers`, `access-control`, `mcp-servers`
+Then as needed: `translations`, `auth`, `file-uploads`, `functions-triggers`, `access-control`, `retrieval`, `mcp-servers`

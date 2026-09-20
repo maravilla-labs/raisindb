@@ -416,6 +416,7 @@ Read these skills next based on what you need:
 - **Build frontend (Svelte)** -- `raisindb-frontend-sveltekit`
 - **Build frontend (React)** -- `raisindb-frontend-react`
 - **Query data** -- `raisindb-sql` (SQL syntax, JSON operators, graph queries)
+- **Search it / answer questions from it** -- `raisindb-retrieval` (hybrid + vector search, chunking, RAG with citations, chatbots over your content)
 - **Add languages** -- `raisindb-translations` (i18n, locale-aware content)
 - **Add auth** -- `raisindb-auth` (login, sessions, user home paths)
 - **Handle files** -- `raisindb-file-uploads` (upload, thumbnails via server functions, signed URLs)

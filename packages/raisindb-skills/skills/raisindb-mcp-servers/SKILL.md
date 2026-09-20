@@ -103,7 +103,11 @@ Set only `data:` for a pure auto server, only `tools:` for a pure custom server,
 
 `operations` are generated verbatim — the exact tool names are:
 `query_nodes`, `get_node`, `search_nodes`, `create_node`, `update_node`, `delete_node`, `list_workspaces`.
-They operate on the `data.workspaces` you list, and **every call runs under the caller's row-level security** — a tool can never read or write what the caller couldn't. `search_nodes` uses full-text and vector search.
+They operate on the `data.workspaces` you list, and **every call runs under the caller's row-level security** — a tool can never read or write what the caller couldn't. `search_nodes` takes a `mode`: `fulltext` (the default), `vector`, or `hybrid`
+— both legs fused by rank, which is the one to give an agent that is looking for
+an answer rather than an exact term. `hybrid` and `vector` need an embedder
+configured for the tenant; `fulltext` does not. It also takes `granularity`,
+where `chunk` returns passages rather than whole nodes.
 
 ### Custom function tools
 

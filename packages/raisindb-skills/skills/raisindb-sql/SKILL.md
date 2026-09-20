@@ -1,6 +1,6 @@
 ---
 name: raisindb-sql
-description: "SQL syntax for querying RaisinDB workspaces: CRUD, JSONB properties, hierarchy queries, graph relations, full-text search. Use when writing queries in frontend or server-side functions."
+description: "SQL syntax for querying RaisinDB workspaces: CRUD, JSONB properties, hierarchy queries, graph relations, full-text and hybrid/vector search. Use when writing queries in frontend or server-side functions."
 ---
 
 # RaisinDB SQL Reference
@@ -298,6 +298,16 @@ FROM NEIGHBORS('social:/articles/tech/my-post', 'OUT', NULL) AS n
 
 Directions: `'OUT'` (outgoing), `'IN'` (incoming), `'BOTH'`.
 
+The `'workspace:/path'` start form above works from **v0.6.34**. Earlier
+versions parsed it wrongly and ran the traversal in the default workspace
+against a source that resolved to nothing — returning zero rows, which reads as
+"this node has no relations" rather than as an error. On an older server, pass a
+bare node id.
+
+Walking more than one hop? Address each next node by its **`id`**, not its
+path: a neighbour row does not say which workspace it came from, and a bare path
+resolves in the default workspace only.
+
 ### REFERENCES (reverse lookup)
 
 Find all nodes that reference a target path. The argument MUST be
@@ -472,15 +482,53 @@ SELECT RESOLVE(properties, 3) FROM social WHERE path = '/posts/my-post'
 
 References are JSON objects with `raisin:ref` (path or ID) and `raisin:workspace` keys.
 
-## 13. FULLTEXT_MATCH
+## 13. Search: FULLTEXT_MATCH, and the search table functions
 
-Full-text search on indexed properties:
+### FULLTEXT_MATCH (a predicate)
+
+Filter rows you are already selecting:
 
 ```sql
 SELECT * FROM social WHERE FULLTEXT_MATCH('database management', 'english')
 ```
 
 Requires `index: [Fulltext]` on the property in the NodeType definition.
+
+### HYBRID_SEARCH / KNN / FULLTEXT_SEARCH (table functions)
+
+For *ranked* results, search the corpus instead of filtering a scan. These three
+are one engine: `HYBRID_SEARCH` runs a lexical and a vector leg and fuses them
+by rank, `KNN` is the vector leg alone, `FULLTEXT_SEARCH` the lexical leg alone.
+
+```sql
+SELECT path, chunk_index, chunk_text, score
+FROM HYBRID_SEARCH('how much notice to terminate', 5,
+                   workspaces => 'handbook',
+                   granularity => 'chunk');
+```
+
+`(query, limit)` are positional; the rest are named — `workspaces`,
+`granularity`, `language`, `vector_weight`, `fulltext_weight`, `max_distance`,
+`kind`.
+
+**The workspace scope is required.** One name, a comma-separated list
+(`'a, b, c'`), a glob (`'content-*'`, one token), or `'ALL READABLE'`. A listed
+name that does not resolve is an ERROR; a glob matching nothing is fine. `'*'`
+and `'ALL'` are rejected on purpose.
+
+**`granularity => 'chunk'` returns one row per PASSAGE**, so `LIMIT 5` means
+five passages and several may share a document — what a RAG prompt wants. The
+default `'node'` returns one row per document.
+
+Useful columns: `chunk_text` (the passage — render this as the snippet),
+`chunk_text_source` (`exact` | `excerpt` | `unavailable`), `chunk_index` (where
+in the document; **`0` is a real chunk**), `score`, and `vector_rank` /
+`fulltext_rank`, NULL when that leg did not match.
+
+Vector results need an embedder configured for the tenant; without one the
+vector leg is simply off. For chunking, embeddings, the built-in `ask` /
+`search-documents` functions and `db.search()` / `db.ask()` in the SDK, see the
+**raisindb-retrieval** skill.
 
 For keyword search without a full-text index, use ILIKE:
 
@@ -865,7 +913,9 @@ be named `workspaces` — the schema table would shadow it.
 | Relate | `RELATE FROM path=$1 TO path=$2 TYPE 'name' [WEIGHT n]` |
 | Unrelate | `UNRELATE FROM path=$1 TO path=$2 [TYPE 'name']` |
 | Graph query | `SELECT * FROM GRAPH_TABLE(MATCH pattern COLUMNS (...)) AS alias` |
-| Fulltext | `WHERE FULLTEXT_MATCH('terms', 'language')` |
+| Fulltext filter | `WHERE FULLTEXT_MATCH('terms', 'language')` |
+| Ranked search | `FROM HYBRID_SEARCH('q', 5, workspaces => 'ws', granularity => 'chunk')` |
+| Vector only | `FROM KNN('q', 5, workspaces => 'ws')` |
 | Hierarchy | `WHERE CHILD_OF('/path')` / `WHERE DESCENDANT_OF('/path')` |
 | Resolve | `SELECT RESOLVE(properties) FROM workspace WHERE ...` |
 | References | `WHERE REFERENCES('workspace:/path')` |

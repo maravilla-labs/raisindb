@@ -438,7 +438,25 @@ const rows = Array.isArray(result) ? result : (result?.rows || []);
 | Method | Description |
 |--------|-------------|
 | `raisin.events.emit(eventType, payload)` | Emit a custom event |
-| `raisin.functions.execute(functionPath, args)` | Call another function |
+| `raisin.functions.call(path, args)` | Call another function — **this is the plain one** |
+| `raisin.functions.execute(path, args, ctx)` | The AI-TOOL-CALL form. Stamps a `raisin:AIToolCall` node from `ctx`, so outside a tool-call context it fails "Node not found" before the callee runs |
+
+### raisin.assets
+
+| Method | Description |
+|--------|-------------|
+| `raisin.assets.setExtractedText(workspace, nodeRef, text, options)` | Land a document's text on an asset node as `__extracted_text` |
+
+The extraction properties are engine-owned and the ordinary write path refuses
+them to function code, deliberately — this binding is the one sanctioned way in.
+It is how a converter (the Studio media plugin turning a `.docx` into markdown)
+makes a document searchable: the node write emits `node:updated` and the server
+chunks, embeds and indexes it from there.
+
+Do not chunk or embed in JavaScript. Core files chunks under a
+`{node}#doc#{chunk}` id grammar; an index built with ids the live path never
+produces is a search that finds nothing and reports no fault. Hand back text and
+stop.
 
 ### raisin.date / raisin.crypto
 

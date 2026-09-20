@@ -1,6 +1,6 @@
 ---
 name: raisindb-file-uploads
-description: "Upload, store, and display files using the raisin:Asset system. Covers single/batch uploads, progress tracking, signed URLs, and thumbnails. Use when adding file handling to your app."
+description: "Upload, store, and display files using the raisin:Asset system. Covers single/batch uploads, progress tracking, signed URLs, thumbnails, and what the server does to an uploaded document on its own (text extraction and chunked embedding, so PDFs become searchable by their contents — see raisindb-retrieval for querying that). Use when adding file handling to your app."
 ---
 
 # File Uploads and the raisin:Asset System
@@ -226,7 +226,16 @@ RaisinDB supports **server-side functions** that run JavaScript on the server, t
 2. **Function** runs server-side JavaScript with access to the `raisin.*` runtime API
 3. The function can: read the uploaded file, detect its MIME type, resize images, extract PDF text, generate thumbnails, call AI models, and update node properties
 
-**Nothing happens automatically after upload** — the `raisin:Asset` node only has the `file` Resource. You build the processing logic as a trigger + function in your RAP package.
+**Nothing *you author* happens automatically** — no thumbnail, no `title`, no
+`file_type`. You build that as a trigger + function in your RAP package.
+
+**But the server does extract and index document text on its own.** An upload
+enqueues an embedding job that reads the document body into `__extracted_text`
+and embeds it chunked (512 tokens, 64 overlap), so the file is findable by
+search without any function you write. Natively that covers PDFs, images (OCR)
+and `text/*`; office formats need the Maravilla media plugin, which ships with
+Studio, and sit at `__extract_status = 'unsupported'` or `'delegated'` until
+then. See the `raisindb-retrieval` skill.
 
 **BEFORE writing function code**: Run `npm install` in the project root (installs `@raisindb/functions-types`), then read `node_modules/@raisindb/functions-types/raisin.d.ts` — it is the complete API reference. Only use methods defined there.
 
@@ -434,10 +443,18 @@ FROM 'content'
 WHERE node_type = 'raisin:Asset'
   AND CHILD_OF('/content/images')
 
--- Search assets by keyword
+-- Search assets by keyword, on their AUTHORED metadata (title, caption...)
 SELECT * FROM 'content'
 WHERE node_type = 'raisin:Asset'
   AND FULLTEXT_MATCH('landscape photo', 'english')
+
+-- Search INSIDE the uploaded documents, and get the passage back.
+-- FULLTEXT_MATCH filters a scan over metadata; it cannot reach a paragraph on
+-- page 30 of a PDF. This can, because the body was extracted and chunked:
+SELECT path, chunk_index, chunk_text, score
+FROM HYBRID_SEARCH('how much notice to terminate', 5,
+                   workspaces => 'content',      -- the scope is required
+                   granularity => 'chunk')
 
 -- Filter by MIME category
 SELECT * FROM 'content'

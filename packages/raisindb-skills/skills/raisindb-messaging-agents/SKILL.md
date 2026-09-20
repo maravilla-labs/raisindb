@@ -1,6 +1,6 @@
 ---
 name: raisindb-messaging-agents
-description: "Build AI chat and messaging on RaisinDB: AI agents with tools, the inbox/outbox chat pipeline, agents that proactively message users and coordinate between them, human-in-the-loop task UIs, chatbox frontends with the JS SDK, and token safeguards (budgets, auto-compaction). Use this whenever the user wants a chatbot, AI assistant, agent with tools, notifications, an inbox, agent-to-user messaging, multi-user coordination ('agent asks staff one by one'), or anything involving raisin:AIAgent, conversations, or message nodes — even if they just say 'add AI to my app'."
+description: "Build AI chat and messaging on RaisinDB: AI agents with tools, the inbox/outbox chat pipeline, agents that proactively message users and coordinate between them, human-in-the-loop task UIs, chatbox frontends with the JS SDK, and token safeguards (budgets, auto-compaction). Use this whenever the user wants a chatbot, AI assistant, agent with tools, notifications, an inbox, agent-to-user messaging, multi-user coordination ('agent asks staff one by one'), an assistant that answers from the user's own documents (pair it with raisindb-retrieval for the search side), or anything involving raisin:AIAgent, conversations, or message nodes — even if they just say 'add AI to my app'."
 ---
 
 # Messaging & AI Agents
@@ -71,6 +71,20 @@ properties:
 
 A tool is a `raisin:Function` whose `description` + `input_schema` become the
 LLM tool definition — write them for the model, not for humans.
+
+**An agent that should answer from your own content needs retrieval tools**, or
+it answers from the model's training and sounds just as confident:
+
+```yaml
+  tools:
+    - /lib/raisin/ai/search-documents   # passages, with citation handles
+    - /lib/raisin/ai/ask                # retrieve + answer, already cited
+    - /lib/raisin/ai/graph-context      # how things relate
+```
+
+`/agents/research-assistant` ships wired this way. For what those return,
+grounding (`grounded: false` means the model was never called), chunking and
+the workspace scope, read the **raisindb-retrieval** skill.
 
 Function-runtime traps (NOT the client SDK):
 - `raisin.sql.query(...)` returns the **row array directly** (the client's

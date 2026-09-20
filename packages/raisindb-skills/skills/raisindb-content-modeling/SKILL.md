@@ -120,7 +120,7 @@ indexable: true
 | `versionable` | Tracks revision history, enables draft/publish workflow |
 | `publishable` | Adds publish/unpublish lifecycle |
 | `auditable` | Records who changed what and when |
-| `indexable` | Includes in full-text search index |
+| `indexable` | Includes in the search indexes — full-text **and** vector |
 | `compound_indexes` | Multi-column indexes that make `filter + ORDER BY + LIMIT` a seek (see below) |
 
 ### Compound Indexes (`ORDER BY … LIMIT` as a seek)
@@ -301,14 +301,14 @@ All fields support: `name`, `title`, `required`, `translatable`, `description`, 
 | `multiple` | boolean | Allow multiple values (stores as array). Works on any field type. On `CompositeField`, creates a repeatable list of structured items |
 | `index` | string[] | Index types for this field's value, e.g. `[Fulltext]` (see below) |
 
-### Full-text searchable ELEMENT fields (`index: [Fulltext]`)
+### Searchable ELEMENT fields (`index: [Fulltext, Vector]`)
 
-`index: [Fulltext]` is not only for NodeType properties — an **ElementType field**
-can declare it too. The full-text indexer walks a node's content (the `content`
+`index:` is not only for NodeType properties — an **ElementType field** can
+declare it too. The full-text indexer walks a node's content (the `content`
 array / SectionFields) and indexes each element field that opts in; element and
 archetype **identities** are always indexed (so a node is findable by the shapes it
 carries), while field **values** are opt-in per field. So to make a Hero's
-`subheadline` or a Pullquote's `quote` findable via `FULLTEXT_SEARCH`, mark those
+`subheadline` or a Pullquote's `quote` findable by search, mark those
 element fields — the parent node's `content` property does NOT need marking.
 
 ```yaml
@@ -318,16 +318,27 @@ fields:
     name: subheadline
     translatable: true
     index:
-      - Fulltext        # subheadline text becomes searchable
+      - Fulltext        # findable by the words it contains
+      - Vector          # findable by what it MEANS
 ```
+
+**Mark both legs unless you have a reason not to.** `HYBRID_SEARCH` fuses a
+lexical and a vector ranking, and it assumes both see the same corpus. A field
+marked `Fulltext` but not `Vector` is reachable by one leg and invisible to the
+other, and the fused order then quietly favours the leg with wider coverage — no
+error, no log line, just a ranking nobody chose. See the `raisindb-retrieval`
+skill.
 
 Notes:
 - The owning NodeType still needs `indexable: true` (the default for content node
-  types). Only `Fulltext`-marked fields contribute their text.
+  types), which gates both index legs. Only marked fields contribute their text.
 - Existing nodes must be **re-indexed** after adding the config (the index plan is
   resolved at index time). A node is re-indexed on its next update, or rebuild the
   whole repo/branch via
   `POST /api/admin/management/database/{tenant}/{repo}/fulltext/rebuild`.
+- Adding `Vector` to a field is an embedding change, not just an index change:
+  those nodes are re-embedded on their next write, at one provider call per
+  chunk. Worth knowing before marking a field on a large workspace.
 
 ### SectionField -- Composition Mechanism
 
