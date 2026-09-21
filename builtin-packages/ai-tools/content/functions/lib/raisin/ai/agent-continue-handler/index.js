@@ -916,9 +916,33 @@ async function handleToolResult(ctx) {
     if (retried) log.info('continue', 'Retry after malformed tool call succeeded');
     response = normalizeCompletionResponse(raw);
 
-    const emptyTurn =
+    let emptyTurn =
       (!response.content || !response.content.trim()) &&
       (!response.tool_calls || response.tool_calls.length === 0);
+
+    /* An EMPTY reply mid-run is not an answer. Some providers return one after a
+     * long tool result (no text, no call, finish_reason 'stop'), and treating it
+     * as the end of the turn stops a build half way with nothing said. Ask once,
+     * with the reason; a second empty reply falls through to the normal ending. */
+    if (emptyTurn && toolsEnabled && !forceFinalText && !toolLoopDetected) {
+      log.warn('continue', 'Model returned an empty reply; retrying once with a nudge');
+      try {
+        const retryResp = normalizeCompletionResponse(await completeWith([
+          ...history,
+          {
+            role: 'system',
+            content: 'Your previous reply was empty. Continue the work: call the next tool you need, or, if the work is finished, write the final answer for the user.',
+          },
+        ]));
+        if ((retryResp.content && retryResp.content.trim()) || (retryResp.tool_calls && retryResp.tool_calls.length)) {
+          response = retryResp;
+          emptyTurn = false;
+          log.info('continue', 'Retry after empty reply succeeded', { tool_calls: response.tool_calls.length });
+        }
+      } catch (retryErr) {
+        log.warn('continue', 'Retry after empty reply failed', { error: retryErr.message });
+      }
+    }
 
     // Only inject fallback for forced-final summaries.
     if (forceFinalText && emptyTurn) {
