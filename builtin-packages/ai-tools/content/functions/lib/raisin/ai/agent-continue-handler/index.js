@@ -1092,23 +1092,44 @@ async function handleToolResult(ctx) {
     }
   }
 
-  const shouldForceAutoRetry =
+  /* A STOP WITH WORK LEFT. Two gaps let a run end mid-plan here, both
+   * measured in a Builder replay where the model's whole reply was the title
+   * of its next task: the provider sent NO finish_reason (so `=== 'stop'`
+   * never matched), and the open-task count only existed when a planning tool
+   * ran in this very turn. An absent finish_reason is a stop; and when this
+   * turn carried no plan progress, the persisted tasks answer — the same
+   * query the finalize gate reads. */
+  const stoppedWithoutTools =
     toolsEnabled &&
     shouldAutoRunTasks(executionMode) &&
     response.tool_calls.length === 0 &&
-    response.finish_reason === 'stop' &&
-    !!planProgress &&
-    planProgress.pending_tasks > 0;
+    (!response.finish_reason || response.finish_reason === 'stop') &&
+    !forceFinalText &&
+    !toolLoopDetected;
+  let openTaskTitles = [];
+  let pendingTaskCount = planProgress ? planProgress.pending_tasks : 0;
+  if (stoppedWithoutTools && !planProgress) {
+    try {
+      const evidence = await collectRunEvidence(workspace, chatPath);
+      openTaskTitles = evidence.open.map((t) => t.title);
+      pendingTaskCount = evidence.open.length;
+    } catch (e) {
+      log.warn('continue', 'Could not read open tasks for the auto-retry check', { error: e.message });
+    }
+  }
+  const shouldForceAutoRetry = stoppedWithoutTools && pendingTaskCount > 0;
 
   if (shouldForceAutoRetry) {
     log.warn('continue', 'Auto mode stop while plan still has pending tasks, forcing retry', {
-      pending_tasks: planProgress.pending_tasks,
+      pending_tasks: pendingTaskCount,
+      finish_reason: response.finish_reason || null,
     });
+    const openList = openTaskTitles.length ? ` Open: ${openTaskTitles.slice(0, 8).map((t) => `"${t}"`).join(', ')}.` : '';
     try {
       const retryRaw = await raisin.ai.completion({
         messages: [...history,
           { role: 'assistant', content: response.content || '' },
-          { role: 'system', content: 'The plan still has pending tasks. Continue by calling the next required tool now. Do not stop yet.' },
+          { role: 'system', content: `The plan still has pending tasks.${openList} Continue by calling the next required tool now. Do not stop yet. If a task cannot be done, mark it failed with the reason.` },
         ],
         model: modelId,
         temperature: agent.properties.temperature,
