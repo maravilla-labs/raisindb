@@ -69,6 +69,7 @@
 
 pub mod engine;
 pub mod physical_plan;
+pub mod schema_auth;
 
 // Re-export commonly used items from raisin-sql
 pub use raisin_sql::{

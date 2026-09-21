@@ -124,6 +124,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         ddl: &raisin_sql::ast::ddl::DdlStatement,
     ) -> Result<RowStream, Error> {
         tracing::info!("Executing DDL statement");
+        crate::schema_auth::require_schema_operator(self.auth_context.as_ref(), "DDL")?;
 
         let stream = crate::physical_plan::ddl_executor::execute_ddl(
             ddl,

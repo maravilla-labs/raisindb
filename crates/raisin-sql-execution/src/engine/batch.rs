@@ -167,6 +167,21 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
 pub fn batch_requires_async(statements: &[AnalyzedStatement]) -> bool {
     for stmt in statements {
         match stmt {
+            // A SCHEMA-TABLE write names ONE definition (`WHERE name = '…'`),
+            // which the filter classifier counts as complex because it is not
+            // an id or a path. Run as a job, the caller got "accepted" instead
+            // of the write's own answer — including a refusal — and a refused
+            // write was retried three times.
+            AnalyzedStatement::Update(update)
+                if matches!(
+                    update.target,
+                    raisin_sql::analyzer::DmlTableTarget::SchemaTable(_)
+                ) => {}
+            AnalyzedStatement::Delete(delete)
+                if matches!(
+                    delete.target,
+                    raisin_sql::analyzer::DmlTableTarget::SchemaTable(_)
+                ) => {}
             AnalyzedStatement::Update(update) => {
                 if matches!(classify_filter(&update.filter), FilterComplexity::Complex) {
                     tracing::debug!(
