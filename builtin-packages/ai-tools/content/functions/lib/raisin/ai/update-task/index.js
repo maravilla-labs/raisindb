@@ -271,6 +271,21 @@ async function handler(input) {
       };
     }
 
+    /* A PLAN-TIME GUESS IS SUPERSEDED BY THE REAL PATH. create-plan runs before
+     * the artifact exists, so the path it names is a guess — measured: Builder
+     * declared /automations/correct-homepage-title, then built and verified
+     * /correct-homepage-titles, and the task could never close because the
+     * guess (which it never wrote) stayed a target beside the real one. A new
+     * declaration replaces the old one ONLY when nothing in this run wrote the
+     * old target; anything the run did write is gated anyway as a derived
+     * target below, so this cannot hide a write from the gate. */
+    const oldDeclared = taskBuildTarget(oldProps);
+    if (declaredTarget && oldDeclared && declaredTarget !== oldDeclared) {
+      const oldArtifact = artifactOf(null, oldDeclared);
+      const oldWasWritten = (run.writes || []).some((w) => sameArtifact(oldArtifact, artifactOf(w.workspace, w.path)));
+      if (!oldWasWritten) effectiveProps = { ...effectiveProps, build_target_path: declaredTarget };
+    }
+
     /* DERIVED TARGETS: what this task WROTE, whether or not it said so. */
     const derived = writesForTask(run, task_id);
     const declared = taskBuildTarget(effectiveProps);

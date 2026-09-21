@@ -463,3 +463,30 @@ test('review: the malformed-call stop text reports an unverified write, like the
   assert.match(text, /This turn stopped/);
   assert.match(text, /UNVERIFIED — no verification record for .*automations:\/enforce-homepage-title/);
 });
+
+// ── E: a plan-time guess is superseded by the real path ──────────────────────
+// Measured in a Builder replay: create-plan declared
+// /automations/correct-homepage-title, the build made /correct-homepage-titles,
+// and the task could never close because the guess stayed a target.
+
+test('E: a declared target this run never wrote is replaced by a new declaration', async () => {
+  const { store } = conversation({
+    tasks: { build: { build_target_path: '/automations/a-guess' } },
+    calls: [{ tool: 'create-node', at: T('10:00.000'), args: {}, result: { success: true, workspace: 'automations', path: AUTO, id: 'a1', node_type: 'studio:Automation' } }],
+  });
+  const res = await complete('build', { build_target_path: AUTO });
+  assert.equal(res.success, false, 'still unverified — nothing verified it');
+  assert.deepEqual(res.build_targets, [AUTO], 'the guess is gone; only the real artifact is gated');
+  assert.equal(store.get(`${PLAN}/build`).properties.build_target_path, AUTO);
+});
+
+test('E: a declared target this run DID write is never dropped by re-declaring', async () => {
+  const OTHER = '/something-else';
+  conversation({
+    tasks: { build: { build_target_path: AUTO } },
+    calls: [{ tool: 'create-node', at: T('10:00.000'), args: {}, result: { success: true, workspace: 'automations', path: AUTO, id: 'a1', node_type: 'studio:Automation' } }],
+  });
+  const res = await complete('build', { build_target_path: OTHER });
+  assert.equal(res.success, false);
+  assert.ok(res.build_targets.includes(AUTO), `the written artifact stays gated: ${JSON.stringify(res.build_targets)}`);
+});
