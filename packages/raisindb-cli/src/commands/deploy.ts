@@ -103,9 +103,19 @@ export async function deployPackage(folder: string, options: DeployOptions): Pro
   console.log(`\nDeployed ${manifest.name} v${manifest.version} successfully${options.install ? ' (installed)' : ''}.`);
 }
 
-/** Shallow string-array equality (order-sensitive, as the server stores them). */
-function sameTypes(a: unknown, b: string[]): boolean {
-  return Array.isArray(a) && a.length === b.length && a.every((v, i) => v === b[i]);
+/**
+ * The package's types, then every type the server already allows that the
+ * package does not list. A deploy NEVER NARROWS a workspace: a type the
+ * installation added since — an app Studio Builder made, an operator's
+ * addition — stays allowed, because dropping it strands every existing node of
+ * that type in a workspace that now refuses it. The server's `sync` install
+ * merges the same way; this step used to replace the lists and undo that.
+ * `null` when nothing would change.
+ */
+function widened(existing: unknown, fromPackage: string[]): string[] | null {
+  const have = Array.isArray(existing) ? (existing as unknown[]).filter((v): v is string => typeof v === 'string') : [];
+  if (fromPackage.every((t) => have.includes(t))) return null;
+  return [...fromPackage, ...have.filter((t) => !fromPackage.includes(t))];
 }
 
 /**
@@ -115,9 +125,10 @@ function sameTypes(a: unknown, b: string[]): boolean {
  * changes (the server install path only fully seeds NEW workspaces).
  *
  * Reads `<folder>/workspaces/*.yaml` (the workspace-definition files), and for
- * each that already exists on the server with drifted allowed types, GETs the
- * current workspace, overlays the two arrays, and PUTs it back — preserving all
- * other fields. New workspaces are left to the install path.
+ * each that already exists on the server and is MISSING a type the package
+ * declares, GETs the current workspace, widens the two arrays (see `widened` —
+ * never narrowed) and PUTs it back, preserving all other fields. New
+ * workspaces are left to the install path.
  */
 export async function reconcileWorkspaceAllowedTypes(
   folder: string,
@@ -162,12 +173,14 @@ export async function reconcileWorkspaceAllowedTypes(
 
     const updated = { ...existing };
     let changed = false;
-    if (Array.isArray(nodeTypes) && !sameTypes(existing.allowed_node_types, nodeTypes as string[])) {
-      updated.allowed_node_types = nodeTypes;
+    const nextTypes = Array.isArray(nodeTypes) ? widened(existing.allowed_node_types, nodeTypes as string[]) : null;
+    if (nextTypes) {
+      updated.allowed_node_types = nextTypes;
       changed = true;
     }
-    if (Array.isArray(rootTypes) && !sameTypes(existing.allowed_root_node_types, rootTypes as string[])) {
-      updated.allowed_root_node_types = rootTypes;
+    const nextRoots = Array.isArray(rootTypes) ? widened(existing.allowed_root_node_types, rootTypes as string[]) : null;
+    if (nextRoots) {
+      updated.allowed_root_node_types = nextRoots;
       changed = true;
     }
     if (!changed) continue;

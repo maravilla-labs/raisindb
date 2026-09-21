@@ -99,6 +99,34 @@ describe('reconcileWorkspaceAllowedTypes', () => {
     await reconcileWorkspaceAllowedTypes(dir, 'studio');
     expect(getWorkspaceRaw).toHaveBeenCalledWith('studio', 'locations');
     expect(putWorkspaceRaw).toHaveBeenCalledTimes(1);
-    expect(putWorkspaceRaw.mock.calls[0][2].allowed_root_node_types).toEqual(['studio:Location']);
+    // Widened, never narrowed: the server's Folder stays allowed.
+    expect(putWorkspaceRaw.mock.calls[0][2].allowed_root_node_types).toEqual(['studio:Location', 'studio:Folder']);
+  });
+
+  it('keeps a type the installation added (a Builder-made app) through a deploy', async () => {
+    writeWs(dir, 'events.yaml', EVENTS_YAML);
+    getWorkspaceRaw.mockResolvedValue({
+      name: 'events',
+      allowed_node_types: ['studio:Folder', 'studio:Event', 'local:Ticket'],
+      allowed_root_node_types: ['studio:Folder', 'studio:Event', 'local:Ticket'],
+    });
+
+    await reconcileWorkspaceAllowedTypes(dir, 'studio');
+    // The package adds nothing the server lacks, so nothing is written — and
+    // above all local:Ticket is not stripped.
+    expect(putWorkspaceRaw).not.toHaveBeenCalled();
+  });
+
+  it('adds a new package type while keeping the installation\'s own', async () => {
+    writeWs(dir, 'events.yaml', EVENTS_YAML);
+    getWorkspaceRaw.mockResolvedValue({
+      name: 'events',
+      allowed_node_types: ['studio:Folder', 'local:Ticket'],
+      allowed_root_node_types: ['studio:Folder', 'studio:Event'],
+    });
+
+    await reconcileWorkspaceAllowedTypes(dir, 'studio');
+    expect(putWorkspaceRaw).toHaveBeenCalledTimes(1);
+    expect(putWorkspaceRaw.mock.calls[0][2].allowed_node_types).toEqual(['studio:Folder', 'studio:Event', 'local:Ticket']);
   });
 });
