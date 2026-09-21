@@ -228,15 +228,33 @@ impl ApiKeyStore {
             return Ok(None);
         }
 
-        // Update last used timestamp
+        // Update last used timestamp — BEST EFFORT. The key is valid whether or
+        // not this bookkeeping write lands. It used to be `?`, so a store that
+        // could not write (a full disk puts RocksDB into its read-only
+        // background-error state until it is reopened) turned every valid key
+        // into "not validated", and the HTTP middleware then served the caller
+        // as ANONYMOUS: reads returned zero rows with a 200 and every function
+        // read as not found. Measured on a dev server 2026-09-21. Refusing
+        // authentication because a timestamp could not be stored is the wrong
+        // failure; the write error is still reported, here.
         api_key.record_usage();
         let key = Self::build_key(tenant_id, user_id, key_id);
-        let value = rmp_serde::to_vec(&api_key).map_err(|e| {
-            raisin_error::Error::Backend(format!("Failed to serialize API key: {}", e))
-        })?;
-        self.db
-            .put_cf(cf, &key, &value)
-            .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+        match rmp_serde::to_vec(&api_key) {
+            Ok(value) => {
+                if let Err(e) = self.db.put_cf(cf, &key, &value) {
+                    tracing::warn!(
+                        key = %api_key.key_prefix,
+                        error = %e,
+                        "API key authenticated, but its last-used timestamp could not be stored"
+                    );
+                }
+            }
+            Err(e) => tracing::warn!(
+                key = %api_key.key_prefix,
+                error = %e,
+                "API key authenticated, but its usage record could not be serialized"
+            ),
+        }
 
         Ok(Some(api_key))
     }
