@@ -361,7 +361,15 @@ async function handler(input) {
             ` and has no current verification record, so it cannot be marked completed. Missing: ${decision.missing.join('; ')}.` +
             (decision.stale.length ? ` ${decision.stale.join('; ')}.` : '') +
             ' Obtain the proof (validate, then test execution) and the verification record will be written by the operation that obtains it — not by this tool.' +
+            /* The order matters and is not obvious: a verification stamps only
+             * the tasks that ALREADY name its artifact. Measured: a target set
+             * by this very refusal left a verification made a moment earlier
+             * stamped on no task at all. */
+            (declarationChanged
+              ? ` This task now names ${effectiveProps.build_target_path}; a verification stamps only tasks that already name its artifact, so run the verification for ${effectiveProps.build_target_path} again NOW, then mark this task completed.`
+              : '') +
             ' If the work was abandoned, mark the task failed or cancelled instead.',
+          ...(declarationChanged ? { next_step: `verify ${effectiveProps.build_target_path} again, then update-task completed` } : {}),
         };
       }
 
