@@ -347,6 +347,13 @@ impl Storage for RocksDBStorage {
         self.event_bus.clone()
     }
 
+    /// `RocksDBTransaction::commit` emits a `NodeEvent` per changed node
+    /// (`transaction/commit/events.rs`), carrying `node_data`, `actor` and the
+    /// commit's own revision.
+    fn commit_publishes_node_events(&self) -> bool {
+        true
+    }
+
     fn graph_resolver<'a>(
         &'a self,
         scope: raisin_storage::scope::BranchScope<'a>,

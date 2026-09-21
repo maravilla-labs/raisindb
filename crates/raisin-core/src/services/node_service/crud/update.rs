@@ -94,29 +94,33 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
 
         ctx.commit().await?;
 
-        // Get current revision and emit event
-        let current_revision = self
-            .storage
-            .branches()
-            .get_branch(&self.tenant_id, &self.repo_id, &self.branch)
-            .await?
-            .map(|b| b.head)
-            .unwrap_or_else(|| HLC::new(0, 0));
+        // A backend whose commit already announced this write (RocksDB)
+        // must not hear it twice: see `Storage::commit_publishes_node_events`.
+        if !self.storage.commit_publishes_node_events() {
+            // Get current revision and emit event
+            let current_revision = self
+                .storage
+                .branches()
+                .get_branch(&self.tenant_id, &self.repo_id, &self.branch)
+                .await?
+                .map(|b| b.head)
+                .unwrap_or_else(|| HLC::new(0, 0));
 
-        self.storage
-            .event_bus()
-            .publish(raisin_storage::Event::Node(raisin_storage::NodeEvent {
-                tenant_id: self.tenant_id.clone(),
-                repository_id: self.repo_id.clone(),
-                branch: self.branch.clone(),
-                workspace_id: self.workspace_id.clone(),
-                node_id: node.id.clone(),
-                node_type: Some(node.node_type.clone()),
-                revision: current_revision,
-                kind: raisin_storage::NodeEventKind::Updated,
-                path: Some(node.path.clone()),
-                metadata: None,
-            }));
+            self.storage
+                .event_bus()
+                .publish(raisin_storage::Event::Node(raisin_storage::NodeEvent {
+                    tenant_id: self.tenant_id.clone(),
+                    repository_id: self.repo_id.clone(),
+                    branch: self.branch.clone(),
+                    workspace_id: self.workspace_id.clone(),
+                    node_id: node.id.clone(),
+                    node_type: Some(node.node_type.clone()),
+                    revision: current_revision,
+                    kind: raisin_storage::NodeEventKind::Updated,
+                    path: Some(node.path.clone()),
+                    metadata: None,
+                }));
+        }
 
         Ok(())
     }

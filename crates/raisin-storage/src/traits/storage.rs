@@ -144,6 +144,18 @@ pub trait Storage: Send + Sync {
     /// Get the event bus for subscribing to storage events
     fn event_bus(&self) -> Arc<dyn EventBus>;
 
+    /// Whether committing a transaction already publishes a `NodeEvent`
+    /// (`Created` / `Updated` / `Deleted`) for every node it changed.
+    ///
+    /// Services that write through a transaction and then announce the write
+    /// themselves must skip their own announcement when this is `true`, or
+    /// every subscriber sees the write twice. Most consumers dedup only while
+    /// the first job is still pending, so the second copy re-runs triggers
+    /// whenever it arrives late (duplicate flow runs, duplicate model calls).
+    fn commit_publishes_node_events(&self) -> bool {
+        false
+    }
+
     /// Build a graph relationship resolver for evaluating `RELATES … VIA`
     /// conditions in row-level-security checks.
     ///
