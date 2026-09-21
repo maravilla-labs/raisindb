@@ -541,14 +541,38 @@ where
 /// resolver and the key format already agreed; only discovery did not.
 fn collect_external_import_dirs(code: &str) -> Vec<String> {
     let mut dirs = Vec::new();
-    for line in code.lines() {
+    let mut lines = code.lines();
+    while let Some(line) = lines.next() {
         let trimmed = line.trim();
         // `export … from '…'` is a dependency too. `export default`/`export
         // const` never carry a specifier, so the `from ` check below is what
         // actually discriminates — this only has to let the line through.
-        if !trimmed.starts_with("import ") && !trimmed.starts_with("export ") {
+        if !trimmed.starts_with("import ")
+            && !trimmed.starts_with("export ")
+            && !trimmed.starts_with("import{")
+            && !trimmed.starts_with("export{")
+        {
             continue;
         }
+        // A STATEMENT, not a line. A braced clause is routinely written over
+        // several lines, and its specifier then sits on the line that closes
+        // the brace (`} from '../dir/file.js';`), which starts with `}` and was
+        // skipped. The directory was never loaded and every call died with
+        // "Error resolving module '../dir/file.js' from 'entry'" — measured on
+        // load-skill, 2026-09-21. Read on to the closing brace. An `export
+        // const x = {` that is not an import merely skips its own body: an
+        // import cannot appear inside an object literal.
+        let mut statement = trimmed.to_string();
+        if statement.contains('{') && !statement.contains('}') {
+            for next in lines.by_ref() {
+                statement.push(' ');
+                statement.push_str(next.trim());
+                if next.contains('}') {
+                    break;
+                }
+            }
+        }
+        let trimmed = statement.as_str();
         // Extract module specifier from: import ... from 'specifier'
         let spec_start = match trimmed.rfind("from ") {
             Some(i) => i + 5,
@@ -797,6 +821,30 @@ import { helper } from '../other-lib/helper.js';
 "#;
         let dirs = collect_external_import_dirs(code);
         assert_eq!(dirs, vec!["agent-shared", "other-lib"]);
+    }
+
+    #[test]
+    fn collect_external_import_dirs_reads_a_multi_line_import() {
+        // The exact shape load-skill shipped with in v0.6.36: the specifier is
+        // on the line that closes the brace, which starts with `}`. Read line by
+        // line, the directory was never found and every call failed with
+        // "Error resolving module '../agent-shared/skills.js' from 'entry'".
+        let code = r#"
+import {
+  SKILL_NODE_TYPE,
+  loadSkillGrant,
+} from '../agent-shared/skills.js';
+export {
+  a,
+  b,
+} from '../refs/ref-shared/refs.js';
+import { one } from '../single/x.js';
+export const config = {
+  from: '../not-an-import/x.js',
+};
+"#;
+        let dirs = collect_external_import_dirs(code);
+        assert_eq!(dirs, vec!["agent-shared", "refs", "single"]);
     }
 
     #[test]
