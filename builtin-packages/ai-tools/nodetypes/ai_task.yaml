@@ -35,6 +35,12 @@ properties:
           value: completed
         - label: Cancelled
           value: cancelled
+        # A run that STOPPED. Distinct from cancelled (a decision) and from
+        # in_progress (which claims work is still happening). The continuation
+        # handler writes it when a run hits its round budget with tasks open, so
+        # a stopped turn cannot sit beside a task that still looks live.
+        - label: Failed
+          value: failed
 
   - name: priority
     title: Priority
@@ -52,6 +58,75 @@ properties:
           value: high
         - label: Urgent
           value: urgent
+
+  # WHAT THIS TASK BUILT, AND THE PROOF THAT IT WORKS.
+  #
+  # raisin:AITask had a large readonly `delegation_*` family and nowhere at all
+  # to hold evidence, so any completion gate had to re-derive proof on every
+  # call. These mirror the delegation conventions — readonly, written by the
+  # server operation that learns the fact, never by the model — and they are what
+  # `finalize_policy: require_verified_completion` reads.
+  #
+  # A task with no `build_target_path` is ordinary work (research, a question, a
+  # decision) and is never gated: there is nothing for a record to be about.
+
+  - name: build_target_path
+    title: Build Target
+    type: string
+    readonly: true
+    description: >-
+      Path of the artifact this task builds (an automation, flow, function or
+      agent node). Its presence is what makes the task subject to the finalize
+      gate.
+
+  - name: build_target_ref
+    title: Build Target Node
+    type: Reference
+    readonly: true
+    description: The same artifact as a reference, when it is resolvable.
+
+  - name: verification_ref
+    title: Verification Record
+    type: Reference
+    readonly: true
+    description: >-
+      The artifact the proof is ABOUT. It must resolve to the same path as the
+      build target; a mismatch means the proof belongs to something else and the
+      task counts as unverified.
+
+  - name: verification_hash
+    title: Verified Revision / Hash
+    type: string
+    readonly: true
+    description: >-
+      The authored revision or content hash the proof was obtained AT. This is
+      what makes verification expire by MISMATCH rather than by trust: an edit
+      after verification changes the hash and the record no longer matches.
+
+  - name: proof_level
+    title: Proof Level
+    type: string
+    readonly: true
+    description: |
+      How strong the proof is. These are distinct states, not synonyms:
+      - draft_validated: the saved artifact compiled and validated clean. Execution untested.
+      - fixture_tested: it also ran successfully against fixtures.
+      - activated: its activation in the authorized scope was confirmed.
+      Absent or unrecognised means unverified.
+    ui:
+      widget: select
+      options:
+        - label: Draft validated (execution untested)
+          value: draft_validated
+        - label: Fixture tested
+          value: fixture_tested
+        - label: Activated (confirmed)
+          value: activated
+
+  - name: verified_at
+    title: Verified At
+    type: Date
+    readonly: true
 
   - name: delegation_id
     title: Delegation ID

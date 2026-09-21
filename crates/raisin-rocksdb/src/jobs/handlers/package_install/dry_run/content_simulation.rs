@@ -20,6 +20,9 @@ use super::super::content_types::{
     derive_content_path, parse_asset_metadata_filename, resource_ref_filename, ContentNodeDef,
 };
 use super::super::handler::PackageInstallHandler;
+use super::super::install_content::skill_md::{
+    is_skill_md, refuse_skill_md_errors, skill_md_clashes, skill_md_to_node,
+};
 use super::super::translation::parse_translation_locale;
 use super::super::types::{
     resolve_install_policy_for_path, DryRunActionCounts, DryRunLogEntry, InstallMode,
@@ -70,6 +73,13 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             let mut resource_refs: HashMap<(String, String), Vec<String>> = HashMap::new();
             // Deferred binaries: (workspace, asset_path, filename, size, containing_node_path)
             let mut binary_candidates: Vec<(String, String, String, usize, String)> = Vec::new();
+            // SKILL.md handling mirrors `collect_content_entries`: every YAML
+            // definition's (workspace, file, node path), the parsed skills, and
+            // the refusals — so a --check fails exactly where an install would.
+            let mut yaml_keys: Vec<(String, String, String)> = Vec::new();
+            let mut skill_keys: Vec<(String, String, String)> = Vec::new();
+            let mut skill_items: Vec<ContentItem> = Vec::new();
+            let mut skill_errors: Vec<String> = Vec::new();
 
             for i in 0..archive.len() {
                 let mut file = archive
@@ -105,11 +115,34 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                 // `zip_collector::collect_content_entries`; previewing only
                 // `.node.yaml` meant flat node files never appeared in a dry
                 // run at all.
-                let is_node_def = filename.ends_with(".yaml")
-                    && parse_translation_locale(&filename).is_none()
-                    && parse_asset_metadata_filename(&filename).is_none();
+                //
+                // `.node.yml` / `node.yml` count as folder definitions, as they
+                // do in the collector (classification keys on `.yaml`, so the
+                // spelling is normalised for those checks only).
+                let is_folder_def_yml = filename == ".node.yml" || filename == "node.yml";
+                let classify = match filename.strip_suffix(".yml") {
+                    Some(stem) if is_folder_def_yml => format!("{stem}.yaml"),
+                    _ => filename.clone(),
+                };
+                let is_node_def = (filename.ends_with(".yaml") || is_folder_def_yml)
+                    && parse_translation_locale(&classify).is_none()
+                    && parse_asset_metadata_filename(&classify).is_none();
 
-                if is_node_def {
+                if is_skill_md(&filename) {
+                    // A raisin:Skill node, never a binary asset — see
+                    // `install_content::skill_md`.
+                    match skill_md_to_node(&name, &content_bytes) {
+                        Ok(node) => {
+                            skill_keys.push((workspace.clone(), name.clone(), node.path.clone()));
+                            skill_items.push(ContentItem::ContentNode {
+                                workspace,
+                                derived_name: node.name,
+                                derived_path: node.path,
+                            });
+                        }
+                        Err(reason) => skill_errors.push(reason),
+                    }
+                } else if is_node_def {
                     let content_def: ContentNodeDef = serde_yaml::from_slice(&content_bytes)
                         .map_err(|e| {
                             Error::Validation(format!("Invalid content YAML in {}: {}", name, e))
@@ -117,6 +150,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
 
                     let derived_name = content_def.derive_name(&name);
                     let derived_path = derive_content_path(&name, &derived_name);
+                    yaml_keys.push((workspace.clone(), name.clone(), derived_path.clone()));
 
                     if let Some(props) = &content_def.properties {
                         for value in props.values() {
@@ -162,6 +196,10 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                     ));
                 }
             }
+
+            skill_errors.extend(skill_md_clashes(&skill_keys, &yaml_keys));
+            refuse_skill_md_errors(skill_errors)?;
+            items.extend(skill_items);
 
             // Emit only binaries that don't bind to an authored Resource.
             for (workspace, asset_path, filename, size, containing_node_path) in binary_candidates {

@@ -197,11 +197,22 @@ where
                 workspace = %workspace,
                 path = %node.path,
                 node_type = %node.node_type,
+                archetype = ?node.archetype,
                 "Creating node via SQL INSERT"
             );
 
-            // Generate and execute INSERT
-            let stmt = sql_generator::generate_insert(&workspace, &node);
+            // Generate and execute INSERT.
+            //
+            // The archetype is a COLUMN, so it has to travel in the INSERT
+            // itself — not in a follow-up UPDATE. Writing the archetype column
+            // EVICTS the row from every property index, and only a later write
+            // that CHANGES an indexed property puts it back; an INSERT followed
+            // by an archetype UPDATE would therefore leave a brand-new node
+            // un-indexed with nothing to repair it.
+            let stmt = match node.archetype.as_deref() {
+                Some(archetype) => generate_insert_with_archetype(&workspace, &node, archetype),
+                None => sql_generator::generate_insert(&workspace, &node),
+            };
             ctx.execute_statement(&stmt).await?;
 
             // Return created node as JSON
@@ -231,10 +242,17 @@ where
                 raisin_error::Error::NotFound(format!("Node not found: {}", path))
             })?;
 
-            // Convert JSON to Node and apply updates
+            // What the row says the archetype is RIGHT NOW, read from the raw
+            // row rather than from the parsed node: the column may arrive
+            // qualified (`<workspace>.archetype`) depending on how the star
+            // projection names it, and a prior value mistaken for absent would
+            // make every update write the column again.
+            let stored_archetype = row_archetype(&existing_node, &workspace);
+
             let mut node: Node = serde_json::from_value(existing_node).map_err(|e| {
                 raisin_error::Error::Internal(format!("Failed to parse node: {}", e))
             })?;
+            node.archetype = stored_archetype.clone();
 
             apply_node_updates(&mut node, data)?;
 
@@ -243,6 +261,33 @@ where
                 path = %path,
                 "Updating node via SQL UPDATE"
             );
+
+            // The archetype is a COLUMN, and WRITING IT EVICTS THE ROW FROM
+            // EVERY PROPERTY INDEX — re-stating the archetype it already had is
+            // enough to do it, and only a later write that CHANGES an indexed
+            // property puts the row back. So: write it ONLY when it actually
+            // DIFFERS, and write it BEFORE the properties, so the property
+            // UPDATE that follows re-indexes the row.
+            if node.archetype != stored_archetype {
+                if let Some(archetype) = node.archetype.as_deref() {
+                    tracing::debug!(
+                        workspace = %workspace,
+                        path = %path,
+                        from = ?stored_archetype,
+                        to = %archetype,
+                        "Archetype differs — writing the column before the properties"
+                    );
+                    let stmt = generate_update_archetype(&workspace, &path, archetype);
+                    ctx.execute_statement(&stmt).await?;
+                }
+            }
+
+            // Caveat worth knowing: an archetype-only update (no `properties`
+            // in `data`) still issues the properties UPDATE below, but with
+            // UNCHANGED values — and it is a write that CHANGES an indexed
+            // property that restores a row evicted by the archetype write. So
+            // set the archetype together with whatever property change belongs
+            // with it whenever you can.
 
             // Generate and execute UPDATE
             let stmt =
@@ -603,6 +648,10 @@ pub fn parse_node_create_data(parent_path: &str, data: Value) -> raisin_error::R
         name: name.to_string(),
         path,
         node_type: node_type.to_string(),
+        // The archetype is what makes a created node openable in an editor
+        // (`isRecord = !!node.archetype`). It used to be dropped here, so a node
+        // a server function created could never be edited by a person.
+        archetype: parse_archetype(&data),
         created_at: Some(chrono::Utc::now()),
         ..Default::default()
     };
@@ -628,8 +677,240 @@ pub fn apply_node_updates(node: &mut Node, data: Value) -> raisin_error::Result<
         }
     }
 
+    // Update the archetype ONLY WHEN IT DIFFERS from what the node already
+    // carries. The archetype is a COLUMN, not a property, and writing it EVICTS
+    // THE ROW FROM EVERY PROPERTY INDEX — re-stating the value it already had is
+    // enough — so an unconditional set turns any idempotent upsert into
+    // something that silently un-indexes its own data. An absent or blank
+    // `archetype` in `data` leaves the stored one alone; it never clears it and
+    // never becomes `Some("")`.
+    if let Some(archetype) = parse_archetype(&data) {
+        if node.archetype.as_deref() != Some(archetype.as_str()) {
+            node.archetype = Some(archetype);
+        }
+    }
+
     // Update timestamp
     node.updated_at = Some(chrono::Utc::now());
 
     Ok(())
+}
+
+/// Read the optional `archetype` a function passed in its node data.
+///
+/// The archetype is a COLUMN on the node, never a property — code that looks for
+/// `properties.archetype` sees `undefined` for ever. Absence stays ABSENCE: a
+/// missing key, a non-string value, or a blank/whitespace string all yield
+/// `None` rather than `Some(String::new())`, because an empty archetype would
+/// still read as "this is a record" downstream while naming no template.
+fn parse_archetype(data: &Value) -> Option<String> {
+    data.get("archetype")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+/// Read the archetype a stored row currently carries.
+///
+/// A row from `SELECT *` may name the column plainly (`archetype`) or qualified
+/// with the workspace (`<workspace>.archetype`), so both are tried. Returning
+/// `None` for a blank value keeps "stored" and "requested" comparable on the
+/// same terms as [`parse_archetype`].
+fn row_archetype(row: &Value, workspace: &str) -> Option<String> {
+    let qualified = format!("{}.archetype", workspace);
+    row.get("archetype")
+        .or_else(|| row.get(qualified.as_str()))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+/// Generate an INSERT that carries the archetype column as well.
+///
+/// ```sql
+/// INSERT INTO workspace (id, path, node_type, archetype, properties)
+/// VALUES ($1, $2, $3, $4, $5::JSONB)
+/// ```
+///
+/// `sql_generator::generate_insert` lists only `id, path, node_type, properties`,
+/// so the archetype form is built here — but its PARAMETERS come from that same
+/// generator, so the `PropertyValue` -> JSON conversion (private to that module)
+/// cannot drift between the two forms. `archetype` is a reserved column of a
+/// workspace INSERT (see `raisin-sql-execution`'s `dml_executor::node_helpers`),
+/// so it lands as the column and is not folded into properties.
+fn generate_insert_with_archetype(
+    workspace: &str,
+    node: &Node,
+    archetype: &str,
+) -> sql_generator::SqlStatement {
+    let base = sql_generator::generate_insert(workspace, node);
+    let mut params = base.params;
+
+    // (id, path, node_type, properties) — the archetype goes in front of the
+    // properties parameter. If that shape ever changes, say so and fall back to
+    // the plain INSERT rather than mis-order the parameters.
+    if params.len() != 4 {
+        tracing::error!(
+            param_count = params.len(),
+            "generate_insert changed shape; archetype NOT written on INSERT"
+        );
+        return sql_generator::SqlStatement {
+            sql: base.sql,
+            params,
+        };
+    }
+    params.insert(3, Value::String(archetype.to_string()));
+
+    sql_generator::SqlStatement {
+        sql: format!(
+            "INSERT INTO {} (id, path, node_type, archetype, properties) VALUES ($1, $2, $3, $4, $5::JSONB)",
+            escape_workspace_identifier(workspace)
+        ),
+        params,
+    }
+}
+
+/// Generate an UPDATE that sets ONLY the archetype column.
+///
+/// ```sql
+/// UPDATE workspace SET archetype = $1 WHERE path = $2
+/// ```
+///
+/// Only ever issued when the archetype actually differs, and always before the
+/// properties UPDATE, because this write evicts the row from every property
+/// index and the property write that follows is what puts it back.
+fn generate_update_archetype(
+    workspace: &str,
+    path: &str,
+    archetype: &str,
+) -> sql_generator::SqlStatement {
+    sql_generator::SqlStatement {
+        sql: format!(
+            "UPDATE {} SET archetype = $1 WHERE path = $2",
+            escape_workspace_identifier(workspace)
+        ),
+        params: vec![
+            Value::String(archetype.to_string()),
+            Value::String(path.to_string()),
+        ],
+    }
+}
+
+/// Quote a workspace identifier unless it is plainly safe.
+///
+/// A local twin of `sql_generator`'s private `escape_identifier`; it exists only
+/// because that one is not visible here. Keep the two in step.
+fn escape_workspace_identifier(name: &str) -> String {
+    if name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+    {
+        name.to_string()
+    } else {
+        format!("\"{}\"", name.replace('"', "\"\""))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn create_reads_the_archetype_from_the_data() {
+        let node = parse_node_create_data(
+            "/automations",
+            json!({
+                "name": "correct-homepage-title",
+                "node_type": "studio:Automation",
+                "archetype": "studio:AutomationPage",
+                "properties": { "title": "Correct the homepage title" }
+            }),
+        )
+        .expect("node parses");
+
+        assert_eq!(node.archetype.as_deref(), Some("studio:AutomationPage"));
+        assert_eq!(node.path, "/automations/correct-homepage-title");
+    }
+
+    #[test]
+    fn an_absent_or_blank_archetype_stays_absent() {
+        for data in [
+            json!({ "name": "n", "node_type": "studio:Automation" }),
+            json!({ "name": "n", "node_type": "studio:Automation", "archetype": "" }),
+            json!({ "name": "n", "node_type": "studio:Automation", "archetype": "   " }),
+            json!({ "name": "n", "node_type": "studio:Automation", "archetype": null }),
+            json!({ "name": "n", "node_type": "studio:Automation", "archetype": 7 }),
+        ] {
+            let node = parse_node_create_data("/", data).expect("node parses");
+            assert_eq!(
+                node.archetype, None,
+                "blank archetype must not become Some(\"\")"
+            );
+        }
+    }
+
+    #[test]
+    fn an_update_sets_the_archetype_only_when_it_differs() {
+        let mut node = Node {
+            name: "n".to_string(),
+            node_type: "studio:Automation".to_string(),
+            archetype: Some("studio:AutomationPage".to_string()),
+            ..Default::default()
+        };
+
+        // Re-stating the same value is not a change — the caller must be able to
+        // see that and skip the write that would evict the row from every
+        // property index.
+        let before = node.archetype.clone();
+        apply_node_updates(&mut node, json!({ "archetype": "studio:AutomationPage" })).unwrap();
+        assert_eq!(node.archetype, before);
+
+        // A genuinely different value lands.
+        apply_node_updates(&mut node, json!({ "archetype": "studio:OtherPage" })).unwrap();
+        assert_eq!(node.archetype.as_deref(), Some("studio:OtherPage"));
+
+        // No archetype in the data leaves the stored one alone — it never clears.
+        apply_node_updates(&mut node, json!({ "properties": { "x": 1 } })).unwrap();
+        assert_eq!(node.archetype.as_deref(), Some("studio:OtherPage"));
+    }
+
+    #[test]
+    fn the_stored_archetype_is_read_qualified_or_plain() {
+        assert_eq!(
+            row_archetype(&json!({ "archetype": "a" }), "studio").as_deref(),
+            Some("a")
+        );
+        assert_eq!(
+            row_archetype(&json!({ "studio.archetype": "a" }), "studio").as_deref(),
+            Some("a")
+        );
+        assert_eq!(row_archetype(&json!({ "path": "/x" }), "studio"), None);
+        assert_eq!(row_archetype(&json!({ "archetype": "" }), "studio"), None);
+    }
+
+    #[test]
+    fn the_archetype_travels_in_the_insert_itself() {
+        let node = parse_node_create_data(
+            "/",
+            json!({
+                "name": "n",
+                "node_type": "studio:Automation",
+                "archetype": "studio:AutomationPage"
+            }),
+        )
+        .unwrap();
+
+        let stmt = generate_insert_with_archetype("studio", &node, "studio:AutomationPage");
+        assert!(stmt
+            .sql
+            .contains("(id, path, node_type, archetype, properties)"));
+        assert_eq!(stmt.params.len(), 5);
+        assert_eq!(
+            stmt.params[3],
+            Value::String("studio:AutomationPage".to_string())
+        );
+    }
 }

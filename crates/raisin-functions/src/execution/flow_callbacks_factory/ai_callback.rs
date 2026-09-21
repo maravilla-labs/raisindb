@@ -18,6 +18,7 @@ use raisin_binary::BinaryStorage;
 use raisin_models::nodes::properties::{Properties, PropertyValue};
 use raisin_storage::{transactional::TransactionalStorage, NodeRepository, Storage, StorageScope};
 
+use super::skills::{self, SelectedSkill};
 use super::types::{AICallerCallback, AIStreamingCallerCallback, AiCallContext};
 
 // ---------------------------------------------------------------------------
@@ -38,12 +39,18 @@ struct CompletionResponseEnvelope {
     usage: Option<UsageEnvelope>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "_tool_map")]
     tool_map: Option<HashMap<String, String>>,
+    /// The skills this call was granted, `[{name, workspace, path}]`. The
+    /// runtime hands it to `load-skill` as `__raisin_context.skill_grant`,
+    /// because a flow has no chat for the tool to derive the grant from.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "_skill_grant")]
+    skill_grant: Option<serde_json::Value>,
 }
 
 impl CompletionResponseEnvelope {
     fn from_response(
         response: raisin_ai::types::CompletionResponse,
         tool_path_map: HashMap<String, String>,
+        skill_grant: &[SelectedSkill],
     ) -> Self {
         Self {
             content: response.message.content,
@@ -58,6 +65,11 @@ impl CompletionResponseEnvelope {
                 None
             } else {
                 Some(tool_path_map)
+            },
+            skill_grant: if skill_grant.is_empty() {
+                None
+            } else {
+                Some(skills::grant_json(skill_grant))
             },
         }
     }
@@ -200,7 +212,7 @@ where
                     "Flow ai_caller callback"
                 );
 
-                let (request, tool_path_map, routing_model_id) =
+                let (request, tool_path_map, routing_model_id, skill_grant) =
                     build_completion_request(&deps, &ctx, &messages, response_format_json, false)
                         .await?;
 
@@ -226,7 +238,11 @@ where
                     "AI completion successful"
                 );
 
-                let envelope = CompletionResponseEnvelope::from_response(response, tool_path_map);
+                let envelope = CompletionResponseEnvelope::from_response(
+                    response,
+                    tool_path_map,
+                    &skill_grant,
+                );
                 serde_json::to_value(&envelope).map_err(|e| format!("Serialization failed: {}", e))
             })
         },
@@ -252,7 +268,7 @@ where
               response_format_json: Option<serde_json::Value>| {
             let deps = deps.clone();
             Box::pin(async move {
-                let (request, tool_path_map, routing_model_id) =
+                let (request, tool_path_map, routing_model_id, skill_grant) =
                     build_completion_request(&deps, &ctx, &messages, response_format_json, true)
                         .await?;
 
@@ -274,10 +290,14 @@ where
 
                 let (tx, rx) = tokio::sync::mpsc::channel::<serde_json::Value>(32);
 
-                if !tool_path_map.is_empty() {
-                    let _ = tx
-                        .send(serde_json::json!({ "_tool_map": tool_path_map }))
-                        .await;
+                // The first chunk carries the side-band maps. `_skill_grant`
+                // rides with `_tool_map` so a streaming caller gets it too.
+                if !tool_path_map.is_empty() || !skill_grant.is_empty() {
+                    let mut first = serde_json::json!({ "_tool_map": tool_path_map });
+                    if !skill_grant.is_empty() {
+                        first["_skill_grant"] = skills::grant_json(&skill_grant);
+                    }
+                    let _ = tx.send(first).await;
                 }
 
                 tokio::spawn(async move {
@@ -311,7 +331,8 @@ where
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Shared helper: load agent, build CompletionRequest and tool-path map.
+/// Shared helper: load agent, build CompletionRequest, tool-path map and the
+/// skill grant.
 ///
 /// The third element of the return is the model id used for ROUTING —
 /// `<slug>:<model>` — which is what `create_provider_for_model` needs to find the
@@ -331,6 +352,7 @@ async fn build_completion_request<S, B>(
         raisin_ai::types::CompletionRequest,
         HashMap<String, String>,
         String,
+        Vec<SelectedSkill>,
     ),
     String,
 >
@@ -387,13 +409,39 @@ where
         _ => raw_model,
     };
 
-    let system_prompt = props.get_string("system_prompt");
+    // RULES FIX. The system prompt used to be `system_prompt` ALONE here, so an
+    // agent's `rules` applied in chat (agent-handler appends them as
+    // `## Rules`) and were silently dropped whenever the same agent ran as a
+    // workflow step. This is the one function every flow surface reaches —
+    // `create_ai_caller` and `create_ai_streaming_caller` both build here,
+    // whichever `call_ai*` trait method the step used — so no step needs
+    // wiring of its own. Rules apply with skills ON or OFF.
+    //
+    // SKILLS share the same tail: the index of the granted raisin:Skill nodes
+    // goes before `## Rules`, which stays last. No skills and no rules leave
+    // `system_prompt` byte for byte.
+    //
+    // Skills are offered only when the caller RUNS A TOOL LOOP
+    // (`ctx.offer_skills`). A decision / competition / agent-assignee call
+    // makes one request and needs its structured answer back; told to load a
+    // skill, it would return a `tool_call` instead. With the switch off the
+    // grant is never resolved, the prompt is the rules-only one and no
+    // `load-skill` is offered — whatever global skills exist.
     let temperature = props.get_number("temperature").map(|n| n as f32);
     let max_tokens = props.get_number("max_tokens").map(|n| n as u32);
 
-    let ai_messages = build_ai_messages(system_prompt.as_deref(), messages);
-    let (mut tools, tool_path_map) =
+    let (mut tools, mut tool_path_map) =
         load_agent_tools(deps, &props, &ctx.tenant_id, &ctx.repo_id, &ctx.branch).await;
+    let (system_prompt, skill_grant) = skill_surface(
+        ctx,
+        &props,
+        &mut tools,
+        &mut tool_path_map,
+        || resolve_skill_grant(deps, ctx, &props),
+        || load_skill_tool_definition(deps, ctx),
+    )
+    .await;
+    let ai_messages = build_ai_messages(system_prompt.as_deref(), messages);
 
     // CONTROL TOOLS, appended after the agent's own. These have no function
     // behind them — the flow runtime intercepts the call by name before it
@@ -459,7 +507,383 @@ where
         response_format,
     };
 
-    Ok((request, tool_path_map, model))
+    Ok((request, tool_path_map, model, skill_grant))
+}
+
+/// The skills side of a request: the system prompt (with the skills index
+/// when anything is granted, and always with `rules`), `load-skill` added to
+/// `tools` / `tool_path_map`, and the grant for `_skill_grant`.
+///
+/// When `ctx.offer_skills` is off, `resolve` and `load_tool` are never called:
+/// the grant is empty, the prompt is `system_prompt` plus rules exactly as
+/// before skills existed, and `tools` is left as the agent declared it.
+/// The IO is passed in as closures so this one path is what the tests run.
+async fn skill_surface<R, RF, L, LF>(
+    ctx: &AiCallContext,
+    props: &Properties<'_>,
+    tools: &mut Vec<ToolDefinition>,
+    tool_path_map: &mut HashMap<String, String>,
+    resolve: R,
+    load_tool: L,
+) -> (Option<String>, Vec<SelectedSkill>)
+where
+    R: FnOnce() -> RF,
+    RF: std::future::Future<Output = Vec<SelectedSkill>>,
+    L: FnOnce() -> LF,
+    LF: std::future::Future<Output = Option<ToolDefinition>>,
+{
+    let skill_grant = if ctx.offer_skills {
+        resolve().await
+    } else {
+        Vec::new()
+    };
+
+    let omitted = skills::skill_index_omitted(&skill_grant);
+    if !skill_grant.is_empty() {
+        tracing::info!(
+            agent_ref = %ctx.agent_ref,
+            granted = skill_grant.len(),
+            listed = skill_grant.len() - omitted,
+            omitted,
+            skills = ?skill_grant.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            "Agent skills index"
+        );
+    }
+    if omitted > 0 {
+        tracing::warn!(
+            agent_ref = %ctx.agent_ref,
+            omitted,
+            "Skill index truncated: {} granted skills are not listed in the prompt",
+            omitted
+        );
+    }
+    let system_prompt = agent_system_prompt(props, &skill_grant);
+
+    // LOAD-SKILL. The index names skills; their bodies load through this tool.
+    // It is a real function, so unlike the control tools it gets a
+    // `tool_path_map` entry and the runtime executes it — with the grant put
+    // into `__raisin_context` from `_skill_grant`, never from the model.
+    if needs_load_skill(tools, &skill_grant) {
+        match load_tool().await {
+            Some(def) => offer_load_skill(tools, tool_path_map, def),
+            None => tracing::warn!(
+                agent_ref = %ctx.agent_ref,
+                path = skills::LOAD_SKILL_PATH,
+                "Skills are granted but the load-skill function is missing; the index lists skills the agent cannot open"
+            ),
+        }
+    }
+
+    (system_prompt, skill_grant)
+}
+
+/// The agent's system prompt with the skills index and its `rules` appended,
+/// in exactly the shape the chat loop writes (see `skills.rs`). No skills and
+/// no rules return `system_prompt` untouched, byte for byte.
+fn agent_system_prompt(props: &Properties<'_>, skill_grant: &[SelectedSkill]) -> Option<String> {
+    let rules: Vec<String> = match props.get("rules") {
+        Some(PropertyValue::Array(items)) => items
+            .iter()
+            .filter_map(|v| match v {
+                PropertyValue::String(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let tail = skills::compose_instruction_tail(&rules, skill_grant);
+    skills::apply_tail(props.get_string("system_prompt"), &tail)
+}
+
+// ---------------------------------------------------------------------------
+// Skills — IO only; every decision is in `skills.rs`
+// ---------------------------------------------------------------------------
+
+/// Where an explicit skill reference points.
+#[derive(Debug, Clone, PartialEq)]
+struct SkillRef {
+    workspace: String,
+    /// A path (leading `/`) or a node id.
+    target: String,
+}
+
+impl SkillRef {
+    fn new(workspace: Option<&str>, path: Option<&str>, id: Option<&str>) -> Option<Self> {
+        fn non_empty(s: Option<&str>) -> Option<&str> {
+            s.map(str::trim).filter(|s| !s.is_empty())
+        }
+        let target = non_empty(path).or_else(|| non_empty(id))?;
+        Some(Self {
+            workspace: non_empty(workspace)
+                .unwrap_or(skills::SKILL_WORKSPACE)
+                .to_string(),
+            target: target.to_string(),
+        })
+    }
+}
+
+/// One entry of an agent's `skills:` — the envelope `tools:` uses, or a bare
+/// path.
+fn parse_skill_ref_property(value: &PropertyValue) -> Option<SkillRef> {
+    match value {
+        PropertyValue::String(path) => SkillRef::new(None, Some(path), None),
+        PropertyValue::Reference(r) => {
+            SkillRef::new(Some(&r.workspace), Some(&r.path), Some(&r.id))
+        }
+        PropertyValue::Object(fields) => {
+            let field = |key: &str| match fields.get(key) {
+                Some(PropertyValue::String(s)) => Some(s.as_str()),
+                _ => None,
+            };
+            SkillRef::new(
+                field("raisin:workspace").or_else(|| field("workspace")),
+                field("raisin:path").or_else(|| field("path")),
+                field("raisin:ref"),
+            )
+        }
+        _ => None,
+    }
+}
+
+/// One entry of a step's `skills:` (JSON from the flow definition).
+fn parse_skill_ref_json(value: &serde_json::Value) -> Option<SkillRef> {
+    match value {
+        serde_json::Value::String(path) => SkillRef::new(None, Some(path), None),
+        serde_json::Value::Object(fields) => {
+            let field = |key: &str| fields.get(key).and_then(|v| v.as_str());
+            SkillRef::new(
+                field("raisin:workspace").or_else(|| field("workspace")),
+                field("raisin:path").or_else(|| field("path")),
+                field("raisin:ref"),
+            )
+        }
+        _ => None,
+    }
+}
+
+/// What the rule reads of a node.
+fn skill_node_of(node: &raisin_models::nodes::Node) -> skills::SkillNode {
+    let props = Properties::new(&node.properties);
+    let mut properties = serde_json::Map::new();
+    if let Some(name) = props.get_string("name") {
+        properties.insert("name".into(), name.into());
+    }
+    if let Some(description) = props.get_string("description") {
+        properties.insert("description".into(), description.into());
+    }
+    if let Some(PropertyValue::Boolean(enabled)) = node.properties.get("enabled") {
+        properties.insert("enabled".into(), (*enabled).into());
+    }
+    skills::SkillNode {
+        path: node.path.clone(),
+        node_type: node.node_type.clone(),
+        properties: serde_json::Value::Object(properties),
+    }
+}
+
+/// Read one explicit reference. A failed read is absent, logged at debug.
+async fn load_declared_skill<S, B>(
+    deps: &Arc<ExecutionDependencies<S, B>>,
+    ctx: &AiCallContext,
+    source: &str,
+    reference: SkillRef,
+) -> skills::DeclaredSkill
+where
+    S: Storage + TransactionalStorage + 'static,
+    B: BinaryStorage + 'static,
+{
+    let scope = StorageScope::new(
+        &ctx.tenant_id,
+        &ctx.repo_id,
+        &ctx.branch,
+        &reference.workspace,
+    );
+    let read = if reference.target.starts_with('/') {
+        deps.storage
+            .nodes()
+            .get_by_path(scope, &reference.target, None)
+            .await
+    } else {
+        deps.storage
+            .nodes()
+            .get(scope, &reference.target, None)
+            .await
+    };
+    let node = match read {
+        Ok(node) => node,
+        Err(e) => {
+            tracing::debug!(
+                workspace = %reference.workspace,
+                target = %reference.target,
+                error = %e,
+                "Skill reference unreadable; treated as absent"
+            );
+            None
+        }
+    };
+    skills::DeclaredSkill {
+        source: source.to_string(),
+        workspace: reference.workspace,
+        path: node
+            .as_ref()
+            .map(|n| n.path.clone())
+            .unwrap_or(reference.target),
+        node: node.as_ref().map(skill_node_of),
+    }
+}
+
+/// The children of a global skills folder. A missing or unreadable folder is
+/// empty, logged at debug.
+async fn list_global_skills<S, B>(
+    deps: &Arc<ExecutionDependencies<S, B>>,
+    ctx: &AiCallContext,
+    folder: &str,
+) -> Vec<skills::SkillNode>
+where
+    S: Storage + TransactionalStorage + 'static,
+    B: BinaryStorage + 'static,
+{
+    match deps
+        .storage
+        .nodes()
+        .list_children(
+            StorageScope::new(
+                &ctx.tenant_id,
+                &ctx.repo_id,
+                &ctx.branch,
+                skills::SKILL_WORKSPACE,
+            ),
+            folder,
+            raisin_storage::ListOptions::default(),
+        )
+        .await
+    {
+        Ok(children) => children.iter().map(skill_node_of).collect(),
+        Err(e) => {
+            tracing::debug!(folder, error = %e, "Global skills folder unreadable; treated as empty");
+            Vec::new()
+        }
+    }
+}
+
+/// The skills this call is granted: the agent's `skills:`, the step's
+/// `skills:` (`ctx.skills`), then — unless the agent says
+/// `global_skills: false` — the installation and package globals.
+async fn resolve_skill_grant<S, B>(
+    deps: &Arc<ExecutionDependencies<S, B>>,
+    ctx: &AiCallContext,
+    props: &Properties<'_>,
+) -> Vec<SelectedSkill>
+where
+    S: Storage + TransactionalStorage + 'static,
+    B: BinaryStorage + 'static,
+{
+    let mut declared = Vec::new();
+    for entry in props.get_array("skills").into_iter().flatten() {
+        if let Some(reference) = parse_skill_ref_property(entry) {
+            declared.push(load_declared_skill(deps, ctx, "agent", reference).await);
+        }
+    }
+    for entry in &ctx.skills {
+        if let Some(reference) = parse_skill_ref_json(entry) {
+            declared.push(load_declared_skill(deps, ctx, "step", reference).await);
+        }
+    }
+
+    let globals_enabled = !matches!(
+        props.get("global_skills"),
+        Some(PropertyValue::Boolean(false))
+    );
+    let (installation, pkg) = if globals_enabled {
+        (
+            list_global_skills(deps, ctx, skills::INSTALLATION_SKILLS_PATH).await,
+            list_global_skills(deps, ctx, skills::PACKAGE_SKILLS_PATH).await,
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
+    skills::select_skills(&skills::SkillSelection {
+        declared,
+        installation,
+        pkg,
+        globals_enabled,
+    })
+}
+
+/// Offer `load-skill` only when something is granted and the agent does not
+/// already list a tool of that name.
+fn needs_load_skill(tools: &[ToolDefinition], skill_grant: &[SelectedSkill]) -> bool {
+    !skill_grant.is_empty()
+        && !tools
+            .iter()
+            .any(|t| t.function.name == skills::LOAD_SKILL_TOOL)
+}
+
+/// Add the `load-skill` tool and route it to its function.
+fn offer_load_skill(
+    tools: &mut Vec<ToolDefinition>,
+    tool_path_map: &mut HashMap<String, String>,
+    def: ToolDefinition,
+) {
+    tool_path_map.insert(
+        skills::LOAD_SKILL_TOOL.to_string(),
+        skills::LOAD_SKILL_PATH.to_string(),
+    );
+    tools.push(def);
+}
+
+/// The `load-skill` function node as a tool, read the way `load_agent_tools`
+/// reads any tool. `None` when the node is missing or unreadable.
+async fn load_skill_tool_definition<S, B>(
+    deps: &Arc<ExecutionDependencies<S, B>>,
+    ctx: &AiCallContext,
+) -> Option<ToolDefinition>
+where
+    S: Storage + TransactionalStorage + 'static,
+    B: BinaryStorage + 'static,
+{
+    let node = deps
+        .storage
+        .nodes()
+        .get_by_path(
+            StorageScope::new(
+                &ctx.tenant_id,
+                &ctx.repo_id,
+                &ctx.branch,
+                skills::SKILL_WORKSPACE,
+            ),
+            skills::LOAD_SKILL_PATH,
+            None,
+        )
+        .await
+        .ok()??;
+    Some(tool_definition_of(
+        skills::LOAD_SKILL_TOOL.to_string(),
+        &Properties::new(&node.properties),
+    ))
+}
+
+/// A function node's tool definition under `name`: its `description` and its
+/// `input_schema` (an empty object schema when it declares none).
+fn tool_definition_of(name: String, func_props: &Properties<'_>) -> ToolDefinition {
+    let parameters = func_props
+        .get("input_schema")
+        .map(|v| serde_json::to_value(v).unwrap_or_default())
+        .unwrap_or_else(|| {
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+            })
+        });
+    ToolDefinition {
+        tool_type: "function".to_string(),
+        function: raisin_ai::types::FunctionDefinition {
+            name,
+            description: func_props.get_string("description").unwrap_or_default(),
+            parameters,
+        },
+    }
 }
 
 /// Build AI messages from system prompt and input JSON messages.
@@ -766,5 +1190,327 @@ mod agent_tool_entry_tests {
             PropertyValue::String("shared".into())
         )]))
         .is_none());
+    }
+}
+
+#[cfg(test)]
+mod skill_prompt_tests {
+    use super::*;
+    use raisin_models::nodes::properties::RaisinReference;
+
+    fn props(pairs: &[(&str, PropertyValue)]) -> HashMap<String, PropertyValue> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect()
+    }
+
+    fn granted(name: &str, source: &str) -> SelectedSkill {
+        SelectedSkill {
+            name: name.to_string(),
+            description: format!("{name} does things."),
+            workspace: "functions".to_string(),
+            path: format!("/skills/{name}"),
+            source: source.to_string(),
+        }
+    }
+
+    fn tool(name: &str) -> ToolDefinition {
+        ToolDefinition {
+            tool_type: "function".to_string(),
+            function: raisin_ai::types::FunctionDefinition {
+                name: name.to_string(),
+                description: String::new(),
+                parameters: serde_json::json!({ "type": "object", "properties": {} }),
+            },
+        }
+    }
+
+    #[test]
+    fn an_empty_grant_with_no_rules_is_the_system_prompt_byte_for_byte() {
+        for sp in ["", "You are a probe.\n", "  trailing  \n\n"] {
+            let data = props(&[("system_prompt", PropertyValue::String(sp.into()))]);
+            assert_eq!(
+                agent_system_prompt(&Properties::new(&data), &[]),
+                Some(sp.to_string())
+            );
+        }
+        let none = props(&[]);
+        assert_eq!(agent_system_prompt(&Properties::new(&none), &[]), None);
+        // An empty rules array is no rules.
+        let empty_rules = props(&[
+            ("system_prompt", PropertyValue::String("sp".into())),
+            ("rules", PropertyValue::Array(vec![])),
+        ]);
+        assert_eq!(
+            agent_system_prompt(&Properties::new(&empty_rules), &[]),
+            Some("sp".to_string())
+        );
+    }
+
+    #[test]
+    fn rules_only_matches_the_chat_text() {
+        // agent-handler: systemPrompt += '\n\n## Rules\n' + rules.map(r => `- ${r}`).join('\n')
+        let data = props(&[
+            ("system_prompt", PropertyValue::String("sp".into())),
+            (
+                "rules",
+                PropertyValue::Array(vec![
+                    PropertyValue::String("be brief".into()),
+                    PropertyValue::String("cite".into()),
+                ]),
+            ),
+        ]);
+        assert_eq!(
+            agent_system_prompt(&Properties::new(&data), &[]),
+            Some("sp\n\n## Rules\n- be brief\n- cite".to_string())
+        );
+    }
+
+    #[test]
+    fn the_index_goes_before_the_rules() {
+        let data = props(&[
+            ("system_prompt", PropertyValue::String("sp".into())),
+            (
+                "rules",
+                PropertyValue::Array(vec![PropertyValue::String("r".into())]),
+            ),
+        ]);
+        let prompt =
+            agent_system_prompt(&Properties::new(&data), &[granted("pdf", "agent")]).unwrap();
+        assert_eq!(
+            prompt,
+            format!(
+                "sp{}\n- pdf \u{2014} pdf does things.\n\n## Rules\n- r",
+                skills::SKILL_INDEX_HEADER
+            )
+        );
+    }
+
+    #[test]
+    fn a_step_skill_is_added_to_the_agents() {
+        let node = |name: &str| skills::SkillNode {
+            path: format!("/skills/{name}"),
+            node_type: skills::SKILL_NODE_TYPE.to_string(),
+            properties: serde_json::json!({ "name": name, "description": "D." }),
+        };
+        let grant = skills::select_skills(&skills::SkillSelection {
+            declared: vec![
+                skills::DeclaredSkill {
+                    source: "agent".into(),
+                    workspace: "functions".into(),
+                    path: "/skills/agent-one".into(),
+                    node: Some(node("agent-one")),
+                },
+                skills::DeclaredSkill {
+                    source: "step".into(),
+                    workspace: "functions".into(),
+                    path: "/skills/step-one".into(),
+                    node: Some(node("step-one")),
+                },
+            ],
+            installation: vec![],
+            pkg: vec![],
+            globals_enabled: true,
+        });
+        let names: Vec<_> = grant
+            .iter()
+            .map(|s| (s.name.as_str(), s.source.as_str()))
+            .collect();
+        assert_eq!(names, vec![("agent-one", "agent"), ("step-one", "step")]);
+    }
+
+    #[test]
+    fn step_skill_refs_parse_from_the_envelope() {
+        let r = parse_skill_ref_json(&serde_json::json!({
+            "raisin:ref": "/skills/pdf", "raisin:workspace": "functions"
+        }))
+        .unwrap();
+        assert_eq!(r.workspace, "functions");
+        assert_eq!(r.target, "/skills/pdf");
+        let r = parse_skill_ref_json(&serde_json::json!({
+            "raisin:ref": "0b6c…uuid", "raisin:workspace": "shared", "raisin:path": "/s/x"
+        }))
+        .unwrap();
+        assert_eq!(
+            (r.workspace.as_str(), r.target.as_str()),
+            ("shared", "/s/x")
+        );
+        assert!(parse_skill_ref_json(&serde_json::json!(42)).is_none());
+        assert!(parse_skill_ref_json(&serde_json::json!({ "raisin:workspace": "x" })).is_none());
+
+        let agent_ref = parse_skill_ref_property(&PropertyValue::Reference(RaisinReference {
+            id: "abc".into(),
+            workspace: "functions".into(),
+            path: String::new(),
+        }))
+        .unwrap();
+        assert_eq!(agent_ref.target, "abc", "an id-only reference reads by id");
+    }
+
+    #[test]
+    fn load_skill_is_offered_only_when_something_is_granted() {
+        let mut tools = vec![tool("lookup")];
+        let mut map: HashMap<String, String> =
+            [("lookup".to_string(), "/lib/lookup".to_string())].into();
+
+        assert!(!needs_load_skill(&tools, &[]));
+        // Nothing granted: the request is exactly the agent's tools.
+        assert_eq!(tools.len(), 1);
+        assert!(!map.contains_key(skills::LOAD_SKILL_TOOL));
+
+        let grant = [granted("pdf", "package")];
+        assert!(needs_load_skill(&tools, &grant));
+        offer_load_skill(&mut tools, &mut map, tool(skills::LOAD_SKILL_TOOL));
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[1].function.name, skills::LOAD_SKILL_TOOL);
+        assert_eq!(
+            map.get(skills::LOAD_SKILL_TOOL).map(String::as_str),
+            Some(skills::LOAD_SKILL_PATH)
+        );
+        // An agent that already lists it does not get it twice.
+        assert!(!needs_load_skill(&tools, &grant));
+    }
+
+    #[test]
+    fn the_envelope_carries_the_grant_only_when_there_is_one() {
+        let response = || raisin_ai::types::CompletionResponse {
+            message: Message::assistant("hi"),
+            model: "m".into(),
+            usage: None,
+            stop_reason: None,
+        };
+        let bare = serde_json::to_value(CompletionResponseEnvelope::from_response(
+            response(),
+            HashMap::new(),
+            &[],
+        ))
+        .unwrap();
+        assert!(bare.get("_skill_grant").is_none());
+        let with = serde_json::to_value(CompletionResponseEnvelope::from_response(
+            response(),
+            HashMap::new(),
+            &[granted("pdf", "agent")],
+        ))
+        .unwrap();
+        assert_eq!(
+            with["_skill_grant"],
+            serde_json::json!([{ "name": "pdf", "workspace": "functions", "path": "/skills/pdf" }])
+        );
+    }
+
+    /// A global (package) skill, resolved the way the server resolves one.
+    fn global_grant() -> Vec<SelectedSkill> {
+        skills::select_skills(&skills::SkillSelection {
+            declared: vec![],
+            installation: vec![],
+            pkg: vec![skills::SkillNode {
+                path: format!("{}/pdf", skills::PACKAGE_SKILLS_PATH),
+                node_type: skills::SKILL_NODE_TYPE.to_string(),
+                properties: serde_json::json!({ "name": "pdf", "description": "Read PDFs." }),
+            }],
+            globals_enabled: true,
+        })
+    }
+
+    fn agent_with_rules() -> HashMap<String, PropertyValue> {
+        props(&[
+            ("system_prompt", PropertyValue::String("Decide.".into())),
+            (
+                "rules",
+                PropertyValue::Array(vec![PropertyValue::String("answer in JSON".into())]),
+            ),
+        ])
+    }
+
+    #[tokio::test]
+    async fn a_decision_call_is_unchanged_by_a_global_skill() {
+        // agent_decision / agent_competition / agent_assignee reach the caller
+        // through `call_ai`, which leaves `offer_skills` at its default.
+        let ctx = AiCallContext::default();
+        assert!(!ctx.offer_skills, "skills are OFF by default");
+        assert!(!global_grant().is_empty(), "a global skill exists");
+
+        let data = agent_with_rules();
+        let mut tools = vec![tool("lookup")];
+        let mut map: HashMap<String, String> =
+            [("lookup".to_string(), "/lib/lookup".to_string())].into();
+        let resolved = std::cell::Cell::new(false);
+        let loaded = std::cell::Cell::new(false);
+
+        let (prompt, grant) = skill_surface(
+            &ctx,
+            &Properties::new(&data),
+            &mut tools,
+            &mut map,
+            || {
+                resolved.set(true);
+                async { global_grant() }
+            },
+            || {
+                loaded.set(true);
+                async { Some(tool(skills::LOAD_SKILL_TOOL)) }
+            },
+        )
+        .await;
+
+        // The prompt a decision step got before skills existed — rules fix
+        // included — and no index.
+        assert_eq!(
+            prompt.as_deref(),
+            Some("Decide.\n\n## Rules\n- answer in JSON")
+        );
+        assert!(!prompt.unwrap().contains(skills::SKILL_INDEX_HEADER.trim()));
+        assert!(grant.is_empty(), "no _skill_grant");
+        let names: Vec<_> = tools.iter().map(|t| t.function.name.as_str()).collect();
+        assert_eq!(names, vec!["lookup"], "no load-skill tool");
+        assert!(!map.contains_key(skills::LOAD_SKILL_TOOL));
+        assert!(!resolved.get(), "the grant is not even resolved");
+        assert!(!loaded.get());
+    }
+
+    #[tokio::test]
+    async fn a_tool_loop_call_gets_the_index_and_load_skill() {
+        let ctx = AiCallContext {
+            offer_skills: true,
+            ..Default::default()
+        };
+        let data = agent_with_rules();
+        let mut tools = vec![tool("lookup")];
+        let mut map: HashMap<String, String> =
+            [("lookup".to_string(), "/lib/lookup".to_string())].into();
+
+        let (prompt, grant) = skill_surface(
+            &ctx,
+            &Properties::new(&data),
+            &mut tools,
+            &mut map,
+            || async { global_grant() },
+            || async { Some(tool(skills::LOAD_SKILL_TOOL)) },
+        )
+        .await;
+
+        assert_eq!(
+            prompt.as_deref(),
+            Some(
+                format!(
+                    "Decide.{}\n- pdf \u{2014} Read PDFs.\n\n## Rules\n- answer in JSON",
+                    skills::SKILL_INDEX_HEADER
+                )
+                .as_str()
+            ),
+            "index before the rules, rules kept"
+        );
+        let granted: Vec<_> = grant
+            .iter()
+            .map(|s| (s.name.as_str(), s.source.as_str()))
+            .collect();
+        assert_eq!(granted, vec![("pdf", "package")]);
+        let names: Vec<_> = tools.iter().map(|t| t.function.name.as_str()).collect();
+        assert_eq!(names, vec!["lookup", skills::LOAD_SKILL_TOOL]);
+        assert_eq!(
+            map.get(skills::LOAD_SKILL_TOOL).map(String::as_str),
+            Some(skills::LOAD_SKILL_PATH)
+        );
     }
 }

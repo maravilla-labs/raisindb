@@ -33,6 +33,10 @@ use crate::jobs::handlers::package_install::content_types::{
     resource_ref_filename, AssetFileDef, BundledBinary, ContentEntry, ContentNodeDef,
 };
 use crate::jobs::handlers::package_install::handler::PackageInstallHandler;
+use crate::jobs::handlers::package_install::install_content::skill_md::{
+    is_deliberately_dropped, is_skill_md, refuse_skill_md_errors, skill_md_clashes,
+    skill_md_to_node, SkillMdNode,
+};
 use crate::jobs::handlers::package_install::translation::{
     derive_base_node_path, parse_translation_locale, yaml_to_overlay,
 };
@@ -52,6 +56,8 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
     /// categorises each entry as one of:
     /// - YAML node definition (`.yaml`)
     /// - Asset metadata file (`.node.{filename}.yaml`)
+    /// - Agent Skills definition (`SKILL.md`, see [`super::skill_md`]) — a
+    ///   `raisin:Skill` node definition filed under `<dir>/.node.yaml`
     /// - Binary file (everything else, excluding hidden files)
     pub(in crate::jobs::handlers::package_install) fn collect_content_entries(
         &self,
@@ -62,6 +68,11 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         let mut binary_files: Vec<(String, String, String, Vec<u8>)> = Vec::new();
         let mut asset_metadata: HashMap<String, AssetFileDef> = HashMap::new();
         let mut translation_files: Vec<(String, String, String, LocaleOverlay)> = Vec::new();
+        // SKILL.md entries: (workspace, archive path, parsed node). Held back
+        // until every YAML definition is known, so a directory defined twice
+        // can be refused.
+        let mut skill_nodes: Vec<(String, String, SkillMdNode)> = Vec::new();
+        let mut skill_errors: Vec<String> = Vec::new();
 
         for i in 0..archive.len() {
             let mut file = archive
@@ -118,7 +129,15 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             // as it always has. The CLI was narrowed to match.
             let is_folder_def_yml = filename == ".node.yml" || filename == "node.yml";
 
-            if filename.ends_with(".yaml") || is_folder_def_yml {
+            if is_skill_md(&filename) {
+                // An Agent Skills definition, never an opaque asset. A bad one
+                // is collected and refused below rather than falling through
+                // to the binary branch, which would install it silently.
+                match skill_md_to_node(&name, &content_bytes) {
+                    Ok(node) => skill_nodes.push((workspace, name.clone(), node)),
+                    Err(reason) => skill_errors.push(reason),
+                }
+            } else if filename.ends_with(".yaml") || is_folder_def_yml {
                 // Classification keys on the `.yaml` suffix
                 // (`parse_translation_locale`, `parse_asset_metadata_filename`),
                 // so normalise the spelling for those checks only. Path
@@ -190,6 +209,50 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                 // Binary file (skip hidden files other than .node.*.yaml which we already handled)
                 binary_files.push((workspace, parent_path, filename, content_bytes));
             }
+        }
+
+        // One node, one definition: refuse a SKILL.md whose directory is also
+        // defined by YAML. Compared on the derived node path, the same
+        // derivation `build_content_entries` applies.
+        let skill_keys: Vec<(String, String, String)> = skill_nodes
+            .iter()
+            .map(|(ws, file, node)| (ws.clone(), file.clone(), node.path.clone()))
+            .collect();
+        let yaml_keys: Vec<(String, String, String)> = yaml_nodes
+            .iter()
+            .map(|(ws, yaml_path, def)| {
+                let path = derive_content_path(yaml_path, &def.derive_name(yaml_path));
+                (ws.clone(), yaml_path.clone(), path)
+            })
+            .collect();
+        skill_errors.extend(skill_md_clashes(&skill_keys, &yaml_keys));
+        refuse_skill_md_errors(skill_errors)?;
+
+        for (workspace, file, node) in skill_nodes {
+            for key in &node.unmapped_keys {
+                if is_deliberately_dropped(key) {
+                    tracing::debug!(
+                        job_id = %job_id,
+                        file = %file,
+                        key = %key,
+                        "SKILL.md key dropped on purpose: a skill cannot widen an agent's tools"
+                    );
+                } else {
+                    tracing::warn!(
+                        job_id = %job_id,
+                        file = %file,
+                        key = %key,
+                        "SKILL.md frontmatter key has no raisin:Skill property, ignored"
+                    );
+                }
+            }
+            tracing::debug!(
+                job_id = %job_id,
+                file = %file,
+                node_path = %node.path,
+                "Found SKILL.md, installing as raisin:Skill"
+            );
+            yaml_nodes.push((workspace, node.synthetic_yaml_path, node.def));
         }
 
         Ok((

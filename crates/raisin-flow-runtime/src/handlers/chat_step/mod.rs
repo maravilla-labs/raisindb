@@ -186,6 +186,7 @@ impl ChatStepHandler {
             conversation_type,
             output_schema,
             approval,
+            skills: super::ai_tool_loop::step_skills(step),
         }
     }
 

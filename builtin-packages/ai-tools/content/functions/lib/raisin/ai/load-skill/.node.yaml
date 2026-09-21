@@ -1,0 +1,41 @@
+node_type: "raisin:Function"
+properties:
+  title: "Load Skill"
+  description: |
+    Load one of your skills by name and return its full instructions. Your system
+    prompt lists the skills you have under "## Skills" (name — description); call
+    this before doing work a skill's description covers, then follow what it says.
+    Only skills listed for you can be loaded.
+  execution_mode: "inline"
+  category: "skills"
+  enabled: true
+  language: "javascript"
+  entry_file: "index.js:handler"
+  input_schema:
+    type: "object"
+    properties:
+      name:
+        type: "string"
+        description: "The skill's name exactly as the ## Skills index lists it, e.g. \"write-release-notes\"."
+    required:
+      - name
+  output_schema:
+    type: "object"
+    properties:
+      success:
+        type: "boolean"
+      name:
+        type: "string"
+      description:
+        type: "string"
+      body:
+        type: "string"
+        description: "The skill's Markdown instructions (capped at 20000 characters)."
+      reason:
+        type: "string"
+        description: "On failure: not_granted | not_found | disabled | no_grant."
+      available:
+        type: "array"
+        items:
+          type: "string"
+        description: "On failure: the skill names this caller may load."

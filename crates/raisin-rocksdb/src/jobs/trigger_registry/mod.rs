@@ -23,6 +23,7 @@
 //! - **Inverted Indexes**: Pre-computed indexes by workspace, node_type, event_kind
 //! - **Quick Reject**: Can instantly determine if an event can't possibly match
 
+mod event_kinds;
 mod parsers;
 mod registry;
 pub(crate) mod snapshot;

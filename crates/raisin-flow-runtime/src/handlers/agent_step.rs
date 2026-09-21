@@ -159,13 +159,18 @@ impl StepHandler for AgentStepHandler {
         let mut tool_iterations: u32 = 0;
         let mut tools_used: Vec<Value> = Vec::new();
 
+        // The step's own skills, added to the agent's for this step only.
+        let step_skills = super::ai_tool_loop::step_skills(step);
+
         let ai_response = loop {
             let response = callbacks
-                .call_ai(
+                .call_ai_with_options(
                     &agent_workspace,
                     &agent_ref,
                     messages.clone(),
                     response_format.clone(),
+                    Vec::new(),
+                    step_skills.clone(),
                 )
                 .await
                 .map_err(|e| {
@@ -190,8 +195,11 @@ impl StepHandler for AgentStepHandler {
             }
             tool_iterations += 1;
 
-            // tool name -> function path mapping provided by call_ai
-            let tool_map = response.get("_tool_map").cloned().unwrap_or(Value::Null);
+            // tool name -> function path: THIS call's offer, provided by call_ai
+            let tool_map = super::ai_tool_loop::tool_map_of(&response);
+            // The skills this call was granted; `load-skill` gets it as its
+            // `__raisin_context`, never from the model.
+            let skill_grant = response.get("_skill_grant").cloned();
 
             // Echo the assistant turn (with its tool calls) into the transcript
             messages.push(serde_json::json!({
@@ -218,11 +226,10 @@ impl StepHandler for AgentStepHandler {
                         }
                     })
                     .unwrap_or(Value::Null);
-                let function_ref = tool_map
-                    .get(name)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(name)
-                    .to_string();
+                // Only an OFFERED tool runs; the model naming anything else —
+                // a function path included — is refused back to it.
+                let function_ref =
+                    super::ai_tool_loop::offered_function(name, &tool_map).map(String::from);
 
                 let _ = callbacks
                     .emit_event(
@@ -231,18 +238,41 @@ impl StepHandler for AgentStepHandler {
                     )
                     .await;
 
-                let (result, tool_error) = match callbacks
-                    .execute_function(&function_ref, arguments.clone())
-                    .await
-                {
-                    Ok(result) => (result, None),
-                    Err(e) => {
+                let (result, tool_error) = match &function_ref {
+                    None => {
                         warn!(
-                            "Agent step '{}' tool '{}' failed: {} - feeding error back to agent",
-                            step.id, name, e
+                            "Agent step '{}': model called tool '{}' it was not offered - refusing",
+                            step.id, name
                         );
-                        (Value::Null, Some(e.to_string()))
+                        (
+                            Value::Null,
+                            Some(super::ai_tool_loop::unoffered_tool_error(name, &tool_map)),
+                        )
                     }
+                    // AS THE AGENT: its own tool call, so its own configured
+                    // rights — the same call the chat and tool-loop paths make.
+                    Some(function_ref) => match callbacks
+                        .execute_function_as_agent(
+                            function_ref,
+                            super::ai_tool_loop::tool_arguments(
+                                name,
+                                function_ref,
+                                arguments.clone(),
+                                skill_grant.as_ref(),
+                            ),
+                            &agent_ref,
+                        )
+                        .await
+                    {
+                        Ok(result) => (result, None),
+                        Err(e) => {
+                            warn!(
+                                "Agent step '{}' tool '{}' failed: {} - feeding error back to agent",
+                                step.id, name, e
+                            );
+                            (Value::Null, Some(e.to_string()))
+                        }
+                    },
                 };
 
                 let _ = callbacks
@@ -349,5 +379,85 @@ impl StepHandler for AgentStepHandler {
             next_node_id,
             output,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::handlers::ai_tool_loop::test_support::{turn, ScriptedCallbacks};
+    use crate::types::StepType;
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    fn step() -> FlowNode {
+        let mut properties = HashMap::new();
+        properties.insert("agent_ref".to_string(), json!("/agents/decider"));
+        properties.insert("prompt".to_string(), json!("Decide."));
+        FlowNode {
+            id: "decide".to_string(),
+            step_type: StepType::AgentStep,
+            properties,
+            children: vec![],
+            next_node: Some("end".to_string()),
+        }
+    }
+
+    async fn run(callbacks: &ScriptedCallbacks) -> Value {
+        let mut context = FlowContext::new("i-1".to_string(), json!({}));
+        match AgentStepHandler::new()
+            .execute(&step(), &mut context, callbacks)
+            .await
+            .expect("agent step runs")
+        {
+            StepResult::Continue { output, .. } => output,
+            other => panic!("expected Continue, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_model_naming_an_unoffered_function_is_refused() {
+        let callbacks = ScriptedCallbacks::new(vec![turn(
+            &[(
+                "c1",
+                "/lib/studio/builder/arm-generated-function",
+                json!({ "function_path": "/x" }),
+            )],
+            Some(json!({ "lookup": "/lib/x/lookup" })),
+        )]);
+        let output = run(&callbacks).await;
+
+        assert!(
+            callbacks.executed().is_empty(),
+            "{:?}",
+            callbacks.executed()
+        );
+        let used = &output["tools_used"][0];
+        assert!(used["function_ref"].is_null());
+        assert!(used["error"]
+            .as_str()
+            .unwrap()
+            .contains("is not a tool offered to you"));
+        assert_eq!(
+            output["response"], "done",
+            "the refusal went back to the model"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_offered_tool_runs_as_the_agent() {
+        let callbacks = ScriptedCallbacks::new(vec![turn(
+            &[("c1", "lookup", json!({ "q": "x" }))],
+            Some(json!({ "lookup": "/lib/x/lookup" })),
+        )]);
+        run(&callbacks).await;
+        assert_eq!(
+            callbacks.executed(),
+            vec![(
+                "/lib/x/lookup".to_string(),
+                json!({ "q": "x" }),
+                Some("/agents/decider".to_string())
+            )]
+        );
     }
 }

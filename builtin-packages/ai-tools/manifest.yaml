@@ -1,5 +1,5 @@
 name: ai-tools
-version: 1.0.30
+version: 1.0.31
 title: AI Tools Package
 description: >
   Provides AI-powered node types and tools for RaisinDB.
@@ -34,6 +34,7 @@ provides:
     - raisin:AICostRecord
     - raisin:AICompaction
     - raisin:AgentUserContext
+    - raisin:Skill
   workspaces:
     - ai
   functions:
@@ -56,6 +57,7 @@ provides:
     - /functions/lib/raisin/ai/ask
     - /functions/lib/raisin/ai/graph-context
     - /functions/lib/raisin/ai/extract-entities
+    - /functions/lib/raisin/ai/load-skill
   triggers:
     - /functions/triggers/raisin/ai/on-user-message
     - /functions/triggers/raisin/ai/on-tool-result
@@ -91,6 +93,7 @@ sync:
         - "ask/**"
         - "graph-context/**"
         - "extract-entities/**"
+        - "load-skill/**"
       mode: merge
 
     # Flow definitions
@@ -121,6 +124,7 @@ workspace_patches:
     allowed_node_types:
       add:
         - raisin:AIAgent
+        - raisin:Skill
   "raisin:access_control":
     allowed_node_types:
       add:

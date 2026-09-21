@@ -178,6 +178,9 @@ impl StepHandler for AgentDecisionHandler {
         });
 
         let messages = vec![json!({ "role": "user", "content": user_content })];
+        // One call, one structured answer, no tool loop: `call_ai` keeps skills OFF
+        // (`AiCallContext::offer_skills`), so no global skill can turn the answer
+        // into a `load-skill` tool_call. Do not switch to `call_ai_with_options`.
         let ai_response = callbacks
             .call_ai(
                 &agent_workspace,

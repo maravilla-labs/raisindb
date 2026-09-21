@@ -33,6 +33,10 @@ import {
   normalizeCompletionResponse,
   parseToolArguments,
   getToolCallName,
+  offeredToolRefs,
+  resolveOfferedTool,
+  unofferedToolError,
+  stripRuntimeArgs,
 } from '../agent-shared/tools.js';
 import {
   resolveAgentOutboxContext,
@@ -47,6 +51,14 @@ import {
 } from '../agent-shared/streaming.js';
 import { loadUserMemory, formatMemoryForPrompt } from '../agent-shared/memory.js';
 import {
+  LOAD_SKILL_TOOL_NAME,
+  LOAD_SKILL_FUNCTION,
+  loadSkillGrant,
+  skillIndexOmitted,
+  composeInstructionTail,
+  appendTail,
+} from '../agent-shared/skills.js';
+import {
   safeJson,
   createCostRecord,
   TERMINAL_FALLBACK_TEXT,
@@ -56,6 +68,28 @@ import {
   shouldAutoRunTasks,
   updateOrchestrationState,
 } from '../agent-shared/utils.js';
+import {
+  FINALIZE_POLICY_VERIFIED,
+  PROOF_LEVELS,
+  TASK_TERMINAL_STATUSES,
+  refToPath,
+  finalizePolicyOf,
+  taskBuildTarget,
+  taskVerification,
+  verificationGaps,
+  readChatAgentProps,
+  collectRunEvidence,
+  serverStatusStatement,
+  persistGatedContent,
+  gateTerminalContent,
+} from '../agent-shared/finalize.js';
+import { gateTerminalContentWithRunWrites } from '../agent-shared/run-evidence.js';
+import {
+  MALFORMED_TOOL_CALL_CODE,
+  completeWithToolCallRetry,
+  malformedToolCallCorrection,
+  malformedToolCallStopText,
+} from '../agent-shared/completion-retry.js';
 
 // ─── Entry Point ────────────────────────────────────────────────────────────
 
@@ -389,6 +423,18 @@ export async function handleUserMessage(context) {
     && Object.values(toolNameToRef).some(r => r.category === 'planning');
   log.step('handler', 2, 6, 'Resolved tools', { count: toolDefinitions.length, planning: hasPlanningTools });
 
+  /* SKILLS. The resolved set is the GRANT; the prompt shows an index of it and
+   * the load-skill tool reads a body. Offered only when there is something to
+   * load and the agent does not list the tool itself — no skills, no change. */
+  const skills = await loadAgentSkills(agentProps);
+  if (skills.length > 0 && !toolNameToRef[LOAD_SKILL_TOOL_NAME]) {
+    const extra = await resolveToolsParallel([
+      { 'raisin:path': LOAD_SKILL_FUNCTION.path, 'raisin:workspace': LOAD_SKILL_FUNCTION.workspace },
+    ]);
+    toolDefinitions = toolDefinitions.concat(extra.toolDefinitions);
+    Object.assign(toolNameToRef, extra.toolNameToRef);
+  }
+
   // ── 6. Build system prompt ────────────────────────────────────────────────
 
   let systemPrompt = agentProps.system_prompt || '';
@@ -403,11 +449,13 @@ export async function handleUserMessage(context) {
     if (memory) systemPrompt += formatMemoryForPrompt(memory);
   }
 
-  // Inject agent rules
-  const rules = agentProps.rules;
-  if (Array.isArray(rules) && rules.length > 0) {
-    systemPrompt += '\n\n## Rules\n' + rules.map(r => `- ${r}`).join('\n');
+  // The skills index, then the agent's rules — one tail, shared with the
+  // continuation handler and (in Rust) the workflow agent step.
+  const omittedSkills = skillIndexOmitted(skills);
+  if (omittedSkills > 0) {
+    log.warn('handler', 'Skill index truncated', { skills: skills.length, omitted: omittedSkills });
   }
+  systemPrompt = appendTail(systemPrompt, composeInstructionTail({ skills, rules: agentProps.rules }));
 
   // ── 7. Build history and call AI completion ───────────────────────────────
 
@@ -422,18 +470,35 @@ export async function handleUserMessage(context) {
 
   let response;
   const t0AI = log.time();
+  /* One malformed tool call from the model gets ONE corrected retry; a second
+   * ends the turn with an honest status. See agent-shared/completion-retry.js. */
+  const toolsOffered = toolDefinitions.length > 0;
+  const completeWith = (messages) => raisin.ai.completion({
+    messages,
+    model: modelId,
+    temperature: agentProps.temperature,
+    tools: toolsOffered ? toolDefinitions : undefined,
+    stream: true,
+    conversation_path: chatPath,
+    conversation_channel: streamChannel || undefined,
+  });
   try {
-    const raw = await raisin.ai.completion({
-      messages: history,
-      model: modelId,
-      temperature: agentProps.temperature,
-      tools: toolDefinitions.length > 0 ? toolDefinitions : undefined,
-      stream: true,
-      conversation_path: chatPath,
-      conversation_channel: streamChannel || undefined,
-    });
+    const { raw, retried } = toolsOffered
+      ? await completeWithToolCallRetry(completeWith, history, (err) => {
+        log.warn('handler', 'Model sent a malformed tool call; retrying once with a correction', { error: err.message });
+      })
+      : { raw: await completeWith(history), retried: false };
+    if (retried) log.info('handler', 'Retry after malformed tool call succeeded');
     response = normalizeCompletionResponse(raw);
   } catch (err) {
+    if (err && err.code === MALFORMED_TOOL_CALL_CODE) {
+      // Ended in a known state: say so, with the server's status, and return.
+      log.error('handler', 'Malformed tool call twice; ending the turn', { error: err.message });
+      const stopText = await malformedToolCallStopText(workspace, chatPath, agentProps, err);
+      await emitAssistantTurnError(workspace, chatPath, replyName, stopText, outboxCtx, streamChannel);
+      terminalEventEmitted = true;
+      return;
+    }
     log.error('handler', 'AI completion failed', { error: err.message });
     await emitAssistantTurnError(workspace, chatPath, replyName, err.message, outboxCtx, streamChannel);
     terminalEventEmitted = true;
@@ -455,8 +520,28 @@ export async function handleUserMessage(context) {
       entries: safeJson(normalized.malformed),
     });
     if (!response.tool_calls.length && !response.content.trim()) {
-      response.content = 'I received an invalid tool call from the model. Please try again.';
-      response.finish_reason = response.finish_reason || 'stop';
+      /* Every call in the turn was unusable: one corrected retry, then an
+       * honest stop — never the old "please try again" with nothing said about
+       * where the run stands. */
+      let recovered = false;
+      if (toolsOffered) {
+        try {
+          const retryResp = normalizeCompletionResponse(await completeWith([...history, malformedToolCallCorrection(safeJson(normalized.malformed))]));
+          const retryNorm = normalizeToolCalls(retryResp.tool_calls);
+          if (retryNorm.normalized.length > 0 || retryResp.content.trim()) {
+            response = retryResp;
+            response.tool_calls = retryNorm.normalized;
+            recovered = true;
+            log.info('handler', 'Retry after malformed tool calls succeeded', { tool_calls: response.tool_calls.length });
+          }
+        } catch (retryErr) {
+          log.warn('handler', 'Retry after malformed tool calls failed', { error: retryErr.message });
+        }
+      }
+      if (!recovered) {
+        response.content = await malformedToolCallStopText(workspace, chatPath, agentProps, null);
+        response.finish_reason = response.finish_reason || 'stop';
+      }
     }
   }
 
@@ -693,6 +778,12 @@ export async function handleUserMessage(context) {
 
   // ── 9. Process tool calls ─────────────────────────────────────────────────
 
+  /* THE OFFER. Every completion that can produce `response.tool_calls` sent
+   * `toolDefinitions` or nothing, so this is what the model could see — and the
+   * only table a call is resolved through. Anything else is refused back to
+   * the model, never queued: the same rule as the Rust agent step. */
+  const offeredTools = offeredToolRefs(toolsOffered ? toolDefinitions : [], toolNameToRef);
+
   try {
 
   for (let i = 0; i < response.tool_calls.length; i++) {
@@ -711,13 +802,13 @@ export async function handleUserMessage(context) {
       throw new Error('Malformed tool call from model');
     }
 
-    const toolRef = toolNameToRef[toolName];
+    const toolRef = resolveOfferedTool(offeredTools, toolName);
 
-    // Unknown tool → create error result, let model retry once
+    // Not offered → error result the model reads, nothing queued; one retry
     if (!toolRef) {
-      log.warn('handler', 'Unknown tool requested', { name: toolName });
+      log.warn('handler', 'Model called a tool it was not offered - refusing', { name: toolName });
 
-      const isRetry = await isRepeatedUnknownTool(workspace, message.path, toolNameToRef);
+      const isRetry = await isRepeatedUnknownTool(workspace, message.path, offeredTools);
       if (isRetry) {
         await emitAssistantTurnError(
           workspace, chatPath, replyName,
@@ -727,9 +818,8 @@ export async function handleUserMessage(context) {
         return;
       }
 
-      const available = Object.keys(toolNameToRef).join(', ');
       await createErrorToolResult(workspace, assistantMsg.path, callNodeName, callId, toolName, {
-        error: `Tool "${toolName}" does not exist. Available: ${available}`,
+        error: unofferedToolError(toolName, offeredTools),
       });
       continuationExpected = true;
       continue;
@@ -738,7 +828,8 @@ export async function handleUserMessage(context) {
     // Parse tool arguments
     let toolArgs;
     try {
-      toolArgs = parseToolArguments(tc);
+      // Runtime-only keys (__raisin_flow, _skill_grant) never come from the model.
+      toolArgs = stripRuntimeArgs(parseToolArguments(tc));
     } catch (err) {
       log.warn('handler', 'Invalid tool arguments', { name: toolName, error: err.message });
       await createErrorToolResult(workspace, assistantMsg.path, callNodeName, callId, toolName, {
@@ -831,9 +922,34 @@ export async function handleUserMessage(context) {
       : (dispatchPhase === 'awaiting_results' ? 'awaiting_results' : null),
   });
 
+  /* THE FINALIZE GATE ON THE FIRST TURN.
+   *
+   * A gate applied only to the continuation handler is bypassed by any turn
+   * that stops without calling a tool — which is exactly the turn that says
+   * "done, it's enabled". Same check, same wording, same single query; an
+   * agent without `finalize_policy` is untouched. Computed once and used by
+   * both the outbox delivery and the SSE payload below, so the two can never
+   * disagree about what happened. */
+  let terminalGate = { content: response.content || TERMINAL_FALLBACK_TEXT, gated: false, statement: null };
+  if (isTerminal) {
+    terminalGate = await gateTerminalContentWithRunWrites(
+      workspace,
+      chatPath,
+      agentProps,
+      response.content || TERMINAL_FALLBACK_TEXT,
+    );
+    /* The STORED turn, not just the outbox and the SSE. See persistGatedContent. */
+    await persistGatedContent(
+      workspace,
+      assistantMsg.path,
+      terminalGate,
+      response.content || TERMINAL_FALLBACK_TEXT,
+    );
+  }
+
   // Outbox delivery for terminal turns (suppress tool-echo content like "Calling update-task")
   if (isTerminal && outboxCtx) {
-    const terminalContent = response.content || TERMINAL_FALLBACK_TEXT;
+    const terminalContent = terminalGate.content;
     const isToolEcho = /^Calling\s+[\w-]+\s*$/.test(terminalContent.trim());
     if (!isToolEcho) {
       await sendAgentOutboxMessage(workspace, outboxCtx, terminalContent, 'chat', {
@@ -860,7 +976,8 @@ export async function handleUserMessage(context) {
   } else if (isTerminal) {
     await emitConversationEvent('conversation:done', {
       type: 'done',
-      content: response.content || TERMINAL_FALLBACK_TEXT,
+      content: terminalGate.content,
+      ...(terminalGate.statement ? { serverStatus: terminalGate.statement, verified: !terminalGate.gated } : {}),
       role: 'assistant',
       senderDisplayName: senderName,
       finishReason: effectiveFinishReason,
@@ -1334,7 +1451,9 @@ async function isRepeatedUnknownTool(workspace, parentMsgPath, knownTools) {
       c.node_type === 'raisin:AIToolCall'
       && c.properties?.status === 'completed'
       && c.properties?.function_name
-      && !knownTools[c.properties.function_name]
+      // Refused calls carry no function_ref; a tool that really ran is not "unknown".
+      && !c.properties?.function_ref
+      && !resolveOfferedTool(knownTools, c.properties.function_name)
     );
   } catch (_) {
     return false;
@@ -1372,4 +1491,42 @@ async function createErrorToolResult(workspace, parentPath, callNodeName, callId
   if (resultNode?.error) {
     throw new Error(`Failed to create error tool-result node under "${resultParent}": ${resultNode.error}`);
   }
+}
+
+/* THE FINALIZE GATE now lives in `agent-shared/finalize.js`, because
+ * `agent-continue-handler` must apply the SAME check and the runtime cannot
+ * resolve an import of another function's ENTRY file. Imported for this file's
+ * own terminal path and re-exported so existing importers keep working. */
+export {
+  FINALIZE_POLICY_VERIFIED,
+  PROOF_LEVELS,
+  TASK_TERMINAL_STATUSES,
+  refToPath,
+  finalizePolicyOf,
+  taskBuildTarget,
+  taskVerification,
+  verificationGaps,
+  readChatAgentProps,
+  collectRunEvidence,
+  serverStatusStatement,
+  persistGatedContent,
+  gateTerminalContent,
+} from '../agent-shared/finalize.js';
+
+/**
+ * The skills this agent was given: its `skills:` references plus the global
+ * layers (see agent-shared/skills.js). A read that fails is logged and counts
+ * as absent — an unreadable skill must not cost the agent its turn.
+ */
+async function loadAgentSkills(agentProps) {
+  return loadSkillGrant({
+    agentProps,
+    stepSkills: [],
+    getNode: (ws, path) => raisin.nodes.get(ws, path),
+    getNodeById: typeof raisin.nodes.getById === 'function' ? (ws, id) => raisin.nodes.getById(ws, id) : undefined,
+    getChildren: (ws, path) => raisin.nodes.getChildren(ws, path),
+    onReadError: ({ workspace, path, id, error }) => {
+      log.warn('handler', 'Could not read skill', { workspace, path: path || id, error: error && error.message });
+    },
+  });
 }

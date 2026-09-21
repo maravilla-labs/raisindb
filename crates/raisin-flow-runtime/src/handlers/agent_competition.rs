@@ -191,6 +191,9 @@ impl StepHandler for AgentCompetitionHandler {
                     _ => base_task,
                 };
 
+                // One call, one structured answer, no tool loop: `call_ai` keeps skills OFF
+                // (`AiCallContext::offer_skills`), so no global skill can turn the answer
+                // into a `load-skill` tool_call. Do not switch to `call_ai_with_options`.
                 let response = callbacks
                     .call_ai(
                         &competitor.agent_workspace,
@@ -275,6 +278,9 @@ impl StepHandler for AgentCompetitionHandler {
                 }
             });
 
+            // One call, one structured answer, no tool loop: `call_ai` keeps skills OFF
+            // (`AiCallContext::offer_skills`), so no global skill can turn the answer
+            // into a `load-skill` tool_call. Do not switch to `call_ai_with_options`.
             let referee_response = callbacks
                 .call_ai(
                     &referee_workspace,

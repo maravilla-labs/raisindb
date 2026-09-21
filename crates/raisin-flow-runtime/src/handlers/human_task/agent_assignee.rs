@@ -264,6 +264,9 @@ async fn evaluate_with_agent(
 
     let messages = vec![json!({"role": "user", "content": prompt})];
 
+    // One call, one structured answer, no tool loop: `call_ai` keeps skills OFF
+    // (`AiCallContext::offer_skills`), so no global skill can turn the answer
+    // into a `load-skill` tool_call. Do not switch to `call_ai_with_options`.
     let ai_response = callbacks
         .call_ai(AGENT_WORKSPACE, agent_ref, messages, Some(response_format))
         .await?;

@@ -63,6 +63,14 @@ async function handler(input) {
         description: task.description || '',
         status: 'pending',
         priority: task.priority || 'normal',
+        /* THE ARTIFACT THIS TASK IS ABOUT, when it has one. It is what makes the
+         * finalize gate reachable: `taskBuildTarget()` reads this, and a task with
+         * no target is not a build task and closes on the agent's word as before.
+         * Absent stays ABSENT — an empty string would look like a declared target
+         * that resolves to nothing. */
+        ...(typeof task.build_target_path === 'string' && task.build_target_path
+          ? { build_target_path: task.build_target_path }
+          : {}),
       },
     });
 

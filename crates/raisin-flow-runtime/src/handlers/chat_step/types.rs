@@ -40,6 +40,11 @@ pub(super) struct ChatConfig {
     /// accord, and who that decision goes to by default.
     #[serde(default)]
     pub approval: ApprovalConfig,
+
+    /// The step's own `skills:` references, added to its agent's skills for
+    /// this step only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<Value>,
 }
 
 /// Agent-initiated approval settings.

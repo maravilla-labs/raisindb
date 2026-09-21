@@ -12,14 +12,19 @@ use tracing::{debug, error, warn};
 /// Call AI with streaming, retry, and timeout.
 ///
 /// Returns the aggregated response as a JSON Value with `content`, `tool_calls`,
-/// `usage`, `model`, and `finish_reason` fields. Text and thought chunks are
-/// emitted as real-time events during streaming.
+/// `usage`, `model`, and `finish_reason` fields — plus the callback's side
+/// band: `_tool_map` (tool name → function path) and, when the agent has
+/// skills, `_skill_grant`, the grant `load-skill` is executed with. Text and
+/// thought chunks are emitted as real-time events during streaming.
+///
+/// `skills` are the STEP's own `skills:`, added to the agent's for this call.
 pub(super) async fn call_ai_streaming_with_retry(
     callbacks: &dyn FlowCallbacks,
     agent_workspace: &str,
     agent_path: &str,
     messages: &[Value],
     response_format: Option<Value>,
+    skills: &[Value],
     instance_id: &str,
     exec: &AiExecutionConfig,
 ) -> FlowResult<Value> {
@@ -39,11 +44,13 @@ pub(super) async fn call_ai_streaming_with_retry(
             tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
         }
 
-        let future = callbacks.call_ai_streaming(
+        let future = callbacks.call_ai_streaming_with_options(
             agent_workspace,
             agent_path,
             messages.to_vec(),
             response_format.clone(),
+            Vec::new(),
+            skills.to_vec(),
         );
 
         match tokio::time::timeout(timeout_duration, future).await {

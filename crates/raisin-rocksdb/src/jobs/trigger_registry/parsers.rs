@@ -138,6 +138,17 @@ impl<S: Storage> TriggerRegistry<S> {
         if event_kinds.is_empty() {
             return None;
         }
+        super::event_kinds::warn_unmatchable_event_kinds(
+            &format!(
+                "{}#{}",
+                func_path,
+                trigger_json
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("default")
+            ),
+            &event_kinds,
+        );
 
         // Extract filters
         let filters = parse_filters(trigger_json.get("filters"));
@@ -229,6 +240,7 @@ impl<S: Storage> TriggerRegistry<S> {
         if event_kinds.is_empty() {
             return None;
         }
+        super::event_kinds::warn_unmatchable_event_kinds(&trigger_node.path, &event_kinds);
 
         // Extract filters
         let filters_json = trigger_node

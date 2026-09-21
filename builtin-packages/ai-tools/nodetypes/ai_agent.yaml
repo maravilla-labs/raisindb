@@ -21,6 +21,31 @@ properties:
       type: Reference
     description: References to raisin:Function nodes that the agent can use
 
+  # SKILLS — instructions the agent loads ON DEMAND (raisin:Skill, the Agent
+  # Skills / SKILL.md shape). The system prompt carries only an index line per
+  # skill; the body is read through the builtin load-skill tool, which is offered
+  # automatically whenever the agent has any skill and refuses one it was not
+  # given. Same reference envelope as `tools:`.
+  - name: skills
+    title: Skills
+    type: array
+    items:
+      type: Reference
+    required: false
+    description: >-
+      References to raisin:Skill nodes this agent may load. Listed before the
+      global skills, in this order; the first skill of a name wins.
+
+  - name: global_skills
+    title: Global Skills
+    type: boolean
+    default: true
+    required: false
+    description: >-
+      Whether this agent also gets the global skills — functions:/local/skills
+      (the installation's) and functions:/skills (what packages ship). false is
+      the per-agent opt-out.
+
   # The agent's OWN contract, distinct from a step's.
   #
   # Neither is enforced at runtime — they are declarative, the way a function's
@@ -59,6 +84,43 @@ properties:
     type: boolean
     default: false
     description: Whether the agent can create and manage structured plans/tasks. When disabled, planning-category tools are filtered out even if listed in tools.
+
+  # WHETHER THIS AGENT MAY CLOSE ITS OWN WORK ON ITS OWN WORD.
+  #
+  # Per-agent for the same reason `max_tool_rounds` is: a builder that persists
+  # executable artifacts — automations, flows, functions, agents — needs evidence
+  # before it may say "done", and an ordinary chat agent must be completely
+  # unaffected. The default is the historical behaviour.
+  #
+  # With `require_verified_completion`, three things change and nothing else:
+  #   * `update-task` refuses to mark a task `completed` when that task declares
+  #     a build target and carries no verification record, answering
+  #     {success:false, reason:'unverified', missing:[…]} — a result the model can
+  #     act on, not an error;
+  #   * a plan no longer auto-completes by counting the boxes the model ticked
+  #     itself, when any of them claims an unverified build;
+  #   * a terminal turn's outbox message and `conversation:done` payload carry the
+  #     SERVER'S statement of the run's status, derived from persisted task state,
+  #     and free text cannot override a stopped or unverified one.
+  - name: finalize_policy
+    title: Finalize Policy
+    type: string
+    default: none
+    required: false
+    description: |
+      How completion claims by this agent are enforced:
+      - none: (default) the agent's own word closes a task, as before.
+      - require_verified_completion: a task that declares a build target needs a
+        verification record (verification_ref + verification_hash + proof_level)
+        before it may be completed, the plan will not auto-complete without one,
+        and the server states the run's status on every terminal turn.
+    ui:
+      widget: select
+      options:
+        - label: None - the agent closes its own tasks
+          value: none
+        - label: Require Verified Completion - evidence before "done"
+          value: require_verified_completion
 
   - name: thinking_enabled
     title: Thinking Enabled

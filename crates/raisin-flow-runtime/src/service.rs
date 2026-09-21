@@ -1164,7 +1164,17 @@ pub async fn list_inbox_tasks<S: Storage>(
         })
         .collect();
 
-    // Sort: pending first, then priority (desc), then due_at (asc)
+    // Sort: pending first, then priority (desc), then due_at (asc), then NEWEST
+    // FIRST.
+    //
+    // The created_at tiebreaker is not decoration. Without it, tasks agreeing on
+    // status, priority and due_at — the normal case, because a flow that parks
+    // three reviews stamps all three identically — fell through every comparator
+    // and kept the order the rows happened to be scanned in. That is not
+    // insertion order and it is not stable between two calls, so an inbox with
+    // several equal tasks appeared shuffled and could reshuffle on a refresh
+    // with no data change. Reported from Studio's inbox, notification bell and
+    // chat list, all of which read this endpoint.
     result.sort_by(|a, b| {
         let status_rank = |v: &Value| match v.get("status").and_then(|s| s.as_str()) {
             Some("pending") => 0,
@@ -1177,10 +1187,34 @@ pub async fn list_inbox_tasks<S: Storage>(
                 .map(String::from)
                 .unwrap_or_else(|| "9999".to_string())
         };
+        // Newest first among equals: an ISO-8601 timestamp sorts correctly as a
+        // string, so no parsing is needed. A task with no created_at becomes the
+        // empty string, which compares below every real stamp and therefore
+        // lands LAST in this descending order — undated is not newest.
+        let created = |v: &Value| {
+            v.get("created_at")
+                .and_then(|c| c.as_str())
+                .map(String::from)
+                .unwrap_or_default()
+        };
         status_rank(a)
             .cmp(&status_rank(b))
             .then(priority(a).cmp(&priority(b)))
             .then(due(a).cmp(&due(b)))
+            .then(created(b).cmp(&created(a)))
+            // Total order, so the result cannot depend on the input order at
+            // all: ids are unique and stable.
+            //
+            // A fn rather than a closure: a closure returning a &str borrowed
+            // from its own argument cannot express that the output lives as long
+            // as the input, and the borrow checker rejects it. Elision on a fn
+            // ties the two together for free.
+            .then_with(|| {
+                fn id(v: &Value) -> &str {
+                    v.get("id").and_then(|i| i.as_str()).unwrap_or_default()
+                }
+                id(a).cmp(id(b))
+            })
     });
 
     Ok(result)

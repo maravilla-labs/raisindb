@@ -36,6 +36,29 @@ pub struct AiCallContext {
     /// `AICallerCallback` / `AIStreamingCallerCallback` type aliases (and every
     /// mock built against them) keep their shape.
     pub extra_tools: Vec<Value>,
+
+    /// Skill references (`raisin:Skill`, the `{raisin:ref, raisin:workspace}`
+    /// envelope an agent's `skills:` uses) a workflow STEP adds to its agent's
+    /// own skills, for THIS CALL ONLY — so an automation can give one step a
+    /// skill without editing the agent. Empty for every other caller.
+    ///
+    /// Carried on the context for the same reason as `extra_tools`.
+    pub skills: Vec<Value>,
+
+    /// Turns skills ON for this call: the capped skills index in the system
+    /// prompt, the `load-skill` tool, and `_skill_grant` in the response.
+    ///
+    /// OFF by default, and set only by a caller that RUNS A TOOL LOOP and
+    /// hands `load-skill` its grant (`agent_step`, `ai_tool_loop` / chat step,
+    /// the AI container — reached through `call_ai_with_options` /
+    /// `call_ai_streaming_with_options`).
+    /// Every other caller — the decision, competition and agent-assignee
+    /// steps — makes one call and expects its structured
+    /// answer back. Offered a skill there, a model loads it: the step gets a
+    /// `tool_call` it cannot execute instead of its decision. So skills stay
+    /// off unless a caller says it can use them, and a global skill appearing
+    /// on the server never changes what a decision step is asked.
+    pub offer_skills: bool,
 }
 
 /// Callbacks provided by the transport/storage layer to the flow runtime.
@@ -181,6 +204,64 @@ pub trait FlowCallbacks: Send + Sync {
         let _ = extra_tools;
         self.call_ai_streaming(agent_workspace, agent_ref, messages, response_format)
             .await
+    }
+
+    /// Call an AI provider with the step-level options: control tools
+    /// (`extra_tools`) and the step's own `skills`, added to the agent's.
+    ///
+    /// The default implementation drops `skills` and delegates to
+    /// [`call_ai_with_tools`], so a callback with no provider behind it (every
+    /// mock) is unchanged. The real one carries both on [`AiCallContext`].
+    ///
+    /// This is the TOOL-LOOP entry point: the real implementation sets
+    /// [`AiCallContext::offer_skills`], so the agent's skills (index +
+    /// `load-skill`) are offered only here. A caller that cannot execute a
+    /// tool call must use [`call_ai`] / [`call_ai_with_tools`] instead.
+    ///
+    /// [`call_ai`]: FlowCallbacks::call_ai
+    /// [`call_ai_with_tools`]: FlowCallbacks::call_ai_with_tools
+    async fn call_ai_with_options(
+        &self,
+        agent_workspace: &str,
+        agent_ref: &str,
+        messages: Vec<Value>,
+        response_format: Option<Value>,
+        extra_tools: Vec<Value>,
+        skills: Vec<Value>,
+    ) -> FlowResult<Value> {
+        let _ = skills;
+        self.call_ai_with_tools(
+            agent_workspace,
+            agent_ref,
+            messages,
+            response_format,
+            extra_tools,
+        )
+        .await
+    }
+
+    /// Streaming counterpart of [`call_ai_with_options`] — also a tool-loop
+    /// entry point, so it offers skills too.
+    ///
+    /// [`call_ai_with_options`]: FlowCallbacks::call_ai_with_options
+    async fn call_ai_streaming_with_options(
+        &self,
+        agent_workspace: &str,
+        agent_ref: &str,
+        messages: Vec<Value>,
+        response_format: Option<Value>,
+        extra_tools: Vec<Value>,
+        skills: Vec<Value>,
+    ) -> FlowResult<tokio::sync::mpsc::Receiver<Value>> {
+        let _ = skills;
+        self.call_ai_streaming_with_tools(
+            agent_workspace,
+            agent_ref,
+            messages,
+            response_format,
+            extra_tools,
+        )
+        .await
     }
 
     /// Execute a function synchronously

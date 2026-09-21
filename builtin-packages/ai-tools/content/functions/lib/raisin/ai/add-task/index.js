@@ -8,7 +8,7 @@
  * Category: planning
  */
 async function handler(input) {
-  const { title, description, priority, __raisin_context } = input;
+  const { title, description, priority, build_target_path, __raisin_context } = input;
   const workspace = __raisin_context?.workspace || 'ai';
   const chatPath = __raisin_context?.chat_path;
 
@@ -50,6 +50,10 @@ async function handler(input) {
       description: description || '',
       status: 'pending',
       priority: priority || 'normal',
+      /* See create-plan: the declared artifact is what the finalize gate checks. */
+      ...(typeof build_target_path === 'string' && build_target_path
+        ? { build_target_path }
+        : {}),
     },
   });
 

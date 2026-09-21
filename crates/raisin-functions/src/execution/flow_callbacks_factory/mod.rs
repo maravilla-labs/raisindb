@@ -23,6 +23,7 @@ mod ai_callback;
 mod function_callback;
 mod job_callback;
 mod node_callbacks;
+mod skills;
 mod types;
 
 pub use types::*;

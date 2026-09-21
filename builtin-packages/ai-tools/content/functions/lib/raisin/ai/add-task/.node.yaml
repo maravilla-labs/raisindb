@@ -25,6 +25,9 @@ properties:
           - high
           - urgent
         description: "Task priority level"
+      build_target_path:
+        type: "string"
+        description: "The artifact this task builds, as a workspace-relative node path (e.g. /correct-homepage-title). DECLARE IT for any task whose outcome is a saved object — an automation, an agent, a function. A task that declares one may only be completed once that artifact has a verification record, when the agent's finalize_policy requires it."
     required:
       - title
   output_schema:

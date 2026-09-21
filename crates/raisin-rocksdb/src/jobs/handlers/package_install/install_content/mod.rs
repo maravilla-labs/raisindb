@@ -19,10 +19,12 @@
 //! - [`zip_collector`]: ZIP iteration and raw entry collection
 //! - [`node_installer`]: Sorted entry batch installation (YAML nodes + binary files)
 //! - [`package_assets`]: README and static file installation as package assets
+//! - [`skill_md`]: `SKILL.md` → `raisin:Skill` (shared with the dry run)
 
 mod node_installer;
 mod package_assets;
 pub(super) mod reference_sort;
+pub(in crate::jobs::handlers::package_install) mod skill_md;
 mod zip_collector;
 
 pub(in crate::jobs::handlers::package_install) use self::zip_collector::CollectedEntries;

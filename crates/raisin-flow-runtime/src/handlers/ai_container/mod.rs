@@ -12,6 +12,7 @@ mod agent_ref;
 mod ai_call;
 mod conversation;
 mod execute;
+mod skill_grant;
 pub mod types;
 
 pub use types::*;
@@ -473,7 +474,9 @@ mod tests {
                     "name": "get_weather",
                     "arguments": "{\"city\": \"Zurich\"}"
                 }
-            }]
+            }],
+            // The offer: only a tool in it runs (see execute.rs tests).
+            "_tool_map": { "get_weather": "/lib/weather/get-weather" }
         })]);
         let handler = AiContainerHandler::new();
         let node = create_ai_container_node();
@@ -487,7 +490,7 @@ mod tests {
                 // Verify the tool was executed
                 let executed = callbacks.get_executed_functions();
                 assert_eq!(executed.len(), 1);
-                assert_eq!(executed[0].0, "get_weather");
+                assert_eq!(executed[0].0, "/lib/weather/get-weather");
             }
             other => panic!("Expected SameStep, got {:?}", other),
         }
@@ -552,7 +555,8 @@ mod tests {
                     "name": "approve_order",
                     "arguments": "{\"order_id\": \"123\"}"
                 }
-            }]
+            }],
+            "_tool_map": { "approve_order": "/lib/orders/approve-order" }
         })]);
         let handler = AiContainerHandler::new();
 

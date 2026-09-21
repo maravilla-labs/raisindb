@@ -26,6 +26,10 @@ import {
   parseToolArguments,
   getToolCallName,
   normalizeCompletionResponse,
+  offeredToolRefs,
+  resolveOfferedTool,
+  unofferedToolError,
+  stripRuntimeArgs,
 } from '../agent-shared/tools.js';
 import {
   resolveAgentOutboxContext,
@@ -42,6 +46,14 @@ import {
 } from '../agent-shared/streaming.js';
 import { loadUserMemory, formatMemoryForPrompt } from '../agent-shared/memory.js';
 import {
+  LOAD_SKILL_TOOL_NAME,
+  LOAD_SKILL_FUNCTION,
+  loadSkillGrant,
+  skillIndexOmitted,
+  composeInstructionTail,
+  appendTail,
+} from '../agent-shared/skills.js';
+import {
   safeJson,
   createCostRecord,
   getPlanningSystemPromptAddition,
@@ -52,6 +64,26 @@ import {
   shouldPauseAfterTask,
   updateOrchestrationState,
 } from '../agent-shared/utils.js';
+/* The finalize gate. It lives in `agent-shared/` because both terminal paths
+ * must apply the SAME check — a gate on one of them is not a gate — and the
+ * runtime CANNOT resolve an import of another function's entry file: importing
+ * it from '../agent-handler/index.js' made every continuation fail validation
+ * with "Error resolving module", which silently killed every multi-tool turn. */
+import {
+  FINALIZE_POLICY_VERIFIED,
+  TASK_TERMINAL_STATUSES,
+  finalizePolicyOf,
+  collectRunEvidence,
+  gateTerminalContent,
+  persistGatedContent,
+} from '../agent-shared/finalize.js';
+import { gateTerminalContentWithRunWrites } from '../agent-shared/run-evidence.js';
+import {
+  MALFORMED_TOOL_CALL_CODE,
+  completeWithToolCallRetry,
+  malformedToolCallCorrection,
+  malformedToolCallStopText,
+} from '../agent-shared/completion-retry.js';
 
 /**
  * How many TOOL ROUNDS one user message may take, by default.
@@ -551,6 +583,7 @@ async function handleToolResult(ctx) {
    * So the count is measured from the last completed task rather than from the
    * start of the turn. No progress, no reset: a model looping without
    * finishing anything still runs out in exactly `depthBudget` rounds. */
+  let agentPropsForGate = null;
   const progressDepth = Number(
     (chatForBudget && chatForBudget.properties && chatForBudget.properties.plan_progress_depth) || 0,
   );
@@ -563,7 +596,8 @@ async function handleToolResult(ctx) {
       const aPath = typeof ref === 'string' ? ref : ref['raisin:path'];
       const aWs = typeof ref === 'object' ? (ref['raisin:workspace'] || 'functions') : 'functions';
       const aNode = await raisin.nodes.get(aWs, aPath);
-      depthBudget = continuationBudget(aNode && aNode.properties);
+      agentPropsForGate = (aNode && aNode.properties) || null;
+      depthBudget = continuationBudget(agentPropsForGate);
     }
   } catch (e) {
     // Unreadable agent: the default stands. A budget we cannot read is not a
@@ -577,7 +611,23 @@ async function handleToolResult(ctx) {
       total_rounds: nextCount,
       since_progress: sinceProgress,
     });
-    const depthMsg = `I've gone ${sinceProgress} tool steps without finishing a task, which is my limit (${depthBudget}). Tell me what to do next and I'll carry on.`;
+    /* A STOPPED RUN MUST NOT LEAVE A CLAIM BEHIND.
+     *
+     * This return used to touch no task at all: whatever was `in_progress`
+     * stayed `in_progress` for ever, and whatever the model had already ticked
+     * off kept that claim — a stopped turn sitting beside "completed", which is
+     * the reported symptom. Closing the open ones as `failed` is the honest
+     * record: the run ended without finishing them. Gated on the agent's
+     * finalize policy so an ordinary chat agent's tasks are left exactly as
+     * they were. */
+    let closedTasks = [];
+    if (finalizePolicyOf(agentPropsForGate) === FINALIZE_POLICY_VERIFIED) {
+      closedTasks = await failOpenTasks(workspace, chatPath, 'max_continuation_depth');
+    }
+    let depthMsg = `I've gone ${sinceProgress} tool steps without finishing a task, which is my limit (${depthBudget}). Tell me what to do next and I'll carry on.`;
+    if (closedTasks.length > 0) {
+      depthMsg += ` This run STOPPED without finishing; ${closedTasks.length} open task(s) are recorded as failed: ${closedTasks.map((t) => `"${t.title}"`).join(', ')}. Nothing from this run is validated or enabled.`;
+    }
     await raisin.nodes.create(workspace, chatPath, {
       name: `continue-${nextCount}-${baseName}`,
       node_type: 'raisin:Message',
@@ -663,6 +713,18 @@ async function handleToolResult(ctx) {
   }
   const hasPlanningTools = taskCreationEnabled && Object.values(toolNameToRef).some(r => r.category === 'planning');
 
+  /* SKILLS — the same grant, index and load-skill offer as the first round
+   * (agent-handler), re-resolved each round so a continuation can open a skill
+   * the first round listed. No skills, no change. */
+  const skills = await loadAgentSkills(agent.properties);
+  if (skills.length > 0 && !toolNameToRef[LOAD_SKILL_TOOL_NAME]) {
+    const extra = await resolveToolsParallel([
+      { 'raisin:path': LOAD_SKILL_FUNCTION.path, 'raisin:workspace': LOAD_SKILL_FUNCTION.workspace },
+    ]);
+    toolDefinitions = toolDefinitions.concat(extra.toolDefinitions);
+    Object.assign(toolNameToRef, extra.toolNameToRef);
+  }
+
   // Emit outbox notifications for completed tool results
   if (outboxCtx) {
     await emitToolResultsToOutbox(workspace, outboxCtx, assistantMsgPath, aggregatedToolResults);
@@ -743,12 +805,12 @@ async function handleToolResult(ctx) {
     }
   }
 
-  // Inject agent rules
-  const rules = agent.properties.rules;
-  if (Array.isArray(rules) && rules.length > 0) {
-    const rulesBlock = '\n\n## Rules\n' + rules.map(r => `- ${r}`).join('\n');
-    systemPrompt = systemPrompt ? systemPrompt + rulesBlock : rulesBlock;
+  // The skills index, then the agent's rules — the same tail as the first round.
+  const omittedSkills = skillIndexOmitted(skills);
+  if (omittedSkills > 0) {
+    log.warn('continue', 'Skill index truncated', { skills: skills.length, omitted: omittedSkills });
   }
+  systemPrompt = appendTail(systemPrompt, composeInstructionTail({ skills, rules: agent.properties.rules }));
 
   const t0Hist = log.time();
   let history = await buildHistoryFromChat(workspace, chatPath, systemPrompt, assistantMsgPath, aggregatedToolResults, {
@@ -831,16 +893,27 @@ async function handleToolResult(ctx) {
   let response;
   let completionError = null;
 
+  /* One malformed tool call from the model gets ONE corrected retry — see
+   * agent-shared/completion-retry.js. Only when tools are offered: with tools
+   * off, a failed_generation is the model inventing call syntax, which the
+   * plain-text retry below handles. */
+  const completeWith = (messages) => raisin.ai.completion({
+    messages,
+    model: modelId,
+    temperature: agent.properties.temperature,
+    tools: toolsEnabled ? offeredTools : undefined,
+    stream: true,
+    conversation_path: chatPath,
+    conversation_channel: streamChannel || undefined,
+  });
+
   try {
-    const raw = await raisin.ai.completion({
-      messages: history,
-      model: modelId,
-      temperature: agent.properties.temperature,
-      tools: toolsEnabled ? offeredTools : undefined,
-      stream: true,
-      conversation_path: chatPath,
-      conversation_channel: streamChannel || undefined,
-    });
+    const { raw, retried } = toolsEnabled
+      ? await completeWithToolCallRetry(completeWith, history, (err) => {
+        log.warn('continue', 'Model sent a malformed tool call; retrying once with a correction', { error: err.message });
+      })
+      : { raw: await completeWith(history), retried: false };
+    if (retried) log.info('continue', 'Retry after malformed tool call succeeded');
     response = normalizeCompletionResponse(raw);
 
     const emptyTurn =
@@ -887,6 +960,17 @@ async function handleToolResult(ctx) {
     }
   }
 
+  /* The corrected retry failed the same way. End the turn — honestly: say what
+   * happened and, for a gated agent, where the run stands per the server — and
+   * return rather than throw, because the turn ended in a known state. */
+  if (!response && completionError && completionError.code === MALFORMED_TOOL_CALL_CODE) {
+    log.error('continue', 'Malformed tool call twice; ending the turn', { error: completionError.message, duration_ms: log.since(t0AI) });
+    const stopText = await malformedToolCallStopText(workspace, chatPath, agent && agent.properties, completionError);
+    await emitAssistantTurnError(workspace, chatPath, continuationMsgName, stopText, outboxCtx, streamChannel);
+    terminalEventEmitted = true;
+    return;
+  }
+
   if (!response && completionError) {
     log.error('continue', 'AI completion failed', { error: completionError.message, duration_ms: log.since(t0AI) });
     await emitAssistantTurnError(workspace, chatPath, continuationMsgName, completionError.message || String(completionError), outboxCtx, streamChannel);
@@ -902,8 +986,27 @@ async function handleToolResult(ctx) {
   if (malformed.length > 0) {
     log.warn('continue', 'Dropped malformed tool call entries', { count: malformed.length, entries: safeJson(malformed) });
     if (normalized.length === 0 && !response.content.trim()) {
-      response.content = 'I received an invalid tool call payload from the model. Please try again.';
-      response.finish_reason = response.finish_reason || 'stop';
+      /* Every call in the turn was unusable. One corrected retry, then an
+       * honest stop — the same contract as a provider-side refusal above. */
+      let recovered = false;
+      if (toolsEnabled) {
+        try {
+          const retryResp = normalizeCompletionResponse(await completeWith([...history, malformedToolCallCorrection(safeJson(malformed))]));
+          const retryNorm = normalizeToolCalls(retryResp.tool_calls);
+          if (retryNorm.normalized.length > 0 || retryResp.content.trim()) {
+            response = retryResp;
+            response.tool_calls = retryNorm.normalized;
+            recovered = true;
+            log.info('continue', 'Retry after malformed tool call entries succeeded', { tool_calls: response.tool_calls.length });
+          }
+        } catch (retryErr) {
+          log.warn('continue', 'Retry after malformed tool call entries failed', { error: retryErr.message });
+        }
+      }
+      if (!recovered) {
+        response.content = await malformedToolCallStopText(workspace, chatPath, agent && agent.properties, null);
+        response.finish_reason = response.finish_reason || 'stop';
+      }
     }
   }
 
@@ -948,7 +1051,7 @@ async function handleToolResult(ctx) {
         ],
         model: modelId,
         temperature: agent.properties.temperature,
-        tools: toolDefinitions,
+        tools: offeredTools,
         stream: false,
         conversation_path: chatPath,
         conversation_channel: streamChannel || undefined,
@@ -985,7 +1088,7 @@ async function handleToolResult(ctx) {
         ],
         model: modelId,
         temperature: agent.properties.temperature,
-        tools: toolDefinitions,
+        tools: offeredTools,
         stream: false,
         conversation_path: chatPath,
         conversation_channel: streamChannel || undefined,
@@ -1110,6 +1213,13 @@ async function handleToolResult(ctx) {
 
   // ── Dispatch tool calls ──
 
+  /* THE OFFER. Every completion that can produce `response.tool_calls` sent
+   * `offeredTools` when tools were enabled and nothing otherwise — so a tool the
+   * loop guard withdrew, or any tool on a forced-final turn, is refused here
+   * rather than queued. `toolNameToRef` (everything the agent was GIVEN) is not
+   * consulted: the same rule as the Rust agent step. */
+  const offeredToolMap = offeredToolRefs(toolsEnabled ? offeredTools : [], toolNameToRef);
+
   try {
 
   if (response.tool_calls.length > 0) {
@@ -1124,19 +1234,23 @@ async function handleToolResult(ctx) {
 
       const toolCallId = tc.id || `generated-${i}`;
       const toolCallName = tc.id ? `tool-call-${tc.id}` : `tool-call-idx-${i}`;
-      const toolRef = toolNameToRef[toolName];
+      const toolRef = resolveOfferedTool(offeredToolMap, toolName);
 
-      // ── Unknown tool handling ──
+      // ── Not offered: an error result the model reads, nothing queued ──
       if (!toolRef) {
-        log.warn('continue', 'Unknown tool requested by model', { name: toolName });
+        log.warn('continue', 'Model called a tool it was not offered - refusing', { name: toolName });
 
-        // Check if previous turn also had unknown tools — if so, give up
+        // Give up only if the previous round's call was ITSELF refused (it
+        // carries no function_ref) and is still not offered. A tool that really
+        // ran last round and is merely not offered now (forced-final turn, loop
+        // guard) is refused below, not treated as an unknown tool.
         const prevChildren = await raisin.nodes.getChildren(workspace, assistantMsgPath);
         const repeatedUnknown = (prevChildren || []).some(c =>
           c.node_type === 'raisin:AIToolCall' &&
           c.properties?.status === 'completed' &&
           c.properties?.function_name &&
-          !toolNameToRef[c.properties.function_name]
+          !c.properties?.function_ref &&
+          !resolveOfferedTool(offeredToolMap, c.properties.function_name)
         );
 
         if (repeatedUnknown) {
@@ -1146,9 +1260,8 @@ async function handleToolResult(ctx) {
           return;
         }
 
-        const available = Object.keys(toolNameToRef).join(', ');
         await createErrorToolResult(workspace, nextMsg.path, toolCallName, toolCallId, toolName,
-          { error: `Tool "${toolName}" does not exist. Available tools: ${available}` });
+          { error: unofferedToolError(toolName, offeredToolMap) });
         continuationExpected = true;
         continue;
       }
@@ -1156,7 +1269,8 @@ async function handleToolResult(ctx) {
       // ── Parse arguments ──
       let toolArgs;
       try {
-        toolArgs = parseToolArguments(tc);
+        // Runtime-only keys (__raisin_flow, _skill_grant) never come from the model.
+        toolArgs = stripRuntimeArgs(parseToolArguments(tc));
       } catch (argsErr) {
         log.warn('continue', 'Invalid arguments for tool', { name: toolName, error: argsErr.message });
         await createErrorToolResult(workspace, nextMsg.path, toolCallName, toolCallId, toolName,
@@ -1258,8 +1372,31 @@ async function handleToolResult(ctx) {
     });
   }
 
+  /* THE FINALIZE GATE. See agent-handler/index.js — the server states the run's
+   * status from persisted task state and verification records, and free text
+   * cannot override a stopped or unverified one. Computed once for both the
+   * outbox message and the SSE payload so they cannot disagree. */
+  let terminalGate = { content: response.content || TERMINAL_FALLBACK_TEXT, gated: false, statement: null };
+  if (isTerminal) {
+    terminalGate = await gateTerminalContentWithRunWrites(
+      workspace,
+      chatPath,
+      agent && agent.properties,
+      response.content || TERMINAL_FALLBACK_TEXT,
+    );
+    /* The STORED turn, not just the outbox and the SSE. See persistGatedContent
+     * in agent-handler: nextMsg was written before isTerminal was known, so it
+     * still carries the model's raw prose until this rewrites it. */
+    await persistGatedContent(
+      workspace,
+      nextMsg.path,
+      terminalGate,
+      response.content || TERMINAL_FALLBACK_TEXT,
+    );
+  }
+
   if (outboxCtx && isTerminal) {
-    const content = response.content || TERMINAL_FALLBACK_TEXT;
+    const content = terminalGate.content;
     const isToolEcho = /^Calling\s+[\w-]+\s*$/.test(content.trim());
     if (!isToolEcho) {
       await sendAgentOutboxMessage(workspace, outboxCtx, content, 'chat', {
@@ -1286,7 +1423,8 @@ async function handleToolResult(ctx) {
   } else if (isTerminal) {
     await emitConversationEvent('conversation:done', {
       type: 'done',
-      content: response.content || TERMINAL_FALLBACK_TEXT,
+      content: terminalGate.content,
+      ...(terminalGate.statement ? { serverStatus: terminalGate.statement, verified: !terminalGate.gated } : {}),
       role: 'assistant',
       senderDisplayName: senderName,
       finishReason: effectiveFinishReason,
@@ -1352,4 +1490,46 @@ async function handleToolResult(ctx) {
 // `detectToolLoop` and its helpers are pure and exported for the loop-guard
 // test (builtin-packages/ai-tools/tests/agent-loop-guard.test.js). Nothing in
 // the runtime should call them but this file.
-export { handleToolResult, detectToolLoop, toolCallSignature, stableStringify, continuationBudget };
+/**
+ * Mark every still-open task of this conversation `failed`, and answer with
+ * what was closed. Called when a run STOPS — the depth cap — because a task
+ * left `in_progress` by a run that will never resume is a false claim that
+ * work is still happening. Writes only on a real delta, and never throws: a
+ * stop must still stop.
+ */
+async function failOpenTasks(workspace, chatPath, reason) {
+  const closed = [];
+  try {
+    const evidence = await collectRunEvidence(workspace, chatPath);
+    for (const t of evidence.tasks) {
+      const status = t.props.status || 'pending';
+      if (TASK_TERMINAL_STATUSES.includes(status)) continue;
+      await raisin.nodes.update(workspace, t.path, {
+        properties: { ...t.props, status: 'failed', completion_notes: `Run stopped (${reason}) before this task finished.` },
+      });
+      closed.push({ path: t.path, title: t.props.title || t.path, previous_status: status });
+    }
+  } catch (e) {
+    log.warn('continue', 'Could not close open tasks after stop', { error: e.message });
+  }
+  return closed;
+}
+
+/**
+ * The skills this agent was given — see agent-handler's loadAgentSkills, which
+ * this mirrors. A failed read is logged and counts as absent.
+ */
+async function loadAgentSkills(agentProps) {
+  return loadSkillGrant({
+    agentProps: agentProps || {},
+    stepSkills: [],
+    getNode: (ws, path) => raisin.nodes.get(ws, path),
+    getNodeById: typeof raisin.nodes.getById === 'function' ? (ws, id) => raisin.nodes.getById(ws, id) : undefined,
+    getChildren: (ws, path) => raisin.nodes.getChildren(ws, path),
+    onReadError: ({ workspace, path, id, error }) => {
+      log.warn('continue', 'Could not read skill', { workspace, path: path || id, error: error && error.message });
+    },
+  });
+}
+
+export { handleToolResult, detectToolLoop, toolCallSignature, stableStringify, continuationBudget, failOpenTasks };

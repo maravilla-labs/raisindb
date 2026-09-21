@@ -47,15 +47,65 @@ async function buildHistoryFromChat(workspace, chatPath, systemPrompt, currentAs
     history.push({ role: 'system', content: systemPrompt });
   }
 
-  // ── Fetch all relevant descendants in a single query ──
+  /* ── Fetch the descendants this turn can still USE ──────────────────────
+   *
+   * This asked for every descendant of the chat, every round, with no lower
+   * bound — and compaction never removed one, because applying it is an
+   * in-memory `slice` of the message array. So the cost of building history
+   * grew with the age of the conversation and nothing ever brought it down.
+   *
+   * Measured on a working Studio Builder chat: `total_nodes=671`,
+   * `messages=12`, `duration_ms=9648`. Five to ten seconds PER TOOL ROUND,
+   * spent fetching and indexing six hundred nodes in order to use twelve. A
+   * twenty-round turn pays two to three minutes for nothing, which reads to
+   * the user as an agent that cannot finish.
+   *
+   * The cutoff is already recorded on the compaction node, so it belongs in
+   * the WHERE clause rather than in a filter afterwards. Two queries: a tiny
+   * one for the newest compaction, then the window it defines. Older nodes
+   * stay in storage — they are the conversation's record and deleting them is
+   * a different decision — they are simply not fetched to be discarded. */
   const t0 = log.time();
-  const allNodes = await raisin.sql.query(`
-    SELECT path, name, node_type, properties, created_at
+  const compactionRows = await raisin.sql.query(`
+    SELECT properties, created_at
     FROM "${workspace}"
-    WHERE DESCENDANT_OF($1)
-      AND node_type IN ('raisin:Message', 'raisin:AIToolCall', 'raisin:AIToolResult', 'raisin:AIToolSingleCallResult', 'raisin:AICompaction')
-    ORDER BY created_at ASC
+    WHERE CHILD_OF($1) AND node_type = 'raisin:AICompaction'
+    ORDER BY created_at DESC
+    LIMIT 1
   `, [chatPath]);
+  const latestCompaction = Array.isArray(compactionRows) ? compactionRows[0] : null;
+  const cutoffAt = latestCompaction?.properties?.cutoff_created_at || null;
+
+  const TYPES = "'raisin:Message', 'raisin:AIToolCall', 'raisin:AIToolResult', 'raisin:AIToolSingleCallResult', 'raisin:AICompaction'";
+  const allNodes = cutoffAt
+    ? await raisin.sql.query(`
+        SELECT path, name, node_type, properties, created_at
+        FROM "${workspace}"
+        WHERE DESCENDANT_OF($1)
+          AND node_type IN (${TYPES})
+          AND created_at > $2
+        ORDER BY created_at ASC
+      `, [chatPath, cutoffAt])
+    : await raisin.sql.query(`
+        SELECT path, name, node_type, properties, created_at
+        FROM "${workspace}"
+        WHERE DESCENDANT_OF($1)
+          AND node_type IN (${TYPES})
+        ORDER BY created_at ASC
+      `, [chatPath]);
+
+  /* The compaction node itself sits AT the cutoff, so the window above
+   * excludes it — and without it the summary of everything before is lost and
+   * the turn starts amnesiac. Put it back. */
+  if (cutoffAt && latestCompaction) {
+    allNodes.push({
+      path: `${chatPath}/__latest_compaction`,
+      name: '__latest_compaction',
+      node_type: 'raisin:AICompaction',
+      properties: latestCompaction.properties,
+      created_at: latestCompaction.created_at,
+    });
+  }
 
   // ── Build parent→children index ──
   const childrenByParent = new Map();

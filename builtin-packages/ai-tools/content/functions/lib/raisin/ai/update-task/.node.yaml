@@ -22,10 +22,25 @@ properties:
           - in_progress
           - completed
           - cancelled
+          - failed
         description: "New status for the task"
       notes:
         type: "string"
         description: "Optional completion notes or reason for status change"
+      build_target_path:
+        type: "string"
+        description: |
+          The artifact this task built, as a workspace-relative node path. Declare
+          it as soon as the artifact exists — usually on the same call that sets
+          in_progress or completed. A task that declares one may only be completed
+          once that artifact has a verification record, when the agent's
+          finalize_policy requires it. The declaration is kept even when the
+          completion is refused, so the next test or verification lands on this
+          task. Leaving it out does not skip the check: a task that created or
+          changed an artifact in this run (read from the run's own tool calls)
+          is gated on that artifact all the same. A record for the same artifact
+          on another task of this conversation counts, unless the artifact was
+          written again after it was verified.
     required:
       - task_id
       - status

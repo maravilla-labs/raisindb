@@ -1,0 +1,76 @@
+name: raisin:Skill
+title: Skill
+description: >
+  Instructions an agent loads on demand — the Agent Skills / SKILL.md shape:
+  a name, a one-sentence description of when it applies, and a Markdown body.
+  The system prompt carries only an index line (name — description); the body
+  is read through the builtin load-skill tool, which refuses a skill the agent
+  was not given. An agent gets a skill from its `skills:` references, from a
+  workflow step's `skills:`, or from the global layers functions:/skills
+  (packages) and functions:/local/skills (the installation, which replaces or,
+  with enabled:false, masks a package skill of the same name).
+icon: book-open
+color: "#8B5CF6"
+version: 1
+indexable: true
+index_types: [Property, Fulltext]
+
+# The Agent Skills `allowed-tools` key is deliberately NOT mapped: a skill is
+# text, and it must not be able to widen the agent's tool grant.
+properties:
+  - name: name
+    title: Name
+    type: String
+    required: true
+    index: [Property]
+    description: >
+      The skill's identifier, and what load-skill is called with. Agent Skills
+      grammar: lowercase letters, digits and single hyphens
+      (^[a-z0-9]+(-[a-z0-9]+)*$), at most 64 characters. A name that breaks
+      the grammar makes the skill unusable.
+
+  - name: description
+    title: Description
+    type: String
+    required: true
+    index: [Property, Fulltext]
+    description: >
+      One sentence saying what the skill is for and when to load it. This is
+      the ONLY part the prompt carries (collapsed, cut at 200 characters), so
+      it is also how a skill is found. A blank description makes it unusable.
+
+  - name: body
+    title: Instructions
+    type: String
+    required: false
+    index: [Fulltext]
+    description: >
+      The Markdown instructions, returned by load-skill (capped at 20000
+      characters). Never put in the system prompt.
+    ui:
+      widget: textarea
+      rows: 20
+
+  - name: enabled
+    title: Enabled
+    type: Boolean
+    default: true
+    required: false
+    description: >
+      false makes the skill absent everywhere. A disabled skill under
+      functions:/local/skills also masks the package skill of the same name —
+      the per-installation opt-out.
+
+  - name: license
+    title: License
+    type: String
+    required: false
+    description: The skill's license, as the Agent Skills frontmatter states it.
+
+  - name: metadata
+    title: Metadata
+    type: Object
+    required: false
+    description: Free-form key/value metadata from the Agent Skills frontmatter.
+
+allowed_children: []

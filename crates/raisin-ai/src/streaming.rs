@@ -129,6 +129,12 @@ where
     // execute a tool by path; a container that only knew the name asked the
     // runtime for a function called `update-node` and got "not found".
     let mut path_map: Option<Value> = None;
+    // The SKILL GRANT the callback resolved for this agent (and step), sent
+    // beside `_tool_map` as `{"_skill_grant": [{name, workspace, path}]}`.
+    // It is the only thing `load-skill` may trust in a flow, so it is passed
+    // through untouched and the FIRST one wins — a later chunk never replaces
+    // it. Dropping it here left every container's load-skill with no grant.
+    let mut skill_grant: Option<Value> = None;
     let mut detector = tool_call_extraction::StreamingToolCallDetector::new();
     let mut think_detector = ThinkTagDetector::new();
 
@@ -136,6 +142,13 @@ where
         if let Some(m) = chunk.get("_tool_map") {
             if m.is_object() {
                 path_map = Some(m.clone());
+            }
+        }
+        if skill_grant.is_none() {
+            if let Some(g) = chunk.get("_skill_grant") {
+                if g.is_array() {
+                    skill_grant = Some(g.clone());
+                }
             }
         }
         // Extract text: streaming chunks carry `delta`; complete
@@ -337,6 +350,12 @@ where
         "content": content,
         "model": model,
     });
+
+    // Only when the callback sent one: an agent with no skills keeps the
+    // exact envelope it always had.
+    if let Some(g) = skill_grant {
+        result["_skill_grant"] = g;
+    }
 
     if !thinking.is_empty() {
         result["thinking"] = Value::String(thinking);
@@ -563,6 +582,33 @@ mod tests {
         assert_eq!(calls[0]["id"], "call_1");
         assert_eq!(calls[0]["function"]["name"], "update-node");
         assert_eq!(calls[0]["function"]["arguments"], "{\"path\":\"/a\"}");
+    }
+
+    #[tokio::test]
+    async fn passes_the_first_skill_grant_through_and_only_when_sent() {
+        let grant =
+            serde_json::json!([{ "name": "pdf", "workspace": "functions", "path": "/skills/pdf" }]);
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut tool_map = HashMap::new();
+        tx.send(serde_json::json!({ "_tool_map": { "load-skill": "/lib/raisin/ai/load-skill" }, "_skill_grant": grant.clone() }))
+            .await
+            .unwrap();
+        // A later chunk carrying another grant does not replace the first.
+        tx.send(serde_json::json!({ "delta": "ok", "_skill_grant": [{ "name": "other" }], "stop_reason": "stop" }))
+            .await
+            .unwrap();
+        drop(tx);
+        let out = accumulate_stream(&mut rx, |_| async {}, &mut tool_map).await;
+        assert_eq!(out["_skill_grant"], grant);
+        assert_eq!(out["_tool_map"]["load-skill"], "/lib/raisin/ai/load-skill");
+
+        let (tx, mut rx) = mpsc::channel(8);
+        tx.send(serde_json::json!({ "delta": "ok", "stop_reason": "stop" }))
+            .await
+            .unwrap();
+        drop(tx);
+        let out = accumulate_stream(&mut rx, |_| async {}, &mut tool_map).await;
+        assert!(out.get("_skill_grant").is_none());
     }
 
     #[tokio::test]

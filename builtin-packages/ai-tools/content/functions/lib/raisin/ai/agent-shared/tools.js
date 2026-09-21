@@ -136,6 +136,69 @@ function parseToolArguments(toolCall) {
 }
 
 /**
+ * Argument keys only the RUNTIME may set, and a model that writes one is
+ * forging it. `__raisin_flow` ties a function's work to a flow instance (an
+ * arming step compares it with the approval it recorded) and `_skill_grant` is
+ * the side-band skill grant — the Rust loop strips both, and so does this one.
+ * `__raisin_context` is deliberately NOT here: the chat handlers spread the
+ * model's copy and then overwrite every key they own (load-skill trusts only
+ * chat_path from it), which is the existing contract.
+ */
+const MODEL_FORBIDDEN_ARG_KEYS = ['__raisin_flow', '_skill_grant'];
+
+/** Model-written tool arguments with every runtime-only key removed. */
+function stripRuntimeArgs(args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return args;
+  const out = { ...args };
+  for (const key of MODEL_FORBIDDEN_ARG_KEYS) delete out[key];
+  return out;
+}
+
+/**
+ * THE OFFER — name → function ref for exactly the tool definitions that were
+ * sent to the model on the call that produced this response. That is the only
+ * table a model's tool call may be resolved through.
+ *
+ * `toolNameToRef` is everything the agent was GIVEN, which is wider than what a
+ * given turn OFFERS: the loop guard withdraws a repeated tool, a forced-final
+ * turn offers none, and an agent without tools makes a plain completion. A
+ * lookup straight into `toolNameToRef` executed all of those anyway — and, being
+ * a plain object, answered `constructor` or `toString` with a truthy prototype
+ * member. A Map built from own properties has neither hole.
+ */
+function offeredToolRefs(offeredDefinitions, toolNameToRef) {
+  const offered = new Map();
+  if (!Array.isArray(offeredDefinitions) || !toolNameToRef) return offered;
+  for (const def of offeredDefinitions) {
+    const name = def?.function?.name;
+    if (typeof name !== 'string' || !name) continue;
+    if (!Object.prototype.hasOwnProperty.call(toolNameToRef, name)) continue;
+    const ref = toolNameToRef[name];
+    if (ref && typeof ref === 'object') offered.set(name, ref);
+  }
+  return offered;
+}
+
+/** The ref an OFFERED tool resolves to — `null` for anything else. */
+function resolveOfferedTool(offered, name) {
+  if (!(offered instanceof Map) || typeof name !== 'string') return null;
+  return offered.get(name) || null;
+}
+
+/**
+ * What a model reads back when it calls a tool it was not offered: that
+ * nothing ran, and what it CAN call. Same wording as the Rust loop's
+ * `unoffered_tool_error`, so one agent reads one message on every path.
+ */
+function unofferedToolError(name, offered) {
+  const names = offered instanceof Map ? [...offered.keys()].sort() : [];
+  const choices = names.length === 0
+    ? 'No tools are offered in this step.'
+    : `The tools offered to you are: ${names.join(', ')}.`;
+  return `\`${name}\` is not a tool offered to you, so it was not run. ${choices}`;
+}
+
+/**
  * Resolve an array of tool references (paths or reference objects) into
  * OpenAI-compatible tool definitions.  All lookups run in parallel via
  * Promise.all().
@@ -229,6 +292,11 @@ async function resolveToolsParallel(toolRefs) {
 export {
   MODEL_TOOL_DENYLIST,
   MODEL_TOOL_PATH_DENYLIST,
+  MODEL_FORBIDDEN_ARG_KEYS,
+  stripRuntimeArgs,
+  offeredToolRefs,
+  resolveOfferedTool,
+  unofferedToolError,
   normalizeCompletionResponse,
   getToolCallName,
   normalizeToolCalls,
