@@ -258,6 +258,15 @@ impl NodeRepositoryImpl {
                 ))
             })?;
 
+        // THE WORKSPACE'S OWN ROOT (`/`) is not a record in it. Creating a
+        // workspace bootstraps it as a `raisin:Folder`, and a workspace that
+        // restricts its types (every app's does) refused its own root, so a
+        // restricted workspace could not be created through the workspace
+        // service at all — only by a package install, which skips the root.
+        if node.path == "/" {
+            return Ok(());
+        }
+
         // Check if this is a root node
         let is_root = node.parent_path().map(|p| p == "/").unwrap_or(true);
 

@@ -55,8 +55,30 @@ impl<S: Storage> WorkspaceService<S> {
             .put(RepoScope::new(tenant_id, repo_id), ws.clone())
             .await?;
 
-        // Bootstrap ROOT node for new workspaces
-        if is_new {
+        // Bootstrap the ROOT node for a new workspace — and for one whose ROOT
+        // is missing. A create whose ROOT commit failed (a restricted workspace
+        // refused its own `raisin:Folder` root before that was exempted) left
+        // the definition saved with no root, and every later `put` saw a
+        // workspace that "exists" and skipped the bootstrap for ever. Repeating
+        // the put now repairs it.
+        let root_missing = !is_new && {
+            use raisin_storage::NodeRepository as _;
+            self.storage
+                .nodes()
+                .get_by_path(
+                    raisin_storage::StorageScope::new(
+                        tenant_id,
+                        repo_id,
+                        &ws.config.default_branch,
+                        &ws.name,
+                    ),
+                    "/",
+                    None,
+                )
+                .await?
+                .is_none()
+        };
+        if is_new || root_missing {
             let branch = ws.config.default_branch.clone();
 
             // Check if this branch was created from an existing revision
