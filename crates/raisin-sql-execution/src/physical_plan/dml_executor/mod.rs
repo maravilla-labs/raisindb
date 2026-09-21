@@ -36,6 +36,7 @@ mod schema_builders;
 mod schema_dml;
 mod translate;
 mod workspace_dml;
+mod workspace_schema_dml;
 
 use crate::physical_plan::executor::{ExecutionContext, Row, RowStream};
 use futures::stream;
@@ -60,20 +61,34 @@ pub use translate::execute_translate;
 use helpers::extract_name_from_filter;
 use schema_dml::*;
 use workspace_dml::*;
+use workspace_schema_dml::*;
 
-/// The reserved `Workspaces` schema table is READ-ONLY over SQL.
+/// DELETE on the reserved `Workspaces` table is refused.
 ///
-/// Workspace definitions are created and altered by package install and the
-/// management API, which also builds the per-workspace nodes table, seeds
-/// `initial_structure` and registers the workspace in the SQL catalog. A bare
-/// row write here would do none of that, so it is refused with a pointer rather
-/// than silently half-applied.
+/// INSERT and UPDATE go through `WorkspaceService::put` (see
+/// `workspace_schema_dml`), which also builds the nodes table and seeds the
+/// initial structure. Dropping a workspace discards every node in it, which is
+/// the management API's decision, not a SQL row delete.
 fn workspaces_are_read_only(op: &str) -> Error {
     Error::Validation(format!(
-        "{op} is not supported on the reserved `Workspaces` table — it is read-only. \
-         Workspaces are defined by package install (workspaces/*.yaml) or the management API; \
-         SELECT here to read allowed_node_types / allowed_root_node_types."
+        "{op} is not supported on the reserved `Workspaces` table. \
+         Remove a workspace through the management API."
     ))
+}
+
+/// Every write to a schema table changes the repository schema.
+fn require_schema_write<S: Storage>(
+    target: &DmlTableTarget,
+    op: &str,
+    ctx: &ExecutionContext<S>,
+) -> Result<(), Error> {
+    if let DmlTableTarget::SchemaTable(kind) = target {
+        crate::schema_auth::require_schema_operator(
+            ctx.auth_context.as_ref(),
+            &format!("{op} on {kind:?}"),
+        )?;
+    }
+    Ok(())
 }
 
 /// Execute a physical INSERT operation.
@@ -93,6 +108,7 @@ pub async fn execute_insert<
 ) -> Result<RowStream, Error> {
     let row_count = values.len();
     let mut written: Vec<Node> = Vec::new();
+    require_schema_write(target, "INSERT", ctx)?;
     if returning.is_some() {
         reject_returning_on_schema_table(target, "INSERT")?;
     }
@@ -112,7 +128,7 @@ pub async fn execute_insert<
             // CONTENT workspace (a nodes table). This is the reserved
             // `Workspaces` schema table listing the workspace DEFINITIONS.
             SchemaTableKind::Workspaces => {
-                return Err(workspaces_are_read_only("INSERT"));
+                execute_insert_workspaces(columns, values, ctx).await?;
             }
         },
         DmlTableTarget::Workspace(workspace) => {
@@ -184,6 +200,7 @@ pub async fn execute_update<
     returning: Option<&'a [ProjectionExpr]>,
     ctx: &'a ExecutionContext<S>,
 ) -> Result<RowStream, Error> {
+    require_schema_write(target, "UPDATE", ctx)?;
     if returning.is_some() {
         reject_returning_on_schema_table(target, "UPDATE")?;
     }
@@ -201,7 +218,9 @@ pub async fn execute_update<
                 SchemaTableKind::ElementTypes => {
                     execute_update_elementtype(&name, assignments, ctx).await?
                 }
-                SchemaTableKind::Workspaces => return Err(workspaces_are_read_only("UPDATE")),
+                SchemaTableKind::Workspaces => {
+                    execute_update_workspaces(&name, assignments, ctx).await?
+                }
             }
         }
         DmlTableTarget::Workspace(workspace) => {
@@ -241,6 +260,7 @@ pub async fn execute_delete<
     returning: Option<&'a [ProjectionExpr]>,
     ctx: &'a ExecutionContext<S>,
 ) -> Result<RowStream, Error> {
+    require_schema_write(target, "DELETE", ctx)?;
     if returning.is_some() {
         reject_returning_on_schema_table(target, "DELETE")?;
     }

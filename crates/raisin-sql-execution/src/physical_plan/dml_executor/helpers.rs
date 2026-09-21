@@ -162,9 +162,12 @@ pub(super) fn literal_to_property_value(lit: &Literal) -> Result<PropertyValue, 
                         .collect(),
                 ))
             } else {
-                Err(Error::Validation(
-                    "JSONB values must be objects for PropertyValue conversion".to_string(),
-                ))
+                // An ARRAY (or scalar) is a value in its own right — a
+                // workspace's `allowed_node_types`, an archetype's `fields`.
+                // The column it is written to decides whether it fits; this
+                // conversion only refused it, so no schema-table column holding
+                // a list could be written at all.
+                Ok(PropertyValue::from_json(j))
             }
         }
         // A geometry-valued expression — `ST_POINT(...)`, `ST_TRANSFORM(...)`,
@@ -327,10 +330,29 @@ pub(super) fn convert_property_value<T: serde::de::DeserializeOwned>(
     column_name: &str,
 ) -> Result<T, Error> {
     let json_value = property_value_to_json(value)?;
-    serde_json::from_value(json_value).map_err(|e| {
-        Error::Validation(format!(
-            "Failed to convert column '{}' value: {}",
-            column_name, e
-        ))
-    })
+    match serde_json::from_value(json_value) {
+        Ok(v) => Ok(v),
+        // JSON TEXT IS ACCEPTED TOO. A SQL string literal carrying the JSON of
+        // a structured column (`fields`, `meta`, `layout`) is how a client
+        // without a JSON parameter type writes one; it is parsed and read the
+        // same way. Anything that is not valid JSON keeps the original error.
+        Err(e) => {
+            if let PropertyValue::String(text) = value {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(text) {
+                    if parsed.is_object() || parsed.is_array() {
+                        return serde_json::from_value(parsed).map_err(|e| {
+                            Error::Validation(format!(
+                                "Failed to convert column '{}' value: {}",
+                                column_name, e
+                            ))
+                        });
+                    }
+                }
+            }
+            Err(Error::Validation(format!(
+                "Failed to convert column '{}' value: {}",
+                column_name, e
+            )))
+        }
+    }
 }

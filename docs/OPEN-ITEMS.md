@@ -1056,7 +1056,7 @@ human-rate event, unlike API-key validation, which is why `last_used_at`
 deliberately stays node-local (§2.106) — but `last_login` is a LWW register and
 will flap if the same account signs in on two nodes.
 
-### 2.117 [P2] A filtered SELECT on a schema table silently returns zero rows
+### 2.117 [FIXED] A filtered SELECT on a schema table silently returns zero rows
 
 `SELECT ... FROM Archetypes WHERE name = 'news:ArticlePage'` returns **nothing**,
 with no error. The same query without the `WHERE` returns every row.
@@ -1081,8 +1081,10 @@ forces a `TableScan` and leaves the predicate as a pushed-down filter, which
 argument and applies it against the full row). So only the planner side is
 missing; the executor has supported this all along.
 
-Not fixed here because it changes plan selection for a reserved table name, and
-the documented workaround (read all, filter client-side) is correct today.
+**Fixed (v0.6.39):** `plan_scan_from_canonical` returns a `TableScan` carrying
+the filter for any schema table, before any index is considered. The pinned
+test is now `schema_table_equality_on_primary_key_reaches_the_schema_reader`,
+and the "full-table SELECTs only" rule is gone from the website reference.
 
 ### 2.118 [Docs] A PGQ label is a loose selector unless you quote it
 
@@ -1133,3 +1135,25 @@ the graph), but "match all nodes" is the wrong description of it, in the code
 comment and in the public reference. Either the docs should say "every node that
 participates in at least one relationship", or the pattern should fall back to a
 node scan when it carries no relationship element.
+
+### 2.120 [FIXED] Schema DDL and schema-table writes checked no authorization
+
+`CREATE / ALTER / DROP NODETYPE|MIXIN|ARCHETYPE|ELEMENTTYPE` and writes to the
+schema tables ran for ANY caller. Measured on a dev server 2026-09-21: an
+anonymous HTTP `CREATE NODETYPE` succeeded. On a repository with anonymous
+access enabled — every public site — the public could change the schema, and
+any signed-in site user could rewrite an archetype. ACL DDL, locks and secrets
+already refused anonymous callers; schema DDL had been missed.
+
+**Fixed (v0.6.39):** `raisin-sql-execution::schema_auth::require_schema_operator`
+runs before any DDL (`execute_ddl`) and before any INSERT / UPDATE / DELETE on a
+schema table. It admits the engine's internal context (`None`), a system context
+(API keys, server functions) and the `system_admin` role, the same rule as
+workspace management over REST. Schema-table UPDATE / DELETE also no longer
+route to a background bulk job, which had answered "accepted" to a write that
+was going to be refused and retried it three times.
+
+Same release: `Archetypes` / `ElementTypes` accept DML with the full JSON body
+(the DDL grammar cannot carry `$type` controls, `config` or `meta.editor`),
+`Workspaces` accepts INSERT / UPDATE through `WorkspaceService::put`, and a
+`sync` package install keeps the workspace types an installation added.

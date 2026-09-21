@@ -1254,25 +1254,16 @@ fn test_child_of_trailing_slash_normalizes_to_the_same_column_value() {
 }
 
 // ---------------------------------------------------------------------------
-// Schema tables: an equality filter on the primary key does NOT reach the
+// Schema tables: an equality filter on the primary key REACHES the
 // schema-table reader.
 // ---------------------------------------------------------------------------
 
-/// `SELECT ... FROM Archetypes WHERE name = '...'` plans a `PropertyIndexScan`
-/// against the CONTENT property index, not the type registry, so it silently
-/// returns zero rows.
-///
-/// Only `TableScan` dispatches into `execute_schema_table_scan`
-/// (`scan_executors/table_scan.rs`), and the planner has no notion of a schema
-/// table, so any predicate it can serve from an index diverts the read.
-///
-/// This test pins the CURRENT behaviour because the public reference documents
-/// it as a rule ("full-table SELECTs only"). **If you fix the planner to keep
-/// schema tables on a TableScan, this test will fail — that is the reminder to
-/// delete that rule from the docs**, in this repo and in the website's
-/// `docs/reference/sql/schema-tables.md`.
+/// `SELECT ... FROM Archetypes WHERE name = '...'` used to plan a
+/// `PropertyIndexScan` against the CONTENT property index and return zero rows,
+/// because only `TableScan` dispatches into `execute_schema_table_scan`. A
+/// schema table now always plans as a TableScan carrying the filter.
 #[test]
-fn schema_table_equality_on_primary_key_diverts_off_the_schema_reader() {
+fn schema_table_equality_on_primary_key_reaches_the_schema_reader() {
     let planner = PhysicalPlanner::new();
     let schema = Arc::new(TableSchema {
         table_name: "Archetypes".to_string(),
@@ -1314,10 +1305,13 @@ fn schema_table_equality_on_primary_key_diverts_off_the_schema_reader() {
 
     let physical = planner.plan(&filter).unwrap();
     assert!(
-        !matches!(physical, PhysicalPlan::TableScan { .. }),
-        "the planner now keeps a filtered schema table on a TableScan, which \
-         means the read reaches the type registry. Good — now delete the \
-         'full-table SELECTs only' rule from the schema-tables reference."
+        matches!(physical, PhysicalPlan::TableScan { .. })
+            || physical
+                .inputs()
+                .iter()
+                .any(|p| matches!(p, PhysicalPlan::TableScan { .. })),
+        "a filtered schema table must stay on a TableScan so the read reaches \
+         the type registry: {physical:?}"
     );
 }
 

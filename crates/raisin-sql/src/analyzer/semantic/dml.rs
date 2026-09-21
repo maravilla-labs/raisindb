@@ -398,10 +398,10 @@ impl<'a> AnalyzerContext<'a> {
 
     /// Resolve a table name to a DML target and schema
     ///
-    /// Schema tables (NodeTypes, Archetypes, ElementTypes) must use DDL syntax.
-    /// DML operations are not yet supported on regular workspace tables.
+    /// Schema tables (NodeTypes, Archetypes, ElementTypes, Workspaces) take DML
+    /// with their JSON body; a workspace name resolves to its nodes table.
     fn resolve_dml_target(&self, table_name: &str) -> Result<(DmlTableTarget, TableDef)> {
-        // Check if it's a schema table - these now require DDL syntax
+        // A reserved schema table
         if is_schema_table(table_name) {
             let kind = SchemaTableKind::from_table_name(table_name).ok_or_else(|| {
                 AnalysisError::InternalError(format!(
@@ -410,31 +410,20 @@ impl<'a> AnalyzerContext<'a> {
                 ))
             })?;
 
-            // `Workspaces` has no DDL equivalent — it is read-only over SQL.
-            // Workspaces are defined by package install / the management API,
-            // which also creates the nodes table, seeds `initial_structure` and
-            // registers the workspace in the catalog; a row write would do none
-            // of that, so point at the right tool instead of a DDL form that
-            // does not exist.
-            let ddl_syntax = match kind {
-                SchemaTableKind::NodeTypes => "CREATE/ALTER/DROP NODETYPE",
-                SchemaTableKind::Archetypes => "CREATE/ALTER/DROP ARCHETYPE",
-                SchemaTableKind::ElementTypes => "CREATE/ALTER/DROP ELEMENTTYPE",
-                SchemaTableKind::Workspaces => {
-                    return Err(AnalysisError::UnsupportedStatement(format!(
-                        "'{}' is read-only: workspaces are defined by package install \
-                         (workspaces/*.yaml) or the management API, not by SQL. \
-                         SELECT here to read allowed_node_types / allowed_root_node_types.",
-                        kind.table_name()
-                    )))
-                }
-            };
-
-            return Err(AnalysisError::UnsupportedStatement(format!(
-                "Direct DML operations on '{}' are not allowed. Use DDL syntax instead: {}",
-                kind.table_name(),
-                ddl_syntax
-            )));
+            // SCHEMA TABLES TAKE DML WITH THE FULL JSON BODY — the same shape a
+            // package YAML carries. The DDL grammar cannot express an editor (a
+            // field's `$type` control and `config`, the `meta.editor` layout),
+            // and a tool that holds a schema as data should not have to render
+            // it into DDL text and back. `Workspaces` writes go through the
+            // workspace service, exactly as the management API does. Every
+            // schema write requires an operator (`schema_auth` in
+            // raisin-sql-execution).
+            let schema = self
+                .catalog
+                .get_table(kind.table_name())
+                .cloned()
+                .ok_or_else(|| AnalysisError::TableNotFound(kind.table_name().to_string()))?;
+            return Ok((DmlTableTarget::SchemaTable(kind), schema));
         }
 
         // Check if it's a workspace table

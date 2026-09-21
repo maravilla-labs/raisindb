@@ -112,7 +112,8 @@ pub(super) fn build_nodetype_from_columns(
 pub(super) fn build_archetype_from_columns(
     col_map: &IndexMap<String, PropertyValue>,
 ) -> Result<Archetype, Error> {
-    let id = extract_string_column(col_map, "id")?;
+    // `id` is optional: a new definition gets one, as CREATE does.
+    let id = extract_optional_string_column(col_map, "id").unwrap_or_else(|| nanoid::nanoid!(16));
     let name = extract_string_column(col_map, "name")?;
     let version = col_map.get("version").and_then(|v| match v {
         PropertyValue::Integer(n) => Some(*n as i32),
@@ -171,7 +172,8 @@ pub(super) fn build_archetype_from_columns(
 pub(super) fn build_elementtype_from_columns(
     col_map: &IndexMap<String, PropertyValue>,
 ) -> Result<ElementType, Error> {
-    let id = extract_string_column(col_map, "id")?;
+    // `id` is optional: a new definition gets one, as CREATE does.
+    let id = extract_optional_string_column(col_map, "id").unwrap_or_else(|| nanoid::nanoid!(16));
     let name = extract_string_column(col_map, "name")?;
     let version = col_map.get("version").and_then(|v| match v {
         PropertyValue::Integer(n) => Some(*n as i32),

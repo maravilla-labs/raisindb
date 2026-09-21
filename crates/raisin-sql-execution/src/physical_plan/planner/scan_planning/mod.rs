@@ -75,6 +75,28 @@ impl PhysicalPlanner {
         projection: Option<Vec<String>>,
         context: &PlanContext,
     ) -> Result<PhysicalPlan, Error> {
+        // A SCHEMA TABLE HAS NO CONTENT INDEX. NodeTypes, Archetypes,
+        // ElementTypes and Workspaces are read from the type registry, and
+        // only a TableScan dispatches there; any index the planner picked
+        // (`WHERE name = '…'` became a PropertyIndexScan on `__name`) searched
+        // the CONTENT index and returned zero rows, silently. The registry is
+        // small, so the filter is applied to its rows.
+        if raisin_sql::analyzer::catalog::is_schema_table(table) {
+            return Ok(PhysicalPlan::TableScan {
+                tenant_id: self.default_tenant_id.to_string(),
+                repo_id: self.default_repo_id.to_string(),
+                branch: branch.to_string(),
+                workspace: workspace.to_string(),
+                table: table.to_string(),
+                alias: alias.clone(),
+                schema,
+                filter: fallback_filter,
+                projection,
+                limit: None,
+                reason: self.determine_scan_reason(canonical),
+            });
+        }
+
         // Priority 0: expand an indexable `col IN (...)` into a Union of
         // per-value equality scans (each reusing the existing equality builders).
         if let Some(union) = self.try_expand_in_union(
