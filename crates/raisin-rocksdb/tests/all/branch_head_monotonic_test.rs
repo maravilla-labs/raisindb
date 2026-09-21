@@ -74,9 +74,7 @@ fn build_node(path: &str, title: &str) -> Node {
     }
 }
 
-#[tokio::test]
-async fn commit_with_older_revision_does_not_regress_branch_head() -> Result<()> {
-    let temp_dir = TempDir::new().unwrap();
+async fn setup(temp_dir: &TempDir) -> Result<Arc<RocksDBStorage>> {
     let mut config = RocksDBConfig::default();
     config.path = temp_dir.path().to_path_buf();
     let storage = Arc::new(RocksDBStorage::with_config(config)?);
@@ -150,6 +148,14 @@ async fn commit_with_older_revision_does_not_regress_branch_head() -> Result<()>
         .put(TENANT, REPO, workspace)
         .await?;
 
+    Ok(storage)
+}
+
+#[tokio::test]
+async fn commit_with_older_revision_does_not_regress_branch_head() -> Result<()> {
+    let temp_dir = TempDir::new().unwrap();
+    let storage = setup(&temp_dir).await?;
+
     // Transaction A: write a node, allocating the OLDER revision, but don't
     // commit yet.
     let node_a = build_node("/node-a", "Node A");
@@ -210,6 +216,151 @@ async fn commit_with_older_revision_does_not_regress_branch_head() -> Result<()>
         .await?;
     assert!(read_a.is_some(), "node-a must remain readable");
     assert!(read_b.is_some(), "node-b must remain readable");
+
+    Ok(())
+}
+
+/// The guard above compares against the branch record as READ, and every
+/// writer reads it before its batch lands. Two writers that both read the same
+/// HEAD both pass the guard, and whichever writes LAST wins — so an older
+/// revision could still regress HEAD, just not sequentially. Observed live: an
+/// AI tool-result aggregation node (a transaction commit at `…972-1`) was
+/// hidden by a concurrent tool-call status update (the non-transactional
+/// `update_property_by_path` path, at `…972-0`) that wrote a moment later, so
+/// no trigger ever matched it and the agent hung.
+///
+/// Races both write paths against each other and asserts that, once everything
+/// has landed, every created node is visible to a HEAD-bounded read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_commits_never_leave_a_created_node_above_head() -> Result<()> {
+    use raisin_storage::scope::StorageScope;
+    use raisin_storage::transactional::TransactionalContext;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    const WRITERS: usize = 16;
+    const ROUNDS: usize = 60;
+
+    let temp_dir = TempDir::new().unwrap();
+    let storage = setup(&temp_dir).await?;
+
+    let shared = build_node("/shared", "Shared");
+    let tx = storage.begin_context().await?;
+    tx.set_tenant_repo(TENANT, REPO)?;
+    tx.set_branch(BRANCH)?;
+    tx.set_actor("test")?;
+    tx.set_auth_context(AuthContext::system())?;
+    tx.set_validate_schema(false)?;
+    tx.add_node(WORKSPACE, &shared).await?;
+    tx.commit().await?;
+
+    let invisible_after_commit = Arc::new(AtomicUsize::new(0));
+    let done = Arc::new(AtomicBool::new(false));
+
+    // Watch HEAD while the writers run: it must never move backwards.
+    let watcher = {
+        let storage = storage.clone();
+        let done = done.clone();
+        tokio::spawn(async move {
+            let mut last = storage.branches().get_head(TENANT, REPO, BRANCH).await?;
+            let mut regressions = Vec::new();
+            while !done.load(Ordering::SeqCst) {
+                let head = storage.branches().get_head(TENANT, REPO, BRANCH).await?;
+                if head < last {
+                    regressions.push((last, head));
+                }
+                last = head;
+                tokio::task::yield_now().await;
+            }
+            Ok::<_, raisin_error::Error>(regressions)
+        })
+    };
+
+    let mut tasks = Vec::new();
+    for writer in 0..WRITERS {
+        let storage = storage.clone();
+        let invisible_after_commit = invisible_after_commit.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut created = Vec::new();
+            for round in 0..ROUNDS {
+                if writer % 2 == 0 {
+                    // Transaction commit path (RocksDBTransaction::commit).
+                    let path = format!("/created-{writer}-{round}");
+                    let tx = storage.begin_context().await?;
+                    tx.set_tenant_repo(TENANT, REPO)?;
+                    tx.set_branch(BRANCH)?;
+                    tx.set_actor("test")?;
+                    tx.set_auth_context(AuthContext::system())?;
+                    tx.set_validate_schema(false)?;
+                    tx.add_node(WORKSPACE, &build_node(&path, "Created"))
+                        .await?;
+                    tx.commit().await?;
+
+                    // The window the incident fell into: the trigger evaluator
+                    // reads the node right after its create commits. HEAD only
+                    // moves forward, so it must be visible now and forever.
+                    let probe = storage.begin_context().await?;
+                    probe.set_tenant_repo(TENANT, REPO)?;
+                    probe.set_branch(BRANCH)?;
+                    probe.set_auth_context(AuthContext::system())?;
+                    if probe.get_node_by_path(WORKSPACE, &path).await?.is_none() {
+                        invisible_after_commit.fetch_add(1, Ordering::SeqCst);
+                    }
+                    created.push(path);
+                } else {
+                    // Repository write path (write_batch_with_head).
+                    storage
+                        .nodes()
+                        .update_property_by_path(
+                            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
+                            "/shared",
+                            "title",
+                            PropertyValue::String(format!("{writer}-{round}")),
+                        )
+                        .await?;
+                }
+            }
+            Ok::<_, raisin_error::Error>(created)
+        }));
+    }
+
+    let mut created = Vec::new();
+    for task in tasks {
+        created.extend(task.await.expect("writer task panicked")?);
+    }
+    done.store(true, Ordering::SeqCst);
+    let regressions = watcher.await.expect("watcher task panicked")?;
+
+    assert!(
+        regressions.is_empty(),
+        "branch HEAD moved backwards {} time(s) under concurrent writers, e.g. {:?}",
+        regressions.len(),
+        regressions.first()
+    );
+    assert_eq!(
+        invisible_after_commit.load(Ordering::SeqCst),
+        0,
+        "a node was invisible to a HEAD-bounded read right after its create committed"
+    );
+
+    let probe = storage.begin_context().await?;
+    probe.set_tenant_repo(TENANT, REPO)?;
+    probe.set_branch(BRANCH)?;
+    probe.set_auth_context(AuthContext::system())?;
+    let mut above_head = Vec::new();
+    for path in &created {
+        if probe.get_node_by_path(WORKSPACE, path).await?.is_none() {
+            above_head.push(path.clone());
+        }
+    }
+
+    assert!(
+        above_head.is_empty(),
+        "{} of {} committed nodes sit above branch HEAD {} and are invisible to HEAD-bounded reads: {:?}",
+        above_head.len(),
+        created.len(),
+        storage.branches().get_head(TENANT, REPO, BRANCH).await?,
+        above_head
+    );
 
     Ok(())
 }

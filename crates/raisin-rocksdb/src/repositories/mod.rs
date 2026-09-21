@@ -36,6 +36,7 @@ mod workspaces;
 
 pub use archetypes::ArchetypeRepositoryImpl;
 pub use audit::{RocksDBAuditRepo, DEFAULT_AUDIT_READ_LIMIT};
+pub(crate) use branches::lock_branch_record;
 pub use branches::BranchRepositoryImpl;
 pub use compound_index::CompoundIndexRepositoryImpl;
 pub use element_types::ElementTypeRepositoryImpl;

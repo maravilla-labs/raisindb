@@ -83,16 +83,11 @@ impl NodeRepositoryImpl {
         self.revision_repo
             .index_node_change_to_batch(&mut batch, tenant_id, repo_id, &revision, id)?;
 
-        // Add branch HEAD update to the same atomic batch
+        // Add branch HEAD update to the batch and write it atomically
         let updated_branch = self
             .branch_repo
-            .update_head_to_batch(&mut batch, tenant_id, repo_id, branch, revision)
+            .write_batch_with_head(batch, tenant_id, repo_id, branch, revision)
             .await?;
-
-        // Atomic commit - all operations succeed or fail together
-        self.db
-            .write(batch)
-            .map_err(|e| raisin_error::Error::storage(format!("Atomic delete failed: {}", e)))?;
 
         // Capture replication events (after atomic write)
         self.branch_repo

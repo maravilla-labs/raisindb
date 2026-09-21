@@ -140,16 +140,11 @@ impl NodeRepositoryImpl {
             node_id,
         )?;
 
-        // Add branch HEAD update to the same atomic batch
+        // Add branch HEAD update to the batch and write it atomically
         let updated_branch = self
             .branch_repo
-            .update_head_to_batch(&mut revision_batch, tenant_id, repo_id, branch, revision)
+            .write_batch_with_head(revision_batch, tenant_id, repo_id, branch, revision)
             .await?;
-
-        // Write revision indexes + branch HEAD atomically
-        self.db.write(revision_batch).map_err(|e| {
-            raisin_error::Error::storage(format!("Atomic revision index failed: {}", e))
-        })?;
 
         // STEP 3.5: Capture replication events (after atomic write)
         self.branch_repo

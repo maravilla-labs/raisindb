@@ -17,6 +17,8 @@ mod divergence;
 mod head;
 mod merge;
 
+pub(crate) use head::lock_branch_record;
+
 use crate::jobs::JobDataStore;
 use raisin_storage::jobs::JobRegistry;
 use rocksdb::DB;

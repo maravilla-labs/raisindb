@@ -271,13 +271,8 @@ impl NodeRepositoryImpl {
 
         let updated_branch = self
             .branch_repo
-            .update_head_to_batch(&mut batch, tenant_id, repo_id, branch, revision)
+            .write_batch_with_head(batch, tenant_id, repo_id, branch, revision)
             .await?;
-
-        // STEP 6: Atomic commit
-        self.db
-            .write(batch)
-            .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
 
         // The write is durable — release every path reservation now (the
         // guard would also release on drop; doing it explicitly documents the

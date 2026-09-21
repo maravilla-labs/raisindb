@@ -6,7 +6,7 @@ use crate::{cf, cf_handle, keys};
 use raisin_context::Branch;
 use raisin_error::Result;
 
-use super::super::BranchRepositoryImpl;
+use super::super::{lock_branch_record, BranchRepositoryImpl};
 
 impl BranchRepositoryImpl {
     /// Set or clear the upstream branch for divergence comparison
@@ -18,6 +18,9 @@ impl BranchRepositoryImpl {
         upstream: Option<&str>,
     ) -> Result<Branch> {
         use raisin_storage::BranchRepository;
+
+        // The whole record is written back, HEAD included: see `branches/head.rs`.
+        let _branch_lock = lock_branch_record(tenant_id, repo_id, branch_name).await;
 
         let mut branch = self
             .get_branch(tenant_id, repo_id, branch_name)
@@ -64,6 +67,9 @@ impl BranchRepositoryImpl {
     ) -> Result<Branch> {
         use raisin_storage::BranchRepository;
 
+        // The whole record is written back, HEAD included: see `branches/head.rs`.
+        let _branch_lock = lock_branch_record(tenant_id, repo_id, branch_name).await;
+
         let mut branch = self
             .get_branch(tenant_id, repo_id, branch_name)
             .await?
@@ -94,6 +100,9 @@ impl BranchRepositoryImpl {
         description: Option<&str>,
     ) -> Result<Branch> {
         use raisin_storage::BranchRepository;
+
+        // The whole record is written back, HEAD included: see `branches/head.rs`.
+        let _branch_lock = lock_branch_record(tenant_id, repo_id, branch_name).await;
 
         let mut branch = self
             .get_branch(tenant_id, repo_id, branch_name)

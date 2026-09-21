@@ -1,33 +1,38 @@
 //! Batch-aware branch operations for atomic transactions
 //!
-//! These methods write to WriteBatch instead of directly to the DB,
-//! enabling inclusion in larger atomic transactions.
+//! These methods carry a branch HEAD advance inside the caller's WriteBatch,
+//! so it lands atomically with the changes it makes visible.
 
 use crate::{cf, cf_handle, keys};
 use raisin_context::Branch;
 use raisin_error::Result;
 use raisin_hlc::HLC;
 
-use super::super::BranchRepositoryImpl;
+use super::super::{lock_branch_record, BranchRepositoryImpl};
 
 impl BranchRepositoryImpl {
-    /// Update branch HEAD within a WriteBatch (for atomic operations)
+    /// Add a branch HEAD advance to `batch` and write the batch, atomically
+    /// with respect to every other writer of the branch record.
     ///
-    /// This method writes to the provided batch instead of directly to the DB,
-    /// allowing the caller to include it in a larger atomic transaction.
+    /// The HEAD update rides in the caller's batch so the nodes and the HEAD
+    /// that makes them visible land together. The branch record is read,
+    /// checked and written under [`lock_branch_record`]: the monotonic guard
+    /// is only meaningful if no other writer can land between the read and
+    /// the write (see `branches/head.rs` for the lost-update this prevents).
     ///
     /// **Note:** This method does NOT handle replication capture. The caller
-    /// should call `capture_head_update_for_replication` after the batch is
-    /// written successfully.
-    pub async fn update_head_to_batch(
+    /// should call `capture_head_update_for_replication` afterwards.
+    pub async fn write_batch_with_head(
         &self,
-        batch: &mut rocksdb::WriteBatch,
+        mut batch: rocksdb::WriteBatch,
         tenant_id: &str,
         repo_id: &str,
         branch_name: &str,
         new_head: HLC,
     ) -> Result<Branch> {
         use raisin_storage::BranchRepository;
+
+        let _branch_lock = lock_branch_record(tenant_id, repo_id, branch_name).await;
 
         let mut branch = self
             .get_branch(tenant_id, repo_id, branch_name)
@@ -37,7 +42,7 @@ impl BranchRepositoryImpl {
             })?;
 
         tracing::debug!(
-            "update_head_to_batch: branch={}, old_head={:?}, new_head={:?}",
+            "write_batch_with_head: branch={}, old_head={:?}, new_head={:?}",
             branch_name,
             branch.head,
             new_head
@@ -46,21 +51,25 @@ impl BranchRepositoryImpl {
         // never move the head back below an already-visible later revision.
         if new_head <= branch.head {
             tracing::debug!(
-                "update_head_to_batch: skipping non-advancing head update branch={} current={:?} candidate={:?}",
+                "write_batch_with_head: skipping non-advancing head update branch={} current={:?} candidate={:?}",
                 branch_name,
                 branch.head,
                 new_head
             );
-            return Ok(branch);
+        } else {
+            branch.head = new_head;
+
+            let key = keys::branch_key(tenant_id, repo_id, branch_name);
+            let value = rmp_serde::to_vec(&branch)
+                .map_err(|e| raisin_error::Error::storage(format!("Serialization error: {}", e)))?;
+
+            let cf = cf_handle(&self.db, cf::BRANCHES)?;
+            batch.put_cf(cf, key, value);
         }
-        branch.head = new_head;
 
-        let key = keys::branch_key(tenant_id, repo_id, branch_name);
-        let value = rmp_serde::to_vec(&branch)
-            .map_err(|e| raisin_error::Error::storage(format!("Serialization error: {}", e)))?;
-
-        let cf = cf_handle(&self.db, cf::BRANCHES)?;
-        batch.put_cf(cf, key, value);
+        self.db
+            .write(batch)
+            .map_err(|e| raisin_error::Error::storage(format!("Atomic write failed: {}", e)))?;
 
         Ok(branch)
     }
@@ -68,7 +77,7 @@ impl BranchRepositoryImpl {
     /// Capture branch HEAD update for replication (call after batch is written)
     ///
     /// This should be called after a successful batch write that included
-    /// `update_head_to_batch` to ensure replication captures the change.
+    /// `write_batch_with_head` to ensure replication captures the change.
     pub async fn capture_head_update_for_replication(
         &self,
         tenant_id: &str,

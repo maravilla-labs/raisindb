@@ -17,7 +17,7 @@ use raisin_storage::jobs::{JobContext, JobType};
 use raisin_storage::BranchRepository;
 use std::collections::HashMap;
 
-use super::BranchRepositoryImpl;
+use super::{lock_branch_record, BranchRepositoryImpl};
 
 impl BranchRepository for BranchRepositoryImpl {
     async fn create_branch(
@@ -368,6 +368,9 @@ impl BranchRepository for BranchRepositoryImpl {
         branch_name: &str,
         new_head: HLC,
     ) -> Result<()> {
+        // Held until the record is written: see `branches/head.rs`.
+        let _branch_lock = lock_branch_record(tenant_id, repo_id, branch_name).await;
+
         let mut branch = self
             .get_branch(tenant_id, repo_id, branch_name)
             .await?
@@ -436,6 +439,9 @@ impl BranchRepository for BranchRepositoryImpl {
         branch_name: &str,
         new_head: HLC,
     ) -> Result<()> {
+        // Held until the record is written: see `branches/head.rs`.
+        let _branch_lock = lock_branch_record(tenant_id, repo_id, branch_name).await;
+
         let mut branch = self
             .get_branch(tenant_id, repo_id, branch_name)
             .await?

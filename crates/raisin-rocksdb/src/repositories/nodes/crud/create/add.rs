@@ -154,19 +154,17 @@ impl NodeRepositoryImpl {
         self.revision_repo
             .index_node_change_to_batch(&mut batch, tenant_id, repo_id, &revision, &node.id)?;
 
-        let updated_branch = self
-            .branch_repo
-            .update_head_to_batch(&mut batch, tenant_id, repo_id, branch, revision)
-            .await?;
-
         let revision_index_time = step_start.elapsed().as_micros();
 
         // ========== STEP 5: RocksDB write batch (single atomic operation) ==========
+        // Branch HEAD advance rides in the same batch; the write happens under
+        // the branch record lock so a concurrent writer cannot regress HEAD.
         let step_start = std::time::Instant::now();
 
-        self.db
-            .write(batch)
-            .map_err(|e| raisin_error::Error::storage(format!("Atomic write failed: {}", e)))?;
+        let updated_branch = self
+            .branch_repo
+            .write_batch_with_head(batch, tenant_id, repo_id, branch, revision)
+            .await?;
 
         let rocksdb_write_time = step_start.elapsed().as_micros();
 

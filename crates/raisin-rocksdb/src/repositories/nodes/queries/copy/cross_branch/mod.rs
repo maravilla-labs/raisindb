@@ -326,13 +326,8 @@ impl NodeRepositoryImpl {
 
         let updated_branch = self
             .branch_repo
-            .update_head_to_batch(&mut batch, tenant_id, repo_id, target_branch, revision)
+            .write_batch_with_head(batch, tenant_id, repo_id, target_branch, revision)
             .await?;
-
-        // ========== STEP 7: atomic commit ==========
-        self.db.write(batch).map_err(|e| {
-            raisin_error::Error::storage(format!("Atomic cross-branch copy failed: {}", e))
-        })?;
 
         tracing::info!(
             "copy_nodes_across_branches: {} copied, {} pruned, {} -> {} at revision {}",

@@ -123,10 +123,20 @@ pub(super) async fn commit_impl(tx: &RocksDBTransaction) -> Result<()> {
     let mut created_revision_meta: Option<raisin_storage::RevisionMeta> = None;
     let mut branch_updates = Vec::new();
 
+    // Held from reading the branch record (RevisionMeta parent, HEAD guard)
+    // until the batch carrying the new HEAD is written. Without it a
+    // concurrent writer that read the same HEAD can land after us with an
+    // OLDER revision and regress HEAD below our nodes — see
+    // `repositories/branches/head.rs`.
+    let mut branch_lock = None;
+
     // ALWAYS update branch head when there's a revision (even for relation-only changes)
     // This ensures replicated data becomes visible immediately
     if let (Some(branch_name), Some(new_revision)) = (branch.as_deref(), max_revision.as_ref()) {
         debug!(branch = %branch_name, revision = %new_revision, "Updating branch head");
+
+        branch_lock =
+            Some(crate::repositories::lock_branch_record(&tenant_id, &repo_id, branch_name).await);
 
         // Create RevisionMeta with defaults if actor/message not set
         let actor_str = actor.as_deref().map(|s| s.as_str()).unwrap_or("system");
@@ -202,6 +212,8 @@ pub(super) async fn commit_impl(tx: &RocksDBTransaction) -> Result<()> {
             raisin_error::Error::storage(format!("Commit write task failed to join: {}", e))
         })?
         .map_err(|e| raisin_error::Error::storage(format!("Transaction commit failed: {}", e)))?;
+
+    drop(branch_lock);
 
     tracing::debug!("Atomic commit successful");
 
