@@ -109,20 +109,21 @@ impl NodeRepositoryImpl {
         use raisin_error::Error;
 
         // Check if node exists
-        let node_exists = self
+        let node = match self
             .get_impl(tenant_id, repo_id, branch, workspace, node_id, false)
             .await?
-            .is_some();
+        {
+            Some(node) => node,
+            None => return Ok(false),
+        };
 
-        if !node_exists {
-            return Ok(false);
-        }
-
-        // Check for children if requested
+        // Check for children if requested. `list_children_impl` takes the
+        // parent's PATH; handing it the id looked up a path that never exists
+        // and failed every non-cascade delete with "Parent node not found".
         if check_has_children {
             let children = self
                 .list_children_impl(
-                    tenant_id, repo_id, branch, workspace, node_id, None, // HEAD revision
+                    tenant_id, repo_id, branch, workspace, &node.path, None, // HEAD revision
                 )
                 .await?;
 

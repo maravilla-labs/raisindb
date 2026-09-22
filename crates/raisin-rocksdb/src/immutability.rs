@@ -48,25 +48,50 @@
 use std::collections::HashMap;
 
 use raisin_error::Result;
+use raisin_models::nodes::is_reserved_property_key;
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::types::NodeType;
 
 /// Reject a property-changing write to an immutable node.
 ///
-/// No-op unless `node_type.immutable == Some(true)` AND `old_properties !=
-/// new_properties`. Callers only invoke this when `node_type` was
-/// successfully resolved for an UPDATE (not a create).
+/// No-op unless `node_type.immutable == Some(true)` AND the old and new
+/// property maps differ in an author-owned key. Callers only invoke this when
+/// `node_type` was successfully resolved for an UPDATE (not a create).
+///
+/// Reserved (`$`-prefixed) keys are server-computed — the type-membership sets
+/// `$mixins` / `$supertypes` are stamped onto every write AFTER this check
+/// runs, so the stored node carries them and the incoming one does not yet.
+/// Comparing them rejected every re-write of an immutable node, even a pure
+/// move that touched no property at all.
 pub fn reject_if_immutable(
     node_type: &NodeType,
     node_id: &str,
     old_properties: &HashMap<String, PropertyValue>,
     new_properties: &HashMap<String, PropertyValue>,
 ) -> Result<()> {
-    if node_type.immutable == Some(true) && old_properties != new_properties {
+    if node_type.immutable == Some(true) && authored_differ(old_properties, new_properties) {
         return Err(raisin_error::Error::Conflict(format!(
             "Node '{}' is immutable (NodeType '{}'); property update rejected",
             node_id, node_type.name
         )));
     }
     Ok(())
+}
+
+/// Whether two property maps differ in any key that is not server-computed.
+fn authored_differ(
+    old_properties: &HashMap<String, PropertyValue>,
+    new_properties: &HashMap<String, PropertyValue>,
+) -> bool {
+    let authored = |props: &HashMap<String, PropertyValue>| {
+        props
+            .iter()
+            .filter(|(key, _)| !is_reserved_property_key(key))
+            .count()
+    };
+    authored(old_properties) != authored(new_properties)
+        || old_properties
+            .iter()
+            .filter(|(key, _)| !is_reserved_property_key(key))
+            .any(|(key, value)| new_properties.get(key) != Some(value))
 }
