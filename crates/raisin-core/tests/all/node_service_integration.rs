@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use raisin_core::NodeService;
+use raisin_models::auth::AuthContext;
 use raisin_models::nodes::properties::schema::{PropertyType, PropertyValueSchema};
 use raisin_models::nodes::types::{
     initial_structure::{InitialChild, InitialNodeStructure},
@@ -329,7 +330,7 @@ async fn test_prevent_nodetype_change() {
 #[tokio::test]
 async fn test_initial_structure_auto_creation() {
     let storage = setup_storage();
-    let service = NodeService::new(storage.clone());
+    let service = NodeService::new(storage.clone()).with_auth(AuthContext::system());
 
     // Create child NodeType
     create_test_node_type(&*storage, "test:File", vec![], false, true).await;
@@ -341,7 +342,7 @@ async fn test_initial_structure_auto_creation() {
             InitialChild {
                 name: "README.md".to_string(),
                 node_type: "test:File".to_string(),
-                archetype: Some("text/markdown".to_string()),
+                archetype: None,
                 properties: None,
                 translations: None,
                 children: None,
@@ -349,7 +350,7 @@ async fn test_initial_structure_auto_creation() {
             InitialChild {
                 name: "index.html".to_string(),
                 node_type: "test:File".to_string(),
-                archetype: Some("text/html".to_string()),
+                archetype: None,
                 properties: None,
                 translations: None,
                 children: None,
@@ -408,13 +409,13 @@ async fn test_initial_structure_auto_creation() {
         "Should auto-create 2 children from initial_structure"
     );
 
-    // Names are sanitized (dots removed)
+    // Names are sanitized: lowercased, dots kept (a file name keeps its extension)
     let has_readme = children
         .iter()
-        .any(|c| c.name == "readmemd" && c.node_type == "test:File");
+        .any(|c| c.name == "readme.md" && c.node_type == "test:File");
     let has_index = children
         .iter()
-        .any(|c| c.name == "indexhtml" && c.node_type == "test:File");
+        .any(|c| c.name == "index.html" && c.node_type == "test:File");
 
     assert!(has_readme, "Should have created README child");
     assert!(has_index, "Should have created index child");
@@ -423,7 +424,7 @@ async fn test_initial_structure_auto_creation() {
 #[tokio::test]
 async fn test_nested_initial_structure() {
     let storage = setup_storage();
-    let service = NodeService::new(storage.clone());
+    let service = NodeService::new(storage.clone()).with_auth(AuthContext::system());
 
     // Create child NodeTypes
     create_test_node_type(&*storage, "test:Folder", vec![], false, true).await;
@@ -441,7 +442,7 @@ async fn test_nested_initial_structure() {
             children: Some(vec![InitialChild {
                 name: "main.rs".to_string(),
                 node_type: "test:File".to_string(),
-                archetype: Some("text/rust".to_string()),
+                archetype: None,
                 properties: None,
                 translations: None,
                 children: None,
@@ -504,14 +505,14 @@ async fn test_nested_initial_structure() {
     assert_eq!(nested_children.len(), 1, "Should have nested child");
 
     let main_file = &nested_children[0];
-    assert_eq!(main_file.name, "mainrs"); // sanitized
+    assert_eq!(main_file.name, "main.rs"); // sanitized, extension kept
     assert_eq!(main_file.node_type, "test:File");
 }
 
 #[tokio::test]
 async fn test_initial_structure_with_transaction_api() {
     let storage = setup_storage();
-    let service = NodeService::new(storage.clone());
+    let service = NodeService::new(storage.clone()).with_auth(AuthContext::system());
 
     // Create child NodeType
     create_test_node_type(&*storage, "test:File", vec![], false, true).await;
@@ -523,7 +524,7 @@ async fn test_initial_structure_with_transaction_api() {
             InitialChild {
                 name: "README.md".to_string(),
                 node_type: "test:File".to_string(),
-                archetype: Some("text/markdown".to_string()),
+                archetype: None,
                 properties: None,
                 translations: None,
                 children: None,
@@ -531,7 +532,7 @@ async fn test_initial_structure_with_transaction_api() {
             InitialChild {
                 name: "LICENSE".to_string(),
                 node_type: "test:File".to_string(),
-                archetype: Some("text/plain".to_string()),
+                archetype: None,
                 properties: None,
                 translations: None,
                 children: None,
@@ -621,10 +622,10 @@ async fn test_initial_structure_with_transaction_api() {
         "Should auto-create 2 children from initial_structure via Transaction API"
     );
 
-    // Names are sanitized (dots removed)
+    // Names are sanitized: lowercased, dots kept (a file name keeps its extension)
     let has_readme = children
         .iter()
-        .any(|c| c.name == "readmemd" && c.node_type == "test:File");
+        .any(|c| c.name == "readme.md" && c.node_type == "test:File");
     let has_license = children
         .iter()
         .any(|c| c.name == "license" && c.node_type == "test:File");
@@ -642,7 +643,7 @@ async fn test_initial_structure_with_transaction_api() {
 #[tokio::test]
 async fn test_nested_initial_structure_with_transaction_api() {
     let storage = setup_storage();
-    let service = NodeService::new(storage.clone());
+    let service = NodeService::new(storage.clone()).with_auth(AuthContext::system());
 
     // Create child NodeTypes
     create_test_node_type(&*storage, "test:Folder", vec![], false, true).await;
@@ -661,7 +662,7 @@ async fn test_nested_initial_structure_with_transaction_api() {
                 InitialChild {
                     name: "guide.md".to_string(),
                     node_type: "test:File".to_string(),
-                    archetype: Some("text/markdown".to_string()),
+                    archetype: None,
                     properties: None,
                     translations: None,
                     children: None,
@@ -669,7 +670,7 @@ async fn test_nested_initial_structure_with_transaction_api() {
                 InitialChild {
                     name: "api.md".to_string(),
                     node_type: "test:File".to_string(),
-                    archetype: Some("text/markdown".to_string()),
+                    archetype: None,
                     properties: None,
                     translations: None,
                     children: None,
@@ -756,10 +757,10 @@ async fn test_nested_initial_structure_with_transaction_api() {
     // Verify both nested files were created
     let has_guide = nested_children
         .iter()
-        .any(|c| c.name == "guidemd" && c.node_type == "test:File");
+        .any(|c| c.name == "guide.md" && c.node_type == "test:File");
     let has_api = nested_children
         .iter()
-        .any(|c| c.name == "apimd" && c.node_type == "test:File");
+        .any(|c| c.name == "api.md" && c.node_type == "test:File");
 
     assert!(
         has_guide,
@@ -778,14 +779,16 @@ async fn test_workspace_isolation() {
         "default".to_string(),
         "main".to_string(),
         "ws1".to_string(),
-    );
+    )
+    .with_auth(AuthContext::system());
     let service_ws2 = NodeService::new_with_context(
         storage.clone(),
         "default".to_string(),
         "default".to_string(),
         "main".to_string(),
         "ws2".to_string(),
-    );
+    )
+    .with_auth(AuthContext::system());
 
     // Create same NodeType in two workspaces
     create_test_node_type(&*storage, "test:Article", vec![], false, true).await;

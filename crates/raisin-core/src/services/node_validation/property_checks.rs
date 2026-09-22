@@ -474,8 +474,10 @@ fn coerce_undeclared_decimals_and_string_numbers(node: &mut Node, resolved: &Res
 /// enforced it, the two doors started refusing each other's values: the admin
 /// console read an integration node, PUT its properties back unchanged, and got
 ///
-///     Property 'capabilities_checked_at' on NodeType 'raisin:Integration'
-///     is declared String but the value is Date
+/// ```text
+/// Property 'capabilities_checked_at' on NodeType 'raisin:Integration'
+/// is declared String but the value is Date
+/// ```
 ///
 /// for a value the server itself had just written. The declarations are now
 /// `Date` (which is what these values are, and what every other `_at` property

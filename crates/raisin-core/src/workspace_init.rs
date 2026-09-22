@@ -121,13 +121,13 @@ pub fn load_embedded_workspaces_with_hashes() -> Vec<(Workspace, String)> {
 /// # Example
 /// ```no_run
 /// use raisin_core::workspace_init::init_repository_workspaces;
-/// use raisin_storage_rocks::RocksStorage;
+/// use raisin_rocksdb::RocksDBStorage;
 /// use raisin_error::Result;
 /// use std::sync::Arc;
 ///
 /// #[tokio::main]
 /// async fn main() -> Result<()> {
-///     let storage = Arc::new(RocksStorage::open("./data")?);
+///     let storage = Arc::new(RocksDBStorage::new("./data")?);
 ///
 ///     // Initialize workspaces for a new repository
 ///     init_repository_workspaces(

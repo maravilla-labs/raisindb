@@ -42,12 +42,12 @@ pub fn calculate_nodetype_version() -> String {
 /// # Example
 /// ```no_run
 /// use raisin_core::init::init_tenant_nodetypes;
-/// use raisin_storage_rocks::RocksStorage;
+/// use raisin_rocksdb::RocksDBStorage;
 /// use raisin_error::Result;
 ///
 /// #[tokio::main]
 /// async fn main() -> Result<()> {
-///     let storage = RocksStorage::open("./data")?;
+///     let storage = RocksDBStorage::new("./data")?;
 ///
 ///     // Initialize NodeTypes for specific tenant on first request
 ///     init_tenant_nodetypes(
@@ -101,13 +101,13 @@ fn load_global_nodetypes() -> Vec<NodeType> {
 /// # Example
 /// ```no_run
 /// use raisin_core::init::init_global_nodetypes;
-/// use raisin_storage_rocks::RocksStorage;
+/// use raisin_rocksdb::RocksDBStorage;
 /// use raisin_error::Result;
 /// use std::sync::Arc;
 ///
 /// #[tokio::main]
 /// async fn main() -> Result<()> {
-///     let storage = Arc::new(RocksStorage::open("./data")?);
+///     let storage = Arc::new(RocksDBStorage::new("./data")?);
 ///
 ///     // Initialize global NodeTypes on startup
 ///     init_global_nodetypes(storage.clone()).await?;

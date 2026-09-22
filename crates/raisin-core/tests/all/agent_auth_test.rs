@@ -195,7 +195,16 @@ fn execution_context_reads_exactly_one_word_as_own_rights() {
     );
     assert_eq!(execution_of(&own), AgentExecution::OwnRights);
 
-    for other in ["system", "user", "", "AGENT"] {
+    // `user` is the caller's own rights, not the agent's: resolved against
+    // whoever caused the execution (see `resolve_agent_context`).
+    let caller = node(
+        "/agents/a",
+        "raisin:AIAgent",
+        HashMap::from([("execution_context".to_string(), s("user"))]),
+    );
+    assert_eq!(execution_of(&caller), AgentExecution::CallerRights);
+
+    for other in ["system", "", "AGENT", "USER"] {
         let n = node(
             "/agents/a",
             "raisin:AIAgent",

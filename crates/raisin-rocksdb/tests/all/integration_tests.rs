@@ -2513,8 +2513,25 @@ mod mvcc_time_travel {
         let nodes = storage.nodes();
         let branches = storage.branches();
 
+        // Time travel needs history, and only a VERSIONABLE type keeps it: the
+        // standard fixture types are `versionable: false`, which overwrites in
+        // place at the same revision (enforced since the immutable/versionable
+        // NodeType flags), so both reads would see the latest write.
+        let versioned_type = NodeType {
+            versionable: Some(true),
+            ..fixture.create_test_nodetype("test:VersionedDoc")
+        };
+        storage
+            .node_types()
+            .put(
+                BranchScope::new(constants::TENANT, constants::REPO, constants::BRANCH),
+                versioned_type,
+                CommitMetadata::system("versioned type for time travel"),
+            )
+            .await?;
+
         // Create a node
-        let mut node = fixture.create_test_node("/doc", "raisin:Page");
+        let mut node = fixture.create_test_node("/doc", "test:VersionedDoc");
         nodes
             .create(
                 StorageScope::new(
