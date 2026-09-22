@@ -25,6 +25,7 @@ npx skills add maravilla-labs/raisindb/packages/raisindb-skills
 | **raisindb-functions-triggers** | Server-side functions (JavaScript, Starlark, and WebAssembly components in Rust/Go/TypeScript) and event-driven triggers |
 | **raisindb-workflows** | Durable workflows: designer format, loops, human approval tasks, saga compensation |
 | **raisindb-retrieval** | Search and RAG: hybrid full-text + vector search, chunking, the built-in `ask`/`search-documents`/`graph-context` functions, `db.search()`/`db.ask()`, citations and grounding, knowledge-graph retrieval |
+| **raisindb-agent-skills** | Write skills your RaisinDB agents load on demand: `SKILL.md`, the package / local / agent-only layers, `raisindb create skill`, granting with `skills:` |
 | **raisindb-messaging-agents** | AI agents with tools, chat pipeline, proactive user coordination, token safeguards |
 | **raisindb-mcp-servers** | Expose data and functions as Model Context Protocol (MCP) servers: `raisin:McpServer`, auto data tools, custom function tools, auth, connecting a client |
 | **raisindb-mcp-ui-widgets** | Attach interactive HTML widgets (MCP-UI) to MCP tools: `raisin:StaticSiteFolder`, `ui: { mode, entry }`, html vs uri-list, `#fragment` SPA routes, `@raisindb/mcp-ui-client`, widget-initiated tool calls |

@@ -9,6 +9,7 @@ import { SyncConfig } from './config.js';
 import { getToken } from '../auth.js';
 import { ChangeEvent } from './watcher.js';
 import { mapChangeToNode, parseTranslationLocale, type SchemaKind } from './mapping.js';
+import { skillMdToNodeYaml } from './skill-md.js';
 import {
   EnvContext,
   emptyEnvContext,
@@ -1036,11 +1037,29 @@ export async function pushFile(
     }
 
     // Read file content, resolving {env:...} tokens
-    const { text: content, error: envError } = readSubstituted(
+    const { text: rawContent, error: envError } = readSubstituted(
       fullPath,
       filePath,
       options.env
     );
+    /* A SKILL.md is its directory's node, written as frontmatter + Markdown.
+     * From here on it is handled exactly like that directory's .node.yaml. */
+    let content = rawContent;
+    let nodeFile = filePath;
+    if (mapped.skillMd && !envError) {
+      try {
+        content = skillMdToNodeYaml(rawContent);
+        nodeFile = path.posix.join(path.posix.dirname(filePath.split(path.sep).join('/')), '.node.yaml');
+      } catch (e) {
+        return {
+          success: false,
+          path: filePath,
+          operation: 'push',
+          error: e instanceof Error ? e.message : String(e),
+          timestamp,
+        };
+      }
+    }
     if (envError) {
       return {
         success: false,
@@ -1087,8 +1106,8 @@ export async function pushFile(
         // Invalid YAML — fall back to the filename-derived name
       }
     }
-    const { url } = buildServerUrl(config, filePath, explicitName);
-    const body = buildPushBody(filePath, content);
+    const { url } = buildServerUrl(config, nodeFile, explicitName);
+    const body = buildPushBody(nodeFile, content);
 
     // Push to server via HTTP API
     const response = await fetch(url, {
@@ -1113,7 +1132,7 @@ export async function pushFile(
         (mapped.kind === 'node-yaml' || mapped.kind === 'node-file')
       ) {
         return createNodeFromYaml(
-          filePath,
+          nodeFile,
           content,
           options,
           token,

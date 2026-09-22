@@ -49,6 +49,8 @@ export interface MappedChange {
   schemaKind?: SchemaKind;
   /** Human-readable hint for structural/skip changes */
   reason?: string;
+  /** The file is a SKILL.md: push it as its directory's raisin:Skill node */
+  skillMd?: boolean;
 }
 
 /**
@@ -158,6 +160,12 @@ export function mapChangeToNode(
 
   const workspace = decodeNamespace(parts[0]);
   const rest = parts.slice(1);
+
+  // SKILL.md → the raisin:Skill node of its directory, exactly as the server
+  // installer files it (under the synthetic `<dir>/.node.yaml`). See skill-md.ts.
+  if (filename === 'SKILL.md' && rest.length > 1) {
+    return { kind: 'node-yaml', workspace, nodePath: rest.slice(0, -1).join('/'), skillMd: true };
+  }
 
   // Translation overlay files
   const locale = parseTranslationLocale(filename);

@@ -11,6 +11,7 @@ import { createFromServer } from './commands/create-from-server.js';
 import { initPackage } from './commands/init.js';
 import { createAdapter } from './commands/create.js';
 import { createFunction } from './commands/create-function.js';
+import { createSkill } from './commands/create-skill.js';
 import { functionBuild, functionDoctor } from './commands/function.js';
 import { functionRun, functionTest } from './commands/function-run.js';
 import { deployPackage } from './commands/deploy.js';
@@ -271,6 +272,23 @@ createCmd
   .action(async (name, options) => {
     try {
       await createFunction(name, options);
+      process.exit(0);
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : String(error));
+      process.exit(1);
+    }
+  });
+
+createCmd
+  .command('skill <name>')
+  .description('Scaffold an agent skill (SKILL.md) inside a package; asks who gets it when --scope is omitted')
+  .option('-s, --scope <scope>', 'package (every agent, shipped) | local (every agent, this installation) | agent (only agents that list it)')
+  .option('-p, --path <dir>', 'For --scope agent: folder under content/functions, e.g. lib/acme/skills')
+  .option('-d, --dir <path>', 'Package directory (default: nearest manifest.yaml above cwd)')
+  .option('--description <text>', 'What the skill does and when an agent should load it (<200 chars)')
+  .action(async (name, options) => {
+    try {
+      await createSkill(name, options);
       process.exit(0);
     } catch (error) {
       console.error('Error:', error instanceof Error ? error.message : String(error));

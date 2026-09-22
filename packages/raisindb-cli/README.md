@@ -80,6 +80,27 @@ or pushed. A token with no value and no inline default fails the command
 instead of shipping a literal. The same substitution applies to
 `package validate`, `deploy`, `sync --push/--watch`, and `.raisin-sync.yaml`.
 
+### Agent Skills
+
+Scaffold an agent skill as a `SKILL.md` (frontmatter + Markdown) inside a
+package. `deploy --install` and `sync --push` both install it as a
+`raisin:Skill` node named after its folder.
+
+```bash
+raisindb create skill pdf-forms                          # asks who gets it
+raisindb create skill pdf-forms --scope package          # content/functions/skills/pdf-forms/SKILL.md
+raisindb create skill pdf-forms --scope local            # content/functions/local/skills/pdf-forms/SKILL.md
+raisindb create skill pdf-forms --scope agent --path lib/acme/skills
+```
+
+| Scope | Folder | Who gets it |
+|-------|--------|-------------|
+| `package` | `functions:/skills/<name>` | every agent, shipped with the package |
+| `local` | `functions:/local/skills/<name>` | every agent, this installation only |
+| `agent` | `functions:/<path>/<name>` | only agents that list it in `skills:` |
+
+An agent opts out of the two global layers with `global_skills: false`.
+
 ## Shell Commands
 
 ### Connection & Authentication
