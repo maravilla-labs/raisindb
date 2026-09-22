@@ -58,6 +58,7 @@ import {
   createCostRecord,
   getPlanningSystemPromptAddition,
   TERMINAL_FALLBACK_TEXT,
+  createToolCallNode,
   getEffectiveExecutionMode,
   requiresPlanApproval,
   shouldAutoRunTasks,
@@ -1340,27 +1341,20 @@ async function handleToolResult(ctx) {
       };
 
       log.info('continue', 'Creating pending tool call', { name: toolName, path: toolRef['raisin:path'] });
-      const createdCall = await raisin.nodes.create(workspace, nextMsg.path, {
-        name: toolCallName,
-        node_type: 'raisin:AIToolCall',
-        properties: {
-          tool_call_id: toolCallId,
-          function_name: toolName,
-          function_ref: toolRef,
-          arguments: toolArgs,
-          status: 'pending',
-        },
+      const { args: storedArgs } = await createToolCallNode(workspace, nextMsg.path, toolCallName, {
+        tool_call_id: toolCallId,
+        function_name: toolName,
+        function_ref: toolRef,
+        arguments: toolArgs,
+        status: 'pending',
       });
-      if (createdCall?.error && !String(createdCall.error).includes('already exists')) {
-        throw new Error(`Failed to create tool-call node "${toolCallName}": ${createdCall.error}`);
-      }
       pendingToolCount++;
 
       await emitConversationEvent('conversation:tool_call_started', {
         type: 'tool_call_started',
         toolCallId: toolCallId,
         functionName: toolName,
-        arguments: toolArgs,
+        arguments: storedArgs,
         timestamp: new Date().toISOString(),
       }, chatPath, streamChannel);
     }

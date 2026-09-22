@@ -62,6 +62,7 @@ import {
   safeJson,
   createCostRecord,
   TERMINAL_FALLBACK_TEXT,
+  createToolCallNode,
   getPlanningSystemPromptAddition,
   getEffectiveExecutionMode,
   requiresPlanApproval,
@@ -856,27 +857,20 @@ export async function handleUserMessage(context) {
       orchestration_round: 0,
     };
 
-    const callNode = await raisin.nodes.create(workspace, assistantMsg.path, {
-      name: callNodeName,
-      node_type: 'raisin:AIToolCall',
-      properties: {
-        tool_call_id: callId,
-        function_name: toolName,
-        function_ref: toolRef,
-        arguments: toolArgs,
-        status: 'pending',
-      },
+    const { args: storedArgs } = await createToolCallNode(workspace, assistantMsg.path, callNodeName, {
+      tool_call_id: callId,
+      function_name: toolName,
+      function_ref: toolRef,
+      arguments: toolArgs,
+      status: 'pending',
     });
-    if (callNode?.error && !String(callNode.error).includes('already exists')) {
-      throw new Error(`Failed to create tool-call node "${callNodeName}": ${callNode.error}`);
-    }
     pendingToolCount++;
 
     await emitConversationEvent('conversation:tool_call_started', {
       type: 'tool_call_started',
       toolCallId: callId,
       functionName: toolName,
-      arguments: toolArgs,
+      arguments: storedArgs,
       timestamp: new Date().toISOString(),
     }, chatPath, streamChannel);
   }

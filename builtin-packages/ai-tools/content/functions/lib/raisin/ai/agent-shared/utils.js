@@ -244,8 +244,65 @@ async function createCostRecord(workspace, chatPath, parentPath, response, provi
   }
 }
 
+/**
+ * A reference envelope a model wrote, as the plain path string it names.
+ * `{raisin:ref, raisin:workspace, raisin:path?}` → `raisin:path || raisin:ref`.
+ */
+function plainReferences(value) {
+  if (Array.isArray(value)) return value.map(plainReferences);
+  if (value && typeof value === 'object') {
+    if (typeof value['raisin:ref'] === 'string') return String(value['raisin:path'] || value['raisin:ref']);
+    const out = {};
+    for (const [k, v] of Object.entries(value)) out[k] = plainReferences(v);
+    return out;
+  }
+  return value;
+}
+
+/**
+ * Store a pending raisin:AIToolCall — and never let the model's ARGUMENTS stop
+ * the conversation.
+ *
+ * The server validates every reference envelope in a node it stores, so a tool
+ * call whose arguments name a node that does not exist
+ * (`{raisin:ref: /agents/x, raisin:workspace: agents}` — measured: a Builder
+ * run wrote the wrong workspace) was refused, the handler's catch ended the
+ * turn, and the conversation stopped with no message and nothing for the model
+ * to correct. Now such a call is stored once more with its envelopes as plain
+ * path strings: the TOOL runs and answers with its own "not found", which the
+ * model reads and repairs. Any other failure is thrown exactly as before.
+ *
+ * Returns the created node and the arguments actually stored.
+ */
+async function createToolCallNode(workspace, parentPath, name, properties) {
+  const write = (props) => raisin.nodes.create(workspace, parentPath, { name, node_type: 'raisin:AIToolCall', properties: props });
+  let node = null;
+  let failure = '';
+  let thrown = null;
+  try {
+    node = await write(properties);
+    if (node?.error) failure = String(node.error);
+  } catch (e) {
+    thrown = e;
+    failure = String(e?.message || e);
+  }
+  if (!failure || failure.includes('already exists')) return { node, args: properties.arguments };
+  if (!/Referenced node not found|reference/i.test(failure)) {
+    throw thrown || new Error(`Failed to create tool-call node "${name}": ${failure}`);
+  }
+  const args = plainReferences(properties.arguments);
+  console.warn(`[tools] tool-call "${name}" arguments named a missing node (${failure}); stored with plain paths so the tool can answer`);
+  const retried = await write({ ...properties, arguments: args, arguments_rewritten: failure });
+  if (retried?.error && !String(retried.error).includes('already exists')) {
+    throw new Error(`Failed to create tool-call node "${name}": ${retried.error}`);
+  }
+  return { node: retried, args };
+}
+
 export {
   TERMINAL_FALLBACK_TEXT,
+  createToolCallNode,
+  plainReferences,
   createCostRecord,
   getPlanningSystemPromptAddition,
   safeJson,
