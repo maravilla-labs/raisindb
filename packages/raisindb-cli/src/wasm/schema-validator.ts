@@ -14,6 +14,7 @@ import {
   validateTranslationFiles,
 } from './translation-validator.js';
 import { validateBundledResources } from './bundled-resource-validator.js';
+import { loadTypeCatalogs, type LoadedTypeCatalogs } from './type-catalog.js';
 import { validateWasmFunctions } from '../wasm-fn/package-check.js';
 import { mergeFlowResults, validatePackageFlows } from '../flow/package-doctor.js';
 import {
@@ -264,16 +265,27 @@ function envTokenResults(
  * Runs the WASM schema validator, the translation validator, and the flow
  * doctor (static analysis of every raisin:Flow node's workflow_data) in a
  * single pass; flow doctor errors fail validation like schema errors.
+ *
+ * Translations are checked against the package's own types plus the type
+ * catalogs (builtin types shipped with the CLI, ~/.raisindb/catalogs/*.json),
+ * so fields inherited from e.g. `standard:ContentPage` resolve. Pass
+ * `typeCatalogs` to use an already loaded set.
  */
 export async function validatePackageDirectory(
   packageDir: string,
-  env: EnvContext = emptyEnvContext()
+  env: EnvContext = emptyEnvContext(),
+  options: { typeCatalogs?: LoadedTypeCatalogs } = {}
 ): Promise<PackageValidationResults> {
   const unresolved: Record<string, UnresolvedToken[]> = {};
   const files = collectPackageFiles(packageDir, env, unresolved);
   const { translationFiles, nonTranslationFiles } = partitionTranslationFiles(files);
   const wasmResults = await validatePackage(nonTranslationFiles);
-  const translationResults = validateTranslationFiles(translationFiles, files);
+  const typeCatalogs = options.typeCatalogs ?? loadTypeCatalogs();
+  const translationResults = validateTranslationFiles(
+    translationFiles,
+    files,
+    typeCatalogs.schemas
+  );
   const flowResults = validatePackageFlows(packageDir, files);
   // Bundled-binary presence check reads the filesystem directly (binaries
   // aren't in the YAML-only `files` map), so it takes packageDir.

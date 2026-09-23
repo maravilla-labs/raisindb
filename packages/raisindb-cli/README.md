@@ -80,6 +80,25 @@ or pushed. A token with no value and no inline default fails the command
 instead of shipping a literal. The same substitution applies to
 `package validate`, `deploy`, `sync --push/--watch`, and `.raisin-sync.yaml`.
 
+### Type catalogs
+
+Translation files are checked against the `translatable` markers of the
+archetype or element type they belong to, including fields inherited through
+`extends`. Types the package does not ship itself (`extends:
+standard:ContentPage`, `archetype: standard:ArticlePage`, a `standard:Hero`
+block) are resolved from type catalogs, loaded offline:
+
+- **builtin** — RaisinDB's own node types, generated into
+  `dist/builtin-types.json` when the CLI is built
+  (`scripts/build-builtin-catalog.mjs`).
+- **`~/.raisindb/catalogs/*.json`** — e.g. the Studio catalog
+  (`studio-types.json`) that `maravilla update` or a build server downloads.
+  The CLI never fetches one itself; files that are not a
+  `raisin-type-catalog` v1 JSON document are ignored.
+
+`package validate` names the catalogs in use. Without a Studio catalog, keys
+inherited from `standard:*` types are not checked.
+
 ### Agent Skills
 
 Scaffold an agent skill as a `SKILL.md` (frontmatter + Markdown) inside a

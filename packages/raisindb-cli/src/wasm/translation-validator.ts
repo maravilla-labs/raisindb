@@ -15,6 +15,7 @@ import yaml from 'yaml';
 import { parseTranslationLocale } from '../sync/operations.js';
 import type { ValidationResult, ValidationError } from './types.js';
 import { ErrorCodes } from './types.js';
+import type { ExternalSchemas } from './type-catalog.js';
 
 // ---------------------------------------------------------------------------
 // Schema types (parsed from package YAML files)
@@ -41,14 +42,15 @@ interface ElementTypeSchema {
 }
 
 /**
- * A schema with its `extends` chain resolved against the package.
+ * A schema with its `extends` chain resolved against the package and the
+ * external type catalogs.
  *
- * `fields` holds the merged fields of every ancestor found in the package
- * (a child's field overrides a parent's field of the same name). `open` is
- * true when the chain reaches a parent that is NOT in the package (e.g.
- * `standard:ContentPage` installed on the server): fields inherited from it
- * are invisible here, so a translated key that is not declared anywhere in
- * the known part of the chain must not be reported.
+ * `fields` holds the merged fields of every ancestor found (a child's field
+ * overrides a parent's field of the same name). `open` is true when the chain
+ * reaches a parent that is neither in the package nor in a loaded catalog
+ * (e.g. `standard:ContentPage` with no Studio catalog installed): fields
+ * inherited from it are invisible here, so a translated key that is not
+ * declared anywhere in the known part of the chain must not be reported.
  */
 interface ResolvedSchema {
   name: string;
@@ -66,11 +68,17 @@ interface NodeTypeSchema {
   properties: NodeTypeProp[];
 }
 
-/** Schema context built from all package files. */
+/**
+ * Schema context built from all package files.
+ *
+ * `external` holds types from the loaded type catalogs (builtin RaisinDB
+ * types, the Studio catalog). Package definitions always win over them.
+ */
 export interface SchemaContext {
   archetypes: Map<string, ArchetypeSchema>;
   elementTypes: Map<string, ElementTypeSchema>;
   nodeTypes: Map<string, NodeTypeSchema>;
+  external?: ExternalSchemas;
 }
 
 // ---------------------------------------------------------------------------
@@ -110,7 +118,10 @@ const SECTION_IDENTIFIER_KEYS: ReadonlySet<string> = new Set(['uuid']);
  * Build a SchemaContext by parsing archetype, element type, and node type
  * YAML files from the package file map.
  */
-export function buildSchemaContext(allFiles: Record<string, string>): SchemaContext {
+export function buildSchemaContext(
+  allFiles: Record<string, string>,
+  external?: ExternalSchemas,
+): SchemaContext {
   const archetypes = new Map<string, ArchetypeSchema>();
   const elementTypes = new Map<string, ElementTypeSchema>();
   const nodeTypes = new Map<string, NodeTypeSchema>();
@@ -140,7 +151,17 @@ export function buildSchemaContext(allFiles: Record<string, string>): SchemaCont
     }
   }
 
-  return { archetypes, elementTypes, nodeTypes };
+  return { archetypes, elementTypes, nodeTypes, external };
+}
+
+/** Look up an archetype in the package, then in the external catalogs. */
+function findArchetype(ctx: SchemaContext, name: string): ArchetypeSchema | undefined {
+  return ctx.archetypes.get(name) ?? ctx.external?.archetypes.get(name);
+}
+
+/** Look up an element type in the package, then in the external catalogs. */
+function findElementType(ctx: SchemaContext, name: string): ElementTypeSchema | undefined {
+  return ctx.elementTypes.get(name) ?? ctx.external?.elementTypes.get(name);
 }
 
 /**
@@ -176,12 +197,13 @@ function fieldHasTranslatableDescendant(f: FieldDef): boolean {
 }
 
 /**
- * Resolve a schema's `extends` chain against the schemas known in the package.
- * Parent fields come first; a child field overrides a parent field by name.
+ * Resolve a schema's `extends` chain against the schemas known in the package
+ * and the external catalogs (`lookup`). Parent fields come first; a child
+ * field overrides a parent field by name.
  */
 function resolveChain<T extends { name: string; extends?: string; fields: FieldDef[] }>(
   schema: T,
-  known: Map<string, T>,
+  lookup: (name: string) => T | undefined,
 ): ResolvedSchema {
   const chain: T[] = [];
   const seen = new Set<string>();
@@ -193,7 +215,7 @@ function resolveChain<T extends { name: string; extends?: string; fields: FieldD
     chain.push(current);
     const parentName: string | undefined = current.extends;
     if (!parentName) break;
-    const parent = known.get(parentName);
+    const parent = lookup(parentName);
     if (!parent) {
       open = true;
       break;
@@ -213,24 +235,26 @@ function resolveChain<T extends { name: string; extends?: string; fields: FieldD
 /**
  * Find the archetype that governs a node.
  *
- * An explicitly named archetype that is not in the package (e.g.
- * `standard:ArticlePage` shipped by another package on the server) is an
- * unknown schema: return undefined so no schema checks run. Only when the
- * node names no archetype do we fall back to a local archetype whose
- * `base_node_type` matches the node's `node_type`.
+ * An explicitly named archetype is looked up in the package, then in the type
+ * catalogs (e.g. `standard:ArticlePage` from the Studio catalog). One found in
+ * neither is an unknown schema: return undefined so no schema checks run.
+ * Only when the node names no archetype do we fall back to a LOCAL archetype
+ * whose `base_node_type` matches the node's `node_type` — never to a catalog
+ * archetype, since many of those share one base node type.
  */
 function resolveArchetype(
   nodeType: string | undefined,
   archetypeName: string | undefined,
   ctx: SchemaContext,
 ): ResolvedSchema | undefined {
+  const lookup = (name: string) => findArchetype(ctx, name);
   if (archetypeName) {
-    const a = ctx.archetypes.get(archetypeName);
-    return a ? resolveChain(a, ctx.archetypes) : undefined;
+    const a = lookup(archetypeName);
+    return a ? resolveChain(a, lookup) : undefined;
   }
   if (nodeType) {
     for (const a of ctx.archetypes.values()) {
-      if (a.base_node_type === nodeType) return resolveChain(a, ctx.archetypes);
+      if (a.base_node_type === nodeType) return resolveChain(a, lookup);
     }
   }
   return undefined;
@@ -424,6 +448,10 @@ function checkTranslatability(
       continue;
     }
 
+    // An embedded element's own fields are not described here — don't
+    // report the embedding field itself.
+    if (fieldDef && fieldDef.$type === 'ElementField' && isPlainObject(translationObj[key])) continue;
+
     // Unknown key on a schema whose chain reaches a parent we cannot see:
     // it may be an inherited field — don't report it.
     if (!fieldDef && archetype.open) continue;
@@ -453,13 +481,13 @@ function checkSectionItems(
   errors: ValidationError[],
   baseItems: unknown[],
 ): void {
-  // Build uuid → element_type map from base items
-  const uuidToElementType = new Map<string, string>();
+  // Build uuid → base element map from base items
+  const uuidToBase = new Map<string, Record<string, unknown>>();
   for (const baseItem of baseItems) {
     if (baseItem && typeof baseItem === 'object' && !Array.isArray(baseItem)) {
       const rec = baseItem as Record<string, unknown>;
       if (typeof rec.uuid === 'string' && typeof rec.element_type === 'string') {
-        uuidToElementType.set(rec.uuid, rec.element_type);
+        uuidToBase.set(rec.uuid, rec);
       }
     }
   }
@@ -471,12 +499,13 @@ function checkSectionItems(
 
     // Resolve element_type from base items via uuid
     const uuid = rec.uuid as string | undefined;
-    const elementTypeName = uuid ? uuidToElementType.get(uuid) : undefined;
-    if (!elementTypeName) continue;
+    const baseElement = uuid ? uuidToBase.get(uuid) : undefined;
+    const elementTypeName = baseElement?.element_type as string | undefined;
+    if (!baseElement || !elementTypeName) continue;
 
-    const etLocal = ctx.elementTypes.get(elementTypeName);
-    if (!etLocal) continue; // unknown element type — warned elsewhere
-    const etSchema = resolveChain(etLocal, ctx.elementTypes);
+    const et = findElementType(ctx, elementTypeName);
+    if (!et) continue; // unknown element type — warned elsewhere
+    const etSchema = resolveChain(et, name => findElementType(ctx, name));
 
     const etTranslatable = collectTranslatableFields(etSchema.fields);
 
@@ -484,8 +513,24 @@ function checkSectionItems(
       if (NON_TRANSLATABLE_KEYS.has(key)) continue;
       if (SECTION_IDENTIFIER_KEYS.has(key)) continue;
 
-      // Check CompositeField sub-arrays inside elements
       const etFieldDef = etSchema.fields.find(f => f.name === key);
+
+      // A container element (standard:Section, standard:Variants, …) holds
+      // its own SectionField: check the nested elements, not the field.
+      if (etFieldDef && etFieldDef.$type === 'SectionField') {
+        const subArr = rec[key];
+        if (Array.isArray(subArr)) {
+          const baseSub = Array.isArray(baseElement[key]) ? (baseElement[key] as unknown[]) : [];
+          checkSectionItems(subArr, `${sectionKey}[${i}].${key}`, filePath, ctx, errors, baseSub);
+        }
+        continue;
+      }
+
+      // An embedded element's own fields are not described here — don't
+      // report the embedding field itself.
+      if (etFieldDef && etFieldDef.$type === 'ElementField' && isPlainObject(rec[key])) continue;
+
+      // Check CompositeField sub-arrays inside elements
       if (etFieldDef && etFieldDef.$type === 'CompositeField') {
         const subArr = rec[key];
         if (Array.isArray(subArr)) {
@@ -610,6 +655,10 @@ function checkCompositeItems(
   }
 }
 
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === 'object' && !Array.isArray(v);
+}
+
 function checkNonTranslatableKeys(
   obj: Record<string, unknown>,
   parentPath: string,
@@ -657,12 +706,16 @@ export function partitionTranslationFiles(
 
 /**
  * Validate all translation files and return a results map.
+ *
+ * `external` supplies types from the loaded type catalogs; without it, keys
+ * inherited from a parent outside the package are not checked.
  */
 export function validateTranslationFiles(
   translationFiles: Record<string, string>,
   allFiles: Record<string, string>,
+  external?: ExternalSchemas,
 ): Record<string, ValidationResult> {
-  const ctx = buildSchemaContext(allFiles);
+  const ctx = buildSchemaContext(allFiles, external);
   const results: Record<string, ValidationResult> = {};
 
   for (const [filePath, content] of Object.entries(translationFiles)) {

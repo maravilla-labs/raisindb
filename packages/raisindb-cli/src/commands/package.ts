@@ -25,6 +25,7 @@ import {
   initSchemaValidator,
 } from '../wasm/schema-validator.js';
 import type { PackageValidationResults, ValidationError } from '../wasm/types.js';
+import { describeTypeCatalogs, loadTypeCatalogs } from '../wasm/type-catalog.js';
 import { UploadProgress } from '../components/UploadProgress.js';
 import { PackageValidator } from '../components/PackageValidator.js';
 import {
@@ -141,12 +142,15 @@ async function runValidationWithProgress(
   packageDir: string,
   env: EnvContext = emptyEnvContext()
 ): Promise<PackageValidationResults> {
+  const typeCatalogs = loadTypeCatalogs();
   if (!process.stdout.isTTY) {
     console.log(`Validating package: ${packageDir}`);
-    const results = await validatePackageDirectory(packageDir, env);
+    console.log(describeTypeCatalogs(typeCatalogs));
+    const results = await validatePackageDirectory(packageDir, env, { typeCatalogs });
     printPlainValidationReport(results);
     return results;
   }
+  console.log(describeTypeCatalogs(typeCatalogs));
   // Initial state
   let state: ValidationState = {
     phase: 'collecting',
@@ -193,7 +197,7 @@ async function runValidationWithProgress(
     }, 50);
 
     // Run the actual validation
-    const results = await validatePackageDirectory(packageDir, env);
+    const results = await validatePackageDirectory(packageDir, env, { typeCatalogs });
 
     clearInterval(progressInterval);
     validated = fileCount;
