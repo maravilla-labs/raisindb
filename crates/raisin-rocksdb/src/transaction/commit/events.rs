@@ -234,6 +234,16 @@ impl RocksDBTransaction {
                         );
                     }
                 }
+                // Top-level property names this commit changed, for the
+                // `filters.changed_properties` trigger filter. Omitted when
+                // the recording path did not know the previous state, so the
+                // filter fails open instead of skipping a real change.
+                if let Some(changed) = &change.changed_properties {
+                    metadata.insert(
+                        "changed_properties".to_string(),
+                        serde_json::Value::from(changed.clone()),
+                    );
+                }
             }
             if let Some(data) = node_data {
                 metadata.insert("node_data".to_string(), data);

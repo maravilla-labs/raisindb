@@ -88,13 +88,16 @@ pub struct TriggerEventInfo {
     pub workspace: String,
     /// Node properties (if available)
     pub node_properties: Option<serde_json::Value>,
+    /// Top-level property names an Updated event changed (None = unknown)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_properties: Option<Vec<String>>,
 }
 
 /// Callback type for finding matching triggers
 ///
 /// This callback is provided by the storage layer to find triggers matching node events.
 /// Returns both the matching triggers and detailed evaluation results for debugging.
-/// Arguments: (event_type, node_id, node_type, node_path, tenant_id, repo_id, branch, workspace, node_properties)
+/// Arguments: (event_type, node_id, node_type, node_path, tenant_id, repo_id, branch, workspace, node_properties, changed_properties)
 /// Returns: (List of matching triggers, List of all evaluation results)
 pub type TriggerMatcherCallback = Arc<
     dyn Fn(
@@ -107,6 +110,7 @@ pub type TriggerMatcherCallback = Arc<
             String,                    // branch
             String,                    // workspace
             Option<serde_json::Value>, // node_properties
+            Option<Vec<String>>,       // changed_properties (Updated events; None = unknown)
         ) -> std::pin::Pin<
             Box<
                 dyn std::future::Future<

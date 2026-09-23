@@ -250,6 +250,12 @@ pub struct TriggerFilters {
     /// Property value filters (JSON query)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub property_filters: Option<serde_json::Value>,
+
+    /// Top-level property names; an `Updated` event passes when ANY of them is
+    /// in its `changed_properties` metadata. Created/Deleted events, and events
+    /// without that metadata, are not narrowed (fail open).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changed_properties: Option<Vec<String>>,
 }
 
 impl TriggerFilters {
@@ -274,6 +280,23 @@ impl TriggerFilters {
     pub fn with_node_types(mut self, node_types: Vec<String>) -> Self {
         self.node_types = Some(node_types);
         self
+    }
+
+    /// Filter by changed top-level properties (Updated events only)
+    pub fn with_changed_properties(mut self, names: Vec<String>) -> Self {
+        self.changed_properties = Some(names);
+        self
+    }
+
+    /// Check the `changed_properties` filter for an event. Only `Updated`
+    /// events are narrowed, and a missing `changed` list passes (fail open).
+    pub fn matches_changed_properties(&self, event_type: &str, changed: Option<&[String]>) -> bool {
+        match (&self.changed_properties, changed) {
+            (Some(wanted), Some(changed)) if event_type == "Updated" => {
+                wanted.iter().any(|w| changed.contains(w))
+            }
+            _ => true,
+        }
     }
 
     /// Check if a given context matches these filters
@@ -399,5 +422,26 @@ impl StandaloneTrigger {
     /// Returns true if this trigger uses a function flow (multi-function)
     pub fn uses_flow(&self) -> bool {
         self.function_flow.is_some()
+    }
+}
+
+#[cfg(test)]
+mod changed_properties_tests {
+    use super::TriggerFilters;
+
+    #[test]
+    fn changed_properties_filter_semantics() {
+        let f = TriggerFilters::new().with_changed_properties(vec!["title".into()]);
+        let title = vec!["title".to_string(), "body".to_string()];
+        let body = vec!["body".to_string()];
+        assert!(f.matches_changed_properties("Updated", Some(&title)));
+        assert!(!f.matches_changed_properties("Updated", Some(&body)));
+        assert!(f.matches_changed_properties("Updated", None));
+        assert!(f.matches_changed_properties("Created", Some(&body)));
+        assert!(TriggerFilters::new().matches_changed_properties("Updated", Some(&body)));
+
+        let parsed: TriggerFilters =
+            serde_json::from_value(serde_json::json!({"changed_properties": ["title"]})).unwrap();
+        assert_eq!(parsed.changed_properties, Some(vec!["title".to_string()]));
     }
 }

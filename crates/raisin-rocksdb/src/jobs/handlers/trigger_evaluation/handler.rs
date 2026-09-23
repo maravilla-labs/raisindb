@@ -141,6 +141,7 @@ impl TriggerEvaluationHandler {
 
         // Get node properties from context metadata for reporting
         let node_properties = context.metadata.get("node_data").cloned();
+        let changed_properties = changed_properties_of(context);
 
         // Build the event info for the report
         let event_info = TriggerEventInfo {
@@ -150,6 +151,7 @@ impl TriggerEvaluationHandler {
             node_path: node_path.clone(),
             workspace: context.workspace_id.clone(),
             node_properties: node_properties.clone(),
+            changed_properties: changed_properties.clone(),
         };
 
         // Find matching triggers using the matcher callback
@@ -164,6 +166,7 @@ impl TriggerEvaluationHandler {
                 context.branch.clone(),
                 context.workspace_id.clone(),
                 node_properties,
+                changed_properties,
             )
             .await?
         } else {
@@ -346,7 +349,7 @@ impl TriggerEvaluationHandler {
         }
 
         // Build input with event data and workspace
-        let flow_input = if let Some(node_data) = context.metadata.get("node_data") {
+        let mut flow_input = if let Some(node_data) = context.metadata.get("node_data") {
             serde_json::json!({
                 "event": {
                     "type": event_type,
@@ -368,6 +371,15 @@ impl TriggerEvaluationHandler {
                 "workspace": context.workspace_id,
             })
         };
+
+        // An Updated event's changed top-level property names, so a function
+        // or flow can read `input.event.changed_properties` (absent = unknown).
+        if let (Some(changed), Some(event)) = (
+            changed_properties_of(context),
+            flow_input.get_mut("event").and_then(|e| e.as_object_mut()),
+        ) {
+            event.insert("changed_properties".to_string(), serde_json::json!(changed));
+        }
 
         // Wrap in the same structure as FlowExecution for consistency
         let input_value = serde_json::json!({
@@ -650,4 +662,13 @@ impl TriggerEvaluationHandler {
 
         Ok(Some(job_id.to_string()))
     }
+}
+
+/// The `changed_properties` an Updated event carried into this job's context
+/// (see `transaction/commit/events.rs`); None when the emitter did not know.
+fn changed_properties_of(context: &JobContext) -> Option<Vec<String>> {
+    context
+        .metadata
+        .get("changed_properties")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
 }

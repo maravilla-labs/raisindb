@@ -15,6 +15,7 @@
 //! This module provides functions to create trigger matcher callbacks
 //! that query raisin:Function nodes to find matching triggers for events.
 
+mod changed_properties;
 mod filters;
 mod inline_triggers;
 mod matcher;

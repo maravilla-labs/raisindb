@@ -258,6 +258,7 @@ pub async fn delete_node(tx: &RocksDBTransaction, workspace: &str, node_id: &str
                 operation: raisin_models::tree::ChangeOperation::Deleted,
                 path: Some(node.path.clone()), // Store path before deletion for event matching
                 node_type: Some(node.node_type.clone()), // Store node_type for subscription filtering
+                changed_properties: None,
             },
         );
 

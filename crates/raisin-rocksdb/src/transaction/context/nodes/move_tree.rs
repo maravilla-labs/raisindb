@@ -388,6 +388,13 @@ pub async fn move_node_tree(
             .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
 
         for (node, _) in &descendants {
+            // A move changes the path, never a property: an untouched node
+            // reports an empty changed-property list; one already written
+            // earlier in this transaction keeps what that write knew.
+            let changed_properties = match changed.get(&node.id) {
+                Some(prev) => prev.changed_properties.clone(),
+                None => Some(Vec::new()),
+            };
             // Track as "Modified" operation (path changed)
             changed.insert(
                 node.id.clone(),
@@ -397,6 +404,7 @@ pub async fn move_node_tree(
                     operation: ChangeOperation::Modified,
                     path: Some(node.path.clone()), // Store path before move for event matching
                     node_type: Some(node.node_type.clone()),
+                    changed_properties,
                 },
             );
         }

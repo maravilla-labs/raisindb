@@ -65,7 +65,12 @@ properties:
     title: Filters
     description: |
       Conditions that narrow when the trigger fires.
-      Structure: { workspaces, paths, node_types, property_filters }
+      Structure: { workspaces, paths, node_types, property_filters, changed_properties }
+      changed_properties: ["title", ...] narrows Updated events to writes that
+      changed ANY of the listed top-level properties. Created/Deleted events are
+      not narrowed, and an Updated event without changed-property information
+      passes (fail open). The changed names reach the function/flow as
+      input.event.changed_properties.
 
   - name: enabled
     type: Boolean

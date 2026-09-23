@@ -41,4 +41,8 @@ pub struct TriggerFilters {
     pub paths: Option<Vec<String>>,
     /// Property value filters
     pub property_filters: Option<serde_json::Map<String, JsonValue>>,
+    /// Top-level property names, any of which must be among an `Updated`
+    /// event's `changed_properties` (None = matches all). Created/Deleted
+    /// events, and events without the metadata, are not narrowed by it.
+    pub changed_properties: Option<Vec<String>>,
 }

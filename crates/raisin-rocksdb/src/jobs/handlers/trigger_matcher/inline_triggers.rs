@@ -20,6 +20,7 @@ use raisin_models::nodes::Node;
 use raisin_storage::{NodeRepository, Storage, StorageScope};
 use std::sync::Arc;
 
+use super::changed_properties::changed_properties_filter;
 use super::filters::{get_nested_property, glob_match, property_filter_matches};
 use crate::jobs::handlers::{FilterCheckResult, TriggerEvaluationResult, TriggerMatch};
 
@@ -38,6 +39,8 @@ pub(super) struct InlineTriggerContext<'a> {
     /// (branch-head visibility race) - without it, a stale read silently
     /// drops the trigger (no retry on no-match).
     pub node_properties: Option<&'a serde_json::Value>,
+    /// `metadata.changed_properties` of an Updated event (None = unknown).
+    pub changed_properties: Option<&'a [String]>,
 }
 
 /// Process inline triggers on raisin:Function nodes
@@ -410,6 +413,11 @@ pub(super) async fn check_trigger_filters<S: Storage + 'static>(
                 all_filters_pass = false;
             }
         }
+    }
+
+    // Check changed_properties (Updated events only, fails open)
+    if all_filters_pass && !changed_properties_filter(f, ctx, filter_checks) {
+        all_filters_pass = false;
     }
 
     // Check property_filters

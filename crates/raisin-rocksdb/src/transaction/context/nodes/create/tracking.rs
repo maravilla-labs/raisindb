@@ -8,7 +8,9 @@ use raisin_hlc::HLC;
 use raisin_models::nodes::Node;
 use raisin_models::tree::ChangeOperation;
 
-use crate::transaction::change_types::NodeChange;
+use crate::transaction::change_types::{
+    changed_property_names, merge_changed_properties, NodeChange,
+};
 use crate::transaction::RocksDBTransaction;
 
 /// Track a new node creation
@@ -45,6 +47,7 @@ pub(super) fn track_create(
                 operation: ChangeOperation::Added,
                 path: Some(node.path.clone()),
                 node_type: Some(node.node_type.clone()),
+                changed_properties: None,
             },
         );
     }
@@ -122,14 +125,25 @@ pub(super) fn track_update(
         // earlier entry knew: a CREATE stays a create (one Created event, not
         // an Updated for a node nobody saw), and a MOVE keeps its pre-move
         // path so commit can still tell the event is a move.
-        let (operation, path) = match changed.get(&new_node.id) {
+        //
+        // The changed-property list is the union over every write to the
+        // node in this transaction; an earlier entry that did not know its
+        // list (None) keeps the whole change unknown.
+        let diff = changed_property_names(&old_node.properties, &new_node.properties);
+        let (operation, path, changed_properties) = match changed.get(&new_node.id) {
             Some(prev) if prev.operation == ChangeOperation::Added => {
-                (ChangeOperation::Added, Some(new_node.path.clone()))
+                (ChangeOperation::Added, Some(new_node.path.clone()), None)
             }
-            Some(prev) if prev.operation == ChangeOperation::Modified => {
-                (ChangeOperation::Modified, prev.path.clone())
-            }
-            _ => (ChangeOperation::Modified, Some(new_node.path.clone())),
+            Some(prev) if prev.operation == ChangeOperation::Modified => (
+                ChangeOperation::Modified,
+                prev.path.clone(),
+                merge_changed_properties(prev.changed_properties.as_ref(), diff),
+            ),
+            _ => (
+                ChangeOperation::Modified,
+                Some(new_node.path.clone()),
+                Some(diff),
+            ),
         };
         changed.insert(
             new_node.id.clone(),
@@ -139,6 +153,7 @@ pub(super) fn track_update(
                 operation,
                 path,
                 node_type: Some(new_node.node_type.clone()),
+                changed_properties,
             },
         );
     }
@@ -276,6 +291,7 @@ pub(crate) fn track_reorder(
                 operation: ChangeOperation::Reordered,
                 path: Some(node_path.to_string()),
                 node_type: Some(node_type.to_string()),
+                changed_properties: None,
             },
         );
     }
@@ -341,6 +357,8 @@ pub(super) fn track_orphaned(
                 operation: ChangeOperation::Modified,
                 path: Some(new_node.path.clone()),
                 node_type: Some(new_node.node_type.clone()),
+                changed_properties: old_node
+                    .map(|old| changed_property_names(&old.properties, &new_node.properties)),
             },
         );
     }

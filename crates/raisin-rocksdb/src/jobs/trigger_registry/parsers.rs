@@ -393,6 +393,16 @@ fn parse_filters(filters_json: Option<&JsonValue>) -> TriggerFilters {
         filters.property_filters = f
             .get("property_filters")
             .and_then(|v| v.as_object().cloned());
+
+        // Extract changed_properties
+        filters.changed_properties =
+            f.get("changed_properties")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                });
     }
 
     filters

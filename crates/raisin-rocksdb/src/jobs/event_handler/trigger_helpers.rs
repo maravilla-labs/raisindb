@@ -135,6 +135,11 @@ impl UnifiedJobEventHandler {
             if let Some(node_data) = meta.get("node_data") {
                 metadata.insert("node_data".to_string(), node_data.clone());
             }
+            // Updated events: which top-level properties the write changed,
+            // for the `filters.changed_properties` trigger filter.
+            if let Some(changed) = meta.get("changed_properties") {
+                metadata.insert("changed_properties".to_string(), changed.clone());
+            }
         }
 
         let context = JobContext {
