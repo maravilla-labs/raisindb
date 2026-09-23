@@ -30,12 +30,30 @@ interface FieldDef {
 interface ArchetypeSchema {
   name: string;
   base_node_type?: string;
+  extends?: string;
   fields: FieldDef[];
 }
 
 interface ElementTypeSchema {
   name: string;
+  extends?: string;
   fields: FieldDef[];
+}
+
+/**
+ * A schema with its `extends` chain resolved against the package.
+ *
+ * `fields` holds the merged fields of every ancestor found in the package
+ * (a child's field overrides a parent's field of the same name). `open` is
+ * true when the chain reaches a parent that is NOT in the package (e.g.
+ * `standard:ContentPage` installed on the server): fields inherited from it
+ * are invisible here, so a translated key that is not declared anywhere in
+ * the known part of the chain must not be reported.
+ */
+interface ResolvedSchema {
+  name: string;
+  fields: FieldDef[];
+  open: boolean;
 }
 
 interface NodeTypeProp {
@@ -102,10 +120,18 @@ export function buildSchemaContext(allFiles: Record<string, string>): SchemaCont
       const parsed = yaml.parse(content);
       if (!parsed || typeof parsed !== 'object') continue;
 
-      if (filePath.startsWith('archetypes/') && parsed.name && parsed.fields) {
-        archetypes.set(parsed.name, parsed as ArchetypeSchema);
-      } else if (filePath.startsWith('elementtypes/') && parsed.name && parsed.fields) {
-        elementTypes.set(parsed.name, parsed as ElementTypeSchema);
+      const hasFieldsOrParent =
+        Array.isArray(parsed.fields) || typeof parsed.extends === 'string';
+      if (filePath.startsWith('archetypes/') && parsed.name && hasFieldsOrParent) {
+        archetypes.set(parsed.name, {
+          ...parsed,
+          fields: Array.isArray(parsed.fields) ? parsed.fields : [],
+        } as ArchetypeSchema);
+      } else if (filePath.startsWith('elementtypes/') && parsed.name && hasFieldsOrParent) {
+        elementTypes.set(parsed.name, {
+          ...parsed,
+          fields: Array.isArray(parsed.fields) ? parsed.fields : [],
+        } as ElementTypeSchema);
       } else if (filePath.startsWith('nodetypes/') && parsed.name && parsed.properties) {
         nodeTypes.set(parsed.name, parsed as NodeTypeSchema);
       }
@@ -150,21 +176,61 @@ function fieldHasTranslatableDescendant(f: FieldDef): boolean {
 }
 
 /**
- * Find an archetype by the node's `archetype` value, falling back to
- * finding one whose `base_node_type` matches the node's `node_type`.
+ * Resolve a schema's `extends` chain against the schemas known in the package.
+ * Parent fields come first; a child field overrides a parent field by name.
+ */
+function resolveChain<T extends { name: string; extends?: string; fields: FieldDef[] }>(
+  schema: T,
+  known: Map<string, T>,
+): ResolvedSchema {
+  const chain: T[] = [];
+  const seen = new Set<string>();
+  let open = false;
+  let current: T | undefined = schema;
+  while (current) {
+    if (seen.has(current.name)) break; // cycle guard
+    seen.add(current.name);
+    chain.push(current);
+    const parentName: string | undefined = current.extends;
+    if (!parentName) break;
+    const parent = known.get(parentName);
+    if (!parent) {
+      open = true;
+      break;
+    }
+    current = parent;
+  }
+
+  const byName = new Map<string, FieldDef>();
+  for (let i = chain.length - 1; i >= 0; i--) {
+    for (const f of chain[i].fields ?? []) {
+      if (f && typeof f.name === 'string') byName.set(f.name, f);
+    }
+  }
+  return { name: schema.name, fields: [...byName.values()], open };
+}
+
+/**
+ * Find the archetype that governs a node.
+ *
+ * An explicitly named archetype that is not in the package (e.g.
+ * `standard:ArticlePage` shipped by another package on the server) is an
+ * unknown schema: return undefined so no schema checks run. Only when the
+ * node names no archetype do we fall back to a local archetype whose
+ * `base_node_type` matches the node's `node_type`.
  */
 function resolveArchetype(
   nodeType: string | undefined,
   archetypeName: string | undefined,
   ctx: SchemaContext,
-): ArchetypeSchema | undefined {
+): ResolvedSchema | undefined {
   if (archetypeName) {
     const a = ctx.archetypes.get(archetypeName);
-    if (a) return a;
+    return a ? resolveChain(a, ctx.archetypes) : undefined;
   }
   if (nodeType) {
     for (const a of ctx.archetypes.values()) {
-      if (a.base_node_type === nodeType) return a;
+      if (a.base_node_type === nodeType) return resolveChain(a, ctx.archetypes);
     }
   }
   return undefined;
@@ -358,6 +424,10 @@ function checkTranslatability(
       continue;
     }
 
+    // Unknown key on a schema whose chain reaches a parent we cannot see:
+    // it may be an inherited field — don't report it.
+    if (!fieldDef && archetype.open) continue;
+
     // Scalar field — must be in the translatable set
     if (!topTranslatable.has(key)) {
       errors.push({
@@ -404,8 +474,9 @@ function checkSectionItems(
     const elementTypeName = uuid ? uuidToElementType.get(uuid) : undefined;
     if (!elementTypeName) continue;
 
-    const etSchema = ctx.elementTypes.get(elementTypeName);
-    if (!etSchema) continue; // unknown element type — warned elsewhere
+    const etLocal = ctx.elementTypes.get(elementTypeName);
+    if (!etLocal) continue; // unknown element type — warned elsewhere
+    const etSchema = resolveChain(etLocal, ctx.elementTypes);
 
     const etTranslatable = collectTranslatableFields(etSchema.fields);
 
@@ -428,6 +499,9 @@ function checkSectionItems(
         }
         continue;
       }
+
+      // Possibly inherited from a parent element type outside the package.
+      if (!etFieldDef && etSchema.open) continue;
 
       if (!etTranslatable.has(key)) {
         errors.push({
