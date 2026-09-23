@@ -11,6 +11,8 @@
 //! - [`functions`]: Serverless functions, flows, webhooks, triggers
 
 mod admin;
+#[cfg(feature = "storage-rocksdb")]
+mod agent_runs;
 mod auth;
 mod functions;
 mod integrations;
@@ -18,6 +20,8 @@ mod locks;
 mod management;
 mod mcp;
 mod mcp_client;
+#[cfg(feature = "storage-rocksdb")]
+mod node_dev;
 mod oauth;
 mod operator;
 mod packages;
@@ -91,6 +95,18 @@ pub fn routes(state: AppState) -> Router {
 
     // Atomic locks / inventory
     router = router.merge(locks::locks_routes(&state));
+
+    // Durable agent runs (create / read / control / stream / client driving)
+    #[cfg(feature = "storage-rocksdb")]
+    {
+        router = router.merge(agent_runs::agent_run_routes(&state));
+    }
+
+    // The node-development surface (typed reads, changesets, branch worktrees)
+    #[cfg(feature = "storage-rocksdb")]
+    {
+        router = router.merge(node_dev::node_dev_routes(&state));
+    }
 
     // Secret store (admin-gated; values are write-only)
     #[cfg(feature = "storage-rocksdb")]

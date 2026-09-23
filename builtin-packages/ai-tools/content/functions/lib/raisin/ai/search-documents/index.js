@@ -1,3 +1,5 @@
+import { runEnvelope } from '../agent-shared/tool-envelope.js';
+import { TOOL_META } from '../agent-shared/tool-meta.js';
 /**
  * search-documents — retrieval, as a tool an agent can call.
  *
@@ -44,6 +46,7 @@ const MAX_LIMIT = 50;
 const DEFAULT_SCOPE = 'ALL READABLE';
 
 export async function handler(input) {
+  const enveloped = await runEnvelope(input, TOOL_META.searchDocuments, handler); if (enveloped) return enveloped;
   const { query, workspaces, limit, max_distance } = input || {};
 
   if (!query || typeof query !== 'string' || !query.trim()) {

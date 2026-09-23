@@ -41,6 +41,9 @@ raisin-indexer = { path = "../raisin-indexer" }
 raisin-hnsw = { path = "../raisin-hnsw" }
 raisin-sql-execution = { path = "../raisin-sql-execution" }
 raisin-core = { path = "../raisin-core" }
+# The AgentRun domain-reducer seam (`runtime::wasm::agent_reducer`). Light and
+# acyclic: raisin-agent-runtime depends on neither raisin-rocksdb nor this crate.
+raisin-agent-runtime = { path = "../raisin-agent-runtime" }
 
 # Workspace dependencies
 serde = { workspace = true }
@@ -142,6 +145,8 @@ default = []
 wasm = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:moka", "dep:blake3"]
 
 [dev-dependencies]
+# The AgentRun test doubles, for the WebAssembly reducer adapter's tests.
+raisin-agent-runtime = { path = "../raisin-agent-runtime", features = ["testing"] }
 # Test-only: generate an ephemeral RSA keypair + JWK at runtime so no private
 # key material is ever committed to the repo (see runtime/crypto tests).
 rsa = { version = "0.9", features = ["pem"] }

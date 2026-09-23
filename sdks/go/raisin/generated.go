@@ -68,6 +68,92 @@ func (AdminSqlAPI) Query(sql string, params []any) (json.RawMessage, error) {
 	return callJSON("admin_sql_query", []any{sql, params})
 }
 
+// AgentRunsAPI is the `raisin.agent_runs` namespace.
+type AgentRunsAPI struct{}
+
+// AgentRuns is the entry point for the `raisin.agent_runs` namespace.
+var AgentRuns AgentRunsAPI
+
+// AckMailbox calls the RaisinDB registry method "agent_runs_ack_mailbox".
+func (AgentRunsAPI) AckMailbox(request any) (json.RawMessage, error) {
+	return callJSON("agent_runs_ack_mailbox", []any{request})
+}
+
+// Checkpoint calls the RaisinDB registry method "agent_runs_checkpoint".
+func (AgentRunsAPI) Checkpoint(request any) (json.RawMessage, error) {
+	return callJSON("agent_runs_checkpoint", []any{request})
+}
+
+// Children calls the RaisinDB registry method "agent_runs_children".
+func (AgentRunsAPI) Children(request any) (json.RawMessage, error) {
+	return callJSON("agent_runs_children", []any{request})
+}
+
+// Control calls the RaisinDB registry method "agent_runs_control".
+func (AgentRunsAPI) Control(request any) (json.RawMessage, error) {
+	return callJSON("agent_runs_control", []any{request})
+}
+
+// ControlChild calls the RaisinDB registry method "agent_runs_control_child".
+func (AgentRunsAPI) ControlChild(request any) (json.RawMessage, error) {
+	return callJSON("agent_runs_control_child", []any{request})
+}
+
+// Create calls the RaisinDB registry method "agent_runs_create".
+func (AgentRunsAPI) Create(request any) (json.RawMessage, error) {
+	return callJSON("agent_runs_create", []any{request})
+}
+
+// Deliver calls the RaisinDB registry method "agent_runs_deliver".
+func (AgentRunsAPI) Deliver(request any) (json.RawMessage, error) {
+	return callJSON("agent_runs_deliver", []any{request})
+}
+
+// Events calls the RaisinDB registry method "agent_runs_events".
+func (AgentRunsAPI) Events(request any) (json.RawMessage, error) {
+	return callJSON("agent_runs_events", []any{request})
+}
+
+// Get calls the RaisinDB registry method "agent_runs_get".
+func (AgentRunsAPI) Get(request any) (json.RawMessage, error) {
+	return callJSON("agent_runs_get", []any{request})
+}
+
+// InspectChild calls the RaisinDB registry method "agent_runs_inspect_child".
+func (AgentRunsAPI) InspectChild(request any) (json.RawMessage, error) {
+	return callJSON("agent_runs_inspect_child", []any{request})
+}
+
+// Mailbox calls the RaisinDB registry method "agent_runs_mailbox".
+func (AgentRunsAPI) Mailbox(request any) (json.RawMessage, error) {
+	return callJSON("agent_runs_mailbox", []any{request})
+}
+
+// PostToParent calls the RaisinDB registry method "agent_runs_post_to_parent".
+func (AgentRunsAPI) PostToParent(request any) (json.RawMessage, error) {
+	return callJSON("agent_runs_post_to_parent", []any{request})
+}
+
+// ReadCheckpoint calls the RaisinDB registry method "agent_runs_read_checkpoint".
+func (AgentRunsAPI) ReadCheckpoint(request any) (json.RawMessage, error) {
+	return callJSON("agent_runs_read_checkpoint", []any{request})
+}
+
+// SpawnChild calls the RaisinDB registry method "agent_runs_spawn_child".
+func (AgentRunsAPI) SpawnChild(request any) (json.RawMessage, error) {
+	return callJSON("agent_runs_spawn_child", []any{request})
+}
+
+// Usage calls the RaisinDB registry method "agent_runs_usage".
+func (AgentRunsAPI) Usage(request any) (json.RawMessage, error) {
+	return callJSON("agent_runs_usage", []any{request})
+}
+
+// WaitChild calls the RaisinDB registry method "agent_runs_wait_child".
+func (AgentRunsAPI) WaitChild(request any) (json.RawMessage, error) {
+	return callJSON("agent_runs_wait_child", []any{request})
+}
+
 // AiAPI is the `raisin.ai` namespace.
 type AiAPI struct{}
 
@@ -381,6 +467,92 @@ func (LocksAPI) Release(key string, token int64) (bool, error) {
 // Renew calls the RaisinDB registry method "locks_renew".
 func (LocksAPI) Renew(key string, token int64, ttlMs int64) (bool, error) {
 	return callBool("locks_renew", []any{key, token, ttlMs})
+}
+
+// NodeDevAPI is the `raisin.node_dev` namespace.
+type NodeDevAPI struct{}
+
+// NodeDev is the entry point for the `raisin.node_dev` namespace.
+var NodeDev NodeDevAPI
+
+// Apply calls the RaisinDB registry method "node_dev_apply".
+func (NodeDevAPI) Apply(request any) (json.RawMessage, error) {
+	return callJSON("node_dev_apply", []any{request})
+}
+
+// Commit calls the RaisinDB registry method "node_dev_commit".
+func (NodeDevAPI) Commit(request any) (json.RawMessage, error) {
+	return callJSON("node_dev_commit", []any{request})
+}
+
+// Diff calls the RaisinDB registry method "node_dev_diff".
+func (NodeDevAPI) Diff(request any) (json.RawMessage, error) {
+	return callJSON("node_dev_diff", []any{request})
+}
+
+// DiffBranch calls the RaisinDB registry method "node_dev_diff_branch".
+func (NodeDevAPI) DiffBranch(request any) (json.RawMessage, error) {
+	return callJSON("node_dev_diff_branch", []any{request})
+}
+
+// Discard calls the RaisinDB registry method "node_dev_discard".
+func (NodeDevAPI) Discard(request any) (json.RawMessage, error) {
+	return callJSON("node_dev_discard", []any{request})
+}
+
+// DiscardBranch calls the RaisinDB registry method "node_dev_discard_branch".
+func (NodeDevAPI) DiscardBranch(request any) (json.RawMessage, error) {
+	return callJSON("node_dev_discard_branch", []any{request})
+}
+
+// DryRun calls the RaisinDB registry method "node_dev_dry_run".
+func (NodeDevAPI) DryRun(request any) (json.RawMessage, error) {
+	return callJSON("node_dev_dry_run", []any{request})
+}
+
+// ForkBranch calls the RaisinDB registry method "node_dev_fork_branch".
+func (NodeDevAPI) ForkBranch(request any) (json.RawMessage, error) {
+	return callJSON("node_dev_fork_branch", []any{request})
+}
+
+// GetChangeset calls the RaisinDB registry method "node_dev_get_changeset".
+func (NodeDevAPI) GetChangeset(request any) (json.RawMessage, error) {
+	return callJSON("node_dev_get_changeset", []any{request})
+}
+
+// List calls the RaisinDB registry method "node_dev_list".
+func (NodeDevAPI) List(request any) (json.RawMessage, error) {
+	return callJSON("node_dev_list", []any{request})
+}
+
+// ListChangesets calls the RaisinDB registry method "node_dev_list_changesets".
+func (NodeDevAPI) ListChangesets(request any) (json.RawMessage, error) {
+	return callJSON("node_dev_list_changesets", []any{request})
+}
+
+// MergeBranch calls the RaisinDB registry method "node_dev_merge_branch".
+func (NodeDevAPI) MergeBranch(request any) (json.RawMessage, error) {
+	return callJSON("node_dev_merge_branch", []any{request})
+}
+
+// Propose calls the RaisinDB registry method "node_dev_propose".
+func (NodeDevAPI) Propose(request any) (json.RawMessage, error) {
+	return callJSON("node_dev_propose", []any{request})
+}
+
+// Read calls the RaisinDB registry method "node_dev_read".
+func (NodeDevAPI) Read(request any) (json.RawMessage, error) {
+	return callJSON("node_dev_read", []any{request})
+}
+
+// Stat calls the RaisinDB registry method "node_dev_stat".
+func (NodeDevAPI) Stat(request any) (json.RawMessage, error) {
+	return callJSON("node_dev_stat", []any{request})
+}
+
+// Watch calls the RaisinDB registry method "node_dev_watch".
+func (NodeDevAPI) Watch(request any) (json.RawMessage, error) {
+	return callJSON("node_dev_watch", []any{request})
 }
 
 // NodesAPI is the `raisin.nodes` namespace.

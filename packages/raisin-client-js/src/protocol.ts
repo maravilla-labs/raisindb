@@ -287,6 +287,17 @@ export enum RequestType {
   FlowSubscribeEvents = 'flow_subscribe_events',
   FlowUnsubscribeEvents = 'flow_unsubscribe_events',
 
+  // Durable agent run operations
+  AgentRunCreate = 'agent_run_create',
+  AgentRunGet = 'agent_run_get',
+  AgentRunBySubject = 'agent_run_by_subject',
+  AgentRunList = 'agent_run_list',
+  AgentRunEvents = 'agent_run_events',
+  AgentRunSubscribe = 'agent_run_subscribe',
+  AgentRunUnsubscribe = 'agent_run_unsubscribe',
+  AgentRunControl = 'agent_run_control',
+  AgentRunChildren = 'agent_run_children',
+
   // Function operations
   FunctionInvoke = 'function_invoke',
   FunctionInvokeSync = 'function_invoke_sync',

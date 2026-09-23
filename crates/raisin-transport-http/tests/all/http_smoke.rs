@@ -1,6 +1,4 @@
 #![cfg(not(feature = "s3"))]
-use std::sync::Arc;
-
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -8,76 +6,21 @@ use axum::{
 use http_body_util::BodyExt; // for collect
 use tower::ServiceExt; // for oneshot
 
-use raisin_models::nodes::types::NodeType;
-#[cfg(feature = "storage-rocksdb")]
-use raisin_rocksdb::RocksDBStorage;
-use raisin_storage::{BranchScope, CommitMetadata, NodeTypeRepository, Storage};
-#[cfg(not(feature = "storage-rocksdb"))]
-use raisin_storage_memory::InMemoryStorage;
-use raisin_transport_http as http;
-// no extra imports needed for multipart test
+/// The HEAD routes of workspaces `demo` and `ws1` in repository `test`. The
+/// fixtures create the repository and send as the operator — see `support`.
+const DEMO: &str = "/api/repository/test/main/head/demo";
+const WS1: &str = "/api/repository/test/main/head/ws1";
 
 #[derive(serde::Deserialize)]
 struct Page<T> {
     items: Vec<T>,
 }
 
-async fn create_test_node_type<S: Storage>(storage: &S, name: &str) {
-    let test_node_type = NodeType {
-        id: Some(name.to_string()),
-        strict: Some(false),
-        name: name.to_string(),
-        extends: None,
-        mixins: vec![],
-        overrides: None,
-        description: Some(format!("Test NodeType: {}", name)),
-        icon: None,
-        version: Some(1),
-        properties: None,
-        allowed_children: vec![],
-        required_nodes: vec![],
-        initial_structure: None,
-        versionable: Some(true),
-        immutable: None,
-        publishable: Some(true),
-        auditable: Some(false),
-        indexable: None,
-        index_types: None,
-        created_at: Some(chrono::Utc::now()),
-        updated_at: None,
-        published_at: None,
-        published_by: None,
-        compound_indexes: None,
-        is_mixin: None,
-        previous_version: None,
-    };
-    storage
-        .node_types()
-        .put(
-            BranchScope::new("test", "test", "main"),
-            test_node_type,
-            CommitMetadata::system("test setup"),
-        )
-        .await
-        .unwrap();
-}
-
 #[tokio::test]
 async fn health_is_ok() {
-    let app = {
-        #[cfg(feature = "storage-rocksdb")]
-        {
-            let path = "/tmp/raisin-rocks-test-health";
-            let _ = std::fs::remove_dir_all(path);
-            let store = RocksDBStorage::new(path).unwrap();
-            // ensure a fresh DB path per test run if you want isolation; using a unique path per test name here
-            raisin_transport_http::router(Arc::new(store))
-        }
-        #[cfg(not(feature = "storage-rocksdb"))]
-        {
-            raisin_transport_http::router(Arc::new(InMemoryStorage::default()))
-        }
-    };
+    let app = crate::support::Fixture::new("smoke-health", "test", "main", &["demo", "ws1"], &[])
+        .await
+        .app;
     let response = app
         .oneshot(
             Request::builder()
@@ -92,25 +35,15 @@ async fn health_is_ok() {
 
 #[tokio::test]
 async fn workspace_put_and_get() {
-    let app = {
-        #[cfg(feature = "storage-rocksdb")]
-        {
-            let path = "/tmp/raisin-rocks-test-ws";
-            let _ = std::fs::remove_dir_all(path);
-            let store = RocksDBStorage::new(path).unwrap();
-            raisin_transport_http::router(Arc::new(store))
-        }
-        #[cfg(not(feature = "storage-rocksdb"))]
-        {
-            raisin_transport_http::router(Arc::new(InMemoryStorage::default()))
-        }
-    };
+    let app = crate::support::Fixture::new("smoke-ws", "test", "main", &[], &[])
+        .await
+        .app;
 
     // PUT workspace
     let body = serde_json::json!({"name": "demo", "allowed_node_types": [], "allowed_root_node_types": [], "depends_on": []});
     let req = Request::builder()
         .method("PUT")
-        .uri("/workspaces/demo")
+        .uri("/api/workspaces/test/demo")
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
         .unwrap();
@@ -122,7 +55,7 @@ async fn workspace_put_and_get() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/workspaces/demo")
+                .uri("/api/workspaces/test/demo")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -136,51 +69,21 @@ async fn workspace_put_and_get() {
 
 #[tokio::test]
 async fn node_put_get_delete() {
-    let app = {
-        #[cfg(feature = "storage-rocksdb")]
-        {
-            let path = "/tmp/raisin-rocks-test-node";
-            let _ = std::fs::remove_dir_all(path);
-            let storage = Arc::new(RocksDBStorage::new(path).unwrap());
-            create_test_node_type(&*storage, "t").await;
-            raisin_transport_http::router(storage)
-        }
-        #[cfg(not(feature = "storage-rocksdb"))]
-        {
-            let storage = Arc::new(InMemoryStorage::default());
-            create_test_node_type(&*storage, "t").await;
-            raisin_transport_http::router(storage)
-        }
-    };
+    let app = crate::support::Fixture::new("smoke-node", "test", "main", &["demo", "ws1"], &["t"])
+        .await
+        .app;
 
     // PUT node under ws "demo" using path-based repo API
-    let body = serde_json::json!({
-        "id": "n1",
-        "name": "node1",
-        "path": "/node1",
-        "node_type": "t",
-        "properties": {},
-        "children": [],
-        "version": 1
-    });
-    let req = Request::builder()
-        .method("PUT")
-        .uri(
-            "/api/repository/demo/".to_string()
-                + body["path"].as_str().unwrap().trim_start_matches('/'),
-        )
-        .header("content-type", "application/json")
-        .body(Body::from(serde_json::to_vec(&body).unwrap()))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    // Created through POST on the parent (PUT only updates an existing node).
+    let (status, text) = crate::support::create_at(&app, DEMO, "n1", "node1", "/node1", "t").await;
+    assert_eq!(status, StatusCode::CREATED, "{text}");
 
     // GET node by path
     let resp = app
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/api/repository/demo/node1")
+                .uri(format!("{DEMO}/node1"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -194,7 +97,7 @@ async fn node_put_get_delete() {
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri("/api/repository/demo/node1")
+                .uri(format!("{DEMO}/node1"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -205,24 +108,15 @@ async fn node_put_get_delete() {
 
 #[tokio::test]
 async fn query_endpoints() {
-    let app = {
-        #[cfg(feature = "storage-rocksdb")]
-        {
-            let path = "/tmp/raisin-rocks-test-query";
-            let _ = std::fs::remove_dir_all(path);
-            let storage = Arc::new(RocksDBStorage::new(path).unwrap());
-            create_test_node_type(&*storage, "alpha").await;
-            create_test_node_type(&*storage, "beta").await;
-            raisin_transport_http::router(storage)
-        }
-        #[cfg(not(feature = "storage-rocksdb"))]
-        {
-            let storage = Arc::new(InMemoryStorage::default());
-            create_test_node_type(&*storage, "alpha").await;
-            create_test_node_type(&*storage, "beta").await;
-            raisin_transport_http::router(storage)
-        }
-    };
+    let app = crate::support::Fixture::new(
+        "smoke-query",
+        "test",
+        "main",
+        &["demo", "ws1"],
+        &["alpha", "beta"],
+    )
+    .await
+    .app;
 
     // seed nodes
     for (id, name, path, parent, t) in [
@@ -230,32 +124,16 @@ async fn query_endpoints() {
         ("b", "B", "/a/b", Some("/a"), "beta"),
         ("c", "C", "/a/c", Some("/a"), "beta"),
     ] {
-        let mut body = serde_json::json!({
-            "id": id,
-            "name": name,
-            "path": path,
-            "node_type": t,
-            "properties": {},
-            "children": [],
-            "version": 1
-        });
-        if let Some(p) = parent {
-            body["parent"] = serde_json::Value::String(p.to_string());
-        }
-        let req = Request::builder()
-            .method("PUT")
-            .uri("/api/repository/demo".to_string() + path)
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap()))
-            .unwrap();
-        let resp = app.clone().oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        // Created through POST on the parent (PUT only updates an existing node).
+        let _ = parent;
+        let (status, text) = crate::support::create_at(&app, DEMO, id, name, path, t).await;
+        assert!(status.is_success(), "seeding {path}: {status} {text}");
     }
 
     // query by type
     let req = Request::builder()
         .method("POST")
-        .uri("/demo/query")
+        .uri(format!("{DEMO}/query"))
         .header("content-type", "application/json")
         .body(Body::from(
             serde_json::to_vec(&serde_json::json!({"nodeType":"beta"})).unwrap(),
@@ -267,13 +145,13 @@ async fn query_endpoints() {
     let v: Page<raisin_models::nodes::Node> = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(v.items.len(), 2);
 
-    // query by parent
+    // query by parent — `parent` is the parent node's ID ("a"), as the SDK sends it
     let req = Request::builder()
         .method("POST")
-        .uri("/demo/query")
+        .uri(format!("{DEMO}/query"))
         .header("content-type", "application/json")
         .body(Body::from(
-            serde_json::to_vec(&serde_json::json!({"parent":"/a"})).unwrap(),
+            serde_json::to_vec(&serde_json::json!({"parent":"a"})).unwrap(),
         ))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -285,10 +163,10 @@ async fn query_endpoints() {
     // combined filters (parent + type)
     let req = Request::builder()
         .method("POST")
-        .uri("/demo/query")
+        .uri(format!("{DEMO}/query"))
         .header("content-type", "application/json")
         .body(Body::from(
-            serde_json::to_vec(&serde_json::json!({"parent":"/a","nodeType":"beta"})).unwrap(),
+            serde_json::to_vec(&serde_json::json!({"parent":"a","nodeType":"beta"})).unwrap(),
         ))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -300,10 +178,10 @@ async fn query_endpoints() {
     // pagination (limit=1)
     let req = Request::builder()
         .method("POST")
-        .uri("/demo/query")
+        .uri(format!("{DEMO}/query"))
         .header("content-type", "application/json")
         .body(Body::from(
-            serde_json::to_vec(&serde_json::json!({"parent":"/a","limit":1})).unwrap(),
+            serde_json::to_vec(&serde_json::json!({"parent":"a","limit":1})).unwrap(),
         ))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -315,7 +193,7 @@ async fn query_endpoints() {
     // query by path
     let req = Request::builder()
         .method("POST")
-        .uri("/demo/query")
+        .uri(format!("{DEMO}/query"))
         .header("content-type", "application/json")
         .body(Body::from(
             serde_json::to_vec(&serde_json::json!({"path":"/a"})).unwrap(),
@@ -330,7 +208,7 @@ async fn query_endpoints() {
     // bad request when neither filter provided
     let req = Request::builder()
         .method("POST")
-        .uri("/demo/query")
+        .uri(format!("{DEMO}/query"))
         .header("content-type", "application/json")
         .body(Body::from("{}"))
         .unwrap();
@@ -348,41 +226,27 @@ async fn query_endpoints() {
 
 #[tokio::test]
 async fn repo_multipart_upload_sets_resource() {
-    let app = {
-        #[cfg(feature = "storage-rocksdb")]
-        {
-            let path = "/tmp/raisin-rocks-test-upload";
-            let _ = std::fs::remove_dir_all(path);
-            let storage = Arc::new(RocksDBStorage::new(path).unwrap());
-            create_test_node_type(&*storage, "t").await;
-            raisin_transport_http::router(storage)
-        }
-        #[cfg(not(feature = "storage-rocksdb"))]
-        {
-            let storage = Arc::new(InMemoryStorage::default());
-            create_test_node_type(&*storage, "t").await;
-            raisin_transport_http::router(storage)
-        }
-    };
+    let app =
+        crate::support::Fixture::new("smoke-upload", "test", "main", &["demo", "ws1"], &["t"])
+            .await
+            .app;
 
     // First create the node
+    // (POST on the parent creates; `?deep=true` creates the missing /path/to)
     let node_body = serde_json::json!({
         "id": "test-node",
         "name": "node",
-        "path": "/path/to/node",
         "node_type": "t",
-        "properties": {},
-        "children": [],
-        "version": 1
+        "properties": {}
     });
     let req = Request::builder()
-        .method("PUT")
-        .uri("/api/repository/ws1/path/to/node")
+        .method("POST")
+        .uri(format!("{WS1}/path/to?deep=true"))
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&node_body).unwrap()))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::CREATED);
 
     // Create a multipart body with one file field "file"
     let boundary = "XBOUNDARY";
@@ -400,7 +264,7 @@ async fn repo_multipart_upload_sets_resource() {
 
     let req = Request::builder()
         .method("POST")
-        .uri("/api/repository/ws1/path/to/node")
+        .uri(format!("{WS1}/path/to/node"))
         .header(
             "content-type",
             format!("multipart/form-data; boundary={}", boundary),
@@ -418,7 +282,7 @@ async fn repo_multipart_upload_sets_resource() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/api/repository/ws1/path/to/node")
+                .uri(format!("{WS1}/path/to/node"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -439,58 +303,35 @@ async fn repo_multipart_upload_sets_resource() {
 
 #[tokio::test]
 async fn query_dsl_endpoint() {
-    let app = {
-        #[cfg(feature = "storage-rocksdb")]
-        {
-            let path = "/tmp/raisin-rocks-test-dsl";
-            let _ = std::fs::remove_dir_all(path);
-            let storage = Arc::new(RocksDBStorage::new(path).unwrap());
-            create_test_node_type(&*storage, "alpha").await;
-            create_test_node_type(&*storage, "beta").await;
-            raisin_transport_http::router(storage)
-        }
-        #[cfg(not(feature = "storage-rocksdb"))]
-        {
-            let storage = Arc::new(InMemoryStorage::default());
-            create_test_node_type(&*storage, "alpha").await;
-            create_test_node_type(&*storage, "beta").await;
-            raisin_transport_http::router(storage)
-        }
-    };
+    let app = crate::support::Fixture::new(
+        "smoke-dsl",
+        "test",
+        "main",
+        &["demo", "ws1"],
+        &["alpha", "beta"],
+    )
+    .await
+    .app;
 
     // seed nodes
+    // The DSL endpoint evaluates the workspace's ROOT-level nodes (see
+    // `post_query_dsl`), whose `parent` is "/".
     for (id, name, path, parent, t) in [
-        ("a", "A", "/a", None, "alpha"),
-        ("b", "B", "/a/b", Some("/a"), "beta"),
-        ("c", "C", "/a/c", Some("/a"), "beta"),
+        ("a", "A", "/a", None::<&str>, "alpha"),
+        ("b", "B", "/b", None, "beta"),
+        ("c", "C", "/c", None, "beta"),
     ] {
-        let mut body = serde_json::json!({
-            "id": id,
-            "name": name,
-            "path": path,
-            "node_type": t,
-            "properties": {},
-            "children": [],
-            "version": 1
-        });
-        if let Some(p) = parent {
-            body["parent"] = serde_json::Value::String(p.to_string());
-        }
-        let req = Request::builder()
-            .method("PUT")
-            .uri("/api/repository/demo".to_string() + path)
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap()))
-            .unwrap();
-        let resp = app.clone().oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        // Created through POST on the parent (PUT only updates an existing node).
+        let _ = parent;
+        let (status, text) = crate::support::create_at(&app, DEMO, id, name, path, t).await;
+        assert!(status.is_success(), "seeding {path}: {status} {text}");
     }
 
-    // DSL: and [ { nodeType in ["beta"] }, { parent eq "/a" } ] with limit 1
+    // DSL: and [ { nodeType in ["beta"] }, { parent eq "/" } ] with limit 1
     let dsl = serde_json::json!({
         "and": [
             { "nodeType": { "in": ["beta"] } },
-            { "parent": { "eq": "/a" } }
+            { "parent": { "eq": "/" } }
         ],
         "order_by": { "path": "asc" },
         "limit": 1,
@@ -498,7 +339,7 @@ async fn query_dsl_endpoint() {
     });
     let req = Request::builder()
         .method("POST")
-        .uri("/demo/query/dsl")
+        .uri(format!("{DEMO}/query/dsl"))
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&dsl).unwrap()))
         .unwrap();

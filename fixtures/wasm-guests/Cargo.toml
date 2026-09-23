@@ -17,6 +17,7 @@ members = [
     "wrong-world",
     "sockets",
     "bench",
+    "agent-reducer",
 ]
 
 [workspace.dependencies]

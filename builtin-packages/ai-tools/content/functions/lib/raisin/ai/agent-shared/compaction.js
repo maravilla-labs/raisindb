@@ -77,7 +77,9 @@ async function getLatestCompaction(workspace, chatPath) {
  * the turn proceeds with uncompacted history.
  */
 async function maybeCompactConversation(workspace, chatPath, agentProps, modelId, options = {}) {
-  if (agentProps?.auto_compact !== true) return null;
+  // `options.always`: a run compacts when its context is over budget, whether
+  // or not the agent opted into threshold-based auto-compaction.
+  if (agentProps?.auto_compact !== true && options.always !== true) return null;
 
   let existing = null;
   try {
@@ -207,8 +209,16 @@ async function maybeCompactConversation(workspace, chatPath, agentProps, modelId
     }
 
     const cutoff = toCompact[toCompact.length - 1];
+    /* A run names its compaction after the operation that made it, so a
+     * replayed operation cannot write a second one; its structured checkpoint
+     * rides along (options.checkpoint). */
+    const nodeName = typeof options.nodeName === 'string' && options.nodeName ? options.nodeName : `compaction-${Date.now()}`;
+    if (options.nodeName) {
+      const prior = await raisin.nodes.get(workspace, `${chatPath}/${nodeName}`);
+      if (prior) return prior;
+    }
     const node = await raisin.nodes.create(workspace, chatPath, {
-      name: `compaction-${Date.now()}`,
+      name: nodeName,
       node_type: 'raisin:AICompaction',
       properties: {
         messages_compacted: toCompact.length,
@@ -219,6 +229,7 @@ async function maybeCompactConversation(workspace, chatPath, agentProps, modelId
         cutoff_created_at: cutoff.created_at || cutoff.properties?.created_at || null,
         token_checkpoint: Number(options.tokenCheckpoint) || 0,
         created_at: new Date().toISOString(),
+        ...(options.checkpoint && typeof options.checkpoint === 'object' ? { checkpoint: options.checkpoint, run_id: options.checkpoint.run_id || null } : {}),
       },
     });
 

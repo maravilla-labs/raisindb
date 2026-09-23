@@ -42,14 +42,40 @@ pub enum ChildrenField {
 }
 
 /// Minimal wrapper that changes just the children field for API responses.
-/// Uses serde flatten to include all Node fields without duplication.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+///
+/// Serialized as the node's own fields with `children` REPLACED by
+/// [`ChildrenField`]. A derived `#[serde(flatten)]` cannot do that: `Node` has
+/// a `children` field of its own, so the derive wrote the key twice — once
+/// from the node (always `[]`, the names having been moved out) and once from
+/// the wrapper. A client whose parser keeps the last key saw the right value;
+/// a strict one (serde_json among them) refused the document with
+/// "duplicate field `children`".
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct NodeWithChildren {
-    /// Flatten includes all fields from Node except children
+    /// All fields of the node; its own `children` is superseded on output.
     #[serde(flatten)]
     pub node: Node,
     /// Override the children field with our flexible enum
     pub children: ChildrenField,
+}
+
+impl Serialize for NodeWithChildren {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::Error;
+
+        let mut value = serde_json::to_value(&self.node).map_err(S::Error::custom)?;
+        let children = serde_json::to_value(&self.children).map_err(S::Error::custom)?;
+        match value.as_object_mut() {
+            Some(object) => {
+                object.insert("children".to_string(), children);
+            }
+            None => return Err(S::Error::custom("a node must serialize as an object")),
+        }
+        value.serialize(serializer)
+    }
 }
 
 impl NodeWithChildren {
@@ -70,5 +96,46 @@ impl NodeWithChildren {
     pub fn with_string_children(mut self, children: Vec<String>) -> Self {
         self.children = ChildrenField::Names(children);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(name: &str) -> Node {
+        Node {
+            id: format!("id-{name}"),
+            name: name.to_string(),
+            path: format!("/{name}"),
+            node_type: "t".to_string(),
+            children: vec!["kid".to_string()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn children_is_written_once_and_round_trips() {
+        let expanded = NodeWithChildren::new(node("parent"))
+            .with_children(vec![NodeWithChildren::new(node("kid"))]);
+
+        let text = serde_json::to_string(&expanded).unwrap();
+        assert_eq!(
+            text.matches("\"children\"").count(),
+            // the parent's key, and the one inside the expanded child
+            2,
+            "{text}"
+        );
+
+        let back: NodeWithChildren = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.node.name, "parent");
+        match back.children {
+            ChildrenField::Nodes(kids) => {
+                assert_eq!(kids.len(), 1);
+                assert_eq!(kids[0].node.name, "kid");
+                assert_eq!(kids[0].children, ChildrenField::Names(vec!["kid".into()]));
+            }
+            other => panic!("expected expanded children, got {other:?}"),
+        }
     }
 }

@@ -1,30 +1,16 @@
-async function handler(input) {
-  const { task_id, __raisin_context } = input;
-  const workspace = __raisin_context?.workspace || 'ai';
-  const chatPath = __raisin_context?.chat_path;
-  if (!task_id) throw new Error('task_id is required');
-  if (!chatPath) throw new Error('Missing chat_path in execution context');
+/**
+ * get-delegation-status — the plan-task spelling of `inspect-agent`: the
+ * child run delegated for a task (read from core), with its status, outcome,
+ * summary, artifacts and acceptance.
+ */
+import { delegationTool, inspect } from '../agent-shared/delegation-tool.js';
+import { DELEGATION_FUNCTIONS } from '../agent-shared/delegation-spec.js';
 
-  const rows = await raisin.sql.query(
-    `SELECT id, path, properties FROM "${workspace}"
-     WHERE DESCENDANT_OF($1) AND node_type = 'raisin:AITask' AND id = $2
-     LIMIT 1`,
-    [chatPath, task_id],
-  );
-  if (!rows.length) return { found: false, task_id, status: 'missing' };
-  const props = rows[0].properties || {};
-  return {
-    found: true,
-    task_id,
-    title: props.title || '',
-    status: props.delegation_status || (props.delegation_id ? 'unknown' : 'not_delegated'),
-    task_status: props.status || 'pending',
-    delegation_id: props.delegation_id || null,
-    flow_instance_id: props.delegation_flow_instance_id || null,
-    agent_ref: props.delegated_agent_ref || null,
-    branch: props.delegation_branch || null,
-    base_branch: props.delegation_base_branch || null,
-    result: props.delegation_result || null,
-    error: props.delegation_error || null,
-  };
+export async function handler(input) {
+  return delegationTool(input, async (args) => {
+    if (!args.task_id) throw Object.assign(new Error('task_id is required'), { error_class: 'invalid_input' });
+    const r = await inspect({ ...args, agent: args.task_id }, DELEGATION_FUNCTIONS.legacyStatus);
+    const c = r.payload.child;
+    return { payload: { found: true, task_id: args.task_id, status: c.status, outcome: c.outcome, result: c.summary, child: c } };
+  });
 }

@@ -1,0 +1,14 @@
+node_type: "raisin:Function"
+properties:
+  title: "Node Diff"
+  description: |
+    Compare one node across two revisions and/or branches: {from, to, moved,
+    changed:[{key, from, to}]}. Sides are {branch?, revision?}; omitted means
+    the current branch head.
+  execution_mode: "inline"
+  category: "node-dev"
+  enabled: true
+  language: "javascript"
+  entry_file: "index.js:handler"
+  version: 1
+  input_schema: {"type": "object", "properties": {"roots": {"type": "array", "description": "The subtrees you work in: [{workspace, path}] (path defaults to '/'). The first root is the base for relative paths; nothing outside the roots can be named. An agent run's own grant narrows these further.", "items": {"type": "object", "properties": {"workspace": {"type": "string"}, "path": {"type": "string"}}, "required": ["workspace"]}}, "workspace": {"type": "string", "description": "Shorthand for roots=[{workspace, path:'/'}]."}, "branch": {"type": "string", "description": "Branch to work on (default main). Develop on a draft branch from node-branch fork."}, "target": {"description": "The node: a path (relative to the first root, or absolute) or {path?, node_id?, workspace?}. Prefer node_id once you have read the node \u2014 it survives moves.", "anyOf": [{"type": "string"}, {"type": "object", "properties": {"path": {"type": "string"}, "node_id": {"type": "string"}, "workspace": {"type": "string"}}}]}, "from": {"type": "object"}, "to": {"type": "object"}}, "required": ["target"]}

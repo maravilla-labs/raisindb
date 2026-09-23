@@ -10,7 +10,7 @@
 
 #![cfg(all(feature = "storage-rocksdb", not(feature = "s3")))]
 
-use std::sync::{Arc, Once};
+use std::sync::Arc;
 
 use axum::{
     body::Body,
@@ -23,25 +23,13 @@ use raisin_models::nodes::types::NodeType;
 use raisin_rocksdb::RocksDBStorage;
 use raisin_storage::{BranchScope, CommitMetadata, NodeTypeRepository, Storage};
 
-/// The bearer `optional_auth_middleware` turns into `AuthContext::system()`.
+/// The bearer `optional_auth_middleware` turns into `AuthContext::system()`,
+/// and the signing secret the router verifies grants with. Both are the ONE
+/// value for this whole test binary (see `support`): a per-file value would
+/// race with every other file's, since the router reads them per request.
 /// Used here to set fixtures up, and to prove that a system caller is exactly
 /// the principal a grant may NOT be minted for.
-const ADMIN_TOKEN: &str = "asset-grants-test-superadmin-token";
-
-/// A signing secret the test also holds, so a grant can be minted in-process and
-/// presented to the router as a client would.
-const SIGNING_SECRET: &str = "asset-grant-test-signing-secret-32b";
-
-/// Env vars are process-global. Both are only ever SET, never cleared, so tests
-/// running in parallel in this binary cannot race on them.
-static ENV: Once = Once::new();
-
-fn init_env() {
-    ENV.call_once(|| {
-        std::env::set_var("RAISIN_SUPERADMIN_TOKEN", ADMIN_TOKEN);
-        std::env::set_var("RAISINDB_SIGNING_SECRET", SIGNING_SECRET);
-    });
-}
+use crate::support::{init_env, ADMIN_TOKEN, SIGNING_SECRET};
 
 const TENANT: &str = "default";
 const REPO: &str = "main";

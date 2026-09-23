@@ -23,6 +23,8 @@
 //! - `functions` - Function-to-function call operations
 
 mod admin;
+mod agent_runs;
+mod agent_runs_children;
 mod ai_ops;
 mod branches;
 mod context;
@@ -37,6 +39,7 @@ mod imap;
 mod integrations;
 mod locks;
 mod network_policy;
+mod node_dev;
 mod nodes;
 mod platform;
 mod resources;
@@ -438,6 +441,18 @@ impl FunctionApi for RaisinFunctionApi {
 
     async fn flow_run(&self, flow_path: &str, input: Value) -> Result<Value> {
         self.impl_flow_run(flow_path, input).await
+    }
+
+    // ========== Durable Agent Runs ==========
+
+    async fn agent_runs_call(&self, method: &str, args: Value) -> Result<Value> {
+        self.impl_agent_runs_call(method, args).await
+    }
+
+    // ========== Node Development Surface ==========
+
+    async fn node_dev_call(&self, method: &str, args: Value) -> Result<Value> {
+        self.impl_node_dev_call(method, args).await
     }
 
     // ========== Scheduled Invocation Operations ==========

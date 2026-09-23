@@ -7,8 +7,6 @@
 //! - 413 for payload too large
 //! - Empty arrays only when resource exists but has no children
 
-use std::sync::Arc;
-
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -16,77 +14,12 @@ use axum::{
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-use raisin_models::nodes::types::NodeType;
-#[cfg(feature = "storage-rocksdb")]
-use raisin_rocksdb::RocksDBStorage;
-use raisin_storage::{BranchScope, CommitMetadata, NodeTypeRepository, Storage};
-#[cfg(not(feature = "storage-rocksdb"))]
-use raisin_storage_memory::InMemoryStorage;
-use raisin_transport_http as http;
-
-async fn create_test_node_type<S: Storage>(storage: &S, name: &str) {
-    let test_node_type = NodeType {
-        id: Some(name.to_string()),
-        strict: Some(false),
-        name: name.to_string(),
-        extends: None,
-        mixins: vec![],
-        overrides: None,
-        description: Some(format!("Test NodeType: {}", name)),
-        icon: None,
-        version: Some(1),
-        properties: None,
-        allowed_children: vec![],
-        required_nodes: vec![],
-        initial_structure: None,
-        versionable: Some(true),
-        immutable: None,
-        publishable: Some(true),
-        auditable: Some(false),
-        indexable: None,
-        index_types: None,
-        created_at: Some(chrono::Utc::now()),
-        updated_at: None,
-        published_at: None,
-        published_by: None,
-        compound_indexes: None,
-        is_mixin: None,
-        previous_version: None,
-    };
-    storage
-        .node_types()
-        .put(
-            BranchScope::new("test", "test", "main"),
-            test_node_type,
-            CommitMetadata::system("test setup"),
-        )
-        .await
-        .unwrap();
-}
-
+/// Repository `test` with the `page` and `folder` node types, sent as the
+/// operator — see `support`. Each test creates workspace `test` itself.
 async fn setup_app() -> axum::Router {
-    #[cfg(feature = "storage-rocksdb")]
-    {
-        let path = format!("/tmp/raisin-rocks-test-errors-{}", nanoid::nanoid!(8));
-        let _ = std::fs::remove_dir_all(&path);
-        let storage = Arc::new(RocksDBStorage::new(&path).unwrap());
-
-        // Create test NodeTypes
-        create_test_node_type(&*storage, "page").await;
-        create_test_node_type(&*storage, "folder").await;
-
-        raisin_transport_http::router(storage)
-    }
-    #[cfg(not(feature = "storage-rocksdb"))]
-    {
-        let storage = Arc::new(InMemoryStorage::default());
-
-        // Create test NodeTypes
-        create_test_node_type(&*storage, "page").await;
-        create_test_node_type(&*storage, "folder").await;
-
-        raisin_transport_http::router(storage)
-    }
+    crate::support::Fixture::new("errors", "test", "main", &[], &["page", "folder"])
+        .await
+        .app
 }
 
 async fn create_workspace(app: &axum::Router) {
@@ -99,7 +32,7 @@ async fn create_workspace(app: &axum::Router) {
     });
     let req = Request::builder()
         .method("PUT")
-        .uri("/workspaces/test")
+        .uri("/api/workspaces/test/test")
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&ws_body).unwrap()))
         .unwrap();
@@ -113,7 +46,7 @@ async fn test_get_nonexistent_node_returns_404() {
     create_workspace(&app).await;
 
     let req = Request::builder()
-        .uri("/api/repository/test/nonexistent")
+        .uri("/api/repository/test/main/head/test/nonexistent")
         .body(Body::empty())
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -128,7 +61,7 @@ async fn test_list_children_of_nonexistent_parent_returns_404() {
 
     // Try to list children of non-existent parent
     let req = Request::builder()
-        .uri("/api/repository/test/nonexistent/")
+        .uri("/api/repository/test/main/head/test/nonexistent/")
         .body(Body::empty())
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -147,7 +80,7 @@ async fn test_deep_children_of_nonexistent_parent_returns_404() {
 
     // Try to get deep children of non-existent parent (nested)
     let req = Request::builder()
-        .uri("/api/repository/test/nonexistent/?level=2")
+        .uri("/api/repository/test/main/head/test/nonexistent/?level=2")
         .body(Body::empty())
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -163,7 +96,7 @@ async fn test_deep_children_of_nonexistent_parent_returns_404() {
     create_workspace(&app).await;
 
     let req = Request::builder()
-        .uri("/api/repository/test/nonexistent/?level=2&flatten=true")
+        .uri("/api/repository/test/main/head/test/nonexistent/?level=2&flatten=true")
         .body(Body::empty())
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -188,16 +121,16 @@ async fn test_list_children_of_childless_parent_returns_empty_array() {
     });
     let req = Request::builder()
         .method("POST")
-        .uri("/api/repository/test/")
+        .uri("/api/repository/test/main/head/test/")
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&node_body).unwrap()))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::CREATED);
 
     // List children - should return empty array, NOT 404
     let req = Request::builder()
-        .uri("/api/repository/test/parent/")
+        .uri("/api/repository/test/main/head/test/parent/")
         .body(Body::empty())
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -230,12 +163,12 @@ async fn test_inline_upload_with_size_limit() {
     });
     let req = Request::builder()
         .method("POST")
-        .uri("/api/repository/test/")
+        .uri("/api/repository/test/main/head/test/")
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&node_body).unwrap()))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::CREATED);
 
     // Create multipart form with small file (< 11MB)
     let boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW";
@@ -247,7 +180,7 @@ async fn test_inline_upload_with_size_limit() {
 
     let req = Request::builder()
         .method("POST")
-        .uri("/api/repository/test/docs?inline=true")
+        .uri("/api/repository/test/main/head/test/docs?inline=true")
         .header(
             "content-type",
             format!("multipart/form-data; boundary={}", boundary),
@@ -264,7 +197,7 @@ async fn test_inline_upload_with_size_limit() {
 
     // Verify file was stored inline
     let req = Request::builder()
-        .uri("/api/repository/test/docs")
+        .uri("/api/repository/test/main/head/test/docs")
         .body(Body::empty())
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -296,12 +229,12 @@ async fn test_inline_upload_size_exceeds_limit() {
     });
     let req = Request::builder()
         .method("POST")
-        .uri("/api/repository/test/")
+        .uri("/api/repository/test/main/head/test/")
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&node_body).unwrap()))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::CREATED);
 
     // Create multipart form with large file (> 11MB)
     let boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW";
@@ -313,7 +246,7 @@ async fn test_inline_upload_size_exceeds_limit() {
 
     let req = Request::builder()
         .method("POST")
-        .uri("/api/repository/test/docs?inline=true")
+        .uri("/api/repository/test/main/head/test/docs?inline=true")
         .header(
             "content-type",
             format!("multipart/form-data; boundary={}", boundary),
@@ -342,12 +275,12 @@ async fn test_inline_upload_non_utf8_fails() {
     });
     let req = Request::builder()
         .method("POST")
-        .uri("/api/repository/test/")
+        .uri("/api/repository/test/main/head/test/")
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&node_body).unwrap()))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::CREATED);
 
     // Create multipart form with invalid UTF-8 bytes
     let boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW";
@@ -364,7 +297,7 @@ async fn test_inline_upload_non_utf8_fails() {
 
     let req = Request::builder()
         .method("POST")
-        .uri("/api/repository/test/docs?inline=true")
+        .uri("/api/repository/test/main/head/test/docs?inline=true")
         .header(
             "content-type",
             format!("multipart/form-data; boundary={}", boundary),
@@ -393,12 +326,12 @@ async fn test_override_replaces_existing_file() {
     });
     let req = Request::builder()
         .method("POST")
-        .uri("/api/repository/test/")
+        .uri("/api/repository/test/main/head/test/")
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&node_body).unwrap()))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::CREATED);
 
     // Upload first file inline
     let boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW";
@@ -410,7 +343,7 @@ async fn test_override_replaces_existing_file() {
 
     let req = Request::builder()
         .method("POST")
-        .uri("/api/repository/test/docs?inline=true")
+        .uri("/api/repository/test/main/head/test/docs?inline=true")
         .header(
             "content-type",
             format!("multipart/form-data; boundary={}", boundary),
@@ -429,7 +362,7 @@ async fn test_override_replaces_existing_file() {
 
     let req = Request::builder()
         .method("POST")
-        .uri("/api/repository/test/docs?inline=true&override=true")
+        .uri("/api/repository/test/main/head/test/docs?inline=true&override=true")
         .header(
             "content-type",
             format!("multipart/form-data; boundary={}", boundary),
@@ -441,7 +374,7 @@ async fn test_override_replaces_existing_file() {
 
     // Verify file was replaced
     let req = Request::builder()
-        .uri("/api/repository/test/docs")
+        .uri("/api/repository/test/main/head/test/docs")
         .body(Body::empty())
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -468,7 +401,7 @@ async fn test_root_listing_returns_empty_for_new_workspace() {
 
     // List root - should return empty array since workspace exists but has no nodes
     let req = Request::builder()
-        .uri("/api/repository/test/")
+        .uri("/api/repository/test/main/head/test/")
         .body(Body::empty())
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -501,16 +434,17 @@ async fn test_deep_children_of_childless_parent_returns_empty() {
     });
     let req = Request::builder()
         .method("POST")
-        .uri("/api/repository/test/")
+        .uri("/api/repository/test/main/head/test/")
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&node_body).unwrap()))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::CREATED);
 
-    // Get deep children (nested) - should return empty map
+    // Get deep children (nested) - should return empty map. `format=map`
+    // selects the keyed map; the default is the array form.
     let req = Request::builder()
-        .uri("/api/repository/test/parent/?level=2")
+        .uri("/api/repository/test/main/head/test/parent/?level=2&format=map")
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -532,7 +466,7 @@ async fn test_deep_children_of_childless_parent_returns_empty() {
 
     // Get deep children (flat) - should return empty map
     let req = Request::builder()
-        .uri("/api/repository/test/parent/?level=2&flatten=true")
+        .uri("/api/repository/test/main/head/test/parent/?level=2&flatten=true&format=map")
         .body(Body::empty())
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -544,11 +478,11 @@ async fn test_deep_children_of_childless_parent_returns_empty() {
     );
 
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let children: std::collections::HashMap<String, raisin_models::nodes::Node> =
-        serde_json::from_slice(&bytes).unwrap();
+    // The flattened form is a list of nodes.
+    let children: Vec<raisin_models::nodes::Node> = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(
         children.len(),
         0,
-        "Should return empty map for childless parent"
+        "Should return an empty list for childless parent"
     );
 }

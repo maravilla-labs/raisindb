@@ -107,6 +107,8 @@ raisin-ai = { version = "0.1.0", path = "../raisin-ai" }
 raisin-packages = { path = "../raisin-packages" }
 raisin-hlc = { path = "../raisin-hlc" }
 raisin-locks = { path = "../raisin-locks" }
+# Durable agent runs (the runtime; the store and job wiring live in raisin-rocksdb).
+raisin-agent-runtime = { path = "../raisin-agent-runtime" }
 raisin-deps = { path = "../raisin-deps" }
 include_dir = "0.7"
 zip = "2.2"

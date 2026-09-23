@@ -9,7 +9,11 @@ icon: package
 # already right; keywords existed to be searched and were reachable only by an
 # exact property predicate. Nothing else changes — `content_hash`,
 # `upload_state`, `teaser_background_url` and the rest are machine fields.
-version: 4
+# v5/v6: `migrations` and `applied_migrations`. The upload processor and the
+# installer have written both since package migrations landed, but the strict
+# schema never declared them, so the first package that shipped a migration
+# failed to install ("Undefined property 'migrations' in strict mode").
+version: 6
 strict: true
 indexable: true
 index_types: [Property, Fulltext]
@@ -202,6 +206,25 @@ properties:
     description: Whether the package is a builtin sytem package
     default: false
     index: [Property]
+
+  - name: migrations
+    type: Array
+    required: false
+    title: Migrations
+    description: |
+      The package's migrations/*.yaml as last seen: written by the upload
+      processor, and the installer records each one's status as it runs.
+      Structure: [{ id: string, path: string, title?: string, hash?: string,
+      status?: string, operations: integer }]
+
+  - name: applied_migrations
+    type: Array
+    required: false
+    title: Applied Migrations
+    description: |
+      The installer's ledger of migrations already applied to this
+      installation, keyed by id and content hash, so a migration runs once.
+      Structure: [{ id: string, hash: string, status: string }]
 
   - name: sync_policy
     type: Object

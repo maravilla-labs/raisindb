@@ -5,8 +5,6 @@
 //! It covers: workspace creation, node CRUD with POST, listing, hierarchy navigation,
 //! deep creation, rename, move, copy, delete, and validates the final state.
 
-use std::sync::Arc;
-
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -14,75 +12,12 @@ use axum::{
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-use raisin_models::nodes::types::NodeType;
-#[cfg(feature = "storage-rocksdb")]
-use raisin_rocksdb::RocksDBStorage;
-use raisin_storage::{BranchScope, CommitMetadata, NodeTypeRepository, Storage};
-#[cfg(not(feature = "storage-rocksdb"))]
-use raisin_storage_memory::InMemoryStorage;
-use raisin_transport_http as http;
-
-async fn create_test_node_type<S: Storage>(storage: &S, name: &str) {
-    let test_node_type = NodeType {
-        id: Some(name.to_string()),
-        strict: Some(false),
-        name: name.to_string(),
-        extends: None,
-        mixins: vec![],
-        overrides: None,
-        description: Some(format!("Test NodeType: {}", name)),
-        icon: None,
-        version: Some(1),
-        properties: None,
-        allowed_children: vec![],
-        required_nodes: vec![],
-        initial_structure: None,
-        versionable: Some(true),
-        immutable: None,
-        publishable: Some(true),
-        auditable: Some(false),
-        indexable: None,
-        index_types: None,
-        created_at: Some(chrono::Utc::now()),
-        updated_at: None,
-        published_at: None,
-        published_by: None,
-        compound_indexes: None,
-        is_mixin: None,
-        previous_version: None,
-    };
-    storage
-        .node_types()
-        .put(
-            BranchScope::new("test", "test", "main"),
-            test_node_type,
-            CommitMetadata::system("test setup"),
-        )
-        .await
-        .unwrap();
-}
-
 #[tokio::test]
 async fn complete_workflow_with_legacy_api() {
     // Setup test app
-    let app = {
-        #[cfg(feature = "storage-rocksdb")]
-        {
-            let path = "/tmp/raisin-rocks-test-e2e";
-            let _ = std::fs::remove_dir_all(path);
-            let store = Arc::new(RocksDBStorage::new(path).unwrap());
-            create_test_node_type(&*store, "page").await;
-            create_test_node_type(&*store, "raisin:Folder").await;
-            raisin_transport_http::router(store)
-        }
-        #[cfg(not(feature = "storage-rocksdb"))]
-        {
-            let store = Arc::new(InMemoryStorage::default());
-            create_test_node_type(&*store, "page").await;
-            create_test_node_type(&*store, "raisin:Folder").await;
-            raisin_transport_http::router(store)
-        }
-    };
+    let app = crate::support::Fixture::new("e2e", "test", "main", &[], &["page", "raisin:Folder"])
+        .await
+        .app;
 
     // ============================================================================
     // 1. Create workspace
@@ -91,13 +26,15 @@ async fn complete_workflow_with_legacy_api() {
     let ws_body = serde_json::json!({
         "name": "demo",
         "description": "Demo workspace for E2E test",
-        "allowed_node_types": ["page", "article", "folder"],
-        "allowed_root_node_types": ["page", "article", "folder"],
+        // `?deep=true` creates missing ancestors as `raisin:Folder` nodes, so
+        // the workspace has to allow that type for step 8 to succeed.
+        "allowed_node_types": ["page", "article", "folder", "raisin:Folder"],
+        "allowed_root_node_types": ["page", "article", "folder", "raisin:Folder"],
         "depends_on": []
     });
     let req = Request::builder()
         .method("PUT")
-        .uri("/workspaces/demo")
+        .uri("/api/workspaces/test/demo")
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&ws_body).unwrap()))
         .unwrap();
@@ -119,12 +56,16 @@ async fn complete_workflow_with_legacy_api() {
     });
     let req = Request::builder()
         .method("POST")
-        .uri("/api/repository/demo/")
+        .uri("/api/repository/test/main/head/demo/")
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&node_body).unwrap()))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "Failed to create root node");
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "Failed to create root node"
+    );
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let about_node: raisin_models::nodes::Node = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(about_node.name, "about");
@@ -135,7 +76,7 @@ async fn complete_workflow_with_legacy_api() {
     // ============================================================================
     eprintln!("=== Step 3: GET Root Node ===");
     let req = Request::builder()
-        .uri("/api/repository/demo/about")
+        .uri("/api/repository/test/main/head/demo/about")
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -156,14 +97,14 @@ async fn complete_workflow_with_legacy_api() {
         });
         let req = Request::builder()
             .method("POST")
-            .uri("/api/repository/demo/")
+            .uri("/api/repository/test/main/head/demo/")
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&node_body).unwrap()))
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(
             resp.status(),
-            StatusCode::OK,
+            StatusCode::CREATED,
             "Failed to create sibling: {}",
             name
         );
@@ -174,7 +115,7 @@ async fn complete_workflow_with_legacy_api() {
     // ============================================================================
     eprintln!("=== Step 5: List Root Nodes ===");
     let req = Request::builder()
-        .uri("/api/repository/demo/")
+        .uri("/api/repository/test/main/head/demo/")
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -200,14 +141,14 @@ async fn complete_workflow_with_legacy_api() {
         });
         let req = Request::builder()
             .method("POST")
-            .uri("/api/repository/demo/services")
+            .uri("/api/repository/test/main/head/demo/services")
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&node_body).unwrap()))
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(
             resp.status(),
-            StatusCode::OK,
+            StatusCode::CREATED,
             "Failed to create child: {}",
             name
         );
@@ -218,7 +159,7 @@ async fn complete_workflow_with_legacy_api() {
     // ============================================================================
     eprintln!("=== Step 7: List Children of /services ===");
     let req = Request::builder()
-        .uri("/api/repository/demo/services/")
+        .uri("/api/repository/test/main/head/demo/services/")
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -246,20 +187,23 @@ async fn complete_workflow_with_legacy_api() {
     });
     let req = Request::builder()
         .method("POST")
-        .uri("/api/repository/demo/products/electronics/phones?deep=true")
+        .uri("/api/repository/test/main/head/demo/products/electronics/phones?deep=true")
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&node_body).unwrap()))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "Failed deep creation");
+    assert_eq!(resp.status(), StatusCode::CREATED, "Failed deep creation");
+    // A child POST commits, and answers `{ node, revision, committed }`.
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let deep_node: raisin_models::nodes::Node = serde_json::from_slice(&bytes).unwrap();
+    let created: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let deep_node: raisin_models::nodes::Node =
+        serde_json::from_value(created["node"].clone()).unwrap();
     assert_eq!(deep_node.path, "/products/electronics/phones/iphone");
 
     // Verify auto-created folders
     for path in ["/products/electronics", "/products/electronics/phones"] {
         let req = Request::builder()
-            .uri(format!("/api/repository/demo{}", path))
+            .uri(format!("/api/repository/test/main/head/demo{}", path))
             .body(Body::empty())
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
@@ -281,9 +225,10 @@ async fn complete_workflow_with_legacy_api() {
     // ============================================================================
     // 9. GET deep children with level parameter
     // ============================================================================
+    // `format=map` selects the path-keyed map; the default is the array form.
     eprintln!("=== Step 9: GET Deep Children with ?level=3 ===");
     let req = Request::builder()
-        .uri("/api/repository/demo/products/?level=3")
+        .uri("/api/repository/test/main/head/demo/products/?level=3&format=map")
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -298,9 +243,13 @@ async fn complete_workflow_with_legacy_api() {
         "Expected at least 1 node in deep hierarchy"
     );
     // Verify electronics folder exists and has nested children
+    let electronics = deep_map
+        .values()
+        .find(|deep| deep.node.path == "/products/electronics")
+        .unwrap_or_else(|| panic!("Should contain electronics folder: {:?}", deep_map.keys()));
     assert!(
-        deep_map.contains_key("/products/electronics"),
-        "Should contain electronics folder"
+        !electronics.children.is_empty(),
+        "electronics should carry its nested children"
     );
 
     // ============================================================================
@@ -308,7 +257,7 @@ async fn complete_workflow_with_legacy_api() {
     // ============================================================================
     eprintln!("=== Step 10: GET Deep Children Flattened ===");
     let req = Request::builder()
-        .uri("/api/repository/demo/products/?level=2&flatten=true")
+        .uri("/api/repository/test/main/head/demo/products/?level=2&flatten=true&format=map")
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -318,11 +267,11 @@ async fn complete_workflow_with_legacy_api() {
         "Failed to get flattened deep children"
     );
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let flat_map: std::collections::HashMap<String, raisin_models::nodes::Node> =
-        serde_json::from_slice(&bytes).unwrap();
+    // The flattened form is a list of nodes.
+    let flat_list: Vec<raisin_models::nodes::Node> = serde_json::from_slice(&bytes).unwrap();
     // Should contain electronics and phones (level 2)
     assert!(
-        flat_map.len() >= 2,
+        flat_list.len() >= 2,
         "Expected at least 2 nodes in flattened list"
     );
 
@@ -332,7 +281,7 @@ async fn complete_workflow_with_legacy_api() {
     eprintln!("=== Step 11: Rename /about → /about-us ===");
     let req = Request::builder()
         .method("POST")
-        .uri("/api/repository/demo/about?command=rename")
+        .uri("/api/repository/test/main/head/demo/about?command=rename")
         .header("content-type", "application/json")
         .body(Body::from(
             serde_json::to_vec(&serde_json::json!({"newName": "about-us"})).unwrap(),
@@ -343,7 +292,7 @@ async fn complete_workflow_with_legacy_api() {
 
     // Verify rename
     let req = Request::builder()
-        .uri("/api/repository/demo/about-us")
+        .uri("/api/repository/test/main/head/demo/about-us")
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -355,7 +304,7 @@ async fn complete_workflow_with_legacy_api() {
     eprintln!("=== Step 12: Move /contact → /services/contact ===");
     let req = Request::builder()
         .method("POST")
-        .uri("/api/repository/demo/contact?command=move")
+        .uri("/api/repository/test/main/head/demo/contact?command=move")
         .header("content-type", "application/json")
         .body(Body::from(
             serde_json::to_vec(&serde_json::json!({"targetPath": "/services/contact"})).unwrap(),
@@ -366,7 +315,7 @@ async fn complete_workflow_with_legacy_api() {
 
     // Verify move
     let req = Request::builder()
-        .uri("/api/repository/demo/services/contact")
+        .uri("/api/repository/test/main/head/demo/services/contact")
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -382,7 +331,7 @@ async fn complete_workflow_with_legacy_api() {
     eprintln!("=== Step 13: Copy /services/consulting → /consulting-copy ===");
     let req = Request::builder()
         .method("POST")
-        .uri("/api/repository/demo/services/consulting?command=copy")
+        .uri("/api/repository/test/main/head/demo/services/consulting?command=copy")
         .header("content-type", "application/json")
         .body(Body::from(
             serde_json::to_vec(&serde_json::json!({
@@ -397,7 +346,7 @@ async fn complete_workflow_with_legacy_api() {
 
     // Verify copy
     let req = Request::builder()
-        .uri("/api/repository/demo/consulting-copy")
+        .uri("/api/repository/test/main/head/demo/consulting-copy")
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -413,7 +362,7 @@ async fn complete_workflow_with_legacy_api() {
     eprintln!("=== Step 14: Delete /products Tree ===");
     let req = Request::builder()
         .method("DELETE")
-        .uri("/api/repository/demo/products")
+        .uri("/api/repository/test/main/head/demo/products")
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -425,7 +374,7 @@ async fn complete_workflow_with_legacy_api() {
 
     // Verify deletion
     let req = Request::builder()
-        .uri("/api/repository/demo/products")
+        .uri("/api/repository/test/main/head/demo/products")
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -442,7 +391,7 @@ async fn complete_workflow_with_legacy_api() {
 
     // List root - should have: about-us, services, consulting-copy
     let req = Request::builder()
-        .uri("/api/repository/demo/")
+        .uri("/api/repository/test/main/head/demo/")
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -466,7 +415,7 @@ async fn complete_workflow_with_legacy_api() {
 
     // List services children - should have: consulting, development, support, contact
     let req = Request::builder()
-        .uri("/api/repository/demo/services/")
+        .uri("/api/repository/test/main/head/demo/services/")
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();

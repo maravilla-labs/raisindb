@@ -58,6 +58,19 @@ properties:
     required: false
     description: Lifetime conversation token total when this compaction began
 
+  - name: checkpoint
+    title: Structured Checkpoint
+    type: Object
+    required: false
+    description: |
+      The runtime facts at compaction time (plan, progress, writes, notices),
+      stored structured so correctness never depends on the prose summary.
+
+  - name: run_id
+    title: Run
+    type: String
+    required: false
+
 versionable: false
 publishable: false
 auditable: false

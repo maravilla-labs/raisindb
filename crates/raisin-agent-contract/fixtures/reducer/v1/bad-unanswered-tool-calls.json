@@ -1,0 +1,69 @@
+{
+  "request": {
+    "contract": "raisin.agent-run.reducer/1",
+    "accept": [
+      "raisin.agent-run.reducer/1"
+    ],
+    "run": {
+      "run_id": "run-1",
+      "status": "running",
+      "turn": 2,
+      "last_seq": 12,
+      "usage": {
+        "operations": 4
+      },
+      "budgets": {},
+      "open_requests": [],
+      "unanswered_calls": [
+        "c1",
+        "c2"
+      ]
+    },
+    "state": {
+      "last_event_seq": 11,
+      "phase": "discover"
+    },
+    "state_rev": 3,
+    "event": {
+      "seq": 12,
+      "kind": "model_turn_completed",
+      "effect_id": "3:0",
+      "operation_id": "run-1/op/4",
+      "data": {}
+    }
+  },
+  "response": {
+    "contract": "raisin.agent-run.reducer/1",
+    "state": {
+      "last_event_seq": 12,
+      "phase": "design"
+    },
+    "state_rev": 4,
+    "effects": [
+      {
+        "effect_id": "4:0",
+        "kind": "request_model_turn",
+        "tools_offered": [
+          {
+            "name": "read",
+            "kind": "function",
+            "function_path": "/lib/demo/read",
+            "schema": {
+              "type": "object"
+            }
+          }
+        ],
+        "tool_results": [
+          {
+            "call_id": "c1",
+            "synthetic": true,
+            "content": {
+              "code": "phase_forbids_tool"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "expect": "unanswered_tool_calls"
+}

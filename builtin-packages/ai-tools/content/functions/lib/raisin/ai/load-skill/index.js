@@ -1,3 +1,5 @@
+import { runEnvelope } from '../agent-shared/tool-envelope.js';
+import { TOOL_META } from '../agent-shared/tool-meta.js';
 /**
  * load-skill — return one granted raisin:Skill's instructions.
  *
@@ -46,11 +48,8 @@ function agentRefTarget(ref) {
   return { workspace: ref['raisin:workspace'] || 'functions', path };
 }
 
-/* The chat grant: the conversation's agent, resolved exactly as the prompt was. */
-async function chatGrant(ctx) {
-  const chatWorkspace = typeof ctx.workspace === 'string' && ctx.workspace ? ctx.workspace : 'ai';
-  const chat = await raisin.nodes.get(chatWorkspace, ctx.chat_path);
-  const target = agentRefTarget(chat && chat.properties && chat.properties.agent_ref);
+/* The skills of the agent at `target`, resolved exactly as the prompt was. */
+async function agentGrant(target) {
   if (!target) return null;
   const agent = await raisin.nodes.get(target.workspace, target.path);
   if (!agent) return null;
@@ -67,6 +66,29 @@ async function chatGrant(ctx) {
   return grantEntries(skills);
 }
 
+/* The chat grant: the conversation's agent. */
+async function chatGrant(ctx) {
+  const chatWorkspace = typeof ctx.workspace === 'string' && ctx.workspace ? ctx.workspace : 'ai';
+  const chat = await raisin.nodes.get(chatWorkspace, ctx.chat_path);
+  return agentGrant(agentRefTarget(chat && chat.properties && chat.properties.agent_ref));
+}
+
+/* The RUN grant: inside an agent run, core injects `run_id` (a reducer or a
+ * model cannot override it), and the run's own `agent_ref` names the agent
+ * whose skills apply — no conversation needed, nothing the model wrote. */
+async function runGrant(ctx) {
+  if (typeof ctx.run_id !== 'string' || !ctx.run_id || !raisin.agentRuns || typeof raisin.agentRuns.get !== 'function') return null;
+  try {
+    const view = await raisin.agentRuns.get({ run_id: ctx.run_id });
+    const ref = view && view.run && view.run.agent_ref;
+    if (typeof ref !== 'string' || !ref) return null;
+    const [ws, path] = ref.includes(':/') ? [ref.slice(0, ref.indexOf(':/')), ref.slice(ref.indexOf(':/') + 1)] : ['functions', ref];
+    return agentGrant({ workspace: ws, path });
+  } catch (_) {
+    return null;
+  }
+}
+
 /* The flow grant, as the runtime stated it. Entries that are not well formed are dropped. */
 function flowGrant(ctx) {
   return ctx.skill_grant
@@ -75,12 +97,15 @@ function flowGrant(ctx) {
 }
 
 export async function handler(input) {
+  const enveloped = await runEnvelope(input, TOOL_META.loadSkill, handler); if (enveloped) return enveloped;
   const args = input || {};
   const ctx = (args.__raisin_context && typeof args.__raisin_context === 'object') ? args.__raisin_context : {};
   const name = typeof args.name === 'string' ? args.name.trim() : '';
 
-  let grant = null;
-  if (typeof ctx.chat_path === 'string' && ctx.chat_path) {
+  let grant = await runGrant(ctx);
+  if (grant) {
+    // the run's agent decided it
+  } else if (typeof ctx.chat_path === 'string' && ctx.chat_path) {
     grant = await chatGrant(ctx);
   } else if (Array.isArray(ctx.skill_grant)) {
     grant = flowGrant(ctx);

@@ -409,6 +409,17 @@ pub enum RequestType {
     FlowSubscribeEvents,
     FlowUnsubscribeEvents,
 
+    // Durable agent run operations (see handlers::agent_runs)
+    AgentRunCreate,
+    AgentRunGet,
+    AgentRunBySubject,
+    AgentRunList,
+    AgentRunEvents,
+    AgentRunSubscribe,
+    AgentRunUnsubscribe,
+    AgentRunControl,
+    AgentRunChildren,
+
     // Function operations
     FunctionInvoke,
     FunctionInvokeSync,

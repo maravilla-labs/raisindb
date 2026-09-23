@@ -1,0 +1,74 @@
+{
+  "envelope": {
+    "envelope": "raisin.tool-result/1",
+    "operation_id": "run-1/op/4",
+    "status": "succeeded",
+    "reads": [
+      {
+        "read_id": "r1",
+        "locator": {
+          "workspace": "apps",
+          "path": "/local/crm"
+        },
+        "revision": {
+          "value": "abc123",
+          "alg": "sha256"
+        }
+      }
+    ],
+    "writes": [
+      {
+        "locator": {
+          "workspace": "apps",
+          "path": "/local/crm"
+        },
+        "action": "created",
+        "revision": {
+          "value": "abc123",
+          "alg": "sha256"
+        }
+      }
+    ],
+    "artifact_refs": [
+      {
+        "logical_key": "crm",
+        "kind": "app",
+        "locator": {
+          "workspace": "apps",
+          "path": "/local/crm"
+        },
+        "revision": {
+          "value": "abc123",
+          "alg": "sha256"
+        },
+        "role": "primary"
+      }
+    ],
+    "evidence": [
+      {
+        "kind": "read_back",
+        "subject": {
+          "locator": {
+            "workspace": "apps",
+            "path": "/local/crm"
+          },
+          "revision": {
+            "value": "abc123",
+            "alg": "sha256"
+          }
+        },
+        "level": "draft_validated",
+        "ok": true
+      }
+    ],
+    "diagnostics": [
+      {
+        "code": "w1",
+        "severity": "warning",
+        "class": null,
+        "message": "m"
+      }
+    ]
+  },
+  "expect": "ok"
+}

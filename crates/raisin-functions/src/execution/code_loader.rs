@@ -540,6 +540,51 @@ where
 /// 'studio-mcp-shared/refs.js'` when the same line sat one level in. The
 /// resolver and the key format already agreed; only discovery did not.
 fn collect_external_import_dirs(code: &str) -> Vec<String> {
+    collect_external_import_dirs_from(code, &[SELF_DIR])
+}
+
+/// The importing module's own directory, for code that sits in the FUNCTION's
+/// directory (the entry and its siblings). A `../x/…` from there names the
+/// sibling directory `x`, exactly as before.
+const SELF_DIR: &str = "\u{0}self";
+
+/// The sibling directory a `../` specifier lands in, resolved against the
+/// IMPORTING module's own directory (`base`, as path segments below the
+/// function's parent) — the same normalization the module resolver applies to
+/// the key. `None` when it does not land in a sibling directory.
+///
+/// Multi-level specifiers are why this resolves rather than slicing: a shared
+/// library at `library/update-node/index.js` importing
+/// `'../../verify-automation/index.js'` means the sibling `verify-automation`,
+/// and the resolver already keys it `verify-automation/index.js`. Taking "the
+/// first segment after `../`" read `..` as the directory name, scanned a path
+/// nothing matches, and every function that loaded that library failed with
+/// "Error resolving module" before its own code ran (measured 2026-09-23: a
+/// Builder-made automation's apply step, via patch-node → update-node).
+fn resolve_sibling_dir(base: &[&str], spec: &str) -> Option<String> {
+    if !spec.starts_with("../") {
+        return None;
+    }
+    let mut stack: Vec<&str> = base.to_vec();
+    for seg in spec.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                stack.pop()?;
+            }
+            s => stack.push(s),
+        }
+    }
+    // A directory AND a file beneath it; a path back into the function's own
+    // directory is a sibling FILE, which the sibling loader already serves.
+    if stack.len() < 2 || stack[0] == SELF_DIR {
+        return None;
+    }
+    Some(stack[0].to_string())
+}
+
+/// The sibling directories `code` imports from, resolved against `base`.
+fn collect_external_import_dirs_from(code: &str, base: &[&str]) -> Vec<String> {
     let mut dirs = Vec::new();
     let mut lines = code.lines();
     while let Some(line) = lines.next() {
@@ -581,13 +626,7 @@ fn collect_external_import_dirs(code: &str) -> Vec<String> {
         let spec = trimmed[spec_start..]
             .trim()
             .trim_matches(|c: char| c == '\'' || c == '"' || c == ';');
-        if !spec.starts_with("../") {
-            continue;
-        }
-        // Get the directory name (first segment after ../)
-        let after = &spec[3..];
-        if let Some(pos) = after.find('/') {
-            let dir = after[..pos].to_string();
+        if let Some(dir) = resolve_sibling_dir(base, spec) {
             if !dirs.contains(&dir) {
                 dirs.push(dir);
             }
@@ -693,7 +732,13 @@ where
                 Ok(code) => {
                     // Whatever THIS module imports is a dependency of the
                     // function too — queue any directory it names.
-                    for dir in collect_external_import_dirs(&code) {
+                    // Resolved against THIS module's own directory: a library
+                    // one level down may reach further up than one `../`.
+                    let base: Vec<&str> = match key.rfind('/') {
+                        Some(i) => key[..i].split('/').collect(),
+                        None => vec![],
+                    };
+                    for dir in collect_external_import_dirs_from(&code, &base) {
                         if !external_dirs.contains(&dir) {
                             external_dirs.push(dir);
                         }
@@ -821,6 +866,27 @@ import { helper } from '../other-lib/helper.js';
 "#;
         let dirs = collect_external_import_dirs(code);
         assert_eq!(dirs, vec!["agent-shared", "other-lib"]);
+    }
+
+    #[test]
+    fn a_library_one_level_down_reaches_a_sibling_two_levels_up() {
+        // library/update-node/index.js → '../../verify-automation/index.js' is
+        // the sibling `verify-automation`, the key the resolver produces.
+        let code = "import { deployBlockers } from '../../verify-automation/index.js';";
+        assert_eq!(
+            collect_external_import_dirs_from(code, &["library", "update-node"]),
+            vec!["verify-automation"]
+        );
+        // From the function's own directory the same specifier leaves the
+        // parent entirely: nothing the loader can serve.
+        assert!(collect_external_import_dirs(code).is_empty());
+        // One level still means exactly what it always meant.
+        let one = "import { x } from '../library/update-node/index.js';";
+        assert_eq!(collect_external_import_dirs(one), vec!["library"]);
+        assert_eq!(
+            collect_external_import_dirs_from(one, &["verify-automation"]),
+            vec!["library"]
+        );
     }
 
     #[test]

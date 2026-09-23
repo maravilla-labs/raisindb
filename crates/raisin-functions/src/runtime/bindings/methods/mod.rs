@@ -9,6 +9,7 @@
 //! All methods are combined into a single registry for use by runtime adapters.
 
 pub mod admin;
+pub mod agent_runs;
 pub mod ai;
 pub mod assets;
 pub mod branches;
@@ -24,6 +25,7 @@ pub mod identities;
 pub mod imap;
 pub mod integrations;
 pub mod locks;
+pub mod node_dev;
 pub mod nodes;
 pub mod notify;
 pub mod ocr;
@@ -53,6 +55,8 @@ pub fn build_registry() -> BindingsRegistry {
     methods.extend(flows::methods());
     methods.extend(branches::methods());
     methods.extend(scheduler::methods());
+    methods.extend(agent_runs::methods());
+    methods.extend(node_dev::methods());
     methods.extend(platform::methods());
     methods.extend(notify::methods());
     methods.extend(locks::methods());
@@ -432,10 +436,11 @@ mod tests {
         // Upper bound check (shouldn't have too many extra methods).
         // This is a duplicate-registration tripwire, not a budget: raise it
         // deliberately when the surface genuinely grows. It was already blown
-        // (101 > 100) before the crypto signing bindings were added.
+        // (101 > 100) before the crypto signing bindings were added. Raised
+        // to 160 for the agent-run (16) and node-development (16) surfaces.
         assert!(
-            method_count <= 130,
-            "Expected at most 130 methods, got {}. Did you accidentally duplicate some bindings?",
+            method_count <= 160,
+            "Expected at most 160 methods, got {}. Did you accidentally duplicate some bindings?",
             method_count
         );
 

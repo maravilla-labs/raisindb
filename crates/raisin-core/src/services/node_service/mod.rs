@@ -29,7 +29,7 @@ mod crud;
 
 // Feature submodules
 mod branch_tag_operations;
-mod copy_publish;
+pub(crate) mod copy_publish;
 mod node_creation_helpers;
 mod property_operations;
 mod relationship_operations;

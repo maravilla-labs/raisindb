@@ -1,0 +1,23 @@
+node_type: raisin:Function
+properties:
+  name: inspect-agent
+  title: Inspect Agent
+  description: >
+    Read the status of your child agent runs: all of them (omit agent) or one,
+    with its outcome, summary, artifacts, acceptance checks and recent run
+    events. Read-only.
+  execution_mode: inline
+  execution_context: system
+  category: delegation
+  # raisin:Function is strict; tool traits live in its declared metadata.
+  metadata: { read_only: true }
+  enabled: true
+  language: javascript
+  entry_file: index.js:handler
+  input_schema:
+    type: object
+    additionalProperties: false
+    properties:
+      agent: { type: string, description: "Child key, run id or task id. Omit for all children." }
+      include_events: { type: boolean, default: true }
+      after_seq: { type: integer, minimum: 0 }

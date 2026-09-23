@@ -1,0 +1,31 @@
+node_type: raisin:Function
+properties:
+  name: flow-agent-run
+  title: Flow Agent Run
+  description: >
+    Start the durable AgentRun of a flow's AI agent step: open a conversation
+    with the step's prompt and create the run with the agent's own tools,
+    pointed back at the waiting flow instance. Called by the flow runtime only.
+  execution_mode: inline
+  execution_context: system
+  category: agent_runs
+  enabled: true
+  language: javascript
+  entry_file: index.js:handler
+  input_schema:
+    type: object
+    required: [agent_ref, __raisin_flow]
+    properties:
+      agent_ref: { type: string }
+      agent_workspace: { type: string }
+      prompt: { type: string }
+      response_format: {}
+      skills: { type: array }
+      max_model_calls: { type: integer }
+      visit: { type: integer }
+      __raisin_flow:
+        type: object
+        required: [instance_id, step_id]
+        properties:
+          instance_id: { type: string }
+          step_id: { type: string }

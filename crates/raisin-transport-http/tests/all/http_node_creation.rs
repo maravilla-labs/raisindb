@@ -1,5 +1,6 @@
 #![cfg(not(feature = "s3"))]
-use std::sync::Arc;
+//! Node creation over the current repository API. The fixture creates the
+//! repository these tests write into and sends as the operator — see `support`.
 
 use axum::{
     body::Body,
@@ -8,73 +9,12 @@ use axum::{
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-use raisin_models::nodes::types::NodeType;
-#[cfg(feature = "storage-rocksdb")]
-use raisin_rocksdb::RocksDBStorage;
-use raisin_storage::{BranchScope, CommitMetadata, NodeTypeRepository, Storage};
-#[cfg(not(feature = "storage-rocksdb"))]
-use raisin_storage_memory::InMemoryStorage;
-use raisin_transport_http as http;
-
-async fn create_test_node_type<S: Storage>(storage: &S, name: &str) {
-    let test_node_type = NodeType {
-        id: Some(name.to_string()),
-        strict: Some(false),
-        name: name.to_string(),
-        extends: None,
-        mixins: vec![],
-        overrides: None,
-        description: Some(format!("Test NodeType: {}", name)),
-        icon: None,
-        version: Some(1),
-        properties: None,
-        allowed_children: vec![],
-        required_nodes: vec![],
-        initial_structure: None,
-        versionable: Some(true),
-        immutable: None,
-        publishable: Some(true),
-        auditable: Some(false),
-        indexable: None,
-        index_types: None,
-        created_at: Some(chrono::Utc::now()),
-        updated_at: None,
-        published_at: None,
-        published_by: None,
-        compound_indexes: None,
-        is_mixin: None,
-        previous_version: None,
-    };
-    storage
-        .node_types()
-        .put(
-            BranchScope::new("default", "default", "main"),
-            test_node_type,
-            CommitMetadata::system("test setup"),
-        )
-        .await
-        .unwrap();
-}
-
 /// Test creating a root node using POST with parent path semantics
 #[tokio::test]
 async fn create_root_node_legacy_api() {
-    let app = {
-        #[cfg(feature = "storage-rocksdb")]
-        {
-            let path = "/tmp/raisin-rocks-test-create-root";
-            let _ = std::fs::remove_dir_all(path);
-            let store = Arc::new(RocksDBStorage::new(path).unwrap());
-            create_test_node_type(&*store, "page").await;
-            raisin_transport_http::router(store)
-        }
-        #[cfg(not(feature = "storage-rocksdb"))]
-        {
-            let store = Arc::new(InMemoryStorage::default());
-            create_test_node_type(&*store, "page").await;
-            raisin_transport_http::router(store)
-        }
-    };
+    let app = crate::support::Fixture::new("create-root", "main", "main", &[], &["page"])
+        .await
+        .app;
 
     // First create workspace
     let ws_body = serde_json::json!({"name": "demo", "allowed_node_types": [], "allowed_root_node_types": [], "depends_on": []});
@@ -139,22 +79,9 @@ async fn create_root_node_legacy_api() {
 /// Test creating a child node under a parent
 #[tokio::test]
 async fn create_child_node_legacy_api() {
-    let app = {
-        #[cfg(feature = "storage-rocksdb")]
-        {
-            let path = "/tmp/raisin-rocks-test-create-child";
-            let _ = std::fs::remove_dir_all(path);
-            let store = Arc::new(RocksDBStorage::new(path).unwrap());
-            create_test_node_type(&*store, "page").await;
-            raisin_transport_http::router(store)
-        }
-        #[cfg(not(feature = "storage-rocksdb"))]
-        {
-            let store = Arc::new(InMemoryStorage::default());
-            create_test_node_type(&*store, "page").await;
-            raisin_transport_http::router(store)
-        }
-    };
+    let app = crate::support::Fixture::new("create-child", "main", "main", &[], &["page"])
+        .await
+        .app;
 
     // Create workspace
     let ws_body = serde_json::json!({"name": "demo", "allowed_node_types": [], "allowed_root_node_types": [], "depends_on": []});
@@ -210,7 +137,10 @@ async fn create_child_node_legacy_api() {
 
     // Verify the created child node
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let node: raisin_models::nodes::Node = serde_json::from_slice(&bytes).unwrap();
+    // A child POST always commits, and answers `{ node, revision, committed }`.
+    let created: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(created["committed"], true);
+    let node: raisin_models::nodes::Node = serde_json::from_value(created["node"].clone()).unwrap();
     assert_eq!(node.name, "team");
     assert_eq!(node.path, "/company/team");
     assert_eq!(node.node_type, "page");
@@ -233,24 +163,15 @@ async fn create_child_node_legacy_api() {
 /// Test deep node creation (auto-creates missing parent folders)
 #[tokio::test]
 async fn create_node_with_deep_parent_creation() {
-    let app = {
-        #[cfg(feature = "storage-rocksdb")]
-        {
-            let path = "/tmp/raisin-rocks-test-deep-create";
-            let _ = std::fs::remove_dir_all(path);
-            let store = Arc::new(RocksDBStorage::new(path).unwrap());
-            create_test_node_type(&*store, "page").await;
-            create_test_node_type(&*store, "raisin:Folder").await;
-            raisin_transport_http::router(store)
-        }
-        #[cfg(not(feature = "storage-rocksdb"))]
-        {
-            let store = Arc::new(InMemoryStorage::default());
-            create_test_node_type(&*store, "page").await;
-            create_test_node_type(&*store, "raisin:Folder").await;
-            raisin_transport_http::router(store)
-        }
-    };
+    let app = crate::support::Fixture::new(
+        "deep-create",
+        "main",
+        "main",
+        &[],
+        &["page", "raisin:Folder"],
+    )
+    .await
+    .app;
 
     // Create workspace
     let ws_body = serde_json::json!({"name": "demo", "allowed_node_types": [], "allowed_root_node_types": [], "depends_on": []});
@@ -286,7 +207,10 @@ async fn create_node_with_deep_parent_creation() {
 
     // Verify the created node
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let node: raisin_models::nodes::Node = serde_json::from_slice(&bytes).unwrap();
+    // A child POST always commits, and answers `{ node, revision, committed }`.
+    let created: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(created["committed"], true);
+    let node: raisin_models::nodes::Node = serde_json::from_value(created["node"].clone()).unwrap();
     assert_eq!(node.name, "report");
     assert_eq!(node.path, "/projects/2024/q1/report");
     assert_eq!(node.node_type, "page");
@@ -327,22 +251,9 @@ async fn create_node_with_deep_parent_creation() {
 /// Test that duplicate names are rejected
 #[tokio::test]
 async fn reject_duplicate_node_names() {
-    let app = {
-        #[cfg(feature = "storage-rocksdb")]
-        {
-            let path = "/tmp/raisin-rocks-test-duplicate";
-            let _ = std::fs::remove_dir_all(path);
-            let store = Arc::new(RocksDBStorage::new(path).unwrap());
-            create_test_node_type(&*store, "page").await;
-            raisin_transport_http::router(store)
-        }
-        #[cfg(not(feature = "storage-rocksdb"))]
-        {
-            let store = Arc::new(InMemoryStorage::default());
-            create_test_node_type(&*store, "page").await;
-            raisin_transport_http::router(store)
-        }
-    };
+    let app = crate::support::Fixture::new("duplicate", "main", "main", &[], &["page"])
+        .await
+        .app;
 
     // Create workspace
     let ws_body = serde_json::json!({"name": "demo", "allowed_node_types": [], "allowed_root_node_types": [], "depends_on": []});
@@ -395,19 +306,9 @@ async fn reject_duplicate_node_names() {
 /// Test that parent must exist (without deep flag)
 #[tokio::test]
 async fn reject_missing_parent_without_deep() {
-    let app = {
-        #[cfg(feature = "storage-rocksdb")]
-        {
-            let path = "/tmp/raisin-rocks-test-missing-parent";
-            let _ = std::fs::remove_dir_all(path);
-            let store = RocksDBStorage::new(path).unwrap();
-            raisin_transport_http::router(Arc::new(store))
-        }
-        #[cfg(not(feature = "storage-rocksdb"))]
-        {
-            raisin_transport_http::router(Arc::new(InMemoryStorage::default()))
-        }
-    };
+    let app = crate::support::Fixture::new("missing-parent", "main", "main", &[], &[])
+        .await
+        .app;
 
     // Create workspace
     let ws_body = serde_json::json!({"name": "demo", "allowed_node_types": [], "allowed_root_node_types": [], "depends_on": []});
@@ -440,22 +341,9 @@ async fn reject_missing_parent_without_deep() {
 /// Test name sanitization
 #[tokio::test]
 async fn sanitize_node_names() {
-    let app = {
-        #[cfg(feature = "storage-rocksdb")]
-        {
-            let path = "/tmp/raisin-rocks-test-sanitize";
-            let _ = std::fs::remove_dir_all(path);
-            let store = Arc::new(RocksDBStorage::new(path).unwrap());
-            create_test_node_type(&*store, "page").await;
-            raisin_transport_http::router(store)
-        }
-        #[cfg(not(feature = "storage-rocksdb"))]
-        {
-            let store = Arc::new(InMemoryStorage::default());
-            create_test_node_type(&*store, "page").await;
-            raisin_transport_http::router(store)
-        }
-    };
+    let app = crate::support::Fixture::new("sanitize", "main", "main", &[], &["page"])
+        .await
+        .app;
 
     // Create workspace
     let ws_body = serde_json::json!({"name": "demo", "allowed_node_types": [], "allowed_root_node_types": [], "depends_on": []});

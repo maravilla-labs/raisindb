@@ -117,8 +117,12 @@ async function buildHistoryFromChat(workspace, chatPath, systemPrompt, currentAs
     childrenByParent.get(parentPath).push(node);
   }
 
+  /* A run keeps a user message that is still a QUEUED steer out of context
+   * until the runtime consumes it (options.excludeMessagePaths). */
+  const excluded = options?.excludeMessagePaths instanceof Set ? options.excludeMessagePaths : null;
   let directMessages = (childrenByParent.get(chatPath) || [])
     .filter(n => n.node_type === 'raisin:Message')
+    .filter(n => !excluded || !excluded.has(n.path))
     .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
 
   // ── Apply latest compaction (if any): drop summarized messages and
@@ -147,6 +151,14 @@ async function buildHistoryFromChat(workspace, chatPath, systemPrompt, currentAs
           role: 'system',
           content: `Earlier conversation summary (older messages were compacted):\n${cProps.summary}`,
         });
+        /* A run's compaction also stores a STRUCTURED checkpoint: the facts
+         * the runtime held at that point, which no summary can drop. */
+        if (cProps.checkpoint && typeof cProps.checkpoint === 'object') {
+          history.push({
+            role: 'system',
+            content: `Structured checkpoint at compaction (from the runtime):\n${JSON.stringify(cProps.checkpoint).slice(0, 8000)}`,
+          });
+        }
         log.debug('history', 'Applied compaction', {
           cutoff: cProps.cutoff_message_path,
           remaining_messages: directMessages.length,

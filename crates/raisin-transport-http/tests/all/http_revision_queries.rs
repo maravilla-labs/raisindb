@@ -15,85 +15,23 @@ use serde_json::json;
 use std::sync::Arc;
 use tower::ServiceExt;
 
-#[cfg(feature = "storage-rocksdb")]
-use raisin_rocksdb::RocksDBStorage;
-
-#[cfg(not(feature = "storage-rocksdb"))]
-use raisin_storage_memory::InMemoryStorage;
-
-use raisin_models::StorageTimestamp;
-use raisin_storage::{
-    BranchRepository, RepositoryManagementRepository, Storage, WorkspaceRepository,
-};
-
-#[cfg(feature = "storage-rocksdb")]
-type Store = RocksDBStorage;
-#[cfg(not(feature = "storage-rocksdb"))]
-type Store = InMemoryStorage;
+type Store = crate::support::TestStorage;
 
 async fn setup_test_environment() -> (tempfile::TempDir, Arc<Store>, axum::Router) {
-    #[cfg(feature = "storage-rocksdb")]
+    // Repository `test_repo` (branch `main`) with workspace `default` and the
+    // two node types these tests write, sent as the operator — see `support`.
+    // The temp dir is kept in the signature for the callers; the fixture owns
+    // its own database directory.
     let temp_dir = tempfile::tempdir().unwrap();
-
-    #[cfg(not(feature = "storage-rocksdb"))]
-    let temp_dir = tempfile::tempdir().unwrap();
-
-    #[cfg(feature = "storage-rocksdb")]
-    let storage = Arc::new(RocksDBStorage::new(temp_dir.path()).unwrap());
-
-    #[cfg(not(feature = "storage-rocksdb"))]
-    let storage = Arc::new(InMemoryStorage::default());
-
-    // Create repository
-    use raisin_context::RepositoryConfig;
-    storage
-        .repository_management()
-        .create_repository("default", "test_repo", RepositoryConfig::default())
-        .await
-        .unwrap();
-
-    // Create workspace
-    use raisin_models::workspace::Workspace;
-    let workspace_model = Workspace {
-        name: "default".to_string(),
-        description: Some("Test workspace".to_string()),
-        allowed_node_types: vec![],
-        allowed_root_node_types: vec![],
-        depends_on: vec![],
-        initial_structure: None,
-        created_at: StorageTimestamp::now(),
-        updated_at: Some(StorageTimestamp::now()),
-        config: raisin_models::workspace::WorkspaceConfig::default(),
-    };
-    storage
-        .workspaces()
-        .put(
-            raisin_storage::RepoScope::new("default", "test_repo"),
-            workspace_model,
-        )
-        .await
-        .unwrap();
-
-    // Create main branch
-    storage
-        .branches()
-        .create_branch(
-            "default",
-            "test_repo",
-            "main",
-            "system",
-            None,
-            None,
-            false,
-            false,
-        )
-        .await
-        .unwrap();
-
-    // Create router
-    let router = raisin_transport_http::router(storage.clone());
-
-    (temp_dir, storage, router)
+    let fixture = crate::support::Fixture::new(
+        "revision-queries",
+        "test_repo",
+        "main",
+        &["default"],
+        &["Article", "Folder"],
+    )
+    .await;
+    (temp_dir, fixture.storage, fixture.app)
 }
 
 /// Helper to create a node via POST /head/ endpoint with commit
@@ -103,7 +41,7 @@ async fn create_node_via_http(
     node_name: &str,
     node_type: &str,
     parent: Option<String>,
-) -> (u64, String) {
+) -> (String, String) {
     let node_id = nanoid::nanoid!();
     let node_path = if let Some(ref parent_path) = parent {
         format!("{}/{}", parent_path.trim_end_matches('/'), node_name)
@@ -154,12 +92,12 @@ async fn create_node_via_http(
         .unwrap();
     let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-    let revision = result["revision"].as_u64().unwrap();
+    let revision = result["revision"].as_str().unwrap().to_string();
     (revision, node_id)
 }
 
 /// Helper to delete a node via DELETE /head/ endpoint with commit
-async fn delete_node_via_http(router: &axum::Router, path: &str, node_id: &str) -> u64 {
+async fn delete_node_via_http(router: &axum::Router, path: &str, node_id: &str) -> String {
     let request_body = json!({
         "commit": {
             "message": format!("Delete node {}", node_id),
@@ -187,7 +125,7 @@ async fn delete_node_via_http(router: &axum::Router, path: &str, node_id: &str) 
         .unwrap();
     let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-    result["revision"].as_u64().unwrap()
+    result["revision"].as_str().unwrap().to_string()
 }
 
 #[tokio::test]

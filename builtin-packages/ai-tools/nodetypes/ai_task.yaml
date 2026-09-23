@@ -193,4 +193,23 @@ properties:
     type: Date
     readonly: true
 
+  # ── Projected from an agent run (the run owns these; the model cannot set them) ──
+  - name: run_task_key
+    title: Run Task Key
+    type: String
+    readonly: true
+    description: The task's key in its run's plan (e.g. t2)
+
+  - name: completion_requested
+    title: Completion Requested
+    type: Boolean
+    readonly: true
+    description: The model asked to complete this task; true while it is still open means no evidence was found
+
+  - name: evidence_ops
+    title: Evidence Operations
+    type: Array
+    readonly: true
+    description: Run operation ids whose success counts as this task's evidence
+
 allowed_children: []

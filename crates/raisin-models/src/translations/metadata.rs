@@ -51,17 +51,18 @@
 //!
 //! ```rust
 //! use raisin_models::translations::{TranslationMeta, LocaleCode};
+//! use raisin_hlc::HLC;
 //!
 //! let locale = LocaleCode::parse("fr-FR").unwrap();
 //! let meta = TranslationMeta::new(
 //!     locale,
-//!     42,                              // revision number (HLC)
-//!     Some(41),                         // parent revision
+//!     HLC::new(42, 0), // revision number (HLC)
+//!     Some(HLC::new(41, 0)), // parent revision
 //!     "translator@example.com".to_string(),
 //!     "Add French translation for product page".to_string(),
 //! );
 //!
-//! assert_eq!(meta.revision, 42);
+//! assert_eq!(meta.revision, HLC::new(42, 0));
 //! assert!(!meta.is_system);
 //! ```
 //!
@@ -69,11 +70,12 @@
 //!
 //! ```rust
 //! use raisin_models::translations::{TranslationMeta, LocaleCode};
+//! use raisin_hlc::HLC;
 //!
 //! let locale = LocaleCode::parse("en").unwrap();
 //! let meta = TranslationMeta::system(
 //!     locale,
-//!     1,
+//!     HLC::new(1, 0),
 //!     "Initial translation setup".to_string(),
 //! );
 //!
@@ -123,18 +125,19 @@ use super::types::LocaleCode;
 ///
 /// ```rust
 /// use raisin_models::translations::{TranslationMeta, LocaleCode};
+/// use raisin_hlc::HLC;
 ///
 /// let locale = LocaleCode::parse("es").unwrap();
 /// let meta = TranslationMeta::new(
 ///     locale,
-///     100,
-///     Some(99),
+///     HLC::new(100, 0),
+///     Some(HLC::new(99, 0)),
 ///     "maria@example.com".to_string(),
 ///     "Translate product descriptions".to_string(),
 /// );
 ///
-/// assert_eq!(meta.revision, 100);
-/// assert_eq!(meta.parent_revision, Some(99));
+/// assert_eq!(meta.revision, HLC::new(100, 0));
+/// assert_eq!(meta.parent_revision, Some(HLC::new(99, 0)));
 /// assert!(!meta.is_system);
 /// ```
 ///
@@ -142,11 +145,12 @@ use super::types::LocaleCode;
 ///
 /// ```rust
 /// use raisin_models::translations::{TranslationMeta, LocaleCode};
+/// use raisin_hlc::HLC;
 ///
 /// let locale = LocaleCode::parse("en").unwrap();
 /// let meta = TranslationMeta::system(
 ///     locale,
-///     1,
+///     HLC::new(1, 0),
 ///     "Initialize base language".to_string(),
 /// );
 ///
@@ -214,17 +218,18 @@ impl TranslationMeta {
     ///
     /// ```rust
     /// use raisin_models::translations::{TranslationMeta, LocaleCode};
+    /// use raisin_hlc::HLC;
     ///
     /// let locale = LocaleCode::parse("de-DE").unwrap();
     /// let meta = TranslationMeta::new(
     ///     locale,
-    ///     42,
-    ///     Some(41),
+    ///     HLC::new(42, 0),
+    ///     Some(HLC::new(41, 0)),
     ///     "hans@example.com".to_string(),
     ///     "Add German translations for UI".to_string(),
     /// );
     ///
-    /// assert_eq!(meta.revision, 42);
+    /// assert_eq!(meta.revision, HLC::new(42, 0));
     /// assert!(!meta.is_system);
     /// ```
     pub fn new(
@@ -263,11 +268,12 @@ impl TranslationMeta {
     ///
     /// ```rust
     /// use raisin_models::translations::{TranslationMeta, LocaleCode};
+    /// use raisin_hlc::HLC;
     ///
     /// let locale = LocaleCode::parse("en").unwrap();
     /// let meta = TranslationMeta::system(
     ///     locale,
-    ///     1,
+    ///     HLC::new(1, 0),
     ///     "Initialize base language content".to_string(),
     /// );
     ///
@@ -305,14 +311,15 @@ impl TranslationMeta {
     ///
     /// ```rust
     /// use raisin_models::translations::{TranslationMeta, LocaleCode};
+    /// use raisin_hlc::HLC;
     /// use chrono::Utc;
     ///
     /// let locale = LocaleCode::parse("ja").unwrap();
     /// let timestamp = Utc::now();
     /// let meta = TranslationMeta::with_timestamp(
     ///     locale,
-    ///     42,
-    ///     Some(41),
+    ///     HLC::new(42, 0),
+    ///     Some(HLC::new(41, 0)),
     ///     timestamp,
     ///     "yuki@example.com".to_string(),
     ///     "Import historical translations".to_string(),
@@ -347,16 +354,17 @@ impl TranslationMeta {
     ///
     /// ```rust
     /// use raisin_models::translations::{TranslationMeta, LocaleCode};
+    /// use raisin_hlc::HLC;
     ///
     /// let locale = LocaleCode::parse("en").unwrap();
-    /// let initial = TranslationMeta::system(locale, 1, "Initial".to_string());
+    /// let initial = TranslationMeta::system(locale, HLC::new(1, 0), "Initial".to_string());
     /// assert!(initial.is_initial());
     ///
     /// let locale = LocaleCode::parse("fr").unwrap();
     /// let update = TranslationMeta::new(
     ///     locale,
-    ///     2,
-    ///     Some(1),
+    ///     HLC::new(2, 0),
+    ///     Some(HLC::new(1, 0)),
     ///     "user@example.com".to_string(),
     ///     "Update".to_string(),
     /// );
@@ -373,10 +381,11 @@ impl TranslationMeta {
     ///
     /// ```rust
     /// use raisin_models::translations::{TranslationMeta, LocaleCode};
+    /// use raisin_hlc::HLC;
     /// use chrono::{Duration, Utc};
     ///
     /// let locale = LocaleCode::parse("en").unwrap();
-    /// let meta = TranslationMeta::system(locale, 1, "Test".to_string());
+    /// let meta = TranslationMeta::system(locale, HLC::new(1, 0), "Test".to_string());
     ///
     /// // Just created, should be very recent
     /// let age = Utc::now().signed_duration_since(meta.timestamp);
@@ -392,10 +401,11 @@ impl TranslationMeta {
     ///
     /// ```rust
     /// use raisin_models::translations::{TranslationMeta, LocaleCode};
+    /// use raisin_hlc::HLC;
     /// use chrono::Duration;
     ///
     /// let locale = LocaleCode::parse("en").unwrap();
-    /// let meta = TranslationMeta::system(locale, 1, "Test".to_string());
+    /// let meta = TranslationMeta::system(locale, HLC::new(1, 0), "Test".to_string());
     ///
     /// assert!(!meta.is_older_than(Duration::hours(1)));
     /// assert!(!meta.is_older_than(Duration::days(1)));
@@ -413,15 +423,16 @@ impl TranslationMeta {
 ///
 /// ```rust
 /// use raisin_models::translations::{TranslationMetaBuilder, LocaleCode};
+/// use raisin_hlc::HLC;
 ///
 /// let locale = LocaleCode::parse("en").unwrap();
-/// let meta = TranslationMetaBuilder::new(locale, 42, "user@example.com".to_string())
+/// let meta = TranslationMetaBuilder::new(locale, HLC::new(42, 0), "user@example.com".to_string())
 ///     .message("Add translations".to_string())
-///     .parent_revision(Some(41))
+///     .parent_revision(Some(HLC::new(41, 0)))
 ///     .build();
 ///
-/// assert_eq!(meta.revision, 42);
-/// assert_eq!(meta.parent_revision, Some(41));
+/// assert_eq!(meta.revision, HLC::new(42, 0));
+/// assert_eq!(meta.parent_revision, Some(HLC::new(41, 0)));
 /// ```
 pub struct TranslationMetaBuilder {
     locale: LocaleCode,
@@ -446,11 +457,12 @@ impl TranslationMetaBuilder {
     ///
     /// ```rust
     /// use raisin_models::translations::{TranslationMetaBuilder, LocaleCode};
+    /// use raisin_hlc::HLC;
     ///
     /// let locale = LocaleCode::parse("en").unwrap();
     /// let builder = TranslationMetaBuilder::new(
     ///     locale,
-    ///     42,
+    ///     HLC::new(42, 0),
     ///     "user@example.com".to_string()
     /// );
     /// ```

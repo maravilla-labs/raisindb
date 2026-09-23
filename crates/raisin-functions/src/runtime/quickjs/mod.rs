@@ -256,6 +256,7 @@ impl FunctionRuntime for QuickJsRuntime {
         debug!("JavaScript function context data: {:?}", context_data);
         let api_clone = api.clone();
         let log_emitter = context.log_emitter.clone();
+        let policy = context.policy;
 
         // Execute with timeout
         let execution_future = async {
@@ -267,6 +268,7 @@ impl FunctionRuntime for QuickJsRuntime {
                     &context_data,
                     api_clone.clone(),
                     log_emitter,
+                    policy,
                 ) {
                     // Extract the ACTUAL exception, exactly as the handler path
                     // does. `rquickjs` renders `Error::Exception` as the fixed

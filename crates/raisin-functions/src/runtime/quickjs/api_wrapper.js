@@ -701,6 +701,77 @@ globalThis.raisin = {
             return r;
         }
     },
+    // Durable agent runs in this repository, as this function's caller.
+    // create({ subject, input?, reducer?: { function_path }, agent_ref?,
+    //   as_agent?, budgets?, create_key?, executor_config?, branch? })
+    //   -> { run_id, created, status }
+    // get({ run_id }), events({ run_id, after_seq?, limit? }),
+    // control({ run_id, control_id, command: { command: "stop" | "steer" | ... } }),
+    // deliver({ run_id, resume_key, delivery_id, envelope }) (system context).
+    // The node-development surface: typed reads, atomic changesets with
+    // dry-run / review / commit, idempotency keys and branch worktrees over
+    // this repository's hierarchy, as this function's caller. Every call takes
+    // one request object with `roots: [{ workspace, path?, ops? }]` (or
+    // `workspace`). Passing `__raisin_context` (what a tool call receives) or
+    // `envelope: true` returns a `raisin.tool-result/1` envelope instead.
+    nodeDev: (() => {
+        const check = (r) => {
+            if (r && r.error) {
+                throw new Error(r.message || r.error);
+            }
+            return r;
+        };
+        // Literal method names, one per line: the registry pinning test
+        // (`test_quickjs_wrapper_matches_registry`) reads every literal name
+        // passed to the dispatcher to prove the wrapper and the registry
+        // agree, and a name built at runtime is invisible to it.
+        return {
+            stat: (request) => check(__call('node_dev_stat', [request || {}])),
+            read: (request) => check(__call('node_dev_read', [request || {}])),
+            list: (request) => check(__call('node_dev_list', [request || {}])),
+            diff: (request) => check(__call('node_dev_diff', [request || {}])),
+            watch: (request) => check(__call('node_dev_watch', [request || {}])),
+            dryRun: (request) => check(__call('node_dev_dry_run', [request || {}])),
+            propose: (request) => check(__call('node_dev_propose', [request || {}])),
+            getChangeset: (request) => check(__call('node_dev_get_changeset', [request || {}])),
+            listChangesets: (request) => check(__call('node_dev_list_changesets', [request || {}])),
+            commit: (request) => check(__call('node_dev_commit', [request || {}])),
+            discard: (request) => check(__call('node_dev_discard', [request || {}])),
+            apply: (request) => check(__call('node_dev_apply', [request || {}])),
+            forkBranch: (request) => check(__call('node_dev_fork_branch', [request || {}])),
+            diffBranch: (request) => check(__call('node_dev_diff_branch', [request || {}])),
+            mergeBranch: (request) => check(__call('node_dev_merge_branch', [request || {}])),
+            discardBranch: (request) => check(__call('node_dev_discard_branch', [request || {}])),
+        };
+    })(),
+    agentRuns: (() => {
+        const check = (r) => {
+            if (r && r.error) {
+                throw new Error(r.message || r.error);
+            }
+            return r;
+        };
+        return {
+            create: (request) => check(__call('agent_runs_create', [request || {}])),
+            get: (request) => check(__call('agent_runs_get', [request || {}])),
+            events: (request) => check(__call('agent_runs_events', [request || {}])),
+            control: (request) => check(__call('agent_runs_control', [request || {}])),
+            deliver: (request) => check(__call('agent_runs_deliver', [request || {}])),
+            // Child runs, mailbox, checkpoints, usage. Inside a tool call the
+            // parent defaults to the calling run (__raisin_context.run_id).
+            spawnChild: (request) => check(__call('agent_runs_spawn_child', [request || {}])),
+            children: (request) => check(__call('agent_runs_children', [request || {}])),
+            inspectChild: (request) => check(__call('agent_runs_inspect_child', [request || {}])),
+            controlChild: (request) => check(__call('agent_runs_control_child', [request || {}])),
+            waitChild: (request) => check(__call('agent_runs_wait_child', [request || {}])),
+            mailbox: (request) => check(__call('agent_runs_mailbox', [request || {}])),
+            ackMailbox: (request) => check(__call('agent_runs_ack_mailbox', [request || {}])),
+            postToParent: (request) => check(__call('agent_runs_post_to_parent', [request || {}])),
+            checkpoint: (request) => check(__call('agent_runs_checkpoint', [request || {}])),
+            readCheckpoint: (request) => check(__call('agent_runs_read_checkpoint', [request || {}])),
+            usage: (request) => check(__call('agent_runs_usage', [request || {}])),
+        };
+    })(),
     scheduler: {
         // Schedule a one-shot invocation of a function or flow at a fixed
         // time. request: { targetKind: "function"|"flow", targetPath,

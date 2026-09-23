@@ -33,6 +33,7 @@ pub(crate) fn parse_wait_type(s: &str) -> WaitType {
         "join" => WaitType::Join,
         "function_call" => WaitType::FunctionCall,
         "chat_session" => WaitType::ChatSession,
+        "agent_run" => WaitType::AgentRun,
         _ => WaitType::Event,
     }
 }

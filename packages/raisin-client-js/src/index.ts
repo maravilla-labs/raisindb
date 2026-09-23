@@ -93,6 +93,47 @@ export type {
 } from './branches';
 export { Tags } from './tags';
 export { SchedulerApi } from './scheduler';
+export { AgentRunsApi, newControlId, subjectOf } from './agent-runs';
+export { AgentRunsWsApi } from './agent-runs-ws';
+export type { AgentRunChildView, AgentRunSubscribeOptions, AgentRunSubscription } from './agent-runs-ws';
+export type {
+  ChildAction,
+  ChildContext,
+  ChildObjective,
+  CheckpointOptions,
+  MailboxEntry,
+  SpawnChildOptions,
+  SpawnChildResult,
+} from './agent-run-children';
+export { NodeDevApi } from './node-dev';
+export type {
+  ChangeOp,
+  ChangesetOptions,
+  CommitOutcome as NodeDevCommitOutcome,
+  NodeDevCommon,
+  NodeDevConflict,
+  NodeDevTransport,
+  NodeLocator,
+  NodeRevision,
+  NodeTarget,
+  OpReceipt,
+  Receipt as NodeDevReceipt,
+  WorkRoot,
+} from './node-dev';
+export type {
+  AgentRunCommand,
+  AgentRunControlAck,
+  AgentRunEvent,
+  AgentRunFence,
+  AgentRunStatus,
+  AgentRunSubject,
+  AgentRunView,
+  AgentRunsTransport,
+  BeginOperationOptions,
+  CreateAgentRunOptions,
+  CreateAgentRunResult,
+  FinishOperationOptions,
+} from './agent-runs';
 export type {
   ListInvocationsFilter,
   ScheduleInvocationOptions,

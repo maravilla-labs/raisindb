@@ -1,3 +1,5 @@
+import { runEnvelope } from '../agent-shared/tool-envelope.js';
+import { TOOL_META } from '../agent-shared/tool-meta.js';
 /**
  * Weather function that gets the current weather for a given city using the Open-Meteo API.
  * The function first retrieves the coordinates of the city using the Open-Meteo Geocoding API, and then uses those coordinates to fetch the current weather data.
@@ -8,6 +10,7 @@
  * @returns 
  */
 async function show(input) { 
+  const enveloped = await runEnvelope(input, TOOL_META.weather, show); if (enveloped) return enveloped;
   const { city } = input;
   const cord = await getCoordinates(city)
   return getWeather(cord);

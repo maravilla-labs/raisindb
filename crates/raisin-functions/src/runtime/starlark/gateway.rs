@@ -10,7 +10,7 @@ use starlark::starlark_module;
 use starlark::values::{none::NoneType, tuple::UnpackTuple, Heap, Value};
 
 use super::conversions::{json_to_starlark, starlark_value_to_json};
-use super::thread_local::{push_log, CURRENT_API, CURRENT_HANDLE};
+use super::thread_local::{push_log, CURRENT_API, CURRENT_HANDLE, CURRENT_POLICY};
 use crate::runtime::bindings::methods::registry;
 use crate::types::LogEntry;
 
@@ -26,6 +26,14 @@ pub(super) fn raisin_gateway_module(builder: &mut GlobalsBuilder) {
     /// Returns:
     ///   JSON string with the result
     fn __raisin_call<'v>(method: &str, args: Value<'v>) -> anyhow::Result<String> {
+        // A deterministic call reaches no host API at all.
+        if !CURRENT_POLICY.with(|cell| cell.get()).allows_host_calls() {
+            let denied = serde_json::json!({
+                "error": true,
+                "message": format!("{}: {method}", crate::types::ExecutionPolicy::HOST_DENIED),
+            });
+            return Ok(denied.to_string());
+        }
         // Get API and handle from thread-local storage
         let api = CURRENT_API.with(|cell| cell.borrow().clone());
         let handle = CURRENT_HANDLE.with(|cell| cell.borrow().clone());

@@ -6,6 +6,9 @@ properties:
     Call this before using the remember tool so you can merge new information
     with existing content. Also useful to check what you know about the user.
   execution_mode: "async"
+  # Memory lives where no user role reaches (ai:/agents/*/memory); the tool
+  # proves its run and acts only for the run's own agent and user.
+  execution_context: "system"
   enabled: true
   language: "javascript"
   entry_file: "index.js:handler"

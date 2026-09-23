@@ -41,6 +41,7 @@ use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, Options, DB};
 use std::path::Path;
 
 mod admin_user_store;
+pub mod agent_runs;
 mod api_key_store;
 mod auth_service;
 pub mod checkpoint;
@@ -60,6 +61,7 @@ pub mod lazy_indexing;
 pub mod management;
 pub mod mcp_listener;
 pub mod monitoring;
+pub mod node_dev;
 pub mod oauth_store;
 pub mod one_time_token;
 mod prefix_transform;
@@ -352,6 +354,14 @@ pub mod cf {
     pub const SECRETS: &str = "secrets";
 }
 
+/// Column families a released build created and a later one no longer uses.
+///
+/// RocksDB refuses to open a database without naming every column family on
+/// disk, so a retired family is opened once more and then dropped.
+/// `agent_runs` held AgentRun records before runs moved onto ordinary nodes in
+/// `raisin:system` (see `agent_runs`).
+const RETIRED_COLUMN_FAMILIES: &[&str] = &["agent_runs"];
+
 /// Every column family name, for callers outside this crate.
 ///
 /// Exposed for the server's memory diagnostics, which reads RocksDB's per-CF
@@ -520,10 +530,27 @@ pub fn open_db_with_config(config: &config::RocksDBConfig) -> Result<DB> {
     // handle and each table factory takes its own reference, so dropping this
     // binding after `open` does not free the cache.
     let cache = config.shared_block_cache();
-    let cfs = create_column_family_descriptors(config, &cache, &config.spatial_compaction);
+    let mut cfs = create_column_family_descriptors(config, &cache, &config.spatial_compaction);
+    let on_disk = DB::list_cf(&db_opts, &config.path).unwrap_or_default();
+    let retired: Vec<&str> = RETIRED_COLUMN_FAMILIES
+        .iter()
+        .copied()
+        .filter(|name| on_disk.iter().any(|d| d == name))
+        .collect();
+    for name in &retired {
+        cfs.push(ColumnFamilyDescriptor::new(*name, Options::default()));
+    }
 
-    let db = DB::open_cf_descriptors(&db_opts, &config.path, cfs)
+    let mut db = DB::open_cf_descriptors(&db_opts, &config.path, cfs)
         .map_err(|e| raisin_error::Error::storage(format!("Failed to open RocksDB: {}", e)))?;
+    for name in retired {
+        match db.drop_cf(name) {
+            Ok(()) => tracing::info!(column_family = name, "Dropped retired column family"),
+            Err(e) => {
+                tracing::warn!(column_family = name, error = %e, "Could not drop retired column family")
+            }
+        }
+    }
 
     Ok(db)
 }

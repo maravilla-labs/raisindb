@@ -456,14 +456,6 @@ test('review: materializing a deleted automation is not a build target', () => {
   assert.deepEqual(runEvidence.writesOfResult({ success: true, deleted: true, disarmed: [], flow_path: '/f' }, { automation_path: '/gone' }), []);
 });
 
-test('review: the malformed-call stop text reports an unverified write, like the terminal gate', async () => {
-  const { malformedToolCallStopText } = await import(`${AI}/agent-shared/completion-retry.js`);
-  conversation({ tasks: {}, calls: [createdAutoAt(T('10:00.000'))] });
-  const text = await malformedToolCallStopText('ai', CHAT, { finalize_policy: FINALIZE_POLICY_VERIFIED }, null);
-  assert.match(text, /This turn stopped/);
-  assert.match(text, /UNVERIFIED — no verification record for .*automations:\/enforce-homepage-title/);
-});
-
 // ── E: a plan-time guess is superseded by the real path ──────────────────────
 // Measured in a Builder replay: create-plan declared
 // /automations/correct-homepage-title, the build made /correct-homepage-titles,

@@ -18,7 +18,9 @@ use tokio::runtime::Handle;
 use super::conversions::{json_to_starlark, starlark_value_to_json};
 use super::gateway::raisin_gateway_module;
 use super::setup_code::generate_setup_code;
-use super::thread_local::{clear_logs, clear_thread_api, set_thread_api, take_logs};
+use super::thread_local::{
+    clear_logs, clear_thread_api, set_thread_api, set_thread_policy, take_logs,
+};
 use crate::api::FunctionApi;
 use crate::runtime::FunctionRuntime;
 use crate::types::{
@@ -278,6 +280,7 @@ impl FunctionRuntime for StarlarkRuntime {
 
         // Set thread-local API, handle, and log emitter for the gateway function
         set_thread_api(api.clone(), handle.clone(), context.log_emitter.clone());
+        set_thread_policy(context.policy);
 
         // Clear any stale logs from previous executions
         clear_logs();

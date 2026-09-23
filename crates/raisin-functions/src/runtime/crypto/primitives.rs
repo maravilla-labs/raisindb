@@ -166,8 +166,10 @@ impl SignJwtOptions {
     /// `None` for anything that is not an integer — and `None` means "mint a
     /// token with no `exp`". From JavaScript that is one division away:
     ///
-    ///     signJwt(c, k, { expiresInSec: ttlMs / 1000 })   // 899.5 -> no exp
-    ///     signJwt(c, k, { expiresInSec: "600" })          // string -> no exp
+    /// ```js
+    /// signJwt(c, k, { expiresInSec: ttlMs / 1000 })   // 899.5 -> no exp
+    /// signJwt(c, k, { expiresInSec: "600" })          // string -> no exp
+    /// ```
     ///
     /// Our own verifier requires `exp`, so such a token fails locally and looks
     /// like a bug in signing. Every other JOSE verifier reads a missing `exp` as

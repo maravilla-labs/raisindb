@@ -181,6 +181,8 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
     ) -> Result<models::nodes::Node> {
         use raisin_storage::transactional::TransactionalContext;
 
+        reject_copy_into_own_subtree(source_path, target_parent)?;
+
         let actor = self
             .auth_context
             .as_ref()
@@ -402,5 +404,41 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
     /// Public method to parse copy target path for transaction builders.
     pub fn parse_copy_target(&self, target_path: &str) -> Result<(String, Option<String>)> {
         self.parse_target_path(target_path)
+    }
+}
+
+/// A tree cannot be copied into itself or into one of its own descendants.
+///
+/// The copy lands at `<target_parent>/<name>`, so it is inside the source
+/// exactly when `target_parent` is the source or lies below it. Allowed, the
+/// copy would walk a subtree that it is growing while it walks it.
+pub(crate) fn reject_copy_into_own_subtree(source_path: &str, target_parent: &str) -> Result<()> {
+    let source = source_path.trim_end_matches('/');
+    let parent = target_parent.trim_end_matches('/');
+    if !source.is_empty() && (parent == source || parent.starts_with(&format!("{source}/"))) {
+        return Err(raisin_error::Error::Validation(format!(
+            "Cannot copy '{}' into itself or its own descendant '{}'",
+            source_path, target_parent
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod copy_into_own_subtree_tests {
+    use super::reject_copy_into_own_subtree;
+
+    #[test]
+    fn a_tree_cannot_be_copied_into_itself_or_below_itself() {
+        assert!(reject_copy_into_own_subtree("/a", "/a").is_err());
+        assert!(reject_copy_into_own_subtree("/a", "/a/b").is_err());
+        assert!(reject_copy_into_own_subtree("/a", "/a/b/").is_err());
+    }
+
+    #[test]
+    fn siblings_and_prefix_lookalikes_are_fine() {
+        assert!(reject_copy_into_own_subtree("/a", "/").is_ok());
+        assert!(reject_copy_into_own_subtree("/a", "/ab").is_ok());
+        assert!(reject_copy_into_own_subtree("/a/b", "/a").is_ok());
     }
 }

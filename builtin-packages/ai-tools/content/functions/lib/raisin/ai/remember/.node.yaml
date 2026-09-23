@@ -9,6 +9,9 @@ properties:
     Always preserve existing entries unless the user explicitly asks to remove something.
     Example: remember(content="- name: Şenol\n- language: Turkish\n- project: RaisinDB")
   execution_mode: "async"
+  # Memory lives where no user role reaches (ai:/agents/*/memory); the tool
+  # proves its run and acts only for the run's own agent and user.
+  execution_context: "system"
   enabled: true
   language: "javascript"
   entry_file: "index.js:handler"

@@ -62,6 +62,7 @@ pub mod services {
     pub mod element_type_resolver;
     pub mod encrypted_fields;
     pub mod indexing_policy;
+    pub mod node_dev;
     pub mod node_service;
     pub mod node_type_resolver;
     pub mod node_validation;

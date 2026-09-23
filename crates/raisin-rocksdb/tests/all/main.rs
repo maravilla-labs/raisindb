@@ -47,6 +47,7 @@ mod move_tree_readback_test;
 mod move_tree_stale_child_link_test;
 mod multi_node_crdt_integration;
 mod named_embedding_specs_test;
+mod node_dev_test;
 mod node_history_test;
 mod node_service_event_once_test;
 mod one_time_token_store_test;

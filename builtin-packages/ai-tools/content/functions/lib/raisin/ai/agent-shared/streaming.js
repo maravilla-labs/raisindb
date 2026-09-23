@@ -197,10 +197,76 @@ async function emitAssistantTurnError(workspace, chatPath, messageName, errorMes
   await resumeTerminalSideEffects(workspace, chatPath, errorNode, outboxCtx, streamChannel);
 }
 
+/**
+ * Persist and publish a user-requested stop as a normal terminal assistant
+ * turn. This is deliberately not an error: committed work remains visible,
+ * while the finish reason lets clients distinguish cancellation from failure.
+ */
+async function emitAssistantTurnStopped(workspace, chatPath, messageName, request, outboxCtx, streamChannel, parentMessagePath = null) {
+  const content = 'Stopped by you. I will not start another model or tool round. Work already completed before the stop request is preserved.';
+  const senderId = outboxCtx ? outboxCtx.agentUserId : 'ai-assistant';
+  const senderName = outboxCtx ? outboxCtx.agentDisplayName : 'AI Assistant';
+  const targetPath = `${chatPath}/${messageName}`;
+  let stoppedNode = null;
+
+  try {
+    stoppedNode = await raisin.nodes.get(workspace, targetPath);
+  } catch (_) {
+    stoppedNode = null;
+  }
+
+  if (!stoppedNode) {
+    try {
+      stoppedNode = await raisin.nodes.create(workspace, chatPath, {
+        name: messageName,
+        node_type: 'raisin:Message',
+        properties: {
+          role: 'assistant',
+          body: { content, message_text: content },
+          content,
+          sender_id: senderId,
+          sender_display_name: senderName,
+          message_type: 'chat',
+          status: 'delivered',
+          created_at: new Date().toISOString(),
+          finish_reason: 'user_stopped',
+          dispatch_phase: 'terminal',
+          terminal_reason_internal: 'user_stopped',
+          turn_terminal_outbox_sent: false,
+          turn_terminal_done_emitted: false,
+          ...(parentMessagePath ? { parent_message_path: parentMessagePath } : {}),
+          agent_control_request_id: request?.request_id || null,
+        },
+      });
+    } catch (createError) {
+      if (!String(createError?.message || '').includes('already exists')) throw createError;
+      stoppedNode = await raisin.nodes.get(workspace, targetPath);
+    }
+  } else {
+    await updateAssistantContent(workspace, stoppedNode, content);
+    await raisin.nodes.updateProperty(workspace, stoppedNode.path, 'finish_reason', 'user_stopped');
+    await raisin.nodes.updateProperty(workspace, stoppedNode.path, 'dispatch_phase', 'terminal');
+    await raisin.nodes.updateProperty(workspace, stoppedNode.path, 'terminal_reason_internal', 'user_stopped');
+    await raisin.nodes.updateProperty(workspace, stoppedNode.path, 'agent_control_request_id', request?.request_id || null);
+    stoppedNode = await raisin.nodes.get(workspace, stoppedNode.path);
+  }
+
+  await emitConversationEvent('conversation:message_saved', {
+    type: 'message_saved',
+    messagePath: stoppedNode.path,
+    role: 'assistant',
+    timestamp: new Date().toISOString(),
+  }, chatPath, streamChannel);
+
+  await resumeTerminalSideEffects(workspace, chatPath, stoppedNode, outboxCtx, streamChannel);
+  return stoppedNode;
+}
+
 export {
   resolveStreamChannel,
   emitConversationEvent,
   setTerminalMarker,
   resumeTerminalSideEffects,
   emitAssistantTurnError,
+  emitAssistantTurnStopped,
 };

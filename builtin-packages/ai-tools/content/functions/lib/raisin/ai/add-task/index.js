@@ -1,3 +1,6 @@
+import { idempotencyKey } from '../agent-shared/tool-envelope.js';
+import { runEnvelope } from '../agent-shared/tool-envelope.js';
+import { TOOL_META } from '../agent-shared/tool-meta.js';
 /**
  * add-task — Adds a new task to the most recent plan in the conversation.
  *
@@ -8,7 +11,8 @@
  * Category: planning
  */
 async function handler(input) {
-  const { title, description, priority, build_target_path, __raisin_context } = input;
+  const enveloped = await runEnvelope(input, TOOL_META.addTask, handler); if (enveloped) return enveloped;
+  const { title, description, priority, __raisin_context } = input;
   const workspace = __raisin_context?.workspace || 'ai';
   const chatPath = __raisin_context?.chat_path;
 
@@ -31,6 +35,20 @@ async function handler(input) {
   const plan = plans[0];
   const planProps = plan.properties || {};
 
+  /* Keyed: a replayed call returns the task it already added. */
+  const idemKey = idempotencyKey(input);
+  if (idemKey) {
+    const prior = await raisin.sql.query(
+      `SELECT id, name, properties FROM "${workspace}"
+       WHERE CHILD_OF($1) AND node_type = 'raisin:AITask' AND properties->>'idempotency_key' = $2
+       LIMIT 1`,
+      [plan.path, idemKey],
+    );
+    if (prior.length) {
+      return { success: true, replayed: true, task_id: prior[0].id, title: prior[0].properties?.title || title, status: prior[0].properties?.status || 'pending', plan_title: planProps.title };
+    }
+  }
+
   // Count existing tasks to determine the next number
   const countResult = await raisin.sql.query(
     `SELECT COUNT(*) as count FROM "${workspace}"
@@ -50,10 +68,8 @@ async function handler(input) {
       description: description || '',
       status: 'pending',
       priority: priority || 'normal',
-      /* See create-plan: the declared artifact is what the finalize gate checks. */
-      ...(typeof build_target_path === 'string' && build_target_path
-        ? { build_target_path }
-        : {}),
+      ...(idemKey ? { idempotency_key: idemKey } : {}),
+      // Bind a concrete artifact later with update-task, after it exists.
     },
   });
 
@@ -77,3 +93,5 @@ async function handler(input) {
     message: `Added task ${taskNumber}: "${title}" to plan "${planProps.title}"`,
   };
 }
+
+export { handler };

@@ -34,6 +34,8 @@ import { HttpNodeTypes, HttpArchetypes, HttpElementTypes } from './http-schema';
 import { McpClient, type McpTransport, type McpFrameStream, type McpJsonRpcFrame } from './mcp';
 import { SSEClient } from './streaming/sse-client';
 import { IdentityAuthApi, type IdentityAuthResult } from './identity-auth';
+import { AgentRunsApi } from './agent-runs';
+import { NodeDevApi } from './node-dev';
 
 /**
  * Current user info
@@ -1057,6 +1059,37 @@ export class RaisinHttpClient extends EventEmitter {
    * @param input - Input data passed to the function
    * @returns Execution ID and job ID for tracking
    */
+  /**
+   * Durable agent runs of `repository`: create, read, control, stream, and
+   * drive them directly (see {@link AgentRunsApi}).
+   */
+  agentRuns(repository: string): AgentRunsApi {
+    return new AgentRunsApi(repository, {
+      request: async <T>(method: string, path: string, body?: unknown): Promise<T> =>
+        (await this.request<T>({ method, path, body })).data,
+      url: (path: string) => `${this.baseUrl}${path}`,
+      headers: (): Record<string, string> => {
+        const token = this.authManager.getAccessToken();
+        const headers: Record<string, string> = {};
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+        return headers;
+      },
+      fetch: this.fetchImpl,
+    });
+  }
+
+  /**
+   * The node-development surface of `repository`: typed reads, atomic
+   * changesets with review and idempotency, branch worktrees (see
+   * {@link NodeDevApi}).
+   */
+  nodeDev(repository: string): NodeDevApi {
+    return new NodeDevApi(repository, {
+      request: async <T>(method: string, path: string, body?: unknown): Promise<T> =>
+        (await this.request<T>({ method, path, body })).data,
+    });
+  }
+
   async invokeFunction(
     repository: string,
     functionName: string,
@@ -1327,6 +1360,16 @@ export class HttpDatabase {
   /**
    * Get FunctionsApi for invoking server-side functions via HTTP
    */
+  /** Durable agent runs of this repository. */
+  agentRuns(): AgentRunsApi {
+    return this.client.agentRuns(this.repository);
+  }
+
+  /** The node-development surface of this repository. */
+  nodeDev(): NodeDevApi {
+    return this.client.nodeDev(this.repository);
+  }
+
   functions(): HttpFunctionsApi {
     return new HttpFunctionsApi(
       this.repository,

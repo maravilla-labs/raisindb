@@ -1,88 +1,47 @@
-/** Start a durable child-agent run for one task in the current plan. */
-async function handler(input) {
-  const { task_id, agent_ref, objective, context, max_tool_iterations, __raisin_context } = input;
-  const workspace = __raisin_context?.workspace || 'ai';
-  const chatPath = __raisin_context?.chat_path;
+/**
+ * delegate-task — the plan-task spelling of `spawn-agent`: a durable CHILD RUN
+ * of core (see agent-shared/delegation-spawn.js), keyed by the task, so
+ * delegating the same task twice finds the first child instead of starting
+ * another. The parent inspects, messages, waits for and interrupts it like
+ * any child; its hand-back arrives through the run mailbox.
+ */
+import { delegationTool } from '../agent-shared/delegation-tool.js';
+import { spawnChild } from '../agent-shared/delegation-spawn.js';
+import { DELEGATION_FUNCTIONS, taskKey } from '../agent-shared/delegation-spec.js';
+import { locator } from '../agent-shared/tool-envelope.js';
 
-  if (!chatPath) throw new Error('Missing chat_path in execution context');
-  if (!task_id || !agent_ref || !objective) {
-    throw new Error('task_id, agent_ref, and objective are required');
-  }
-  if (!/^\/agents\/[a-z0-9][a-z0-9-]*$/.test(agent_ref)) {
-    throw new Error('agent_ref must be an installed /agents/{slug} path');
-  }
-
-  const agent = await raisin.nodes.get('functions', agent_ref);
-  if (!agent || agent.node_type !== 'raisin:AIAgent') {
-    throw new Error(`Delegation target is not an installed agent: ${agent_ref}`);
-  }
-
-  const rows = await raisin.sql.query(
-    `SELECT id, path, properties FROM "${workspace}"
-     WHERE DESCENDANT_OF($1) AND node_type = 'raisin:AITask' AND id = $2
-     LIMIT 1`,
-    [chatPath, task_id],
-  );
-  if (!rows.length) throw new Error(`Task not found in current conversation: ${task_id}`);
-
-  const task = rows[0];
-  const delegationId = await raisin.crypto.uuid();
-  const startedAt = new Date().toISOString();
-  const updated = {
-    ...(task.properties || {}),
-    status: 'in_progress',
-    delegation_id: delegationId,
-    delegation_status: 'queued',
-    delegated_agent_ref: {
-      'raisin:ref': agent.id || '',
-      'raisin:workspace': 'functions',
-      'raisin:path': agent_ref,
-    },
-    delegated_at: startedAt,
-    delegation_objective: objective,
-  };
-  await raisin.nodes.update(workspace, task.path, { properties: updated });
-
-  let run;
-  try {
-    run = await raisin.flows.run('/flows/delegated-agent-task', {
-      delegation_id: delegationId,
-      task_id,
-      task_path: task.path,
-      chat_path: chatPath,
-      workspace,
+export async function handler(input) {
+  return delegationTool(input, async (args) => {
+    const { task_id, agent_ref, objective, context, max_tool_iterations } = args;
+    if (!task_id || !agent_ref || !objective) throw Object.assign(new Error('task_id, agent_ref, and objective are required'), { error_class: 'invalid_input' });
+    const iterations = Math.min(Math.max(Number(max_tool_iterations) || 6, 1), 12);
+    const r = await spawnChild({
+      __raisin_context: args.__raisin_context,
       agent_ref,
+      key: taskKey(task_id),
+      task_id,
       objective,
-      context: context || {},
-      max_tool_iterations: Math.min(Math.max(Number(max_tool_iterations) || 6, 1), 12),
-    });
-  } catch (error) {
-    await raisin.nodes.update(workspace, task.path, {
-      properties: {
-        ...updated,
-        delegation_status: 'failed',
-        delegation_error: String(error?.message || error),
+      context_mode: context ? 'snapshot' : 'none',
+      context: context || null,
+      budget: { max_model_calls: iterations + 2, max_operations: iterations * 4 + 8 },
+      independent: args.independent === true,
+    }, { functionPath: DELEGATION_FUNCTIONS.legacyDelegate, taskBinding: task_id });
+    const loc = locator('ai', r.chat_path);
+    return {
+      payload: {
+        success: true,
+        delegation_id: r.child.run_id,
+        child_run_id: r.child.run_id,
+        child: r.child,
+        task_id,
+        agent_ref,
+        status: r.child.status || 'running',
+        replayed: r.replayed,
+        message: `Delegated task ${task_id} to ${agent_ref} as child run ${r.child.key}. Collect its result with wait_for_agents or get_delegation_status.`,
       },
-    });
-    throw error;
-  }
-
-  const instanceId = run?.instance_id || run?.instanceId || null;
-  await raisin.nodes.update(workspace, task.path, {
-    properties: {
-      ...updated,
-      delegation_status: 'running',
-      delegation_flow_instance_id: instanceId,
-    },
+      writes: r.replayed ? [] : [{ locator: loc, action: 'created' }],
+      refs: [{ kind: 'child_run', logical_key: r.child.key, locator: loc, role: 'primary' }],
+      next: [{ action: 'wait_for_agents', args: { agents: [r.child.key] }, reason: 'the child runs asynchronously' }],
+    };
   });
-
-  return {
-    success: true,
-    delegation_id: delegationId,
-    flow_instance_id: instanceId,
-    task_id,
-    agent_ref,
-    status: 'running',
-    message: `Delegated "${updated.title || task_id}" to ${agent.properties?.title || agent_ref}.`,
-  };
 }

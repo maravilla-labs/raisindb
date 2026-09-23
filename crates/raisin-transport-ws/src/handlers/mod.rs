@@ -14,6 +14,8 @@ use crate::{
     protocol::{RequestEnvelope, RequestType, ResponseEnvelope},
 };
 
+#[cfg(feature = "storage-rocksdb")]
+mod agent_runs;
 mod archetypes;
 mod auth;
 mod branches;
@@ -35,6 +37,8 @@ mod transactions;
 mod translations;
 mod workspaces;
 
+#[cfg(feature = "storage-rocksdb")]
+pub use agent_runs::*;
 pub use archetypes::*;
 pub use auth::*;
 pub use branches::*;
@@ -312,6 +316,31 @@ where
         }
         RequestType::FlowUnsubscribeEvents => {
             handle_flow_unsubscribe_events(state, connection_state, request).await
+        }
+
+        // Durable agent run operations
+        #[cfg(feature = "storage-rocksdb")]
+        RequestType::AgentRunCreate
+        | RequestType::AgentRunGet
+        | RequestType::AgentRunBySubject
+        | RequestType::AgentRunList
+        | RequestType::AgentRunEvents
+        | RequestType::AgentRunSubscribe
+        | RequestType::AgentRunUnsubscribe
+        | RequestType::AgentRunControl
+        | RequestType::AgentRunChildren => {
+            let op = match request.request_type {
+                RequestType::AgentRunCreate => "create",
+                RequestType::AgentRunGet => "get",
+                RequestType::AgentRunBySubject => "by_subject",
+                RequestType::AgentRunList => "list",
+                RequestType::AgentRunEvents => "events",
+                RequestType::AgentRunSubscribe => "subscribe",
+                RequestType::AgentRunUnsubscribe => "unsubscribe",
+                RequestType::AgentRunControl => "control",
+                _ => "children",
+            };
+            handle_agent_run(state, connection_state, request, op).await
         }
 
         // Function operations

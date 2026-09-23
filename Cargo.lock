@@ -6916,6 +6916,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "raisin-agent-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "raisin-agent-runtime"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "raisin-agent-contract",
+ "raisin-agent-runtime",
+ "raisin-error",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
 name = "raisin-ai"
 version = "0.1.0"
 dependencies = [
@@ -7047,6 +7072,7 @@ dependencies = [
  "include_dir",
  "md5 0.8.0",
  "nanoid",
+ "raisin-agent-contract",
  "raisin-audit",
  "raisin-binary",
  "raisin-context",
@@ -7213,6 +7239,7 @@ dependencies = [
  "nanoid",
  "num_cpus",
  "pdf_oxide",
+ "raisin-agent-runtime",
  "raisin-ai",
  "raisin-binary",
  "raisin-context",
@@ -7549,6 +7576,7 @@ dependencies = [
  "nanoid",
  "num_cpus",
  "once_cell",
+ "raisin-agent-runtime",
  "raisin-ai",
  "raisin-audit",
  "raisin-auth",
@@ -7619,6 +7647,7 @@ dependencies = [
  "mime_guess",
  "nanoid",
  "pgwire",
+ "raisin-agent-runtime",
  "raisin-ai",
  "raisin-audit",
  "raisin-binary",
@@ -7818,6 +7847,7 @@ dependencies = [
  "nanoid",
  "once_cell",
  "percent-encoding",
+ "raisin-agent-runtime",
  "raisin-ai",
  "raisin-audit",
  "raisin-auth",
@@ -7922,6 +7952,7 @@ dependencies = [
  "jsonwebtoken",
  "nanoid",
  "parking_lot",
+ "raisin-agent-runtime",
  "raisin-audit",
  "raisin-binary",
  "raisin-context",

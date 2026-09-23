@@ -1,0 +1,17 @@
+{
+  "envelope": {
+    "envelope": "raisin.tool-result/1",
+    "operation_id": "run-1/op/4",
+    "status": "succeeded",
+    "writes": [
+      {
+        "locator": {
+          "workspace": "apps",
+          "path": "/local/crm"
+        },
+        "action": "updated"
+      }
+    ]
+  },
+  "expect": "writes_without_primary"
+}

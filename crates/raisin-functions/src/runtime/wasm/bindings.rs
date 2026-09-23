@@ -57,6 +57,18 @@ pub struct HostState {
     pub wasi: WasiCtx,
     /// Resource handles the guest holds (streams, mainly).
     pub table: ResourceTable,
+    /// Whether `host.call` may reach the API at all.
+    pub policy: HostPolicy,
+}
+
+/// What the generic gateway allows for one execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostPolicy {
+    /// An ordinary function: every registered `raisin.*` method.
+    Allow,
+    /// A PURE caller — an AgentRun domain reducer. Every `host.call` is an
+    /// `Err`, so purity is enforced at runtime, not only by convention.
+    DenyAll,
 }
 
 impl HostState {
@@ -92,6 +104,12 @@ impl host::Host for HostState {
     /// an unknown method, bad arguments and an API failure are all `Err`
     /// values the guest can see and handle. Only a host bug traps.
     async fn call(&mut self, method: String, args: String) -> Result<String, String> {
+        if self.policy == HostPolicy::DenyAll {
+            return Err(format!(
+                "{}: {method}",
+                crate::types::ExecutionPolicy::HOST_DENIED
+            ));
+        }
         let Some(descriptor) = registry().find_by_internal_name(&method) else {
             tracing::error!(method = %method, "wasm host call: unknown method");
             return Err(format!("Unknown raisin API method: {}", method));

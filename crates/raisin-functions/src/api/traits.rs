@@ -374,6 +374,35 @@ pub trait FunctionApi: Send + Sync {
         )))
     }
 
+    // ========== Durable Agent Runs ==========
+
+    /// `raisin.agent_runs.*`: create, read, read events of, and control a
+    /// durable agent run in this function's repository, as the function's
+    /// caller. `method` is one of `create | get | events | control |
+    /// deliver`; `args` is that call's request object (the same shapes as
+    /// `/api/agent-runs`).
+    async fn agent_runs_call(&self, method: &str, args: Value) -> Result<Value> {
+        let _ = args;
+        Err(raisin_error::Error::Validation(format!(
+            "Agent runs are not available in this runtime (agent_runs.{method})"
+        )))
+    }
+
+    // ========== Node Development Surface ==========
+
+    /// `raisin.node_dev.*`: typed stat/list/read/diff/watch, atomic
+    /// changesets (dry_run/propose/commit/discard/apply) and branch
+    /// fork/diff/merge/discard over this repository's node hierarchy, as the
+    /// function's caller. `method` is one of
+    /// `raisin_core::services::node_dev::dispatch::METHODS`; `args` is the
+    /// request object (the same shapes as `/api/node-dev`).
+    async fn node_dev_call(&self, method: &str, args: Value) -> Result<Value> {
+        let _ = args;
+        Err(raisin_error::Error::Validation(format!(
+            "The node-development surface is not available in this runtime (node_dev.{method})"
+        )))
+    }
+
     // ========== Scheduled Invocation Operations ==========
 
     /// Schedule a one-shot invocation of a function or flow at a fixed time.

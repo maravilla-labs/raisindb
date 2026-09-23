@@ -707,8 +707,12 @@ fn test_raisin_reference_json_serialization() {
 
 #[test]
 fn test_raisin_reference_messagepack_roundtrip() {
-    // MessagePack serializes structs as arrays by field order, not as maps.
-    // The deserializer must handle both formats.
+    // Nodes are stored as NAMED MessagePack (`rmp_serde::to_vec_named`), where a
+    // struct is a map and the reference keeps its `raisin:*` keys. The
+    // positional form (`to_vec`, a struct as a bare array) is deliberately NOT
+    // read back as a reference: that heuristic turned plain string arrays such
+    // as keywords into references (see `deserialize_raisin_reference` and the
+    // two `*_not_deserialized_as_reference` tests below).
     let reference = RaisinReference {
         id: "test-uuid".to_string(),
         workspace: "social".to_string(),
@@ -716,7 +720,7 @@ fn test_raisin_reference_messagepack_roundtrip() {
     };
 
     let pv = PropertyValue::Reference(reference.clone());
-    let bytes = rmp_serde::to_vec(&pv).expect("should serialize to msgpack");
+    let bytes = rmp_serde::to_vec_named(&pv).expect("should serialize to msgpack");
     let deserialized: PropertyValue =
         rmp_serde::from_slice(&bytes).expect("should deserialize from msgpack");
 
@@ -797,7 +801,7 @@ fn test_real_reference_with_uuid_still_works() {
     };
 
     let pv = PropertyValue::Reference(reference);
-    let bytes = rmp_serde::to_vec(&pv).expect("should serialize");
+    let bytes = rmp_serde::to_vec_named(&pv).expect("should serialize");
     let deserialized: PropertyValue = rmp_serde::from_slice(&bytes).expect("should deserialize");
 
     if let PropertyValue::Reference(r) = deserialized {
@@ -818,7 +822,7 @@ fn test_real_reference_with_nanoid_still_works() {
     };
 
     let pv = PropertyValue::Reference(reference);
-    let bytes = rmp_serde::to_vec(&pv).expect("should serialize");
+    let bytes = rmp_serde::to_vec_named(&pv).expect("should serialize");
     let deserialized: PropertyValue = rmp_serde::from_slice(&bytes).expect("should deserialize");
 
     if let PropertyValue::Reference(r) = deserialized {
@@ -839,7 +843,7 @@ fn test_real_reference_with_path_id_still_works() {
     };
 
     let pv = PropertyValue::Reference(reference);
-    let bytes = rmp_serde::to_vec(&pv).expect("should serialize");
+    let bytes = rmp_serde::to_vec_named(&pv).expect("should serialize");
     let deserialized: PropertyValue = rmp_serde::from_slice(&bytes).expect("should deserialize");
 
     if let PropertyValue::Reference(r) = deserialized {

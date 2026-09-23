@@ -68,6 +68,40 @@ pub struct ExecutionContext {
     /// When set, console.log/warn/error calls will be streamed in real-time.
     #[serde(skip)]
     pub log_emitter: Option<raisin_storage::LogEmitter>,
+
+    /// What the execution may touch beyond its input. Every runtime honours it
+    /// (see [`ExecutionPolicy`]); it is never read from the function's input.
+    #[serde(skip)]
+    pub policy: ExecutionPolicy,
+}
+
+/// The generic execution policy, honoured by EVERY runtime.
+///
+/// A policy is a property of the CALL, not of the language: the same function
+/// contract (`input -> output`) runs under it whether the function is
+/// JavaScript, Starlark or a WebAssembly component. Each runtime enforces it
+/// with its own means.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ExecutionPolicy {
+    /// An ordinary function: the full `raisin.*` surface its node grants.
+    #[default]
+    Standard,
+    /// A PURE call — e.g. an AgentRun domain reducer. No host calls at all
+    /// (every `raisin.*` method, plugin method and `fetch` fails), and no
+    /// ambient nondeterminism: the clock reads the epoch and randomness is a
+    /// fixed sequence, so the same input always yields the same output.
+    Deterministic,
+}
+
+impl ExecutionPolicy {
+    /// The error text every runtime reports for a refused host call.
+    pub const HOST_DENIED: &'static str =
+        "host calls are denied here (a deterministic function must be pure)";
+
+    /// Whether a `raisin.*` host call may reach the API.
+    pub fn allows_host_calls(self) -> bool {
+        matches!(self, Self::Standard)
+    }
 }
 
 impl std::fmt::Debug for ExecutionContext {
@@ -91,6 +125,7 @@ impl std::fmt::Debug for ExecutionContext {
                 "log_emitter",
                 &self.log_emitter.as_ref().map(|_| "<LogEmitter>"),
             )
+            .field("policy", &self.policy)
             .finish()
     }
 }
@@ -119,7 +154,14 @@ impl ExecutionContext {
             auth_context: None,
             allows_admin_escalation: false,
             log_emitter: None,
+            policy: ExecutionPolicy::Standard,
         }
+    }
+
+    /// Run under `policy` (see [`ExecutionPolicy`]).
+    pub fn with_policy(mut self, policy: ExecutionPolicy) -> Self {
+        self.policy = policy;
+        self
     }
 
     /// Adopt an execution id that was minted by the caller.

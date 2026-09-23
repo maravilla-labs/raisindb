@@ -2317,6 +2317,7 @@ async fn test_raisin_api_surface_snapshot() {
     expect(
         "root",
         vec![
+            "agentRuns",
             "ai",
             "asAdmin",
             "assets",
@@ -2336,6 +2337,7 @@ async fn test_raisin_api_surface_snapshot() {
             "inventory",
             "locks",
             "media",
+            "nodeDev",
             "nodes",
             "notify",
             "ocr",

@@ -154,17 +154,26 @@ impl NodeRepositoryImpl {
                 .rsplit_once('/')
                 .map(|(p, _)| if p.is_empty() { "/" } else { p })
         {
-            if let Some(old_parent_node) = self
-                .get_by_path_impl(tenant_id, repo_id, branch, workspace, old_parent_path, None)
-                .await?
-            {
+            // The workspace root has no stored node: its ORDERED_CHILDREN are
+            // keyed by the literal "/", exactly as for the new parent below.
+            // Looking "/" up as a node found nothing, so a node moved OUT of the
+            // root kept its root entry and went on being listed there — a ghost
+            // at the root while it answered at its new path.
+            let old_parent_id = if old_parent_path == "/" {
+                Some("/".to_string())
+            } else {
+                self.get_by_path_impl(tenant_id, repo_id, branch, workspace, old_parent_path, None)
+                    .await?
+                    .map(|node| node.id)
+            };
+            if let Some(old_parent_id) = old_parent_id {
                 // Tombstone old ordered children entry
                 if let Some(old_label) = self.get_order_label_for_child(
                     tenant_id,
                     repo_id,
                     branch,
                     workspace,
-                    &old_parent_node.id,
+                    &old_parent_id,
                     id,
                 )? {
                     let old_ordered_key = keys::ordered_child_key_versioned(
@@ -172,7 +181,7 @@ impl NodeRepositoryImpl {
                         repo_id,
                         branch,
                         workspace,
-                        &old_parent_node.id,
+                        &old_parent_id,
                         &old_label,
                         &revision,
                         id,
@@ -185,7 +194,7 @@ impl NodeRepositoryImpl {
                         repo_id,
                         branch,
                         workspace,
-                        &old_parent_node.id,
+                        &old_parent_id,
                     );
                     batch.delete_cf(cf_ordered, metadata_key);
                 }

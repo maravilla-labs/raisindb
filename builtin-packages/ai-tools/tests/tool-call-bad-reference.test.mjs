@@ -3,49 +3,53 @@
 // Measured in a Builder run: propose-automation was called with
 // {raisin:ref: /agents/homepage-title-reviewer, raisin:workspace: agents} — the
 // wrong workspace. The server refused the tool-call node ("Referenced node not
-// found"), the continuation ended in its catch, and the conversation stopped
-// with nothing for the model to correct.
+// found") and the conversation stopped with nothing for the model to correct.
+// A run's transcript writes (the assistant turn with its calls, each call and
+// its result) are stored once more with plain paths instead.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
 
-const AI = join(dirname(fileURLToPath(import.meta.url)), '../content/functions/lib/raisin/ai');
-const { createToolCallNode, plainReferences } = await import(`${AI}/agent-shared/utils.js`);
+import { createOrGet } from '../content/functions/lib/raisin/ai/agent-shared/run-transcript.js';
+import { plainReferences } from '../content/functions/lib/raisin/ai/agent-shared/utils.js';
 
 function host(refuse) {
   const writes = [];
-  globalThis.raisin = { nodes: { async create(ws, parent, def) {
-    writes.push(def);
-    if (refuse(def)) throw new Error('Validation failed: Referenced node not found: agents:/agents/x');
-    return { path: `${parent}/${def.name}` };
-  } } };
+  globalThis.raisin = {
+    nodes: {
+      async create(ws, parent, def) {
+        writes.push(def);
+        if (refuse(def)) throw new Error('Validation failed: Referenced node not found: agents:/agents/x');
+        return { path: `${parent}/${def.name}`, properties: def.properties };
+      },
+      async get() { return null; },
+    },
+  };
   return writes;
 }
 const hasEnvelope = (v) => JSON.stringify(v).includes('raisin:ref');
-const props = (args) => ({ tool_call_id: 't1', function_name: 'propose-automation', function_ref: {}, arguments: args, status: 'pending' });
+const call = (args) => ({ name: 'tool-call-1', node_type: 'raisin:AIToolCall', properties: { tool_call_id: 't1', function_name: 'propose-automation', arguments: args, status: 'completed' } });
 
-test('a bad reference in the arguments is stored as a plain path, and the tool still runs', async () => {
-  const writes = host((def) => hasEnvelope(def.properties.arguments));
+test('a bad reference in the arguments is stored as a plain path, and the transcript goes on', async () => {
+  const writes = host((def) => hasEnvelope(def.properties));
   const args = { candidate: { steps: [{ agent: { 'raisin:ref': '/agents/x', 'raisin:workspace': 'agents' } }] } };
-  const out = await createToolCallNode('ai', '/chat/m1', 'tool-call-1', props(args));
+  const node = await createOrGet('ai', '/chat/m1', call(args));
   assert.equal(writes.length, 2, 'written once more');
-  assert.deepEqual(out.args, { candidate: { steps: [{ agent: '/agents/x' }] } });
-  assert.equal(writes[1].properties.status, 'pending', 'still pending, so the tool executes');
-  assert.match(writes[1].properties.arguments_rewritten, /Referenced node not found/);
+  assert.deepEqual(node.properties.arguments, { candidate: { steps: [{ agent: '/agents/x' }] } });
+  assert.equal(node.properties.status, 'completed', 'a final status: core never executes it');
+  assert.match(node.properties.references_rewritten, /Referenced node not found/);
 });
 
 test('good arguments are written once, untouched', async () => {
   const writes = host(() => false);
   const args = { agent: { 'raisin:ref': '/agents/y', 'raisin:workspace': 'functions' } };
-  const out = await createToolCallNode('ai', '/chat/m1', 'tool-call-1', props(args));
+  const node = await createOrGet('ai', '/chat/m1', call(args));
   assert.equal(writes.length, 1);
-  assert.deepEqual(out.args, args);
+  assert.deepEqual(node.properties.arguments, args);
 });
 
 test('any other failure still throws', async () => {
   globalThis.raisin = { nodes: { async create() { throw new Error('disk full'); } } };
-  await assert.rejects(createToolCallNode('ai', '/c', 'n', props({})), /disk full/);
+  await assert.rejects(createOrGet('ai', '/c', call({})), /disk full/);
 });
 
 test('plainReferences keeps the path when the envelope has one', () => {

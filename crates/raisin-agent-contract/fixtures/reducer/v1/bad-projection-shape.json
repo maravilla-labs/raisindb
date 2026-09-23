@@ -1,0 +1,62 @@
+{
+  "request": {
+    "contract": "raisin.agent-run.reducer/1",
+    "accept": [
+      "raisin.agent-run.reducer/1"
+    ],
+    "run": {
+      "run_id": "run-1",
+      "status": "running",
+      "turn": 2,
+      "last_seq": 12,
+      "usage": {
+        "operations": 4
+      },
+      "budgets": {},
+      "open_requests": [],
+      "unanswered_calls": []
+    },
+    "state": {
+      "last_event_seq": 11,
+      "phase": "discover"
+    },
+    "state_rev": 3,
+    "event": {
+      "seq": 12,
+      "kind": "tool_result",
+      "effect_id": "3:0",
+      "operation_id": "run-1/op/4",
+      "data": {}
+    }
+  },
+  "response": {
+    "contract": "raisin.agent-run.reducer/1",
+    "state": {
+      "last_event_seq": 12,
+      "phase": "design"
+    },
+    "state_rev": 4,
+    "effects": [
+      {
+        "effect_id": "4:0",
+        "kind": "call_tool",
+        "tool": "/lib/demo/read",
+        "args": {
+          "q": 1
+        },
+        "mutating": false,
+        "replay_safe": true
+      }
+    ],
+    "projection": {
+      "items": [
+        {
+          "key": "a",
+          "title": "A",
+          "status": "running_fast"
+        }
+      ]
+    }
+  },
+  "expect": "projection_invalid"
+}

@@ -32,6 +32,12 @@ mod handlers {
     #[cfg(feature = "storage-rocksdb")]
     pub mod admin_users;
     #[cfg(feature = "storage-rocksdb")]
+    pub mod agent_runs;
+    #[cfg(feature = "storage-rocksdb")]
+    pub mod agent_runs_children;
+    #[cfg(feature = "storage-rocksdb")]
+    pub mod agent_runs_stream;
+    #[cfg(feature = "storage-rocksdb")]
     pub mod ai;
     pub mod archetypes;
     pub mod audit;
@@ -61,6 +67,8 @@ mod handlers {
     #[cfg(feature = "storage-rocksdb")]
     pub mod mcp_client;
     pub mod mixins;
+    #[cfg(feature = "storage-rocksdb")]
+    pub mod node_dev;
     pub mod node_types;
     #[cfg(feature = "storage-rocksdb")]
     pub mod oauth_as;

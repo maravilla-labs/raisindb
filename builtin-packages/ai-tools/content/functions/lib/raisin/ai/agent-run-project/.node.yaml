@@ -1,0 +1,16 @@
+node_type: raisin:Function
+properties:
+  title: Agent run projection
+  description: >-
+    Projects an agent run's state into its conversation: the plan card, a
+    pending approval, and the final answer with the runtime's own status.
+    Issued by the run's reducer, never by a model. Returns a
+    raisin.tool-result/1 envelope.
+  language: javascript
+  entry_file: index.js:handler
+  execution_mode: Sync
+  # Writes into the agent's inbox; verifies the run it acts for first.
+  execution_context: system
+  enabled: true
+  resource_limits:
+    timeout_ms: 30000

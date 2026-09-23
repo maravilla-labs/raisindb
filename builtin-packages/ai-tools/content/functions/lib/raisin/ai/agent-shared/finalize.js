@@ -34,10 +34,6 @@ import { log } from './logger.js';
  * written the same way: by the server operation that obtained the proof, never
  * by the model. The gate READS it; it never mints it. Nothing here re-derives
  * proof, so the check costs one query.
- *
- * These helpers live in this file rather than in `agent-shared/` only because
- * the continuation handler already imports one-hop siblings and this file is
- * the one both terminal paths can reach without a cycle.
  * ──────────────────────────────────────────────────────────────────────────── */
 
 /** The one policy value that turns the gate on. */

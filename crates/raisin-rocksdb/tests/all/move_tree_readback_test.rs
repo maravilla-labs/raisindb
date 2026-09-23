@@ -274,3 +274,56 @@ async fn tx_read(storage: &Arc<RocksDBStorage>, path: &str) -> Option<Node> {
         .await
         .unwrap()
 }
+
+/// Moving a node OUT of the workspace root takes it off the root listing.
+///
+/// The root has no stored node — its ORDERED_CHILDREN are keyed by the literal
+/// "/". The move looked the old parent up as a node, found none, and so never
+/// tombstoned the root entry: the node answered at its new path AND went on
+/// being listed at the root, where the HTTP listing showed it as a ghost.
+#[tokio::test]
+async fn a_node_moved_out_of_the_root_leaves_the_root_listing() {
+    use raisin_storage::{scope::StorageScope, ListOptions, NodeRepository};
+
+    let (storage, _dir) = setup().await;
+
+    let a_id = {
+        let tx = storage.begin_context().await.unwrap();
+        tx.set_tenant_repo(TENANT, REPO).unwrap();
+        tx.set_branch(BRANCH).unwrap();
+        tx.set_actor("test").unwrap();
+        tx.set_message("seed").unwrap();
+        tx.set_auth_context(AuthContext::system()).unwrap();
+        let a = node("/a");
+        let a_id = a.id.clone();
+        tx.upsert_deep_node(WS, &a, "raisin:Folder").await.unwrap();
+        tx.upsert_deep_node(WS, &node("/b"), "raisin:Folder")
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        a_id
+    };
+
+    let tx = storage.begin_context().await.unwrap();
+    tx.set_tenant_repo(TENANT, REPO).unwrap();
+    tx.set_branch(BRANCH).unwrap();
+    tx.set_actor("test").unwrap();
+    tx.set_message("move out of the root").unwrap();
+    tx.set_auth_context(AuthContext::system()).unwrap();
+    tx.move_node_tree(WS, &a_id, "/b/a").await.unwrap();
+    tx.commit().await.unwrap();
+
+    let root: Vec<String> = storage
+        .nodes()
+        .list_root(
+            StorageScope::new(TENANT, REPO, BRANCH, WS),
+            ListOptions::for_api(),
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|n| n.path)
+        .collect();
+    assert_eq!(root, vec!["/b".to_string()], "the moved node left the root");
+    assert_eq!(tx_read(&storage, "/b/a").await.map(|n| n.id), Some(a_id));
+}

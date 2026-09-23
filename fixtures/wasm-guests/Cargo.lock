@@ -3,6 +3,14 @@
 version = 4
 
 [[package]]
+name = "agent-reducer"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "wit-bindgen 0.61.1",
+]
+
+[[package]]
 name = "alloc"
 version = "0.1.0"
 dependencies = [

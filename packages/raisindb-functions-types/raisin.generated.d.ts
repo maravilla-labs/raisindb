@@ -24,6 +24,25 @@ declare namespace raisin {
     }
   }
 
+  namespace agent_runs {
+    function ackMailbox(request: any): Promise<any>;
+    function checkpoint(request: any): Promise<any>;
+    function children(request: any): Promise<any>;
+    function control(request: any): Promise<any>;
+    function controlChild(request: any): Promise<any>;
+    function create(request: any): Promise<any>;
+    function deliver(request: any): Promise<any>;
+    function events(request: any): Promise<any>;
+    function get(request: any): Promise<any>;
+    function inspectChild(request: any): Promise<any>;
+    function mailbox(request: any): Promise<any>;
+    function postToParent(request: any): Promise<any>;
+    function readCheckpoint(request: any): Promise<any>;
+    function spawnChild(request: any): Promise<any>;
+    function usage(request: any): Promise<any>;
+    function waitChild(request: any): Promise<any>;
+  }
+
   namespace ai {
     function completion(request: any): Promise<any>;
     function embed(request: any): Promise<any>;
@@ -112,6 +131,25 @@ declare namespace raisin {
     function acquire(key: string, ttlMs: number, owner?: string | null): Promise<any>;
     function release(key: string, token: number): Promise<boolean>;
     function renew(key: string, token: number, ttlMs: number): Promise<boolean>;
+  }
+
+  namespace node_dev {
+    function apply(request: any): Promise<any>;
+    function commit(request: any): Promise<any>;
+    function diff(request: any): Promise<any>;
+    function diff_branch(request: any): Promise<any>;
+    function discard(request: any): Promise<any>;
+    function discard_branch(request: any): Promise<any>;
+    function dry_run(request: any): Promise<any>;
+    function fork_branch(request: any): Promise<any>;
+    function get_changeset(request: any): Promise<any>;
+    function list(request: any): Promise<any>;
+    function list_changesets(request: any): Promise<any>;
+    function merge_branch(request: any): Promise<any>;
+    function propose(request: any): Promise<any>;
+    function read(request: any): Promise<any>;
+    function stat(request: any): Promise<any>;
+    function watch(request: any): Promise<any>;
   }
 
   namespace nodes {

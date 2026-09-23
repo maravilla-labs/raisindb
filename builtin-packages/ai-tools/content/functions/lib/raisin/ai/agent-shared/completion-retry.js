@@ -10,16 +10,13 @@
  * no statement of where the run had got to.
  *
  * So: ONE retry, with a short correction appended for the model. If the retry
- * fails the same way the turn ends — but with an honest terminal status, the
- * finalize gate's own statement for agents that declare the policy, never the
- * raw provider error alone and never silently.
+ * fails the same way the model turn fails with `malformed_tool_call`, and the
+ * run's reducer decides what follows — never the raw provider error alone and
+ * never silently.
  *
  * The same applies to the other shape of the fault: a completion that RETURNS
  * but whose only tool calls were dropped as malformed by `normalizeToolCalls`.
  */
-
-import { finalizePolicyOf, FINALIZE_POLICY_VERIFIED } from './finalize.js';
-import { gateTerminalContentWithRunWrites } from './run-evidence.js';
 
 /** Provider refusals that mean "the model's tool call was not parseable". */
 const MALFORMED_PATTERNS = [
@@ -86,24 +83,4 @@ export async function completeWithToolCallRetry(complete, messages, onRetry) {
       throw out;
     }
   }
-}
-
-/**
- * What the turn says when the retry failed too. For an agent that declares the
- * finalize policy the gate's statement is appended — the run's state comes
- * from persisted tasks and evidence, not from the model.
- */
-export async function malformedToolCallStopText(workspace, chatPath, agentProps, err) {
-  const tool = (err && err.tool) || failedToolName(err);
-  let text =
-    `This turn stopped: the model sent a tool call${tool ? ` to ${tool}` : ''} whose arguments were not valid JSON, ` +
-    'was asked once to correct it, and sent an invalid one again. That call did not run. ' +
-    'Send a message to continue from here.';
-  if (finalizePolicyOf(agentProps) === FINALIZE_POLICY_VERIFIED) {
-    // The same statement the terminal gate would make — including writes this
-    // run made that no record covers, and records a later write made stale.
-    const { statement } = await gateTerminalContentWithRunWrites(workspace, chatPath, agentProps, '');
-    text += `\n\n${statement || 'Status (server-verified): nothing in this run has been verified.'}`;
-  }
-  return text;
 }

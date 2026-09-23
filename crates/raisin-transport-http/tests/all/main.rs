@@ -34,3 +34,4 @@ mod http_secrets;
 mod http_smoke;
 mod http_snapshot_branches;
 mod mcp_oauth_flow;
+mod support;

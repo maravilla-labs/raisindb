@@ -2,9 +2,12 @@ node_type: raisin:Function
 properties:
   name: get-delegation-status
   title: Get Delegation Status
-  description: Read the durable state, result, and review branch of a delegated plan task.
+  description: Read the child run delegated for a plan task — status, outcome, summary, artifacts and acceptance checks.
   execution_mode: inline
+  execution_context: system
   category: planning
+  # raisin:Function is strict; tool traits live in its declared metadata.
+  metadata: { read_only: true }
   enabled: true
   language: javascript
   entry_file: index.js:handler

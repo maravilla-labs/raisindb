@@ -1,0 +1,24 @@
+node_type: raisin:Function
+properties:
+  name: wait-for-agents
+  title: Wait For Agents
+  description: >
+    Wait until your child agent runs have handed back (mode all, the default) or
+    until one has (mode any), then get their results: outcome, summary,
+    artifacts, acceptance and any messages they sent you. Your run waits durably
+    (the runtime delivers each hand-back); a new user message interrupts the
+    wait and the children keep working.
+  execution_mode: inline
+  execution_context: system
+  category: delegation
+  # raisin:Function is strict; tool traits live in its declared metadata.
+  metadata: { idempotent: true }
+  enabled: true
+  language: javascript
+  entry_file: index.js:handler
+  input_schema:
+    type: object
+    additionalProperties: false
+    properties:
+      agents: { type: array, items: { type: string }, description: "Child keys or run ids. Omit for all children." }
+      mode: { type: string, enum: [all, any], default: all }

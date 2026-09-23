@@ -76,6 +76,12 @@ pub mod testing;
 #[doc(hidden)]
 pub mod __private;
 
+/// The AgentRun reducer contract (`raisin.agent-run.reducer/1` and
+/// `raisin.tool-result/1`): envelope types, `validate_response`,
+/// `canonical_json` and the shared fixtures. Feature `agent-run`.
+#[cfg(feature = "agent-run")]
+pub use raisin_agent_contract as agent_run;
+
 /// Typed wrappers over every `raisin.*` host method — GENERATED, do not edit.
 ///
 /// Regenerate with `make gen-bindings`; the source of truth is

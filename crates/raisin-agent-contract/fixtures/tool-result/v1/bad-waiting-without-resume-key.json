@@ -1,0 +1,8 @@
+{
+  "envelope": {
+    "envelope": "raisin.tool-result/1",
+    "operation_id": "run-1/op/4",
+    "status": "waiting"
+  },
+  "expect": "waiting_without_resume_key"
+}

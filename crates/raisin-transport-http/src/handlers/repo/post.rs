@@ -339,11 +339,41 @@ pub async fn repo_post(
         bytes,
         auth_context,
         tenant_id,
+        q.deep.unwrap_or(false),
     )
     .await
 }
 
+/// The ancestors of `parent_path` (itself included) that do not exist yet,
+/// outermost first. Empty when the parent exists or is the workspace root.
+///
+/// Once one ancestor is missing every path below it is missing too, so the
+/// walk stops reading at the first gap.
+async fn missing_ancestors<S: Storage + TransactionalStorage + 'static>(
+    nodes_svc: &NodeService<S>,
+    parent_path: &str,
+) -> Result<Vec<String>, ApiError> {
+    let mut missing = Vec::new();
+    let mut current = String::new();
+    for segment in parent_path.split('/').filter(|s| !s.is_empty()) {
+        current.push('/');
+        current.push_str(segment);
+        if !missing.is_empty() || nodes_svc.get_by_path(&current).await?.is_none() {
+            missing.push(current.clone());
+        }
+    }
+    Ok(missing)
+}
+
 /// Handle JSON POST for node creation.
+///
+/// The parent named by the URL must exist. Without that check the transaction
+/// committed the child anyway, at a path no listing reaches (its parent does
+/// not list it, because there is no parent) — an orphan. `?deep=true` is the
+/// explicit way to ask for the missing ancestors: they are created as
+/// `raisin:Folder` nodes in the SAME transaction as the child, so either the
+/// whole chain lands or none of it does.
+#[allow(clippy::too_many_arguments)]
 async fn handle_json_post<S: Storage + TransactionalStorage + 'static>(
     _state: &AppState,
     nodes_svc: &NodeService<S>,
@@ -354,6 +384,7 @@ async fn handle_json_post<S: Storage + TransactionalStorage + 'static>(
     bytes: Bytes,
     auth_context: Option<AuthContext>,
     tenant_id: &str,
+    deep: bool,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let json_body: serde_json::Value =
         serde_json::from_slice(&bytes).map_err(|e| ApiError::invalid_json(e.to_string()))?;
@@ -407,7 +438,29 @@ async fn handle_json_post<S: Storage + TransactionalStorage + 'static>(
 
     let node_id = node.id.clone();
 
+    let missing = missing_ancestors(nodes_svc, &parent_path).await?;
+    if !missing.is_empty() && !deep {
+        return Err(ApiError::node_not_found(&parent_path));
+    }
+
     let mut tx = nodes_svc.transaction();
+    for folder_path in missing {
+        let name = folder_path
+            .rsplit('/')
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        tx.create(models::nodes::Node {
+            id: nanoid::nanoid!(),
+            parent: models::nodes::Node::extract_parent_name_from_path(&folder_path),
+            name,
+            path: folder_path,
+            node_type: "raisin:Folder".to_string(),
+            created_by: Some(commit.actor.clone()),
+            updated_by: Some(commit.actor.clone()),
+            ..Default::default()
+        });
+    }
     tx.create(node);
 
     let revision = tx.commit(commit.message, commit.actor).await?;

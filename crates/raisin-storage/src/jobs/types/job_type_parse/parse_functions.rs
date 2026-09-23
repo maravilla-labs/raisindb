@@ -105,6 +105,16 @@ pub(crate) fn parse_flow_variants(s: &str) -> Result<Option<JobType>, String> {
             }
         }
     }
+    if let Some(rest) = s.strip_prefix("AgentRunStep(") {
+        if let Some(c) = rest.strip_suffix(')') {
+            if let Some((run_id, reason)) = c.split_once('/') {
+                return Ok(Some(JobType::AgentRunStep {
+                    run_id: run_id.to_string(),
+                    reason: reason.to_string(),
+                }));
+            }
+        }
+    }
     if let Some(rest) = s.strip_prefix("FlowInstanceExecution(") {
         if let Some(c) = rest.strip_suffix(')') {
             let p: Vec<&str> = c.split('/').collect();

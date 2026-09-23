@@ -61,3 +61,27 @@ properties:
     title: Metadata
     type: Object
     description: Additional plan metadata
+
+  # ── Projected from an agent run ──
+  - name: run_id
+    title: Run
+    type: String
+    readonly: true
+    description: The agent run whose state this card projects
+
+  - name: run_plan_no
+    title: Run Plan Number
+    type: Number
+    readonly: true
+
+  - name: projection_of_run
+    title: Projection of Run
+    type: Boolean
+    readonly: true
+    description: True when this card is written by the run, never by a tool
+
+  - name: approval_digest
+    title: Approval Digest
+    type: String
+    readonly: true
+    description: The digest an approval of this plan is bound to

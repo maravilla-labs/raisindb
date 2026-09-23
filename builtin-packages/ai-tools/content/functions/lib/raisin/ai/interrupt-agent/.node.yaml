@@ -1,0 +1,24 @@
+node_type: raisin:Function
+properties:
+  name: interrupt-agent
+  title: Interrupt Agent
+  description: >
+    Stop (or pause) one of your child agent runs, or all of them with all: true.
+    A stopped child keeps what it already wrote and reports an honest partial
+    result.
+  execution_mode: inline
+  execution_context: system
+  category: delegation
+  # raisin:Function is strict; tool traits live in its declared metadata.
+  metadata: { idempotent: true }
+  enabled: true
+  language: javascript
+  entry_file: index.js:handler
+  input_schema:
+    type: object
+    additionalProperties: false
+    properties:
+      agent: { type: string, description: "Child key or run id" }
+      all: { type: boolean, default: false }
+      mode: { type: string, enum: [stop, pause], default: stop }
+      reason: { type: string }

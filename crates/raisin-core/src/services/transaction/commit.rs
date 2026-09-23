@@ -20,7 +20,7 @@ fn is_placeholder_actor(actor: &str) -> bool {
 
 impl<S: TransactionalStorage> Transaction<S> {
     /// Helper to create initial children from NodeType definition within a transaction
-    pub(super) async fn create_initial_structure_children(
+    pub(crate) async fn create_initial_structure_children(
         &self,
         ctx: &dyn raisin_storage::transactional::TransactionalContext,
         parent_node: &Node,
@@ -288,6 +288,11 @@ impl<S: TransactionalStorage> Transaction<S> {
                     target_parent,
                     new_name
                 );
+
+                crate::services::node_service::copy_publish::reject_copy_into_own_subtree(
+                    source_path,
+                    target_parent,
+                )?;
 
                 ctx.copy_node_tree(
                     &self.workspace_id,

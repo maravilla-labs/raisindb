@@ -15,6 +15,8 @@ static GLOBAL_ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 mod admin_ui;
 mod admin_user_init_handler;
 #[cfg(feature = "storage-rocksdb")]
+mod agent_runs;
+#[cfg(feature = "storage-rocksdb")]
 mod builtin_package_init_handler;
 mod config;
 mod deps_setup;
@@ -1294,6 +1296,35 @@ async fn main() {
             // cleanup, clock skew). Idempotent - duplicates are deduped by
             // the job registry and check_flow_timeout no-ops on undue waits.
             flow_sweeper::spawn_flow_wait_sweeper(storage.clone(), 120);
+
+            // Durable agent runs: the store, the job-queue waker, the
+            // function-backed reducer resolver and executors, and the sweeper.
+            agent_runs::start(
+                storage.clone(),
+                execution_deps.clone(),
+                lock_manager.clone(),
+                server_config
+                    .cluster_node_id
+                    .clone()
+                    .unwrap_or_else(|| format!("node-{}", nanoid::nanoid!(8))),
+                30,
+            );
+
+            // The node-development surface: commits on a branch serialized
+            // cluster-wide by the same keyed mutex + raisin-locks lease the
+            // flow runtime uses; its records are ordinary replicated nodes.
+            raisin_rocksdb::node_dev::install_node_dev(std::sync::Arc::new(
+                raisin_core::services::node_dev::NodeDevService::with_sections(
+                    storage.clone(),
+                    std::sync::Arc::new(raisin_rocksdb::node_dev::ClusterSections::new(
+                        lock_manager.clone(),
+                        server_config
+                            .cluster_node_id
+                            .clone()
+                            .unwrap_or_else(|| "node-dev".to_string()),
+                    )),
+                ),
+            ));
 
             tracing::info!(
                 "Total: {} dispatcher workers across {} runtime threads",

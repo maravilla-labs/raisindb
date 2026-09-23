@@ -116,6 +116,21 @@ pub async fn resume_flow(
         }
     }
 
+    // An agent run's result resumes ONLY the step waiting for that run. A
+    // redelivered result (the run's waiter is owed until its resume job is
+    // enqueued) must never be taken for another wait's answer.
+    if let Some(run_id) = resume_data.get("agent_run_id").and_then(Value::as_str) {
+        let expected = crate::handlers::agent_step::expected_event(run_id);
+        let waiting_for_it = instance.wait_info.as_ref().is_some_and(|w| {
+            w.wait_type == WaitType::AgentRun
+                && w.expected_event.as_deref() == Some(expected.as_str())
+        });
+        if !waiting_for_it {
+            info!(instance_id = %instance_id, run_id = %run_id, "Agent run result for a wait this flow is not in - ignored");
+            return Ok(());
+        }
+    }
+
     // 3. Check if the wait has timed out.
     //
     // Scheduled and Retry waits are excluded: for those, timeout_at is the
@@ -406,6 +421,13 @@ fn process_resume_data(instance_id: &str, instance: &mut FlowInstance, resume_da
                     .cloned()
                     .unwrap_or_else(|| resume_data.clone());
                 set_instance_variable(instance, "__chat_user_message", message);
+            }
+            WaitType::AgentRun => {
+                set_instance_variable(
+                    instance,
+                    crate::handlers::agent_step::AGENT_RUN_RESULT_VAR,
+                    resume_data.clone(),
+                );
             }
             WaitType::Event | WaitType::Join => {
                 set_instance_variable(instance, "__resume_data", resume_data.clone());

@@ -277,8 +277,10 @@ impl JsonPointer {
     /// let ptr = JsonPointer::new("/properties/nested/field");
     /// assert_eq!(ptr.last_segment(), Some("field"));
     ///
-    /// let root = JsonPointer::new("/");
-    /// assert_eq!(root.last_segment(), None);
+    /// // Per RFC 6901, "/" names the key "" (the empty string), not the
+    /// // document root, so its last segment is that empty key.
+    /// let empty_key = JsonPointer::new("/");
+    /// assert_eq!(empty_key.last_segment(), Some(""));
     /// ```
     pub fn last_segment(&self) -> Option<&str> {
         self.segments().last().copied()

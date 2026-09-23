@@ -155,50 +155,6 @@ function stripRuntimeArgs(args) {
 }
 
 /**
- * THE OFFER — name → function ref for exactly the tool definitions that were
- * sent to the model on the call that produced this response. That is the only
- * table a model's tool call may be resolved through.
- *
- * `toolNameToRef` is everything the agent was GIVEN, which is wider than what a
- * given turn OFFERS: the loop guard withdraws a repeated tool, a forced-final
- * turn offers none, and an agent without tools makes a plain completion. A
- * lookup straight into `toolNameToRef` executed all of those anyway — and, being
- * a plain object, answered `constructor` or `toString` with a truthy prototype
- * member. A Map built from own properties has neither hole.
- */
-function offeredToolRefs(offeredDefinitions, toolNameToRef) {
-  const offered = new Map();
-  if (!Array.isArray(offeredDefinitions) || !toolNameToRef) return offered;
-  for (const def of offeredDefinitions) {
-    const name = def?.function?.name;
-    if (typeof name !== 'string' || !name) continue;
-    if (!Object.prototype.hasOwnProperty.call(toolNameToRef, name)) continue;
-    const ref = toolNameToRef[name];
-    if (ref && typeof ref === 'object') offered.set(name, ref);
-  }
-  return offered;
-}
-
-/** The ref an OFFERED tool resolves to — `null` for anything else. */
-function resolveOfferedTool(offered, name) {
-  if (!(offered instanceof Map) || typeof name !== 'string') return null;
-  return offered.get(name) || null;
-}
-
-/**
- * What a model reads back when it calls a tool it was not offered: that
- * nothing ran, and what it CAN call. Same wording as the Rust loop's
- * `unoffered_tool_error`, so one agent reads one message on every path.
- */
-function unofferedToolError(name, offered) {
-  const names = offered instanceof Map ? [...offered.keys()].sort() : [];
-  const choices = names.length === 0
-    ? 'No tools are offered in this step.'
-    : `The tools offered to you are: ${names.join(', ')}.`;
-  return `\`${name}\` is not a tool offered to you, so it was not run. ${choices}`;
-}
-
-/**
  * Resolve an array of tool references (paths or reference objects) into
  * OpenAI-compatible tool definitions.  All lookups run in parallel via
  * Promise.all().
@@ -280,6 +236,11 @@ async function resolveToolsParallel(toolRefs) {
       'raisin:path': toolPath,
       execution_mode: props.execution_mode || 'async',
       category: props.category || null,
+      // Run metadata: whether the tool writes, and whether it honours the
+      // operation id as an idempotency key (see agent-shared/run-tools.js).
+      ...(props.mutating === false || props.read_only === true ? { mutating: false } : {}),
+      ...(props.idempotent === true ? { idempotent: true } : {}),
+      description: props.description ? String(props.description) : '',
     };
 
     log.debug('tools', 'Resolved tool', { name: toolName, path: toolPath, mode: props.execution_mode || 'async' });
@@ -294,9 +255,6 @@ export {
   MODEL_TOOL_PATH_DENYLIST,
   MODEL_FORBIDDEN_ARG_KEYS,
   stripRuntimeArgs,
-  offeredToolRefs,
-  resolveOfferedTool,
-  unofferedToolError,
   normalizeCompletionResponse,
   getToolCallName,
   normalizeToolCalls,

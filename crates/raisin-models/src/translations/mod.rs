@@ -100,17 +100,18 @@
 //!
 //! ```rust
 //! use raisin_models::translations::{TranslationMeta, LocaleCode};
+//! use raisin_hlc::HLC;
 //!
 //! let locale = LocaleCode::parse("es").unwrap();
 //! let meta = TranslationMeta::new(
 //!     locale,
-//!     42,                                    // revision (HLC timestamp)
-//!     Some(41),                              // parent revision
+//!     HLC::new(42, 0), // revision (HLC timestamp)
+//!     Some(HLC::new(41, 0)), // parent revision
 //!     "translator@example.com".to_string(),  // actor
 //!     "Add Spanish translations".to_string() // message
 //! );
 //!
-//! assert_eq!(meta.revision, 42);
+//! assert_eq!(meta.revision, HLC::new(42, 0));
 //! assert!(!meta.is_system);
 //! ```
 //!
@@ -170,6 +171,7 @@
 //! use raisin_models::translations::{
 //!     LocaleCode, LocaleOverlay, JsonPointer, TranslationMeta, helpers
 //! };
+//! use raisin_hlc::HLC;
 //! use raisin_models::nodes::properties::PropertyValue;
 //! use std::collections::HashMap;
 //!
@@ -185,7 +187,7 @@
 //! // 2. Create metadata for the translation
 //! let meta = TranslationMeta::new(
 //!     locale.clone(),
-//!     100,
+//!     HLC::new(100, 0),
 //!     None, // Initial translation
 //!     "hans@example.com".to_string(),
 //!     "Add German translation".to_string()

@@ -362,7 +362,8 @@ mod tests {
         let node_type: NodeType = serde_yaml::from_str(yaml).expect("YAML should parse");
         assert_eq!(node_type.name, "raisin:Asset");
         assert!(node_type.allowed_children.is_empty());
-        assert!(node_type.mixins.is_empty());
+        // An asset carries the virtual-mount stamps (see the YAML's `mixins:`).
+        assert_eq!(node_type.mixins, vec!["raisin:VirtualNode".to_string()]);
 
         let bytes =
             rmp_serde::to_vec_named(&node_type).expect("MessagePack serialization should work");
@@ -372,7 +373,13 @@ mod tests {
         assert_eq!(decoded.name, "raisin:Asset");
         assert_eq!(decoded.description, node_type.description);
         assert_eq!(decoded.allowed_children, node_type.allowed_children);
-        assert_eq!(decoded.properties.as_ref().map(|p| p.len()), Some(5));
+        assert_eq!(decoded.mixins, node_type.mixins);
+        // Every declared property survives the roundtrip, whatever the YAML's
+        // current count (it grows with each version bump).
+        let declared = node_type.properties.as_ref().map(|p| p.len());
+        assert!(declared.unwrap_or(0) > 0, "the YAML declares properties");
+        assert_eq!(decoded.properties.as_ref().map(|p| p.len()), declared);
+        assert_eq!(decoded.properties, node_type.properties);
     }
 
     /// `allowed_children` matches a FAMILY, not a leaf name, and an empty list

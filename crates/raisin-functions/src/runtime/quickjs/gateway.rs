@@ -45,10 +45,17 @@ fn error_envelope(message: impl std::fmt::Display) -> String {
 pub(super) fn register_registry_gateway<'js>(
     ctx: &Ctx<'js>,
     api: Arc<dyn FunctionApi>,
+    allow: bool,
 ) -> std::result::Result<(), rquickjs::Error> {
     let call_fn = Function::new(
         ctx.clone(),
         move |method: String, args_json: String| -> String {
+            if !allow {
+                return error_envelope(format!(
+                    "{}: {method}",
+                    crate::types::ExecutionPolicy::HOST_DENIED
+                ));
+            }
             let api = api.clone();
 
             let Some(descriptor) = registry().find_by_internal_name(&method) else {
@@ -91,10 +98,17 @@ pub(super) fn register_registry_gateway<'js>(
 pub(super) fn register_plugin_gateway<'js>(
     ctx: &Ctx<'js>,
     api: Arc<dyn FunctionApi>,
+    allow: bool,
 ) -> std::result::Result<(), rquickjs::Error> {
     let call_fn = Function::new(
         ctx.clone(),
         move |method: String, args_json: String| -> String {
+            if !allow {
+                return error_envelope(format!(
+                    "{}: {method}",
+                    crate::types::ExecutionPolicy::HOST_DENIED
+                ));
+            }
             let api = api.clone();
 
             let args: serde_json::Value = match serde_json::from_str(&args_json) {

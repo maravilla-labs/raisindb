@@ -6,7 +6,7 @@
 
 #![cfg(all(feature = "storage-rocksdb", not(feature = "s3")))]
 
-use std::sync::{Arc, Once};
+use std::sync::Arc;
 
 use axum::{
     body::Body,
@@ -22,23 +22,9 @@ use raisin_rocksdb::RocksDBStorage;
 
 /// The bearer the tests present. `optional_auth_middleware` matches it against
 /// `RAISIN_SUPERADMIN_TOKEN` and installs `AuthContext::system()`, which is
-/// what `require_admin` accepts.
-const ADMIN_TOKEN: &str = "secrets-test-superadmin-token";
-
-/// Env vars are process-global. Both of these are only ever SET, never cleared,
-/// so tests running in parallel in this binary cannot race on them.
-///
-/// `RAISIN_CRYPTO_EMIT_V2` is not optional: the node-secret crypto family is
-/// `V1Policy::Reject`, so without it every write fails with
-/// `V2EmissionRequired` rather than storing bytes it could never read back.
-static ENV: Once = Once::new();
-
-fn init_env() {
-    ENV.call_once(|| {
-        std::env::set_var("RAISIN_CRYPTO_EMIT_V2", "1");
-        std::env::set_var("RAISIN_SUPERADMIN_TOKEN", ADMIN_TOKEN);
-    });
-}
+/// what `require_admin` accepts. It is the ONE token for this whole test binary
+/// (see `support`): a per-file value would race with every other file's.
+use crate::support::{init_env, ADMIN_TOKEN};
 
 /// A router over a fresh RocksDB, with a secret store installed from an
 /// explicit keyring rather than the environment — so these tests do not depend

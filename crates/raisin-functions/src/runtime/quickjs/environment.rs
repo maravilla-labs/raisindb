@@ -26,6 +26,7 @@ use super::api_fetch::register_fetch_internal;
 use super::api_temp::register_temp_internal;
 use super::console::{create_console_api, setup_timers_api};
 use super::gateway::{register_plugin_gateway, register_registry_gateway};
+use crate::types::ExecutionPolicy;
 
 /// Setup the JavaScript environment with the raisin API.
 ///
@@ -43,6 +44,7 @@ pub(super) fn setup_js_environment<'js>(
     context_data: &serde_json::Value,
     api: Arc<dyn FunctionApi>,
     log_emitter: Option<raisin_storage::LogEmitter>,
+    policy: ExecutionPolicy,
 ) -> std::result::Result<(), rquickjs::Error> {
     let globals = ctx.globals();
 
@@ -82,6 +84,7 @@ pub(super) fn setup_js_environment<'js>(
             api.clone(),
             abort_registry.clone(),
             stream_registry.clone(),
+            policy,
         ),
     )?;
 
@@ -147,8 +150,39 @@ pub(super) fn setup_js_environment<'js>(
         ctx.eval::<(), _>(TIMERS_POLYFILL.as_bytes().to_vec()),
     )?;
 
+    // A deterministic call sees no clock and no entropy: `Date` reads the
+    // epoch and `Math.random` is a fixed sequence. Host calls were already
+    // refused at the gateways above.
+    if policy == ExecutionPolicy::Deterministic {
+        step(
+            "eval(deterministic prelude)",
+            ctx.eval::<(), _>(DETERMINISTIC_PRELUDE.as_bytes().to_vec()),
+        )?;
+    }
+
     Ok(())
 }
+
+/// Freezes the ambient sources of nondeterminism for
+/// [`ExecutionPolicy::Deterministic`]. A fresh context per execution means
+/// nothing here outlives the call.
+const DETERMINISTIC_PRELUDE: &str = r#"(() => {
+  const RealDate = Date;
+  function PureDate(...args) {
+    if (!new.target) return new RealDate(0).toString();
+    return args.length ? new RealDate(...args) : new RealDate(0);
+  }
+  PureDate.prototype = RealDate.prototype;
+  PureDate.now = () => 0;
+  PureDate.UTC = RealDate.UTC;
+  PureDate.parse = RealDate.parse;
+  globalThis.Date = PureDate;
+  let seed = 0x2545f491;
+  Math.random = () => {
+    seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5;
+    return (seed >>> 0) / 4294967296;
+  };
+})();"#;
 
 /// Register the registry gateway plus the runtime-local internal functions,
 /// then evaluate the JS wrapper code that creates the public API.
@@ -157,24 +191,29 @@ fn setup_raisin_api<'js>(
     api: Arc<dyn FunctionApi>,
     abort_registry: Arc<AbortRegistry>,
     stream_registry: Arc<StreamRegistry>,
+    policy: ExecutionPolicy,
 ) -> std::result::Result<(), rquickjs::Error> {
     let globals = ctx.globals();
+    let allow = policy.allows_host_calls();
 
     // The single dispatch point for all raisin.* API methods: looks the
     // method up in the shared bindings registry and runs its invoker.
-    register_registry_gateway(ctx, api.clone())?;
+    register_registry_gateway(ctx, api.clone(), allow)?;
 
     // Gateway for function-binding plugin methods (raisin.<ns>.*). Routes to
     // FunctionApi::plugin_call, bypassing the registry. A no-op at the JS level
     // when no plugins are registered (nothing calls it).
-    register_plugin_gateway(ctx, api.clone())?;
+    register_plugin_gateway(ctx, api.clone(), allow)?;
 
     // Internal namespace for the runtime-local host functions that cannot be
     // expressed as registry invokers (they bind per-execution state, not
-    // FunctionApi): temp files and the W3C fetch plumbing.
+    // FunctionApi): temp files and the W3C fetch plumbing. A deterministic
+    // call gets neither: with no fetch plumbing, `fetch()` fails.
     let internal = Object::new(ctx.clone())?;
-    register_temp_internal(ctx, &internal)?;
-    register_fetch_internal(ctx, &internal, api, abort_registry, stream_registry)?;
+    if allow {
+        register_temp_internal(ctx, &internal)?;
+        register_fetch_internal(ctx, &internal, api, abort_registry, stream_registry)?;
+    }
     globals.set("__raisin_internal", internal)?;
 
     // Evaluate JS code that creates the public API with JSON parsing, then the

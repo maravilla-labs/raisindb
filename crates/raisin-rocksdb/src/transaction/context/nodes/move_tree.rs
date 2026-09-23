@@ -124,12 +124,19 @@ pub async fn move_node_tree(
     }
 
     // Get old parent info BEFORE locking batch (to avoid holding non-Send lock across await)
+    //
+    // The workspace root has no stored node; its ORDERED_CHILDREN are keyed by
+    // the literal "/", as `target_parent_id` is above. Looking "/" up as a node
+    // found nothing, so a node moved OUT of the root kept its root entry and
+    // went on being listed there.
     let old_parent_id = if let Some(source_parent_path) = source_node
         .path
         .rsplit_once('/')
         .map(|(p, _)| if p.is_empty() { "/" } else { p })
     {
-        if let Ok(Some(old_parent)) =
+        if source_parent_path == "/" {
+            Some("/".to_string())
+        } else if let Ok(Some(old_parent)) =
             super::read::get_node_by_path(tx, workspace, source_parent_path).await
         {
             Some(old_parent.id.clone())

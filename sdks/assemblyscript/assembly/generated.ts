@@ -105,6 +105,89 @@ export namespace sql {
 }
 }
 
+export namespace agent_runs {
+  /** `raisin.agent_runs.ackMailbox` — registry method `agent_runs_ack_mailbox`. Returns raw JSON. */
+  export function ackMailbox(request: string): string {
+    return call("agent_runs_ack_mailbox", argsOf([request]));
+  }
+
+  /** `raisin.agent_runs.checkpoint` — registry method `agent_runs_checkpoint`. Returns raw JSON. */
+  export function checkpoint(request: string): string {
+    return call("agent_runs_checkpoint", argsOf([request]));
+  }
+
+  /** `raisin.agent_runs.children` — registry method `agent_runs_children`. Returns raw JSON. */
+  export function children(request: string): string {
+    return call("agent_runs_children", argsOf([request]));
+  }
+
+  /** `raisin.agent_runs.control` — registry method `agent_runs_control`. Returns raw JSON. */
+  export function control(request: string): string {
+    return call("agent_runs_control", argsOf([request]));
+  }
+
+  /** `raisin.agent_runs.controlChild` — registry method `agent_runs_control_child`. Returns raw JSON. */
+  export function controlChild(request: string): string {
+    return call("agent_runs_control_child", argsOf([request]));
+  }
+
+  /** `raisin.agent_runs.create` — registry method `agent_runs_create`. Returns raw JSON. */
+  export function create(request: string): string {
+    return call("agent_runs_create", argsOf([request]));
+  }
+
+  /** `raisin.agent_runs.deliver` — registry method `agent_runs_deliver`. Returns raw JSON. */
+  export function deliver(request: string): string {
+    return call("agent_runs_deliver", argsOf([request]));
+  }
+
+  /** `raisin.agent_runs.events` — registry method `agent_runs_events`. Returns raw JSON. */
+  export function events(request: string): string {
+    return call("agent_runs_events", argsOf([request]));
+  }
+
+  /** `raisin.agent_runs.get` — registry method `agent_runs_get`. Returns raw JSON. */
+  export function get(request: string): string {
+    return call("agent_runs_get", argsOf([request]));
+  }
+
+  /** `raisin.agent_runs.inspectChild` — registry method `agent_runs_inspect_child`. Returns raw JSON. */
+  export function inspectChild(request: string): string {
+    return call("agent_runs_inspect_child", argsOf([request]));
+  }
+
+  /** `raisin.agent_runs.mailbox` — registry method `agent_runs_mailbox`. Returns raw JSON. */
+  export function mailbox(request: string): string {
+    return call("agent_runs_mailbox", argsOf([request]));
+  }
+
+  /** `raisin.agent_runs.postToParent` — registry method `agent_runs_post_to_parent`. Returns raw JSON. */
+  export function postToParent(request: string): string {
+    return call("agent_runs_post_to_parent", argsOf([request]));
+  }
+
+  /** `raisin.agent_runs.readCheckpoint` — registry method `agent_runs_read_checkpoint`. Returns raw JSON. */
+  export function readCheckpoint(request: string): string {
+    return call("agent_runs_read_checkpoint", argsOf([request]));
+  }
+
+  /** `raisin.agent_runs.spawnChild` — registry method `agent_runs_spawn_child`. Returns raw JSON. */
+  export function spawnChild(request: string): string {
+    return call("agent_runs_spawn_child", argsOf([request]));
+  }
+
+  /** `raisin.agent_runs.usage` — registry method `agent_runs_usage`. Returns raw JSON. */
+  export function usage(request: string): string {
+    return call("agent_runs_usage", argsOf([request]));
+  }
+
+  /** `raisin.agent_runs.waitChild` — registry method `agent_runs_wait_child`. Returns raw JSON. */
+  export function waitChild(request: string): string {
+    return call("agent_runs_wait_child", argsOf([request]));
+  }
+
+}
+
 export namespace ai {
   /** `raisin.ai.completion` — registry method `ai_completion`. Returns raw JSON. */
   export function completion(request: string): string {
@@ -371,6 +454,89 @@ export namespace locks {
   /** `raisin.locks.renew` — registry method `locks_renew`. Returns raw JSON. */
   export function renew(key: string, token: i64, ttlMs: i64): string {
     return call("locks_renew", argsOf([jsonString(key), token.toString(), ttlMs.toString()]));
+  }
+
+}
+
+export namespace node_dev {
+  /** `raisin.node_dev.apply` — registry method `node_dev_apply`. Returns raw JSON. */
+  export function apply(request: string): string {
+    return call("node_dev_apply", argsOf([request]));
+  }
+
+  /** `raisin.node_dev.commit` — registry method `node_dev_commit`. Returns raw JSON. */
+  export function commit(request: string): string {
+    return call("node_dev_commit", argsOf([request]));
+  }
+
+  /** `raisin.node_dev.diff` — registry method `node_dev_diff`. Returns raw JSON. */
+  export function diff(request: string): string {
+    return call("node_dev_diff", argsOf([request]));
+  }
+
+  /** `raisin.node_dev.diff_branch` — registry method `node_dev_diff_branch`. Returns raw JSON. */
+  export function diff_branch(request: string): string {
+    return call("node_dev_diff_branch", argsOf([request]));
+  }
+
+  /** `raisin.node_dev.discard` — registry method `node_dev_discard`. Returns raw JSON. */
+  export function discard(request: string): string {
+    return call("node_dev_discard", argsOf([request]));
+  }
+
+  /** `raisin.node_dev.discard_branch` — registry method `node_dev_discard_branch`. Returns raw JSON. */
+  export function discard_branch(request: string): string {
+    return call("node_dev_discard_branch", argsOf([request]));
+  }
+
+  /** `raisin.node_dev.dry_run` — registry method `node_dev_dry_run`. Returns raw JSON. */
+  export function dry_run(request: string): string {
+    return call("node_dev_dry_run", argsOf([request]));
+  }
+
+  /** `raisin.node_dev.fork_branch` — registry method `node_dev_fork_branch`. Returns raw JSON. */
+  export function fork_branch(request: string): string {
+    return call("node_dev_fork_branch", argsOf([request]));
+  }
+
+  /** `raisin.node_dev.get_changeset` — registry method `node_dev_get_changeset`. Returns raw JSON. */
+  export function get_changeset(request: string): string {
+    return call("node_dev_get_changeset", argsOf([request]));
+  }
+
+  /** `raisin.node_dev.list` — registry method `node_dev_list`. Returns raw JSON. */
+  export function list(request: string): string {
+    return call("node_dev_list", argsOf([request]));
+  }
+
+  /** `raisin.node_dev.list_changesets` — registry method `node_dev_list_changesets`. Returns raw JSON. */
+  export function list_changesets(request: string): string {
+    return call("node_dev_list_changesets", argsOf([request]));
+  }
+
+  /** `raisin.node_dev.merge_branch` — registry method `node_dev_merge_branch`. Returns raw JSON. */
+  export function merge_branch(request: string): string {
+    return call("node_dev_merge_branch", argsOf([request]));
+  }
+
+  /** `raisin.node_dev.propose` — registry method `node_dev_propose`. Returns raw JSON. */
+  export function propose(request: string): string {
+    return call("node_dev_propose", argsOf([request]));
+  }
+
+  /** `raisin.node_dev.read` — registry method `node_dev_read`. Returns raw JSON. */
+  export function read(request: string): string {
+    return call("node_dev_read", argsOf([request]));
+  }
+
+  /** `raisin.node_dev.stat` — registry method `node_dev_stat`. Returns raw JSON. */
+  export function stat(request: string): string {
+    return call("node_dev_stat", argsOf([request]));
+  }
+
+  /** `raisin.node_dev.watch` — registry method `node_dev_watch`. Returns raw JSON. */
+  export function watch(request: string): string {
+    return call("node_dev_watch", argsOf([request]));
   }
 
 }

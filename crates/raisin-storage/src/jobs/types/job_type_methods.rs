@@ -120,6 +120,7 @@ impl JobType {
                 execution_type,
                 resume_reason.as_deref().unwrap_or("")
             ),
+            Self::AgentRunStep { run_id, reason } => format!("agent_run:{}:{}", run_id, reason),
             Self::PropertyIndexBuild {
                 tenant_id,
                 repo_id,
@@ -403,7 +404,8 @@ impl JobType {
             | Self::AIToolResultAggregation { .. }
             | Self::AICall { .. }
             | Self::FlowExecution { .. }
-            | Self::FlowInstanceExecution { .. } => JobCategory::Realtime,
+            | Self::FlowInstanceExecution { .. }
+            | Self::AgentRunStep { .. } => JobCategory::Realtime,
 
             // Background: indexing, embedding, replication, maintenance
             Self::FulltextIndex { .. }
@@ -484,6 +486,7 @@ impl JobType {
             | Self::TriggerEvaluation { .. }
             | Self::FlowExecution { .. }
             | Self::FlowInstanceExecution { .. }
+            | Self::AgentRunStep { .. }
             | Self::AICall { .. }
             | Self::AIToolCallExecution { .. }
             | Self::AIToolResultAggregation { .. }

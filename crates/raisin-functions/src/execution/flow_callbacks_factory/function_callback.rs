@@ -71,7 +71,22 @@ where
                 )
                 .await
                 .map_err(|e| format!("Function execution failed: {}", e))
-                .map(|result| result.result.unwrap_or(serde_json::json!(null)))
+                .and_then(|result| {
+                    // A function that THREW is a failure of the call, not a
+                    // `null` answer: the caller (an agent step, a
+                    // compensation) must see why, not a success with nothing.
+                    if result.success {
+                        Ok(result.result.unwrap_or(serde_json::json!(null)))
+                    } else {
+                        Err(format!(
+                            "Function {} failed: {}",
+                            function_ref,
+                            result
+                                .error
+                                .unwrap_or_else(|| "no error message".to_string())
+                        ))
+                    }
+                })
             })
         },
     )

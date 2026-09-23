@@ -1,0 +1,15 @@
+node_type: raisin:Function
+properties:
+  title: Agent run reducer (generic agent loop)
+  description: >-
+    The generic agent loop of every conversation run, as a
+    raisin.agent-run.reducer/1 reducer. Core calls it inline under the
+    deterministic execution policy: (state, event) -> (state', effects).
+    Plan tools are domain tools answered here; completion is granted from
+    evidence, never from the model's word. Not a model tool.
+  language: javascript
+  entry_file: index.js:handler
+  execution_mode: Sync
+  enabled: true
+  resource_limits:
+    timeout_ms: 2000

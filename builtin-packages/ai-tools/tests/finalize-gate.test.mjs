@@ -135,7 +135,7 @@ test('the same plan, ungated, completes exactly as before', async () => {
 // ── the terminal-response path ───────────────────────────────────────────────
 
 test('a terminal turn with an open task states STOPPED and makes no readiness claim', async () => {
-  const { gateTerminalContent } = await import(`${AI}/agent-handler/index.js`);
+  const { gateTerminalContent } = await import(`${AI}/agent-shared/finalize.js`);
   fixture({ policy: 'require_verified_completion', taskProps: {} });
   const out = await gateTerminalContent('ai', CHAT, { finalize_policy: 'require_verified_completion' },
     'All done! The automation is validated and enabled and ready to use.');
@@ -146,7 +146,7 @@ test('a terminal turn with an open task states STOPPED and makes no readiness cl
 });
 
 test('a terminal turn with an unverified completed build says UNVERIFIED', async () => {
-  const { gateTerminalContent } = await import(`${AI}/agent-handler/index.js`);
+  const { gateTerminalContent } = await import(`${AI}/agent-shared/finalize.js`);
   fixture({ policy: 'require_verified_completion', taskProps: { status: 'completed', build_target_path: '/automations/x' } });
   const out = await gateTerminalContent('ai', CHAT, { finalize_policy: 'require_verified_completion' }, 'Ready and enabled.');
   assert.equal(out.gated, true);
@@ -156,7 +156,7 @@ test('a terminal turn with an unverified completed build says UNVERIFIED', async
 });
 
 test('draft validation says execution untested, and keeps the agent prose', async () => {
-  const { gateTerminalContent } = await import(`${AI}/agent-handler/index.js`);
+  const { gateTerminalContent } = await import(`${AI}/agent-shared/finalize.js`);
   const target = '/automations/x';
   fixture({ policy: 'require_verified_completion', taskProps: { status: 'completed', build_target_path: target, verification_ref: target, verification_hash: 'h', proof_level: 'draft_validated' } });
   const out = await gateTerminalContent('ai', CHAT, { finalize_policy: 'require_verified_completion' }, 'I built the automation.');
@@ -166,30 +166,17 @@ test('draft validation says execution untested, and keeps the agent prose', asyn
 });
 
 test('an agent without the policy has its content passed through untouched', async () => {
-  const { gateTerminalContent } = await import(`${AI}/agent-handler/index.js`);
+  const { gateTerminalContent } = await import(`${AI}/agent-shared/finalize.js`);
   fixture({ policy: null, taskProps: {} });
   const out = await gateTerminalContent('ai', CHAT, {}, 'Ready and enabled.');
   assert.equal(out.content, 'Ready and enabled.');
   assert.equal(out.statement, null);
 });
 
-test('a stopped run leaves no task in in_progress', async () => {
-  const { failOpenTasks } = await import(`${AI}/agent-continue-handler/index.js`);
-  const store = fixture({ policy: 'require_verified_completion', taskProps: {} });
-  store.set('/chats/c1/plan/t2', { node_type: 'raisin:AITask', properties: { title: 'Ticked itself', status: 'completed' } });
-  const closed = await failOpenTasks('ai', CHAT, 'max_continuation_depth');
-  assert.equal(closed.length, 1);
-  assert.equal(store.get(TASK).properties.status, 'failed');
-  assert.equal(store.get('/chats/c1/plan/t2').properties.status, 'completed', 'a terminal task is left alone');
-  for (const [, n] of store) {
-    if (n.node_type === 'raisin:AITask') assert.notEqual(n.properties.status, 'in_progress');
-  }
-});
-
 // ── added by the adversarial review: a check that could not run is not a pass ──
 
 test('an unreadable task query is UNVERIFIED, not a pass', async () => {
-  const { gateTerminalContent } = await import(`${AI}/agent-handler/index.js`);
+  const { gateTerminalContent } = await import(`${AI}/agent-shared/finalize.js`);
   fixture({ policy: 'require_verified_completion', taskProps: { status: 'completed' } });
   // The one failure the gate must not wave through: the query itself throws.
   globalThis.raisin.sql.query = async () => { throw new Error('index unavailable'); };

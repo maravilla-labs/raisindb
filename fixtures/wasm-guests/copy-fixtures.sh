@@ -7,7 +7,7 @@ src="$here/target/wasm32-wasip2/release"
 dest="$here/../../crates/raisin-functions/src/runtime/wasm/fixtures"
 
 mkdir -p "$dest"
-for name in echo call_host log spin alloc wrong_world sockets bench; do
+for name in echo call_host log spin alloc wrong_world sockets bench agent_reducer; do
     cp "$src/$name.wasm" "$dest/$name.wasm"
     printf '%8d  %s\n' "$(wc -c < "$dest/$name.wasm")" "$name.wasm"
 done

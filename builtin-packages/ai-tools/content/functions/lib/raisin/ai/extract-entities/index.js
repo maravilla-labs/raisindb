@@ -1,3 +1,5 @@
+import { runEnvelope } from '../agent-shared/tool-envelope.js';
+import { TOOL_META } from '../agent-shared/tool-meta.js';
 /**
  * extract-entities — build the graph out of the documents.
  *
@@ -80,6 +82,7 @@ const SYSTEM_PROMPT = [
 ].join('\n');
 
 export async function handler(input) {
+  const enveloped = await runEnvelope(input, TOOL_META.extractEntities, handler); if (enveloped) return enveloped;
   const { path, workspace, entity_workspace, model, force } = input || {};
 
   if (!path || typeof path !== 'string') {

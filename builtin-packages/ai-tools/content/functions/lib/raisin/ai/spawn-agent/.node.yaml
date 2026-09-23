@@ -1,0 +1,91 @@
+node_type: raisin:Function
+properties:
+  name: spawn-agent
+  title: Spawn Agent
+  description: >
+    Start a CHILD agent run for one bounded, well-defined piece of work and get
+    its run id back at once (it works in the background). Give it a typed
+    objective, only the context it needs, only the tools and write subtrees it
+    needs, what it must produce, and how its result will be checked. Collect the
+    result with wait_for_agents. Run a second child in parallel only for work
+    that does not depend on the first (set independent: true). Do not delegate
+    work that is naturally sequential or that the next step depends on.
+  execution_mode: inline
+  execution_context: system
+  category: delegation
+  # raisin:Function is strict; tool traits live in its declared metadata.
+  metadata: { idempotent: true }
+  enabled: true
+  language: javascript
+  entry_file: index.js:handler
+  input_schema:
+    type: object
+    additionalProperties: false
+    required: [objective]
+    properties:
+      agent_ref:
+        type: string
+        description: "Installed agent to run, e.g. /agents/reviewer. Omit to run a worker copy of yourself."
+      key:
+        type: string
+        description: "Short name for the child (unique in this run), used to inspect, message, wait for or interrupt it."
+      task_id: { type: string, description: "Plan task this child works on, if any" }
+      objective:
+        type: object
+        description: "The typed objective the child works from."
+        required: [goal]
+        properties:
+          goal: { type: string, description: "What to achieve, in one or two sentences" }
+          deliverable: { type: string, description: "What to hand back" }
+          done_when: { type: string, description: "The observable condition that means done" }
+          constraints: { type: array, items: { type: string } }
+      context_mode:
+        type: string
+        enum: [none, recent, snapshot]
+        default: none
+        description: "none = only the brief; recent = your last recent_turns messages; snapshot = your plan + objective + context"
+      recent_turns: { type: integer, minimum: 1, maximum: 20, default: 6 }
+      context:
+        type: object
+        description: "Only the structured facts the child needs"
+      tools:
+        type: array
+        items: { type: string }
+        description: "Tool names the child may use (a subset of its agent's tools). Omit for all of them."
+      writes:
+        type: array
+        description: "Subtrees the child may write. [] = read-only. Omit = unrestricted (its own rights still apply)."
+        items:
+          type: object
+          required: [workspace, path]
+          properties:
+            workspace: { type: string }
+            path: { type: string }
+      expected_artifacts:
+        type: array
+        items:
+          type: object
+          required: [workspace, path]
+          properties:
+            workspace: { type: string }
+            path: { type: string }
+            kind: { type: string }
+            description: { type: string }
+      checks:
+        type: array
+        description: "Acceptance checks evaluated on stored state at hand-back"
+        items:
+          type: object
+          required: [kind]
+          properties:
+            kind: { type: string, enum: [node_exists, property_equals, artifact_written, outcome_is] }
+            workspace: { type: string }
+            path: { type: string }
+            property: { type: string }
+            value: {}
+      budget:
+        type: object
+        description: "Limits: max_model_calls, max_operations, max_wall_s, max_total_tokens (clamped)"
+      independent:
+        type: boolean
+        description: "Required to start a child while another is still working: this work does not depend on it."

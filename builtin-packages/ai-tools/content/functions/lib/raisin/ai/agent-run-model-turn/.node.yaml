@@ -1,0 +1,24 @@
+node_type: raisin:Function
+properties:
+  title: Agent run model turn
+  description: >-
+    One model turn of an agent run: context construction (system prompt,
+    authoritative run facts, transcript), compaction to a structured
+    checkpoint, output budgeting, the provider request with streaming and
+    bounded retries, and the transcript projection of the turn. Called by the
+    run runtime, never by a model.
+  language: JavaScript
+  entry_file: index.js:handler
+  execution_mode: Sync
+  # Writes the transcript into the agent's inbox (it proves its run first).
+  execution_context: system
+  enabled: true
+  resource_limits:
+    timeout_ms: 300000
+    max_memory_bytes: 268435456
+  network_policy:
+    http_enabled: true
+    allowed_urls:
+      - "https://api.openai.com/**"
+      - "https://api.anthropic.com/**"
+      - "http://localhost:11434/*"

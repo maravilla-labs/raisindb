@@ -375,6 +375,9 @@ pub enum WaitType {
 
     /// Waiting for chat session user response
     ChatSession,
+
+    /// Waiting for an agent step's AgentRun to end
+    AgentRun,
 }
 
 /// One recorded position in a flow's history: where it was, and what it knew.

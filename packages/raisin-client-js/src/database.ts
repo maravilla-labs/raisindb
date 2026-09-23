@@ -13,6 +13,7 @@ import { Branches } from './branches';
 import { SchedulerApi } from './scheduler';
 import { Tags } from './tags';
 import { FlowsApi } from './flows';
+import { AgentRunsWsApi } from './agent-runs-ws';
 import { FunctionsApi } from './functions-api';
 import { SearchApi } from './search-api';
 import type {
@@ -62,6 +63,7 @@ export class Database {
   private getSignAssetUrl?: (options: SignAssetOptions) => Promise<SignedAssetUrl>;
   private httpOptions?: DatabaseHttpOptions;
   private _flowsApi?: FlowsApi;
+  private _runsApi?: AgentRunsWsApi;
   private _functionsApi?: FunctionsApi;
   private _conversationManager?: ConversationManager;
   private _flowClient?: FlowClient;
@@ -312,6 +314,17 @@ export class Database {
       );
     }
     return this._flowsApi;
+  }
+
+  /**
+   * Durable agent runs over this WebSocket connection: find a subject's run,
+   * follow it live (gap-free, resumable), control it, list its children.
+   */
+  runs(): AgentRunsWsApi {
+    if (!this._runsApi) {
+      this._runsApi = new AgentRunsWsApi(this._context, this.sendRequest, this.eventHandler);
+    }
+    return this._runsApi;
   }
 
   /**

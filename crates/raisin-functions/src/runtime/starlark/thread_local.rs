@@ -19,6 +19,14 @@ thread_local! {
     pub(super) static CURRENT_HANDLE: RefCell<Option<Handle>> = const { RefCell::new(None) };
     static CURRENT_LOGS: RefCell<Vec<LogEntry>> = const { RefCell::new(Vec::new()) };
     static CURRENT_LOG_EMITTER: RefCell<Option<raisin_storage::LogEmitter>> = RefCell::new(None);
+    /// The execution policy of the call on this thread (host calls allowed?).
+    pub(super) static CURRENT_POLICY: std::cell::Cell<crate::types::ExecutionPolicy> =
+        const { std::cell::Cell::new(crate::types::ExecutionPolicy::Standard) };
+}
+
+/// Set the execution policy for the call on this thread.
+pub(super) fn set_thread_policy(policy: crate::types::ExecutionPolicy) {
+    CURRENT_POLICY.with(|cell| cell.set(policy));
 }
 
 /// Set the current API for the thread
@@ -40,6 +48,7 @@ pub(super) fn set_thread_api(
 
 /// Clear the current API for the thread
 pub(super) fn clear_thread_api() {
+    CURRENT_POLICY.with(|cell| cell.set(crate::types::ExecutionPolicy::Standard));
     CURRENT_API.with(|cell| {
         *cell.borrow_mut() = None;
     });

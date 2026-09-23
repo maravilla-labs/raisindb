@@ -112,9 +112,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "raisin-agent-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "raisin-sdk"
 version = "0.1.0"
 dependencies = [
+ "raisin-agent-contract",
  "raisin-sdk-macros",
  "serde",
  "serde_json",

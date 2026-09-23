@@ -61,6 +61,8 @@
 //! - `executor`: Main function execution orchestration
 //! - `backup_main_callbacks`: Preserved original code from main.rs (reference only)
 
+pub mod agent_reducer;
+pub mod agent_reducer_store;
 pub mod ai_provider;
 mod backup_main_callbacks;
 pub mod callbacks;
@@ -76,6 +78,11 @@ mod tool_change_sink;
 mod types;
 
 // Re-export public API
+pub use agent_reducer::{
+    function_artifact_hash, DeterministicInvoker, DeterministicRun, DirectRuntimeInvoker,
+    FunctionDomainReducer,
+};
+pub use agent_reducer_store::{FunctionReducerResolver, StorageDeterministicInvoker};
 pub use callbacks::platform::{configure_platform_hooks, PlatformHook};
 pub use provider::ExecutionProvider;
 pub use remote_tool::configure_mcp_client;

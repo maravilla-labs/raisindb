@@ -25,6 +25,8 @@ raisin-sql-execution = { path = "../raisin-sql-execution", optional = true }
 raisin-storage-memory = { path = "../raisin-storage-memory", optional = true }
 # Optional RocksDB backend
 raisin-rocksdb = { path = "../raisin-rocksdb", optional = true }
+# Durable agent runs: the transport-neutral run API (light, serde-only deps).
+raisin-agent-runtime = { path = "../raisin-agent-runtime" }
 raisin-ratelimit = { path = "../raisin-ratelimit", optional = true }
 raisin-indexer = { path = "../raisin-indexer", optional = true }
 raisin-hnsw = { path = "../raisin-hnsw", optional = true }

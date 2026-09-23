@@ -33,11 +33,12 @@
 //!
 //! ```rust
 //! use raisin_models::translations::{TranslationHashRecord, JsonPointer};
+//! use raisin_hlc::HLC;
 //! use chrono::Utc;
 //!
 //! let record = TranslationHashRecord::new(
 //!     "a1b2c3d4e5f6...".to_string(),
-//!     12345,
+//!     HLC::new(12345, 0),
 //! );
 //!
 //! // Later, when checking staleness
@@ -159,8 +160,9 @@ impl TranslationHashRecord {
     ///
     /// ```rust
     /// use raisin_models::translations::TranslationHashRecord;
+    /// use raisin_hlc::HLC;
     ///
-    /// let record = TranslationHashRecord::new("hash1".to_string(), 1);
+    /// let record = TranslationHashRecord::new("hash1".to_string(), HLC::new(1, 0));
     ///
     /// assert!(!record.is_stale("hash1"));  // Same hash = fresh
     /// assert!(record.is_stale("hash2"));   // Different hash = stale

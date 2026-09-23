@@ -139,10 +139,16 @@ impl FunctionRuntime for WasmRuntime {
 
         // No args, no env, no preopens: a function reaches the outside world
         // through `raisin.*` and nothing else.
-        let wasi = WasiCtxBuilder::new()
-            .stdout(stdout.clone())
-            .stderr(stderr.clone())
-            .build();
+        // A deterministic call gets frozen clocks and fixed entropy instead,
+        // and its host calls are refused (see `purity`).
+        let wasi = if context.policy.allows_host_calls() {
+            WasiCtxBuilder::new()
+                .stdout(stdout.clone())
+                .stderr(stderr.clone())
+                .build()
+        } else {
+            super::purity::pure_wasi()
+        };
 
         let mut store = Store::new(
             engine()?,
@@ -154,6 +160,7 @@ impl FunctionRuntime for WasmRuntime {
                 limiter: FunctionLimiter::new(limits.max_memory_bytes as usize),
                 wasi,
                 table: ResourceTable::new(),
+                policy: super::purity::host_policy(context.policy),
             },
         );
         store.limiter(|state| &mut state.limiter);

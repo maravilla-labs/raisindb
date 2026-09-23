@@ -1,0 +1,40 @@
+[package]
+name = "raisin-agent-runtime"
+version = "0.1.0"
+edition = "2021"
+description = "Durable AgentRun runtime: lifecycle, event log, controls, leases with fencing, checkpoints and the domain-reducer seam"
+license = "BSL-1.1"
+
+[lib]
+path = "src/lib.rs"
+
+# Deliberately NOT depending on raisin-ai, raisin-flow-runtime, raisin-rocksdb
+# or raisin-functions: storage backends and the WebAssembly reducer adapter
+# depend on THIS crate, never the reverse.
+[dependencies]
+raisin-agent-contract = { path = "../raisin-agent-contract" }
+raisin-error = { path = "../raisin-error" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tokio-util = "0.7"
+uuid = { workspace = true }
+thiserror = { workspace = true }
+blake3 = { workspace = true }
+
+[features]
+default = []
+# Exposes `testing` (scripted planner/executor/reducer and the store
+# conformance suite) to other crates' tests, e.g. the RocksDB backend.
+testing = []
+
+[dev-dependencies]
+# `start_paused` needs tokio's test-util, which the workspace "full" set lacks.
+tokio = { workspace = true, features = ["test-util"] }
+# The integration tests use the `testing` helpers.
+raisin-agent-runtime = { path = ".", features = ["testing"] }
+
+[[test]]
+name = "all"
+path = "tests/all/main.rs"

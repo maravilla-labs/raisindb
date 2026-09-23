@@ -3,7 +3,9 @@ use axum::{
     Json,
 };
 use raisin_hlc::HLC;
-use raisin_storage::{BranchRepository, RevisionMeta, RevisionRepository, Storage};
+use raisin_storage::{
+    BranchRepository, RepositoryManagementRepository, RevisionMeta, RevisionRepository, Storage,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{error::ApiError, state::AppState};
@@ -52,6 +54,16 @@ pub async fn list_revisions(
 ) -> Result<Json<ListRevisionsResponse>, ApiError> {
     let storage = state.connection().storage();
     let revisions_repo = storage.revisions();
+
+    // A repository that does not exist has no history to page through; say so
+    // rather than answering with an empty page that reads as "no commits yet".
+    if !storage
+        .repository_management()
+        .repository_exists(&tenant_id, &repo_id)
+        .await?
+    {
+        return Err(ApiError::repository_not_found(&repo_id));
+    }
 
     // Fetch one more than limit to check if there are more results
     let fetch_limit = query.limit + 1;
@@ -142,6 +154,14 @@ pub async fn get_revision_changes(
     let revision: HLC = revision_str
         .parse()
         .map_err(|e| ApiError::validation_failed(format!("Invalid revision: {}", e)))?;
+
+    // A revision that does not exist is a 404, as it is on `get_revision`.
+    // Asking storage for its changes first surfaced the miss as a storage
+    // error, i.e. a 500 for what is the caller's mistake.
+    revisions_repo
+        .get_revision_meta(&tenant_id, &repo_id, &revision)
+        .await?
+        .ok_or_else(|| ApiError::revision_not_found(&revision))?;
 
     let changed_nodes = revisions_repo
         .list_changed_nodes(&tenant_id, &repo_id, &revision)

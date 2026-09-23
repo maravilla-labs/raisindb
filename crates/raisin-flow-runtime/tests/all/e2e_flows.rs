@@ -21,6 +21,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+use raisin_flow_runtime::handlers::agent_step::FLOW_AGENT_RUN_FUNCTION;
 use raisin_flow_runtime::runtime::{check_flow_timeout, execute_flow, resume_flow};
 use raisin_flow_runtime::types::{
     FlowCallbacks, FlowError, FlowExecutionEvent, FlowInstance, FlowResult, FlowStatus, WaitType,
@@ -450,10 +451,12 @@ impl FlowCallbacks for Harness {
     }
 
     async fn execute_function(&self, function_ref: &str, input: Value) -> FlowResult<Value> {
-        self.sync_executions
-            .lock()
-            .unwrap()
-            .push((function_ref.to_string(), input));
+        let mut executions = self.sync_executions.lock().unwrap();
+        executions.push((function_ref.to_string(), input));
+        // The AI package's start function: an agent step's run is created.
+        if function_ref == FLOW_AGENT_RUN_FUNCTION {
+            return Ok(json!({ "run_id": format!("run-{}", executions.len()), "created": true }));
+        }
         Ok(json!({"compensated": true}))
     }
 
@@ -1432,11 +1435,32 @@ async fn pending_task_for_same_wait_is_reused_not_duplicated() {
 // 6. Agent steps
 // ===========================================================================
 
-#[tokio::test]
-async fn agent_step_resolves_prompt_template() {
-    let harness = Harness::new();
-    harness.script_ai(json!({"content": "Positive", "finish_reason": "stop"}));
+/// The requests an agent step made to start its run.
+fn run_starts(harness: &Harness) -> Vec<Value> {
+    harness
+        .sync_executions
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(f, _)| f == FLOW_AGENT_RUN_FUNCTION)
+        .map(|(_, input)| input.clone())
+        .collect()
+}
 
+/// The run's end, as core's waiter delivers it.
+fn run_result(run_id: &str, status: &str, message: &str) -> Value {
+    json!({
+        "agent_run_id": run_id,
+        "status": status,
+        "outcome": { "kind": if status == "completed" { "succeeded" } else { status }, "message": message },
+        "usage": { "model_calls": 1 },
+        "waiter": { "kind": "flow_instance" },
+    })
+}
+
+#[tokio::test]
+async fn agent_step_runs_the_agent_as_a_durable_run() {
+    let harness = Harness::new();
     let flow = json!({
         "nodes": [
             { "id": "start", "step_type": "start", "next_node": "classify" },
@@ -1454,19 +1478,109 @@ async fn agent_step_resolves_prompt_template() {
     });
 
     let id = run_to_quiescence(&harness, flow, json!({"text": "great product"})).await;
+    // The step started a run and parked on it; no model was called in-step.
     let instance = harness.instance(&id);
-    assert_eq!(instance.status, FlowStatus::Completed);
-
-    let calls = harness.ai_calls.lock().unwrap();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].1, "/agents/classifier");
-    let content = calls[0].2[0]["content"].as_str().unwrap();
-    assert_eq!(content, "Classify the sentiment of: great product");
-
-    // The agent's response is recorded under step_outputs
+    assert_eq!(instance.status, FlowStatus::Waiting);
+    let wait = instance.wait_info.clone().unwrap();
+    assert_eq!(wait.wait_type, WaitType::AgentRun);
+    assert_eq!(wait.expected_event.as_deref(), Some("agent_run:run-1"));
+    assert!(harness.ai_calls.lock().unwrap().is_empty());
+    let starts = run_starts(&harness);
+    assert_eq!(starts.len(), 1);
+    assert_eq!(starts[0]["agent_ref"], json!("/agents/classifier"));
     assert_eq!(
-        instance.variables["step_outputs"]["classify"]["response"],
-        json!("Positive")
+        starts[0]["prompt"],
+        json!("Classify the sentiment of: great product")
+    );
+    // The runtime, not the definition, names the waiting flow.
+    assert_eq!(starts[0]["__raisin_flow"]["instance_id"], json!(id));
+    assert_eq!(starts[0]["__raisin_flow"]["step_id"], json!("classify"));
+
+    // The run ends: its result resumes the step.
+    resume_flow(&id, run_result("run-1", "completed", "Positive"), &harness)
+        .await
+        .unwrap();
+    harness.pump().await;
+    let instance = harness.instance(&id);
+    assert_eq!(
+        instance.status,
+        FlowStatus::Completed,
+        "{:?}",
+        instance.error
+    );
+    let out = &instance.variables["step_outputs"]["classify"];
+    assert_eq!(out["response"], json!("Positive"));
+    assert_eq!(out["agent_run_id"], json!("run-1"));
+}
+
+#[tokio::test]
+async fn agent_step_ignores_the_result_of_a_run_it_is_not_waiting_for() {
+    let harness = Harness::new();
+    let flow = json!({
+        "nodes": [
+            { "id": "start", "step_type": "start", "next_node": "ask" },
+            { "id": "ask", "step_type": "agent_step",
+              "properties": { "agent_ref": "/agents/a", "prompt": "Hi" }, "next_node": "end" },
+            { "id": "end", "step_type": "end" }
+        ]
+    });
+    let id = run_to_quiescence(&harness, flow, json!({})).await;
+    resume_flow(&id, run_result("run-other", "completed", "stale"), &harness)
+        .await
+        .unwrap();
+    assert_eq!(
+        harness.instance(&id).status,
+        FlowStatus::Waiting,
+        "a stale result is ignored"
+    );
+    resume_flow(&id, run_result("run-1", "completed", "fresh"), &harness)
+        .await
+        .unwrap();
+    harness.pump().await;
+    let instance = harness.instance(&id);
+    assert_eq!(
+        instance.variables["step_outputs"]["ask"]["response"],
+        json!("fresh")
+    );
+}
+
+#[tokio::test]
+async fn a_failed_agent_run_takes_the_error_edge() {
+    let harness = Harness::new();
+    harness.script_function(
+        "/lib/fallback",
+        json!({"success": true, "result": {"handled": true}}),
+    );
+    let flow = json!({
+        "nodes": [
+            { "id": "start", "step_type": "start", "next_node": "ask" },
+            { "id": "ask", "step_type": "agent_step",
+              "properties": { "agent_ref": "/agents/a", "prompt": "Hi", "max_retries": 0, "error_edge": "fallback" },
+              "next_node": "end" },
+            { "id": "fallback", "step_type": "function_step",
+              "properties": { "function_ref": "/lib/fallback" }, "next_node": "end" },
+            { "id": "end", "step_type": "end" }
+        ]
+    });
+    let id = run_to_quiescence(&harness, flow, json!({})).await;
+    resume_flow(
+        &id,
+        run_result("run-1", "failed", "provider down"),
+        &harness,
+    )
+    .await
+    .unwrap();
+    harness.pump().await;
+    let instance = harness.instance(&id);
+    assert_eq!(
+        instance.status,
+        FlowStatus::Completed,
+        "{:?}",
+        instance.error
+    );
+    assert_eq!(
+        instance.variables["step_outputs"]["fallback"]["handled"],
+        json!(true)
     );
 }
 
@@ -2229,80 +2343,6 @@ async fn test_run_mocks_bypass_functions_and_agents() {
 }
 
 // ===========================================================================
-// 23. Agent step executes its agent's own tools in an internal loop
-// ===========================================================================
-
-#[tokio::test]
-async fn agent_step_runs_internal_tool_loop() {
-    let harness = Harness::new();
-
-    // Turn 1: the agent answers with a tool call (lookup-price), turn 2: final
-    harness.script_ai(json!({
-        "content": "",
-        "finish_reason": "tool_calls",
-        "tool_calls": [{
-            "id": "call_1",
-            "type": "function",
-            "function": { "name": "lookup-price", "arguments": "{\"sku\": \"A-1\"}" }
-        }],
-        "_tool_map": { "lookup-price": "/lib/pricing/lookup-price" }
-    }));
-    harness.script_ai(json!({
-        "content": "The price of A-1 is 42 CHF.",
-        "finish_reason": "stop"
-    }));
-
-    let flow = json!({
-        "nodes": [
-            { "id": "start", "step_type": "start", "next_node": "ask" },
-            {
-                "id": "ask",
-                "step_type": "agent_step",
-                "properties": {
-                    "agent_ref": "/agents/pricing",
-                    "prompt": "What does {{ input.sku }} cost?"
-                },
-                "next_node": "end"
-            },
-            { "id": "end", "step_type": "end" }
-        ]
-    });
-
-    let id = run_to_quiescence(&harness, flow, json!({"sku": "A-1"})).await;
-    let instance = harness.instance(&id);
-    assert_eq!(
-        instance.status,
-        FlowStatus::Completed,
-        "{:?}",
-        instance.error
-    );
-
-    // Two AI turns happened; the second one carried the tool transcript
-    let calls = harness.ai_calls.lock().unwrap();
-    assert_eq!(calls.len(), 2);
-    let second_turn = &calls[1].2;
-    assert_eq!(second_turn.len(), 3); // user + assistant(tool_calls) + tool result
-    assert_eq!(second_turn[1]["role"], "assistant");
-    assert_eq!(second_turn[2]["role"], "tool");
-    assert_eq!(second_turn[2]["tool_call_id"], "call_1");
-    drop(calls);
-
-    // The tool was executed synchronously with parsed JSON arguments,
-    // resolved through _tool_map to the function path
-    let executions = harness.sync_executions.lock().unwrap();
-    assert_eq!(executions.len(), 1);
-    assert_eq!(executions[0].0, "/lib/pricing/lookup-price");
-    assert_eq!(executions[0].1, json!({"sku": "A-1"}));
-    drop(executions);
-
-    // Step output records the final answer + tool audit trail
-    let out = &instance.variables["step_outputs"]["ask"];
-    assert_eq!(out["response"], json!("The price of A-1 is 42 CHF."));
-    assert_eq!(out["tools_used"][0]["name"], json!("lookup-price"));
-    assert_eq!(out["tool_iterations"], json!(1));
-}
-
-// ===========================================================================
 // 24. AI-routed OR container: agent picks the branch; low confidence falls back
 // ===========================================================================
 
@@ -2369,7 +2409,10 @@ async fn ai_router_routes_to_agent_chosen_branch() {
     assert!(prompt.contains("- vip: VIP handling"));
     // Structured output schema constrains the branch enum
     let schema = calls[0].3.as_ref().unwrap();
-    assert_eq!(schema["schema"]["properties"]["branch"]["enum"][1], "vip");
+    assert_eq!(
+        schema["json_schema"]["schema"]["properties"]["branch"]["enum"][1],
+        "vip"
+    );
     drop(calls);
 
     // Routed to vip; the other branches never ran
@@ -2513,7 +2556,7 @@ async fn competition_referee_accepts_winner() {
     assert!(referee_prompt.contains("Taste the cloud."));
     assert!(referee_prompt.contains("Sky in a cup."));
     assert_eq!(
-        calls[2].3.as_ref().unwrap()["schema"]["properties"]["winner"]["enum"][0],
+        calls[2].3.as_ref().unwrap()["json_schema"]["schema"]["properties"]["winner"]["enum"][0],
         "claude_writer"
     );
     drop(calls);
@@ -2583,7 +2626,6 @@ async fn agent_step_include_context_injects_workflow_state() {
         "/lib/reserve",
         json!({"success": true, "result": {"reservation_id": "res-77", "total": 450}}),
     );
-    harness.script_ai(json!({ "content": "Looks fine.", "finish_reason": "stop" }));
 
     let flow = json!({
         "nodes": [
@@ -2601,18 +2643,12 @@ async fn agent_step_include_context_injects_workflow_state() {
     });
 
     let id = run_to_quiescence(&harness, flow, json!({"customer": "ACME"})).await;
-    let instance = harness.instance(&id);
-    assert_eq!(
-        instance.status,
-        FlowStatus::Completed,
-        "{:?}",
-        instance.error
-    );
+    assert_eq!(harness.instance(&id).status, FlowStatus::Waiting);
 
-    // The agent prompt contains the prompt text AND the injected context:
+    // The run's prompt contains the prompt text AND the injected context:
     // flow input + the previous step's output - without any templating
-    let calls = harness.ai_calls.lock().unwrap();
-    let prompt = calls[0].2[0]["content"].as_str().unwrap();
+    let starts = run_starts(&harness);
+    let prompt = starts[0]["prompt"].as_str().unwrap();
     assert!(prompt.starts_with("Review this order."));
     assert!(prompt.contains("# Workflow context"));
     assert!(prompt.contains("\"customer\": \"ACME\""));

@@ -239,6 +239,9 @@ impl fmt::Display for JobType {
                 "FlowExecution({}/{}/step:{})",
                 trigger_path, flow_execution_id, current_step_index
             ),
+            Self::AgentRunStep { run_id, reason } => {
+                write!(f, "AgentRunStep({}/{})", run_id, reason)
+            }
             Self::FlowInstanceExecution {
                 instance_id,
                 execution_type,

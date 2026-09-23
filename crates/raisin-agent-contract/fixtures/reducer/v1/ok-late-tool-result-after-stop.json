@@ -1,0 +1,45 @@
+{
+  "request": {
+    "contract": "raisin.agent-run.reducer/1",
+    "accept": [
+      "raisin.agent-run.reducer/1"
+    ],
+    "run": {
+      "run_id": "run-1",
+      "status": "stopped",
+      "turn": 2,
+      "last_seq": 12,
+      "usage": {
+        "operations": 4
+      },
+      "budgets": {},
+      "open_requests": [],
+      "unanswered_calls": []
+    },
+    "state": {
+      "last_event_seq": 11,
+      "phase": "discover"
+    },
+    "state_rev": 3,
+    "event": {
+      "seq": 12,
+      "kind": "tool_result",
+      "effect_id": "3:0",
+      "operation_id": "run-1/op/4",
+      "data": {}
+    }
+  },
+  "response": {
+    "contract": "raisin.agent-run.reducer/1",
+    "state": {
+      "last_event_seq": 12,
+      "phase": "done",
+      "ingested": [
+        "run-1/op/4"
+      ]
+    },
+    "state_rev": 4,
+    "effects": []
+  },
+  "expect": "ok"
+}

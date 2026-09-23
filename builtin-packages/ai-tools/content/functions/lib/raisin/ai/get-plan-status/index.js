@@ -1,3 +1,5 @@
+import { runEnvelope } from '../agent-shared/tool-envelope.js';
+import { TOOL_META } from '../agent-shared/tool-meta.js';
 /**
  * get-plan-status — Returns the current plan and all task statuses.
  *
@@ -9,6 +11,7 @@
  * Category: planning
  */
 async function handler(input) {
+  const enveloped = await runEnvelope(input, TOOL_META.getPlanStatus, handler); if (enveloped) return enveloped;
   const { __raisin_context } = input;
   const workspace = __raisin_context?.workspace || 'ai';
   const chatPath = __raisin_context?.chat_path;

@@ -1,3 +1,5 @@
+import { runEnvelope } from '../agent-shared/tool-envelope.js';
+import { TOOL_META } from '../agent-shared/tool-meta.js';
 /**
  * ask — retrieve, grade, retry, then answer with citations.
  *
@@ -91,6 +93,7 @@ const GRADER_PROMPT = [
 ].join('\n');
 
 export async function handler(input) {
+  const enveloped = await runEnvelope(input, TOOL_META.ask, handler); if (enveloped) return enveloped;
   const { question, workspaces, limit, model, use_graph } = input || {};
 
   if (!question || typeof question !== 'string' || !question.trim()) {

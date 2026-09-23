@@ -4,6 +4,7 @@
 //! for different job types. Each handler is responsible for executing jobs
 //! of a specific category (fulltext indexing, embedding generation, bulk SQL, etc.).
 
+pub mod agent_run_step;
 pub mod ai_tool_call_execution;
 pub mod ai_tool_result_aggregation;
 pub mod asset_processing;
@@ -46,6 +47,7 @@ pub mod trigger_matcher;
 pub mod vector_clock_verification;
 pub mod virtual_mount_sync;
 
+pub use agent_run_step::AgentRunStepHandler;
 pub use ai_tool_call_execution::{AIToolCallExecutionHandler, NodeCreatorCallback};
 pub use ai_tool_result_aggregation::AIToolResultAggregationHandler;
 #[allow(deprecated)]
@@ -153,6 +155,9 @@ pub struct JobHandlerRegistry {
     pub function_execution: Arc<FunctionExecutionHandler>,
     pub flow_execution: Arc<FlowExecutionHandler>,
     pub flow_instance_execution: Arc<FlowInstanceExecutionHandler>,
+    /// Durable agent run steps. Needs no construction arguments: it reads the
+    /// process's late-bound `AgentRunHost` (see `agent_runs::host_slot`).
+    pub agent_run_step: Arc<AgentRunStepHandler>,
     pub trigger_evaluation: Arc<TriggerEvaluationHandler>,
     pub scheduled_trigger: Arc<ScheduledTriggerHandler>,
     pub scheduled_invocation: Arc<ScheduledInvocationHandler>,
@@ -255,6 +260,7 @@ impl JobHandlerRegistry {
             function_execution,
             flow_execution,
             flow_instance_execution,
+            agent_run_step: Arc::new(AgentRunStepHandler::new()),
             trigger_evaluation,
             scheduled_trigger,
             scheduled_invocation,
@@ -453,6 +459,7 @@ impl JobHandlerRegistry {
                 // Flow instance execution runs stateful workflows using raisin-flow-runtime
                 self.flow_instance_execution.handle(job, context).await
             }
+            JobType::AgentRunStep { .. } => self.agent_run_step.handle(job, context).await,
             JobType::TriggerEvaluation { .. } => {
                 // Trigger evaluation returns detailed debug report
                 self.trigger_evaluation.handle(job, context).await

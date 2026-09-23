@@ -23,6 +23,7 @@ mod config;
 mod engine;
 mod errors;
 mod limits;
+mod purity;
 mod runtime_impl;
 
 #[cfg(test)]

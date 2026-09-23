@@ -1,3 +1,5 @@
+import { runEnvelope } from '../agent-shared/tool-envelope.js';
+import { TOOL_META } from '../agent-shared/tool-meta.js';
 // RAISINDB_GATE_PROBE_MARKER deploy-route proof 2026-09-20
 /**
  * update-task — Updates a task's status and propagates progress to the parent plan.
@@ -154,6 +156,7 @@ function decideCompletion({ taskPath, props, targets, tasks, run }) {
 }
 
 async function handler(input) {
+  const enveloped = await runEnvelope(input, TOOL_META.updateTask, handler); if (enveloped) return enveloped;
   const { task_id, status, notes, build_target_path, __raisin_context } = input;
   const workspace = __raisin_context?.workspace || 'ai';
   const chatPath = __raisin_context?.chat_path;

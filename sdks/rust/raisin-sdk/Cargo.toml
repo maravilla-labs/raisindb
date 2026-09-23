@@ -21,6 +21,14 @@ publish = false
 raisin-sdk-macros = { version = "0.1.0", path = "raisin-sdk-macros" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The AgentRun reducer contract (envelopes, validation, canonical JSON), for
+# guests that implement a domain reducer. Serde-only, so it builds for
+# wasm32-wasip2 unchanged. Off by default: existing guests compile as before.
+raisin-agent-contract = { version = "0.1.0", path = "../../../crates/raisin-agent-contract", optional = true }
+
+[features]
+default = []
+agent-run = ["dep:raisin-agent-contract"]
 
 # Only guests need the WIT bindings; a native `cargo test` links neither
 # wit-bindgen nor any wasm intrinsics and runs against `MockHost` instead.

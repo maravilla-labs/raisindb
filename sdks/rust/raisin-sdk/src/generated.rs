@@ -221,6 +221,345 @@ pub mod admin {
 
 }
 
+pub mod agent_runs {
+    /// `raisin.agent_runs.ackMailbox` — registry method `agent_runs_ack_mailbox`.
+    pub fn ack_mailbox(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("agent_runs_ack_mailbox", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `ack_mailbox`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn ack_mailbox_as<T: ::serde::de::DeserializeOwned>(request: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("agent_runs_ack_mailbox", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+    /// `raisin.agent_runs.checkpoint` — registry method `agent_runs_checkpoint`.
+    pub fn checkpoint(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("agent_runs_checkpoint", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `checkpoint`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn checkpoint_as<T: ::serde::de::DeserializeOwned>(request: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("agent_runs_checkpoint", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+    /// `raisin.agent_runs.children` — registry method `agent_runs_children`.
+    pub fn children(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("agent_runs_children", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `children`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn children_as<T: ::serde::de::DeserializeOwned>(request: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("agent_runs_children", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+    /// `raisin.agent_runs.control` — registry method `agent_runs_control`.
+    pub fn control(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("agent_runs_control", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `control`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn control_as<T: ::serde::de::DeserializeOwned>(request: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("agent_runs_control", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+    /// `raisin.agent_runs.controlChild` — registry method `agent_runs_control_child`.
+    pub fn control_child(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("agent_runs_control_child", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `control_child`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn control_child_as<T: ::serde::de::DeserializeOwned>(request: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("agent_runs_control_child", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+    /// `raisin.agent_runs.create` — registry method `agent_runs_create`.
+    pub fn create(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("agent_runs_create", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `create`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn create_as<T: ::serde::de::DeserializeOwned>(request: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("agent_runs_create", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+    /// `raisin.agent_runs.deliver` — registry method `agent_runs_deliver`.
+    pub fn deliver(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("agent_runs_deliver", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `deliver`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn deliver_as<T: ::serde::de::DeserializeOwned>(request: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("agent_runs_deliver", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+    /// `raisin.agent_runs.events` — registry method `agent_runs_events`.
+    pub fn events(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("agent_runs_events", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `events`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn events_as<T: ::serde::de::DeserializeOwned>(request: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("agent_runs_events", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+    /// `raisin.agent_runs.get` — registry method `agent_runs_get`.
+    pub fn get(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("agent_runs_get", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `get`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn get_as<T: ::serde::de::DeserializeOwned>(request: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("agent_runs_get", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+    /// `raisin.agent_runs.inspectChild` — registry method `agent_runs_inspect_child`.
+    pub fn inspect_child(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("agent_runs_inspect_child", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `inspect_child`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn inspect_child_as<T: ::serde::de::DeserializeOwned>(request: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("agent_runs_inspect_child", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+    /// `raisin.agent_runs.mailbox` — registry method `agent_runs_mailbox`.
+    pub fn mailbox(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("agent_runs_mailbox", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `mailbox`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn mailbox_as<T: ::serde::de::DeserializeOwned>(request: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("agent_runs_mailbox", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+    /// `raisin.agent_runs.postToParent` — registry method `agent_runs_post_to_parent`.
+    pub fn post_to_parent(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("agent_runs_post_to_parent", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `post_to_parent`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn post_to_parent_as<T: ::serde::de::DeserializeOwned>(request: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("agent_runs_post_to_parent", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+    /// `raisin.agent_runs.readCheckpoint` — registry method `agent_runs_read_checkpoint`.
+    pub fn read_checkpoint(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("agent_runs_read_checkpoint", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `read_checkpoint`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn read_checkpoint_as<T: ::serde::de::DeserializeOwned>(request: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("agent_runs_read_checkpoint", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+    /// `raisin.agent_runs.spawnChild` — registry method `agent_runs_spawn_child`.
+    pub fn spawn_child(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("agent_runs_spawn_child", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `spawn_child`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn spawn_child_as<T: ::serde::de::DeserializeOwned>(request: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("agent_runs_spawn_child", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+    /// `raisin.agent_runs.usage` — registry method `agent_runs_usage`.
+    pub fn usage(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("agent_runs_usage", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `usage`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn usage_as<T: ::serde::de::DeserializeOwned>(request: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("agent_runs_usage", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+    /// `raisin.agent_runs.waitChild` — registry method `agent_runs_wait_child`.
+    pub fn wait_child(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("agent_runs_wait_child", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `wait_child`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn wait_child_as<T: ::serde::de::DeserializeOwned>(request: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("agent_runs_wait_child", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+}
+
 pub mod ai {
     /// `raisin.ai.completion` — registry method `ai_completion`.
     pub fn completion(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
@@ -1077,6 +1416,345 @@ pub mod locks {
         .to_string();
         let raw = crate::host::call("locks_renew", &args)?;
         crate::wire::decode_bool(&raw)
+    }
+
+}
+
+pub mod node_dev {
+    /// `raisin.node_dev.apply` — registry method `node_dev_apply`.
+    pub fn apply(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("node_dev_apply", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `apply`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn apply_as<T: ::serde::de::DeserializeOwned>(request: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("node_dev_apply", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+    /// `raisin.node_dev.commit` — registry method `node_dev_commit`.
+    pub fn commit(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("node_dev_commit", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `commit`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn commit_as<T: ::serde::de::DeserializeOwned>(request: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("node_dev_commit", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+    /// `raisin.node_dev.diff` — registry method `node_dev_diff`.
+    pub fn diff(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("node_dev_diff", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `diff`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn diff_as<T: ::serde::de::DeserializeOwned>(request: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("node_dev_diff", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+    /// `raisin.node_dev.diff_branch` — registry method `node_dev_diff_branch`.
+    pub fn diff_branch(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("node_dev_diff_branch", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `diff_branch`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn diff_branch_as<T: ::serde::de::DeserializeOwned>(request: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("node_dev_diff_branch", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+    /// `raisin.node_dev.discard` — registry method `node_dev_discard`.
+    pub fn discard(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("node_dev_discard", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `discard`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn discard_as<T: ::serde::de::DeserializeOwned>(request: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("node_dev_discard", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+    /// `raisin.node_dev.discard_branch` — registry method `node_dev_discard_branch`.
+    pub fn discard_branch(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("node_dev_discard_branch", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `discard_branch`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn discard_branch_as<T: ::serde::de::DeserializeOwned>(request: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("node_dev_discard_branch", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+    /// `raisin.node_dev.dry_run` — registry method `node_dev_dry_run`.
+    pub fn dry_run(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("node_dev_dry_run", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `dry_run`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn dry_run_as<T: ::serde::de::DeserializeOwned>(request: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("node_dev_dry_run", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+    /// `raisin.node_dev.fork_branch` — registry method `node_dev_fork_branch`.
+    pub fn fork_branch(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("node_dev_fork_branch", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `fork_branch`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn fork_branch_as<T: ::serde::de::DeserializeOwned>(request: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("node_dev_fork_branch", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+    /// `raisin.node_dev.get_changeset` — registry method `node_dev_get_changeset`.
+    pub fn get_changeset(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("node_dev_get_changeset", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `get_changeset`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn get_changeset_as<T: ::serde::de::DeserializeOwned>(request: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("node_dev_get_changeset", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+    /// `raisin.node_dev.list` — registry method `node_dev_list`.
+    pub fn list(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("node_dev_list", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `list`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn list_as<T: ::serde::de::DeserializeOwned>(request: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("node_dev_list", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+    /// `raisin.node_dev.list_changesets` — registry method `node_dev_list_changesets`.
+    pub fn list_changesets(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("node_dev_list_changesets", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `list_changesets`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn list_changesets_as<T: ::serde::de::DeserializeOwned>(request: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("node_dev_list_changesets", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+    /// `raisin.node_dev.merge_branch` — registry method `node_dev_merge_branch`.
+    pub fn merge_branch(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("node_dev_merge_branch", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `merge_branch`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn merge_branch_as<T: ::serde::de::DeserializeOwned>(request: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("node_dev_merge_branch", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+    /// `raisin.node_dev.propose` — registry method `node_dev_propose`.
+    pub fn propose(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("node_dev_propose", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `propose`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn propose_as<T: ::serde::de::DeserializeOwned>(request: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("node_dev_propose", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+    /// `raisin.node_dev.read` — registry method `node_dev_read`.
+    pub fn read(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("node_dev_read", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `read`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn read_as<T: ::serde::de::DeserializeOwned>(request: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("node_dev_read", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+    /// `raisin.node_dev.stat` — registry method `node_dev_stat`.
+    pub fn stat(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("node_dev_stat", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `stat`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn stat_as<T: ::serde::de::DeserializeOwned>(request: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("node_dev_stat", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+    /// `raisin.node_dev.watch` — registry method `node_dev_watch`.
+    pub fn watch(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("node_dev_watch", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `watch`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn watch_as<T: ::serde::de::DeserializeOwned>(request: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(request)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("node_dev_watch", &args)?;
+        crate::wire::decode_json_as(&raw)
     }
 
 }

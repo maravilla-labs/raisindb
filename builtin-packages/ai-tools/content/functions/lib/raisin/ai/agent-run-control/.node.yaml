@@ -1,0 +1,28 @@
+node_type: raisin:Function
+properties:
+  title: Agent run control
+  description: >-
+    The user's controls for a conversation's agent run: stop, pause, resume,
+    steer, approve, reject, answer, status. Routed to the runtime, which
+    applies each atomically and acknowledges it (applied, duplicate, rejected).
+    Not a model tool.
+  language: JavaScript
+  entry_file: index.js:handler
+  execution_mode: Sync
+  enabled: true
+  input_schema:
+    type: object
+    required: [action]
+    properties:
+      action: { type: string, enum: [stop, pause, resume, steer, approve, reject, answer, status] }
+      run_id: { type: string }
+      conversation_path: { type: string }
+      stream_channel: { type: string }
+      control_id: { type: string }
+      text: { type: string }
+      reason: { type: string }
+      request_id: { type: string }
+      subject_digest: { type: string }
+      value: {}
+  resource_limits:
+    timeout_ms: 10000

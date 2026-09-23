@@ -1,5 +1,7 @@
 #![cfg(not(feature = "s3"))]
-use std::sync::Arc;
+//! Name sanitization on create and rename over the current repository API.
+//! The fixture creates repository `test` with workspace `ws` and sends as the
+//! operator — see `support`.
 
 use axum::{
     body::Body,
@@ -7,88 +9,28 @@ use axum::{
 };
 use tower::ServiceExt;
 
-use raisin_models::nodes::types::NodeType;
-#[cfg(feature = "storage-rocksdb")]
-use raisin_rocksdb::RocksDBStorage;
-use raisin_storage::{BranchScope, CommitMetadata, NodeTypeRepository, Storage};
-#[cfg(not(feature = "storage-rocksdb"))]
-use raisin_storage_memory::InMemoryStorage;
-use raisin_transport_http as http;
-
-async fn create_test_node_type<S: Storage>(storage: &S, name: &str) {
-    let test_node_type = NodeType {
-        id: Some(name.to_string()),
-        strict: Some(false),
-        name: name.to_string(),
-        extends: None,
-        mixins: vec![],
-        overrides: None,
-        description: Some(format!("Test NodeType: {}", name)),
-        icon: None,
-        version: Some(1),
-        properties: None,
-        allowed_children: vec![],
-        required_nodes: vec![],
-        initial_structure: None,
-        versionable: Some(true),
-        immutable: None,
-        publishable: Some(true),
-        auditable: Some(false),
-        indexable: None,
-        index_types: None,
-        created_at: Some(chrono::Utc::now()),
-        updated_at: None,
-        published_at: None,
-        published_by: None,
-        compound_indexes: None,
-        is_mixin: None,
-        previous_version: None,
-    };
-    storage
-        .node_types()
-        .put(
-            BranchScope::new("test", "test", "main"),
-            test_node_type,
-            CommitMetadata::system("test setup"),
-        )
-        .await
-        .unwrap();
-}
+/// The HEAD route of workspace `ws` in repository `test`.
+const WS: &str = "/api/repository/test/main/head/ws";
 
 async fn app() -> axum::Router {
-    #[cfg(feature = "storage-rocksdb")]
-    {
-        let path = format!("/tmp/raisin-rocks-test-sanitize-{}", nanoid::nanoid!(6));
-        let _ = std::fs::remove_dir_all(&path);
-        let storage = Arc::new(RocksDBStorage::new(&path).unwrap());
-
-        // Create test NodeType
-        create_test_node_type(&*storage, "t").await;
-
-        return raisin_transport_http::router(storage);
-    }
-    #[cfg(not(feature = "storage-rocksdb"))]
-    {
-        let storage = Arc::new(InMemoryStorage::default());
-
-        // Create test NodeType
-        create_test_node_type(&*storage, "t").await;
-
-        raisin_transport_http::router(storage)
-    }
+    crate::support::Fixture::new("sanitize", "test", "main", &["ws"], &["t"])
+        .await
+        .app
 }
 
 #[tokio::test]
-async fn put_by_path_rejects_whitespace_leaf() {
+async fn create_rejects_whitespace_name() {
     let app = app().await;
-    // leaf is whitespace only -> sanitized name becomes empty -> 400
+    // A node is created by POST on its parent, and its path segment is its
+    // sanitized NAME. A whitespace-only name sanitizes to nothing -> 400.
+    let (status, text) = crate::support::create_at(&app, WS, "a", "a", "/a", "t").await;
+    assert!(status.is_success(), "seeding /a: {status} {text}");
     let node = serde_json::json!({
-        "id":"n1", "name":"ignored", "path":"/   ", "node_type":"t", "properties":{}, "children":[], "version":1
+        "id":"n1", "name":"   ", "node_type":"t", "properties":{}
     });
-    // percent-encode the space-containing path
     let req = Request::builder()
-        .method("PUT")
-        .uri("/api/repository/ws/%20%20%20")
+        .method("POST")
+        .uri(format!("{WS}/a"))
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&node).unwrap()))
         .unwrap();
@@ -97,24 +39,26 @@ async fn put_by_path_rejects_whitespace_leaf() {
 }
 
 #[tokio::test]
-async fn put_by_path_sanitizes_simple() {
+async fn create_sanitizes_simple_name() {
     let app = app().await;
-    // name will be sanitized: " Hello World " -> "hello-world"
+    // A child's path segment is its sanitized name: " Hello World " -> "hello-world"
+    let (status, text) = crate::support::create_at(&app, WS, "a", "a", "/a", "t").await;
+    assert!(status.is_success(), "seeding /a: {status} {text}");
     let node = serde_json::json!({
-        "id":"n2", "name":"any", "path":"/ Hello World ", "node_type":"t", "properties":{}, "children":[], "version":1
+        "id":"n2", "name":" Hello World ", "node_type":"t", "properties":{}
     });
     let req = Request::builder()
-        .method("PUT")
-        .uri("/api/repository/ws/%20Hello%20World%20")
+        .method("POST")
+        .uri(format!("{WS}/a"))
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&node).unwrap()))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::CREATED);
 
     // fetch via repo API normalized path
     let req = Request::builder()
-        .uri("/api/repository/ws/hello-world")
+        .uri(format!("{WS}/a/hello-world"))
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -125,23 +69,14 @@ async fn put_by_path_sanitizes_simple() {
 async fn rename_sanitizes_and_rejects_bad() {
     let app = app().await;
     // seed /x
-    let node = serde_json::json!({
-        "id":"x","name":"x","path":"/x","node_type":"t","properties":{},"children":[],"version":1
-    });
-    let req = Request::builder()
-        .method("PUT")
-        .uri("/api/repository/ws/x")
-        .header("content-type", "application/json")
-        .body(Body::from(serde_json::to_vec(&node).unwrap()))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    let (status, text) = crate::support::create_at(&app, WS, "x", "x", "/x", "t").await;
+    assert!(status.is_success(), "seeding /x: {status} {text}");
 
     // rename to " Hello World " -> ok
     let body = serde_json::json!({"newName":" Hello World "});
     let req = Request::builder()
         .method("POST")
-        .uri("/api/repository/ws/x?command=rename")
+        .uri(format!("{WS}/x?command=rename"))
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
         .unwrap();
@@ -152,7 +87,7 @@ async fn rename_sanitizes_and_rejects_bad() {
     let body = serde_json::json!({"newName":"bad/name"});
     let req = Request::builder()
         .method("POST")
-        .uri("/api/repository/ws/hello-world?command=rename")
+        .uri(format!("{WS}/hello-world?command=rename"))
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
         .unwrap();

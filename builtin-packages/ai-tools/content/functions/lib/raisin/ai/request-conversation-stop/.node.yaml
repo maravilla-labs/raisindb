@@ -1,0 +1,28 @@
+node_type: raisin:Function
+properties:
+  title: Request conversation stop
+  description: >-
+    Requests cooperative cancellation of the active AI turn for a conversation.
+    The request is matched with the conversation's private stream channel and is
+    acknowledged by the agent handler before it starts another model or tool
+    round. Work already committed before the request is preserved.
+  language: JavaScript
+  entry_file: index.js:handler
+  execution_mode: Sync
+  enabled: true
+  input_schema:
+    type: object
+    required: [conversation_path, stream_channel]
+    properties:
+      conversation_path: { type: string }
+      stream_channel: { type: string }
+      reason: { type: string }
+  output_schema:
+    type: object
+    properties:
+      accepted: { type: boolean }
+      request_id: { type: string }
+      requested_at: { type: string }
+      message: { type: string }
+  resource_limits:
+    timeout_ms: 10000

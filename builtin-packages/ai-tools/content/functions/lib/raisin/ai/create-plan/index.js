@@ -1,3 +1,6 @@
+import { idempotencyKey, keyToken } from '../agent-shared/tool-envelope.js';
+import { runEnvelope } from '../agent-shared/tool-envelope.js';
+import { TOOL_META } from '../agent-shared/tool-meta.js';
 /**
  * create-plan — Creates a structured plan with tasks as child nodes.
  *
@@ -11,6 +14,7 @@
  * Category: planning
  */
 async function handler(input) {
+  const enveloped = await runEnvelope(input, TOOL_META.createPlan, handler); if (enveloped) return enveloped;
   const { title, description, tasks, __raisin_context } = input;
   const workspace = __raisin_context?.workspace || 'ai';
   const msgPath = __raisin_context?.msg_path;
@@ -30,7 +34,16 @@ async function handler(input) {
   const planStatus = requiresApproval ? 'pending_approval' : 'in_progress';
 
   // Create plan node under the assistant message
-  const planName = `plan-${Date.now()}`;
+  /* Keyed by the operation id under a run (or an explicit idempotency_key):
+   * a replayed call finds the plan it already created. */
+  const idemKey = idempotencyKey(input);
+  const planName = idemKey ? `plan-${keyToken(idemKey)}` : `plan-${Date.now()}`;
+  if (idemKey) {
+    const prior = await raisin.nodes.get(workspace, `${msgPath}/${planName}`);
+    if (prior) {
+      return { success: true, replayed: true, plan_id: prior.id || null, plan_path: prior.path, title: prior.properties?.title || title, status: prior.properties?.status || planStatus, requires_approval: requiresApproval, total_tasks: tasks.length, tasks: [], message: 'This plan was already created by the same operation.' };
+    }
+  }
   const planNode = await raisin.nodes.create(workspace, msgPath, {
     name: planName,
     node_type: 'raisin:AIPlan',
@@ -63,14 +76,11 @@ async function handler(input) {
         description: task.description || '',
         status: 'pending',
         priority: task.priority || 'normal',
-        /* THE ARTIFACT THIS TASK IS ABOUT, when it has one. It is what makes the
-         * finalize gate reachable: `taskBuildTarget()` reads this, and a task with
-         * no target is not a build task and closes on the agent's word as before.
-         * Absent stays ABSENT — an empty string would look like a declared target
-         * that resolves to nothing. */
-        ...(typeof task.build_target_path === 'string' && task.build_target_path
-          ? { build_target_path: task.build_target_path }
-          : {}),
+        /* A plan describes intended outcomes, not proven writes. Persisting a
+         * guessed build target here makes discovery/reuse tasks impossible to
+         * close: the completion gate correctly asks for verification of an
+         * artifact the task never created. `update-task` binds the concrete
+         * path after an authoring tool has actually returned it. */
       },
     });
 
@@ -103,3 +113,5 @@ async function handler(input) {
     message,
   };
 }
+
+export { handler };

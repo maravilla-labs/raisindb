@@ -1,55 +1,89 @@
 /**
- * User memory loading for agent handlers.
+ * Per-user agent memory.
  *
- * Each agent stores per-user memory as a node at
- *   /agents/{agentName}/memory/{sanitized_user_id}
- * with either a markdown `content` property (current) or a legacy
- * `entries` array.  The loaded content is appended to the system prompt
- * so the AI retains user-specific context across conversations.
+ * Each agent keeps one markdown document per user at
+ *   ai:/agents/{agentName}/memory/{sanitized_user_id}
+ * (`raisin:AgentUserContext`, `content`; a legacy `entries` array is still
+ * read). The model turn appends it to the system prompt; `remember`,
+ * `forget` and `read-user-context` edit it.
+ *
+ * WHOSE memory is never taken from a tool's arguments: it is the run's
+ * OWNER — the agent the run executes and the user it acts for, both read
+ * from the run record core keeps (`memoryOwnerOf`). The memory tools run in
+ * a system context (no user role grants the `ai` workspace) and prove their
+ * run first, so a user can only ever reach their own memory with this agent.
  */
 
 import { log } from './logger.js';
+import { actingUser, runAgent, requireRunOperation } from './run-caller.js';
+import { runContextOf, buildEnvelope, errorEnvelope, locator } from './tool-envelope.js';
+
+export const MEMORY_WORKSPACE = 'ai';
+
+const safeUser = (id) => String(id || '').replace(/[^a-zA-Z0-9_-]/g, '_');
+
+/** Where one agent keeps one user's memory. */
+export function memoryPath(agentName, userId) {
+  return `/agents/${agentName}/memory/${safeUser(userId)}`;
+}
+
+/** `{ agentName, userId }` of a run record, or null when either is unknown. */
+export function memoryOwnerOf(rec) {
+  const agent = runAgent(rec).path;
+  const m = /^\/agents\/([^/]+)$/.exec(String(agent || ''));
+  const userId = actingUser(rec);
+  if (!m || !userId) return null;
+  return { agentName: m[1], userId };
+}
 
 /**
  * Load stored memory for a user from an agent's memory store.
- *
- * @param {string} agentName  Name segment of the agent (e.g. "sample-assistant")
- * @param {string} userId     User identifier
- * @returns {string} Memory content (markdown) or empty string
+ * Returns markdown, or '' when there is none.
  */
 async function loadUserMemory(agentName, userId) {
-  log.debug('memory', 'Loading user memory', { agent: agentName, user: userId });
   if (!agentName || !userId) return '';
-
-  const safeName = userId.replace(/[^a-zA-Z0-9_-]/g, '_');
-  const contextPath = `/agents/${agentName}/memory/${safeName}`;
-
   try {
-    const contextNode = await raisin.nodes.get('ai', contextPath);
-    if (!contextNode) return '';
-
-    // Preferred format: markdown string
-    const rawContent = contextNode.properties?.content;
-    if (typeof rawContent === 'string' && rawContent.trim()) {
-      log.debug('memory', 'User memory loaded', { content_length: rawContent.trim().length });
-      return rawContent.trim();
-    }
-
-    // Legacy format: array of { key, value } entries
-    if (Array.isArray(contextNode.properties?.entries)) {
-      const entries = contextNode.properties.entries;
-      log.debug('memory', 'User memory loaded (legacy)', { entry_count: entries.length });
-      return entries
-        .filter(e => e.key)
-        .map(e => `- ${e.key}: ${e.value || ''}`)
+    const node = await raisin.nodes.get(MEMORY_WORKSPACE, memoryPath(agentName, userId));
+    if (!node) return '';
+    const raw = node.properties?.content;
+    if (typeof raw === 'string' && raw.trim()) return raw.trim();
+    if (Array.isArray(node.properties?.entries)) {
+      return node.properties.entries
+        .filter((e) => e.key)
+        .map((e) => `- ${e.key}: ${e.value || ''}`)
         .join('\n');
     }
-  } catch (_) {
-    // Node doesn't exist — not an error
+  } catch (err) {
+    log.debug('memory', 'No user memory', { error: String(err && err.message) });
   }
-
-  log.debug('memory', 'No user memory found');
   return '';
+}
+
+/** Write (create or replace) one user's memory document. */
+export async function saveUserMemory(agentName, userId, content) {
+  const path = memoryPath(agentName, userId);
+  const now = new Date().toISOString();
+  const existing = await raisin.nodes.get(MEMORY_WORKSPACE, path);
+  if (existing) {
+    await raisin.nodes.update(MEMORY_WORKSPACE, path, { properties: { content, updated_at: now } });
+    return { path, action: 'updated' };
+  }
+  const folder = `/agents/${agentName}/memory`;
+  if (!(await raisin.nodes.get(MEMORY_WORKSPACE, folder))) {
+    try {
+      await raisin.nodes.create(MEMORY_WORKSPACE, `/agents/${agentName}`, {
+        name: 'memory', node_type: 'raisin:Folder', properties: { title: 'User Memory' },
+      });
+    } catch (err) {
+      if (!/already exists/i.test(String(err && err.message))) throw err;
+    }
+  }
+  await raisin.nodes.create(MEMORY_WORKSPACE, folder, {
+    name: safeUser(userId),
+    node_type: 'raisin:AgentUserContext',
+    properties: { user_id: userId, content, updated_at: now },
+  });
+  return { path, action: 'created' };
 }
 
 /**
@@ -58,7 +92,6 @@ async function loadUserMemory(agentName, userId) {
  */
 function formatMemoryForPrompt(memoryContent) {
   if (!memoryContent) return '';
-
   return [
     '',
     '[User Context Memory]',
@@ -73,3 +106,34 @@ export {
   loadUserMemory,
   formatMemoryForPrompt,
 };
+
+/**
+ * Run a memory tool for the PROVEN owner of the calling run. `body(owner,
+ * input)` returns `{ payload, writes? }`. Outside a run it refuses: without a
+ * run there is no trustworthy answer to "whose memory is this".
+ */
+export async function memoryTool(input, functionPath, body) {
+  const ctx = runContextOf(input);
+  if (!ctx) {
+    return { success: false, error: 'Agent memory works only inside an agent run (the run says whose memory it is).' };
+  }
+  try {
+    const run = await requireRunOperation(input, functionPath, { what: 'Agent memory' });
+    const owner = memoryOwnerOf(run.rec);
+    if (!owner) {
+      throw Object.assign(new Error('This run acts for no user, so it has no user memory.'), { error_class: 'unsupported' });
+    }
+    const r = await body(owner, input || {});
+    const writes = (r.writes || []).map((w) => ({ locator: locator(MEMORY_WORKSPACE, w.path), action: w.action }));
+    return buildEnvelope({
+      operationId: ctx.operation_id,
+      status: 'succeeded',
+      payload: r.payload,
+      writes,
+      artifactRefs: writes.map((w) => ({ kind: 'user_memory', locator: w.locator, role: 'primary' })),
+      retryPolicy: { retryable: false, max_attempts: 1, backoff_ms: 0, reason: writes.length ? 'idempotent_by_operation_id' : 'read_only' },
+    });
+  } catch (err) {
+    return errorEnvelope(ctx.operation_id, err);
+  }
+}

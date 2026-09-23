@@ -1,0 +1,15 @@
+node_type: "raisin:Function"
+properties:
+  title: "Node Branch"
+  description: |
+    Branches are worktrees. action=fork (name: a new draft branch from the
+    current branch), diff (base: what changed on this branch inside your roots),
+    merge (target: merge this branch into target; conflicts are reported and
+    nothing merges; dry_run to only check), discard (delete this draft branch).
+  execution_mode: "inline"
+  category: "node-dev"
+  enabled: true
+  language: "javascript"
+  entry_file: "index.js:handler"
+  version: 1
+  input_schema: {"type": "object", "properties": {"roots": {"type": "array", "description": "The subtrees you work in: [{workspace, path}] (path defaults to '/'). The first root is the base for relative paths; nothing outside the roots can be named. An agent run's own grant narrows these further.", "items": {"type": "object", "properties": {"workspace": {"type": "string"}, "path": {"type": "string"}}, "required": ["workspace"]}}, "workspace": {"type": "string", "description": "Shorthand for roots=[{workspace, path:'/'}]."}, "branch": {"type": "string", "description": "Branch to work on (default main). Develop on a draft branch from node-branch fork."}, "action": {"type": "string", "enum": ["fork", "diff", "merge", "discard"]}, "name": {"type": "string"}, "base": {"type": "string"}, "target": {"type": "string"}, "dry_run": {"type": "boolean"}, "message": {"type": "string"}}, "required": ["action"]}

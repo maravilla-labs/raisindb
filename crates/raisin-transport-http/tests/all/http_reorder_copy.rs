@@ -1,86 +1,16 @@
 #![cfg(not(feature = "s3"))]
-use std::sync::Arc;
+//! Reorder and copy over the current repository API. The fixture creates the
+//! repository and workspace these tests write into and sends as the operator —
+//! see `support`.
 
 use axum::{body::Body, http::Request};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-use raisin_models::nodes::types::NodeType;
-#[cfg(feature = "storage-rocksdb")]
-use raisin_rocksdb::RocksDBStorage;
-use raisin_storage::{BranchScope, CommitMetadata, NodeTypeRepository, Storage};
-#[cfg(not(feature = "storage-rocksdb"))]
-use raisin_storage_memory::InMemoryStorage;
-use raisin_transport_http as http;
-
-async fn create_test_node_type<S: Storage>(storage: &S, name: &str) {
-    let test_node_type = NodeType {
-        id: Some(name.to_string()),
-        strict: Some(false),
-        name: name.to_string(),
-        extends: None,
-        mixins: vec![],
-        overrides: None,
-        description: Some(format!("Test NodeType: {}", name)),
-        icon: None,
-        version: Some(1),
-        properties: None,
-        allowed_children: vec![],
-        required_nodes: vec![],
-        initial_structure: None,
-        versionable: Some(true),
-        immutable: None,
-        publishable: Some(true),
-        auditable: Some(false),
-        indexable: None,
-        index_types: None,
-        created_at: Some(chrono::Utc::now()),
-        updated_at: None,
-        published_at: None,
-        published_by: None,
-        compound_indexes: None,
-        is_mixin: None,
-        previous_version: None,
-    };
-    storage
-        .node_types()
-        .put(
-            BranchScope::new("default", "default", "main"),
-            test_node_type,
-            CommitMetadata::system("test setup"),
-        )
-        .await
-        .unwrap();
-}
-
-#[cfg_attr(not(feature = "storage-rocksdb"), allow(unused_variables))]
 async fn app_with_test_nodetype(path_suffix: &str) -> axum::Router {
-    #[cfg(feature = "storage-rocksdb")]
-    {
-        let path = format!("/tmp/raisin-rocks-test-{}", path_suffix);
-        let _ = std::fs::remove_dir_all(&path);
-        let storage = Arc::new(RocksDBStorage::new(&path).unwrap());
-        create_test_node_type(&*storage, "t").await;
-        let app = raisin_transport_http::router(storage);
-
-        // Create workspace
-        let ws_body = serde_json::json!({"name": "ws", "allowed_node_types": [], "allowed_root_node_types": [], "depends_on": []});
-        let req = Request::builder()
-            .method("PUT")
-            .uri("/api/workspaces/main/ws")
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&ws_body).unwrap()))
-            .unwrap();
-        let _ = app.clone().oneshot(req).await.unwrap();
-
-        app
-    }
-    #[cfg(not(feature = "storage-rocksdb"))]
-    {
-        let storage = Arc::new(InMemoryStorage::default());
-        create_test_node_type(&*storage, "t").await;
-        raisin_transport_http::router(storage)
-    }
+    crate::support::Fixture::new(path_suffix, "main", "main", &["ws"], &["t"])
+        .await
+        .app
 }
 
 #[tokio::test]
@@ -171,26 +101,18 @@ async fn repo_command_reorder_before_and_after() {
         ("y", "y", "/p/y", Some("/p")),
         ("z", "z", "/p/z", Some("/p")),
     ] {
-        let mut body = serde_json::json!({
-            "id": id,
-            "name": name,
-            "path": path,
-            "node_type": "t",
-            "properties": {},
-            "children": [],
-            "version": 1
-        });
-        if let Some(p) = parent {
-            body["parent"] = serde_json::Value::String(p.to_string());
-        }
-        let req = Request::builder()
-            .method("PUT")
-            .uri("/api/repository/main/main/head/ws".to_string() + path)
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap()))
-            .unwrap();
-        let resp = app.clone().oneshot(req).await.unwrap();
-        assert!(resp.status().is_success());
+        // Created through POST on the parent (PUT only updates an existing node).
+        let _ = parent;
+        let (status, text) = crate::support::create_at(
+            &app,
+            "/api/repository/main/main/head/ws",
+            id,
+            name,
+            path,
+            "t",
+        )
+        .await;
+        assert!(status.is_success(), "seeding {path}: {status} {text}");
     }
 
     // move z before y
@@ -256,18 +178,18 @@ async fn reorder_position_beyond_len_appends_and_noop_self_moves() {
         ("x", "x", "/p/x", Some("/p")),
         ("y", "y", "/p/y", Some("/p")),
     ] {
-        let mut body = serde_json::json!({ "id": id, "name": name, "path": path, "node_type": "t", "properties": {}, "children": [], "version": 1 });
-        if let Some(p) = parent {
-            body["parent"] = serde_json::Value::String(p.to_string());
-        }
-        let req = Request::builder()
-            .method("PUT")
-            .uri("/api/repository/main/main/head/ws".to_string() + path)
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap()))
-            .unwrap();
-        let resp = app.clone().oneshot(req).await.unwrap();
-        assert!(resp.status().is_success());
+        // Created through POST on the parent (PUT only updates an existing node).
+        let _ = parent;
+        let (status, text) = crate::support::create_at(
+            &app,
+            "/api/repository/main/main/head/ws",
+            id,
+            name,
+            path,
+            "t",
+        )
+        .await;
+        assert!(status.is_success(), "seeding {path}: {status} {text}");
     }
 
     // reorder beyond len -> append: move x after y
@@ -352,18 +274,18 @@ async fn reorder_before_with_missing_target_returns_404_and_no_change() {
         ("x", "x", "/p/x", Some("/p")),
         ("y", "y", "/p/y", Some("/p")),
     ] {
-        let mut body = serde_json::json!({ "id": id, "name": name, "path": path, "node_type": "t", "properties": {}, "children": [], "version": 1 });
-        if let Some(p) = parent {
-            body["parent"] = serde_json::Value::String(p.to_string());
-        }
-        let req = Request::builder()
-            .method("PUT")
-            .uri("/api/repository/main/main/head/ws".to_string() + path)
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap()))
-            .unwrap();
-        let resp = app.clone().oneshot(req).await.unwrap();
-        assert!(resp.status().is_success());
+        // Created through POST on the parent (PUT only updates an existing node).
+        let _ = parent;
+        let (status, text) = crate::support::create_at(
+            &app,
+            "/api/repository/main/main/head/ws",
+            id,
+            name,
+            path,
+            "t",
+        )
+        .await;
+        assert!(status.is_success(), "seeding {path}: {status} {text}");
     }
 
     // move x before non-existent sibling -> should return 404 and keep order as x, y
@@ -401,23 +323,22 @@ async fn copy_tree_to_same_path_conflicts() {
         ("dst", "dst", "/dst", None),
         ("a", "a", "/dst/a", Some("/dst")),
     ] {
-        let mut body = serde_json::json!({
-            "id": id, "name": name, "path": path, "node_type": "t", "properties": {}, "children": [], "version": 1
-        });
-        if let Some(p) = parent {
-            body["parent"] = serde_json::Value::String(p.to_string());
-        }
-        let req = Request::builder()
-            .method("PUT")
-            .uri("/api/repository/main/main/head/ws".to_string() + path)
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap()))
-            .unwrap();
-        let resp = app.clone().oneshot(req).await.unwrap();
-        assert!(resp.status().is_success());
+        // Created through POST on the parent (PUT only updates an existing node).
+        let _ = parent;
+        let (status, text) = crate::support::create_at(
+            &app,
+            "/api/repository/main/main/head/ws",
+            id,
+            name,
+            path,
+            "t",
+        )
+        .await;
+        assert!(status.is_success(), "seeding {path}: {status} {text}");
     }
 
-    // attempt copy_tree /dst/a -> /dst/a (same path) should fail (500)
+    // attempt copy_tree /dst/a -> /dst/a (same path) is refused as a client
+    // error: the destination already exists
     let body = serde_json::json!({"targetPath":"/dst/a"});
     let req = Request::builder()
         .method("POST")
@@ -426,7 +347,7 @@ async fn copy_tree_to_same_path_conflicts() {
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -441,30 +362,23 @@ async fn repo_command_copy_tree_copies_descendants() {
         ("c", "c", "/src/a/c", Some("/src/a")),
         ("dst", "dst", "/dst", None),
     ] {
-        let mut body = serde_json::json!({
-            "id": id,
-            "name": name,
-            "path": path,
-            "node_type": "t",
-            "properties": {},
-            "children": [],
-            "version": 1
-        });
-        if let Some(p) = parent {
-            body["parent"] = serde_json::Value::String(p.to_string());
-        }
-        let req = Request::builder()
-            .method("PUT")
-            .uri("/api/repository/main/main/head/ws".to_string() + path)
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap()))
-            .unwrap();
-        let resp = app.clone().oneshot(req).await.unwrap();
-        assert!(resp.status().is_success());
+        // Created through POST on the parent (PUT only updates an existing node).
+        let _ = parent;
+        let (status, text) = crate::support::create_at(
+            &app,
+            "/api/repository/main/main/head/ws",
+            id,
+            name,
+            path,
+            "t",
+        )
+        .await;
+        assert!(status.is_success(), "seeding {path}: {status} {text}");
     }
 
-    // copy_tree /src/a -> /dst/a (target_path is the parent, so "/dst")
-    let body = serde_json::json!({"targetPath":"/dst"});
+    // copy_tree /src/a -> /dst/a. Without `newName`, `targetPath` is the full
+    // DESTINATION path (its parent and its name), so "/dst/a".
+    let body = serde_json::json!({"targetPath":"/dst/a"});
     let req = Request::builder()
         .method("POST")
         .uri("/api/repository/main/main/head/ws/src/a/raisin:cmd/copy_tree")

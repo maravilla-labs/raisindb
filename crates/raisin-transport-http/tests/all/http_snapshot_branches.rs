@@ -14,24 +14,14 @@ use axum::{
 use serde_json::json;
 use tower::ServiceExt;
 
-#[cfg(feature = "storage-rocksdb")]
-use raisin_rocksdb::RocksDBStorage;
-#[cfg(feature = "storage-rocksdb")]
-use std::sync::Arc;
-
-#[cfg(feature = "storage-rocksdb")]
-use raisin_transport_http::router;
-
 /// Helper to create a test router with RocksDB storage
 #[cfg(feature = "storage-rocksdb")]
-fn create_test_router() -> Router {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-    let id = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let path = format!("/tmp/raisin-test-snapshot-branches-{}", id);
-    let _ = std::fs::remove_dir_all(&path);
-    let storage = Arc::new(RocksDBStorage::new(&path).expect("Failed to create RocksDBStorage"));
-    router(storage)
+async fn create_test_router() -> Router {
+    // Repository `default` with branch `main` and workspace `demo`, sent as the
+    // operator — see `support`.
+    crate::support::Fixture::new("snapshot-branches", "default", "main", &["demo"], &[])
+        .await
+        .app
 }
 
 /// Helper to parse JSON response
@@ -54,9 +44,11 @@ async fn create_node(
     name: &str,
     node_type: &str,
 ) -> (Router, serde_json::Value) {
+    // `raisin:Page` requires a title.
     let request_body = json!({
         "name": name,
         "node_type": node_type,
+        "properties": { "title": name },
     });
 
     let response = app
@@ -65,8 +57,11 @@ async fn create_node(
             Request::builder()
                 .method("POST")
                 .uri(&format!(
-                    "/api/repository/{}/{}/{}/{}",
-                    repo, branch, workspace, parent_path
+                    "/api/repository/{}/{}/head/{}/{}",
+                    repo,
+                    branch,
+                    workspace,
+                    parent_path.trim_start_matches('/')
                 ))
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_vec(&request_body).unwrap()))
@@ -75,8 +70,13 @@ async fn create_node(
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let node: serde_json::Value = parse_json_response(response).await;
+    let status = response.status();
+    let body: serde_json::Value = parse_json_response(response).await;
+    assert_eq!(status, StatusCode::CREATED, "creating {name}: {body}");
+    let node = match body.get("node") {
+        Some(node) => node.clone(),
+        None => body,
+    };
     (app, node)
 }
 
@@ -107,7 +107,7 @@ async fn create_branch_from_revision(
     app: Router,
     repo: &str,
     branch_name: &str,
-    from_revision: u64,
+    from_revision: &str,
 ) -> Router {
     let request_body = json!({
         "name": branch_name,
@@ -140,7 +140,7 @@ async fn create_branch_from_revision(
 #[cfg(feature = "storage-rocksdb")]
 async fn test_snapshot_branch_nested_listing() {
     // Create test environment
-    let app = create_test_router();
+    let app = create_test_router().await;
 
     // 1. Create nodes on main branch
     let (app, folder) = create_node(
@@ -185,12 +185,15 @@ async fn test_snapshot_branch_nested_listing() {
 
     // 2. Get current revision (should be after creating the 2 children)
     let (app, branch_info) = get_branch(app, "default", "main").await;
-    let snapshot_revision = branch_info["head"].as_u64().unwrap();
+    let snapshot_revision = branch_info["head"].as_str().unwrap().to_string();
     eprintln!("Snapshot revision: {}", snapshot_revision);
 
+    let head: raisin_hlc::HLC = snapshot_revision
+        .parse()
+        .expect("branch head is an HLC string");
     assert!(
-        snapshot_revision >= 3,
-        "Expected at least 3 revisions (folder + 2 children), got {}",
+        head > raisin_hlc::HLC::new(0, 0),
+        "Expected the three commits (folder + 2 children) to have moved HEAD, got {}",
         snapshot_revision
     );
 
@@ -217,7 +220,7 @@ async fn test_snapshot_branch_nested_listing() {
             Request::builder()
                 .method("GET")
                 .uri(&format!(
-                    "/api/repository/default/main/demo/{}/",
+                    "/api/repository/default/main/head/demo{}/",
                     folder_path
                 ))
                 .body(Body::empty())
@@ -233,7 +236,7 @@ async fn test_snapshot_branch_nested_listing() {
 
     // 5. Create snapshot branch from the revision BEFORE child3 was added
     let app =
-        create_branch_from_revision(app, "default", "feature-snapshot", snapshot_revision).await;
+        create_branch_from_revision(app, "default", "feature-snapshot", &snapshot_revision).await;
     eprintln!(
         "Created snapshot branch from revision {}",
         snapshot_revision
@@ -247,7 +250,7 @@ async fn test_snapshot_branch_nested_listing() {
             Request::builder()
                 .method("GET")
                 .uri(&format!(
-                    "/api/repository/default/feature-snapshot/rev/{}/demo/{}/",
+                    "/api/repository/default/feature-snapshot/rev/{}/demo{}/",
                     snapshot_revision, folder_path
                 ))
                 .body(Body::empty())
@@ -310,7 +313,7 @@ async fn test_snapshot_branch_nested_listing() {
             Request::builder()
                 .method("GET")
                 .uri(&format!(
-                    "/api/repository/default/feature-snapshot/rev/{}/demo/{}",
+                    "/api/repository/default/feature-snapshot/rev/{}/demo{}",
                     snapshot_revision, folder_path
                 ))
                 .body(Body::empty())
@@ -336,7 +339,7 @@ async fn test_snapshot_branch_nested_listing() {
 async fn test_snapshot_branch_root_vs_nested() {
     // This test specifically verifies that BOTH root and nested paths work on snapshot branches
 
-    let app = create_test_router();
+    let app = create_test_router().await;
 
     // 1. Create folder at root
     let (app, root_folder) = create_node(
@@ -391,10 +394,11 @@ async fn test_snapshot_branch_root_vs_nested() {
 
     // 4. Get snapshot revision
     let (app, branch_info) = get_branch(app, "default", "main").await;
-    let snapshot_revision = branch_info["head"].as_u64().unwrap();
+    let snapshot_revision = branch_info["head"].as_str().unwrap().to_string();
 
     // 5. Create snapshot branch
-    let app = create_branch_from_revision(app, "default", "test-snapshot", snapshot_revision).await;
+    let app =
+        create_branch_from_revision(app, "default", "test-snapshot", &snapshot_revision).await;
 
     // 6. TEST ROOT LEVEL - should work
     let response = app
@@ -427,7 +431,7 @@ async fn test_snapshot_branch_root_vs_nested() {
             Request::builder()
                 .method("GET")
                 .uri(&format!(
-                    "/api/repository/default/test-snapshot/rev/{}/demo/{}/",
+                    "/api/repository/default/test-snapshot/rev/{}/demo{}/",
                     snapshot_revision, root_folder_path
                 ))
                 .body(Body::empty())
@@ -459,7 +463,7 @@ async fn test_snapshot_branch_root_vs_nested() {
             Request::builder()
                 .method("GET")
                 .uri(&format!(
-                    "/api/repository/default/test-snapshot/rev/{}/demo/{}/",
+                    "/api/repository/default/test-snapshot/rev/{}/demo{}/",
                     snapshot_revision, nested_folder_path
                 ))
                 .body(Body::empty())

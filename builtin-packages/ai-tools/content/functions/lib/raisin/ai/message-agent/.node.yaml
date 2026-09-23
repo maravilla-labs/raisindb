@@ -1,0 +1,24 @@
+node_type: raisin:Function
+properties:
+  name: message-agent
+  title: Message Agent
+  description: >
+    Send new input to one of your running child agents. mode message adds
+    information it should take into account; mode steer redirects its work. The
+    input is queued and read at the child's next safe boundary.
+  execution_mode: inline
+  execution_context: system
+  category: delegation
+  # raisin:Function is strict; tool traits live in its declared metadata.
+  metadata: { idempotent: true }
+  enabled: true
+  language: javascript
+  entry_file: index.js:handler
+  input_schema:
+    type: object
+    additionalProperties: false
+    required: [agent, text]
+    properties:
+      agent: { type: string, description: "Child key or run id" }
+      text: { type: string }
+      mode: { type: string, enum: [message, steer], default: message }

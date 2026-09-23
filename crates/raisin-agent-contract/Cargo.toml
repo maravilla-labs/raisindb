@@ -1,0 +1,22 @@
+[package]
+name = "raisin-agent-contract"
+version = "0.1.0"
+edition = "2021"
+description = "Wire contract of the AgentRun reducer seam: envelope types, validation, canonical JSON and fixtures"
+license = "BSL-1.1"
+
+# SERDE-ONLY on purpose. This crate is the single source of the core-to-WASM
+# reducer contract and is compiled by three different builds: this workspace,
+# the separate `sdks/rust/raisin-sdk` workspace, and guest crates that target
+# `wasm32-wasip2` (a domain package's own reducer). Explicit versions — never
+# `workspace = true` — so a path dependency from another workspace resolves.
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[[test]]
+name = "all"
+path = "tests/all/main.rs"

@@ -219,6 +219,22 @@ impl RocksDBTransaction {
             if bookkeeping {
                 metadata.insert("bookkeeping".to_string(), serde_json::Value::Bool(true));
             }
+            // A transactional MOVE records the pre-move path on its change;
+            // when it differs from where the node is now, say so exactly the
+            // way the direct move path does (`moved` + `old_path`), so the
+            // reference-retarget job runs and consumers see a move, never an
+            // ambiguous delete-plus-create.
+            if matches!(event_kind, NodeEventKind::Updated) {
+                if let (Some(old), Some(now)) = (stored_path.as_ref(), node_path.as_ref()) {
+                    if old != now {
+                        metadata.insert("moved".to_string(), serde_json::Value::Bool(true));
+                        metadata.insert(
+                            "old_path".to_string(),
+                            serde_json::Value::String(old.clone()),
+                        );
+                    }
+                }
+            }
             if let Some(data) = node_data {
                 metadata.insert("node_data".to_string(), data);
             }

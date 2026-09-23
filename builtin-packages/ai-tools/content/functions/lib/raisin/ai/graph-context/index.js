@@ -1,3 +1,5 @@
+import { runEnvelope } from '../agent-shared/tool-envelope.js';
+import { TOOL_META } from '../agent-shared/tool-meta.js';
 /**
  * graph-context — seed by meaning, then expand along the graph.
  *
@@ -59,6 +61,7 @@ const MAX_NODES = 60;
 const FAN_OUT_LIMIT = 25;
 
 export async function handler(input) {
+  const enveloped = await runEnvelope(input, TOOL_META.graphContext, handler); if (enveloped) return enveloped;
   const { query, seeds, workspaces, hops, seed_limit } = input || {};
 
   const depth = Math.min(

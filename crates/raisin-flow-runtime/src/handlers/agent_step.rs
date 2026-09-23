@@ -3,16 +3,24 @@
 // RaisinDB - Git-like hierarchical multi model database
 // Copyright (C) 2019-2025 SOLUTAS GmbH, Switzerland
 
-//! Lightweight single-shot AI agent step handler.
+//! The flow's AI agent step: the agent runs as a durable AgentRun.
 //!
-//! Calls an agent with the flow context as input. The agent's OWN tools
-//! (configured on the agent node) are executed in a bounded internal
-//! loop — synchronously, with no conversation persistence and no child
-//! steps. For workflow-level tools, orchestration, or explicit tool
-//! visibility, use an `ai_sequence` container instead.
+//! The step does not call a model itself. On first entry it asks the AI
+//! package's start function ([`FLOW_AGENT_RUN_FUNCTION`]) to open a
+//! conversation with the step's prompt and create an AgentRun for the agent —
+//! the same run every conversation uses, with the agent's own tools, its
+//! budgets, stop / steer / approve, leases and resume. The run carries a
+//! WAITER naming this flow instance, and the step parks (`agent_run` wait).
 //!
-//! Use cases: classify email, extract entities, sentiment analysis,
-//! generate summary — including agents that need a lookup tool to do so.
+//! When the run ends, core hands its result to the waiter through a
+//! `FlowInstanceExecution` resume job (durably owed until enqueued, on any
+//! node), and the step re-enters with it: the run's final answer becomes the
+//! step's `response`, parsed into `structured_output` when a
+//! `response_format` was asked for. A run that failed or was stopped fails the
+//! step through the ordinary error machinery (retry, error edge, rollback).
+//!
+//! Use cases: classify email, extract entities, summarize — including agents
+//! that need their own tools to do so.
 
 use super::{StepHandler, StepResult};
 use crate::runtime::DataMapper;
@@ -20,27 +28,149 @@ use crate::types::{
     FlowCallbacks, FlowContext, FlowError, FlowExecutionEvent, FlowNode, FlowResult,
 };
 use async_trait::async_trait;
-use serde_json::Value;
-use std::time::Instant;
-use tracing::{debug, error, instrument, warn};
+use serde_json::{json, Value};
+use tracing::{debug, instrument, warn};
 
-/// Default cap for the internal tool loop of an agent step
-const MAX_TOOL_ITERATIONS_DEFAULT: u32 = 5;
+/// The AI package function that starts a flow step's AgentRun.
+pub const FLOW_AGENT_RUN_FUNCTION: &str = "/lib/raisin/ai/flow-agent-run";
 
-/// Handler for single-shot AI agent steps.
-#[derive(Debug)]
+/// Wait reason (and `WaitType`) of a step waiting for its run.
+pub const AGENT_RUN_WAIT: &str = "agent_run";
+
+/// Variable the resume stores the run's result under.
+pub const AGENT_RUN_RESULT_VAR: &str = "__agent_run_result";
+
+/// The `expected_event` of the wait: which run the step is waiting for.
+pub fn expected_event(run_id: &str) -> String {
+    format!("{AGENT_RUN_WAIT}:{run_id}")
+}
+
+/// Default model-call budget of a step's run (the old tool-loop cap was 5).
+const MAX_MODEL_CALLS_DEFAULT: u32 = 8;
+
+/// Handler for AI agent steps.
+#[derive(Debug, Default)]
 pub struct AgentStepHandler;
 
 impl AgentStepHandler {
+    /// A handler.
     pub fn new() -> Self {
         Self
     }
 }
 
-impl Default for AgentStepHandler {
-    fn default() -> Self {
-        Self::new()
+fn agent_ref_of(step: &FlowNode, context: &FlowContext) -> FlowResult<String> {
+    let raw = step.get_property("agent_ref").cloned().ok_or_else(|| {
+        FlowError::MissingProperty(format!(
+            "Agent step '{}' missing required property: agent_ref",
+            step.id
+        ))
+    })?;
+    let resolved = DataMapper::map(&raw, context)?;
+    resolved
+        .as_str()
+        .map(String::from)
+        .or_else(|| {
+            resolved.as_object().and_then(|obj| {
+                obj.get("raisin:path")
+                    .or_else(|| obj.get("raisin:ref"))
+                    .and_then(Value::as_str)
+                    .map(String::from)
+            })
+        })
+        .ok_or_else(|| {
+            FlowError::InvalidDefinition(format!(
+                "Agent step '{}' resolved agent_ref to an invalid value",
+                step.id
+            ))
+        })
+}
+
+/// The user message: an explicit `prompt` (or `message`), template-resolved;
+/// otherwise the triggering content from the flow input.
+fn prompt_of(step: &FlowNode, context: &FlowContext) -> FlowResult<String> {
+    let text = match step
+        .get_property("prompt")
+        .or_else(|| step.get_property("message"))
+    {
+        Some(v) => match DataMapper::map(v, context)? {
+            Value::String(s) => s,
+            Value::Null => String::new(),
+            other => other.to_string(),
+        },
+        // A trigger-started flow carries the changed node as `input.node`.
+        None => context
+            .input
+            .get("node")
+            .or_else(|| context.input.get("event").and_then(|e| e.get("node_data")))
+            .and_then(|n| n.get("properties"))
+            .and_then(|p| p.get("content"))
+            .and_then(Value::as_str)
+            .or_else(|| context.input.get("message").and_then(Value::as_str))
+            .or_else(|| context.input.get("input").and_then(Value::as_str))
+            .unwrap_or("")
+            .to_string(),
+    };
+    Ok(super::context_injection::with_context_block(
+        text,
+        context,
+        super::context_injection::ContextInjection::from_step(step),
+    ))
+}
+
+/// How many times this step has been entered (loops create a new run per visit).
+fn visit_of(step: &FlowNode, context: &FlowContext) -> u64 {
+    context
+        .variables
+        .get(crate::runtime::executor::VISITS_KEY)
+        .and_then(|v| v.get(&step.id))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+}
+
+/// The step's output from its run's result.
+fn output_of(step: &FlowNode, result: &Value) -> Result<Value, FlowError> {
+    let status = result
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("failed");
+    let run_id = result.get("agent_run_id").cloned().unwrap_or(Value::Null);
+    let outcome = result.get("outcome").cloned().unwrap_or(Value::Null);
+    let message = outcome
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if status != "completed" {
+        let code = outcome
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or(status);
+        return Err(FlowError::AIProvider(format!(
+            "agent run {} {status} ({code}){}",
+            run_id.as_str().unwrap_or("?"),
+            if message.is_empty() {
+                String::new()
+            } else {
+                format!(": {message}")
+            }
+        )));
     }
+    let mut output = json!({
+        "response": message,
+        "agent_run_id": run_id,
+        "outcome": outcome.get("kind").cloned().unwrap_or(Value::Null),
+        "usage": result.get("usage").cloned().unwrap_or(Value::Null),
+    });
+    if step.get_property("response_format").is_some() && !message.is_empty() {
+        match serde_json::from_str::<Value>(message.trim()) {
+            Ok(parsed) => output["structured_output"] = parsed,
+            Err(e) => {
+                warn!(step_id = %step.id, "response_format set but the answer is not JSON: {e}")
+            }
+        }
+    }
+    Ok(output)
 }
 
 #[async_trait]
@@ -52,332 +182,90 @@ impl StepHandler for AgentStepHandler {
         context: &mut FlowContext,
         callbacks: &dyn FlowCallbacks,
     ) -> FlowResult<StepResult> {
-        debug!("Executing agent step: {}", step.id);
-        let step_start = Instant::now();
+        // Re-entry with the run's result.
+        if let Some(result) = context.variables.remove(AGENT_RUN_RESULT_VAR) {
+            let output = match output_of(step, &result) {
+                Ok(output) => output,
+                Err(error) => return Ok(StepResult::Error { error }),
+            };
+            if let Some(text) = output["response"].as_str().filter(|t| !t.is_empty()) {
+                let _ = callbacks
+                    .emit_event(&context.instance_id, FlowExecutionEvent::text_chunk(text))
+                    .await;
+            }
+            let _ = callbacks
+                .emit_event(
+                    &context.instance_id,
+                    FlowExecutionEvent::step_completed(&step.id, output.clone(), 0),
+                )
+                .await;
+            let next_node_id = step
+                .next_node
+                .clone()
+                .or_else(|| step.get_string_property("next_node"))
+                .unwrap_or_else(|| "end".to_string());
+            return Ok(StepResult::Continue {
+                next_node_id,
+                output,
+            });
+        }
 
-        // Emit step started event
         let _ = callbacks
             .emit_event(
                 &context.instance_id,
                 FlowExecutionEvent::step_started(&step.id, None, "agent_step"),
             )
             .await;
-
-        // Get agent reference
-        let agent_ref_value = step.get_property("agent_ref").cloned().ok_or_else(|| {
-            FlowError::MissingProperty(format!(
-                "Agent step '{}' missing required property: agent_ref",
-                step.id
-            ))
-        })?;
-        let resolved_agent_ref = DataMapper::map(&agent_ref_value, context)?;
-        let agent_ref = resolved_agent_ref
-            .as_str()
-            .map(String::from)
-            .or_else(|| {
-                resolved_agent_ref.as_object().and_then(|obj| {
-                    obj.get("raisin:path")
-                        .or_else(|| obj.get("raisin:ref"))
-                        .and_then(|v| v.as_str())
-                        .map(String::from)
-                })
-            })
-            .ok_or_else(|| {
-                FlowError::InvalidDefinition(format!(
-                    "Agent step '{}' resolved agent_ref to an invalid value",
-                    step.id
-                ))
-            })?;
-
+        let agent_ref = agent_ref_of(step, context)?;
         let agent_workspace = step
             .get_string_property("agent_workspace")
             .unwrap_or_else(|| "functions".to_string());
-
-        // Build user message: an explicit `prompt` (or `message`) property is
-        // template-resolved against the flow context (e.g.
-        // "Summarize: {{ steps.fetch.body }}"); otherwise fall back to
-        // digging the triggering content out of the flow input.
-        let user_content: String = match step
-            .get_property("prompt")
-            .or_else(|| step.get_property("message"))
-        {
-            Some(prompt_value) => match DataMapper::map(prompt_value, context)? {
-                Value::String(s) => s,
-                Value::Null => String::new(),
-                other => other.to_string(),
-            },
-            // A trigger-started flow carries the changed node as `input.node`
-            // (see the trigger evaluation job); the older `event.node_data`
-            // spelling is still accepted.
-            None => context
-                .input
-                .get("node")
-                .or_else(|| context.input.get("event").and_then(|e| e.get("node_data")))
-                .and_then(|n| n.get("properties"))
-                .and_then(|p| p.get("content"))
-                .and_then(|c| c.as_str())
-                .or_else(|| context.input.get("message").and_then(|v| v.as_str()))
-                .or_else(|| context.input.get("input").and_then(|v| v.as_str()))
-                .unwrap_or("")
-                .to_string(),
-        };
-
-        // Optional workflow-context injection (include_context property:
-        // "input" | "full" | true) - templates stay the precise mechanism
-        let user_content = super::context_injection::with_context_block(
-            user_content,
-            context,
-            super::context_injection::ContextInjection::from_step(step),
+        let max_model_calls = step
+            .get_u32_property("max_model_calls")
+            .or_else(|| step.get_u32_property("max_tool_iterations").map(|n| n + 1))
+            .unwrap_or(MAX_MODEL_CALLS_DEFAULT);
+        let request = super::function_step::with_flow_context(
+            json!({
+                "agent_ref": agent_ref,
+                "agent_workspace": agent_workspace,
+                "prompt": prompt_of(step, context)?,
+                "response_format": step.get_property("response_format").cloned(),
+                "skills": super::ai_tool_loop::step_skills(step),
+                "max_model_calls": max_model_calls,
+                "visit": visit_of(step, context),
+            }),
+            &context.instance_id,
+            &step.id,
         );
-
-        let mut messages = vec![serde_json::json!({
-            "role": "user",
-            "content": user_content,
-        })];
-
-        debug!(
-            "Calling agent: {}:{} with {} chars of input",
-            agent_workspace,
-            agent_ref,
-            user_content.len()
-        );
-
-        // Read optional response_format from step properties for structured output
-        let response_format = step.get_property("response_format").cloned();
-
-        if response_format.is_some() {
-            debug!("Agent step '{}' has response_format configured", step.id);
-        }
-
-        // Bounded internal tool loop: the agent's own tools (advertised by
-        // call_ai from the agent node config) are executed here so a
-        // tool-equipped agent works in a single-shot step. Workflow-level
-        // tools / explicit tool steps remain ai_sequence territory.
-        let max_tool_iterations = step
-            .get_u32_property("max_tool_iterations")
-            .unwrap_or(MAX_TOOL_ITERATIONS_DEFAULT);
-        let mut tool_iterations: u32 = 0;
-        let mut tools_used: Vec<Value> = Vec::new();
-
-        // The step's own skills, added to the agent's for this step only.
-        let step_skills = super::ai_tool_loop::step_skills(step);
-
-        let ai_response = loop {
-            let response = callbacks
-                .call_ai_with_options(
-                    &agent_workspace,
-                    &agent_ref,
-                    messages.clone(),
-                    response_format.clone(),
-                    Vec::new(),
-                    step_skills.clone(),
-                )
-                .await
-                .map_err(|e| {
-                    error!("Agent step AI call failed: {}", e);
-                    FlowError::AIProvider(format!("Agent step AI call failed: {}", e))
-                })?;
-
-            let tool_calls: Vec<Value> = response
-                .get("tool_calls")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            if tool_calls.is_empty() {
-                break response;
-            }
-            if tool_iterations >= max_tool_iterations {
-                warn!(
-                    "Agent step '{}' hit max_tool_iterations ({}) with tool calls still pending - using last response",
-                    step.id, max_tool_iterations
-                );
-                break response;
-            }
-            tool_iterations += 1;
-
-            // tool name -> function path: THIS call's offer, provided by call_ai
-            let tool_map = super::ai_tool_loop::tool_map_of(&response);
-            // The skills this call was granted; `load-skill` gets it as its
-            // `__raisin_context`, never from the model.
-            let skill_grant = response.get("_skill_grant").cloned();
-
-            // Echo the assistant turn (with its tool calls) into the transcript
-            messages.push(serde_json::json!({
-                "role": "assistant",
-                "content": response.get("content").and_then(|v| v.as_str()).unwrap_or(""),
-                "tool_calls": tool_calls,
-            }));
-
-            for call in &tool_calls {
-                let call_id = call.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                let name = call
-                    .get("function")
-                    .and_then(|f| f.get("name"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let arguments: Value = call
-                    .get("function")
-                    .and_then(|f| f.get("arguments"))
-                    .map(|a| {
-                        if let Some(s) = a.as_str() {
-                            serde_json::from_str(s).unwrap_or(Value::Null)
-                        } else {
-                            a.clone()
-                        }
-                    })
-                    .unwrap_or(Value::Null);
-                // Only an OFFERED tool runs; the model naming anything else —
-                // a function path included — is refused back to it.
-                let function_ref =
-                    super::ai_tool_loop::offered_function(name, &tool_map).map(String::from);
-
-                let _ = callbacks
-                    .emit_event(
-                        &context.instance_id,
-                        FlowExecutionEvent::tool_call_started(call_id, name, arguments.clone()),
-                    )
-                    .await;
-
-                let (result, tool_error) = match &function_ref {
-                    None => {
-                        warn!(
-                            "Agent step '{}': model called tool '{}' it was not offered - refusing",
-                            step.id, name
-                        );
-                        (
-                            Value::Null,
-                            Some(super::ai_tool_loop::unoffered_tool_error(name, &tool_map)),
-                        )
-                    }
-                    // AS THE AGENT: its own tool call, so its own configured
-                    // rights — the same call the chat and tool-loop paths make.
-                    Some(function_ref) => match callbacks
-                        .execute_function_as_agent(
-                            function_ref,
-                            super::ai_tool_loop::tool_arguments(
-                                name,
-                                function_ref,
-                                arguments.clone(),
-                                skill_grant.as_ref(),
-                            ),
-                            &agent_ref,
-                        )
-                        .await
-                    {
-                        Ok(result) => (result, None),
-                        Err(e) => {
-                            warn!(
-                                "Agent step '{}' tool '{}' failed: {} - feeding error back to agent",
-                                step.id, name, e
-                            );
-                            (Value::Null, Some(e.to_string()))
-                        }
-                    },
-                };
-
-                let _ = callbacks
-                    .emit_event(
-                        &context.instance_id,
-                        FlowExecutionEvent::tool_call_completed(
-                            call_id,
-                            result.clone(),
-                            tool_error.clone(),
-                            None,
-                        ),
-                    )
-                    .await;
-
-                let tool_content = match &tool_error {
-                    Some(err) => format!("Error: {}", err),
-                    None => match &result {
-                        Value::String(s) => s.clone(),
-                        other => other.to_string(),
-                    },
-                };
-                messages.push(serde_json::json!({
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "content": tool_content,
-                }));
-                tools_used.push(serde_json::json!({
-                    "name": name,
-                    "function_ref": function_ref,
-                    "error": tool_error,
-                }));
-            }
-        };
-
-        let content = ai_response
-            .get("content")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
+        debug!(agent = %agent_ref, "Starting the agent step's run");
+        let started = callbacks
+            .execute_function(FLOW_AGENT_RUN_FUNCTION, request)
+            .await
+            .map_err(|e| FlowError::AIProvider(format!("could not start the agent run: {e}")))?;
+        let run_id = started
+            .get("run_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                FlowError::AIProvider(format!("the agent run did not start: {started}"))
+            })?
             .to_string();
 
-        // Emit text chunk
-        if !content.is_empty() {
-            let _ = callbacks
-                .emit_event(
-                    &context.instance_id,
-                    FlowExecutionEvent::text_chunk(&content),
-                )
-                .await;
-        }
-
-        // If response_format was requested, try to parse the content as JSON
-        let structured_output = if response_format.is_some() && !content.is_empty() {
-            match serde_json::from_str::<Value>(&content) {
-                Ok(parsed) => {
-                    debug!("Parsed structured output from agent step '{}'", step.id);
-                    Some(parsed)
-                }
-                Err(e) => {
-                    warn!(
-                        "Agent step '{}': response_format set but content is not valid JSON: {}",
-                        step.id, e
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        let mut output = serde_json::json!({
-            "response": content,
-            "model": ai_response.get("model"),
-            "finish_reason": ai_response.get("finish_reason"),
-            "usage": ai_response.get("usage"),
+        let mut metadata = json!({
+            "run_id": run_id,
+            "expected_event": expected_event(&run_id),
+            "target_path": started.get("chat_path").cloned().unwrap_or(Value::Null),
+            "step_id": step.id,
         });
-
-        if let Some(data) = structured_output {
-            output["structured_output"] = data;
+        if let Some(ms) = step
+            .get_property("timeout_ms")
+            .and_then(Value::as_u64)
+            .filter(|ms| *ms > 0)
+        {
+            metadata["timeout_ms"] = json!(ms);
         }
-        if !tools_used.is_empty() {
-            output["tools_used"] = Value::Array(tools_used);
-            output["tool_iterations"] = serde_json::json!(tool_iterations);
-        }
-
-        // Emit step completed
-        let _ = callbacks
-            .emit_event(
-                &context.instance_id,
-                FlowExecutionEvent::step_completed(
-                    &step.id,
-                    output.clone(),
-                    step_start.elapsed().as_millis() as u64,
-                ),
-            )
-            .await;
-
-        let next_node_id = step
-            .next_node
-            .clone()
-            .or_else(|| step.get_string_property("next_node"))
-            .unwrap_or_else(|| "end".to_string());
-
-        Ok(StepResult::Continue {
-            next_node_id,
-            output,
+        Ok(StepResult::Wait {
+            reason: AGENT_RUN_WAIT.to_string(),
+            metadata,
         })
     }
 }
@@ -385,15 +273,11 @@ impl StepHandler for AgentStepHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::handlers::ai_tool_loop::test_support::{turn, ScriptedCallbacks};
     use crate::types::StepType;
-    use serde_json::json;
     use std::collections::HashMap;
 
-    fn step() -> FlowNode {
-        let mut properties = HashMap::new();
-        properties.insert("agent_ref".to_string(), json!("/agents/decider"));
-        properties.insert("prompt".to_string(), json!("Decide."));
+    fn step(props: Value) -> FlowNode {
+        let properties: HashMap<String, Value> = serde_json::from_value(props).unwrap();
         FlowNode {
             id: "decide".to_string(),
             step_type: StepType::AgentStep,
@@ -403,61 +287,32 @@ mod tests {
         }
     }
 
-    async fn run(callbacks: &ScriptedCallbacks) -> Value {
-        let mut context = FlowContext::new("i-1".to_string(), json!({}));
-        match AgentStepHandler::new()
-            .execute(&step(), &mut context, callbacks)
-            .await
-            .expect("agent step runs")
-        {
-            StepResult::Continue { output, .. } => output,
-            other => panic!("expected Continue, got {other:?}"),
-        }
+    fn done(message: &str) -> Value {
+        json!({ "agent_run_id": "r1", "status": "completed",
+                "outcome": { "kind": "succeeded", "message": message }, "usage": {} })
     }
 
-    #[tokio::test]
-    async fn a_model_naming_an_unoffered_function_is_refused() {
-        let callbacks = ScriptedCallbacks::new(vec![turn(
-            &[(
-                "c1",
-                "/lib/studio/builder/arm-generated-function",
-                json!({ "function_path": "/x" }),
-            )],
-            Some(json!({ "lookup": "/lib/x/lookup" })),
-        )]);
-        let output = run(&callbacks).await;
-
-        assert!(
-            callbacks.executed().is_empty(),
-            "{:?}",
-            callbacks.executed()
-        );
-        let used = &output["tools_used"][0];
-        assert!(used["function_ref"].is_null());
-        assert!(used["error"]
-            .as_str()
-            .unwrap()
-            .contains("is not a tool offered to you"));
-        assert_eq!(
-            output["response"], "done",
-            "the refusal went back to the model"
-        );
+    #[test]
+    fn a_completed_run_is_the_step_output() {
+        let out = output_of(&step(json!({ "agent_ref": "/a" })), &done("Positive")).unwrap();
+        assert_eq!(out["response"], "Positive");
+        assert_eq!(out["agent_run_id"], "r1");
+        assert_eq!(out["outcome"], "succeeded");
+        assert!(out.get("structured_output").is_none());
     }
 
-    #[tokio::test]
-    async fn an_offered_tool_runs_as_the_agent() {
-        let callbacks = ScriptedCallbacks::new(vec![turn(
-            &[("c1", "lookup", json!({ "q": "x" }))],
-            Some(json!({ "lookup": "/lib/x/lookup" })),
-        )]);
-        run(&callbacks).await;
-        assert_eq!(
-            callbacks.executed(),
-            vec![(
-                "/lib/x/lookup".to_string(),
-                json!({ "q": "x" }),
-                Some("/agents/decider".to_string())
-            )]
-        );
+    #[test]
+    fn a_response_format_parses_the_answer() {
+        let s = step(json!({ "agent_ref": "/a", "response_format": { "type": "json_object" } }));
+        let out = output_of(&s, &done("{\"label\":\"spam\"}")).unwrap();
+        assert_eq!(out["structured_output"]["label"], "spam");
+    }
+
+    #[test]
+    fn a_failed_or_stopped_run_fails_the_step() {
+        let failed = json!({ "agent_run_id": "r1", "status": "stopped",
+                             "outcome": { "kind": "stopped", "message": "user stop" } });
+        let err = output_of(&step(json!({ "agent_ref": "/a" })), &failed).unwrap_err();
+        assert!(err.to_string().contains("r1 stopped"), "{err}");
     }
 }

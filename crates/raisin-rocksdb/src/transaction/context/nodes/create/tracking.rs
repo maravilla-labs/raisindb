@@ -118,13 +118,26 @@ pub(super) fn track_update(
             .changed_nodes
             .lock()
             .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
+        // A node already touched earlier in this transaction keeps what that
+        // earlier entry knew: a CREATE stays a create (one Created event, not
+        // an Updated for a node nobody saw), and a MOVE keeps its pre-move
+        // path so commit can still tell the event is a move.
+        let (operation, path) = match changed.get(&new_node.id) {
+            Some(prev) if prev.operation == ChangeOperation::Added => {
+                (ChangeOperation::Added, Some(new_node.path.clone()))
+            }
+            Some(prev) if prev.operation == ChangeOperation::Modified => {
+                (ChangeOperation::Modified, prev.path.clone())
+            }
+            _ => (ChangeOperation::Modified, Some(new_node.path.clone())),
+        };
         changed.insert(
             new_node.id.clone(),
             NodeChange {
                 workspace: workspace.to_string(),
                 revision,
-                operation: ChangeOperation::Modified,
-                path: Some(new_node.path.clone()),
+                operation,
+                path,
                 node_type: Some(new_node.node_type.clone()),
             },
         );

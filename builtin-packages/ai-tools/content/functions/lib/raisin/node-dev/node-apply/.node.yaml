@@ -1,0 +1,17 @@
+node_type: "raisin:Function"
+properties:
+  title: "Node Apply"
+  description: |
+    Apply a changeset atomically: all operations commit together or none do.
+    Moves keep node ids, children and references. A stale expected_revision, a
+    missing target or an occupied destination returns a conflict and writes
+    NOTHING — re-read and re-plan. The result lists exactly what was written
+    (old and new locators, descendants, rewritten references, resulting
+    revision).
+  execution_mode: "inline"
+  category: "node-dev"
+  enabled: true
+  language: "javascript"
+  entry_file: "index.js:handler"
+  version: 1
+  input_schema: {"type": "object", "properties": {"roots": {"type": "array", "description": "The subtrees you work in: [{workspace, path}] (path defaults to '/'). The first root is the base for relative paths; nothing outside the roots can be named. An agent run's own grant narrows these further.", "items": {"type": "object", "properties": {"workspace": {"type": "string"}, "path": {"type": "string"}}, "required": ["workspace"]}}, "workspace": {"type": "string", "description": "Shorthand for roots=[{workspace, path:'/'}]."}, "branch": {"type": "string", "description": "Branch to work on (default main). Develop on a draft branch from node-branch fork."}, "ops": {"type": "array", "description": "Operations, applied in order, all-or-nothing. Each is one of: {op:'create', path, node_type, archetype?, properties?} | {op:'patch', target, set?, unset?, archetype?, expected_revision?} | {op:'move', target, to_parent, new_name?, expected_revision?} | {op:'rename', target, new_name, expected_revision?} | {op:'copy', source, to_parent, new_name?} | {op:'delete', target, recursive?, expected_revision?}. Pass expected_revision (the revision.value you read) to refuse the write if the node changed since.", "items": {"type": "object", "properties": {"op": {"type": "string", "enum": ["create", "patch", "move", "rename", "copy", "delete"]}}, "required": ["op"]}}, "idempotency_key": {"type": "string", "description": "Optional; inside an agent run the run's operation id is used automatically, so a replay never applies twice."}, "message": {"type": "string", "description": "Commit message."}, "primary": {"type": "integer", "description": "Index of the op whose node is the result's primary artifact (default 0)."}, "kind": {"type": "string", "description": "Artifact kind to report (default 'node')."}}, "required": ["ops"]}

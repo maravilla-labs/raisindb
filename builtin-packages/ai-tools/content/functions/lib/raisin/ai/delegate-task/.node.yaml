@@ -3,10 +3,14 @@ properties:
   name: delegate-task
   title: Delegate Plan Task
   description: >
-    Delegate one approved plan task to an installed agent. The child runs in an
-    isolated content branch which is preserved for review instead of merged.
+    Delegate one approved plan task to an installed agent as a durable child
+    run. Collect its result with wait_for_agents (or get_delegation_status);
+    message or interrupt it while it works. Same as spawn_agent, keyed by task.
   execution_mode: inline
+  execution_context: system
   category: planning
+  # raisin:Function is strict; tool traits live in its declared metadata.
+  metadata: { idempotent: true }
   enabled: true
   language: javascript
   entry_file: index.js:handler
@@ -26,12 +30,15 @@ properties:
         minimum: 1
         maximum: 12
         default: 6
+      independent:
+        type: boolean
+        description: "Required while another child still works: this task does not depend on it"
   output_schema:
     type: object
     properties:
       success: { type: boolean }
       delegation_id: { type: string }
-      flow_instance_id: { type: string }
+      child_run_id: { type: string }
       task_id: { type: string }
       agent_ref: { type: string }
       status: { type: string }

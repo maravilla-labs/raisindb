@@ -80,7 +80,7 @@ async fn test_create_branch_from_revision() {
 
     let request_body = serde_json::json!({
         "name": "hotfix",
-        "from_revision": 42,
+        "from_revision": "42-0",
         "created_by": "admin",
         "protected": true
     });
@@ -292,8 +292,12 @@ async fn test_get_branch_head() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let head: u64 = parse_json_response(response).await;
-    assert_eq!(head, 0); // Initial HEAD is 0
+    // HEAD is an HLC, returned as `{ "revision": "<timestamp>-<counter>" }`.
+    // A branch created from scratch starts at the zero revision.
+    let head: serde_json::Value = parse_json_response(response).await;
+    let revision: HLC = serde_json::from_value(head["revision"].clone())
+        .expect("HEAD response carries an HLC revision");
+    assert_eq!(revision, HLC::new(0, 0));
 }
 
 #[tokio::test]
@@ -322,7 +326,7 @@ async fn test_update_branch_head() {
 
     // Update branch HEAD
     let update_body = serde_json::json!({
-        "revision": 123
+        "revision": "123-0"
     });
 
     let response = app
@@ -350,7 +354,7 @@ async fn test_create_tag() {
 
     let request_body = serde_json::json!({
         "name": "v1.0.0",
-        "revision": 100,
+        "revision": "100-0",
         "created_by": "release-manager",
         "message": "First stable release",
         "protected": true
@@ -384,7 +388,7 @@ async fn test_create_tag_minimal() {
 
     let request_body = serde_json::json!({
         "name": "snapshot-2024",
-        "revision": 42,
+        "revision": "42-0",
         "created_by": null,
         "message": null,
         "protected": false
@@ -415,7 +419,7 @@ async fn test_list_tags() {
     let app = test_router();
 
     // Create multiple tags
-    for (name, revision) in &[("v1.0.0", 10), ("v1.1.0", 20), ("v2.0.0", 30)] {
+    for (name, revision) in &[("v1.0.0", "10-0"), ("v1.1.0", "20-0"), ("v2.0.0", "30-0")] {
         let request_body = serde_json::json!({
             "name": name,
             "revision": revision,
@@ -467,7 +471,7 @@ async fn test_get_tag() {
     // Create a tag
     let request_body = serde_json::json!({
         "name": "release-candidate",
-        "revision": 99,
+        "revision": "99-0",
         "created_by": "qa-team",
         "message": "Ready for testing",
         "protected": false
@@ -530,7 +534,7 @@ async fn test_delete_tag() {
     // Create a tag
     let request_body = serde_json::json!({
         "name": "temp-tag",
-        "revision": 5,
+        "revision": "5-0",
         "created_by": "test-user",
         "message": null,
         "protected": false

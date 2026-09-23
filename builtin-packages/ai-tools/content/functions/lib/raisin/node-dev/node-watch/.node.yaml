@@ -1,0 +1,14 @@
+node_type: "raisin:Function"
+properties:
+  title: "Node Watch"
+  description: |
+    What changed inside your roots after a cursor: {changes:[{revision,
+    operation, locator}], cursor}. Call without since to start, then pass the
+    returned cursor.
+  execution_mode: "inline"
+  category: "node-dev"
+  enabled: true
+  language: "javascript"
+  entry_file: "index.js:handler"
+  version: 1
+  input_schema: {"type": "object", "properties": {"roots": {"type": "array", "description": "The subtrees you work in: [{workspace, path}] (path defaults to '/'). The first root is the base for relative paths; nothing outside the roots can be named. An agent run's own grant narrows these further.", "items": {"type": "object", "properties": {"workspace": {"type": "string"}, "path": {"type": "string"}}, "required": ["workspace"]}}, "workspace": {"type": "string", "description": "Shorthand for roots=[{workspace, path:'/'}]."}, "branch": {"type": "string", "description": "Branch to work on (default main). Develop on a draft branch from node-branch fork."}, "since": {"type": "string"}, "limit": {"type": "integer"}}}

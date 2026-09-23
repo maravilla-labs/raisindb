@@ -195,6 +195,15 @@ pub enum JobType {
         execution_type: String,
         resume_reason: Option<String>,
     },
+    /// One wake of a durable agent run: whichever worker picks it up drives
+    /// the run under the lease stored in its record. The scope comes from the
+    /// job context; `reason` is informational.
+    AgentRunStep {
+        /// The run.
+        run_id: String,
+        /// Why it was woken (`Created`, `Steer`, `Finalize`, ...).
+        reason: String,
+    },
     AICall {
         instance_id: String,
         step_id: String,
@@ -463,6 +472,9 @@ impl JobType {
             JobType::AICall { .. } => 300,
             JobType::FlowExecution { .. } => 300,
             JobType::FlowInstanceExecution { .. } => 300,
+            // A step drives a run through model turns and tool calls; the
+            // execution lease (renewed while it runs) is the real guard.
+            JobType::AgentRunStep { .. } => 1800,
             // Long-running background/maintenance jobs
             JobType::IntegrityScan => 600,
             JobType::IndexRebuild => 600,

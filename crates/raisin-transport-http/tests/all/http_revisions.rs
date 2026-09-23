@@ -24,7 +24,8 @@ use raisin_rocksdb::RocksDBStorage;
 #[cfg(not(feature = "storage-rocksdb"))]
 fn create_test_router() -> axum::Router {
     let storage = Arc::new(InMemoryStorage::default());
-    router(storage)
+    // Sent as the operator: see `support::as_admin`.
+    crate::support::as_admin(router(storage))
 }
 
 /// Helper to create a test router with RocksDB storage
@@ -36,7 +37,8 @@ fn create_test_router() -> axum::Router {
     let path = format!("/tmp/raisin-test-revisions-{}", id);
     let _ = std::fs::remove_dir_all(&path);
     let storage = Arc::new(RocksDBStorage::new(&path).expect("Failed to create RocksDBStorage"));
-    router(storage)
+    // Sent as the operator: see `support::as_admin`.
+    crate::support::as_admin(router(storage))
 }
 
 /// Helper to parse JSON response
@@ -156,7 +158,7 @@ async fn create_node(
     }
 
     let uri = format!(
-        "/api/repository/{}/{}/{}/{}",
+        "/api/repository/{}/{}/head/{}/{}",
         repo_id, branch, workspace, path
     );
 
@@ -173,7 +175,8 @@ async fn create_node(
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    // A root-level POST answers 201 with the created node itself.
+    assert_eq!(response.status(), StatusCode::CREATED);
 
     let node: serde_json::Value = parse_json_response(response).await;
     (app, node)
@@ -202,7 +205,9 @@ async fn test_list_revisions_empty() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let revisions: Vec<serde_json::Value> = parse_json_response(response).await;
+    // The listing is `{ revisions: [...], ... }`; system commits are hidden by default.
+    let body: serde_json::Value = parse_json_response(response).await;
+    let revisions = body["revisions"].as_array().expect("revisions array");
     assert_eq!(
         revisions.len(),
         0,
@@ -232,7 +237,8 @@ async fn test_list_revisions_with_pagination() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let revisions: Vec<serde_json::Value> = parse_json_response(response).await;
+    let body: serde_json::Value = parse_json_response(response).await;
+    let revisions = body["revisions"].as_array().expect("revisions array");
     assert!(revisions.len() <= 10, "Should respect limit parameter");
 }
 
@@ -285,7 +291,7 @@ async fn test_get_single_revision() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/management/repositories/default/test-repo/revisions/1")
+                .uri("/api/management/repositories/default/test-repo/revisions/1-0")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -307,7 +313,7 @@ async fn test_get_revision_changes() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/management/repositories/default/test-repo/revisions/1/changes")
+                .uri("/api/management/repositories/default/test-repo/revisions/1-0/changes")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -361,7 +367,7 @@ async fn test_browse_head_vs_revision() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/repository/test-repo/main/rev/1/demo/homepage")
+                .uri("/api/repository/test-repo/main/rev/1-0/demo/homepage")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -384,7 +390,7 @@ async fn test_get_root_at_revision() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/repository/test-repo/main/rev/1/demo/")
+                .uri("/api/repository/test-repo/main/rev/1-0/demo/")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -416,14 +422,31 @@ async fn test_get_node_by_id_at_revision() {
 
     let node_id = node["id"].as_str().unwrap();
 
-    // Try to get the node at revision 1
+    // Revisions are HLCs. Read the branch HEAD, which is at or after the create.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/management/repositories/default/test-repo/branches/main")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let branch: serde_json::Value = parse_json_response(response).await;
+    let head = branch["head"]
+        .as_str()
+        .expect("branch head is an HLC string");
+
     let response = app
         .oneshot(
             Request::builder()
                 .method("GET")
                 .uri(&format!(
-                    "/api/repository/test-repo/main/rev/1/demo/_id/{}",
-                    node_id
+                    "/api/repository/test-repo/main/rev/{}/demo/$ref/{}",
+                    head, node_id
                 ))
                 .body(Body::empty())
                 .unwrap(),
@@ -431,8 +454,9 @@ async fn test_get_node_by_id_at_revision() {
         .await
         .unwrap();
 
-    // Might be 404 if no snapshot exists at revision 1
-    assert!(response.status() == StatusCode::OK || response.status() == StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::OK);
+    let at_head: serde_json::Value = parse_json_response(response).await;
+    assert_eq!(at_head["id"], node_id);
 }
 
 #[tokio::test]
@@ -455,7 +479,7 @@ async fn test_revision_route_is_read_only() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/repository/test-repo/main/rev/1/demo/")
+                .uri("/api/repository/test-repo/main/rev/1-0/demo/")
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_vec(&payload).unwrap()))
                 .unwrap(),
@@ -500,7 +524,7 @@ async fn test_head_route_allows_writes() {
 
     assert_eq!(
         response.status(),
-        StatusCode::OK,
+        StatusCode::CREATED,
         "HEAD route should allow writes"
     );
 }
@@ -510,13 +534,14 @@ async fn test_head_route_allows_writes() {
 // ============================================================================
 
 #[tokio::test]
-async fn test_legacy_routes_still_work() {
+async fn test_legacy_routes_are_not_served() {
     let app = create_test_router();
     let app = create_repository(app, "test-repo").await;
     let app = create_branch(app, "test-repo", "main").await;
     let app = create_workspace(app, "test-repo", "demo").await;
 
-    // Old route format (without /head/)
+    // The pre-`/head/` form (`/api/repository/{repo}/{branch}/{ws}/...`) is not a
+    // route. A write through it must not succeed, and must not create anything.
     let payload = serde_json::json!({
         "name": "legacy-test",
         "node_type": "raisin:Page",
@@ -537,75 +562,69 @@ async fn test_legacy_routes_still_work() {
         )
         .await
         .unwrap();
-
-    assert_eq!(
-        response.status(),
-        StatusCode::OK,
-        "Legacy route should still work"
+    assert!(
+        !response.status().is_success(),
+        "the legacy write form is not a route, got {}",
+        response.status()
     );
 
-    // Verify we can read it back with the old route
     let response = app
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/repository/test-repo/main/demo/legacy-test")
+                .uri("/api/repository/test-repo/main/head/demo/legacy-test")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-
     assert_eq!(
         response.status(),
-        StatusCode::OK,
-        "Legacy GET route should work"
+        StatusCode::NOT_FOUND,
+        "nothing was created through the legacy form"
     );
 }
 
 #[tokio::test]
-async fn test_legacy_and_head_routes_are_equivalent() {
+async fn test_head_and_revision_routes_are_equivalent_at_head() {
     let app = create_test_router();
     let app = create_repository(app, "test-repo").await;
     let app = create_branch(app, "test-repo", "main").await;
     let app = create_workspace(app, "test-repo", "demo").await;
 
-    // Create node using legacy route
-    let payload = serde_json::json!({
-        "name": "test-page",
-        "node_type": "raisin:Page",
-        "properties": {
-            "title": "Test Page"
-        }
-    });
+    let (app, _node) = create_node(
+        app,
+        "test-repo",
+        "main",
+        "demo",
+        "",
+        "raisin:Page",
+        "test-page",
+    )
+    .await;
 
-    app.clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/repository/test-repo/main/demo/")
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&payload).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    // Read with legacy route
-    let legacy_response = app
+    // The branch HEAD revision, as an HLC string.
+    let response = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/repository/test-repo/main/demo/test-page")
+                .uri("/api/management/repositories/default/test-repo/branches/main")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let branch: serde_json::Value = parse_json_response(response).await;
+    let head = branch["head"]
+        .as_str()
+        .expect("branch head is an HLC string")
+        .to_string();
 
-    // Read with HEAD route
+    // Read with the HEAD route
     let head_response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
@@ -616,15 +635,30 @@ async fn test_legacy_and_head_routes_are_equivalent() {
         .await
         .unwrap();
 
-    assert_eq!(legacy_response.status(), StatusCode::OK);
-    assert_eq!(head_response.status(), StatusCode::OK);
+    // Read with the revision route, pinned at that same HEAD
+    let rev_response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(&format!(
+                    "/api/repository/test-repo/main/rev/{}/demo/test-page",
+                    head
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
 
-    let legacy_node: serde_json::Value = parse_json_response(legacy_response).await;
+    assert_eq!(head_response.status(), StatusCode::OK);
+    assert_eq!(rev_response.status(), StatusCode::OK);
+
     let head_node: serde_json::Value = parse_json_response(head_response).await;
+    let rev_node: serde_json::Value = parse_json_response(rev_response).await;
 
     // Both should return the same node
-    assert_eq!(legacy_node["id"], head_node["id"]);
-    assert_eq!(legacy_node["name"], head_node["name"]);
+    assert_eq!(head_node["id"], rev_node["id"]);
+    assert_eq!(head_node["name"], rev_node["name"]);
 }
 
 // ============================================================================

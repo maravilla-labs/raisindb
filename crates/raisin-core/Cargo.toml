@@ -7,6 +7,8 @@ edition = "2021"
 rust_decimal = { workspace = true }
 anyhow = { workspace = true }
 raisin-storage = { path = "../raisin-storage" }
+# The tool-result envelope the node-development surface speaks (serde-only).
+raisin-agent-contract = { path = "../raisin-agent-contract" }
 raisin-context = { path = "../raisin-context" }
 raisin-error = { path = "../raisin-error" }
 raisin-hlc = { path = "../raisin-hlc" }

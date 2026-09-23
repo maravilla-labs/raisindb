@@ -84,31 +84,6 @@ function requiresPlanApproval(executionMode) {
   return mode === 'manual' || mode === 'step_by_step' || mode === 'approve_then_auto';
 }
 
-function shouldAutoRunTasks(executionMode) {
-  const mode = getEffectiveExecutionMode(executionMode);
-  return mode === 'automatic' || mode === 'approve_then_auto';
-}
-
-function shouldPauseAfterTask(executionMode) {
-  return getEffectiveExecutionMode(executionMode) === 'step_by_step';
-}
-
-async function updateOrchestrationState(workspace, messagePath, update) {
-  if (!workspace || !messagePath || !update || typeof update !== 'object') return;
-  try {
-    const node = await raisin.nodes.get(workspace, messagePath);
-    if (!node) return;
-    await raisin.nodes.update(workspace, messagePath, {
-      properties: {
-        ...(node.properties || {}),
-        ...update,
-      },
-    });
-  } catch (e) {
-    log.warn('utils', 'Failed to update orchestration state', { path: messagePath, error: e.message });
-  }
-}
-
 /**
  * Safely stringify a value, returning '[unserializable]' on failure.
  */
@@ -259,49 +234,9 @@ function plainReferences(value) {
   return value;
 }
 
-/**
- * Store a pending raisin:AIToolCall — and never let the model's ARGUMENTS stop
- * the conversation.
- *
- * The server validates every reference envelope in a node it stores, so a tool
- * call whose arguments name a node that does not exist
- * (`{raisin:ref: /agents/x, raisin:workspace: agents}` — measured: a Builder
- * run wrote the wrong workspace) was refused, the handler's catch ended the
- * turn, and the conversation stopped with no message and nothing for the model
- * to correct. Now such a call is stored once more with its envelopes as plain
- * path strings: the TOOL runs and answers with its own "not found", which the
- * model reads and repairs. Any other failure is thrown exactly as before.
- *
- * Returns the created node and the arguments actually stored.
- */
-async function createToolCallNode(workspace, parentPath, name, properties) {
-  const write = (props) => raisin.nodes.create(workspace, parentPath, { name, node_type: 'raisin:AIToolCall', properties: props });
-  let node = null;
-  let failure = '';
-  let thrown = null;
-  try {
-    node = await write(properties);
-    if (node?.error) failure = String(node.error);
-  } catch (e) {
-    thrown = e;
-    failure = String(e?.message || e);
-  }
-  if (!failure || failure.includes('already exists')) return { node, args: properties.arguments };
-  if (!/Referenced node not found|reference/i.test(failure)) {
-    throw thrown || new Error(`Failed to create tool-call node "${name}": ${failure}`);
-  }
-  const args = plainReferences(properties.arguments);
-  console.warn(`[tools] tool-call "${name}" arguments named a missing node (${failure}); stored with plain paths so the tool can answer`);
-  const retried = await write({ ...properties, arguments: args, arguments_rewritten: failure });
-  if (retried?.error && !String(retried.error).includes('already exists')) {
-    throw new Error(`Failed to create tool-call node "${name}": ${retried.error}`);
-  }
-  return { node: retried, args };
-}
 
 export {
   TERMINAL_FALLBACK_TEXT,
-  createToolCallNode,
   plainReferences,
   createCostRecord,
   getPlanningSystemPromptAddition,
@@ -312,7 +247,4 @@ export {
   hasCompletedToolCalls,
   getEffectiveExecutionMode,
   requiresPlanApproval,
-  shouldAutoRunTasks,
-  shouldPauseAfterTask,
-  updateOrchestrationState,
 };
