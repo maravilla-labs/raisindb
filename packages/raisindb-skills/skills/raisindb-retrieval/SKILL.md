@@ -271,7 +271,9 @@ These all fail silently. They cost real debugging time.
   is indexed under it, and locale overlay text is not in the lexical index at
   all. On a `de` repository `FULLTEXT_SEARCH('flugplan', 'de')` finds the base
   pages; on a repository created with the default `en`, the same German pages
-  sit under `'en'`. For a visitor in another locale, search the base content
+  sit under `'en'` until the default is changed
+  (`raisindb repo languages <repo> --default de`, which queues the rebuild
+  itself). For a visitor in another locale, search the base content
   semantically (`KNN` with a multilingual embedder) instead of lexically. Up to
   v0.6.45 a full-text `rebuild` / `reconcile` filed everything under `en`
   whatever the repository said; rebuild once on v0.6.46 or later.

@@ -177,6 +177,7 @@ Manage multilingual content with built-in translation support.
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/repositories/{repo}/translation-config` | Get translation configuration |
+| PATCH | `/api/repositories/{repo}/translation-config` | Update supported languages, fallback chains or the default language |
 | POST | `/api/repository/{repo}/{branch}/head/{ws}/{*path}/raisin:cmd/translate` | Create or update translation |
 | POST | `/api/repository/{repo}/{branch}/head/{ws}/{*path}/raisin:cmd/list-translations` | List available translations |
 | POST | `/api/repository/{repo}/{branch}/head/{ws}/{*path}/raisin:cmd/delete-translation` | Delete a translation |

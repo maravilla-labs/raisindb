@@ -82,7 +82,7 @@ instead of shipping a literal. The same substitution applies to
 
 ### Repositories and languages
 
-A repository's default language is fixed when it is created. Base content is
+A repository's default language is set when it is created. Base content is
 stored in that language, and every other language is a translation overlay on
 top of it, so pick it before the first install:
 
@@ -90,17 +90,22 @@ top of it, so pick it before the first install:
 raisindb repo create website --default-language de --languages de,fr,en
 raisindb repo languages website                  # show default + supported languages
 raisindb repo languages website --add it         # add a translation language
+raisindb repo languages website --default de     # change the default language
 raisindb repo list                               # LANGUAGES column per repository
 ```
 
 Without `--default-language` the server uses `en`, and `--languages` alone is
 refused rather than guessing which entry is the base. `--exists-ok` fails when
 the existing repository has a different default language, and warns about
-missing translation languages. The default language cannot be changed later;
-the only way to change it is to delete and recreate the repository. From
-v0.6.46, `raisindb repo delete` removes all of the repository's data
-(irreversibly), so a recreated repository starts empty. After
-recreating a repository or adding languages, rebuild its full-text index
+missing translation languages.
+
+`repo languages --default <code>` changes the default language. The base
+content is not rewritten; it is from then on treated as the new language. The
+new default is added to the supported languages and the old one kept. The
+server refuses while translations in the new language exist (they would collide
+with the base content), and otherwise queues a full-text rebuild of every
+branch and prints the job ids. It asks for confirmation at a terminal; pass
+`--yes` in scripts. After adding languages, rebuild the full-text index
 (`POST /api/admin/management/database/{tenant}/{repo}/fulltext/rebuild`).
 
 ### Type catalogs
