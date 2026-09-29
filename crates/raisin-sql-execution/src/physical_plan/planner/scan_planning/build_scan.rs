@@ -64,10 +64,25 @@ impl PhysicalPlanner {
         context: &PlanContext,
     ) -> Result<PhysicalPlan, Error> {
         match best_predicate {
-            CanonicalPredicate::ColumnEq { .. } | CanonicalPredicate::JsonPropertyEq { .. } => self
-                .build_property_index_scan(
-                    canonical, table, alias, workspace, branch, projection, context,
-                ),
+            CanonicalPredicate::ColumnEq { .. } | CanonicalPredicate::JsonPropertyEq { .. } => {
+                // `build_property_index_scan` drives the scan with the FIRST
+                // indexable equality it finds, so the selected predicate has to
+                // be first. Passing `canonical` as written meant the WHERE
+                // clause's spelling order, not the selection, picked the index:
+                // `node_type = 'x' AND properties->>'url' = $1` scanned every
+                // node of the type even when the URL had been chosen.
+                let ordered: Vec<CanonicalPredicate> = std::iter::once(best_predicate.clone())
+                    .chain(
+                        canonical
+                            .iter()
+                            .filter(|p| !std::ptr::eq(*p, best_predicate))
+                            .cloned(),
+                    )
+                    .collect();
+                self.build_property_index_scan(
+                    &ordered, table, alias, workspace, branch, projection, context,
+                )
+            }
             CanonicalPredicate::ChildOf { ref parent_path } => self.build_child_of_scan(
                 parent_path,
                 canonical,

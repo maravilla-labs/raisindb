@@ -20,6 +20,15 @@ impl PhysicalPlanner {
         index_options: &[(&'a CanonicalPredicate, f64)],
         ordering_by_path: bool,
     ) -> Option<&'a CanonicalPredicate> {
+        let best = self.select_best_predicate_by_heuristics(index_options, ordering_by_path)?;
+        Some(prefer_value_over_type(best, index_options))
+    }
+
+    fn select_best_predicate_by_heuristics<'a>(
+        &self,
+        index_options: &[(&'a CanonicalPredicate, f64)],
+        ordering_by_path: bool,
+    ) -> Option<&'a CanonicalPredicate> {
         let has_prefix = index_options
             .iter()
             .any(|(pred, _)| matches!(pred, CanonicalPredicate::PrefixRange { .. }));
@@ -137,4 +146,40 @@ impl PhysicalPlanner {
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(p, _)| *p)
     }
+}
+
+/// Is this an equality on what KIND of node it is, rather than on a value?
+fn is_type_equality(predicate: &CanonicalPredicate) -> bool {
+    match predicate {
+        CanonicalPredicate::ColumnEq { column, .. } => {
+            column.eq_ignore_ascii_case("node_type") || column.eq_ignore_ascii_case("archetype")
+        }
+        CanonicalPredicate::TypeMembership { .. } => true,
+        _ => false,
+    }
+}
+
+/// When a type equality won, but the query also pins a property to a value,
+/// drive the scan with the property.
+///
+/// `node_type = 'x' AND properties->>'url' = $1` is the shape of every lookup
+/// by key — a page by its URL, a redirect by its source, a user by email. The
+/// type estimate comes from `SchemaStats` as `1 / number of node types`, the
+/// share of the TYPES, not of the nodes: in a content workspace one page type
+/// holds most of the nodes, yet it scored as the most selective predicate and
+/// the lookup read every page to find one. A value inside a type is by
+/// construction no wider than the type itself on the rows that matter, and the
+/// type equality is still enforced by the residual filter.
+fn prefer_value_over_type<'a>(
+    best: &'a CanonicalPredicate,
+    index_options: &[(&'a CanonicalPredicate, f64)],
+) -> &'a CanonicalPredicate {
+    if !is_type_equality(best) {
+        return best;
+    }
+    index_options
+        .iter()
+        .find(|(p, _)| matches!(p, CanonicalPredicate::JsonPropertyEq { .. }))
+        .map(|(p, _)| *p)
+        .unwrap_or(best)
 }
