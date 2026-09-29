@@ -97,7 +97,7 @@ The management routes under `/api/admin/management/database/{tenant}/{repo}` (se
 
 These handlers call into `raisin-indexer` and `raisin-embeddings` for Tantivy and vector index maintenance. Each takes an optional `?branch=` (default: the repository's default branch). Which one to run:
 
-- `fulltext/rebuild` after recreating a repository or changing its languages. It indexes base content under the repository's `default_language` and `supported_languages`; up to v0.6.45 rebuild and reconcile used `en` for every repository, so rebuild once on v0.6.46 or later.
+- `fulltext/rebuild` after recreating a repository or changing its languages. Changing the default language through `PATCH /api/repositories/{repo}/translation-config` queues this rebuild for every branch by itself. It indexes base content under the repository's `default_language` and `supported_languages`; up to v0.6.45 rebuild and reconcile used `en` for every repository, so rebuild once on v0.6.46 or later.
 - `vector/rebuild` re-adds the stored embeddings to the HNSW index, with no embedding provider calls.
 - `vector/regenerate` queues re-embedding for stored vectors with the wrong dimensions and, from v0.6.46, for embedding-eligible nodes that have no embedding; `?force=true` re-embeds every stored embedding.
 

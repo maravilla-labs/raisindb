@@ -33,9 +33,9 @@ Using the CLI:
 # Create a new repository
 raisin repo create my-blog
 
-# Or, for multilingual content, set the base language now: it cannot be
-# changed after the repository is created (translation languages can be
-# added later with `raisindb repo languages my-blog --add it`)
+# Or, for multilingual content, set the base language now (translation
+# languages can be added later with `raisindb repo languages my-blog --add it`;
+# changing the default later with `--default` re-indexes the repository)
 raisindb repo create my-blog --default-language de --languages de,fr,en
 
 # Create a workspace

@@ -23,11 +23,11 @@ content/launchpad/home/
 
 ## Choose the Default Language When Creating the Repository
 
-The repository's `default_language` is fixed at creation and can never be
-changed. It decides which language `.node.yaml` is: a German site in a
-repository created with the server default (`en`) files its German base content
-as English, and its `de` files become overlays on top of it. Create the
-repository with the site's main language before the first install:
+The repository's `default_language` decides which language `.node.yaml` is: a
+German site in a repository created with the server default (`en`) files its
+German base content as English, and its `de` files become overlays on top of
+it. Create the repository with the site's main language before the first
+install:
 
 ```bash
 raisindb repo create website --default-language de --languages de,fr,en
@@ -35,10 +35,22 @@ raisindb repo languages website              # check: default + supported langua
 raisindb repo languages website --add it     # translation languages can be added later
 ```
 
-The wrong default means deleting and recreating the repository; from v0.6.46 a
-delete removes all of its data, so re-import the content afterwards. Full-text search
-indexes base content under the default language, so after recreating a
-repository or changing its languages, rebuild the full-text index
+A wrong default can be fixed without recreating the repository:
+
+```bash
+raisindb repo languages website --default de   # asks to confirm; --yes in scripts
+```
+
+(or `PATCH /api/repositories/{repo}/translation-config` with
+`{"default_language": "de"}`). The base content is not rewritten; it is from
+then on treated as `de`. The new default joins the supported languages and the
+old one stays. The server refuses the change (409, with the overlay count)
+while translations in the new default exist, because they would collide with
+the base content. Delete them first. On success it queues a full-text rebuild
+of every branch, because full-text search indexes base content under the
+default language. Embeddings are language-agnostic and are left alone.
+
+After adding languages by hand, rebuild the full-text index
 (`POST /api/admin/management/database/{tenant}/{repo}/fulltext/rebuild`).
 
 ## Mark Fields as Translatable

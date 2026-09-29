@@ -153,15 +153,15 @@ GET /api/repositories/{repo}/translation-config
 
 The `default_language` is set when the repository is created
 (`default_language` and `supported_languages` in the `POST /api/repositories`
-body, or `raisindb repo create <repo> --default-language de --languages de,fr,en`)
-and cannot be changed afterwards. Base content is stored in it, and full-text
-search indexes base content under it. To change it, delete and recreate the
-repository, then run `POST /api/admin/management/database/{tenant}/{repo}/fulltext/rebuild`.
+body, or `raisindb repo create <repo> --default-language de --languages de,fr,en`).
+Base content is stored in it, and full-text search indexes base content under
+it. It is normalized as a BCP-47 tag (`DE-ch` becomes `de-CH`). It can be
+changed later; see below.
 
 ### Update Translation Configuration
 
-Configure supported languages and fallback chains. The default language cannot
-be changed here.
+Configure supported languages, fallback chains and the default language. Every
+field is optional.
 
 **Endpoint:**
 ```
@@ -171,6 +171,7 @@ PATCH /api/repositories/{repo}/translation-config
 **Body:**
 ```json
 {
+  "default_language": "de",
   "supported_languages": ["en", "de", "fr", "es", "ja"],
   "locale_fallback_chains": {
     "de-CH": ["de-CH", "de", "en"],
@@ -179,6 +180,70 @@ PATCH /api/repositories/{repo}/translation-config
   }
 }
 ```
+
+**Response (200):** the stored repository configuration, plus the full-text
+rebuilds a default-language change queued (`reindex_jobs`, one per branch,
+empty otherwise) and `previous_default_language` when the default changed:
+
+```json
+{
+  "default_branch": "main",
+  "description": null,
+  "tags": {},
+  "default_language": "de",
+  "supported_languages": ["en", "de"],
+  "locale_fallback_chains": {},
+  "previous_default_language": "en",
+  "reindex_jobs": [{ "branch": "main", "job_id": "…" }]
+}
+```
+
+The default language is always in `supported_languages`: the server adds it
+when a request leaves it out.
+
+#### Changing the default language
+
+Sending a `default_language` that differs from the current one changes the
+language the base content is considered to be in. The content itself is not
+translated or rewritten. Use it when a repository was created with the wrong
+default, for example a German site created with the server default `en`.
+
+- **Supported languages.** Without `supported_languages` in the request, the
+  new default is added to the existing list and the old default stays in it.
+  With it, the new default is added when missing.
+- **Conflicting translations.** Translation overlays that already exist in the
+  new default would collide with the base content. While any exist (on any
+  branch, node-level or block-level; deleted translations do not count), the
+  request is refused and nothing changes:
+
+  ```json
+  {
+    "code": "DEFAULT_LANGUAGE_CONFLICT",
+    "message": "Cannot make 'de' the default language of 'website': 3 translation overlay(s) in 'de' exist …",
+    "language": "de",
+    "overlay_count": 3,
+    "node_overlays": 3,
+    "block_overlays": 0,
+    "current_default_language": "en"
+  }
+  ```
+
+  The response status is `409 Conflict`. Delete those translations first.
+- **Re-index.** On success a full-text rebuild of every branch is queued, so
+  base content moves from the old language's index to the new one's:
+  afterwards `FULLTEXT_SEARCH(…, 'de')` finds it and `'en'` does not. Until the
+  jobs finish, full-text search can miss base content. Follow the jobs by id in
+  the job list. Vector embeddings are language-agnostic, so nothing is
+  re-embedded.
+- **Clusters.** The change replicates like any other repository configuration
+  change, and every peer queues the same rebuild for its own full-text index.
+- **Same language.** Sending the current default is a no-op that answers 200
+  with no `reindex_jobs`.
+- **Other routes.** `PUT /api/repositories/{repo}` and the WebSocket repository
+  update keep the default language unchanged. Only this endpoint changes it.
+
+From the CLI: `raisindb repo languages <repo> --default de` (asks for
+confirmation; `--yes` in scripts).
 
 ---
 
