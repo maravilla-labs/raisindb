@@ -83,6 +83,16 @@ pub(in crate::repositories::nodes) fn parse_ordered_child_key<'a>(
 /// it arrives as multi-byte UTF-8 / a replacement char depending on the path —
 /// hence the marker-substring checks rather than an exact match.
 fn is_metadata_label(order_label: &str) -> bool {
+    // Every metadata marker contains a non-ASCII byte or one of `M`, `L`, `F`;
+    // a fractional label is lowercase hex and `:`. Answering the common case
+    // from one byte scan keeps three substring searches off every entry of
+    // every children listing.
+    if !order_label
+        .bytes()
+        .any(|b| b >= 0x80 || matches!(b, b'M' | b'L' | b'F'))
+    {
+        return false;
+    }
     order_label.starts_with('\u{FFFF}')
         || order_label.starts_with('\u{FFFD}')
         || order_label.contains("META")

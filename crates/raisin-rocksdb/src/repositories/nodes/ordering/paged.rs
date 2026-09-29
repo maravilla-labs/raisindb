@@ -21,7 +21,7 @@ use super::parse_ordered_child_key;
 use crate::{cf, cf_handle, keys};
 use raisin_error::Result;
 use raisin_hlc::HLC;
-use rocksdb::{Direction, IteratorMode, ReadOptions};
+use rocksdb::ReadOptions;
 use std::collections::HashSet;
 
 /// Where a forward/reverse ordered-children scan begins.
@@ -123,73 +123,87 @@ impl NodeRepositoryImpl {
         opts.set_iterate_lower_bound(prefix.clone());
         opts.set_iterate_upper_bound(prefix_upper_bound(&prefix));
 
-        // Owned here so the iterator can borrow it for the whole scan.
+        // A raw iterator: the entries are only looked at, and the boxed
+        // iterator copied every key and value it yielded. On a real content
+        // tree a parent's range holds one entry per revision of every child
+        // (each update restamps the label), so this loop runs far more often
+        // than it emits, and its per-entry cost is the cost of listing.
         let seek_key = seek_key(&prefix, &start, descending);
-        let mode = match (seek_key.as_deref(), descending) {
-            (None, false) => IteratorMode::Start,
-            (None, true) => IteratorMode::End,
-            (Some(seek), false) => IteratorMode::From(seek, Direction::Forward),
-            (Some(seek), true) => IteratorMode::From(seek, Direction::Reverse),
-        };
-        let iter = self.db.iterator_cf_opt(cf_ordered, opts, mode);
+        let mut iter = self.db.raw_iterator_cf_opt(cf_ordered, opts);
+        match (seek_key.as_deref(), descending) {
+            (None, false) => iter.seek_to_first(),
+            (None, true) => iter.seek_to_last(),
+            (Some(seek), false) => iter.seek(seek),
+            (Some(seek), true) => iter.seek_for_prev(seek),
+        }
 
-        // MVCC: `(label, child_id)` dedupe keeps only the newest revision of
-        // each entry (descending revision encoding puts it first). The separate
+        // MVCC: `(label, child_id)` dedupe keeps only the first entry seen of
+        // each — the newest revision, which descending revision encoding puts
+        // first. Keys sort by label before revision and child, so one label's
+        // entries are contiguous: the dedupe only has to remember the children
+        // of the label group it is in, not every pair seen so far. The separate
         // `child_id` set collapses a child that still has live entries at more
         // than one label — which happens when a branch merge copies labels
-        // verbatim.
-        let mut seen_entries: HashSet<(String, String)> = HashSet::new();
+        // verbatim — and is only touched for entries that are emitted.
+        let mut group_label: Vec<u8> = Vec::new();
+        let mut group_children: Vec<Vec<u8>> = Vec::new();
         let mut seen_child_ids: HashSet<String> = HashSet::new();
         let mut out = Vec::new();
 
-        for item in iter {
-            let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
-
-            let Some(parsed) = parse_ordered_child_key(&key, &prefix) else {
-                continue;
+        while iter.valid() {
+            let (Some(key), Some(value)) = (iter.key(), iter.value()) else {
+                break;
             };
 
-            // Enforce the start bound precisely. The seek only positions us
-            // close: a label is a variable-length prefix of the remaining key, so
-            // the boundary group still has to be filtered here.
-            if !start.admits(parsed.order_label, descending) {
-                continue;
-            }
+            if let Some(parsed) = parse_ordered_child_key(key, &prefix) {
+                // Enforce the start bound precisely. The seek only positions us
+                // close: a label is a variable-length prefix of the remaining
+                // key, so the boundary group still has to be filtered here.
+                let visible = start.admits(parsed.order_label, descending)
+                    && match (max_revision, parsed.revision()) {
+                        (Some(max_rev), Some(rev)) => &rev <= max_rev,
+                        _ => true,
+                    };
 
-            if let Some(max_rev) = max_revision {
-                match parsed.revision() {
-                    Some(rev) if &rev > max_rev => continue,
-                    _ => {}
+                if visible {
+                    if parsed.order_label.as_bytes() != group_label.as_slice() {
+                        group_label.clear();
+                        group_label.extend_from_slice(parsed.order_label.as_bytes());
+                        group_children.clear();
+                    }
+                    let child = parsed.child_id.as_bytes();
+                    let first_of_entry = !group_children.iter().any(|c| c.as_slice() == child);
+                    if first_of_entry {
+                        group_children.push(child.to_vec());
+                    }
+
+                    // Tombstones are recorded above before being skipped, so an
+                    // older live revision of the same entry cannot resurrect it.
+                    if first_of_entry
+                        && !is_tombstone(value)
+                        && seen_child_ids.insert(parsed.child_id.to_string())
+                    {
+                        out.push(OrderedChildEntry {
+                            child_id: parsed.child_id.to_string(),
+                            order_label: parsed.order_label.to_string(),
+                            name: String::from_utf8_lossy(value).to_string(),
+                        });
+
+                        if limit.is_some_and(|limit| out.len() >= limit) {
+                            break;
+                        }
+                    }
                 }
             }
 
-            let entry_key = (parsed.order_label.to_string(), parsed.child_id.to_string());
-            if !seen_entries.insert(entry_key) {
-                continue;
-            }
-
-            // Tombstones are recorded above before being skipped, so an older
-            // live revision of the same entry cannot resurrect it.
-            if is_tombstone(&value) {
-                continue;
-            }
-
-            if !seen_child_ids.insert(parsed.child_id.to_string()) {
-                continue;
-            }
-
-            out.push(OrderedChildEntry {
-                child_id: parsed.child_id.to_string(),
-                order_label: parsed.order_label.to_string(),
-                name: String::from_utf8_lossy(&value).to_string(),
-            });
-
-            if let Some(limit) = limit {
-                if out.len() >= limit {
-                    break;
-                }
+            if descending {
+                iter.prev();
+            } else {
+                iter.next();
             }
         }
+        iter.status()
+            .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
 
         Ok(out)
     }
