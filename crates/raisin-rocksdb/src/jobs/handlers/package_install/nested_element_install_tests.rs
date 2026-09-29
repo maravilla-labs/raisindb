@@ -173,10 +173,17 @@ async fn install(env: &Env, entries: Vec<ContentEntry>) -> InstallStats {
 }
 
 async fn read(env: &Env, path: &str) -> Option<Node> {
-    let tx = env.storage.begin_context().await.unwrap();
-    tx.set_tenant_repo(TENANT, REPO).unwrap();
-    tx.set_branch(BRANCH).unwrap();
-    tx.get_node_by_path(WS, path).await.unwrap()
+    use raisin_storage::{scope::StorageScope, NodeRepository};
+    env.storage
+        .nodes()
+        .list_all(
+            StorageScope::new(TENANT, REPO, BRANCH, WS),
+            Default::default(),
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|n| n.path == path)
 }
 
 const SITE_FOLDER: &str = "node_type: raisin:Folder\n";
