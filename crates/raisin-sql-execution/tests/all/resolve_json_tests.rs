@@ -332,3 +332,37 @@ async fn json_member_extraction_reads_single_members() {
     assert_eq!(mt, row["p"]["meta"]);
     assert!(row.get("x").is_none() || row["x"].is_null());
 }
+
+/// A listing that projects no property skips decoding them; a filter or an
+/// output column that reads one still sees them.
+#[tokio::test]
+async fn property_filters_still_apply_when_only_path_is_selected() {
+    let (engine, _dir) = setup().await;
+    seed_folders(&engine).await;
+
+    let sql = "SELECT path FROM pages WHERE CHILD_OF('/f1') AND properties->>'title'::String = 'A'";
+    assert_eq!(sorted_paths(&rows(&engine, sql).await), ["/f1/a"]);
+    let sql =
+        "SELECT path FROM pages WHERE DESCENDANT_OF('/f1') AND properties->>'title'::String = 'B'";
+    assert_eq!(sorted_paths(&rows(&engine, sql).await), ["/f1/b"]);
+
+    let found = rows(
+        &engine,
+        "SELECT path, properties FROM pages WHERE CHILD_OF('/f2')",
+    )
+    .await;
+    assert_eq!(found[0]["properties"]["title"], "C");
+    let found = rows(
+        &engine,
+        "SELECT path, properties->>'title' AS t FROM pages WHERE DESCENDANT_OF('/f2')",
+    )
+    .await;
+    assert_eq!(found[0]["t"], "C");
+    let found = rows(
+        &engine,
+        "SELECT path, name, id FROM pages WHERE CHILD_OF('/f2')",
+    )
+    .await;
+    assert_eq!(found[0]["path"], "/f2/c");
+    assert_eq!(found[0]["name"], "c");
+}

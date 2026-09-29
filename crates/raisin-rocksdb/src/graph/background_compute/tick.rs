@@ -266,6 +266,7 @@ impl GraphComputeTask {
                 ListOptions {
                     max_revision: None, // Get latest
                     compute_has_children: false,
+                    skip_properties: false,
                 },
             )
             .await?;

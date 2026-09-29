@@ -5,6 +5,7 @@
 //! that process and backward compatibility with old Node format.
 
 use super::super::super::helpers::is_tombstone;
+use super::super::super::storage_node::PropertiesMode;
 use super::super::super::NodeRepositoryImpl;
 use crate::{cf, cf_handle, keys};
 use raisin_error::Result;
@@ -86,10 +87,56 @@ impl NodeRepositoryImpl {
         node_id: &str,
         target_revision: &HLC,
     ) -> Result<Node> {
-        use super::super::super::storage_node::StorageNode;
+        self.deserialize_node_with_path_as(
+            bytes,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            node_id,
+            target_revision,
+            PropertiesMode::Load,
+        )
+    }
 
-        // First, try to deserialize as StorageNode (new format without path)
-        if let Ok(storage_node) = rmp_serde::from_slice::<StorageNode>(bytes) {
+    /// [`Self::deserialize_node_with_path`], optionally without decoding the
+    /// properties (`PropertiesMode::Skip` returns an empty map).
+    ///
+    /// The legacy full-`Node` fallback always decodes everything: it is rare,
+    /// and correctness there is worth more than the saving.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::repositories::nodes) fn deserialize_node_with_path_as(
+        &self,
+        bytes: &[u8],
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        node_id: &str,
+        target_revision: &HLC,
+        mode: PropertiesMode,
+    ) -> Result<Node> {
+        use super::super::super::storage_node::{StorageNode, StorageNodeHead};
+
+        if mode == PropertiesMode::Skip {
+            // The head reader accepts everything the full one does, and its
+            // path lookup is the same one: if either fails here it would fail
+            // below too, so go straight to the legacy format instead of paying
+            // for the StorageNode attempt twice.
+            if let Ok(head) = rmp_serde::from_slice::<StorageNodeHead>(bytes) {
+                if let Ok(path) = self.materialize_path(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    node_id,
+                    target_revision,
+                ) {
+                    return Ok(head.into_node_without_properties(path));
+                }
+            }
+        } else if let Ok(storage_node) = rmp_serde::from_slice::<StorageNode>(bytes) {
+            // First, try to deserialize as StorageNode (new format without path)
             match self.materialize_path(
                 tenant_id,
                 repo_id,

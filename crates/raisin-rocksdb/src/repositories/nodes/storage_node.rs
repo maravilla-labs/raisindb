@@ -33,8 +33,21 @@ use std::collections::HashMap;
 ///
 /// Uses MessagePack via `rmp_serde` for compact binary format, matching
 /// the existing node serialization approach.
+///
+/// # Reading without the properties
+///
+/// `P` is the type the `properties` field decodes into. It is the property map
+/// everywhere except [`StorageNodeHead`], which decodes it as
+/// [`serde::de::IgnoredAny`]: the field is walked and dropped, never turned
+/// into `PropertyValue`s. The encoding is positional (MessagePack arrays), so
+/// the two readers MUST share this one field list — which is why it is one
+/// generic struct rather than a second copy.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct StorageNode {
+#[serde(bound(
+    serialize = "P: Serialize",
+    deserialize = "P: Deserialize<'de> + Default"
+))]
+pub(crate) struct StorageNode<P = HashMap<String, PropertyValue>> {
     /// Unique identifier for this node
     pub id: String,
 
@@ -52,7 +65,7 @@ pub(crate) struct StorageNode {
 
     /// Key-value map of properties, validated against the NodeType schema
     #[serde(default)]
-    pub properties: HashMap<String, PropertyValue>,
+    pub properties: P,
 
     /// Ordered list of child node IDs
     #[serde(default)]
@@ -124,8 +137,62 @@ pub(crate) struct StorageNode {
     pub relations: Vec<RelationRef>,
 }
 
+/// Whether a read decodes the node's properties.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PropertiesMode {
+    /// Decode them — what every reader did, and still the default.
+    Load,
+    /// Leave the property map empty: the caller never looks at it
+    /// (`ListOptions::skip_properties`).
+    Skip,
+}
+
+impl PropertiesMode {
+    pub(crate) fn from_options(options: &raisin_storage::ListOptions) -> Self {
+        if options.skip_properties {
+            Self::Skip
+        } else {
+            Self::Load
+        }
+    }
+}
+
 fn default_version() -> i32 {
     1
+}
+
+/// A stored node read without its properties; see [`StorageNode`].
+pub(crate) type StorageNodeHead = StorageNode<serde::de::IgnoredAny>;
+
+impl StorageNodeHead {
+    /// The node with an EMPTY property map. Only for readers that were told
+    /// the caller does not look at properties (`ListOptions::skip_properties`).
+    pub fn into_node_without_properties(self, path: String) -> Node {
+        StorageNode {
+            id: self.id,
+            name: self.name,
+            node_type: self.node_type,
+            archetype: self.archetype,
+            properties: HashMap::new(),
+            children: self.children,
+            order_key: self.order_key,
+            parent: self.parent,
+            parent_id: self.parent_id,
+            version: self.version,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            published_at: self.published_at,
+            published_by: self.published_by,
+            updated_by: self.updated_by,
+            created_by: self.created_by,
+            translations: self.translations,
+            tenant_id: self.tenant_id,
+            workspace: self.workspace,
+            owner_id: self.owner_id,
+            relations: self.relations,
+        }
+        .into_node(path)
+    }
 }
 
 impl StorageNode {
@@ -272,6 +339,41 @@ mod tests {
         assert!(
             !bytes_str.contains("very/long/path"),
             "path should not be in serialized blob"
+        );
+    }
+
+    /// The head reader decodes every field the full reader does, from the same
+    /// bytes, except the properties.
+    #[test]
+    fn test_head_decode_matches_full_decode_without_properties() {
+        let mut node = Node::default();
+        node.id = "head".to_string();
+        node.name = "page".to_string();
+        node.node_type = "raisin:Page".to_string();
+        node.archetype = Some("studio:Page".to_string());
+        node.order_key = "a0".to_string();
+        node.parent = Some("parent".to_string());
+        node.version = 7;
+        node.owner_id = Some("owner".to_string());
+        node.created_by = Some("me".to_string());
+        node.properties.insert(
+            "content".to_string(),
+            PropertyValue::Array(vec![PropertyValue::String("block".to_string())]),
+        );
+
+        let bytes = rmp_serde::to_vec(&StorageNode::from_node(&node, Some("pid".to_string())))
+            .expect("encode");
+        let full: StorageNode = rmp_serde::from_slice(&bytes).expect("full");
+        let head: StorageNodeHead = rmp_serde::from_slice(&bytes).expect("head");
+
+        let full = full.into_node("/p".to_string());
+        let head = head.into_node_without_properties("/p".to_string());
+        assert!(head.properties.is_empty());
+        let mut expected = full.clone();
+        expected.properties.clear();
+        assert_eq!(
+            serde_json::to_value(&head).unwrap(),
+            serde_json::to_value(&expected).unwrap()
         );
     }
 }

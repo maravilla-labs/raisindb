@@ -160,6 +160,21 @@ pub(super) async fn resolve_node_for_locale<S: Storage>(
     ctx: &ExecutionContext<S>,
     locale: &str,
 ) -> Result<Option<Node>, Error> {
+    resolve_node_for_locale_as(node, ctx, locale, true).await
+}
+
+/// [`resolve_node_for_locale`] for a scan that may not read properties.
+///
+/// With `with_properties == false` the node was read without its property map
+/// (`ListOptions::skip_properties`), so there is nothing to merge an overlay
+/// into: only the visibility question is answered, which also skips reading
+/// the block overlays.
+pub(super) async fn resolve_node_for_locale_as<S: Storage>(
+    node: Node,
+    ctx: &ExecutionContext<S>,
+    locale: &str,
+    with_properties: bool,
+) -> Result<Option<Node>, Error> {
     // Skip translation if:
     // 1. No repository_config is set (translation not configured)
     // 2. The locale matches the default language (no translation needed)
@@ -184,6 +199,21 @@ pub(super) async fn resolve_node_for_locale<S: Storage>(
     let translation_repo = ctx.storage.translations();
     let resolver = TranslationResolver::new(Arc::new(translation_repo.clone()), config.clone());
 
+    if !with_properties {
+        let visible = resolver
+            .is_visible(
+                &ctx.tenant_id,
+                &ctx.repo_id,
+                &ctx.branch,
+                &ctx.workspace,
+                &node.id,
+                &locale_code,
+                &revision,
+            )
+            .await?;
+        return Ok(visible.then_some(node));
+    }
+
     // Resolve translation for this node
     resolver
         .resolve_node(
@@ -196,4 +226,62 @@ pub(super) async fn resolve_node_for_locale<S: Storage>(
             &revision,
         )
         .await
+}
+
+/// Columns `node_to_row` fills from the node record itself, never from
+/// `properties`. Any other projected name is looked up IN `properties`
+/// (`insert_property_fields`), so it needs them decoded.
+const NODE_RECORD_COLUMNS: &[&str] = &[
+    "id",
+    "path",
+    "name",
+    "node_type",
+    "__node_type",
+    "archetype",
+    "created_at",
+    "updated_at",
+    "created_by",
+    "updated_by",
+    "published_at",
+    "published_by",
+    "version",
+    "depth",
+    "parent_name",
+    "locale",
+    "__workspace",
+    "__order",
+    "__tree_order",
+    "embedding",
+];
+
+/// Does a scan with this projection need each node's `properties` decoded?
+///
+/// The projection is the set of columns the plan above the scan reads —
+/// output columns AND the columns its residual filters evaluate — so when it
+/// holds only node-record columns, the property map is decoded for nothing.
+/// That decode is most of what reading a content node costs.
+///
+/// Also yes whenever row-level security may evaluate a CONDITION: conditions
+/// read node properties (`rls_filter::context`), and an empty map would make
+/// them decide differently. System callers, system admins and grants without
+/// conditions never look.
+pub(super) fn scan_needs_properties<S: Storage>(
+    projection: &Option<Vec<String>>,
+    ctx: &ExecutionContext<S>,
+) -> bool {
+    let Some(columns) = projection else {
+        return true;
+    };
+    if columns
+        .iter()
+        .any(|c| !NODE_RECORD_COLUMNS.contains(&c.as_str()))
+    {
+        return true;
+    }
+    ctx.auth_context.as_ref().is_some_and(|auth| {
+        !auth.is_system
+            && auth.permissions().is_none_or(|p| {
+                !p.is_system_admin && p.permissions.iter().any(|perm| perm.condition.is_some())
+            })
+    })
 }

@@ -37,6 +37,7 @@ use raisin_storage::{
 use std::collections::HashMap;
 
 use super::ordering::OrderedScanStart;
+use super::storage_node::PropertiesMode;
 use super::NodeRepositoryImpl;
 
 impl NodeRepository for NodeRepositoryImpl {
@@ -370,6 +371,7 @@ impl NodeRepository for NodeRepositoryImpl {
                 after_tree_order,
                 limit,
                 options.max_revision.as_ref(),
+                PropertiesMode::from_options(&options),
             )?
             .into_iter()
             .map(|(node, _depth, tree_order)| (node, tree_order))
@@ -522,6 +524,7 @@ impl NodeRepository for NodeRepositoryImpl {
             descending,
             options.max_revision.as_ref(),
             options.compute_has_children,
+            PropertiesMode::from_options(&options),
         )
         .await
     }

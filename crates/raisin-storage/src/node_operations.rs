@@ -242,6 +242,18 @@ pub struct ListOptions {
     ///
     /// Default: None (latest)
     pub max_revision: Option<HLC>,
+
+    /// The caller does not read `properties`: a backend MAY return nodes with
+    /// an empty property map instead of decoding it.
+    ///
+    /// Decoding a content node's properties (blocks, rich text, nested
+    /// objects) is most of what reading it costs, and a tree listing that
+    /// projects `path` or `id` throws all of it away. This is permission to
+    /// skip that work, not a request for empty maps: a backend that ignores
+    /// it returns the properties as usual.
+    ///
+    /// Default: false
+    pub skip_properties: bool,
 }
 
 impl ListOptions {
@@ -259,6 +271,7 @@ impl ListOptions {
         Self {
             compute_has_children: true,
             max_revision: None,
+            skip_properties: false,
         }
     }
 
@@ -276,6 +289,7 @@ impl ListOptions {
         Self {
             compute_has_children: false,
             max_revision: None,
+            skip_properties: false,
         }
     }
 
@@ -291,6 +305,7 @@ impl ListOptions {
         Self {
             compute_has_children: false,
             max_revision: Some(revision),
+            skip_properties: false,
         }
     }
 
@@ -302,7 +317,16 @@ impl ListOptions {
         Self {
             compute_has_children: true,
             max_revision: Some(revision),
+            skip_properties: false,
         }
+    }
+
+    /// Allow the backend to skip decoding `properties`; see
+    /// [`Self::skip_properties`].
+    #[inline]
+    pub fn without_properties(mut self) -> Self {
+        self.skip_properties = true;
+        self
     }
 }
 

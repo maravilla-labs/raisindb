@@ -130,6 +130,7 @@ impl NodeRepository for InMemoryNodeRepo {
                 ListOptions {
                     compute_has_children: false,
                     max_revision: max_revision.copied(),
+                    skip_properties: false,
                 },
             )
             .await?;

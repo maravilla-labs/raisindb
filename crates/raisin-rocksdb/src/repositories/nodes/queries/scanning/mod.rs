@@ -11,6 +11,7 @@ mod path_prefix;
 
 use super::super::helpers::is_tombstone;
 use super::super::ordering::{join_tree_order, split_tree_order, OrderedScanStart};
+use super::super::storage_node::PropertiesMode;
 use super::super::NodeRepositoryImpl;
 use crate::{cf, cf_handle, keys};
 use raisin_error::Result;
@@ -48,6 +49,7 @@ impl NodeRepositoryImpl {
                 None,
                 None,
                 max_revision,
+                PropertiesMode::Load,
             )?
             .into_iter()
             .map(|(node, depth, _tree_order)| (node, depth))
@@ -95,6 +97,7 @@ impl NodeRepositoryImpl {
         after_tree_order: Option<&str>,
         limit: Option<usize>,
         max_revision: Option<&HLC>,
+        properties: PropertiesMode,
     ) -> Result<Vec<(Node, usize, String)>> {
         use std::collections::HashSet;
 
@@ -150,6 +153,7 @@ impl NodeRepositoryImpl {
                 workspace,
                 &frame.node_id,
                 max_revision,
+                properties,
             )? {
                 Some(node) => node,
                 None => {
@@ -362,6 +366,7 @@ impl NodeRepositoryImpl {
         workspace: &str,
         node_id: &str,
         max_revision: Option<&HLC>,
+        properties: PropertiesMode,
     ) -> Result<Option<Node>> {
         // Build prefix for all versions of this node
         let prefix = keys::KeyBuilder::new()
@@ -404,8 +409,8 @@ impl NodeRepositoryImpl {
             }
 
             // Found valid node at acceptable revision - deserialize and materialize path if needed
-            let node = self.deserialize_node_with_path(
-                &value, tenant_id, repo_id, branch, workspace, node_id, &revision,
+            let node = self.deserialize_node_with_path_as(
+                &value, tenant_id, repo_id, branch, workspace, node_id, &revision, properties,
             )?;
 
             return Ok(Some(node));

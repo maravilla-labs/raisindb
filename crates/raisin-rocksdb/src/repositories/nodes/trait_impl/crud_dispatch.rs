@@ -89,6 +89,7 @@ impl NodeRepositoryImpl {
                 ListOptions {
                     compute_has_children: false,
                     max_revision: max_revision.cloned(),
+                    skip_properties: false,
                 },
             )
             .await?;

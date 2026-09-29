@@ -115,6 +115,44 @@ impl<R: TranslationRepository> TranslationResolver<R> {
         Ok(Some(node))
     }
 
+    /// Is the node visible in `locale` — i.e. not hidden anywhere in its
+    /// fallback chain — without merging any overlay?
+    ///
+    /// For readers that never look at the translated properties (a listing
+    /// that projects `path`): [`Self::resolve_node`] answers the same question
+    /// but also reads every block overlay and merges into the property tree.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn is_visible(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        node_id: &str,
+        locale: &LocaleCode,
+        revision: &raisin_hlc::HLC,
+    ) -> Result<bool> {
+        for fallback_locale in self.config.get_fallback_chain(locale.as_str()) {
+            let locale_code = LocaleCode::parse(&fallback_locale)?;
+            let overlay = self
+                .repository
+                .get_translation(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    node_id,
+                    &locale_code,
+                    revision,
+                )
+                .await?;
+            if matches!(overlay, Some(LocaleOverlay::Hidden)) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     /// Apply the block overlays that belong to ONE locale of the fallback chain.
     ///
     /// `block_overlays` is the node's `(block_uuid, locale)` inventory, read once by

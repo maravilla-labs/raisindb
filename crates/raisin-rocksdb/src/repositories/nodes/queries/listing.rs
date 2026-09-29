@@ -9,6 +9,7 @@
 
 use super::super::helpers::is_tombstone;
 use super::super::ordering::OrderedScanStart;
+use super::super::storage_node::PropertiesMode;
 use super::super::NodeRepositoryImpl;
 use crate::{cf, cf_handle, keys};
 use raisin_error::Result;
@@ -112,6 +113,7 @@ impl NodeRepositoryImpl {
                 false,
                 max_revision,
                 populate_has_children,
+                PropertiesMode::Load,
             )
             .await?
             .into_iter()
@@ -144,6 +146,7 @@ impl NodeRepositoryImpl {
         descending: bool,
         max_revision: Option<&HLC>,
         populate_has_children: bool,
+        properties: PropertiesMode,
     ) -> Result<Vec<(Node, String)>> {
         // Special case: "/" is the parent NAME for root-level nodes,
         // For root nodes, we use "/" itself as the parent_id
@@ -199,7 +202,7 @@ impl NodeRepositoryImpl {
         for entry in entries {
             let node_opt = match max_revision {
                 Some(rev) => {
-                    self.get_at_revision_impl(
+                    self.get_at_revision_impl_as(
                         tenant_id,
                         repo_id,
                         branch,
@@ -207,17 +210,19 @@ impl NodeRepositoryImpl {
                         &entry.child_id,
                         rev,
                         populate_has_children,
+                        properties,
                     )
                     .await?
                 }
                 None => {
-                    self.get_impl(
+                    self.get_impl_as(
                         tenant_id,
                         repo_id,
                         branch,
                         workspace,
                         &entry.child_id,
                         populate_has_children,
+                        properties,
                     )
                     .await?
                 }

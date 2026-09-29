@@ -94,6 +94,7 @@ async fn test_order_preservation() -> Result<(), Box<dyn std::error::Error>> {
             ListOptions {
                 compute_has_children: false,
                 max_revision: None,
+                skip_properties: false,
             },
         )
         .await?;
@@ -216,6 +217,7 @@ async fn test_move_operations_preserve_order() -> Result<(), Box<dyn std::error:
             ListOptions {
                 compute_has_children: false,
                 max_revision: None,
+                skip_properties: false,
             },
         )
         .await?;

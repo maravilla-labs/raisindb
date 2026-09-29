@@ -10,7 +10,7 @@
 //! 1. **Direct Children Only** - Uses fast list_by_parent or list_root API
 //! 2. **All Descendants** - Uses ORDERED_CHILDREN traversal for tree-ordered results
 
-use super::helpers::{get_locales_to_use, resolve_node_for_locale};
+use super::helpers::{get_locales_to_use, resolve_node_for_locale_as, scan_needs_properties};
 use super::node_to_row::{node_to_row, OrderContext};
 use super::{SCAN_COUNT_CEILING, SCAN_TIME_LIMIT, TIME_CHECK_INTERVAL};
 use crate::physical_plan::executor::{ExecutionContext, ExecutionError, RowStream};
@@ -91,6 +91,20 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
     let storage = ctx.storage.clone();
     let max_revision = ctx.max_revision;
     let ctx_clone = ctx.clone();
+    // Tree listings that project `path`, `id`, `name`… never look at the
+    // property map, and decoding it is most of what reading a node costs.
+    let skip_properties = !scan_needs_properties(&projection, ctx);
+    let list_options = move || {
+        let options = match max_revision.as_ref() {
+            Some(rev) => raisin_storage::ListOptions::at_revision(*rev),
+            None => raisin_storage::ListOptions::for_sql(),
+        };
+        if skip_properties {
+            options.without_properties()
+        } else {
+            options
+        }
+    };
 
     // Only bound the index seek by `limit` when this scan's own order is the
     // order the query asked for. Otherwise a Sort/TopN sits above us and
@@ -185,11 +199,7 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
             let mut emitted = 0usize;
 
             'pages: while parent_id.is_some() {
-                let list_options = if let Some(rev) = max_revision.as_ref() {
-                    raisin_storage::ListOptions::at_revision(*rev)
-                } else {
-                    raisin_storage::ListOptions::for_sql()
-                };
+                let list_options = list_options();
 
                 let nodes = match parent_id.as_ref() {
                     Some(parent_id) => {
@@ -263,7 +273,7 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
                     let order_ctx = OrderContext::label(&order_label);
 
                     for locale in &locales_to_use {
-                        let translated_node = match resolve_node_for_locale(node.clone(), &ctx_clone, locale).await? {
+                        let translated_node = match resolve_node_for_locale_as(node.clone(), &ctx_clone, locale, !skip_properties).await? {
                             Some(n) => n,
                             None => continue,
                         };
@@ -354,7 +364,7 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
                 };
 
                 for locale in &locales_to_use {
-                    let translated_node = match resolve_node_for_locale(node.clone(), &ctx_clone, locale).await? {
+                    let translated_node = match resolve_node_for_locale_as(node.clone(), &ctx_clone, locale, !skip_properties).await? {
                         Some(n) => n,
                         None => continue,
                     };
@@ -418,11 +428,7 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
                             // The traversal root is emitted but filtered out below,
                             // so leave room for it when bounding the walk.
                             page_size,
-                            if let Some(rev) = max_revision.as_ref() {
-                                raisin_storage::ListOptions::at_revision(*rev)
-                            } else {
-                                raisin_storage::ListOptions::for_sql()
-                            },
+                            list_options(),
                         )
                         .await?;
 
@@ -485,7 +491,7 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
                         };
 
                         for locale in &locales_to_use {
-                            let translated_node = match resolve_node_for_locale(node.clone(), &ctx_clone, locale).await? {
+                            let translated_node = match resolve_node_for_locale_as(node.clone(), &ctx_clone, locale, !skip_properties).await? {
                                 Some(n) => n,
                                 None => continue,
                             };

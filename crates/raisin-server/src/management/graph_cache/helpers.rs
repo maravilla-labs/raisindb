@@ -33,6 +33,7 @@ pub(super) async fn load_all_configs(
             ListOptions {
                 max_revision: None,
                 compute_has_children: false,
+                skip_properties: false,
             },
         )
         .await?;

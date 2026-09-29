@@ -205,6 +205,7 @@ async fn count_rows_under(storage: &RocksDBStorage, parent: &str, path: &str) ->
             ListOptions {
                 compute_has_children: false,
                 max_revision: None,
+                skip_properties: false,
             },
         )
         .await?;
