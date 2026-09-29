@@ -58,6 +58,11 @@ pub(super) struct InstallStats {
     /// Non-empty means the install failed, but only after every other entry
     /// had its chance.
     pub content_errors: Vec<String>,
+    /// Rejections whose only fault is a reference to an entry that was itself
+    /// rejected earlier in this install. Kept apart from `content_errors` so
+    /// the report leads with the few root causes instead of burying them under
+    /// every page that links to a page that points at one missing asset.
+    pub content_errors_cascaded: Vec<String>,
 }
 
 /// Content node definition from YAML

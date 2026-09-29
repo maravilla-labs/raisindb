@@ -76,7 +76,17 @@ pub async fn resolve_references(
     // Phase 2: Resolve each reference
     let mut resolved_refs = Vec::with_capacity(ref_locations.len());
     for loc in ref_locations {
-        let resolved = resolve_single_reference(tx, loc.reference, source_workspace).await?;
+        let resolved = resolve_single_reference(tx, loc.reference, source_workspace)
+            .await
+            .map_err(|e| match e {
+                // Name the property holding the dangling reference: on a page
+                // with forty blocks "Referenced node not found" alone does not
+                // say which image or link to fix.
+                Error::Validation(msg) => {
+                    Error::Validation(format!("{msg} (at {})", format_ref_path(&loc.path)))
+                }
+                other => other,
+            })?;
         resolved_refs.push((loc.path, resolved));
     }
 
@@ -86,6 +96,23 @@ pub async fn resolve_references(
     }
 
     Ok(())
+}
+
+/// `content[0].items[2].image`, the spelling validation errors use.
+fn format_ref_path(path: &[PathSegment]) -> String {
+    let mut out = String::new();
+    for segment in path {
+        match segment {
+            PathSegment::Key(key) => {
+                if !out.is_empty() {
+                    out.push('.');
+                }
+                out.push_str(key);
+            }
+            PathSegment::Index(idx) => out.push_str(&format!("[{idx}]")),
+        }
+    }
+    out
 }
 
 /// Collect all references from properties using iterative traversal
@@ -368,5 +395,17 @@ mod tests {
         } else {
             panic!("Expected reference");
         }
+    }
+
+    #[test]
+    fn test_format_ref_path_names_the_nested_property() {
+        let path = vec![
+            PathSegment::Key("content".to_string()),
+            PathSegment::Index(0),
+            PathSegment::Key("items".to_string()),
+            PathSegment::Index(2),
+            PathSegment::Key("image".to_string()),
+        ];
+        assert_eq!(format_ref_path(&path), "content[0].items[2].image");
     }
 }

@@ -60,6 +60,61 @@ fn is_per_node_error(err: &Error) -> bool {
     )
 }
 
+/// `workspace:path` of the node a content entry writes, in the same spelling
+/// the reference resolver uses in "Referenced node not found: {ws}:{path}".
+fn entry_target(entry: &ContentEntry) -> Option<String> {
+    match entry {
+        ContentEntry::NodeDef {
+            workspace, node, ..
+        } => Some(format!("{}:{}", workspace, node.path)),
+        _ => None,
+    }
+}
+
+/// The `workspace:path` a "Referenced node not found" error names, if any.
+fn missing_reference_target(err: &Error) -> Option<String> {
+    const MARKER: &str = "Referenced node not found: ";
+    let message = err.to_string();
+    let rest = &message[message.find(MARKER)? + MARKER.len()..];
+    rest.split_whitespace().next().map(str::to_string)
+}
+
+/// Record a rejected entry and file its message as a root cause or a cascade.
+///
+/// The installer validates references, so one missing asset rejects the page
+/// that uses it, then every page that references that page, and so on. Each
+/// of those errors alone says only "Referenced node not found: stories:/…",
+/// which points at a page that exists in the package and sends the operator
+/// looking in the wrong place. Here a rejection caused by a reference to an
+/// entry this install already rejected names that entry's own root cause.
+fn record_rejection(
+    entry: &ContentEntry,
+    err: &Error,
+    rejected: &mut HashMap<String, String>,
+    stats: &mut InstallStats,
+) {
+    let label = describe_entry(entry);
+    let root = missing_reference_target(err)
+        .and_then(|target| rejected.get(&target).map(|root| (target, root.clone())));
+
+    let root_cause = match root {
+        Some((target, root_cause)) => {
+            stats.content_errors_cascaded.push(format!(
+                "{label}: references {target}, which was rejected in this install (root cause: {root_cause})"
+            ));
+            root_cause
+        }
+        None => {
+            let message = format!("{label}: {err}");
+            stats.content_errors.push(message.clone());
+            message
+        }
+    };
+    if let Some(target) = entry_target(entry) {
+        rejected.insert(target, root_cause);
+    }
+}
+
 /// A short, operator-readable label for a content entry, used in error
 /// reporting so a rejection names the file it came from.
 fn describe_entry(entry: &ContentEntry) -> String {
@@ -108,6 +163,11 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
 
         // Collect nodes that need a second pass (circular references)
         let mut deferred_nodes: Vec<(String, Node, String)> = Vec::new();
+
+        // `workspace:path` of every rejected entry -> its root cause, so a
+        // later entry that fails only because it references one of them is
+        // reported as a cascade of that cause (see `record_rejection`).
+        let mut rejected: HashMap<String, String> = HashMap::new();
 
         for batch in entries.chunks(CONTENT_BATCH_SIZE) {
             let tx = self.storage.begin_context().await?;
@@ -273,7 +333,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                         error = %err,
                         "Package install: content entry rejected, continuing with the rest"
                     );
-                    stats.content_errors.push(format!("{label}: {err}"));
+                    record_rejection(entry, &err, &mut rejected, stats);
                 }
             }
 

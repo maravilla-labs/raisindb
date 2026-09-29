@@ -447,25 +447,19 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         // a package that half-applied must not report itself as installed, or
         // the next `deploy --install` will skip it and the gap becomes
         // permanent.
-        if !stats.content_errors.is_empty() {
-            let detail = stats
-                .content_errors
-                .iter()
-                .map(|e| format!("  - {e}"))
-                .collect::<Vec<_>>()
-                .join("\n");
+        if !stats.content_errors.is_empty() || !stats.content_errors_cascaded.is_empty() {
+            let rejected = stats.content_errors.len() + stats.content_errors_cascaded.len();
             tracing::error!(
                 job_id = %job.id,
                 package_name = %package_name,
-                rejected = stats.content_errors.len(),
+                rejected = rejected,
+                root_causes = stats.content_errors.len(),
                 "Package installation rejected content entries"
             );
-            return Err(raisin_error::Error::Validation(format!(
-                "Package '{}' installed {} content node(s) but {} were rejected:\n{}",
+            return Err(raisin_error::Error::Validation(rejection_report(
                 package_name,
                 stats.content_nodes_created + stats.content_nodes_synced,
-                stats.content_errors.len(),
-                detail
+                &stats,
             )));
         }
 
@@ -610,4 +604,43 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
 
         Ok(())
     }
+}
+
+/// The install-failure message: root causes first, then the entries that were
+/// rejected only because they reference one of those.
+///
+/// It is what lands in the package node's `error` and the job's error, and so
+/// what `raisindb deploy --install` prints.
+pub(super) fn rejection_report(
+    package_name: &str,
+    installed: usize,
+    stats: &InstallStats,
+) -> String {
+    let direct = &stats.content_errors;
+    let cascaded = &stats.content_errors_cascaded;
+    let mut report = format!(
+        "Package '{}' installed {} content node(s) but {} were rejected",
+        package_name,
+        installed,
+        direct.len() + cascaded.len()
+    );
+    if cascaded.is_empty() {
+        report.push(':');
+    } else {
+        report.push_str(&format!(
+            " ({} root cause(s); {} more only because they reference a rejected entry):",
+            direct.len(),
+            cascaded.len()
+        ));
+    }
+    for e in direct {
+        report.push_str(&format!("\n  - {e}"));
+    }
+    if !cascaded.is_empty() {
+        report.push_str("\nRejected because they reference a rejected entry:");
+        for e in cascaded {
+            report.push_str(&format!("\n  - {e}"));
+        }
+    }
+    report
 }
