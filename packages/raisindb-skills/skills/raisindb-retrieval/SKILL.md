@@ -267,6 +267,21 @@ These all fail silently. They cost real debugging time.
   searching, is an embedder configured, and has the node been written since
   either changed? Writes are indexed on save; nothing re-indexes retroactively
   except a rebuild.
+- **Full-text language is the repository's `default_language`.** Base content
+  is indexed under it, and locale overlay text is not in the lexical index at
+  all. On a `de` repository `FULLTEXT_SEARCH('flugplan', 'de')` finds the base
+  pages; on a repository created with the default `en`, the same German pages
+  sit under `'en'`. For a visitor in another locale, search the base content
+  semantically (`KNN` with a multilingual embedder) instead of lexically. Up to
+  v0.6.45 a full-text `rebuild` / `reconcile` filed everything under `en`
+  whatever the repository said; rebuild once on a newer server.
+- **Which repair?** `POST /api/admin/management/database/{tenant}/{repo}/…`:
+  `fulltext/rebuild` after recreating a repository or changing its languages;
+  `vector/rebuild` (or `REBUILD VECTOR INDEX`) re-adds the stored embeddings to
+  the index, no embedder calls; `vector/regenerate` queues re-embedding for
+  nodes whose stored vector has the wrong dimensions (`?force=true`: every node).
+  An unreadable vector index file is set aside as `*.unreadable-<ts>` and
+  rebuilt from the stored embeddings automatically.
 
 ## 8. Cost
 

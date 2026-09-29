@@ -9,7 +9,7 @@ description: "Multi-language content with translation files and locale-based que
 
 RaisinDB uses a file-overlay system for multi-language content:
 
-- **Base content** lives in `.node.yaml` and serves as the default language (typically English).
+- **Base content** lives in `.node.yaml` and is stored in the repository's default language (`en` unless the repository was created with another one).
 - **Translation overlays** live in `.node.{locale}.yaml` files alongside the base file (e.g., `.node.fr.yaml`, `.node.de.yaml`).
 - Only fields marked `translatable: true` in their archetype or element type definition appear in translation files.
 - At query time, the server merges the base content with the requested locale's overlay.
@@ -20,6 +20,25 @@ content/launchpad/home/
   .node.fr.yaml     # French overlay
   .node.de.yaml     # German overlay
 ```
+
+## Choose the Default Language When Creating the Repository
+
+The repository's `default_language` is fixed at creation and can never be
+changed. It decides which language `.node.yaml` is: a German site in a
+repository created with the server default (`en`) files its German base content
+as English, and its `de` files become overlays on top of it. Create the
+repository with the site's main language before the first install:
+
+```bash
+raisindb repo create website --default-language de --languages de,fr,en
+raisindb repo languages website              # check: default + supported languages
+raisindb repo languages website --add it     # translation languages can be added later
+```
+
+The wrong default means deleting and recreating the repository. Full-text search
+indexes base content under the default language, so after recreating a
+repository or changing its languages, rebuild the full-text index
+(`POST /api/admin/management/database/{tenant}/{repo}/fulltext/rebuild`).
 
 ## Mark Fields as Translatable
 

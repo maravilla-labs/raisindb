@@ -215,6 +215,19 @@ SELECT PARENT(path) AS parent_path FROM social WHERE path = '/a/b/c'
 SELECT DEPTH(path) AS level FROM social
 ```
 
+**Project only what a listing needs.** A `CHILD_OF` / `DESCENDANT_OF` listing
+whose selected and filtered columns are all node-record columns (`id`, `path`,
+`name`, `node_type`, `archetype`, `created_at`, `updated_at`, `depth`,
+`__order`, …) does not decode the node's properties, which is most of what
+reading a node costs (about 20% faster on a real site tree). `SELECT *`, any
+`properties->>…` in the select list or `WHERE`, or row-level security with
+conditional grants loads them as before.
+
+```sql
+-- a nav tree: no property is read, so none is decoded
+SELECT path, name, archetype FROM social WHERE DESCENDANT_OF('/articles', 2)
+```
+
 ## 8. MOVE / COPY
 
 ### MOVE

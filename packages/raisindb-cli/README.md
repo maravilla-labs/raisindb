@@ -80,6 +80,27 @@ or pushed. A token with no value and no inline default fails the command
 instead of shipping a literal. The same substitution applies to
 `package validate`, `deploy`, `sync --push/--watch`, and `.raisin-sync.yaml`.
 
+### Repositories and languages
+
+A repository's default language is fixed when it is created. Base content is
+stored in that language, and every other language is a translation overlay on
+top of it, so pick it before the first install:
+
+```bash
+raisindb repo create website --default-language de --languages de,fr,en
+raisindb repo languages website                  # show default + supported languages
+raisindb repo languages website --add it         # add a translation language
+raisindb repo list                               # LANGUAGES column per repository
+```
+
+Without `--default-language` the server uses `en`, and `--languages` alone is
+refused rather than guessing which entry is the base. `--exists-ok` fails when
+the existing repository has a different default language, and warns about
+missing translation languages. The default language cannot be changed later;
+the only way to change it is to delete and recreate the repository. After
+recreating a repository or adding languages, rebuild its full-text index
+(`POST /api/admin/management/database/{tenant}/{repo}/fulltext/rebuild`).
+
 ### Type catalogs
 
 Translation files are checked against the `translatable` markers of the
