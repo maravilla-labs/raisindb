@@ -39,27 +39,51 @@ use std::sync::Arc;
 /// already uses for paging through bulk jobs.
 const REBUILD_CHUNK_SIZE: usize = 500;
 
-/// Default language / supported languages used when we don't have
-/// repository metadata at the rebuild site. The fulltext schema is
-/// language-aware (see `tantivy_engine::language`, which analyses each
-/// document with its own language's stemmer), so we pass "en" as the
-/// default; per-language translations on each node are still indexed via
-/// `do_batch_index`'s built-in translation loop.
-const DEFAULT_LANGUAGE: &str = "en";
+/// The languages a rebuild indexes in: the repository's own configuration.
+///
+/// This was a hard-coded `"en"`, so a rebuild of a German repository filed its
+/// base content under English: `FULLTEXT_SEARCH('flugplan', 'de')` found
+/// nothing while `'en'` found the German pages, and hybrid search's lexical leg
+/// came back empty. The event path (`jobs/handlers/fulltext/handler.rs`) has
+/// always read the repository config; the rebuild now reads the same fields,
+/// so both write the index the same way.
+#[derive(Clone)]
+struct RepoLanguages {
+    default_language: String,
+    supported_languages: Vec<String>,
+}
+
+async fn repo_languages(
+    storage: &Arc<RocksDBStorage>,
+    tenant_id: &str,
+    repo_id: &str,
+) -> Result<RepoLanguages> {
+    use raisin_storage::{RepositoryManagementRepository, Storage};
+    let repo = storage
+        .repository_management()
+        .get_repository(tenant_id, repo_id)
+        .await?
+        .ok_or_else(|| Error::NotFound(format!("Repository not found: {tenant_id}/{repo_id}")))?;
+    Ok(RepoLanguages {
+        default_language: repo.config.default_language,
+        supported_languages: repo.config.supported_languages,
+    })
+}
 
 fn batch_context(
     tenant_id: &str,
     repo_id: &str,
     branch: &str,
     workspace: &str,
+    languages: &RepoLanguages,
 ) -> BatchIndexContext {
     BatchIndexContext {
         tenant_id: tenant_id.to_string(),
         repo_id: repo_id.to_string(),
         branch: branch.to_string(),
         workspace_id: workspace.to_string(),
-        default_language: DEFAULT_LANGUAGE.to_string(),
-        supported_languages: vec![DEFAULT_LANGUAGE.to_string()],
+        default_language: languages.default_language.clone(),
+        supported_languages: languages.supported_languages.clone(),
     }
 }
 
@@ -213,6 +237,14 @@ async fn reindex_all_workspaces(
         }
     }
 
+    let languages = match repo_languages(storage, tenant_id, repo_id).await {
+        Ok(languages) => languages,
+        Err(e) => {
+            tracing::error!(error = %e, "repository config unavailable during fulltext rebuild");
+            return (0, 1);
+        }
+    };
+
     let workspaces = match list_workspaces(storage, tenant_id, repo_id).await {
         Ok(ws) => ws,
         Err(e) => {
@@ -269,7 +301,6 @@ async fn reindex_all_workspaces(
         // and tokenizer work). Hop to the blocking pool so we don't
         // tie up the worker runtime for the duration of a large
         // rebuild.
-        let ctx = batch_context(tenant_id, repo_id, branch, workspace);
         let engine_clone = engine.clone();
         for chunk in nodes.chunks(REBUILD_CHUNK_SIZE) {
             // Resolve the shape-driven plan for each node (cached per type),
@@ -295,8 +326,7 @@ async fn reindex_all_workspaces(
                     }
                 }
             }
-            let ctx_clone =
-                batch_context(&ctx.tenant_id, &ctx.repo_id, &ctx.branch, &ctx.workspace_id);
+            let ctx_clone = batch_context(tenant_id, repo_id, branch, workspace, &languages);
             let engine_for_task = engine_clone.clone();
             let result = tokio::task::spawn_blocking(move || {
                 engine_for_task.do_batch_index(&ctx_clone, node_plans, Vec::new())
