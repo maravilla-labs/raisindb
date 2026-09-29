@@ -86,39 +86,29 @@ pub struct ServerHandle {
 
 impl ServerHandle {
     /// Start a new server instance
+    ///
+    /// Refuses a port something else is already listening on: the readiness
+    /// check below only asks "does this port answer", so a test pointed at a
+    /// taken port would silently run against whatever server owns it — which
+    /// is how a test run once created a repository on a developer's live
+    /// local server.
     pub async fn start(config: ServerConfig) -> Result<Self, String> {
-        // Build server binary if needed
-        let workspace_root = std::env::var("CARGO_MANIFEST_DIR")
-            .map(|p| {
-                PathBuf::from(p)
-                    .parent()
-                    .unwrap()
-                    .parent()
-                    .unwrap()
-                    .to_path_buf()
-            })
-            .unwrap_or_else(|_| PathBuf::from("../.."));
-
-        let binary_path = workspace_root.join("target/debug/raisin-server");
-
-        if !binary_path.exists() {
-            println!("Building raisin-server...");
-            let build_status = Command::new("cargo")
-                .current_dir(&workspace_root)
-                .args(&[
-                    "build",
-                    "--package",
-                    "raisin-server",
-                    "--features",
-                    "storage-rocksdb",
-                ])
-                .status()
-                .expect("Failed to build raisin-server");
-
-            if !build_status.success() {
-                return Err("Failed to build raisin-server".to_string());
-            }
+        if let Err(e) = std::net::TcpListener::bind(("127.0.0.1", config.port)) {
+            return Err(format!(
+                "port {} is already in use ({e}); refusing to run a test against a server it did not start",
+                config.port
+            ));
         }
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("../.."));
+
+        // The binary cargo built for THIS test run (it builds the package's
+        // binaries before its integration tests). `target/debug/…` could be
+        // stale, or missing when CARGO_TARGET_DIR points elsewhere.
+        let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_raisin-server"));
 
         // Write TOML config (same approach as cluster tests)
         let config_path = config.data_dir.join("server.toml");
@@ -197,7 +187,7 @@ max_connections = 16
     }
 
     /// Wait for server to be ready (health check)
-    pub async fn wait_for_ready(&self, timeout: Duration) -> Result<(), String> {
+    pub async fn wait_for_ready(&mut self, timeout: Duration) -> Result<(), String> {
         let client = Client::new();
         let health_url = format!("{}/health", self.base_url);
         let start = std::time::Instant::now();
@@ -207,6 +197,15 @@ max_connections = 16
                 return Err(format!(
                     "Server on port {} did not become ready within {:?}",
                     self.config.port, timeout
+                ));
+            }
+
+            // A server that died (e.g. could not bind) must not be mistaken
+            // for another process that answers on the same port.
+            if let Ok(Some(status)) = self.process.try_wait() {
+                return Err(format!(
+                    "Server on port {} exited before becoming ready: {status}",
+                    self.config.port
                 ));
             }
 
@@ -434,4 +433,17 @@ pub async fn wait_for_node(
 
         sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// A taken port is refused before anything is spawned, instead of the
+/// readiness check accepting whatever server already answers there.
+#[tokio::test]
+async fn start_refuses_a_port_that_is_already_in_use() {
+    let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = occupied.local_addr().unwrap().port();
+    let err = match ServerHandle::start(ServerConfig::new(port)).await {
+        Ok(_) => panic!("started a test server on a port another process holds"),
+        Err(e) => e,
+    };
+    assert!(err.contains("already in use"), "{err}");
 }

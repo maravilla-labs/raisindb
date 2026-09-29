@@ -13,22 +13,11 @@ use tokio::time::sleep;
 use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
 
-const BASE_URL: &str = "http://127.0.0.1:8080";
+use crate::cluster_test_utils::ports::free_port;
+use crate::helpers::multi_node::{ServerConfig, ServerHandle};
+
 const REPO: &str = "default";
 const BRANCH: &str = "main";
-
-/// Guard that ensures server is killed when dropped
-struct ServerGuard;
-
-impl Drop for ServerGuard {
-    fn drop(&mut self) {
-        println!("\n=== Cleaning up: Killing server ===");
-        let _ = std::process::Command::new("pkill")
-            .arg("-9")
-            .arg("raisin-server")
-            .output();
-    }
-}
 
 /// Helper to create a test .rap package (ZIP with manifest.yaml)
 fn create_test_rap_package(name: &str, version: &str, title: &str, description: &str) -> Vec<u8> {
@@ -59,85 +48,23 @@ category: testing
     buffer.into_inner()
 }
 
-async fn ensure_server_running() {
-    // Kill any existing server
-    let _ = std::process::Command::new("pkill")
-        .arg("-9")
-        .arg("raisin-server")
-        .output();
-
-    sleep(Duration::from_secs(1)).await;
-
-    // Clean RocksDB data directory for fresh start
-    // Server uses ./.data/rocksdb, not ./data
-    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap();
-    let _ = std::fs::remove_dir_all(workspace_root.join(".data/rocksdb"));
-    let _ = std::fs::remove_dir_all(workspace_root.join(".data/uploads"));
-
-    // Build the server
-    println!("  Building server with storage-rocksdb feature...");
-    let build_output = std::process::Command::new("cargo")
-        .args(&[
-            "build",
-            "--package",
-            "raisin-server",
-            "--features",
-            "storage-rocksdb",
-        ])
-        .output()
-        .expect("Failed to build server");
-
-    if !build_output.status.success() {
-        panic!(
-            "Server build failed: {}",
-            String::from_utf8_lossy(&build_output.stderr)
-        );
-    }
-    println!("  Server built successfully");
-
-    // Start the server
-    let log_file =
-        std::fs::File::create("/tmp/package_test.log").expect("Failed to create log file");
-    let log_file_err = log_file.try_clone().expect("Failed to clone log file");
-
-    let binary_path = workspace_root.join("target/debug/raisin-server");
-
-    std::process::Command::new(&binary_path)
-        .current_dir(workspace_root)
-        .env("RUST_LOG", "info")
-        .stdout(std::process::Stdio::from(log_file))
-        .stderr(std::process::Stdio::from(log_file_err))
-        .spawn()
-        .expect("Failed to start server");
-
-    // Wait for server to be ready
-    sleep(Duration::from_secs(5)).await;
-
-    for _ in 0..10 {
-        if reqwest::get(format!("{}/management/health", BASE_URL))
-            .await
-            .is_ok()
-        {
-            println!("  Server is ready");
-            return;
-        }
-        sleep(Duration::from_millis(500)).await;
-    }
-
-    panic!("Server failed to start");
+/// Start a server of this test's own, on a free port with a temporary data
+/// directory. The returned handle kills that server, and only that one, when
+/// dropped. (This test used to kill every `raisin-server` process and talk to
+/// a hard-coded 127.0.0.1:8080, i.e. to whatever was listening there.)
+async fn start_server() -> ServerHandle {
+    ServerHandle::start(ServerConfig::new(free_port()))
+        .await
+        .expect("Failed to start server")
 }
 
-async fn setup_repository() {
+async fn setup_repository(base_url: &str) {
     let client = reqwest::Client::new();
 
     // Create repository first
     println!("  Setting up repository '{}'...", REPO);
     let resp = client
-        .post(&format!("{}/api/repositories", BASE_URL))
+        .post(&format!("{}/api/repositories", base_url))
         .header("content-type", "application/json")
         .json(&serde_json::json!({
             "repo_id": REPO,
@@ -161,7 +88,7 @@ async fn setup_repository() {
     sleep(Duration::from_millis(500)).await;
 }
 
-async fn setup_packages_workspace() {
+async fn setup_packages_workspace(base_url: &str) {
     let client = reqwest::Client::new();
 
     // Create packages workspace
@@ -174,7 +101,7 @@ async fn setup_packages_workspace() {
     });
 
     let resp = client
-        .put(&format!("{}/api/workspaces/{}/packages", BASE_URL, REPO))
+        .put(&format!("{}/api/workspaces/{}/packages", base_url, REPO))
         .header("content-type", "application/json")
         .json(&workspace_payload)
         .send()
@@ -197,7 +124,7 @@ async fn setup_packages_workspace() {
     let nodetypes_resp = client
         .get(&format!(
             "{}/api/management/default/main/nodetypes",
-            BASE_URL
+            base_url
         ))
         .send()
         .await
@@ -225,13 +152,12 @@ async fn setup_packages_workspace() {
 
 #[tokio::test]
 async fn test_package_upload_unified_endpoint() {
-    let _guard = ServerGuard;
-
     println!("\n=== Package Upload Integration Test ===\n");
 
-    ensure_server_running().await;
-    setup_repository().await;
-    setup_packages_workspace().await;
+    let server = start_server().await;
+    let base_url = server.base_url.as_str();
+    setup_repository(base_url).await;
+    setup_packages_workspace(base_url).await;
 
     let client = reqwest::Client::new();
 
@@ -254,7 +180,7 @@ async fn test_package_upload_unified_endpoint() {
     // Note: Query params use camelCase due to serde(rename_all = "camelCase")
     let upload_url = format!(
         "{}/api/repository/{}/{}/head/packages/{}?nodeType=raisin:Package",
-        BASE_URL, REPO, BRANCH, package_name
+        base_url, REPO, BRANCH, package_name
     );
 
     println!("\n  Uploading package...");
@@ -292,7 +218,7 @@ async fn test_package_upload_unified_endpoint() {
     // Get the node - check initial state
     let node_url = format!(
         "{}/api/repository/{}/{}/head/packages/{}",
-        BASE_URL, REPO, BRANCH, package_name
+        base_url, REPO, BRANCH, package_name
     );
 
     println!("\n  Checking initial node state...");
