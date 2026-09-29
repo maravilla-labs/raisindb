@@ -43,6 +43,13 @@ impl EventHandler for SchemaStatsEventHandler {
                     "Schema stats cache invalidated"
                 );
             }
+            // A deleted repository takes its schema with it; the cache is keyed
+            // per branch and a delete is rare, so drop everything.
+            if let Event::Repository(repo_event) = event {
+                if matches!(repo_event.kind, raisin_events::RepositoryEventKind::Deleted) {
+                    self.cache.invalidate_all();
+                }
+            }
             Ok(())
         })
     }

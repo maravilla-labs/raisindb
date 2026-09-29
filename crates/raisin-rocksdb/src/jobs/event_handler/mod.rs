@@ -12,7 +12,7 @@
 mod asset_processing;
 mod delete_and_schema_handlers;
 mod event_dispatch;
-mod index_helpers;
+pub(crate) mod index_helpers;
 mod job_helpers;
 mod node_handlers;
 mod replication_handlers;

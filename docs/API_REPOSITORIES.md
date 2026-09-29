@@ -138,16 +138,32 @@ Content-Type: application/json
 
 ### Delete Repository
 
-Delete a repository and all its content.
+Delete a repository and all of its data. **Irreversible:** there is no
+trash, no soft delete and no undo. Take a backup first if the data may be
+needed again.
 
-**WARNING:** This permanently deletes:
-- All branches
-- All tags
-- All revisions
-- All workspaces
-- All nodes and content
+The delete removes, from every column family, everything stored under the
+repository:
+- branches, tags, revisions, trees and node version history
+- workspaces, nodes and their path, property, reference, relation, order,
+  spatial, compound and unique indexes
+- translations and their indexes
+- node types, archetypes and element types
+- embeddings, graph caches and projections, audit log, secrets
+- index status records and the repository's replication log
+- the repository's jobs: queued and running ones are cancelled, and their
+  records, contexts, results and history are removed, as are queued
+  full-text and embedding jobs
+- the full-text (Tantivy) and vector (HNSW) index directories on disk
 
-This operation cannot be undone.
+A repository recreated under the same id starts empty. Other repositories of
+the tenant, including ones whose id starts with the deleted id, are not
+touched. In a cluster the delete is replicated, and each peer removes its own
+copy.
+
+Not removed: uploaded binaries in the binary store (a stored file can be
+referenced from more than one place), and tenant-wide data (identities,
+sessions, tenant AI/auth/embedding configuration).
 
 **Request:**
 ```http

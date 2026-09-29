@@ -181,6 +181,37 @@ impl OperationApplicator {
                     .await
             }
 
+            OpType::DeleteRepository { tenant_id, repo_id } => {
+                // A peer deleted the repository: remove ours, every key of it,
+                // exactly as the local delete does. Our APPLIED_OPS record of
+                // this operation is what stops a replay from re-applying the
+                // repository's older operations afterwards.
+                let report =
+                    crate::storage::repo_purge::purge_repository_keys(&self.db, tenant_id, repo_id);
+                tracing::warn!(
+                    tenant_id = %tenant_id,
+                    repo_id = %repo_id,
+                    from = %op.cluster_node_id,
+                    failed = ?report.failed,
+                    "Applied a replicated repository delete"
+                );
+                self.event_bus.publish(raisin_events::Event::Repository(
+                    raisin_events::RepositoryEvent {
+                        tenant_id: tenant_id.clone(),
+                        repository_id: repo_id.clone(),
+                        kind: raisin_events::RepositoryEventKind::Deleted,
+                        workspace: None,
+                        revision_id: None,
+                        branch_name: None,
+                        tag_name: None,
+                        message: None,
+                        actor: None,
+                        metadata: None,
+                    },
+                ));
+                Ok(())
+            }
+
             // ========== Schema Operations ==========
             OpType::UpdateNodeType {
                 node_type_id,

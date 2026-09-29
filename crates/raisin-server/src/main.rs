@@ -29,6 +29,8 @@ mod management;
 #[cfg(feature = "storage-rocksdb")]
 mod migrations;
 mod nodetype_init_handler;
+#[cfg(feature = "storage-rocksdb")]
+mod repository_index_purge_handler;
 mod schema_stats_event_handler;
 mod sse;
 mod startup;
@@ -424,6 +426,17 @@ async fn main() {
         let engine = startup::indexing::init_hnsw_engine(hnsw_path, &storage);
         Some(engine)
     };
+
+    // A repository deleted by a replicated operation loses its index
+    // directories too (HTTP and WebSocket deletes remove them directly).
+    #[cfg(feature = "storage-rocksdb")]
+    storage.event_bus().subscribe(std::sync::Arc::new(
+        repository_index_purge_handler::RepositoryIndexPurgeHandler::new(
+            storage.clone(),
+            indexing_engine.clone(),
+            hnsw_engine.clone(),
+        ),
+    ));
 
     // The query-side partner of the HNSW engine above, installed process-wide so
     // that EVERY SQL surface can embed query text — not just the one that

@@ -12,9 +12,11 @@ mod deltas;
 mod init;
 mod jobs;
 mod replication;
+pub(crate) mod repo_purge;
 mod tenant_wipe;
 mod types;
 
+pub use repo_purge::RepoPurgeReport;
 pub use tenant_wipe::TenantWipeReport;
 pub use types::RestoreStats;
 

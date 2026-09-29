@@ -271,4 +271,23 @@ impl OperationCapture {
         )
         .await
     }
+
+    /// Capture a repository deletion, so peers purge their copy of it.
+    pub async fn capture_delete_repository(
+        &self,
+        tenant_id: String,
+        repo_id: String,
+        actor: String,
+    ) -> Result<Operation> {
+        self.capture_operation(
+            tenant_id.clone(),
+            repo_id.clone(),
+            "main".to_string(),
+            OpType::DeleteRepository { tenant_id, repo_id },
+            actor,
+            None,
+            true,
+        )
+        .await
+    }
 }

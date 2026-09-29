@@ -13,6 +13,10 @@ pub struct RepositoryManagementRepositoryImpl {
     db: Arc<DB>,
     event_bus: Arc<dyn EventBus>,
     operation_capture: Option<Arc<crate::OperationCapture>>,
+    /// The live job registry, so a deleted repository's queued and running
+    /// jobs are cancelled before its keys go — otherwise a worker finishing
+    /// one would write the repository straight back.
+    job_registry: Option<Arc<raisin_storage::jobs::JobRegistry>>,
 }
 
 impl RepositoryManagementRepositoryImpl {
@@ -21,7 +25,17 @@ impl RepositoryManagementRepositoryImpl {
             db,
             event_bus,
             operation_capture: None,
+            job_registry: None,
         }
+    }
+
+    /// Attach the job registry; see the field.
+    pub fn with_job_registry(
+        mut self,
+        job_registry: Arc<raisin_storage::jobs::JobRegistry>,
+    ) -> Self {
+        self.job_registry = Some(job_registry);
+        self
     }
 
     pub fn new_with_capture(
@@ -33,6 +47,7 @@ impl RepositoryManagementRepositoryImpl {
             db,
             event_bus,
             operation_capture: Some(operation_capture),
+            job_registry: None,
         }
     }
 }
@@ -175,6 +190,26 @@ impl RepositoryManagementRepository for RepositoryManagementRepositoryImpl {
         Ok(repos)
     }
 
+    /// Delete a repository and EVERYTHING it owns. Irreversible.
+    ///
+    /// This used to remove the registry entry and nothing else: nodes,
+    /// revisions, branches, translations, embeddings, indexes and jobs stayed,
+    /// and a repository recreated under the same id came back with the old
+    /// one's data. Now, in this order:
+    ///
+    /// 1. the repository's jobs are cancelled and dropped from the live
+    ///    registry, so no worker writes into it while it is being removed;
+    /// 2. every key it owns is removed from every column family
+    ///    (`storage::repo_purge`, whose registry of column families is
+    ///    exhaustive and test-enforced);
+    /// 3. a `DeleteRepository` operation is captured, so cluster peers purge
+    ///    their copy instead of replicating it back;
+    /// 4. a `Deleted` repository event is published, so caches keyed by the
+    ///    repository (SQL catalog, schema statistics) are dropped.
+    ///
+    /// Search index directories live outside RocksDB: the HTTP and WebSocket
+    /// deletes remove them before answering, and the server's
+    /// `RepositoryIndexPurgeHandler` removes them for a replicated delete.
     async fn delete_repository(&self, tenant_id: &str, repo_id: &str) -> Result<bool> {
         let key = keys::repository_key(tenant_id, repo_id);
         let cf = cf_handle(&self.db, cf::REGISTRY)?;
@@ -184,15 +219,61 @@ impl RepositoryManagementRepository for RepositoryManagementRepositoryImpl {
             .get_cf(cf, &key)
             .map_err(|e| raisin_error::Error::storage(e.to_string()))?
             .is_some();
-
-        if exists {
-            self.db
-                .delete_cf(cf, key)
-                .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
-            Ok(true)
-        } else {
-            Ok(false)
+        if !exists {
+            return Ok(false);
         }
+
+        if let Some(registry) = &self.job_registry {
+            cancel_repository_jobs(&self.db, registry, tenant_id, repo_id).await;
+        }
+
+        let report =
+            crate::storage::repo_purge::purge_repository_keys(&self.db, tenant_id, repo_id);
+        if report.failed.is_empty() {
+            tracing::warn!(
+                tenant_id,
+                repo_id,
+                column_families = report.cfs_purged,
+                jobs = report.jobs_removed,
+                "Repository deleted with all of its data"
+            );
+        } else {
+            tracing::error!(
+                tenant_id,
+                repo_id,
+                failed = ?report.failed,
+                "Repository deleted, but some column families could not be purged"
+            );
+        }
+
+        if let Some(ref capture) = self.operation_capture {
+            if capture.is_enabled() {
+                let _ = capture
+                    .capture_delete_repository(
+                        tenant_id.to_string(),
+                        repo_id.to_string(),
+                        "system".to_string(),
+                    )
+                    .await;
+            }
+        }
+
+        self.event_bus.publish(raisin_events::Event::Repository(
+            raisin_events::RepositoryEvent {
+                tenant_id: tenant_id.to_string(),
+                repository_id: repo_id.to_string(),
+                kind: raisin_events::RepositoryEventKind::Deleted,
+                workspace: None,
+                revision_id: None,
+                branch_name: None,
+                tag_name: None,
+                message: None,
+                actor: None,
+                metadata: None,
+            },
+        ));
+
+        Ok(true)
     }
 
     async fn repository_exists(&self, tenant_id: &str, repo_id: &str) -> Result<bool> {
@@ -234,6 +315,37 @@ impl RepositoryManagementRepository for RepositoryManagementRepositoryImpl {
         }
 
         Ok(())
+    }
+}
+
+/// Cancel and forget every live job of the repository. Its persisted records
+/// are removed by the key purge that follows.
+async fn cancel_repository_jobs(
+    db: &Arc<DB>,
+    registry: &raisin_storage::jobs::JobRegistry,
+    tenant_id: &str,
+    repo_id: &str,
+) {
+    let data = crate::jobs::JobDataStore::new(db.clone());
+    let mut ids = Vec::new();
+    for job in registry.list_jobs_by_tenant(tenant_id).await {
+        if let Ok(Some(context)) = data.get(tenant_id, &job.id) {
+            if context.repo_id == repo_id {
+                ids.push(job.id);
+            }
+        }
+    }
+    for id in &ids {
+        let _ = registry.cancel_job(id).await;
+        let _ = registry.delete_job(id).await;
+    }
+    if !ids.is_empty() {
+        tracing::info!(
+            tenant_id,
+            repo_id,
+            jobs = ids.len(),
+            "Cancelled the deleted repository's jobs"
+        );
     }
 }
 

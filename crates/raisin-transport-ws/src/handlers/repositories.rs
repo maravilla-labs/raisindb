@@ -238,6 +238,7 @@ where
         .await?;
 
     if deleted {
+        purge_repository_indexes(state, tenant_id, &payload.repository_id);
         Ok(Some(ResponseEnvelope::success(
             request.request_id,
             serde_json::json!({"success": true}),
@@ -248,4 +249,33 @@ where
             payload.repository_id
         )))
     }
+}
+
+/// Remove a deleted repository's full-text and vector indexes from disk before
+/// answering, so a repository recreated under the same id right away starts
+/// with no index directories (same as the HTTP delete).
+#[cfg(feature = "storage-rocksdb")]
+fn purge_repository_indexes<S, B>(state: &Arc<WsState<S, B>>, tenant_id: &str, repo_id: &str)
+where
+    S: Storage + TransactionalStorage,
+    B: raisin_binary::BinaryStorage,
+{
+    if let Some(engine) = state.indexing_engine.as_ref() {
+        if let Err(e) = engine.purge_repository(tenant_id, repo_id) {
+            tracing::warn!(tenant_id, repo_id, error = %e, "could not remove the deleted repository's full-text indexes");
+        }
+    }
+    if let Some(engine) = state.hnsw_engine.as_ref() {
+        if let Err(e) = engine.purge_repository(tenant_id, repo_id) {
+            tracing::warn!(tenant_id, repo_id, error = %e, "could not remove the deleted repository's vector indexes");
+        }
+    }
+}
+
+#[cfg(not(feature = "storage-rocksdb"))]
+fn purge_repository_indexes<S, B>(_state: &Arc<WsState<S, B>>, _tenant_id: &str, _repo_id: &str)
+where
+    S: Storage + TransactionalStorage,
+    B: raisin_binary::BinaryStorage,
+{
 }
