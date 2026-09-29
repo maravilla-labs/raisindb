@@ -112,13 +112,21 @@ async fn validating_an_artifact_does_not_park_the_only_worker() {
     let measured = {
         let ticks = ticks.clone();
         tokio::spawn(async move {
-            let bytes: StdArc<[u8]> = StdArc::from(ECHO.to_vec());
+            // A distinct artifact per round: validation keeps what it
+            // compiled, so validating the same bytes again is a cache hit and
+            // would measure nothing.
+            let artifact = |arm: &str, round: usize| -> StdArc<[u8]> {
+                StdArc::from(super::tests_cache::uniquified(
+                    ECHO,
+                    &format!("park-{arm}-{round}"),
+                ))
+            };
             // Let the counter reach its loop before either arm starts.
             tokio::task::yield_now().await;
 
             let before_async = ticks.load(Ordering::Relaxed);
-            for _ in 0..ROUNDS {
-                validate_component_async(bytes.clone())
+            for round in 0..ROUNDS {
+                validate_component_async(artifact("async", round))
                     .await
                     .expect("echo.wasm validates");
             }
@@ -126,8 +134,8 @@ async fn validating_an_artifact_does_not_park_the_only_worker() {
 
             // Negative control: the synchronous form, on the worker itself.
             let before_sync = ticks.load(Ordering::Relaxed);
-            for _ in 0..ROUNDS {
-                validate_component(&bytes).expect("echo.wasm validates");
+            for round in 0..ROUNDS {
+                validate_component(&artifact("sync", round)).expect("echo.wasm validates");
             }
             let during_sync = ticks.load(Ordering::Relaxed) - before_sync;
 

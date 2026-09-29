@@ -31,14 +31,25 @@ use super::engine::{engine, linker};
 /// Cranelift is the expensive part (seconds on a 10 MB jco component), so
 /// callers on an async path must run this inside `spawn_blocking`.
 pub fn compile(bytes: &[u8]) -> Result<InstancePre<HostState>> {
-    let component = Component::new(engine()?, bytes).map_err(|e| {
+    link(&compile_component(bytes)?)
+}
+
+/// Step 1 alone: Cranelift. The expensive part, and the only one whose output
+/// is worth keeping on disk (`cache.rs`).
+pub fn compile_component(bytes: &[u8]) -> Result<Component> {
+    Component::new(engine()?, bytes).map_err(|e| {
         Error::Validation(format!(
             "wasm component rejected: not a valid WebAssembly component \
              (a core module is not one) - {e:#}"
         ))
-    })?;
+    })
+}
 
-    let instance_pre = linker()?.instantiate_pre(&component).map_err(|e| {
+/// Steps 2 and 3: link against this host and check the exported handler.
+/// Cheap — an import walk — so a component read back from disk is re-linked
+/// every time rather than trusting that the host it was compiled for matched.
+pub fn link(component: &Component) -> Result<InstancePre<HostState>> {
+    let instance_pre = linker()?.instantiate_pre(component).map_err(|e| {
         Error::Validation(format!(
             "wasm component rejected: an import it needs is not provided by this host \
              (wasi:sockets and wasi:http are never provided) - {e:#}"

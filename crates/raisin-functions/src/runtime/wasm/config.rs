@@ -53,6 +53,9 @@ pub struct WasmRuntimeConfig {
     pub max_instances: u32,
     /// Per stream, per execution capture ceiling for guest stdout/stderr.
     pub stdout_capture_bytes: usize,
+    /// Where compiled images are kept across restarts (`cache.rs`). `None`
+    /// keeps them in memory only.
+    pub compiled_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for WasmRuntimeConfig {
@@ -66,6 +69,7 @@ impl Default for WasmRuntimeConfig {
             allocation: WasmAllocationStrategy::OnDemand,
             max_instances: 15,
             stdout_capture_bytes: 1024 * 1024,
+            compiled_dir: None,
         }
     }
 }

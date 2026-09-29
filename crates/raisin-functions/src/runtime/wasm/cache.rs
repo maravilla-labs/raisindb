@@ -45,8 +45,9 @@ use raisin_rocksdb::KeyedMutex;
 use wasmtime::component::InstancePre;
 
 use super::bindings::HostState;
-use super::compile::compile;
+use super::compile::{compile_component, link};
 use super::config::config;
+use super::engine::engine;
 
 /// One compiled, linked artifact, ready to instantiate into a fresh `Store`.
 pub struct CachedComponent {
@@ -140,11 +141,29 @@ pub async fn get_or_compile(bytes: Arc<[u8]>) -> Result<Arc<CachedComponent>> {
         return Ok(hit);
     }
 
+    tokio::task::spawn_blocking(move || load_or_compile(key, &bytes))
+        .await
+        .map_err(|e| Error::Internal(format!("wasm compile task failed: {e}")))?
+}
+
+/// The miss path, on a blocking thread: the on-disk image if there is one,
+/// otherwise Cranelift — and either way the result goes into the cache.
+fn load_or_compile(key: String, bytes: &[u8]) -> Result<Arc<CachedComponent>> {
     let artifact_bytes = bytes.len();
     let started = std::time::Instant::now();
-    let instance_pre = tokio::task::spawn_blocking(move || compile(&bytes))
-        .await
-        .map_err(|e| Error::Internal(format!("wasm compile task failed: {e}")))??;
+
+    let (component, source) = match disk::load(&key) {
+        Some(component) => (component, "disk"),
+        None => {
+            let component = compile_component(bytes)?;
+            COMPILES_TOTAL.fetch_add(1, Ordering::Relaxed);
+            let previous = COMPILES_BY_KEY.get(&key).unwrap_or(0);
+            COMPILES_BY_KEY.insert(key.clone(), previous + 1);
+            disk::store(&key, &component);
+            (component, "cranelift")
+        }
+    };
+    let instance_pre = link(&component)?;
 
     let entry = Arc::new(CachedComponent {
         image_bytes: image_bytes(&instance_pre),
@@ -152,37 +171,42 @@ pub async fn get_or_compile(bytes: Arc<[u8]>) -> Result<Arc<CachedComponent>> {
         artifact_bytes,
     });
 
-    tracing::debug!(
+    tracing::info!(
         artifact_key = %key,
         artifact_bytes,
         image_bytes = entry.image_bytes,
-        compile_ms = started.elapsed().as_millis() as u64,
-        "Compiled wasm component"
+        source,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "wasm component ready"
     );
 
-    COMPILES_TOTAL.fetch_add(1, Ordering::Relaxed);
-    // Serialized by the single-flight lock above, so this read-modify-write is
-    // exact for a given key.
-    let previous = COMPILES_BY_KEY.get(&key).unwrap_or(0);
-    COMPILES_BY_KEY.insert(key.clone(), previous + 1);
     COMPILED.insert(key, entry.clone());
-
     Ok(entry)
 }
 
-/// Decide whether an artifact could ever run on this host.
+/// Decide whether an artifact could ever run on this host — and, since the
+/// answer costs a full compile, keep what the compile produced.
 ///
-/// The same `compile()` the cache-miss path takes, so an artifact accepted at
-/// upload cannot be rejected at run time. It deliberately does NOT populate the
-/// cache: validation answers a question, and an artifact that is uploaded but
-/// never invoked should not hold compiled-code budget.
+/// The same compile the cache-miss path takes, so an artifact accepted at
+/// upload cannot be rejected at run time. It used to throw the compiled code
+/// away ("an artifact that is uploaded but never invoked should not hold
+/// compiled-code budget"), which made every deploy pay Cranelift TWICE: once in
+/// the installer, and again inside the first request to the function — the
+/// 1–3.5 s cold start a site saw after each package install, long enough to
+/// trip its client timeouts. The budget argument does not hold up: the cache
+/// is LRU by weight, so an artifact nobody invokes is simply the first thing
+/// evicted.
 ///
 /// Used by the HTTP upload path and the package installer (through the
 /// `raisin-rocksdb` validator inversion); a build without the `wasm` feature
 /// gets the stub in `runtime::validate_component`, which warns and accepts.
 pub fn validate_component(bytes: &[u8]) -> Result<()> {
     check_artifact_cap(bytes.len())?;
-    compile(bytes).map(|_| ())
+    let key = artifact_key(bytes);
+    if COMPILED.contains_key(&key) {
+        return Ok(());
+    }
+    load_or_compile(key, bytes).map(|_| ())
 }
 
 /// [`validate_component`] for an async caller.
@@ -194,11 +218,80 @@ pub fn validate_component(bytes: &[u8]) -> Result<()> {
 /// through THIS, exactly as the cache-miss path does; the synchronous form
 /// stays for callers that are already on a blocking thread.
 pub async fn validate_component_async(bytes: Arc<[u8]>) -> Result<()> {
-    check_artifact_cap(bytes.len())?;
-    tokio::task::spawn_blocking(move || compile(&bytes))
-        .await
-        .map_err(|e| Error::Internal(format!("wasm validation task failed: {e}")))??;
-    Ok(())
+    get_or_compile(bytes).await.map(|_| ())
+}
+
+/// Compiled images on disk, so a restart does not recompile every function.
+///
+/// `<compiled_dir>/<blake3 of the artifact>-<engine fingerprint>.cwasm`. The
+/// fingerprint is wasmtime's own compatibility hash (version, target, every
+/// setting that changes code generation), so a different binary or a changed
+/// `[functions.wasm]` looks for a different file instead of loading code built
+/// for another engine; wasmtime re-checks the header on load regardless.
+///
+/// Loading an image is `unsafe` in wasmtime's terms because the bytes are
+/// executed as native code. The directory lives inside the server's own data
+/// directory and only this module writes it, atomically (temp file + rename),
+/// so it is trusted exactly as far as the RocksDB files beside it are. Any
+/// failure — unreadable, truncated, incompatible — is a miss, never an error:
+/// the artifact is compiled from source as before.
+mod disk {
+    use std::hash::{Hash, Hasher};
+    use std::path::PathBuf;
+    use std::sync::LazyLock;
+
+    use wasmtime::component::Component;
+
+    use super::{config, engine};
+
+    static ENGINE_FINGERPRINT: LazyLock<Option<String>> = LazyLock::new(|| {
+        let engine = engine().ok()?;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        engine.precompile_compatibility_hash().hash(&mut hasher);
+        Some(format!("{:016x}", hasher.finish()))
+    });
+
+    fn path(key: &str) -> Option<PathBuf> {
+        let dir = config().compiled_dir.as_ref()?;
+        let fingerprint = ENGINE_FINGERPRINT.as_ref()?;
+        Some(dir.join(format!("{key}-{fingerprint}.cwasm")))
+    }
+
+    pub(super) fn load(key: &str) -> Option<Component> {
+        let path = path(key)?;
+        if !path.is_file() {
+            return None;
+        }
+        // SAFETY: see the module docs — the file was written by `store` below
+        // from `Component::serialize` of this same engine configuration, and
+        // wasmtime validates the header and compatibility before mapping it.
+        match unsafe { Component::deserialize_file(engine().ok()?, &path) } {
+            Ok(component) => Some(component),
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "discarding unusable compiled wasm image");
+                let _ = std::fs::remove_file(&path);
+                None
+            }
+        }
+    }
+
+    pub(super) fn store(key: &str, component: &Component) {
+        let Some(path) = path(key) else {
+            return;
+        };
+        let written = (|| -> std::io::Result<()> {
+            let image = component.serialize().map_err(std::io::Error::other)?;
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+            std::fs::write(&tmp, image)?;
+            std::fs::rename(&tmp, &path)
+        })();
+        if let Err(e) = written {
+            tracing::warn!(path = %path.display(), error = %e, "could not persist compiled wasm image");
+        }
+    }
 }
 
 /// Artifacts compiled since boot. Rises only on a cache miss.

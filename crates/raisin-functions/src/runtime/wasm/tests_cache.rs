@@ -20,7 +20,10 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use super::cache::{check_artifact_cap, compile_count, compile_count_of, get_or_compile};
+use super::cache::{
+    check_artifact_cap, compile_count, compile_count_of, get_or_compile, validate_component,
+    validate_component_async,
+};
 use super::WasmRuntime;
 use crate::api::MockFunctionApi;
 use crate::runtime::FunctionRuntime;
@@ -37,7 +40,7 @@ const CALL_HOST: &[u8] = include_bytes!("fixtures/call_host.wasm");
 /// Appends a custom section (id 0, `name`-prefixed payload) — legal anywhere at
 /// a component's top level and ignored by the validator, so the artifact still
 /// compiles while hashing to a fresh cache key.
-fn uniquified(base: &[u8], tag: &str) -> Vec<u8> {
+pub(super) fn uniquified(base: &[u8], tag: &str) -> Vec<u8> {
     let name = format!("raisin-test-{tag}");
     assert!(name.len() < 0x80, "the single-byte LEB shortcut needs it");
 
@@ -98,6 +101,30 @@ async fn a_second_execution_of_the_same_artifact_does_not_recompile() {
         compile_count() > before_total,
         "the process-wide counter must have moved too"
     );
+}
+
+/// Install validates (= compiles) an artifact; the first invocation after it
+/// must reuse that compile instead of paying Cranelift a second time inside a
+/// request — the cold start a site saw after every package deploy.
+#[tokio::test]
+async fn the_first_execution_after_validation_does_not_recompile() {
+    let artifact = uniquified(ECHO, "validate-then-run");
+    validate_component(&artifact).expect("valid");
+    assert_eq!(compile_count_of(&artifact), 1);
+    assert!(run(&artifact, json!({})).await.success);
+    assert_eq!(
+        compile_count_of(&artifact),
+        1,
+        "validation left it compiled"
+    );
+
+    let artifact = uniquified(ECHO, "validate-async-then-run");
+    validate_component_async(Arc::from(artifact.clone()))
+        .await
+        .expect("valid");
+    validate_component(&artifact).expect("still valid");
+    assert!(run(&artifact, json!({})).await.success);
+    assert_eq!(compile_count_of(&artifact), 1);
 }
 
 #[tokio::test]

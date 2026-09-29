@@ -99,6 +99,9 @@ async fn main() {
             },
             max_instances: w.max_instances,
             stdout_capture_bytes: w.stdout_capture_bytes,
+            // Inside the data directory, so the images live and die with the
+            // data they were compiled for and are written by nobody else.
+            compiled_dir: Some(std::path::Path::new(&server_config.data_dir).join("wasm-compiled")),
         });
         tracing::info!(
             enabled = w.enabled,
