@@ -24,6 +24,18 @@ pub struct InvokeFunctionRequest {
     pub wait_for_completion: bool,
     /// Optional max wait time for async wait mode (milliseconds).
     pub wait_timeout_ms: Option<u64>,
+    /// Branch the function executes against (default `main`). Also accepted
+    /// as `?branch=`; the body wins when both are given.
+    #[serde(default)]
+    pub branch: Option<String>,
+}
+
+/// Query string of the invoke endpoint.
+#[derive(Debug, Default, Deserialize)]
+pub struct InvokeFunctionQuery {
+    /// Branch the function executes against; see [`InvokeFunctionRequest::branch`].
+    #[serde(default)]
+    pub branch: Option<String>,
 }
 
 /// Response from function invocation.

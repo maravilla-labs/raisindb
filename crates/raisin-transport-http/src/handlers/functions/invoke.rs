@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     Extension, Json,
 };
 use raisin_functions::{ExecutionContext, ExecutionMode, FunctionExecutor};
@@ -20,14 +20,16 @@ use crate::middleware::TenantInfo;
 use crate::{error::ApiError, state::AppState};
 
 use super::helpers::{
-    build_loaded_function, find_function_node, load_function_code, map_storage_error,
-    parse_execution_mode, property_as_bool,
+    build_loaded_function, find_function_node_on_branch, load_function_code_on_branch,
+    map_storage_error, parse_execution_mode, property_as_bool,
 };
-use super::types::{InlineFunctionResult, InvokeFunctionRequest, InvokeFunctionResponse};
+use super::types::{
+    InlineFunctionResult, InvokeFunctionQuery, InvokeFunctionRequest, InvokeFunctionResponse,
+};
 use super::{DEFAULT_BRANCH, FUNCTIONS_WORKSPACE};
 
 #[cfg(feature = "storage-rocksdb")]
-use super::api_factory::build_function_api;
+use super::api_factory::build_function_api_on_branch;
 #[cfg(feature = "storage-rocksdb")]
 use raisin_storage::jobs::{JobContext, JobId, JobInfo, JobStatus, JobType};
 
@@ -41,6 +43,7 @@ pub async fn invoke_function(
     State(state): State<AppState>,
     Extension(tenant_info): Extension<TenantInfo>,
     Path((repo, name)): Path<(String, String)>,
+    Query(query): Query<InvokeFunctionQuery>,
     auth: Option<Extension<AuthContext>>,
     Json(req): Json<InvokeFunctionRequest>,
 ) -> Result<Json<InvokeFunctionResponse>, ApiError> {
@@ -59,9 +62,40 @@ pub async fn invoke_function(
     // Phase timing for the sync path. `duration_ms` in the response covers the
     // function's own execution only, so without this the rest of the handler is
     // invisible and "invoke is slow" cannot be attributed to a step.
+    // The branch the function runs AGAINST: its SQL, node reads and search
+    // all use it. This was hard-coded to `main`, so a site reading its publish
+    // branch had every function answer from working content — search returned
+    // hits for documents that were never published.
+    let branch = req
+        .branch
+        .clone()
+        .or(query.branch)
+        .filter(|b| !b.is_empty())
+        .unwrap_or_else(|| DEFAULT_BRANCH.to_string());
+    if branch != DEFAULT_BRANCH {
+        use raisin_storage::{BranchRepository, Storage};
+        let exists = state
+            .storage()
+            .branches()
+            .get_branch(tenant_id, &repo, &branch)
+            .await
+            .map_err(map_storage_error)?
+            .is_some();
+        if !exists {
+            return Err(ApiError::not_found(format!("Branch '{branch}' not found")));
+        }
+    }
+
     let t_lookup = std::time::Instant::now();
-    let function_node =
-        find_function_node(&state, tenant_id, &repo, &name, auth_context.as_ref()).await?;
+    let (function_node, code_branch) = resolve_function(
+        &state,
+        tenant_id,
+        &repo,
+        &branch,
+        &name,
+        auth_context.as_ref(),
+    )
+    .await?;
     let lookup_ms = t_lookup.elapsed().as_micros() as f64 / 1000.0;
 
     let execution_mode = parse_execution_mode(function_node.properties.get("execution_mode"));
@@ -105,6 +139,8 @@ pub async fn invoke_function(
             &state,
             tenant_id,
             &repo,
+            &branch,
+            &code_branch,
             &function_node,
             req.input,
             req.timeout_ms,
@@ -143,10 +179,20 @@ pub async fn invoke_function(
     } else {
         // Asynchronous: the job IS the delivery mechanism, so it is registered
         // here rather than for every invocation.
+        // A job loads the function from the branch it runs on, so an async
+        // invoke on a branch needs the function to exist there.
+        if code_branch != branch {
+            return Err(ApiError::validation_failed(format!(
+                "Function '{name}' does not exist on branch '{branch}'; an asynchronous \
+                 invocation loads it from the branch it runs on. Invoke with sync=true, \
+                 or make the function available on that branch."
+            )));
+        }
         let job_id = register_function_job(
             &rocksdb,
             tenant_id,
             &repo,
+            &branch,
             &function_node.path,
             req.input.clone(),
             execution_id.clone(),
@@ -228,6 +274,35 @@ pub async fn invoke_function(
     )))
 }
 
+/// Find the function to run for `branch`: on that branch, or on `main`.
+///
+/// Returns the node and the branch it was found on, which is where its code is
+/// loaded from. Functions are deployed to `main`; a publish branch usually
+/// carries content only, and requiring every function to be published before
+/// it could serve that branch would make invoke-on-branch useless. A branch
+/// that does carry its own version of the function gets that version.
+#[cfg(feature = "storage-rocksdb")]
+async fn resolve_function(
+    state: &AppState,
+    tenant_id: &str,
+    repo: &str,
+    branch: &str,
+    name: &str,
+    auth_context: Option<&AuthContext>,
+) -> Result<(raisin_models::nodes::Node, String), ApiError> {
+    if branch != DEFAULT_BRANCH {
+        if let Ok(node) =
+            find_function_node_on_branch(state, tenant_id, repo, branch, name, auth_context).await
+        {
+            return Ok((node, branch.to_string()));
+        }
+    }
+    let node =
+        find_function_node_on_branch(state, tenant_id, repo, DEFAULT_BRANCH, name, auth_context)
+            .await?;
+    Ok((node, DEFAULT_BRANCH.to_string()))
+}
+
 // ============================================================================
 // Job registration and inline execution
 // ============================================================================
@@ -238,6 +313,7 @@ async fn register_function_job(
     rocksdb: &Arc<raisin_rocksdb::RocksDBStorage>,
     tenant_id: &str,
     repo_id: &str,
+    branch: &str,
     function_path: &str,
     input: serde_json::Value,
     execution_id: String,
@@ -263,7 +339,7 @@ async fn register_function_job(
     let context = JobContext {
         tenant_id: tenant_id.to_string(),
         repo_id: repo_id.to_string(),
-        branch: DEFAULT_BRANCH.into(),
+        branch: branch.to_string(),
         workspace_id: FUNCTIONS_WORKSPACE.into(),
         revision: HLC::new(0, 0),
         metadata,
@@ -425,6 +501,10 @@ async fn execute_function_inline(
     state: &AppState,
     tenant_id: &str,
     repo: &str,
+    // The branch the function runs against.
+    branch: &str,
+    // The branch its node and code were found on (`resolve_function`).
+    code_branch: &str,
     node: &raisin_models::nodes::Node,
     input: serde_json::Value,
     timeout_override: Option<u64>,
@@ -434,7 +514,7 @@ async fn execute_function_inline(
     // `raisin.context.execution_id` matches it.
     execution_id: String,
 ) -> Result<InlineFunctionResult, ApiError> {
-    let code = load_function_code(state, tenant_id, repo, node).await?;
+    let code = load_function_code_on_branch(state, tenant_id, repo, code_branch, node).await?;
     let mut loaded = build_loaded_function(node, code)?;
 
     // Module files for ES6 `import` resolution. The QuickJS loader is rebuilt
@@ -453,7 +533,7 @@ async fn execute_function_inline(
             state,
             tenant_id,
             repo,
-            DEFAULT_BRANCH,
+            code_branch,
             &node.path,
             loaded.metadata.entry_file_path(),
             loaded.code.as_text().unwrap_or(""),
@@ -494,7 +574,7 @@ async fn execute_function_inline(
         .map(|s| s.as_str())
         .unwrap_or("system");
 
-    let mut context = ExecutionContext::new(tenant_id, repo, DEFAULT_BRANCH, actor)
+    let mut context = ExecutionContext::new(tenant_id, repo, branch, actor)
         .with_execution_id(execution_id)
         .with_workspace(FUNCTIONS_WORKSPACE)
         .with_input(input)
@@ -513,7 +593,14 @@ async fn execute_function_inline(
         allowed_urls = ?loaded.metadata.network_policy.allowed_urls,
         "execute_function_inline: network policy"
     );
-    let api = build_function_api(state, tenant_id, repo, &loaded.metadata, tx_auth_context);
+    let api = build_function_api_on_branch(
+        state,
+        tenant_id,
+        repo,
+        branch,
+        &loaded.metadata,
+        tx_auth_context,
+    );
     let executor = FunctionExecutor::new();
 
     let result = executor

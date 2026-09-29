@@ -50,9 +50,33 @@ pub(crate) fn build_function_api(
     metadata: &FunctionMetadata,
     auth_context: Option<AuthContext>,
 ) -> Arc<RaisinFunctionApi> {
+    build_function_api_on_branch(
+        state,
+        tenant_id,
+        repo,
+        DEFAULT_BRANCH,
+        metadata,
+        auth_context,
+    )
+}
+
+/// [`build_function_api`] for an execution that reads and writes `branch`.
+///
+/// Every callback — node CRUD, `raisin.sql.query`, transactions, search — is
+/// scoped to the branch given here, so a function invoked for the publish
+/// branch sees published content and that branch's search indexes.
+#[cfg(feature = "storage-rocksdb")]
+pub(crate) fn build_function_api_on_branch(
+    state: &AppState,
+    tenant_id: &str,
+    repo: &str,
+    branch: &str,
+    metadata: &FunctionMetadata,
+    auth_context: Option<AuthContext>,
+) -> Arc<RaisinFunctionApi> {
     let repo_id = repo.to_string();
     let tenant = tenant_id.to_string();
-    let branch = DEFAULT_BRANCH.to_string();
+    let branch_name = branch.to_string();
 
     // Create AI config store from storage
     let ai_config_store: Option<Arc<dyn raisin_ai::TenantAIConfigStore>> =
@@ -88,11 +112,11 @@ pub(crate) fn build_function_api(
     });
 
     // Build all callbacks via canonical factory
-    let callbacks = create_production_callbacks(deps, tenant, repo_id, branch, auth_context);
+    let callbacks = create_production_callbacks(deps, tenant, repo_id, branch_name, auth_context);
 
     Arc::new(
         RaisinFunctionApi::new(
-            ExecutionContext::new(tenant_id, repo, DEFAULT_BRANCH, "system")
+            ExecutionContext::new(tenant_id, repo, branch, "system")
                 .with_workspace(FUNCTIONS_WORKSPACE),
             metadata.network_policy.clone(),
             callbacks,

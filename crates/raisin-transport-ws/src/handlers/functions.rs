@@ -65,6 +65,55 @@ mod inner {
         connection_state.read().tenant_id.clone()
     }
 
+    /// The branch an invocation runs against: the request context's, else
+    /// `main`. Both invoke handlers ignored it and ran on `main`, so a client
+    /// reading its publish branch got functions answering from working content.
+    fn request_branch(request: &RequestEnvelope) -> String {
+        request
+            .context
+            .branch
+            .clone()
+            .filter(|b| !b.is_empty())
+            .unwrap_or_else(|| DEFAULT_BRANCH.to_string())
+    }
+
+    /// The function node for `branch`: on that branch, else on `main`, where
+    /// functions are deployed. Returns the node and the branch it came from,
+    /// which is where its code is loaded from.
+    async fn find_function_for_branch<S: Storage>(
+        storage: &S,
+        tenant_id: &str,
+        repo: &str,
+        branch: &str,
+        name: &str,
+    ) -> Result<(raisin_models::nodes::Node, String), WsError> {
+        if branch != DEFAULT_BRANCH {
+            if let Ok(node) = raisin_functions::execution::code_loader::find_function(
+                storage,
+                tenant_id,
+                repo,
+                branch,
+                FUNCTIONS_WORKSPACE,
+                name,
+            )
+            .await
+            {
+                return Ok((node, branch.to_string()));
+            }
+        }
+        let node = raisin_functions::execution::code_loader::find_function(
+            storage,
+            tenant_id,
+            repo,
+            DEFAULT_BRANCH,
+            FUNCTIONS_WORKSPACE,
+            name,
+        )
+        .await
+        .map_err(|e| WsError::InvalidRequest(e.to_string()))?;
+        Ok((node, DEFAULT_BRANCH.to_string()))
+    }
+
     // -----------------------------------------------------------------------
     // Async invoke (background job)
     // -----------------------------------------------------------------------
@@ -88,16 +137,24 @@ mod inner {
             .ok_or_else(|| WsError::InternalError("RocksDB storage not available".to_string()))?
             .clone();
 
-        let function_node = raisin_functions::execution::code_loader::find_function(
+        let branch = request_branch(&request);
+        let (function_node, code_branch) = find_function_for_branch(
             &*state.storage,
             &tenant_id,
             &repo,
-            DEFAULT_BRANCH,
-            FUNCTIONS_WORKSPACE,
+            &branch,
             &payload.function_name,
         )
-        .await
-        .map_err(|e| WsError::InvalidRequest(e.to_string()))?;
+        .await?;
+        // A job loads the function from the branch it runs on.
+        if code_branch != branch {
+            return Err(WsError::InvalidRequest(format!(
+                "Function '{}' does not exist on branch '{branch}'; an asynchronous \
+                 invocation loads it from the branch it runs on. Use invokeSync, or make \
+                 the function available on that branch.",
+                payload.function_name
+            )));
+        }
 
         // Register a background job for execution
         let execution_id = nanoid::nanoid!();
@@ -124,7 +181,7 @@ mod inner {
         let context = raisin_storage::jobs::JobContext {
             tenant_id: tenant_id.clone(),
             repo_id: repo.clone(),
-            branch: DEFAULT_BRANCH.into(),
+            branch: branch.clone(),
             workspace_id: FUNCTIONS_WORKSPACE.into(),
             revision: raisin_hlc::HLC::new(0, 0),
             metadata,
@@ -323,16 +380,15 @@ mod inner {
         let request_id = request.request_id.clone();
 
         // Find function via canonical code_loader
-        let function_node = raisin_functions::execution::code_loader::find_function(
+        let branch = request_branch(&request);
+        let (function_node, code_branch) = find_function_for_branch(
             &*state.storage,
             &tenant_id,
             &repo,
-            DEFAULT_BRANCH,
-            FUNCTIONS_WORKSPACE,
+            &branch,
             &payload.function_name,
         )
-        .await
-        .map_err(|e| WsError::InvalidRequest(e.to_string()))?;
+        .await?;
 
         // Load function code via canonical code_loader (resolves entry_file property)
         let (code, metadata) = raisin_functions::execution::code_loader::load_function_code(
@@ -340,7 +396,7 @@ mod inner {
             &*state.bin,
             &tenant_id,
             &repo,
-            DEFAULT_BRANCH,
+            &code_branch,
             FUNCTIONS_WORKSPACE,
             &function_node,
             &function_node.path,
@@ -366,7 +422,7 @@ mod inner {
             &*state.bin,
             &tenant_id,
             &repo,
-            DEFAULT_BRANCH,
+            &code_branch,
             FUNCTIONS_WORKSPACE,
             &function_node.path,
             loaded.metadata.entry_file_path(),
@@ -469,11 +525,11 @@ mod inner {
             deps,
             tenant_id.clone(),
             repo.clone(),
-            DEFAULT_BRANCH.to_string(),
+            branch.clone(),
             auth_context.clone(),
         );
 
-        let mut api_context = ExecutionContext::new(&tenant_id, &repo, DEFAULT_BRANCH, actor)
+        let mut api_context = ExecutionContext::new(&tenant_id, &repo, &branch, actor)
             .with_workspace(FUNCTIONS_WORKSPACE);
         if let Some(auth) = auth_context.clone() {
             api_context = api_context.with_auth(auth);
@@ -486,7 +542,7 @@ mod inner {
                 .with_identity_policy(metadata.identity_policy.clone()),
         );
 
-        let mut context = ExecutionContext::new(&tenant_id, &repo, DEFAULT_BRANCH, actor)
+        let mut context = ExecutionContext::new(&tenant_id, &repo, &branch, actor)
             .with_workspace(FUNCTIONS_WORKSPACE)
             .with_input(payload.input);
         if let Some(auth) = auth_context {
