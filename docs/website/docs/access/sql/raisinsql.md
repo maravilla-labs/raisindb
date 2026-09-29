@@ -300,13 +300,15 @@ Resolve references in a JSONB value, replacing reference objects with the full r
 ```sql
 RESOLVE(jsonb) → jsonb
 RESOLVE(jsonb, depth) → jsonb
+RESOLVE(jsonb, depth, fields) → jsonb
 ```
 
 **Parameters:**
 - `jsonb`: A JSONB value containing references. Can be a single reference (`properties -> 'field'`) or an entire properties object (`properties`).
 - `depth` (optional): How many levels of nested references to resolve (default: `1`, max: `10`). Depth `0` returns the input unchanged.
+- `fields` (optional): A comma-separated list of property names (`'title,alt,file'`). Every inlined node then carries only `id`, `name`, `path`, `node_type` and those properties. `NULL` means all properties.
 
-**Returns:** JSONB with reference objects replaced by the full node data (`id`, `name`, `path`, `node_type`, plus all properties). Returns `NULL` if input is `NULL`. Unresolvable references are kept as-is.
+**Returns:** JSONB with reference objects replaced by the node data (`id`, `name`, `path`, `node_type`, plus all properties, or only `fields`). Returns `NULL` if input is `NULL`. Unresolvable references are kept as-is.
 
 **Examples:**
 
@@ -348,6 +350,15 @@ WHERE id = 'article-123';
 ```
 
 ```sql
+-- Render a page: inline what the blocks show, not whole asset nodes.
+-- An asset's extracted text, rendition map and AI metadata are most of what a
+-- fully resolved page weighs; name the fields the renderer reads instead.
+SELECT id, path, RESOLVE(properties, 2, 'title,alt,file,renditions') AS properties
+FROM stories
+WHERE path = $1;
+```
+
+```sql
 -- Combine with other functions
 SELECT
   id,
@@ -381,9 +392,9 @@ LIMIT 20;
 
 **Cross-workspace:** References that point to nodes in other workspaces are resolved using the reference's `raisin:workspace` field.
 
-**Circular references:** Protected by a visited-set. If a circular reference chain is detected (A &rarr; B &rarr; A), the cycle is broken and the already-visited reference is kept as-is.
+**Shared and circular references:** Each referenced node is read once per call and inlined everywhere it appears — an asset used on the page and on a teased child page is resolved in both places. A cycle (A &rarr; B &rarr; A) nests until `depth` runs out; the last level keeps the reference object.
 
-**Performance:** For a single reference (`RESOLVE(properties -> 'field')`), this is a single node lookup. For full properties (`RESOLVE(properties)`), the function walks the property tree to find all references. Use single-reference resolution when you only need one field.
+**Performance:** Resolution works on the JSON directly and reads each distinct node once, so the cost is one node read per distinct reference plus the size of what is inlined. The size is usually the larger part: pass `fields` when you render a few properties of each referenced node.
 
 ## JSON Operations
 
