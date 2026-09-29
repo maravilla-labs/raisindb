@@ -8,96 +8,41 @@ use tokio::time::sleep;
 use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
 
-const BASE_URL: &str = "http://127.0.0.1:8080";
+use crate::cluster_test_utils::ports::free_port;
+use crate::helpers::multi_node::{ServerConfig, ServerHandle};
+
 const REPO: &str = "default";
 const BRANCH: &str = "main";
 const WORKSPACE: &str = "demo";
 
-/// Guard that ensures server is killed when dropped
-struct ServerGuard;
-
-impl Drop for ServerGuard {
-    fn drop(&mut self) {
-        println!("\n=== Cleaning up: Killing server ===");
-        let _ = std::process::Command::new("pkill")
-            .arg("-9")
-            .arg("raisin-server")
-            .output();
-    }
+std::thread_local! {
+    /// URL of the server THIS test started. Each `#[tokio::test]` runs on its
+    /// own current-thread runtime, so a thread-local is per test.
+    static BASE_URL: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
 
-/// Starts the server and keeps it running for all tests
-async fn ensure_server_running() {
-    // Kill any existing server
-    let _ = std::process::Command::new("pkill")
-        .arg("-9")
-        .arg("raisin-server")
-        .output();
+fn base_url() -> String {
+    let url = BASE_URL.with(|u| u.borrow().clone());
+    assert!(
+        !url.is_empty(),
+        "start_server() must run before any request"
+    );
+    url
+}
 
-    sleep(Duration::from_secs(1)).await;
-
-    // Clean RocksDB data directory for fresh start
-    // Server uses ./.data/rocksdb, not ./data
-    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap();
-    let _ = std::fs::remove_dir_all(workspace_root.join(".data/rocksdb"));
-    let _ = std::fs::remove_dir_all(workspace_root.join(".data/uploads"));
-
-    // Explicitly build the server with storage-rocksdb feature first
-    println!("  Building server with storage-rocksdb feature...");
-    let build_output = std::process::Command::new("cargo")
-        .args(&[
-            "build",
-            "--package",
-            "raisin-server",
-            "--features",
-            "storage-rocksdb",
-        ])
-        .output()
-        .expect("Failed to build server");
-
-    if !build_output.status.success() {
-        panic!(
-            "Server build failed: {}",
-            String::from_utf8_lossy(&build_output.stderr)
-        );
-    }
-    println!("  Server built successfully");
-
-    // Create log file for server output
-    let log_file =
-        std::fs::File::create("/tmp/server_test.log").expect("Failed to create log file");
-    let log_file_err = log_file.try_clone().expect("Failed to clone log file");
-
-    // Start the pre-built server binary directly
-    let binary_path = workspace_root.join("target/debug/raisin-server");
-
-    std::process::Command::new(&binary_path)
-        .current_dir(workspace_root) // Set working directory to workspace root
-        .env("RUST_LOG", "debug")
-        .stdout(std::process::Stdio::from(log_file))
-        .stderr(std::process::Stdio::from(log_file_err))
-        .spawn()
+/// Start a server of this test's own — on a free port, with a temporary data
+/// directory — and point every request at it. The returned handle kills that
+/// server, and only that one, when dropped.
+///
+/// These tests used to kill every `raisin-server` process, wipe
+/// `<workspace>/.data`, and talk to a hard-coded `127.0.0.1:8080`; when a
+/// developer's own server held 8080, they ran against it.
+async fn start_server() -> ServerHandle {
+    let server = ServerHandle::start(ServerConfig::new(free_port()))
+        .await
         .expect("Failed to start server");
-
-    // Wait for server to be ready
-    sleep(Duration::from_secs(5)).await;
-
-    // Verify server is responding
-    for _ in 0..10 {
-        if reqwest::get(format!("{}/management/health", BASE_URL))
-            .await
-            .is_ok()
-        {
-            return;
-        }
-        sleep(Duration::from_millis(500)).await;
-    }
-
-    panic!("Server failed to start");
+    BASE_URL.with(|u| *u.borrow_mut() = server.base_url.clone());
+    server
 }
 
 /// Helper to create a node with commit metadata - returns the node's path
@@ -114,7 +59,7 @@ async fn create_node_in_workspace(
     } else {
         format!("{}{}", repo_path, clean_path)
     };
-    let url = format!("{}{}", BASE_URL, full_path);
+    let url = format!("{}{}", base_url(), full_path);
     let client = reqwest::Client::new();
 
     // Add required properties based on node type
@@ -220,7 +165,7 @@ async fn create_node_original(parent_path: &str, node_type: &str, name: &str) ->
     } else {
         format!("{}{}", repo_path, clean_path)
     };
-    let url = format!("{}{}", BASE_URL, full_path);
+    let url = format!("{}{}", base_url(), full_path);
     let client = reqwest::Client::new();
 
     // Add required properties based on node type
@@ -293,7 +238,11 @@ async fn publish_node(node_path: &str) {
     let client = reqwest::Client::new();
     let url = format!(
         "{}/api/repository/{}/{}/head/{}{}/raisin%3Acmd/publish",
-        BASE_URL, REPO, BRANCH, WORKSPACE, node_path
+        base_url(),
+        REPO,
+        BRANCH,
+        WORKSPACE,
+        node_path
     );
 
     let resp = client
@@ -312,7 +261,11 @@ async fn get_node(node_path: &str) -> serde_json::Value {
     let client = reqwest::Client::new();
     let url = format!(
         "{}/api/repository/{}/{}/head/{}{}",
-        BASE_URL, REPO, BRANCH, WORKSPACE, node_path
+        base_url(),
+        REPO,
+        BRANCH,
+        WORKSPACE,
+        node_path
     );
 
     let resp = client.get(&url).send().await.expect("Failed to get node");
@@ -345,7 +298,7 @@ async fn setup_repository_and_branch() {
     // Create repository
     println!("  Setting up repository '{}'...", REPO);
     let resp = client
-        .post(&format!("{}/api/repositories", BASE_URL))
+        .post(&format!("{}/api/repositories", base_url()))
         .header("content-type", "application/json")
         .json(&serde_json::json!({
             "repo_id": REPO,
@@ -367,7 +320,7 @@ async fn setup_repository_and_branch() {
     // Verify repository exists
     println!("  Verifying repository...");
     let resp = client
-        .get(&format!("{}/api/repositories/{}", BASE_URL, REPO))
+        .get(&format!("{}/api/repositories/{}", base_url(), REPO))
         .send()
         .await
         .expect("Failed to get repository");
@@ -396,7 +349,9 @@ async fn setup_repository_and_branch() {
     let resp = client
         .put(&format!(
             "{}/api/workspaces/{}/{}",
-            BASE_URL, REPO, WORKSPACE
+            base_url(),
+            REPO,
+            WORKSPACE
         ))
         .header("content-type", "application/json")
         .json(&serde_json::json!({
@@ -422,7 +377,7 @@ async fn setup_repository_and_branch() {
     // Verify repository exists
     println!("  Verifying repository...");
     let verify_repo_resp = client
-        .get(&format!("{}/api/repositories/{}", BASE_URL, REPO))
+        .get(&format!("{}/api/repositories/{}", base_url(), REPO))
         .send()
         .await
         .expect("Failed to verify repository");
@@ -439,7 +394,9 @@ async fn setup_repository_and_branch() {
     let verify_branch_resp = client
         .get(&format!(
             "{}/api/management/repositories/default/{}/branches/{}",
-            BASE_URL, REPO, BRANCH
+            base_url(),
+            REPO,
+            BRANCH
         ))
         .send()
         .await
@@ -459,7 +416,7 @@ async fn setup_repository_and_branch() {
     let nodetypes_resp = client
         .get(&format!(
             "{}/api/management/default/main/nodetypes",
-            BASE_URL
+            base_url()
         ))
         .send()
         .await
@@ -503,11 +460,8 @@ async fn setup_repository_and_branch() {
 #[tokio::test]
 // #[ignore] // Run with: cargo test --package raisin-server --test integration_node_operations --  --ignored
 async fn test_all_node_operations() {
-    // Create guard that will kill server when test ends (success or panic)
-    let _guard = ServerGuard;
-
     // Start server once for all tests
-    ensure_server_running().await;
+    let _server = start_server().await;
 
     // Setup repository and branch
     setup_repository_and_branch().await;
@@ -588,7 +542,10 @@ async fn test_rename_operations_impl() {
 
     let url = format!(
         "{}/api/repository/{}/{}/head/{}/rename-test-1/raisin%3Acmd/rename",
-        BASE_URL, REPO, BRANCH, WORKSPACE
+        base_url(),
+        REPO,
+        BRANCH,
+        WORKSPACE
     );
     println!("    POST {}", url);
     let resp = client
@@ -620,7 +577,10 @@ async fn test_rename_operations_impl() {
     let list_resp = client
         .get(&format!(
             "{}/api/repository/{}/{}/head/{}/",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .send()
         .await
@@ -645,7 +605,7 @@ async fn test_rename_operations_impl() {
     // create_node("/", "raisin:Folder", "rename-test-2").await;
     // publish_node("/rename-test-2").await;
 
-    // let resp = client.post(&format!("{}/api/repository/{}/{}/head/{}/rename-test-2/raisin%3Acmd/rename", BASE_URL, REPO, BRANCH, WORKSPACE))
+    // let resp = client.post(&format!("{}/api/repository/{}/{}/head/{}/rename-test-2/raisin%3Acmd/rename", base_url(), REPO, BRANCH, WORKSPACE))
     //     .header("content-type", "application/json")
     //     .json(&serde_json::json!({"newName": "should-fail"}))
     //     .send()
@@ -661,7 +621,7 @@ async fn test_rename_operations_impl() {
     // create_node("/rename-test-3", "raisin:Page", "child").await;
     // publish_node("/rename-test-3/child").await;
 
-    // let resp = client.post(&format!("{}/api/repository/{}/{}/head/{}/rename-test-3/raisin%3Acmd/rename", BASE_URL, REPO, BRANCH, WORKSPACE))
+    // let resp = client.post(&format!("{}/api/repository/{}/{}/head/{}/rename-test-3/raisin%3Acmd/rename", base_url(), REPO, BRANCH, WORKSPACE))
     //     .header("content-type", "application/json")
     //     .json(&serde_json::json!({"newName": "should-also-fail"}))
     //     .send()
@@ -684,7 +644,10 @@ async fn test_move_operations_impl() {
     let resp = client
         .post(&format!(
             "{}/api/repository/{}/{}/head/{}/move-a/item1/raisin%3Acmd/move",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .header("content-type", "application/json")
         .json(&serde_json::json!({
@@ -715,7 +678,7 @@ async fn test_move_operations_impl() {
     // create_node("/move-c", "raisin:Page", "item2").await;
     // publish_node("/move-c/item2").await;
 
-    // let resp = client.post(&format!("{}/api/repository/{}/{}/head/{}/move-c/item2/raisin%3Acmd/move", BASE_URL, REPO, BRANCH, WORKSPACE))
+    // let resp = client.post(&format!("{}/api/repository/{}/{}/head/{}/move-c/item2/raisin%3Acmd/move", base_url(), REPO, BRANCH, WORKSPACE))
     //     .header("content-type", "application/json")
     //     .json(&serde_json::json!({"targetPath": "/move-d/item2"}))
     //     .send()
@@ -733,7 +696,7 @@ async fn test_move_operations_impl() {
     // create_node("/move-e/subfolder", "raisin:Page", "page").await;
     // publish_node("/move-e/subfolder/page").await;
 
-    // let resp = client.post(&format!("{}/api/repository/{}/{}/head/{}/move-e/raisin%3Acmd/move", BASE_URL, REPO, BRANCH, WORKSPACE))
+    // let resp = client.post(&format!("{}/api/repository/{}/{}/head/{}/move-e/raisin%3Acmd/move", base_url(), REPO, BRANCH, WORKSPACE))
     //     .header("content-type", "application/json")
     //     .json(&serde_json::json!({"targetPath": "/move-f/move-e"}))
     //     .send()
@@ -759,7 +722,10 @@ async fn test_copy_operations_impl() {
     let original_id = node["id"].as_str().unwrap();
     let copy_url = &format!(
         "{}/api/repository/{}/{}/head/{}/copy-original/raisin%3Acmd/copy",
-        BASE_URL, REPO, BRANCH, WORKSPACE
+        base_url(),
+        REPO,
+        BRANCH,
+        WORKSPACE
     );
     println!("      COPY URL: {}", copy_url);
     let resp = client
@@ -830,7 +796,7 @@ async fn test_copy_tree_operations_impl() {
     // publish_node("/tree-source/page1").await;
     // publish_node("/tree-source/page2").await;
 
-    // let resp = client.post(&format!("{}/api/repository/{}/{}/head/{}/tree-source/raisin%3Acmd/copy_tree", BASE_URL, REPO, BRANCH, WORKSPACE))
+    // let resp = client.post(&format!("{}/api/repository/{}/{}/head/{}/tree-source/raisin%3Acmd/copy_tree", base_url(), REPO, BRANCH, WORKSPACE))
     //     .header("content-type", "application/json")
     //     .json(&serde_json::json!({"targetPath": "/", "newName": "tree-copy"}))
     //     .send()
@@ -859,7 +825,7 @@ async fn test_copy_tree_operations_impl() {
     // let original_source_id = source_node["id"].as_str().unwrap();
     // let original_child_id = child_node["id"].as_str().unwrap();
 
-    // let resp = client.post(&format!("{}/api/repository/{}/{}/head/{}/id-source/raisin%3Acmd/copy_tree", BASE_URL, REPO, BRANCH, WORKSPACE))
+    // let resp = client.post(&format!("{}/api/repository/{}/{}/head/{}/id-source/raisin%3Acmd/copy_tree", base_url(), REPO, BRANCH, WORKSPACE))
     //     .header("content-type", "application/json")
     //     .json(&serde_json::json!({"targetPath": "/", "newName": "id-dest"}))
     //     .send()
@@ -894,7 +860,7 @@ async fn test_reorder_operations_impl() {
 
     // sleep(Duration::from_millis(100)).await;
 
-    // let resp = client.post(&format!("{}/api/repository/{}/{}/head/{}/reorder-folder/item-b/raisin%3Acmd/reorder", BASE_URL, REPO, BRANCH, WORKSPACE))
+    // let resp = client.post(&format!("{}/api/repository/{}/{}/head/{}/reorder-folder/item-b/raisin%3Acmd/reorder", base_url(), REPO, BRANCH, WORKSPACE))
     //     .header("content-type", "application/json")
     //     .json(&serde_json::json!({"targetPath": "/reorder-folder/item-a", "movePosition": "before"}))
     //     .send()
@@ -931,7 +897,10 @@ async fn test_order_key_sorting_impl() {
     let resp = client
         .post(&format!(
             "{}/api/repository/{}/{}/head/{}/",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .json(&payload)
         .send()
@@ -948,7 +917,10 @@ async fn test_order_key_sorting_impl() {
     let resp = client
         .post(&format!(
             "{}/api/repository/{}/{}/head/{}/",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .json(&payload)
         .send()
@@ -965,7 +937,10 @@ async fn test_order_key_sorting_impl() {
     let resp = client
         .post(&format!(
             "{}/api/repository/{}/{}/head/{}/",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .json(&payload)
         .send()
@@ -982,7 +957,10 @@ async fn test_order_key_sorting_impl() {
     let resp = client
         .post(&format!(
             "{}/api/repository/{}/{}/head/{}/",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .json(&payload)
         .send()
@@ -995,7 +973,10 @@ async fn test_order_key_sorting_impl() {
     let resp = client
         .get(&format!(
             "{}/api/repository/{}/{}/head/{}/",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .send()
         .await
@@ -1110,7 +1091,10 @@ async fn test_order_key_sorting_impl() {
     let resp = client
         .get(&format!(
             "{}/api/repository/{}/{}/head/{}/childnodetest/",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .send()
         .await
@@ -1186,7 +1170,10 @@ async fn test_versioning_operations_impl() {
     let resp = client
         .put(&format!(
             "{}/api/repository/{}/{}/head/{}/version-test",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .header("content-type", "application/json")
         .json(&serde_json::json!({"properties": {"title": "V1 Content"}}))
@@ -1199,7 +1186,10 @@ async fn test_versioning_operations_impl() {
     let resp = client
         .post(&format!(
             "{}/api/repository/{}/{}/head/{}/version-test/raisin%3Acmd/create_version",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .header("content-type", "application/json")
         .json(&serde_json::json!({"note": "Initial snapshot"}))
@@ -1217,7 +1207,10 @@ async fn test_versioning_operations_impl() {
     let resp = client
         .get(&format!(
             "{}/api/repository/{}/{}/head/{}/version-test/raisin%3Aversion",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .send()
         .await
@@ -1236,7 +1229,10 @@ async fn test_versioning_operations_impl() {
     let resp = client
         .put(&format!(
             "{}/api/repository/{}/{}/head/{}/version-test",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .header("content-type", "application/json")
         .json(&serde_json::json!({"properties": {"title": "V2 Content", "extra": "New field"}}))
@@ -1248,7 +1244,10 @@ async fn test_versioning_operations_impl() {
     let resp = client
         .post(&format!(
             "{}/api/repository/{}/{}/head/{}/version-test/raisin%3Acmd/create_version",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .header("content-type", "application/json")
         .json(&serde_json::json!({"note": "Added extra field"}))
@@ -1282,7 +1281,10 @@ async fn test_versioning_operations_impl() {
     let resp = client
         .post(&format!(
             "{}/api/repository/{}/{}/head/{}/version-test/raisin%3Acmd/restore_version",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .header("content-type", "application/json")
         .json(&serde_json::json!({"version": 1}))
@@ -1318,14 +1320,14 @@ async fn test_versioning_operations_impl() {
 
     // Test 6: Delete version
     // println!("  Test 6: Delete version...");
-    // let resp = client.get(&format!("{}/api/repository/{}/{}/head/{}/version-test/raisin%3Aversion", BASE_URL, REPO, BRANCH, WORKSPACE))
+    // let resp = client.get(&format!("{}/api/repository/{}/{}/head/{}/version-test/raisin%3Aversion", base_url(), REPO, BRANCH, WORKSPACE))
     //     .send()
     //     .await
     //     .unwrap();
     // let versions: serde_json::Value = resp.json().await.unwrap();
     // let version_count_before = versions.as_array().unwrap().len();
 
-    // let resp = client.post(&format!("{}/api/repository/{}/{}/head/{}/version-test/raisin%3Acmd/delete_version", BASE_URL, REPO, BRANCH, WORKSPACE))
+    // let resp = client.post(&format!("{}/api/repository/{}/{}/head/{}/version-test/raisin%3Acmd/delete_version", base_url(), REPO, BRANCH, WORKSPACE))
     //     .header("content-type", "application/json")
     //     .json(&serde_json::json!({"version": 2}))
     //     .send()
@@ -1336,7 +1338,7 @@ async fn test_versioning_operations_impl() {
     // let result: serde_json::Value = resp.json().await.unwrap();
     // assert_eq!(result["deleted"], true);
 
-    // let resp = client.get(&format!("{}/api/repository/{}/{}/head/{}/version-test/raisin%3Aversion", BASE_URL, REPO, BRANCH, WORKSPACE))
+    // let resp = client.get(&format!("{}/api/repository/{}/{}/head/{}/version-test/raisin%3Aversion", base_url(), REPO, BRANCH, WORKSPACE))
     //     .send()
     //     .await
     //     .unwrap();
@@ -1347,7 +1349,7 @@ async fn test_versioning_operations_impl() {
 
     // // Test 6: Get specific version details
     // println!("  Test 6: Get specific version details...");
-    // let resp = client.get(&format!("{}/api/repository/{}/{}/head/{}/version-test/raisin%3Aversion/1", BASE_URL, REPO, BRANCH, WORKSPACE))
+    // let resp = client.get(&format!("{}/api/repository/{}/{}/head/{}/version-test/raisin%3Aversion/1", base_url(), REPO, BRANCH, WORKSPACE))
     //     .send()
     //     .await
     //     .unwrap();
@@ -1366,7 +1368,7 @@ async fn test_repository_operations_impl() {
     // Test 1: Create a new repository
     println!("  Test 1: Create repository...");
     let resp = client
-        .post(&format!("{}/api/repositories", BASE_URL))
+        .post(&format!("{}/api/repositories", base_url()))
         .header("content-type", "application/json")
         .json(&serde_json::json!({
             "repo_id": "test-repo",
@@ -1387,7 +1389,7 @@ async fn test_repository_operations_impl() {
     // Test 2: Get repository
     println!("  Test 2: Get repository...");
     let resp = client
-        .get(&format!("{}/api/repositories/test-repo", BASE_URL))
+        .get(&format!("{}/api/repositories/test-repo", base_url()))
         .send()
         .await
         .unwrap();
@@ -1400,7 +1402,7 @@ async fn test_repository_operations_impl() {
     // Test 3: List repositories
     println!("  Test 3: List repositories...");
     let resp = client
-        .get(&format!("{}/api/repositories", BASE_URL))
+        .get(&format!("{}/api/repositories", base_url()))
         .send()
         .await
         .unwrap();
@@ -1417,7 +1419,7 @@ async fn test_repository_operations_impl() {
     // Test 4: Update repository
     println!("  Test 4: Update repository...");
     let resp = client
-        .put(&format!("{}/api/repositories/test-repo", BASE_URL))
+        .put(&format!("{}/api/repositories/test-repo", base_url()))
         .header("content-type", "application/json")
         .json(&serde_json::json!({
             "description": "Updated description"
@@ -1429,7 +1431,7 @@ async fn test_repository_operations_impl() {
     assert_eq!(resp.status(), 204, "Update should return 204");
 
     let resp = client
-        .get(&format!("{}/api/repositories/test-repo", BASE_URL))
+        .get(&format!("{}/api/repositories/test-repo", base_url()))
         .send()
         .await
         .unwrap();
@@ -1440,7 +1442,7 @@ async fn test_repository_operations_impl() {
     // Test 5: Delete repository
     println!("  Test 5: Delete repository...");
     let resp = client
-        .delete(&format!("{}/api/repositories/test-repo", BASE_URL))
+        .delete(&format!("{}/api/repositories/test-repo", base_url()))
         .send()
         .await
         .unwrap();
@@ -1448,7 +1450,7 @@ async fn test_repository_operations_impl() {
     assert_eq!(resp.status(), 204);
 
     let resp = client
-        .get(&format!("{}/api/repositories/test-repo", BASE_URL))
+        .get(&format!("{}/api/repositories/test-repo", base_url()))
         .send()
         .await
         .unwrap();
@@ -1464,7 +1466,8 @@ async fn test_branch_operations_impl() {
     let resp = client
         .post(&format!(
             "{}/api/management/repositories/default/{}/branches",
-            BASE_URL, REPO
+            base_url(),
+            REPO
         ))
         .header("content-type", "application/json")
         .json(&serde_json::json!({
@@ -1489,7 +1492,8 @@ async fn test_branch_operations_impl() {
     let resp = client
         .get(&format!(
             "{}/api/management/repositories/default/{}/branches/feature-test",
-            BASE_URL, REPO
+            base_url(),
+            REPO
         ))
         .send()
         .await
@@ -1505,7 +1509,8 @@ async fn test_branch_operations_impl() {
     let resp = client
         .get(&format!(
             "{}/api/management/repositories/default/{}/branches",
-            BASE_URL, REPO
+            base_url(),
+            REPO
         ))
         .send()
         .await
@@ -1532,7 +1537,8 @@ async fn test_branch_operations_impl() {
     let resp = client
         .get(&format!(
             "{}/api/management/repositories/default/{}/branches/feature-test/head",
-            BASE_URL, REPO
+            base_url(),
+            REPO
         ))
         .send()
         .await
@@ -1559,7 +1565,8 @@ async fn test_branch_operations_impl() {
     let resp = client
         .delete(&format!(
             "{}/api/management/repositories/default/{}/branches/feature-test",
-            BASE_URL, REPO
+            base_url(),
+            REPO
         ))
         .send()
         .await
@@ -1570,7 +1577,8 @@ async fn test_branch_operations_impl() {
     let resp = client
         .get(&format!(
             "{}/api/management/repositories/default/{}/branches/feature-test",
-            BASE_URL, REPO
+            base_url(),
+            REPO
         ))
         .send()
         .await
@@ -1592,7 +1600,8 @@ async fn test_branch_from_revision_snapshot_impl() {
     let resp = client
         .get(&format!(
             "{}/api/management/repositories/default/{}/branches/main",
-            BASE_URL, REPO
+            base_url(),
+            REPO
         ))
         .send()
         .await
@@ -1609,7 +1618,8 @@ async fn test_branch_from_revision_snapshot_impl() {
     let resp = client
         .get(&format!(
             "{}/api/management/repositories/default/{}/branches/main",
-            BASE_URL, REPO
+            base_url(),
+            REPO
         ))
         .send()
         .await
@@ -1624,7 +1634,10 @@ async fn test_branch_from_revision_snapshot_impl() {
     let resp = client
         .get(&format!(
             "{}/api/repository/{}/{}/head/{}/",
-            BASE_URL, REPO, BRANCH, test_workspace
+            base_url(),
+            REPO,
+            BRANCH,
+            test_workspace
         ))
         .send()
         .await
@@ -1650,7 +1663,8 @@ async fn test_branch_from_revision_snapshot_impl() {
     let resp = client
         .post(&format!(
             "{}/api/management/repositories/default/{}/branches",
-            BASE_URL, REPO
+            base_url(),
+            REPO
         ))
         .header("content-type", "application/json")
         .json(&serde_json::json!({
@@ -1673,7 +1687,9 @@ async fn test_branch_from_revision_snapshot_impl() {
     let resp = client
         .get(&format!(
             "{}/api/repository/{}/feature-snapshot/head/{}/",
-            BASE_URL, REPO, test_workspace
+            base_url(),
+            REPO,
+            test_workspace
         ))
         .send()
         .await
@@ -1710,7 +1726,10 @@ async fn test_branch_from_revision_snapshot_impl() {
     let resp = client
         .get(&format!(
             "{}/api/repository/{}/main/rev/{}/{}/",
-            BASE_URL, REPO, revision_1, test_workspace
+            base_url(),
+            REPO,
+            revision_1,
+            test_workspace
         ))
         .send()
         .await
@@ -1744,7 +1763,8 @@ async fn test_branch_from_revision_snapshot_impl() {
     let resp = client
         .post(&format!(
             "{}/api/management/repositories/default/{}/workspaces",
-            BASE_URL, REPO
+            base_url(),
+            REPO
         ))
         .header("content-type", "application/json")
         .json(&serde_json::json!({
@@ -1762,7 +1782,8 @@ async fn test_branch_from_revision_snapshot_impl() {
         let resp = client
             .get(&format!(
                 "{}/api/repository/{}/main/head/demo2/",
-                BASE_URL, REPO
+                base_url(),
+                REPO
             ))
             .send()
             .await
@@ -1806,7 +1827,8 @@ async fn test_tag_operations_impl() {
     let resp = client
         .get(&format!(
             "{}/api/management/repositories/default/{}/tags/nonexistent",
-            BASE_URL, REPO
+            base_url(),
+            REPO
         ))
         .send()
         .await
@@ -1838,7 +1860,8 @@ async fn test_tag_operations_impl() {
     let resp = client
         .get(&format!(
             "{}/api/management/repositories/default/{}/branches/main",
-            BASE_URL, REPO
+            base_url(),
+            REPO
         ))
         .send()
         .await
@@ -1853,7 +1876,8 @@ async fn test_tag_operations_impl() {
     let resp = client
         .post(&format!(
             "{}/api/management/repositories/default/{}/tags",
-            BASE_URL, REPO
+            base_url(),
+            REPO
         ))
         .header("content-type", "application/json")
         .json(&serde_json::json!({
@@ -1881,7 +1905,9 @@ async fn test_tag_operations_impl() {
     let resp = client
         .get(&format!(
             "{}/api/repository/{}/v2.0.0-index-test/head/{}/docs",
-            BASE_URL, REPO, tag_test_workspace
+            base_url(),
+            REPO,
+            tag_test_workspace
         ))
         .send()
         .await
@@ -1903,7 +1929,9 @@ async fn test_tag_operations_impl() {
     let resp = client
         .get(&format!(
             "{}/api/repository/{}/v2.0.0-index-test/head/{}/docs/",
-            BASE_URL, REPO, tag_test_workspace
+            base_url(),
+            REPO,
+            tag_test_workspace
         ))
         .send()
         .await
@@ -1940,7 +1968,9 @@ async fn test_tag_operations_impl() {
     let resp = client
         .get(&format!(
             "{}/api/repository/{}/v2.0.0-index-test/head/{}/docs/page1",
-            BASE_URL, REPO, tag_test_workspace
+            base_url(),
+            REPO,
+            tag_test_workspace
         ))
         .send()
         .await
@@ -2001,7 +2031,10 @@ async fn test_transaction_operations_impl() {
     let resp = client
         .post(&format!(
             "{}/api/repository/{}/{}/head/{}/raisin:cmd/commit",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .json(&serde_json::json!({
             "message": "Test transaction commit",
@@ -2038,7 +2071,10 @@ async fn test_transaction_operations_impl() {
     let resp = client
         .post(&format!(
             "{}/api/repository/{}/{}/head/{}/raisin:cmd/commit",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .json(&serde_json::json!({
             "message": "Empty commit",
@@ -2057,7 +2093,10 @@ async fn test_transaction_operations_impl() {
     let resp = client
         .post(&format!(
             "{}/api/repository/{}/{}/head/{}/raisin:cmd/commit",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .json(&serde_json::json!({
             "actor": "test",
@@ -2075,7 +2114,10 @@ async fn test_transaction_operations_impl() {
     let resp = client
         .post(&format!(
             "{}/api/repository/{}/{}/head/{}/raisin:cmd/commit",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .json(&serde_json::json!({
             "message": "Invalid ops",
@@ -2098,7 +2140,8 @@ async fn test_revision_operations_impl() {
     let resp = client
         .get(&format!(
             "{}/api/management/repositories/default/{}/revisions",
-            BASE_URL, REPO
+            base_url(),
+            REPO
         ))
         .send()
         .await
@@ -2117,7 +2160,8 @@ async fn test_revision_operations_impl() {
     let resp = client
         .get(&format!(
             "{}/api/management/repositories/default/{}/revisions?limit=10&offset=0",
-            BASE_URL, REPO
+            base_url(),
+            REPO
         ))
         .send()
         .await
@@ -2139,7 +2183,8 @@ async fn test_revision_operations_impl() {
     let resp_with_system = client
         .get(&format!(
             "{}/api/management/repositories/default/{}/revisions?include_system=true",
-            BASE_URL, REPO
+            base_url(),
+            REPO
         ))
         .send()
         .await
@@ -2148,7 +2193,8 @@ async fn test_revision_operations_impl() {
     let resp_without_system = client
         .get(&format!(
             "{}/api/management/repositories/default/{}/revisions?include_system=false",
-            BASE_URL, REPO
+            base_url(),
+            REPO
         ))
         .send()
         .await
@@ -2183,7 +2229,8 @@ async fn test_revision_operations_impl() {
     let resp = client
         .get(&format!(
             "{}/api/management/repositories/default/{}/revisions",
-            BASE_URL, REPO
+            base_url(),
+            REPO
         ))
         .send()
         .await
@@ -2222,7 +2269,8 @@ async fn test_revision_operations_impl() {
     let resp = client
         .get(&format!(
             "{}/api/management/repositories/default/{}/revisions",
-            BASE_URL, REPO
+            base_url(),
+            REPO
         ))
         .send()
         .await
@@ -2239,7 +2287,9 @@ async fn test_revision_operations_impl() {
         let resp = client
             .get(&format!(
                 "{}/api/management/repositories/default/{}/revisions/{}",
-                BASE_URL, REPO, first_rev
+                base_url(),
+                REPO,
+                first_rev
             ))
             .send()
             .await
@@ -2263,7 +2313,8 @@ async fn test_revision_operations_impl() {
     let resp = client
         .get(&format!(
             "{}/api/management/repositories/default/{}/revisions",
-            BASE_URL, REPO
+            base_url(),
+            REPO
         ))
         .send()
         .await
@@ -2280,7 +2331,9 @@ async fn test_revision_operations_impl() {
         let resp = client
             .get(&format!(
                 "{}/api/management/repositories/default/{}/revisions/{}/changes",
-                BASE_URL, REPO, first_rev
+                base_url(),
+                REPO,
+                first_rev
             ))
             .send()
             .await
@@ -2304,7 +2357,8 @@ async fn test_revision_operations_impl() {
     let resp = client
         .get(&format!(
             "{}/api/management/repositories/default/{}/revisions/999999",
-            BASE_URL, REPO
+            base_url(),
+            REPO
         ))
         .send()
         .await
@@ -2330,7 +2384,10 @@ async fn test_time_travel_operations_impl() {
     let resp = client
         .get(&format!(
             "{}/api/repository/{}/{}/head/{}/time-travel-test/page-v1",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .send()
         .await
@@ -2345,7 +2402,10 @@ async fn test_time_travel_operations_impl() {
         let resp = client
             .get(&format!(
                 "{}/api/repository/{}/{}/head/{}/time-travel-test/page-v1",
-                BASE_URL, REPO, BRANCH, WORKSPACE
+                base_url(),
+                REPO,
+                BRANCH,
+                WORKSPACE
             ))
             .send()
             .await
@@ -2362,7 +2422,8 @@ async fn test_time_travel_operations_impl() {
     let resp = client
         .get(&format!(
             "{}/api/management/repositories/default/{}/revisions?limit=1",
-            BASE_URL, REPO
+            base_url(),
+            REPO
         ))
         .send()
         .await
@@ -2381,7 +2442,11 @@ async fn test_time_travel_operations_impl() {
             let resp = client
                 .get(&format!(
                     "{}/api/repository/{}/{}/rev/{}/{}/",
-                    BASE_URL, REPO, BRANCH, latest_rev, WORKSPACE
+                    base_url(),
+                    REPO,
+                    BRANCH,
+                    latest_rev,
+                    WORKSPACE
                 ))
                 .send()
                 .await
@@ -2418,7 +2483,10 @@ async fn test_time_travel_operations_impl() {
     let resp = client
         .post(&format!(
             "{}/api/repository/{}/{}/rev/1/{}/",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .header("content-type", "application/json")
         .json(&payload)
@@ -2448,7 +2516,10 @@ async fn test_time_travel_operations_impl() {
     let resp = client
         .post(&format!(
             "{}/api/repository/{}/{}/head/{}/",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .header("content-type", "application/json")
         .json(&payload)
@@ -2475,7 +2546,11 @@ async fn test_time_travel_operations_impl() {
     let resp = client
         .get(&format!(
             "{}/api/repository/{}/{}/rev/1/{}/_id/{}",
-            BASE_URL, REPO, BRANCH, WORKSPACE, node_id
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE,
+            node_id
         ))
         .send()
         .await
@@ -2498,7 +2573,10 @@ async fn test_time_travel_operations_impl() {
     let legacy_resp = client
         .get(&format!(
             "{}/api/repository/{}/{}/head/{}/time-travel-test",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .send()
         .await
@@ -2507,7 +2585,10 @@ async fn test_time_travel_operations_impl() {
     let head_resp = client
         .get(&format!(
             "{}/api/repository/{}/{}/head/{}/time-travel-test",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .send()
         .await
@@ -2534,7 +2615,10 @@ async fn test_time_travel_operations_impl() {
     let resp = client
         .get(&format!(
             "{}/api/repository/{}/{}/rev/invalid/{}/",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .send()
         .await
@@ -2560,7 +2644,8 @@ async fn test_revisions_branch_snapshot_impl() {
     let resp = client
         .get(&format!(
             "{}/api/management/repositories/default/{}/branches/main",
-            BASE_URL, REPO
+            base_url(),
+            REPO
         ))
         .send()
         .await
@@ -2576,7 +2661,8 @@ async fn test_revisions_branch_snapshot_impl() {
     let resp = client
         .get(&format!(
             "{}/api/management/repositories/default/{}/branches/main",
-            BASE_URL, REPO
+            base_url(),
+            REPO
         ))
         .send()
         .await
@@ -2590,7 +2676,8 @@ async fn test_revisions_branch_snapshot_impl() {
     let resp = client
         .get(&format!(
             "{}/api/management/repositories/default/{}/revisions?branch=main&include_system=false",
-            BASE_URL, REPO
+            base_url(),
+            REPO
         ))
         .send()
         .await
@@ -2637,7 +2724,8 @@ async fn test_revisions_branch_snapshot_impl() {
     let resp = client
         .post(&format!(
             "{}/api/management/repositories/default/{}/branches",
-            BASE_URL, REPO
+            base_url(),
+            REPO
         ))
         .header("content-type", "application/json")
         .json(&serde_json::json!({
@@ -2663,7 +2751,7 @@ async fn test_revisions_branch_snapshot_impl() {
     let resp = client
         .get(&format!(
             "{}/api/management/repositories/default/{}/revisions?branch=feature-rev-snapshot&include_system=false",
-            BASE_URL, REPO
+            base_url(), REPO
         ))
         .send()
         .await
@@ -2708,7 +2796,8 @@ async fn test_revisions_branch_snapshot_impl() {
     let resp = client
         .get(&format!(
             "{}/api/management/repositories/default/{}/branches/main",
-            BASE_URL, REPO
+            base_url(),
+            REPO
         ))
         .send()
         .await
@@ -2725,7 +2814,7 @@ async fn test_revisions_branch_snapshot_impl() {
     let resp = client
         .get(&format!(
             "{}/api/management/repositories/default/{}/revisions?branch=feature-rev-snapshot&include_system=false",
-            BASE_URL, REPO
+            base_url(), REPO
         ))
         .send()
         .await
@@ -2759,7 +2848,8 @@ async fn test_revisions_branch_snapshot_impl() {
     let resp = client
         .get(&format!(
             "{}/api/management/repositories/default/{}/revisions?branch=main&include_system=false",
-            BASE_URL, REPO
+            base_url(),
+            REPO
         ))
         .send()
         .await
@@ -2799,9 +2889,7 @@ async fn test_revisions_branch_snapshot_impl() {
 #[cfg(feature = "storage-rocksdb")]
 async fn test_snapshot_branch_nested_path_listing() {
     println!("\n=== Testing snapshot branch nested path listing ===");
-
-    let _guard = ServerGuard;
-    ensure_server_running().await;
+    let _server = start_server().await;
     setup_repository_and_branch().await;
     let client = reqwest::Client::new();
 
@@ -2821,7 +2909,8 @@ async fn test_snapshot_branch_nested_path_listing() {
     let resp = client
         .get(&format!(
             "{}/api/management/repositories/default/{}/branches/main",
-            BASE_URL, REPO
+            base_url(),
+            REPO
         ))
         .send()
         .await
@@ -2840,7 +2929,10 @@ async fn test_snapshot_branch_nested_path_listing() {
     let resp = client
         .get(&format!(
             "{}/api/repository/{}/{}/head/demo{}/",
-            BASE_URL, REPO, BRANCH, parent_path
+            base_url(),
+            REPO,
+            BRANCH,
+            parent_path
         ))
         .send()
         .await
@@ -2866,7 +2958,8 @@ async fn test_snapshot_branch_nested_path_listing() {
     let resp = client
         .post(&format!(
             "{}/api/management/repositories/default/{}/branches",
-            BASE_URL, REPO
+            base_url(),
+            REPO
         ))
         .json(&serde_json::json!({
             "name": "feature-snapshot-test",
@@ -2884,7 +2977,10 @@ async fn test_snapshot_branch_nested_path_listing() {
     println!("  Step 7: CRITICAL TEST - List children on snapshot branch at snapshot revision...");
     let test_url = format!(
         "{}/api/repository/{}/feature-snapshot-test/rev/{}/demo{}/",
-        BASE_URL, REPO, snapshot_revision, parent_path
+        base_url(),
+        REPO,
+        snapshot_revision,
+        parent_path
     );
     println!("    Testing URL: {}", test_url);
 
@@ -2941,7 +3037,7 @@ async fn test_snapshot_branch_nested_path_listing() {
     let resp = client
         .get(&format!(
             "{}/api/repository/{}/feature-snapshot-test/rev/{}/demo{}",
-            BASE_URL,
+            base_url(),
             REPO,
             snapshot_revision,
             parent_path.trim_end_matches('/')
@@ -2964,8 +3060,7 @@ async fn test_snapshot_branch_nested_path_listing() {
 
 #[tokio::test]
 async fn test_query_dsl_operations() {
-    let _guard = ServerGuard;
-    ensure_server_running().await;
+    let _server = start_server().await;
     setup_repository_and_branch().await;
 
     println!("\n========================================");
@@ -2998,7 +3093,10 @@ async fn test_query_dsl_operations() {
     let resp = client
         .post(&format!(
             "{}/api/repository/{}/{}/head/{}/query/dsl",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .json(&query)
         .send()
@@ -3031,7 +3129,10 @@ async fn test_query_dsl_operations() {
     let resp = client
         .post(&format!(
             "{}/api/repository/{}/{}/head/{}/query/dsl",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .json(&query)
         .send()
@@ -3060,7 +3161,10 @@ async fn test_query_dsl_operations() {
     let resp = client
         .post(&format!(
             "{}/api/repository/{}/{}/head/{}/query/dsl",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .json(&query)
         .send()
@@ -3086,7 +3190,10 @@ async fn test_query_dsl_operations() {
     let resp = client
         .post(&format!(
             "{}/api/repository/{}/{}/head/{}/query/dsl",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .json(&query)
         .send()
@@ -3112,7 +3219,10 @@ async fn test_query_dsl_operations() {
     let resp = client
         .post(&format!(
             "{}/api/repository/{}/{}/head/{}/query/dsl",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .json(&query)
         .send()
@@ -3142,7 +3252,10 @@ async fn test_query_dsl_operations() {
     let resp = client
         .post(&format!(
             "{}/api/repository/{}/{}/head/{}/query/dsl",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .json(&query)
         .send()
@@ -3168,7 +3281,10 @@ async fn test_query_dsl_operations() {
     let resp = client
         .post(&format!(
             "{}/api/repository/{}/{}/head/{}/query/dsl",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .json(&query)
         .send()
@@ -3202,7 +3318,10 @@ async fn test_query_dsl_operations() {
     let resp = client
         .post(&format!(
             "{}/api/repository/{}/{}/head/{}/query/dsl",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .json(&query)
         .send()
@@ -3234,7 +3353,10 @@ async fn test_query_dsl_operations() {
     let resp = client
         .post(&format!(
             "{}/api/repository/{}/{}/head/{}/query/dsl",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .json(&query)
         .send()
@@ -3272,7 +3394,10 @@ async fn test_query_dsl_operations() {
     let resp = client
         .post(&format!(
             "{}/api/repository/{}/{}/head/{}/query/dsl",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .json(&query)
         .send()
@@ -3303,7 +3428,10 @@ async fn test_query_dsl_operations() {
     let resp = client
         .post(&format!(
             "{}/api/repository/{}/{}/head/{}/query/dsl",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .json(&query)
         .send()
@@ -3334,7 +3462,10 @@ async fn test_query_dsl_operations() {
     let resp = client
         .post(&format!(
             "{}/api/repository/{}/{}/head/{}/query/dsl",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .json(&query)
         .send()
@@ -3369,7 +3500,10 @@ async fn test_query_dsl_operations() {
     let resp = client
         .post(&format!(
             "{}/api/repository/{}/{}/head/{}/query/dsl",
-            BASE_URL, REPO, BRANCH, WORKSPACE
+            base_url(),
+            REPO,
+            BRANCH,
+            WORKSPACE
         ))
         .json(&query)
         .send()
@@ -3407,7 +3541,7 @@ async fn test_one_shot_upload_impl() {
     // with multipart body ("file") and query params to control creation/storage.
     let url = format!(
         "{}/api/repository/{}/{}/head/{}{}?node_type=raisin:Asset&property_path=file&commit_message=OneShotUpload&commit_actor=tester",
-        BASE_URL, REPO, BRANCH, WORKSPACE, asset_path
+        base_url(), REPO, BRANCH, WORKSPACE, asset_path
     );
 
     println!("    POST {}", url);
@@ -3476,7 +3610,11 @@ async fn test_one_shot_upload_impl() {
     // Download the stored content via @file to document the read pattern
     let download_url = format!(
         "{}/api/repository/{}/{}/head/{}{}@file",
-        BASE_URL, REPO, BRANCH, WORKSPACE, asset_path
+        base_url(),
+        REPO,
+        BRANCH,
+        WORKSPACE,
+        asset_path
     );
     let download_resp = client
         .get(&download_url)
@@ -3515,7 +3653,7 @@ async fn test_upload_to_property_path_impl() {
     // REST pattern: POST /{path}@properties.attachment
     let url = format!(
         "{}/api/repository/{}/{}/head/{}{}@properties.attachment?commit_message=AddAttachment&commit_actor=tester",
-        BASE_URL, REPO, BRANCH, WORKSPACE, target_path
+        base_url(), REPO, BRANCH, WORKSPACE, target_path
     );
 
     println!("    POST {}", url);
@@ -3559,7 +3697,11 @@ async fn test_upload_to_property_path_impl() {
     // Download the attachment via @attachment
     let download_url = format!(
         "{}/api/repository/{}/{}/head/{}{}@attachment",
-        BASE_URL, REPO, BRANCH, WORKSPACE, target_path
+        base_url(),
+        REPO,
+        BRANCH,
+        WORKSPACE,
+        target_path
     );
     let download_resp = client
         .get(&download_url)
@@ -3594,7 +3736,7 @@ async fn test_inline_upload_impl() {
     // REST pattern: POST with ?inline=true
     let url = format!(
         "{}/api/repository/{}/{}/head/{}{}?node_type=raisin:Asset&property_path=file&inline=true&commit_message=InlineUpload&commit_actor=tester",
-        BASE_URL, REPO, BRANCH, WORKSPACE, asset_path
+        base_url(), REPO, BRANCH, WORKSPACE, asset_path
     );
 
     println!("    POST {}", url);
@@ -3651,7 +3793,11 @@ async fn test_inline_upload_impl() {
     // Download should still work
     let download_url = format!(
         "{}/api/repository/{}/{}/head/{}{}@file",
-        BASE_URL, REPO, BRANCH, WORKSPACE, asset_path
+        base_url(),
+        REPO,
+        BRANCH,
+        WORKSPACE,
+        asset_path
     );
     let download_resp = client
         .get(&download_url)
@@ -3685,7 +3831,7 @@ async fn test_override_existing_upload_impl() {
 
     let url = format!(
         "{}/api/repository/{}/{}/head/{}{}?node_type=raisin:Asset&property_path=file&commit_message=OriginalUpload&commit_actor=tester",
-        BASE_URL, REPO, BRANCH, WORKSPACE, asset_path
+        base_url(), REPO, BRANCH, WORKSPACE, asset_path
     );
 
     println!("    POST {} (original)", url);
@@ -3710,7 +3856,11 @@ async fn test_override_existing_upload_impl() {
     // Verify original content
     let download_url = format!(
         "{}/api/repository/{}/{}/head/{}{}@file",
-        BASE_URL, REPO, BRANCH, WORKSPACE, asset_path
+        base_url(),
+        REPO,
+        BRANCH,
+        WORKSPACE,
+        asset_path
     );
     let download_resp = client
         .get(&download_url)
@@ -3724,7 +3874,7 @@ async fn test_override_existing_upload_impl() {
 
     let override_url = format!(
         "{}/api/repository/{}/{}/head/{}{}?override_existing=true&commit_message=OverrideUpload&commit_actor=tester",
-        BASE_URL, REPO, BRANCH, WORKSPACE, asset_path
+        base_url(), REPO, BRANCH, WORKSPACE, asset_path
     );
 
     println!("    POST {} (override)", override_url);
@@ -3825,7 +3975,10 @@ async fn test_package_upload_impl() {
     // POST /api/repository/{repo}/main/head/packages/{filename}?node_type=raisin:Package
     let upload_url = format!(
         "{}/api/repository/{}/{}/head/packages/{}?node_type=raisin:Package",
-        BASE_URL, REPO, BRANCH, package_name
+        base_url(),
+        REPO,
+        BRANCH,
+        package_name
     );
 
     println!("    POST {}", upload_url);
@@ -3858,7 +4011,10 @@ async fn test_package_upload_impl() {
     // Get the node immediately - should have status "processing"
     let node_url = format!(
         "{}/api/repository/{}/{}/head/packages/{}",
-        BASE_URL, REPO, BRANCH, package_name
+        base_url(),
+        REPO,
+        BRANCH,
+        package_name
     );
 
     println!("    Checking initial node state...");
