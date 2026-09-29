@@ -77,6 +77,7 @@ mod tombstones;
 mod transaction;
 pub mod vaulting;
 pub mod vmount_registry;
+pub mod write_health;
 
 pub use admin_user_store::AdminUserStore;
 pub use api_key_store::ApiKeyStore;

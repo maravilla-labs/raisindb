@@ -168,6 +168,11 @@ impl RocksDBStorage {
         &self.db
     }
 
+    /// Whether RocksDB currently accepts writes; see [`crate::write_health`].
+    pub fn write_health(&self) -> &Arc<crate::write_health::WriteHealth> {
+        &self.write_health
+    }
+
     /// Flush every column family and the WAL, then stop background work.
     ///
     /// Call this on the process's shutdown path, once serving has stopped.
