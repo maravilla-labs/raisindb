@@ -111,7 +111,18 @@ impl<S: Storage> ReferenceResolver<S> {
     /// and unchanged here.
     async fn fetch_referenced_node(&self, workspace: &str, id: &str) -> Result<Option<Node>> {
         let scope = StorageScope::new(&self.tenant_id, &self.repo_id, &self.branch, workspace);
-        let Some(node) = self.storage.nodes().get(scope, id, None).await? else {
+        // A reference may name its target by PATH instead of id: that is how
+        // references written into a translation overlay (and by hand) arrive —
+        // `{"raisin:ref": "/uploads/a.png"}` with no `raisin:path` — because
+        // nothing resolves them to an id on the way in. Read by id only, those
+        // stayed unresolved in every translated page while the same page in
+        // the base language resolved. A node id never starts with '/'.
+        let node = if id.starts_with('/') {
+            self.storage.nodes().get_by_path(scope, id, None).await?
+        } else {
+            self.storage.nodes().get(scope, id, None).await?
+        };
+        let Some(node) = node else {
             return Ok(None);
         };
 
@@ -1347,5 +1358,31 @@ mod tests {
             .unwrap();
         assert_eq!(out["hero"]["alt"], "A plane");
         assert_eq!(out["teaser"]["image"]["alt"], "A plane");
+    }
+
+    /// A reference that names its target by path — as translation overlays
+    /// write them — resolves like one by id.
+    #[tokio::test]
+    async fn test_resolve_json_reference_by_path() {
+        let storage = Arc::new(InMemoryStorage::default());
+        create_test_node(
+            &storage,
+            "assets",
+            "img",
+            "hero.jpg",
+            "/uploads/hero.jpg",
+            str_props(&[("alt", "A plane")]),
+        )
+        .await;
+
+        let doc = serde_json::json!({
+            "background": {"raisin:ref": "/uploads/hero.jpg", "raisin:workspace": "assets"}
+        });
+        let out = test_resolver(&storage)
+            .resolve_json("stories", &doc, 1, None)
+            .await
+            .unwrap();
+        assert_eq!(out["background"]["id"], "img");
+        assert_eq!(out["background"]["alt"], "A plane");
     }
 }
