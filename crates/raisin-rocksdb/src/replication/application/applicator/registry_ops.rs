@@ -142,14 +142,21 @@ impl OperationApplicator {
         let key = keys::repository_key(tenant_id, repo_id);
         let cf = cf_handle(&self.db, cf::REGISTRY)?;
 
-        let is_new_repository = match self.db.get_cf(cf, &key) {
-            Ok(Some(_bytes)) => false,
-            Ok(None) => true,
+        let existing = match self.db.get_cf(cf, &key) {
+            Ok(bytes) => bytes,
             Err(e) => {
                 tracing::error!("Failed to check existing repository: {}", e);
                 return Err(raisin_error::Error::storage(e.to_string()));
             }
         };
+        let is_new_repository = existing.is_none();
+        // The default language this node had before the update, to notice a
+        // default-language change: base content is full-text indexed under the
+        // default language, and this node's index is its own to rebuild.
+        let previous_default_language = existing
+            .as_deref()
+            .and_then(|bytes| rmp_serde::from_slice::<raisin_context::RepositoryInfo>(bytes).ok())
+            .map(|info| info.config.default_language);
 
         // Serialize and write using helper
         serialize_and_write_compact(
@@ -186,6 +193,35 @@ impl OperationApplicator {
                 tenant_id,
                 repo_id
             );
+        }
+
+        if let Some(previous) = previous_default_language {
+            let current = &repository.config.default_language;
+            if &previous != current {
+                tracing::info!(
+                    tenant_id,
+                    repo_id,
+                    previous = %previous,
+                    current = %current,
+                    "Replicated default-language change; the full-text index must be rebuilt"
+                );
+                self.event_bus.publish(Event::Repository(RepositoryEvent {
+                    tenant_id: tenant_id.to_string(),
+                    repository_id: repo_id.to_string(),
+                    kind: RepositoryEventKind::Updated,
+                    workspace: None,
+                    revision_id: None,
+                    branch_name: None,
+                    tag_name: None,
+                    message: None,
+                    actor: Some(op.actor.clone()),
+                    metadata: Some(
+                        crate::management::default_language::default_language_changed_metadata(
+                            &previous, current,
+                        ),
+                    ),
+                }));
+            }
         }
 
         Ok(())

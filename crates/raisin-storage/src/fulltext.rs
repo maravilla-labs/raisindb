@@ -67,7 +67,7 @@ pub struct FullTextIndexJob {
     /// Source branch name (for BranchCreated operation)
     pub source_branch: Option<String>,
 
-    /// Default language for the repository (immutable after creation)
+    /// Default language for the repository: base content is indexed under it
     pub default_language: String,
 
     /// Supported languages for translations

@@ -15,9 +15,14 @@ pub struct RepositoryConfig {
     #[serde(default)]
     pub tags: std::collections::HashMap<String, String>,
 
-    /// Default language for content (IMMUTABLE after repository creation)
-    /// This is the primary language for the repository and cannot be changed
-    /// after the repository is created to ensure indexing consistency.
+    /// Default language for content: the language base (untranslated) content
+    /// is stored and full-text indexed in. Every other language is a
+    /// translation overlay on top of it.
+    ///
+    /// It can be changed after creation through
+    /// `PATCH /api/repositories/{repo}/translation-config`, which refuses the
+    /// change while overlays in the new language exist and queues a full-text
+    /// rebuild of every branch. See [`RepositoryConfig::set_default_language`].
     #[serde(default = "default_language")]
     pub default_language: String,
 
@@ -115,6 +120,30 @@ impl RepositoryConfig {
         }
 
         Ok(())
+    }
+
+    /// Make `language` the default language, keeping the configuration valid.
+    ///
+    /// The new default is appended to `supported_languages` when missing, and
+    /// the previous default stays in it (a supported language is only ever
+    /// removed on request). Returns the previous default when it changed, and
+    /// `None` when `language` already was the default.
+    ///
+    /// This only edits the configuration. Whoever stores it owns the rest of a
+    /// default-language change: refusing it while overlays in `language` exist
+    /// (they would collide with the base content) and rebuilding the full-text
+    /// index, which files base content under the default language.
+    pub fn set_default_language(&mut self, language: &str) -> Option<String> {
+        if !self.supported_languages.iter().any(|l| l == language) {
+            self.supported_languages.push(language.to_string());
+        }
+        if self.default_language == language {
+            return None;
+        }
+        Some(std::mem::replace(
+            &mut self.default_language,
+            language.to_string(),
+        ))
     }
 
     /// Get the fallback chain for a locale.

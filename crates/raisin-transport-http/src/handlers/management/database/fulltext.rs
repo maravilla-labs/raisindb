@@ -42,8 +42,6 @@ async fn queue_fulltext_job(
     branch: &str,
     metadata: std::collections::HashMap<String, serde_json::Value>,
 ) -> Result<raisin_storage::jobs::JobId, (StatusCode, Json<ErrorResponse>)> {
-    use raisin_storage::jobs::{JobContext, JobId};
-
     let internal = |msg: String| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -61,37 +59,16 @@ async fn queue_fulltext_job(
         .as_ref()
         .ok_or_else(|| internal("RocksDB storage not initialized".to_string()))?;
 
-    let context = JobContext {
-        tenant_id: tenant.to_string(),
-        repo_id: repo.to_string(),
-        branch: branch.to_string(),
-        // Fulltext maintenance is branch-wide: it walks every workspace on the
-        // branch rather than being scoped to one.
-        workspace_id: String::new(),
-        revision: raisin_hlc::HLC::new(0, 0),
+    raisin_rocksdb::management::enqueue_fulltext_job(
+        rocksdb_storage,
+        job_type,
+        tenant,
+        repo,
+        branch,
         metadata,
-    };
-
-    let job_id = JobId::new();
-    rocksdb_storage
-        .job_data_store()
-        .put(&job_id, &context)
-        .map_err(|e| internal(format!("Failed to store job context: {}", e)))?;
-
-    rocksdb_storage
-        .job_registry()
-        .register_job_with_id(
-            job_id.clone(),
-            job_type,
-            tenant.to_string(),
-            None,
-            None,
-            Some(0),
-        )
-        .await
-        .map_err(|e| internal(format!("Failed to register job: {}", e)))?;
-
-    Ok(job_id)
+    )
+    .await
+    .map_err(|e| internal(e.to_string()))
 }
 
 /// Verify fulltext index integrity.
