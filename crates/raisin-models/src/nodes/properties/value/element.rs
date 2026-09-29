@@ -156,7 +156,17 @@ impl<'de> serde::Deserialize<'de> for Element {
     }
 }
 
+/// A list of elements with its own id: exactly `{uuid, items}`.
+///
+/// `deny_unknown_fields` is load-bearing. `PropertyValue` is `untagged` and
+/// tries `Composite` before `Element`, and an element serializes FLAT — so an
+/// element that has a field named `items` (an accordion, a tab bar, a list
+/// block) and a `uuid` has both keys a Composite needs. Without this the
+/// element round-tripped through storage as a Composite: its `element_type`
+/// and every other field were silently dropped, and the next write was
+/// refused with "Field 'content[0]' expects element values".
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Composite {
     pub uuid: String,
     pub items: Vec<Element>,

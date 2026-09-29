@@ -1608,3 +1608,69 @@ fn a_schema_default_keeps_its_spelling() {
         "a constraint value was turned into a decimal"
     );
 }
+
+/// An element with a field named `items` and a `uuid` (an accordion) carries
+/// both keys `Composite` needs. It must still come back as the element in
+/// every format it is stored or sent in — JSON, YAML and MessagePack — with
+/// its `element_type` and other fields intact.
+#[test]
+fn test_element_with_items_field_is_not_read_as_composite() {
+    let mut item_content = HashMap::new();
+    item_content.insert("title".to_string(), PropertyValue::String("Q".into()));
+    let item = PropertyValue::Element(Element {
+        uuid: "acc-0-items-0".into(),
+        element_type: "bap:AccordionItem".into(),
+        content: item_content,
+    });
+    let mut content = HashMap::new();
+    content.insert("headline".to_string(), PropertyValue::String("FAQ".into()));
+    content.insert("items".to_string(), PropertyValue::Array(vec![item]));
+    let accordion = PropertyValue::Element(Element {
+        uuid: "acc-0".into(),
+        element_type: "bap:Accordion".into(),
+        content,
+    });
+
+    let json = serde_json::to_string(&accordion).unwrap();
+    assert_eq!(
+        serde_json::from_str::<PropertyValue>(&json).unwrap(),
+        accordion,
+        "JSON round-trip"
+    );
+
+    let yaml = serde_yaml::to_string(&accordion).unwrap();
+    assert_eq!(
+        serde_yaml::from_str::<PropertyValue>(&yaml).unwrap(),
+        accordion,
+        "YAML round-trip"
+    );
+
+    let msgpack = rmp_serde::to_vec_named(&accordion).unwrap();
+    assert_eq!(
+        rmp_serde::from_slice::<PropertyValue>(&msgpack).unwrap(),
+        accordion,
+        "MessagePack round-trip"
+    );
+
+    // The flat form a package author writes by hand.
+    let authored: PropertyValue = serde_yaml::from_str(
+        "element_type: bap:Accordion\nuuid: acc-0\nheadline: FAQ\nitems:\n  - element_type: bap:AccordionItem\n    uuid: acc-0-items-0\n    title: Q\n",
+    )
+    .unwrap();
+    assert_eq!(authored, accordion, "authored flat YAML");
+}
+
+/// A real composite — exactly `{uuid, items}` — is still a Composite.
+#[test]
+fn test_exact_uuid_items_map_is_still_a_composite() {
+    let value: PropertyValue = serde_json::from_str(
+        r#"{"uuid":"c-1","items":[{"element_type":"x:Card","uuid":"e-1","title":"Hi"}]}"#,
+    )
+    .unwrap();
+    let PropertyValue::Composite(composite) = value else {
+        panic!("expected Composite, got {value:?}");
+    };
+    assert_eq!(composite.uuid, "c-1");
+    assert_eq!(composite.items.len(), 1);
+    assert_eq!(composite.items[0].element_type, "x:Card");
+}
