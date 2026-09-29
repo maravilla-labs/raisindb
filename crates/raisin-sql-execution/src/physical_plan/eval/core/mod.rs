@@ -175,36 +175,39 @@ pub fn eval_expr(expr: &TypedExpr, row: &Row) -> Result<Literal, Error> {
 
 /// Evaluate a column reference against a row
 fn eval_column(table: &str, column: &str, row: &Row) -> Result<Literal, Error> {
+    match column_value(table, column, row) {
+        Some(value) => from_property_value(value)
+            .map_err(|e| Error::Validation(format!("Failed to convert column value: {}", e))),
+        None => Ok(Literal::Null),
+    }
+}
+
+/// The stored value a column reference names, without converting it.
+///
+/// THE lookup `eval_column` does, exposed so an operator that needs one part of
+/// a column — `properties ->> 'title'` — can take that part instead of
+/// converting the whole column first.
+pub(super) fn column_value<'a>(
+    table: &str,
+    column: &str,
+    row: &'a Row,
+) -> Option<&'a raisin_models::nodes::properties::PropertyValue> {
     // Strategy 1: Try qualified name (for pre-projection rows with known table)
     if !table.is_empty() {
         let qualified_name = format!("{}.{}", table, column);
         if let Some(value) = row.get(&qualified_name) {
-            return from_property_value(value)
-                .map_err(|e| Error::Validation(format!("Failed to convert column value: {}", e)));
+            return Some(value);
         }
     }
 
     // Strategy 2: Try unqualified column name (for post-projection rows)
     if let Some(value) = row.get(column) {
-        return from_property_value(value)
-            .map_err(|e| Error::Validation(format!("Failed to convert column value: {}", e)));
+        return Some(value);
     }
 
-    // Strategy 3: Search for any column ending with ".{column}"
-    if table.is_empty() {
-        if let Some(value) = row.get_by_unqualified(column) {
-            return from_property_value(value)
-                .map_err(|e| Error::Validation(format!("Failed to convert column value: {}", e)));
-        }
-    }
-
-    // Strategy 4: Final fallback - unqualified match regardless of table name
-    if let Some(value) = row.get_by_unqualified(column) {
-        return from_property_value(value)
-            .map_err(|e| Error::Validation(format!("Failed to convert column value: {}", e)));
-    }
-
-    Ok(Literal::Null)
+    // Strategies 3 and 4 (a column ending with ".{column}", whatever the
+    // table name) are the same lookup.
+    row.get_by_unqualified(column)
 }
 
 /// Evaluate a function expression, checking for pre-computed values first

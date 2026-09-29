@@ -75,6 +75,22 @@ pub(super) fn eval_json_extract(
     key: &TypedExpr,
     row: &Row,
 ) -> Result<Literal, Error> {
+    // `properties -> 'hero'`: the member only, as `->>` does above.
+    if let (Expr::Column { table, column }, Expr::Literal(Literal::Text(key_str))) =
+        (&object.expr, &key.expr)
+    {
+        if let Some(raisin_models::nodes::properties::PropertyValue::Object(map)) =
+            super::column_value(table, column, row)
+        {
+            return Ok(match map.get(key_str) {
+                None => Literal::Null,
+                Some(member) => Literal::JsonB(
+                    serde_json::to_value(member).map_err(|e| Error::Backend(e.to_string()))?,
+                ),
+            });
+        }
+    }
+
     let obj_lit = super::eval_expr(object, row)?;
     let key_lit = super::eval_expr(key, row)?;
 
@@ -105,6 +121,26 @@ pub(super) fn eval_json_extract_text(
         }
     }
 
+    // `properties ->> 'title'`: read the one member instead of converting the
+    // whole column to JSON and then picking the member out. With a dozen
+    // extractions from a page's `properties` per row, the whole-column
+    // conversion ran a dozen times and made a projection of a few fields
+    // several times dearer than returning the entire blob.
+    if let (Expr::Column { table, column }, Expr::Literal(Literal::Text(key_str))) =
+        (&object.expr, &key.expr)
+    {
+        if let Some(raisin_models::nodes::properties::PropertyValue::Object(map)) =
+            super::column_value(table, column, row)
+        {
+            return Ok(match map.get(key_str) {
+                None | Some(raisin_models::nodes::properties::PropertyValue::Null) => Literal::Null,
+                Some(member) => json_member_text(
+                    &serde_json::to_value(member).map_err(|e| Error::Backend(e.to_string()))?,
+                ),
+            });
+        }
+    }
+
     let obj_lit = super::eval_expr(object, row)?;
     let key_lit = super::eval_expr(key, row)?;
 
@@ -129,6 +165,16 @@ pub(super) fn eval_json_extract_text(
                 "JSON extract text (->>) requires JSONB and TEXT key".to_string(),
             ))
         }
+    }
+}
+
+/// `->>` of one JSON member: a string unquoted, null as NULL, anything else as
+/// its JSON text.
+fn json_member_text(value: &serde_json::Value) -> Literal {
+    match value {
+        serde_json::Value::Null => Literal::Null,
+        serde_json::Value::String(s) => Literal::Text(s.clone()),
+        other => Literal::Text(other.to_string()),
     }
 }
 
