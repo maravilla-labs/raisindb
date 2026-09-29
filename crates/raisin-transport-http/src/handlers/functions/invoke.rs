@@ -508,10 +508,10 @@ async fn execute_function_inline(
         context = context.with_auth(auth);
     }
 
-    eprintln!(
-        "[DEBUG] execute_function_inline - passing network_policy to build_function_api: http_enabled={}, allowed_urls={:?}",
-        loaded.metadata.network_policy.http_enabled,
-        loaded.metadata.network_policy.allowed_urls
+    tracing::debug!(
+        http_enabled = loaded.metadata.network_policy.http_enabled,
+        allowed_urls = ?loaded.metadata.network_policy.allowed_urls,
+        "execute_function_inline: network policy"
     );
     let api = build_function_api(state, tenant_id, repo, &loaded.metadata, tx_auth_context);
     let executor = FunctionExecutor::new();

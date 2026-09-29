@@ -19,11 +19,11 @@ impl NodeRepositoryImpl {
         id: &str,
         populate_has_children: bool,
     ) -> Result<Option<Node>> {
-        let blob_revision =
-            match self.get_latest_revision_for_node(tenant_id, repo_id, branch, workspace, id)? {
-                Some(rev) => rev,
+        let (blob_revision, bytes) =
+            match self.get_latest_revision_with_blob(tenant_id, repo_id, branch, workspace, id)? {
+                Some(found) => found,
                 None => {
-                    tracing::info!("REPO get_impl: node_id={} - no revision found", id);
+                    tracing::trace!("REPO get_impl: node_id={} - no revision found", id);
                     return Ok(None);
                 }
             };
@@ -42,55 +42,36 @@ impl NodeRepositoryImpl {
             path_revision
         );
 
-        let key =
-            keys::node_key_versioned(tenant_id, repo_id, branch, workspace, id, &blob_revision);
-        let cf = cf_handle(&self.db, cf::NODES)?;
-
-        match self.db.get_cf(cf, key) {
-            Ok(Some(bytes)) => {
-                if is_tombstone(&bytes) {
-                    tracing::trace!(
-                        "REPO get_impl: node_id={} at revision={} is tombstone",
-                        id,
-                        blob_revision
-                    );
-                    return Ok(None);
-                }
-
-                let mut node = self.deserialize_node_with_path(
-                    &bytes,
-                    tenant_id,
-                    repo_id,
-                    branch,
-                    workspace,
-                    id,
-                    &path_revision,
-                )?;
-                tracing::trace!(
-                    "REPO get_impl: node_id={} successfully deserialized, path={}",
-                    id,
-                    node.path
-                );
-
-                if populate_has_children {
-                    self.populate_node_has_children(
-                        tenant_id, repo_id, branch, workspace, &mut node, None,
-                    )
-                    .await?;
-                }
-
-                Ok(Some(node))
-            }
-            Ok(None) => {
-                tracing::trace!(
-                    "REPO get_impl: node_id={} at revision={} - key not found in db",
-                    id,
-                    blob_revision
-                );
-                Ok(None)
-            }
-            Err(e) => Err(raisin_error::Error::storage(e.to_string())),
+        if is_tombstone(&bytes) {
+            tracing::trace!(
+                "REPO get_impl: node_id={} at revision={} is tombstone",
+                id,
+                blob_revision
+            );
+            return Ok(None);
         }
+
+        let mut node = self.deserialize_node_with_path(
+            &bytes,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            id,
+            &path_revision,
+        )?;
+        tracing::trace!(
+            "REPO get_impl: node_id={} successfully deserialized, path={}",
+            id,
+            node.path
+        );
+
+        if populate_has_children {
+            self.populate_node_has_children(tenant_id, repo_id, branch, workspace, &mut node, None)
+                .await?;
+        }
+
+        Ok(Some(node))
     }
 
     /// Get a node at a specific revision (time-travel)

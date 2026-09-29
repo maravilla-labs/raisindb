@@ -55,6 +55,46 @@ impl NodeRepositoryImpl {
         Ok(None)
     }
 
+    /// The newest revision of a node together with its stored blob.
+    ///
+    /// The revision scan already positions an iterator ON the newest version's
+    /// key, whose value is the blob a HEAD read wants. Taking it from there
+    /// saves the second, point read of the very same key that
+    /// `get_latest_revision_for_node` + `get_cf` costs — one RocksDB lookup
+    /// per node read, which RESOLVE() and every id-based read pay per node.
+    pub(in super::super) fn get_latest_revision_with_blob(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        node_id: &str,
+    ) -> Result<Option<(HLC, Box<[u8]>)>> {
+        let prefix = keys::KeyBuilder::new()
+            .push(tenant_id)
+            .push(repo_id)
+            .push(branch)
+            .push(workspace)
+            .push("nodes")
+            .push(node_id)
+            .build_prefix();
+
+        let cf = cf_handle(&self.db, cf::NODES)?;
+        let mut iter = crate::prefix_scan(&self.db, cf, prefix);
+
+        // Due to descending revision encoding, the first item is the newest
+        match iter.next() {
+            Some(item) => {
+                let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+                let revision = keys::extract_revision_from_key(&key).map_err(|e| {
+                    raisin_error::Error::storage(format!("Failed to decode revision: {}", e))
+                })?;
+                Ok(Some((revision, value)))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Get the latest revision for a node at or before a target revision
     ///
     /// Used for time-travel queries to find the most recent version of a node
