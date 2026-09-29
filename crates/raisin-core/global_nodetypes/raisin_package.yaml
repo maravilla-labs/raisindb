@@ -13,7 +13,11 @@ icon: package
 # installer have written both since package migrations landed, but the strict
 # schema never declared them, so the first package that shipped a migration
 # failed to install ("Undefined property 'migrations' in strict mode").
-version: 6
+# v7: `error`. The upload processor and the installer have always tried to
+# write the failure detail next to `status: failed`, but strict mode refused
+# the undeclared property, the write was retried without it, and `raisindb
+# deploy --install` could only print "failed" with no reason.
+version: 7
 strict: true
 indexable: true
 index_types: [Property, Fulltext]
@@ -161,6 +165,16 @@ properties:
     description: Processing status of the package (processing, ready, error)
     default: "ready"
     index: [Property]
+
+  - name: error
+    type: String
+    required: false
+    title: Error
+    description: |
+      Why the last upload processing or install failed, set together with
+      `status: failed` and cleared when the package is processed or installed
+      again. For an install that rejected content entries it lists every
+      rejected entry with its reason.
 
   - name: progress
     type: Number

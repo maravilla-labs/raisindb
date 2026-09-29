@@ -122,19 +122,24 @@ pub(crate) fn build_package_properties(
         );
     }
 
-    // Dependencies
+    // Dependencies: an ARRAY of {name, version}, as raisin:Package declares
+    // it. This used to be an Object keyed "0", "1", … which strict type
+    // checking refuses ("declared Array but the value is Object"), so any
+    // manifest with a `dependencies:` block failed PackageProcess.
     if let Some(dependencies) = &manifest.dependencies {
-        let mut deps_map = HashMap::new();
-        for (i, dep) in dependencies.iter().enumerate() {
-            let mut dep_obj = HashMap::new();
-            dep_obj.insert("name".to_string(), PropertyValue::String(dep.name.clone()));
-            dep_obj.insert(
-                "version".to_string(),
-                PropertyValue::String(dep.version.clone()),
-            );
-            deps_map.insert(i.to_string(), PropertyValue::Object(dep_obj));
-        }
-        properties.insert("dependencies".to_string(), PropertyValue::Object(deps_map));
+        let deps = dependencies
+            .iter()
+            .map(|dep| {
+                let mut dep_obj = HashMap::new();
+                dep_obj.insert("name".to_string(), PropertyValue::String(dep.name.clone()));
+                dep_obj.insert(
+                    "version".to_string(),
+                    PropertyValue::String(dep.version.clone()),
+                );
+                PropertyValue::Object(dep_obj)
+            })
+            .collect();
+        properties.insert("dependencies".to_string(), PropertyValue::Array(deps));
     }
 
     // Provides
@@ -218,4 +223,41 @@ pub(crate) fn build_package_properties(
     }
 
     properties
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `raisin:Package.dependencies` is declared Array. Writing it as an
+    /// Object keyed by index made PackageProcess fail for every manifest that
+    /// declared a dependency.
+    #[test]
+    fn dependencies_are_written_as_an_array() {
+        let manifest: PackageManifest = serde_yaml::from_str(
+            "name: site\nversion: 1.0.0\ndependencies:\n  - name: studio\n    version: \">=0.3.12\"\n  - name: raisin-relationships\n    version: \"*\"\n",
+        )
+        .unwrap();
+
+        let properties = build_package_properties(&manifest);
+
+        let Some(PropertyValue::Array(deps)) = properties.get("dependencies") else {
+            panic!(
+                "dependencies must be an Array, got {:?}",
+                properties.get("dependencies")
+            );
+        };
+        assert_eq!(deps.len(), 2);
+        let PropertyValue::Object(first) = &deps[0] else {
+            panic!("dependency entries are objects");
+        };
+        assert_eq!(
+            first.get("name"),
+            Some(&PropertyValue::String("studio".to_string()))
+        );
+        assert_eq!(
+            first.get("version"),
+            Some(&PropertyValue::String(">=0.3.12".to_string()))
+        );
+    }
 }
