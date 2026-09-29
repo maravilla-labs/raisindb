@@ -228,7 +228,8 @@ impl RocksDBStorage {
                 db.clone(),
                 event_bus.clone(),
                 operation_capture.clone(),
-            ),
+            )
+            .with_job_registry(job_registry.clone()),
             branches: (*branch_repo_arc).clone(),
             tags: (*tag_repo_arc).clone(),
             revisions: (*revision_repo_arc).clone(),

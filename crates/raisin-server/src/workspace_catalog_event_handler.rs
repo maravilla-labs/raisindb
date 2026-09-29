@@ -39,6 +39,17 @@ impl EventHandler for WorkspaceCatalogEventHandler {
                     "Workspace catalog cache invalidated"
                 );
             }
+            // A deleted repository's catalog must not outlive it: one recreated
+            // under the same id would otherwise be planned against the old
+            // repository's workspaces.
+            if let Event::Repository(repo_event) = event {
+                if matches!(repo_event.kind, raisin_events::RepositoryEventKind::Deleted) {
+                    raisin_sql_execution::invalidate_workspace_catalog(
+                        &repo_event.tenant_id,
+                        &repo_event.repository_id,
+                    );
+                }
+            }
             Ok(())
         })
     }

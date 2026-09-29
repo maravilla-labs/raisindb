@@ -439,8 +439,10 @@ pub struct TranslationConfigResponse {
 /// X-Tenant-ID: {tenant_id}
 ///
 /// # Warning
-/// This will delete all branches, tags, revisions, and nodes in the repository.
-/// This operation cannot be undone.
+/// Irreversible. Removes ALL of the repository's data — branches, revisions,
+/// nodes, translations, embeddings, every index, its jobs and its index
+/// directories — so a repository recreated under the same id starts empty.
+/// See `docs/API_REPOSITORIES.md`.
 pub async fn delete_repository(
     State(state): State<AppState>,
     Path(repo_id): Path<String>,

@@ -82,8 +82,6 @@ impl UnifiedJobEventHandler {
         node_id: &str,
         node_data: Option<&raisin_models::nodes::Node>,
     ) -> IndexSettings {
-        use raisin_models::nodes::properties::schema::IndexType;
-
         // Use provided node_data if available, otherwise fetch from DB
         let node: std::borrow::Cow<'_, raisin_models::nodes::Node> = if let Some(n) = node_data {
             tracing::trace!(
@@ -141,59 +139,66 @@ impl UnifiedJobEventHandler {
             )
             .await
         {
-            Ok(Some(nt)) => nt,
-            Ok(None) => {
-                tracing::debug!(
-                    node_type = %node.node_type,
-                    "NodeType not found, treating as indexable (default)"
-                );
-                return IndexSettings {
-                    fulltext: true,
-                    vector: true,
-                };
-            }
+            Ok(def) => def,
             Err(e) => {
                 tracing::warn!(
                     node_type = %node.node_type,
                     error = %e,
                     "Failed to fetch NodeType, treating as indexable (default)"
                 );
-                return IndexSettings {
-                    fulltext: true,
-                    vector: true,
-                };
+                None
             }
         };
 
-        // Check if indexable is explicitly set to false
-        if node_type_def.indexable == Some(false) {
-            tracing::debug!(
-                node_type = %node.node_type,
-                "NodeType has indexable=false, skipping all indexes"
-            );
-            return IndexSettings::default();
-        }
-
-        // Check index_types to determine which indexes are allowed
-        let (fulltext, vector) = if let Some(index_types) = &node_type_def.index_types {
-            (
-                index_types.contains(&IndexType::Fulltext),
-                index_types.contains(&IndexType::Vector),
-            )
-        } else {
-            // Default: all index types allowed
-            (true, true)
-        };
-
+        let settings = index_settings_for(workspace_id, &node.node_type, node_type_def.as_ref());
         tracing::trace!(
             node_id = %node_id,
             node_type = %node.node_type,
-            fulltext = %fulltext,
-            vector = %vector,
+            fulltext = %settings.fulltext,
+            vector = %settings.vector,
             "Determined index settings for node"
         );
+        settings
+    }
+}
 
-        IndexSettings { fulltext, vector }
+/// Which indexes a node gets, from its workspace, its type name and that
+/// type's definition (`None` when the NodeType is not found).
+///
+/// The one eligibility rule for both the node-event trigger and vector
+/// regenerate, so a node regenerate queues is exactly a node an edit would.
+/// - function source files get none (see [`is_function_source`])
+/// - an unknown NodeType gets every index
+/// - `indexable: false` gets none
+/// - otherwise `index_types` decides, and unset means every index
+pub(crate) fn index_settings_for(
+    workspace_id: &str,
+    node_type: &str,
+    node_type_def: Option<&raisin_models::nodes::types::NodeType>,
+) -> IndexSettings {
+    use raisin_models::nodes::properties::schema::IndexType;
+
+    if is_function_source(workspace_id, node_type) {
+        return IndexSettings::default();
+    }
+    let Some(def) = node_type_def else {
+        return IndexSettings {
+            fulltext: true,
+            vector: true,
+        };
+    };
+    if def.indexable == Some(false) {
+        return IndexSettings::default();
+    }
+    match &def.index_types {
+        Some(index_types) => IndexSettings {
+            fulltext: index_types.contains(&IndexType::Fulltext),
+            vector: index_types.contains(&IndexType::Vector),
+        },
+        None => IndexSettings {
+            fulltext: true,
+            vector: true,
+        },
     }
 }
 

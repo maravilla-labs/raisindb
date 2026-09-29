@@ -2,9 +2,9 @@
 
 //! Vector embedding regeneration handler.
 //!
-//! Queues a `VectorRegenerate` job; `MaintenanceJobHandler` scans the tenant's
-//! stored embeddings for dimension mismatches and queues an `EmbeddingGenerate`
-//! job per node. The handler used to register a `Custom` job and run the scan
+//! Queues a `VectorRegenerate` job; `MaintenanceJobHandler` queues an
+//! `EmbeddingGenerate` job per node whose stored embedding has the wrong
+//! dimensions, and per embedding-eligible node that has no embedding at all. The handler used to register a `Custom` job and run the scan
 //! in a detached task, which the worker pool then failed for having no handler.
 
 use axum::{
@@ -17,11 +17,13 @@ use crate::state::AppState;
 
 use super::types::{get_branch_name, DatabaseOpQuery, ErrorResponse, JobResponse};
 
-/// Regenerate embeddings for nodes with dimension mismatches.
+/// Regenerate embeddings for nodes with dimension mismatches or no embedding.
 ///
 /// POST /api/admin/management/database/:tenant/:repo/vector/regenerate
 ///
-/// `?force=true` re-embeds every node, not only mismatched ones. One
+/// Nodes eligible for an embedding (same rule as on write) that have none are
+/// always queued. `?force=true` also re-embeds every stored embedding, not
+/// only mismatched ones. One
 /// regeneration per tenant at a time.
 #[cfg(feature = "storage-rocksdb")]
 pub async fn regenerate_vector_embeddings(
@@ -98,7 +100,7 @@ pub async fn regenerate_vector_embeddings(
         job_id: job_id.0,
         message: format!(
             "Embedding regeneration started for {}/{}/{}. \
-             Jobs will be queued for nodes with dimension mismatches.",
+             Jobs will be queued for nodes with dimension mismatches or no embedding.",
             tenant, repo, branch
         ),
     }))

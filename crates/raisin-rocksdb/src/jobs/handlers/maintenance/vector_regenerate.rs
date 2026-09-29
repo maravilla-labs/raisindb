@@ -1,7 +1,17 @@
 // SPDX-License-Identifier: BSL-1.1
 
-//! `VectorRegenerate`: find stored embeddings whose dimensions no longer match
-//! the tenant's embedding config and queue an `EmbeddingGenerate` job for each.
+//! `VectorRegenerate`: queue an `EmbeddingGenerate` job for every node on the
+//! branch whose embedding is wrong or missing:
+//! - a stored embedding whose dimensions no longer match the tenant's
+//!   embedding config (or every stored one, with `force`);
+//! - an embedding-eligible node with no stored embedding at all — typically
+//!   one whose job died at max retries while the embedder was down. Scanning
+//!   only the embeddings column family never saw those, and nothing else
+//!   would ever queue them again short of an edit to the node.
+//!
+//! Eligibility is the node-event trigger's own rule
+//! ([`index_settings_for`]), so regenerate queues exactly the nodes an edit
+//! would.
 //!
 //! The endpoint used to register a `Custom("EmbeddingRegeneration")` job and
 //! run this scan in a detached task. The worker pool claimed that job too, had
@@ -10,14 +20,21 @@
 //! Here the worker that owns the job runs the scan and its return value is the
 //! job result.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use raisin_embeddings::storage::TenantEmbeddingConfigStore;
 use raisin_embeddings::EmbeddingStorage;
 use raisin_error::{Error, Result};
+use raisin_hlc::HLC;
+use raisin_models::nodes::types::NodeType;
 use raisin_storage::jobs::{JobContext, JobId, JobInfo, JobType};
+use raisin_storage::{
+    BranchRepository, BranchScope, ListOptions, NodeRepository, NodeTypeRepository, Storage,
+    StorageScope,
+};
 use serde_json::{json, Value};
 
+use crate::jobs::event_handler::index_helpers::index_settings_for;
 use crate::{RocksDBEmbeddingStorage, RocksDBStorage};
 
 /// Metadata key: re-embed every node, not only those with mismatched dimensions.
@@ -76,8 +93,23 @@ pub(super) async fn regenerate(
         }
     }
 
-    let total = entries.len();
+    // Nodes with no stored embedding at all, and eligible for one.
+    let embedded: HashSet<(&str, &str)> = entries
+        .iter()
+        .map(|(workspace, node_id, _, _)| (workspace.as_str(), node_id.as_str()))
+        .collect();
+    let missing = missing_embeddings(storage, tenant, repo, branch, &embedded).await?;
+
+    let total = entries.len() + missing.len();
     let (mut queued, mut skipped, mut errors) = (0usize, 0usize, 0usize);
+    let report_progress = |done: usize| async move {
+        if done % 100 == 0 || done == total {
+            let _ = registry
+                .update_progress(&job.id, done as f32 / total as f32)
+                .await;
+        }
+    };
+
     for (idx, (workspace, node_id, revision, dims)) in entries.iter().enumerate() {
         if !force && *dims == expected_dims {
             skipped += 1;
@@ -125,19 +157,118 @@ pub(super) async fn regenerate(
                 errors += 1;
             }
         }
-        if idx % 100 == 0 || idx + 1 == total {
-            let _ = registry
-                .update_progress(&job.id, (idx + 1) as f32 / total as f32)
-                .await;
+        report_progress(idx + 1).await;
+    }
+
+    // A node with no embedding is queued the way a node event queues it — at
+    // the branch head and under the same dedup key — so an embedding job the
+    // node already has pending absorbs this one instead of running twice.
+    let (mut missing_queued, mut missing_pending) = (0usize, 0usize);
+    for (idx, (workspace, node_id, revision)) in missing.iter().enumerate() {
+        let job_type = JobType::EmbeddingGenerate {
+            node_id: node_id.clone(),
+        };
+        let dedup_key = format!(
+            "{tenant}:{repo}:{branch}:{workspace}:{}:{revision}",
+            job_type.dedup_key()
+        );
+        let embed_context = JobContext {
+            tenant_id: tenant.to_string(),
+            repo_id: repo.to_string(),
+            branch: branch.to_string(),
+            workspace_id: workspace.clone(),
+            revision: *revision,
+            metadata: HashMap::new(),
+        };
+        let embed_job = JobId::new();
+        let registered = match storage.job_data_store().put(&embed_job, &embed_context) {
+            Ok(()) => {
+                registry
+                    .register_job_with_id_idempotent(
+                        embed_job.clone(),
+                        job_type,
+                        tenant.to_string(),
+                        dedup_key,
+                        None,
+                    )
+                    .await
+            }
+            Err(e) => Err(e),
+        };
+        match registered {
+            Ok(true) => missing_queued += 1,
+            Ok(false) => {
+                let _ = storage.job_data_store().delete(tenant, &embed_job);
+                missing_pending += 1;
+            }
+            Err(e) => {
+                tracing::error!(node_id = %node_id, error = %e, "failed to queue embedding for a node without one");
+                errors += 1;
+            }
         }
+        report_progress(entries.len() + idx + 1).await;
     }
 
     Ok(json!({
         "expected_dimensions": expected_dims,
         "force": force,
-        "checked": total,
-        "queued": queued,
+        "checked": entries.len(),
+        "queued": queued + missing_queued,
         "skipped": skipped,
+        "missing": missing.len(),
+        "missing_queued": missing_queued,
+        "missing_already_pending": missing_pending,
         "errors": errors,
     }))
+}
+
+/// Every node on the branch head that is eligible for an embedding and has
+/// none stored, as `(workspace, node_id, branch head revision)`.
+async fn missing_embeddings(
+    storage: &RocksDBStorage,
+    tenant: &str,
+    repo: &str,
+    branch: &str,
+    embedded: &HashSet<(&str, &str)>,
+) -> Result<Vec<(String, String, HLC)>> {
+    let head = storage
+        .branches()
+        .get_branch(tenant, repo, branch)
+        .await?
+        .ok_or_else(|| Error::NotFound(format!("branch '{branch}' not found")))?
+        .head;
+
+    let mut node_types: HashMap<String, Option<NodeType>> = HashMap::new();
+    let mut missing = Vec::new();
+    for workspace in crate::management::list_workspaces(storage, tenant, repo).await? {
+        let nodes = storage
+            .nodes()
+            .list_all(
+                StorageScope::new(tenant, repo, branch, &workspace),
+                ListOptions::default(),
+            )
+            .await?;
+        for node in nodes {
+            if embedded.contains(&(workspace.as_str(), node.id.as_str())) {
+                continue;
+            }
+            if !node_types.contains_key(&node.node_type) {
+                let def = storage
+                    .node_types()
+                    .get(
+                        BranchScope::new(tenant, repo, branch),
+                        &node.node_type,
+                        None,
+                    )
+                    .await
+                    .unwrap_or(None);
+                node_types.insert(node.node_type.clone(), def);
+            }
+            let def = node_types.get(&node.node_type).and_then(Option::as_ref);
+            if index_settings_for(&workspace, &node.node_type, def).vector {
+                missing.push((workspace.clone(), node.id, head));
+            }
+        }
+    }
+    Ok(missing)
 }
