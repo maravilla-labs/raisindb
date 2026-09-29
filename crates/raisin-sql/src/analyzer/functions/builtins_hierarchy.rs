@@ -123,4 +123,15 @@ pub(super) fn register(registry: &mut FunctionRegistry) {
         is_deterministic: false,
         category: FunctionCategory::Hierarchy,
     });
+
+    // RESOLVE(jsonb, depth, fields) - fields is a comma-separated list of the
+    // properties to keep on each inlined node ('title,file,alt'); id, name,
+    // path and node_type are always kept.
+    registry.register(FunctionSignature {
+        name: "RESOLVE".into(),
+        params: vec![DataType::JsonB, DataType::Int, DataType::Text],
+        return_type: DataType::JsonB,
+        is_deterministic: false,
+        category: FunctionCategory::Hierarchy,
+    });
 }

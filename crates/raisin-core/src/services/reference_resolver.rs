@@ -275,6 +275,77 @@ impl<S: Storage> ReferenceResolver<S> {
         Ok(Some(node_to_json_value(&final_node)))
     }
 
+    /// Resolve every reference inside a JSON value, in place of the value.
+    ///
+    /// THE path the SQL `RESOLVE()` function takes. It works on the JSON the
+    /// expression evaluator already holds instead of converting it to
+    /// `PropertyValue` and back: that conversion goes through the untagged
+    /// `PropertyValue` ladder, which re-parses every nested object once per
+    /// candidate variant and was the dominant cost of resolving a page — a
+    /// homepage with 38 references spent more time re-classifying its own
+    /// blocks than reading the referenced nodes.
+    ///
+    /// Semantics:
+    ///
+    /// - a reference is any object carrying a string `raisin:ref`; its
+    ///   `raisin:workspace` defaults to `workspace` when absent or empty;
+    /// - level N replaces the references that became visible at level N-1, so
+    ///   `max_depth` bounds how deep inlined nodes nest (capped at
+    ///   [`MAX_RESOLUTION_DEPTH`]) — which is also what makes a cycle terminate;
+    /// - each node id is READ at most once per call and inlined everywhere it
+    ///   appears. The PropertyValue path instead refused to resolve an id a
+    ///   second time, so an asset used both on the page and on a teased child
+    ///   page came back resolved in one place and as a bare reference in the
+    ///   other — which a renderer cannot tell from a broken link;
+    /// - an unresolvable reference (missing, or hidden in the locale) is kept.
+    ///
+    /// The value may itself be a single reference, which resolves to the node.
+    ///
+    /// `fields`, when given, trims every inlined node to `id`, `name`, `path`,
+    /// `node_type` plus the listed properties. A page usually renders two or
+    /// three fields of an asset; inlining all of them — extracted text,
+    /// rendition maps, AI metadata — is most of what a resolved page weighs.
+    pub async fn resolve_json(
+        &self,
+        workspace: &str,
+        value: &serde_json::Value,
+        max_depth: u32,
+        fields: Option<&[String]>,
+    ) -> Result<serde_json::Value> {
+        let depth = max_depth.min(MAX_RESOLUTION_DEPTH);
+        let mut current = value.clone();
+        // id -> the inlined node, or None when it cannot be resolved.
+        let mut fetched: HashMap<String, Option<serde_json::Value>> = HashMap::new();
+
+        for _ in 0..depth {
+            let mut wanted: Vec<(String, String)> = Vec::new();
+            collect_json_references(&current, workspace, &mut wanted);
+            if wanted.is_empty() {
+                break;
+            }
+
+            let mut resolvable = false;
+            for (ref_workspace, id) in wanted {
+                if !fetched.contains_key(&id) {
+                    let node = self
+                        .fetch_referenced_node(&ref_workspace, &id)
+                        .await?
+                        .map(|node| node_to_json_value_with_fields(&node, fields));
+                    fetched.insert(id.clone(), node);
+                }
+                resolvable |= matches!(fetched.get(&id), Some(Some(_)));
+            }
+            // Only unresolvable references are left: another pass would find
+            // exactly the same ones.
+            if !resolvable {
+                break;
+            }
+            replace_json_references(&mut current, &fetched);
+        }
+
+        Ok(current)
+    }
+
     /// Internal: resolve references in properties with visited-set tracking
     ///
     /// Uses `Box::pin` for recursive async calls since the compiler cannot
@@ -522,6 +593,97 @@ pub fn node_to_json_value(node: &Node) -> serde_json::Value {
     }
 
     serde_json::Value::Object(map)
+}
+
+/// [`node_to_json_value`], optionally keeping only `fields` of the properties.
+///
+/// The identity members (`id`, `name`, `path`, `node_type`) are always kept:
+/// they are what a renderer links and keys by, and a trimmed node without them
+/// could not be told apart from its neighbours.
+pub fn node_to_json_value_with_fields(node: &Node, fields: Option<&[String]>) -> serde_json::Value {
+    let Some(fields) = fields else {
+        return node_to_json_value(node);
+    };
+    let mut map = serde_json::Map::with_capacity(4 + fields.len());
+    map.insert("id".into(), serde_json::Value::String(node.id.clone()));
+    map.insert("name".into(), serde_json::Value::String(node.name.clone()));
+    map.insert("path".into(), serde_json::Value::String(node.path.clone()));
+    map.insert(
+        "node_type".into(),
+        serde_json::Value::String(node.node_type.clone()),
+    );
+    for field in fields {
+        if let Some(value) = node.properties.get(field) {
+            if let Ok(json) = serde_json::to_value(value) {
+                map.insert(field.clone(), json);
+            }
+        }
+    }
+    serde_json::Value::Object(map)
+}
+
+/// The id of a JSON reference object (`{"raisin:ref": "<id>", ...}`).
+fn json_reference_id(map: &serde_json::Map<String, serde_json::Value>) -> Option<&str> {
+    map.get("raisin:ref")?.as_str()
+}
+
+/// Collect the references in `value` as `(workspace, id)`, in document order.
+/// An id may appear more than once; the caller reads each id once.
+fn collect_json_references(
+    value: &serde_json::Value,
+    default_workspace: &str,
+    out: &mut Vec<(String, String)>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(id) = json_reference_id(map) {
+                let workspace = map
+                    .get("raisin:workspace")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|ws| !ws.is_empty())
+                    .unwrap_or(default_workspace);
+                out.push((workspace.to_string(), id.to_string()));
+                // A reference is a leaf: its own members are not content.
+                return;
+            }
+            for v in map.values() {
+                collect_json_references(v, default_workspace, out);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for v in items {
+                collect_json_references(v, default_workspace, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Replace every resolvable reference with its node. The inserted node is not
+/// descended into: its own references belong to the next level.
+fn replace_json_references(
+    value: &mut serde_json::Value,
+    resolved: &HashMap<String, Option<serde_json::Value>>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(id) = json_reference_id(map) {
+                if let Some(Some(node)) = resolved.get(id) {
+                    *value = node.clone();
+                }
+                return;
+            }
+            for v in map.values_mut() {
+                replace_json_references(v, resolved);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for v in items {
+                replace_json_references(v, resolved);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
@@ -999,5 +1161,191 @@ mod tests {
         assert_eq!(json["path"], "/test");
         assert_eq!(json["node_type"], "test:Content");
         assert_eq!(json["bio"], "Test bio");
+    }
+
+    fn test_resolver(storage: &Arc<InMemoryStorage>) -> ReferenceResolver<InMemoryStorage> {
+        ReferenceResolver::new(
+            storage.clone(),
+            "default".to_string(),
+            "default".to_string(),
+            "main".to_string(),
+        )
+    }
+
+    fn str_props(pairs: &[(&str, &str)]) -> HashMap<String, PropertyValue> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), PropertyValue::String(v.to_string())))
+            .collect()
+    }
+
+    fn json_ref(id: &str, workspace: &str) -> serde_json::Value {
+        serde_json::json!({"raisin:ref": id, "raisin:workspace": workspace, "raisin:path": ""})
+    }
+
+    /// References nested in blocks, arrays and a second workspace resolve in one
+    /// pass, a missing target is kept verbatim, and a repeated id is fetched once
+    /// but inlined everywhere it appears.
+    #[tokio::test]
+    async fn test_resolve_json_nested_blocks() {
+        let storage = Arc::new(InMemoryStorage::default());
+        create_test_node(
+            &storage,
+            "assets",
+            "img",
+            "hero.jpg",
+            "/hero.jpg",
+            str_props(&[("alt", "A plane"), ("extracted_text", "long")]),
+        )
+        .await;
+        create_test_node(
+            &storage,
+            "tags",
+            "tag",
+            "news",
+            "/news",
+            str_props(&[("title", "News")]),
+        )
+        .await;
+
+        let doc = serde_json::json!({
+            "title": "Home",
+            "content": [
+                {"element_type": "x:Hero", "uuid": "h1", "image": json_ref("img", "assets")},
+                {"element_type": "x:Gallery", "uuid": "g1",
+                 "items": [json_ref("img", "assets"), json_ref("gone", "assets")]}
+            ],
+            "tags": [json_ref("tag", "tags")]
+        });
+
+        let out = test_resolver(&storage)
+            .resolve_json("stories", &doc, 1, None)
+            .await
+            .unwrap();
+
+        assert_eq!(out["title"], "Home");
+        assert_eq!(out["content"][0]["image"]["path"], "/hero.jpg");
+        assert_eq!(out["content"][0]["image"]["alt"], "A plane");
+        assert_eq!(out["content"][1]["items"][0]["id"], "img");
+        assert_eq!(out["content"][1]["items"][1]["raisin:ref"], "gone");
+        assert_eq!(out["tags"][0]["title"], "News");
+        assert_eq!(out["content"][0]["element_type"], "x:Hero");
+    }
+
+    /// `fields` keeps the identity members plus the named properties only.
+    #[tokio::test]
+    async fn test_resolve_json_fields_projection() {
+        let storage = Arc::new(InMemoryStorage::default());
+        create_test_node(
+            &storage,
+            "assets",
+            "img",
+            "hero.jpg",
+            "/hero.jpg",
+            str_props(&[("alt", "A plane"), ("extracted_text", "long")]),
+        )
+        .await;
+
+        let fields = vec!["alt".to_string(), "missing".to_string()];
+        let out = test_resolver(&storage)
+            .resolve_json(
+                "stories",
+                &serde_json::json!({"image": json_ref("img", "assets")}),
+                1,
+                Some(&fields),
+            )
+            .await
+            .unwrap();
+
+        let image = out["image"].as_object().unwrap();
+        let mut keys: Vec<&str> = image.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["alt", "id", "name", "node_type", "path"]);
+    }
+
+    /// Depth 2 resolves references inside resolved nodes, a single reference
+    /// resolves to the node itself, and a cycle is bounded by the depth.
+    #[tokio::test]
+    async fn test_resolve_json_depth_and_cycles() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let mut a = str_props(&[("title", "A")]);
+        a.insert(
+            "next".into(),
+            PropertyValue::Reference(RaisinReference {
+                id: "b".into(),
+                workspace: "test".into(),
+                path: "/b".into(),
+            }),
+        );
+        let mut b = str_props(&[("title", "B")]);
+        b.insert(
+            "next".into(),
+            PropertyValue::Reference(RaisinReference {
+                id: "a".into(),
+                workspace: "test".into(),
+                path: "/a".into(),
+            }),
+        );
+        create_test_node(&storage, "test", "a", "a", "/a", a).await;
+        create_test_node(&storage, "test", "b", "b", "/b", b).await;
+
+        let resolver = test_resolver(&storage);
+        let one = resolver
+            .resolve_json("test", &json_ref("a", ""), 1, None)
+            .await
+            .unwrap();
+        assert_eq!(one["title"], "A");
+        assert_eq!(one["next"]["raisin:ref"], "b");
+
+        let two = resolver
+            .resolve_json("test", &json_ref("a", ""), 2, None)
+            .await
+            .unwrap();
+        assert_eq!(two["next"]["title"], "B");
+
+        // A cycle nests until the depth runs out, and then stops as a reference.
+        let three = resolver
+            .resolve_json("test", &json_ref("a", ""), 3, None)
+            .await
+            .unwrap();
+        assert_eq!(three["next"]["next"]["title"], "A");
+        assert_eq!(three["next"]["next"]["next"]["raisin:ref"], "b");
+    }
+
+    /// An asset used on the page AND on a teased child page is inlined in both
+    /// places, from a single read.
+    #[tokio::test]
+    async fn test_resolve_json_shared_reference_across_levels() {
+        let storage = Arc::new(InMemoryStorage::default());
+        create_test_node(
+            &storage,
+            "assets",
+            "img",
+            "hero.jpg",
+            "/hero.jpg",
+            str_props(&[("alt", "A plane")]),
+        )
+        .await;
+        let mut child = str_props(&[("title", "Child")]);
+        child.insert(
+            "image".into(),
+            PropertyValue::Reference(RaisinReference {
+                id: "img".into(),
+                workspace: "assets".into(),
+                path: "/hero.jpg".into(),
+            }),
+        );
+        create_test_node(&storage, "stories", "child", "child", "/child", child).await;
+
+        let doc = serde_json::json!({
+            "hero": json_ref("img", "assets"),
+            "teaser": json_ref("child", "stories"),
+        });
+        let out = test_resolver(&storage)
+            .resolve_json("stories", &doc, 2, None)
+            .await
+            .unwrap();
+        assert_eq!(out["hero"]["alt"], "A plane");
+        assert_eq!(out["teaser"]["image"]["alt"], "A plane");
     }
 }

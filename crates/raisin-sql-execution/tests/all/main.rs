@@ -41,6 +41,7 @@ mod profiling_test;
 mod references_compose_tests;
 mod references_integration_tests;
 mod regex_and_quantified_ops;
+mod resolve_json_tests;
 mod restore_workspace;
 mod rocksdb_integration_tests;
 mod search_table_function_rls;

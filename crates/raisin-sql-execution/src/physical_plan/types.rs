@@ -106,11 +106,16 @@ pub fn to_property_value(literal: &Literal) -> Result<PropertyValue, String> {
         Literal::Text(s) => Ok(PropertyValue::String(s.clone())),
         Literal::Uuid(u) => Ok(PropertyValue::String(u.clone())),
         Literal::Path(p) => Ok(PropertyValue::String(p.clone())),
-        Literal::JsonB(json) => {
-            // Try to convert JSON back to PropertyValue
-            serde_json::from_value(json.clone())
-                .map_err(|e| format!("Failed to deserialize JSON to PropertyValue: {}", e))
-        }
+        // The shared JSON -> PropertyValue conversion, NOT the untagged serde
+        // ladder. JSON here is a rendering of values that were already typed,
+        // and the ladder GUESSES: numeric arrays became `Vector` (f32, so
+        // `[1, 2]` came back `[1.0, 2.0]`) and RFC3339-looking strings became
+        // `Date` and were re-spelled. It was also the dominant cost of
+        // projecting `properties` or a RESOLVE() result (~30x `from_json` on a
+        // resolved page, before the ladder itself was rewritten). `from_json`
+        // classifies objects the same way (Reference, Url, Resource, Composite,
+        // Element, Geometry) and leaves scalars and arrays as they are.
+        Literal::JsonB(json) => Ok(PropertyValue::from_json(json)),
         Literal::Vector(vec) => {
             // Convert vector directly to PropertyValue::Vector to preserve type
             // This is critical for CTE materialization where vectors need to remain vectors

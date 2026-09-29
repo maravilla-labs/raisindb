@@ -9,7 +9,7 @@ use crate::physical_plan::executor::Row;
 use raisin_core::services::reference_resolver::{ReferenceResolver, ResolutionLocale};
 use raisin_error::Error;
 use raisin_locks::LockManager;
-use raisin_models::nodes::properties::{extract_references, PropertyValue, RaisinReference};
+use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::translations::LocaleCode;
 use raisin_sql::analyzer::{BinaryOperator, Expr, Literal, TypedExpr};
 use std::collections::HashMap;
@@ -293,7 +293,7 @@ pub async fn generate_embedding_cached<S: raisin_storage::Storage>(
 ///
 /// Currently handles:
 /// - EMBEDDING(text): Generates embedding vector via external API with caching
-/// - RESOLVE(jsonb[, depth]): Resolves PropertyValue::Reference to full node data
+/// - RESOLVE(jsonb[, depth[, fields]]): Inlines referenced nodes
 ///
 /// # Caching Strategy
 /// EMBEDDING results are cached in ExecutionContext.embedding_cache to avoid
@@ -398,22 +398,28 @@ fn resolution_locale<S: raisin_storage::Storage>(
     })
 }
 
-/// Evaluate RESOLVE(jsonb[, depth]) - resolve PropertyValue::Reference to full node data
+/// Evaluate RESOLVE(jsonb[, depth[, fields]]) - inline referenced nodes.
 ///
-/// Two code paths:
-/// - Single reference: Input JSON has "raisin:ref" key -> fetch that one node
-/// - Full properties: Input JSON is a properties object -> walk and replace all references
+/// The argument is either a single reference (`{"raisin:ref": ...}`), which
+/// resolves to the node, or any JSON value (typically `properties`) whose
+/// references are replaced by the nodes they point to. Unresolvable references
+/// are kept as-is; NULL in is NULL out.
 ///
-/// Returns JSONB with references replaced by full node objects.
-/// Returns NULL if input is NULL. Unresolvable references are kept as-is.
+/// `fields` is a comma-separated list of property names (`'title,file,alt'`).
+/// When given, every inlined node carries only `id`, `name`, `path`,
+/// `node_type` and those properties — what a renderer actually reads of an
+/// asset, instead of the whole node.
+///
+/// Resolution runs on the JSON directly (`ReferenceResolver::resolve_json`);
+/// see there for why it does not round-trip through `PropertyValue`.
 async fn eval_resolve<S: raisin_storage::Storage>(
     args: &[TypedExpr],
     row: &Row,
     ctx: &crate::physical_plan::executor::ExecutionContext<S>,
 ) -> Result<Literal, Error> {
-    if args.is_empty() || args.len() > 2 {
+    if args.is_empty() || args.len() > 3 {
         return Err(Error::Validation(
-            "RESOLVE requires 1 or 2 arguments: RESOLVE(jsonb[, depth])".to_string(),
+            "RESOLVE requires 1 to 3 arguments: RESOLVE(jsonb[, depth[, fields]])".to_string(),
         ));
     }
 
@@ -435,7 +441,7 @@ async fn eval_resolve<S: raisin_storage::Storage>(
     };
 
     // Parse optional depth argument (default: 1, max: 10)
-    let max_depth = if args.len() == 2 {
+    let max_depth = if args.len() >= 2 {
         let depth_lit = eval_expr(&args[1], row)?;
         match depth_lit {
             Literal::Null => 1, // NULL depth treated as default
@@ -461,79 +467,54 @@ async fn eval_resolve<S: raisin_storage::Storage>(
         1
     };
 
+    let fields = if args.len() == 3 {
+        match eval_expr(&args[2], row)? {
+            Literal::Null => None,
+            Literal::Text(list) => Some(parse_resolve_fields(&list)),
+            _ => {
+                return Err(Error::Validation(
+                    "RESOLVE fields argument must be a comma-separated text list".to_string(),
+                ))
+            }
+        }
+    } else {
+        None
+    };
+
     if max_depth == 0 {
         return Ok(Literal::JsonB(json_value));
     }
 
-    let workspace = ctx.workspace.as_ref();
-
+    let resolver = ReferenceResolver::new(
+        ctx.storage.clone(),
+        ctx.tenant_id.to_string(),
+        ctx.repo_id.to_string(),
+        ctx.branch.to_string(),
+    )
     // The language this read is in — see `resolution_locale` for why RESOLVE()
     // has to know it, and for the one case it cannot answer exactly.
-    let resolution_locale = resolution_locale(row, ctx);
+    .with_locale(resolution_locale(row, ctx));
 
-    // Path A: Single reference (JSON object with "raisin:ref" key)
-    if json_value.get("raisin:ref").is_some() {
-        let reference: RaisinReference =
-            serde_json::from_value(json_value.clone()).map_err(|e| {
-                Error::Validation(format!("Failed to parse reference from JSONB: {}", e))
-            })?;
-
-        let resolver = ReferenceResolver::new(
-            ctx.storage.clone(),
-            ctx.tenant_id.to_string(),
-            ctx.repo_id.to_string(),
-            ctx.branch.to_string(),
+    let resolved = resolver
+        .resolve_json(
+            ctx.workspace.as_ref(),
+            &json_value,
+            max_depth,
+            fields.as_deref(),
         )
-        .with_locale(resolution_locale.clone());
+        .await
+        .map_err(|e| Error::Backend(format!("RESOLVE() storage error: {}", e)))?;
 
-        match resolver
-            .resolve_single_reference(workspace, &reference, max_depth)
-            .await
-            .map_err(|e| Error::Backend(format!("RESOLVE() storage error: {}", e)))?
-        {
-            Some(resolved_json) => Ok(Literal::JsonB(resolved_json)),
-            None => {
-                // Unresolvable reference: keep original
-                Ok(Literal::JsonB(json_value))
-            }
-        }
-    }
-    // Path B: Full properties object - walk and replace all references
-    else {
-        // Deserialize JSON to HashMap<String, PropertyValue>
-        let properties: HashMap<String, PropertyValue> = serde_json::from_value(json_value.clone())
-            .map_err(|e| {
-                Error::Validation(format!(
-                    "Failed to parse properties from JSONB for RESOLVE: {}",
-                    e
-                ))
-            })?;
+    Ok(Literal::JsonB(resolved))
+}
 
-        // Check if there are any references to resolve
-        let refs = extract_references(&properties);
-        if refs.is_empty() {
-            return Ok(Literal::JsonB(json_value));
-        }
-
-        let resolver = ReferenceResolver::new(
-            ctx.storage.clone(),
-            ctx.tenant_id.to_string(),
-            ctx.repo_id.to_string(),
-            ctx.branch.to_string(),
-        )
-        .with_locale(resolution_locale.clone());
-
-        let resolved_properties = resolver
-            .resolve_properties(workspace, &properties, max_depth)
-            .await
-            .map_err(|e| Error::Backend(format!("RESOLVE() storage error: {}", e)))?;
-
-        let result_json = serde_json::to_value(&resolved_properties).map_err(|e| {
-            Error::Internal(format!("Failed to serialize resolved properties: {}", e))
-        })?;
-
-        Ok(Literal::JsonB(result_json))
-    }
+/// `'title, file ,alt'` -> `["title", "file", "alt"]`; empty entries dropped.
+fn parse_resolve_fields(list: &str) -> Vec<String> {
+    list.split(',')
+        .map(str::trim)
+        .filter(|f| !f.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// Evaluate INVOKE(path[, input[, workspace]]) - queue a background function invocation.
