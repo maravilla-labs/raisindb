@@ -508,7 +508,7 @@ describe('repo create/delete', () => {
     ]);
     await expect(
       repoCreate('site', { existsOk: true, defaultLanguage: 'de', languages: 'de,fr' }, fetchImpl)
-    ).rejects.toThrow(/default language 'en', not 'de'.*cannot be changed/);
+    ).rejects.toThrow(/default language 'en', not 'de'.*repo languages site --default de/);
   });
 
   it('409 fails without --exists-ok and succeeds with it', async () => {
@@ -569,6 +569,73 @@ describe('repo languages', () => {
     await repoLanguages('site', { add: 'fr,en' }, fetchImpl);
     const patch = calls.find((c) => c.method === 'PATCH')!;
     expect(patch.body).toEqual({ supported_languages: ['de', 'fr', 'en'] });
+  });
+
+  describe('--default', () => {
+    const before = { default_language: 'en', supported_languages: ['en'], locale_fallback_chains: {} };
+    const after = { default_language: 'de', supported_languages: ['en', 'de'], locale_fallback_chains: {} };
+
+    function server(patch: { status: number; body: unknown }) {
+      let patched = false;
+      const calls: { url: string; method: string; body: unknown }[] = [];
+      const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+        const method = init?.method ?? 'GET';
+        calls.push({ url: String(input), method, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+        if (method === 'PATCH') {
+          patched = patch.status === 200;
+          return new Response(JSON.stringify(patch.body), { status: patch.status });
+        }
+        return new Response(JSON.stringify(patched ? after : before), { status: 200 });
+      }) as FetchLike;
+      return { fetchImpl, calls };
+    }
+
+    const ok = {
+      status: 200,
+      body: { ...after, previous_default_language: 'en', reindex_jobs: [{ branch: 'main', job_id: 'job-1' }] },
+    };
+
+    it('refuses without --yes when nobody can confirm, and explains the reindex', async () => {
+      const { fetchImpl, calls } = server(ok);
+      await expect(repoLanguages('site', { default: 'de' }, fetchImpl)).rejects.toThrow(
+        /full-text rebuild[\s\S]*--yes/
+      );
+      expect(calls.map((c) => c.method)).toEqual(['GET']);
+    });
+
+    it('asks, and does nothing when the answer is no', async () => {
+      const { fetchImpl, calls } = server(ok);
+      const confirm = vi.fn(async () => false);
+      await repoLanguages('site', { default: 'de', confirm }, fetchImpl);
+      expect(confirm).toHaveBeenCalledOnce();
+      expect(calls.map((c) => c.method)).toEqual(['GET']);
+    });
+
+    it('PATCHes default_language and reports the queued rebuilds', async () => {
+      const { fetchImpl, calls } = server(ok);
+      await repoLanguages('site', { default: 'de', yes: true }, fetchImpl);
+      expect(calls.find((c) => c.method === 'PATCH')!.body).toEqual({ default_language: 'de' });
+      const out = (console.log as unknown as { mock: { calls: unknown[][] } }).mock.calls.flat().join('\n');
+      expect(out).toMatch(/changed from 'en' to 'de'/);
+      expect(out).toMatch(/rebuild of branch 'main' \(job job-1\)/);
+      expect(out).toMatch(/Default language:\s+de/);
+    });
+
+    it('explains a 409: translations in the new default exist', async () => {
+      const { fetchImpl } = server({
+        status: 409,
+        body: { code: 'DEFAULT_LANGUAGE_CONFLICT', message: 'conflict', language: 'de', overlay_count: 3 },
+      });
+      await expect(repoLanguages('site', { default: 'de', yes: true }, fetchImpl)).rejects.toThrow(
+        /3 translation\(s\) in 'de'.*Nothing was changed/
+      );
+    });
+
+    it('the current default is a no-op without a PATCH', async () => {
+      const { fetchImpl, calls } = server(ok);
+      await repoLanguages('site', { default: 'en' }, fetchImpl);
+      expect(calls.map((c) => c.method)).toEqual(['GET']);
+    });
   });
 
   it('404 names the repository', async () => {

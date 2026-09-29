@@ -8,12 +8,13 @@ import { apiCall, formatTable, FetchLike } from './admin-util.js';
  *   GET    /api/repositories
  *   DELETE /api/repositories/{repo_id}
  *   GET    /api/repositories/{repo_id}/translation-config
- *   PATCH  /api/repositories/{repo_id}/translation-config  {supported_languages}
+ *   PATCH  /api/repositories/{repo_id}/translation-config  {supported_languages?, default_language?}
  *
- * A repository's `default_language` is fixed when it is created: the server
- * never changes it afterwards, because content in the default language is the
- * base that translation overlays are stored against. Only the list of
- * supported (translation) languages can grow later.
+ * A repository's `default_language` is the language base content is stored in;
+ * every other language is a translation overlay against it. Pick it at create
+ * time. It can be changed later (`repo languages --default`): the server
+ * refuses while translations in the new language exist, and queues a full-text
+ * rebuild of every branch so search files base content under the new language.
  */
 
 interface RepositoryInfo {
@@ -64,7 +65,7 @@ export interface RepoCreateOptions {
   description?: string;
   /** Exit successfully if the repository already exists (idempotent CI). */
   existsOk?: boolean;
-  /** Base language of the content. Immutable after creation; server default is `en`. */
+  /** Base language of the content; server default is `en`. Change later with `repo languages --default`. */
   defaultLanguage?: string;
   /** Comma-separated translation languages, e.g. `de,fr,en`. */
   languages?: string;
@@ -84,11 +85,10 @@ export async function repoCreate(
   const defaultLanguage = options.defaultLanguage?.trim() || undefined;
   if (languages.length > 0 && !defaultLanguage) {
     // Without an explicit default the server picks `en`, and the first entry of
-    // --languages is what people mean by "the base language". Refuse to guess
-    // about something that can never be changed afterwards.
+    // --languages is what people mean by "the base language". Refuse to guess:
+    // changing the default later means re-indexing the repository.
     throw new Error(
-      `--languages requires --default-language: the default language cannot be changed after ` +
-        `the repository is created.\n` +
+      `--languages requires --default-language: it is the language the base content is stored in.\n` +
         `For example: raisindb repo create ${name} --default-language ${languages[0]} --languages ${languages.join(',')}`
     );
   }
@@ -128,8 +128,9 @@ export async function repoCreate(
 
 /**
  * `--exists-ok` must not hide a repository whose languages differ from what
- * the caller asked for: a wrong default language cannot be fixed later, so
- * that is an error; missing translation languages only need `repo languages --add`.
+ * the caller asked for: a different default language is an error (changing it
+ * is a deliberate, re-indexing `repo languages --default`); missing translation
+ * languages only need `repo languages --add`.
  */
 async function checkExistingLanguages(
   name: string,
@@ -148,8 +149,8 @@ async function checkExistingLanguages(
   if (defaultLanguage && default_language !== defaultLanguage) {
     throw new Error(
       `Repository '${name}' already exists with default language '${default_language}', ` +
-        `not '${defaultLanguage}'. The default language cannot be changed after creation; ` +
-        `delete and recreate the repository to change it.`
+        `not '${defaultLanguage}'. To change it (this re-indexes the repository): ` +
+        `raisindb repo languages ${name} --default ${defaultLanguage}`
     );
   }
   const missing = languages.filter((l) => !supported_languages.includes(l));
@@ -164,12 +165,51 @@ async function checkExistingLanguages(
 export interface RepoLanguagesOptions {
   /** Comma-separated languages to add to supported_languages. */
   add?: string;
+  /** Make this language the default (base) language. Queues a full-text rebuild. */
+  default?: string;
+  /** Skip the confirmation for --default. */
+  yes?: boolean;
   json?: boolean;
+  /**
+   * Ask the user to confirm a default-language change. Only set when a person
+   * is at the terminal; without it, --default requires --yes.
+   */
+  confirm?: (question: string) => Promise<boolean>;
+}
+
+interface ReindexJob {
+  branch: string;
+  job_id: string;
+}
+
+interface UpdateTranslationConfigResponse extends TranslationConfig {
+  previous_default_language?: string;
+  reindex_jobs?: ReindexJob[];
+}
+
+interface DefaultLanguageConflict {
+  message?: string;
+  language?: string;
+  overlay_count?: number;
+}
+
+/** What changing the default language does, shown before it is confirmed. */
+export function describeDefaultLanguageChange(name: string, from: string, to: string): string {
+  return (
+    `Changing the default language of '${name}' from '${from}' to '${to}':\n` +
+    `  - Base (untranslated) content is from now on treated as '${to}'. The content\n` +
+    `    itself is not translated or rewritten.\n` +
+    `  - '${to}' is added to the supported languages; '${from}' stays in them.\n` +
+    `  - A full-text rebuild of every branch is queued, so search finds the base\n` +
+    `    content under '${to}' instead of '${from}'. Until it finishes, full-text\n` +
+    `    search may miss base content. Vector embeddings are not affected.\n` +
+    `  - The server refuses the change while translations in '${to}' exist.`
+  );
 }
 
 /**
- * Show a repository's languages, or add translation languages with `--add`.
- * The default language is shown but can never be changed.
+ * Show a repository's languages, add translation languages with `--add`, or
+ * change the default language with `--default` (confirmed, it queues a rebuild).
  */
 export async function repoLanguages(
   name: string,
@@ -187,23 +227,67 @@ export async function repoLanguages(
 
   let config = current.data;
   const toAdd = parseLanguageList(options.add).filter((l) => !config.supported_languages.includes(l));
+  const newDefault = options.default?.trim() || undefined;
+  const changeDefault = newDefault !== undefined && newDefault !== config.default_language;
 
-  if (toAdd.length > 0) {
-    const updated = await apiCall<unknown>(path, {
+  if (newDefault !== undefined && !changeDefault && !options.json) {
+    console.log(`No change: '${newDefault}' already is the default language of '${name}'.`);
+  }
+
+  if (changeDefault) {
+    const explanation = describeDefaultLanguageChange(name, config.default_language, newDefault!);
+    if (!options.yes) {
+      if (!options.confirm) {
+        throw new Error(`${explanation}\n\nRe-run with --yes to confirm: raisindb repo languages ${name} --default ${newDefault} --yes`);
+      }
+      console.log(explanation);
+      if (!(await options.confirm('Change the default language? [y/N] '))) {
+        console.log('Aborted; nothing changed.');
+        return;
+      }
+    }
+  }
+
+  if (toAdd.length > 0 || changeDefault) {
+    const body: Record<string, unknown> = {};
+    if (toAdd.length > 0) body.supported_languages = [...config.supported_languages, ...toAdd];
+    if (changeDefault) body.default_language = newDefault;
+
+    const updated = await apiCall<UpdateTranslationConfigResponse & DefaultLanguageConflict>(path, {
       method: 'PATCH',
-      body: { supported_languages: [...config.supported_languages, ...toAdd] },
+      body,
       fetchImpl,
     });
+    if (updated.status === 409 && changeDefault) {
+      const count = updated.data?.overlay_count;
+      throw new Error(
+        `Cannot make '${newDefault}' the default language of '${name}': ` +
+          `${count ?? 'some'} translation(s) in '${newDefault}' already exist and would collide ` +
+          `with the base content. Delete those translations first. Nothing was changed.`
+      );
+    }
     if (!updated.ok) {
       throw new Error(`Failed to update languages of '${name}': ${updated.errorMessage}`);
     }
+
+    const jobs = updated.data?.reindex_jobs ?? [];
     // Re-read so the output is what the server stored, not what we sent.
     const reread = await apiCall<TranslationConfig>(path, { fetchImpl });
     if (reread.ok && reread.data) {
       config = reread.data;
     }
     if (!options.json) {
-      console.log(`Added ${toAdd.join(', ')} to '${name}'.`);
+      if (toAdd.length > 0) {
+        console.log(`Added ${toAdd.join(', ')} to '${name}'.`);
+      }
+      if (changeDefault) {
+        console.log(
+          `Default language of '${name}' changed from '${updated.data?.previous_default_language ?? current.data.default_language}' to '${config.default_language}'.`
+        );
+        for (const job of jobs) {
+          console.log(`Queued full-text rebuild of branch '${job.branch}' (job ${job.job_id}).`);
+        }
+      }
     }
   } else if (options.add && !options.json) {
     console.log(`No change: '${name}' already supports ${parseLanguageList(options.add).join(', ')}.`);
@@ -213,7 +297,7 @@ export async function repoLanguages(
     console.log(JSON.stringify(config, null, 2));
     return;
   }
-  console.log(`Default language:    ${config.default_language} (fixed at creation)`);
+  console.log(`Default language:    ${config.default_language}`);
   console.log(`Supported languages: ${config.supported_languages.join(', ')}`);
   const chains = Object.entries(config.locale_fallback_chains ?? {});
   if (chains.length > 0) {

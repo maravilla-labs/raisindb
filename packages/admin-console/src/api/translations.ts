@@ -6,6 +6,29 @@ export interface TranslationConfig {
   locale_fallback_chains: Record<string, string[]>
 }
 
+export interface UpdateTranslationConfigRequest {
+  /** Changing it queues a full-text rebuild; 409 while overlays in it exist */
+  default_language?: string
+  supported_languages?: string[]
+  locale_fallback_chains?: Record<string, string[]>
+}
+
+export interface UpdateTranslationConfigResponse extends TranslationConfig {
+  default_branch: string
+  description?: string | null
+  previous_default_language?: string
+  /** Full-text rebuilds queued by a default-language change, one per branch */
+  reindex_jobs: { branch: string; job_id: string }[]
+}
+
+/** 409 body when overlays in the requested default language exist */
+export interface DefaultLanguageConflict {
+  code: 'DEFAULT_LANGUAGE_CONFLICT'
+  message: string
+  language: string
+  overlay_count: number
+}
+
 export interface UpdateTranslationRequest {
   translations: Record<string, any>
   message?: string
@@ -57,6 +80,16 @@ export const translationsApi = {
    */
   getConfig: (repo: string) =>
     api.get<TranslationConfig>(`/api/repositories/${repo}/translation-config`),
+
+  /**
+   * Update the translation configuration, including the default language
+   * PATCH /api/repositories/{repo}/translation-config
+   */
+  updateConfig: (repo: string, data: UpdateTranslationConfigRequest) =>
+    api.patch<UpdateTranslationConfigResponse>(
+      `/api/repositories/${repo}/translation-config`,
+      data
+    ),
 
   /**
    * Update or create a translation for a node in a specific locale

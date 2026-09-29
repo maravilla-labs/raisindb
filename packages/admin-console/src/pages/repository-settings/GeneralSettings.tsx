@@ -1,8 +1,11 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { AlertCircle, Check, Globe, Lock, Save, ArrowRight, X, Plus } from 'lucide-react'
+import { AlertCircle, AlertTriangle, Check, Globe, Save, ArrowRight, X, Plus } from 'lucide-react'
 import GlassCard from '../../components/GlassCard'
+import ConfirmDialog from '../../components/ConfirmDialog'
 import { repositoriesApi, type Repository } from '../../api/repositories'
+import { translationsApi, type DefaultLanguageConflict } from '../../api/translations'
+import { ApiError } from '../../api/client'
 import { useToast, ToastContainer } from '../../components/Toast'
 
 // Language configuration with flags and display names
@@ -39,6 +42,9 @@ export default function GeneralSettings() {
   const [defaultBranch, setDefaultBranch] = useState<string>('')
   const [fallbackChains, setFallbackChains] = useState<Record<string, string[]>>({})
   const [success, setSuccess] = useState(false)
+  const [newDefaultLanguage, setNewDefaultLanguage] = useState<string>('')
+  const [confirmDefaultOpen, setConfirmDefaultOpen] = useState(false)
+  const [changingDefault, setChangingDefault] = useState(false)
   const { toasts, error: showError, success: showSuccess, closeToast } = useToast()
 
   useEffect(() => {
@@ -53,6 +59,7 @@ export default function GeneralSettings() {
       const data = await repositoriesApi.get(repo)
       setRepository(data)
       setDefaultLanguage(data.config.default_language)
+      setNewDefaultLanguage(data.config.default_language)
       setSelectedLanguages(data.config.supported_languages)
       setDescription(data.config.description || '')
       setDefaultBranch(data.config.default_branch)
@@ -97,6 +104,40 @@ export default function GeneralSettings() {
       delete updated[locale]
       return updated
     })
+  }
+
+  async function handleChangeDefaultLanguage() {
+    if (!repo || !newDefaultLanguage || newDefaultLanguage === defaultLanguage) return
+    setConfirmDefaultOpen(false)
+    setChangingDefault(true)
+    try {
+      const result = await translationsApi.updateConfig(repo, {
+        default_language: newDefaultLanguage,
+      })
+      const jobs = result.reindex_jobs ?? []
+      showSuccess(
+        'Default language changed',
+        `Now ${result.default_language}. Queued ${jobs.length} full-text rebuild${jobs.length !== 1 ? 's' : ''} (${jobs.map((j) => j.branch).join(', ') || 'no branches'}).`
+      )
+      await loadRepository()
+    } catch (error) {
+      console.error('Failed to change default language:', error)
+      if (error instanceof ApiError && error.status === 409) {
+        const conflict = error.response as unknown as DefaultLanguageConflict | undefined
+        showError(
+          'Default language not changed',
+          `${conflict?.overlay_count ?? 'Some'} translation(s) in '${newDefaultLanguage}' already exist and would collide with the base content. Delete them first.`
+        )
+      } else {
+        showError(
+          'Error',
+          error instanceof Error ? error.message : 'Failed to change the default language'
+        )
+      }
+      setNewDefaultLanguage(defaultLanguage)
+    } finally {
+      setChangingDefault(false)
+    }
   }
 
   async function handleSave() {
@@ -196,38 +237,51 @@ export default function GeneralSettings() {
           </div>
         </div>
 
-        {/* Immutability Warning */}
-        <div className="mb-6 p-4 bg-amber-500/10 border border-amber-500/30 rounded-lg">
-          <div className="flex items-start gap-3">
-            <Lock className="w-5 h-5 text-amber-400 mt-0.5 flex-shrink-0" />
-            <div>
-              <h3 className="text-amber-200 font-semibold mb-1">Default Language is Immutable</h3>
-              <p className="text-amber-100/80 text-sm">
-                The default language <span className="font-mono bg-amber-500/20 px-1.5 py-0.5 rounded">{defaultLanguage}</span> cannot be changed after repository creation.
-                This ensures consistency in the full-text search indexing system.
-                You can add or remove other supported languages at any time.
-              </p>
-            </div>
-          </div>
-        </div>
-
-        {/* Default Language Display */}
+        {/* Default Language */}
         <div className="mb-6">
           <label className="block text-sm font-medium text-zinc-300 mb-3">
-            Default Language (Immutable)
+            Default Language
           </label>
-          <div className="flex items-center gap-3 p-4 bg-primary-500/10 border-2 border-primary-500/30 rounded-lg">
+          <div className="flex flex-wrap items-center gap-3 p-4 bg-primary-500/10 border-2 border-primary-500/30 rounded-lg">
             <span className="text-4xl">{LANGUAGES.find((l) => l.code === defaultLanguage)?.flag}</span>
-            <div className="flex-1">
+            <div className="flex-1 min-w-[8rem]">
               <div className="text-white font-semibold">
-                {LANGUAGES.find((l) => l.code === defaultLanguage)?.name}
+                {LANGUAGES.find((l) => l.code === defaultLanguage)?.name ?? defaultLanguage}
               </div>
               <div className="text-xs text-zinc-400 font-mono">{defaultLanguage}</div>
             </div>
-            <div className="flex items-center gap-2 text-primary-400">
-              <Lock className="w-4 h-4" />
-              <span className="text-sm font-medium">Locked</span>
-            </div>
+            <select
+              value={newDefaultLanguage}
+              onChange={(e) => setNewDefaultLanguage(e.target.value)}
+              disabled={changingDefault}
+              aria-label="New default language"
+              className="px-3 py-2 bg-zinc-800/50 border border-zinc-700 rounded-lg text-sm text-white focus:outline-none focus:ring-2 focus:ring-primary-500"
+            >
+              {!LANGUAGES.some((l) => l.code === defaultLanguage) && (
+                <option value={defaultLanguage}>{defaultLanguage}</option>
+              )}
+              {LANGUAGES.map((language) => (
+                <option key={language.code} value={language.code}>
+                  {language.name} ({language.code})
+                </option>
+              ))}
+            </select>
+            <button
+              onClick={() => setConfirmDefaultOpen(true)}
+              disabled={changingDefault || newDefaultLanguage === defaultLanguage}
+              className="px-4 py-2 bg-amber-500/80 hover:bg-amber-500 text-white text-sm rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {changingDefault ? 'Changing...' : 'Change default'}
+            </button>
+          </div>
+          <div className="mt-3 p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg flex items-start gap-2">
+            <AlertTriangle className="w-4 h-4 text-amber-400 mt-0.5 flex-shrink-0" />
+            <p className="text-amber-100/80 text-xs">
+              Base (untranslated) content is stored in the default language; every other language is a
+              translation on top of it. Changing it does not translate anything: the base content is from
+              then on treated as the new language, and a full-text rebuild of every branch is queued.
+              It is refused while translations in the new language exist.
+            </p>
           </div>
         </div>
 
@@ -428,6 +482,25 @@ export default function GeneralSettings() {
           {saving ? 'Saving...' : 'Save Changes'}
         </button>
       </div>
+      <ConfirmDialog
+        open={confirmDefaultOpen}
+        variant="warning"
+        title="Change the default language?"
+        message={
+          `Change the default language of '${repo}' from '${defaultLanguage}' to '${newDefaultLanguage}'.\n\n` +
+          `• Base content is from then on treated as '${newDefaultLanguage}'. It is not translated or rewritten.\n` +
+          `• '${newDefaultLanguage}' is added to the supported languages; '${defaultLanguage}' stays.\n` +
+          `• A full-text rebuild of every branch is queued. Until it finishes, search may miss base content.\n` +
+          `• Vector embeddings are not affected.\n` +
+          `• Refused while translations in '${newDefaultLanguage}' exist.`
+        }
+        confirmText="Change and rebuild"
+        onConfirm={handleChangeDefaultLanguage}
+        onCancel={() => {
+          setConfirmDefaultOpen(false)
+          setNewDefaultLanguage(defaultLanguage)
+        }}
+      />
       <ToastContainer toasts={toasts} onClose={closeToast} />
     </div>
   )

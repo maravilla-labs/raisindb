@@ -290,7 +290,7 @@ function CreateRepositoryDialog({ onClose, onCreate }: CreateRepositoryDialogPro
 
     // Require acknowledgment in step 2
     if (!acknowledgedWarning) {
-      setError('Please acknowledge that the default language cannot be changed after creation')
+      setError('Please confirm the default language of the base content')
       return
     }
 
@@ -408,7 +408,9 @@ function CreateRepositoryDialog({ onClose, onCreate }: CreateRepositoryDialogPro
               <div className="flex items-start gap-2">
                 <AlertTriangle className="w-4 h-4 text-amber-400 mt-0.5 flex-shrink-0" />
                 <p className="text-sm text-amber-100/90">
-                  The default language is <strong>permanent</strong> and cannot be changed after creation.
+                  Base content is stored in the default language. Pick it before importing content:
+                  changing it later (in the repository settings) re-indexes the repository and is
+                  refused while translations in the new language exist.
                 </p>
               </div>
             </div>
@@ -496,9 +498,9 @@ function CreateRepositoryDialog({ onClose, onCreate }: CreateRepositoryDialogPro
                   className="mt-0.5 w-4 h-4 rounded border-red-500/50 bg-white/5 text-purple-600 focus:ring-purple-500 focus:ring-offset-0"
                 />
                 <span className="text-white/90 text-sm flex-1">
-                  I understand that <strong className="text-white">
+                  The base content of this repository is in <strong className="text-white">
                     {LANGUAGES.find((l) => l.code === formData.default_language)?.name} ({formData.default_language})
-                  </strong> cannot be changed after creation
+                  </strong>
                 </span>
               </label>
             </div>
