@@ -351,13 +351,19 @@ impl PhysicalPlanner {
         // Find the first `IN` predicate whose column is plausibly indexed. The
         // per-branch post-check below is the hard correctness guarantee; this is
         // just a cheap pre-filter.
-        let idx = canonical.iter().position(|p| match p {
+        let expandable = |p: &CanonicalPredicate| match p {
             CanonicalPredicate::ColumnIn { column, .. } => self.column_in_indexable(column),
             CanonicalPredicate::JsonPropertyIn { .. } => {
                 self.index_catalog.has_property_index() || !self.compound_indexes.is_empty()
             }
             _ => false,
-        });
+        };
+        // A set of values (paths, ids, property values) before a set of types:
+        // the former names particular rows, the latter only narrows them.
+        let idx = canonical
+            .iter()
+            .position(|p| expandable(p) && !Self::is_type_set(p))
+            .or_else(|| canonical.iter().position(expandable));
         let idx = match idx {
             Some(i) => i,
             None => return Ok(None),
@@ -424,6 +430,16 @@ impl PhysicalPlanner {
             .map(|(_, p)| p.clone())
             .collect();
 
+        // A set of TYPES next to something that already finds the rows is a
+        // filter, not a way in. `path = X AND node_type IN (a, b)` expanded
+        // into two identical path lookups, and `DESCENDANT_OF(s) AND node_type
+        // IN (a, b)` walked the subtree twice — each branch then planned by the
+        // OTHER predicate, so the union only multiplied the work. Leave the IN
+        // in the residual filter and let the other predicate drive.
+        if Self::is_type_set(&canonical[idx]) && self.has_row_locating_predicate(&others) {
+            return Ok(None);
+        }
+
         // Branches must not inherit LIMIT/ORDER pushdown — a Limit/Sort above the
         // Union handles global ordering and bounding.
         let branch_ctx = PlanContext::empty();
@@ -463,6 +479,40 @@ impl PhysicalPlanner {
             branches.len()
         );
         Ok(Some(PhysicalPlan::Union { inputs: branches }))
+    }
+
+    /// `node_type IN (…)` / `archetype IN (…)`: a set of kinds, which selects
+    /// whole classes of nodes rather than particular ones.
+    fn is_type_set(predicate: &CanonicalPredicate) -> bool {
+        matches!(
+            predicate,
+            CanonicalPredicate::ColumnIn { column, .. }
+                if column.eq_ignore_ascii_case("node_type")
+                    || column.eq_ignore_ascii_case("archetype")
+        )
+    }
+
+    /// Does one of `predicates` locate rows by itself — an identity, a place in
+    /// the tree, a property value, a search?
+    fn has_row_locating_predicate(&self, predicates: &[CanonicalPredicate]) -> bool {
+        self.find_fulltext_predicate(predicates).is_some()
+            || predicates.iter().any(|p| match p {
+                CanonicalPredicate::ColumnEq { column, .. } => {
+                    let column = column.to_lowercase();
+                    column == "path" || column == "id"
+                }
+                CanonicalPredicate::ColumnIn { column, .. } => {
+                    let column = column.to_lowercase();
+                    column == "path" || column == "id"
+                }
+                CanonicalPredicate::ChildOf { .. }
+                | CanonicalPredicate::DescendantOf { .. }
+                | CanonicalPredicate::PrefixRange { .. }
+                | CanonicalPredicate::JsonPropertyEq { .. }
+                | CanonicalPredicate::References { .. }
+                | CanonicalPredicate::SpatialDWithin { .. } => true,
+                _ => false,
+            })
     }
 
     /// Whether a `col IN (...)` over `column` can plausibly use an index.

@@ -218,3 +218,29 @@ async fn a_property_value_drives_the_scan_over_a_node_type() {
     .await;
     assert!(found.is_empty());
 }
+
+/// `node_type IN (…)` next to a predicate that already locates the rows is a
+/// filter. Expanding it into a Union planned the same path lookup, or walked
+/// the same subtree, once per listed type.
+#[tokio::test]
+async fn a_type_set_beside_a_locating_predicate_stays_a_filter() {
+    let (engine, _dir) = setup().await;
+    seed(&engine).await;
+
+    for sql in [
+        "SELECT id FROM pages WHERE path = '/child' AND node_type IN ('test:Doc', 'other:Type')",
+        "SELECT id FROM pages WHERE CHILD_OF('/') AND node_type IN ('test:Doc', 'other:Type')",
+        "SELECT id FROM pages WHERE properties->>'title'::String = 'Child' AND node_type IN ('test:Doc', 'other:Type')",
+    ] {
+        let plan = explain(&engine, sql).await;
+        assert!(!plan.contains("Union"), "{sql}\n{plan}");
+        assert_eq!(rows(&engine, sql).await.len(), if sql.contains("CHILD_OF") { 2 } else { 1 }, "{sql}");
+    }
+
+    // A set of paths still fans out into point lookups, with the type set as
+    // the filter on each.
+    let sql = "SELECT id FROM pages WHERE node_type IN ('test:Doc', 'other:Type') AND path IN ('/child', '/home')";
+    let plan = explain(&engine, sql).await;
+    assert_eq!(plan.matches("PathIndexScan").count(), 2, "{plan}");
+    assert_eq!(rows(&engine, sql).await.len(), 2);
+}
