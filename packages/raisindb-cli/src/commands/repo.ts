@@ -273,7 +273,9 @@ export async function repoDelete(
 ): Promise<void> {
   if (!options.yes) {
     throw new Error(
-      `Deleting a repository removes ALL branches, revisions and nodes and cannot be undone.\n` +
+      `Deleting a repository removes ALL of its data and cannot be undone: branches, revisions,\n` +
+        `nodes, translations, installed packages, embeddings, search indexes and jobs.\n` +
+        `Uploaded files in the binary store are kept.\n` +
         `Re-run with --yes to confirm: raisindb repo delete ${name} --yes`
     );
   }
