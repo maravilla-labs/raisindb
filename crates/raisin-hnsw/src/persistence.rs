@@ -29,6 +29,13 @@ pub(crate) struct IndexMetadata {
 }
 
 /// Save an HNSW index to disk as dual files (.hnsw + .hnsw.meta).
+///
+/// Both files are written to temporaries next to their targets and RENAMED
+/// into place, graph first and sidecar last. Writing in place truncated the
+/// live files first, so any failure mid-write — a full disk, a crash, a
+/// deleted directory — left zero-byte files behind, and every later load of
+/// that index failed until someone removed them by hand. With the rename a
+/// failed save leaves the previous files untouched.
 pub(crate) fn save_to_file(index: &HnswIndex, path: &Path) -> Result<()> {
     // Create parent directory if needed
     if let Some(parent) = path.parent() {
@@ -37,30 +44,52 @@ pub(crate) fn save_to_file(index: &HnswIndex, path: &Path) -> Result<()> {
         })?;
     }
 
-    // Save usearch index natively
-    let path_str = path.to_str().ok_or_else(|| {
-        raisin_error::Error::storage("Index path contains invalid UTF-8".to_string())
-    })?;
-    index.usearch_index().save(path_str).map_err(|e| {
-        raisin_error::Error::storage(format!("Failed to save usearch index: {}", e))
-    })?;
-
-    // Save metadata sidecar
+    let graph_tmp = tmp_path_for(path);
     let meta_path = meta_path_for(path);
-    let metadata = IndexMetadata {
-        node_to_key: index.node_to_key().clone(),
-        key_to_meta: index.key_to_meta().clone(),
-        dimensions: index.dimensions(),
-        distance_metric: index.distance_metric(),
-        next_key: index.next_key(),
-        quantization: index.quantization(),
-    };
-    let json = serde_json::to_vec(&metadata).map_err(|e| {
-        raisin_error::Error::storage(format!("Failed to serialize index metadata: {}", e))
-    })?;
-    std::fs::write(&meta_path, json).map_err(|e| {
-        raisin_error::Error::storage(format!("Failed to write metadata sidecar: {}", e))
-    })?;
+    let meta_tmp = tmp_path_for(&meta_path);
+
+    let written = (|| -> Result<()> {
+        // Save usearch index natively
+        let tmp_str = graph_tmp.to_str().ok_or_else(|| {
+            raisin_error::Error::storage("Index path contains invalid UTF-8".to_string())
+        })?;
+        index.usearch_index().save(tmp_str).map_err(|e| {
+            raisin_error::Error::storage(format!("Failed to save usearch index: {}", e))
+        })?;
+
+        // Save metadata sidecar
+        let metadata = IndexMetadata {
+            node_to_key: index.node_to_key().clone(),
+            key_to_meta: index.key_to_meta().clone(),
+            dimensions: index.dimensions(),
+            distance_metric: index.distance_metric(),
+            next_key: index.next_key(),
+            quantization: index.quantization(),
+        };
+        let json = serde_json::to_vec(&metadata).map_err(|e| {
+            raisin_error::Error::storage(format!("Failed to serialize index metadata: {}", e))
+        })?;
+        std::fs::write(&meta_tmp, json).map_err(|e| {
+            raisin_error::Error::storage(format!("Failed to write metadata sidecar: {}", e))
+        })?;
+
+        std::fs::rename(&graph_tmp, path).map_err(|e| {
+            raisin_error::Error::storage(format!("Failed to move HNSW index into place: {}", e))
+        })?;
+        std::fs::rename(&meta_tmp, &meta_path).map_err(|e| {
+            raisin_error::Error::storage(format!(
+                "Failed to move metadata sidecar into place: {}",
+                e
+            ))
+        })?;
+        Ok(())
+    })();
+
+    if written.is_err() {
+        let _ = std::fs::remove_file(&graph_tmp);
+        let _ = std::fs::remove_file(&meta_tmp);
+    }
+    written?;
 
     tracing::debug!(
         path = %path.display(),
@@ -69,6 +98,13 @@ pub(crate) fn save_to_file(index: &HnswIndex, path: &Path) -> Result<()> {
     );
 
     Ok(())
+}
+
+/// `<path>.tmp`: where a save writes before it renames into place.
+fn tmp_path_for(path: &Path) -> std::path::PathBuf {
+    let mut tmp = path.as_os_str().to_os_string();
+    tmp.push(".tmp");
+    std::path::PathBuf::from(tmp)
 }
 
 /// Load an HNSW index from disk, auto-detecting old vs new format.

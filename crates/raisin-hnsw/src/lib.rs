@@ -65,7 +65,7 @@ pub use chunk_id::{
 pub use dims::{IndexSpec, IndexSpecResolver, FALLBACK_DIMENSIONS};
 pub use engine::key::{index_path, meta_path, IndexKey};
 pub use engine::metrics::VectorMetricsSnapshot;
-pub use engine::{list_partitions_in, HnswIndexingEngine, IndexStats};
+pub use engine::{list_partitions_in, HnswIndexingEngine, IndexStats, RecoveryHook};
 pub use excerpt::{ExcerptFetcher, ExcerptRequest};
 pub use index::{HnswIndex, ScopeFilterMode, ScopedSearch};
 pub use partition::PartitionId;

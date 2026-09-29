@@ -2172,3 +2172,190 @@ fn the_candidate_dump_is_bounded_in_level_and_in_volume() {
          truncation reads as 'the index only held 20 candidates'"
     );
 }
+
+/// Zero-byte index files — what a save interrupted by a full disk used to
+/// leave — no longer fail every load: they are set aside, an empty index takes
+/// their place, and the recovery hook is asked to rebuild.
+#[test]
+fn test_unreadable_index_files_are_set_aside_and_recovery_is_requested() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let base = temp_dir.path().to_path_buf();
+    let key = IndexKey::new("tenant1", "repo1", "main", &p());
+    std::fs::create_dir_all(key.index_path(&base).parent().unwrap()).unwrap();
+    std::fs::write(key.index_path(&base), b"").unwrap();
+    std::fs::write(key.meta_path(&base), b"").unwrap();
+
+    let engine = Arc::new(HnswIndexingEngine::new(base.clone(), 256 * 1024 * 1024, 128).unwrap());
+    let requested: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let seen = requested.clone();
+    engine.set_recovery_hook(Arc::new(move |t: &str, r: &str, b: &str| {
+        seen.lock().unwrap().push(format!("{t}/{r}/{b}"));
+    }));
+
+    // A write goes through: the embedding job no longer fails on the file.
+    engine
+        .add_embedding(
+            "tenant1",
+            "repo1",
+            "main",
+            &p(),
+            "ws1",
+            "node1",
+            HLC::new(1, 0),
+            create_test_vector(128, 1.0),
+        )
+        .unwrap();
+    let results = engine
+        .search(
+            "tenant1",
+            "repo1",
+            "main",
+            &p(),
+            &["ws1".to_string()],
+            &create_test_vector(128, 1.0),
+            1,
+        )
+        .unwrap();
+    assert_eq!(results.len(), 1);
+
+    assert_eq!(*requested.lock().unwrap(), ["tenant1/repo1/main"]);
+    let set_aside = std::fs::read_dir(key.index_path(&base).parent().unwrap())
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().contains(".unreadable-"))
+        .count();
+    assert_eq!(set_aside, 2, "graph and sidecar are kept, renamed");
+
+    // And the replacement saves as a readable pair.
+    engine.snapshot_dirty_indexes().unwrap();
+    assert!(std::fs::metadata(key.meta_path(&base)).unwrap().len() > 0);
+    let reopened = Arc::new(HnswIndexingEngine::new(base, 256 * 1024 * 1024, 128).unwrap());
+    let results = reopened
+        .search(
+            "tenant1",
+            "repo1",
+            "main",
+            &p(),
+            &["ws1".to_string()],
+            &create_test_vector(128, 1.0),
+            1,
+        )
+        .unwrap();
+    assert_eq!(results.len(), 1);
+}
+
+/// A save leaves no temporaries behind, and a failed one leaves the previous
+/// files as they were.
+#[test]
+fn test_save_is_atomic() {
+    let (engine, temp_dir) = create_test_engine();
+    engine
+        .add_embedding(
+            "tenant1",
+            "repo1",
+            "main",
+            &p(),
+            "ws1",
+            "node1",
+            HLC::new(1, 0),
+            create_test_vector(128, 1.0),
+        )
+        .unwrap();
+    engine.snapshot_dirty_indexes().unwrap();
+
+    let key = IndexKey::new("tenant1", "repo1", "main", &p());
+    let dir = key
+        .index_path(temp_dir.path())
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    assert!(names.iter().all(|n| !n.ends_with(".tmp")), "{names:?}");
+    let before = std::fs::read(key.meta_path(temp_dir.path())).unwrap();
+
+    // Make the rename fail: a directory where the sidecar temp file goes.
+    let mut blocker = key.meta_path(temp_dir.path()).into_os_string();
+    blocker.push(".tmp");
+    std::fs::create_dir_all(&blocker).unwrap();
+    engine
+        .add_embedding(
+            "tenant1",
+            "repo1",
+            "main",
+            &p(),
+            "ws1",
+            "node2",
+            HLC::new(2, 0),
+            create_test_vector(128, 2.0),
+        )
+        .unwrap();
+    let _ = engine.snapshot_dirty_indexes();
+    assert_eq!(
+        std::fs::read(key.meta_path(temp_dir.path())).unwrap(),
+        before
+    );
+    assert!(
+        std::fs::metadata(key.index_path(temp_dir.path()))
+            .unwrap()
+            .len()
+            > 0
+    );
+}
+
+/// Deleting a repository removes its indexes, so one recreated under the same
+/// id starts empty.
+#[test]
+fn test_purge_repository_removes_every_branch() {
+    let (engine, temp_dir) = create_test_engine();
+    for branch in ["main", "feature"] {
+        engine
+            .add_embedding(
+                "tenant1",
+                "repo1",
+                branch,
+                &p(),
+                "ws1",
+                "node1",
+                HLC::new(1, 0),
+                create_test_vector(128, 1.0),
+            )
+            .unwrap();
+    }
+    engine
+        .add_embedding(
+            "tenant1",
+            "other",
+            "main",
+            &p(),
+            "ws1",
+            "node1",
+            HLC::new(1, 0),
+            create_test_vector(128, 1.0),
+        )
+        .unwrap();
+    engine.snapshot_dirty_indexes().unwrap();
+
+    engine.purge_repository("tenant1", "repo1").unwrap();
+    assert!(!temp_dir.path().join("tenant1").join("repo1").exists());
+    assert!(temp_dir.path().join("tenant1").join("other").exists());
+
+    // Nothing comes back: not from the cache, not from a later snapshot.
+    engine.snapshot_dirty_indexes().unwrap();
+    assert!(!temp_dir.path().join("tenant1").join("repo1").exists());
+    let results = engine
+        .search(
+            "tenant1",
+            "repo1",
+            "main",
+            &p(),
+            &["ws1".to_string()],
+            &create_test_vector(128, 1.0),
+            1,
+        )
+        .unwrap();
+    assert!(results.is_empty());
+}

@@ -93,10 +93,12 @@ pub fn init_hnsw_management(
     let config_repo = storage.tenant_embedding_config_repository();
 
     let management = Arc::new(HnswManagement::new(
-        hnsw_engine,
+        hnsw_engine.clone(),
         embedding_storage,
         config_repo,
     ));
+
+    install_hnsw_recovery(&hnsw_engine, &management);
 
     tracing::info!("HNSW management initialized");
 
@@ -125,4 +127,52 @@ pub fn init_embedding_storage(
     tracing::info!("Embedding storage ready for API endpoints");
 
     (emb_storage, emb_job_store)
+}
+
+/// Rebuild a vector index the engine found unreadable, from the stored
+/// embeddings, in the background.
+///
+/// The engine sets such files aside and continues with an empty index (see
+/// `HnswIndexingEngine::set_recovery_hook`); this is what refills it, so an
+/// index damaged by a failed write heals itself instead of waiting for an
+/// operator to notice empty vector results. One rebuild per branch at a time.
+#[cfg(feature = "storage-rocksdb")]
+fn install_hnsw_recovery(
+    hnsw_engine: &Arc<HnswIndexingEngine>,
+    management: &Arc<raisin_rocksdb::HnswManagement>,
+) {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        tracing::warn!("no tokio runtime at startup; unreadable HNSW indexes will not self-heal");
+        return;
+    };
+    let management = Arc::downgrade(management);
+    let in_flight: Arc<std::sync::Mutex<std::collections::HashSet<(String, String, String)>>> =
+        Arc::default();
+    hnsw_engine.set_recovery_hook(Arc::new(move |tenant: &str, repo: &str, branch: &str| {
+        let Some(management) = management.upgrade() else {
+            return;
+        };
+        let scope = (tenant.to_string(), repo.to_string(), branch.to_string());
+        if !in_flight.lock().unwrap().insert(scope.clone()) {
+            return;
+        }
+        let in_flight = in_flight.clone();
+        runtime.spawn(async move {
+            let (tenant, repo, branch) = &scope;
+            match management.rebuild_index(tenant, repo, branch, None).await {
+                Ok(stats) => tracing::info!(
+                    tenant,
+                    repo,
+                    branch,
+                    items = stats.items_processed,
+                    "Rebuilt an unreadable HNSW index from the stored embeddings"
+                ),
+                Err(e) => tracing::error!(
+                    tenant, repo, branch, error = %e,
+                    "Could not rebuild an unreadable HNSW index; run REBUILD VECTOR INDEX"
+                ),
+            }
+            in_flight.lock().unwrap().remove(&scope);
+        });
+    }));
 }

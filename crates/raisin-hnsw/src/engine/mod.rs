@@ -99,7 +99,15 @@ pub struct HnswIndexingEngine {
 
     /// Observability metrics
     metrics: Arc<metrics::VectorMetrics>,
+
+    /// Called with `(tenant, repo, branch)` when an index file could not be
+    /// read and was replaced by an empty one, so the owner can rebuild it
+    /// from the stored embeddings. See [`Self::set_recovery_hook`].
+    recovery_hook: Arc<std::sync::OnceLock<RecoveryHook>>,
 }
+
+/// See [`HnswIndexingEngine::set_recovery_hook`].
+pub type RecoveryHook = Arc<dyn Fn(&str, &str, &str) + Send + Sync>;
 
 impl HnswIndexingEngine {
     /// Create a new HNSW indexing engine.
@@ -206,7 +214,97 @@ impl HnswIndexingEngine {
             spec_resolver: None,
             distance_metric,
             metrics: Arc::new(metrics::VectorMetrics::new()),
+            recovery_hook: Arc::new(std::sync::OnceLock::new()),
         })
+    }
+
+    /// Install the callback that rebuilds an index the engine could not read.
+    ///
+    /// The engine owns the files but not the vectors — those live in the
+    /// embeddings column family, which only the storage layer can read — so a
+    /// rebuild has to be delegated. Set once, at startup; a second call is
+    /// ignored.
+    pub fn set_recovery_hook(&self, hook: RecoveryHook) {
+        if self.recovery_hook.set(hook).is_err() {
+            tracing::warn!("HNSW recovery hook already installed; ignoring the second one");
+        }
+    }
+
+    /// An index file that cannot be read is set aside and replaced by an
+    /// empty index, instead of failing every load.
+    ///
+    /// This used to be fatal in a loop: a zero-byte `.hnsw.meta` (left by a
+    /// write that died half way) made EVERY embedding job for the branch fail
+    /// with "EOF while parsing" until it hit max retries, and every vector
+    /// search over the partition error, until someone deleted the files by
+    /// hand. The unreadable files are renamed, never deleted, so nothing is
+    /// lost, and the recovery hook rebuilds the index from the stored
+    /// embeddings.
+    fn recover_unreadable_index(&self, key: &IndexKey, path: &Path, error: &raisin_error::Error) {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or_default();
+        for file in [path.to_path_buf(), key.meta_path(&self.base_path)] {
+            if file.exists() {
+                let mut aside = file.clone().into_os_string();
+                aside.push(format!(".unreadable-{stamp}"));
+                if let Err(e) = std::fs::rename(&file, &aside) {
+                    tracing::warn!(file = %file.display(), error = %e, "could not set an unreadable HNSW file aside");
+                }
+            }
+        }
+        tracing::warn!(
+            index = %key,
+            error = %error,
+            "HNSW index could not be read; it was set aside (*.unreadable-{stamp}) and replaced \
+             by an empty index, which is being rebuilt from the stored embeddings"
+        );
+        match self.recovery_hook.get() {
+            Some(hook) => hook(&key.tenant_id, &key.repo_id, &key.branch),
+            None => tracing::warn!(
+                index = %key,
+                "no HNSW recovery hook installed; run REBUILD VECTOR INDEX to restore the vectors"
+            ),
+        }
+    }
+
+    /// Drop every index of a repository: cached handles, dirty flags and the
+    /// files. Called when the repository is deleted, so a repository recreated
+    /// under the same id starts from nothing instead of the old one's indexes.
+    pub fn purge_repository(&self, tenant_id: &str, repo_id: &str) -> Result<()> {
+        let keys: Vec<IndexKey> = self
+            .index_cache
+            .iter()
+            .map(|(key, _)| (*key).clone())
+            .filter(|key| key.tenant_id == tenant_id && key.repo_id == repo_id)
+            .collect();
+        {
+            let mut dirty = self.dirty_indexes.write().unwrap();
+            dirty.retain(|key| !(key.tenant_id == tenant_id && key.repo_id == repo_id));
+        }
+        {
+            let mut counts = self.mutations_since_weigh.write().unwrap();
+            counts.retain(|key, _| !(key.tenant_id == tenant_id && key.repo_id == repo_id));
+        }
+        for key in &keys {
+            self.index_cache.invalidate(key);
+        }
+        self.index_cache.run_pending_tasks();
+        // Invalidating can evict — and an evicted DIRTY index is saved by the
+        // listener. The dirty flags were cleared first so nothing is written
+        // back; the directory goes last.
+        let dir = self.base_path.join(tenant_id).join(repo_id);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).map_err(|e| {
+                raisin_error::Error::storage(format!(
+                    "Failed to remove HNSW directory {}: {}",
+                    dir.display(),
+                    e
+                ))
+            })?;
+        }
+        Ok(())
     }
 
     /// Attach the per-partition index-shape resolver.
@@ -354,8 +452,18 @@ impl HnswIndexingEngine {
 
         // Load from disk or create new
         let path = key.index_path(&self.base_path);
-        let index = if path.exists() {
-            let loaded = HnswIndex::view_from_file(&path)?;
+        let loaded = if path.exists() {
+            match HnswIndex::view_from_file(&path) {
+                Ok(loaded) => Some(loaded),
+                Err(e) => {
+                    self.recover_unreadable_index(&key, &path, &e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let index = if let Some(loaded) = loaded {
             let on_disk = loaded.dimensions();
             if on_disk == spec.dimensions {
                 loaded
