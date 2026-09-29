@@ -18,7 +18,8 @@ mod index_selection;
 mod selectivity;
 
 use super::{
-    CanonicalPredicate, Error, PhysicalPlan, PhysicalPlanner, PlanContext, TableSchema, TypedExpr,
+    CanonicalPredicate, Error, Expr, Literal, PhysicalPlan, PhysicalPlanner, PlanContext,
+    TableSchema, TypedExpr,
 };
 use std::sync::Arc;
 
@@ -100,6 +101,20 @@ impl PhysicalPlanner {
         // Priority 0: expand an indexable `col IN (...)` into a Union of
         // per-value equality scans (each reusing the existing equality builders).
         if let Some(union) = self.try_expand_in_union(
+            canonical,
+            table,
+            alias,
+            &schema,
+            workspace,
+            branch,
+            &projection,
+        )? {
+            return Ok(union);
+        }
+
+        // Priority 0b: an OR of subtrees (`CHILD_OF(a) OR CHILD_OF(b)`) as a
+        // Union of one bounded scan per disjunct.
+        if let Some(union) = self.try_expand_or_union(
             canonical,
             table,
             alias,
@@ -476,6 +491,119 @@ impl PhysicalPlanner {
 
         tracing::info!(
             "   Expanding IN(..) into Union of {} indexed scans",
+            branches.len()
+        );
+        Ok(Some(PhysicalPlan::Union { inputs: branches }))
+    }
+
+    /// Plan `(D1 OR D2 OR …) AND rest` as a Union of one scan per disjunct.
+    ///
+    /// An OR is not a canonical predicate, so it used to stay a residual filter
+    /// over whatever the REST could drive — for
+    /// `(CHILD_OF(d1) OR … OR CHILD_OF(d4)) AND node_type = 'bap:Flight'` that
+    /// is every flight in the workspace, filtered down to four folders: 61 ms
+    /// where the four folders read one by one take ~14 ms. Each disjunct that
+    /// locates rows by itself (a subtree, a path, a property value, …) now gets
+    /// its own index-backed scan, with the rest of the WHERE clause applied to
+    /// every branch.
+    ///
+    /// Branch `k` also excludes the rows of every earlier disjunct, so a row
+    /// that satisfies two of them — `CHILD_OF('/a') OR DESCENDANT_OF('/a')` —
+    /// is emitted once. The exclusion is `CASE WHEN Dj THEN FALSE ELSE TRUE
+    /// END` rather than `NOT Dj`: a disjunct that is NULL for a row must not
+    /// exclude it, and `NOT NULL` would.
+    ///
+    /// Abandoned — back to the single residual-filter scan — when any branch
+    /// would be a table scan, since N table scans are worse than one.
+    #[allow(clippy::too_many_arguments)]
+    fn try_expand_or_union(
+        &self,
+        canonical: &[CanonicalPredicate],
+        table: &str,
+        alias: &Option<String>,
+        schema: &Arc<TableSchema>,
+        workspace: &str,
+        branch: &str,
+        projection: &Option<Vec<String>>,
+    ) -> Result<Option<PhysicalPlan>, Error> {
+        fn flatten_ors(expr: &TypedExpr, out: &mut Vec<TypedExpr>) {
+            match &expr.expr {
+                Expr::BinaryOp {
+                    left,
+                    op: raisin_sql::analyzer::BinaryOperator::Or,
+                    right,
+                } => {
+                    flatten_ors(left, out);
+                    flatten_ors(right, out);
+                }
+                _ => out.push(expr.clone()),
+            }
+        }
+
+        let Some((idx, disjuncts)) = canonical.iter().enumerate().find_map(|(i, p)| match p {
+            CanonicalPredicate::Other(expr) => {
+                let mut disjuncts = Vec::new();
+                flatten_ors(expr, &mut disjuncts);
+                (disjuncts.len() > 1).then_some((i, disjuncts))
+            }
+            _ => None,
+        }) else {
+            return Ok(None);
+        };
+
+        let mut analyzed = Vec::with_capacity(disjuncts.len());
+        for disjunct in &disjuncts {
+            let preds = self.analyze_filter(disjunct)?;
+            if !self.has_row_locating_predicate(&preds) {
+                return Ok(None);
+            }
+            analyzed.push(preds);
+        }
+
+        let rest: Vec<CanonicalPredicate> = canonical
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| *j != idx)
+            .map(|(_, p)| p.clone())
+            .collect();
+        let branch_ctx = PlanContext::empty();
+
+        let mut branches = Vec::with_capacity(disjuncts.len());
+        for (k, preds) in analyzed.into_iter().enumerate() {
+            let mut sub = rest.clone();
+            sub.extend(preds);
+            for earlier in &disjuncts[..k] {
+                sub.push(CanonicalPredicate::Other(TypedExpr::new(
+                    Expr::Case {
+                        conditions: vec![(
+                            earlier.clone(),
+                            TypedExpr::literal(Literal::Boolean(false)),
+                        )],
+                        else_expr: Some(Box::new(TypedExpr::literal(Literal::Boolean(true)))),
+                    },
+                    raisin_sql::analyzer::DataType::Boolean,
+                )));
+            }
+            let fallback = self.combine_canonical_predicates(&sub);
+            let plan = self.plan_scan_from_canonical(
+                &sub,
+                table,
+                alias,
+                schema.clone(),
+                workspace,
+                branch,
+                fallback,
+                projection.clone(),
+                &branch_ctx,
+            )?;
+            if Self::plan_has_table_scan(&plan) {
+                return Ok(None);
+            }
+            branches.push(plan);
+        }
+
+        tracing::info!(
+            "   Expanding OR into Union of {} indexed scans",
             branches.len()
         );
         Ok(Some(PhysicalPlan::Union { inputs: branches }))

@@ -244,3 +244,91 @@ async fn a_type_set_beside_a_locating_predicate_stays_a_filter() {
     assert_eq!(plan.matches("PathIndexScan").count(), 2, "{plan}");
     assert_eq!(rows(&engine, sql).await.len(), 2);
 }
+
+async fn seed_folders(engine: &QueryEngine<raisin_rocksdb::RocksDBStorage>) {
+    for folder in ["/f1", "/f2", "/f3"] {
+        insert(engine, "pages", folder, json!({ "title": folder })).await;
+    }
+    for (path, title) in [
+        ("/f1/a", "A"),
+        ("/f1/b", "B"),
+        ("/f2/c", "C"),
+        ("/f3/d", "D"),
+    ] {
+        insert(
+            engine,
+            "pages",
+            path,
+            json!({ "title": title, "meta": { "n": 1, "tags": ["x"] } }),
+        )
+        .await;
+    }
+}
+
+fn sorted_paths(found: &[Value]) -> Vec<String> {
+    let mut paths: Vec<String> = found
+        .iter()
+        .map(|r| r["path"].as_str().expect("path").to_string())
+        .collect();
+    paths.sort();
+    paths
+}
+
+/// An OR of subtrees plans as one bounded scan per subtree, returns each row
+/// once even where the disjuncts overlap, and keeps the rest of the WHERE.
+#[tokio::test]
+async fn an_or_of_subtrees_is_a_union_of_bounded_scans() {
+    let (engine, _dir) = setup().await;
+    seed_folders(&engine).await;
+
+    let sql = "SELECT path FROM pages WHERE (CHILD_OF('/f1') OR CHILD_OF('/f2')) AND node_type = 'test:Doc'";
+    let plan = explain(&engine, sql).await;
+    assert!(plan.contains("Union: 2 branch(es)"), "{plan}");
+    assert_eq!(plan.matches("PrefixScan").count(), 2, "{plan}");
+    assert!(
+        !plan.contains("TableScan") && !plan.contains("PropertyIndexScan"),
+        "{plan}"
+    );
+    assert_eq!(
+        sorted_paths(&rows(&engine, sql).await),
+        ["/f1/a", "/f1/b", "/f2/c"]
+    );
+
+    // Overlapping disjuncts: every row once.
+    let sql = "SELECT path FROM pages WHERE CHILD_OF('/f1') OR DESCENDANT_OF('/f1')";
+    assert_eq!(sorted_paths(&rows(&engine, sql).await), ["/f1/a", "/f1/b"]);
+
+    // A disjunct carrying its own conjunct, and one that is NULL for most rows.
+    let sql = "SELECT path FROM pages WHERE CHILD_OF('/f2') \
+               OR (CHILD_OF('/f3') AND node_type = 'test:Doc') \
+               OR properties->>'title'::String = 'A'";
+    assert_eq!(
+        sorted_paths(&rows(&engine, sql).await),
+        ["/f1/a", "/f2/c", "/f3/d"]
+    );
+
+    // The rest of the WHERE still applies to every branch.
+    let sql = "SELECT path FROM pages WHERE (CHILD_OF('/f1') OR CHILD_OF('/f2')) AND node_type = 'other:Type'";
+    assert!(rows(&engine, sql).await.is_empty());
+}
+
+/// Extracting single members of `properties` gives the same values as before
+/// the per-member fast path.
+#[tokio::test]
+async fn json_member_extraction_reads_single_members() {
+    let (engine, _dir) = setup().await;
+    seed_folders(&engine).await;
+
+    let found = rows(
+        &engine,
+        "SELECT properties->>'title' AS t, properties->'meta' AS m, properties->>'meta' AS mt, \
+         properties->>'missing' AS x, properties AS p FROM pages WHERE path = '/f1/a'",
+    )
+    .await;
+    let row = &found[0];
+    assert_eq!(row["t"], "A");
+    assert_eq!(row["m"], row["p"]["meta"]);
+    let mt: Value = serde_json::from_str(row["mt"].as_str().expect("text")).expect("json text");
+    assert_eq!(mt, row["p"]["meta"]);
+    assert!(row.get("x").is_none() || row["x"].is_null());
+}
