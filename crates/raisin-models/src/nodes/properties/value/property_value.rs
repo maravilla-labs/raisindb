@@ -14,13 +14,10 @@
 
 use rust_decimal::Decimal;
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::HashMap;
 
-use crate::nodes::properties::utils::{
-    deserialize_guarded_string, deserialize_raisin_reference, deserialize_raisin_url,
-    deserialize_tagged_decimal, serialize_guarded_string, serialize_tagged_decimal,
-};
+use crate::nodes::properties::utils::{serialize_guarded_string, serialize_tagged_decimal};
 use crate::timestamp::StorageTimestamp;
 
 use super::domain_types::{RaisinReference, RaisinUrl, Resource};
@@ -92,7 +89,12 @@ pub type DateTimeTimestamp = StorageTimestamp;
 /// Both extensions are `skip_serializing_if`-elided when absent, so every value
 /// written before them serializes byte-identically — no stored-blob change, no
 /// `hash_property_value` change, no property-index churn, no migration.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema)]
+///
+/// `Deserialize` is implemented by hand in `deserialize.rs`: the same ladder,
+/// with the same result, without re-parsing a subtree once per variant. The
+/// `deserialize_with` attributes below are what that ladder calls, and they
+/// document the order; keep the two in step.
+#[derive(Serialize, Debug, Clone, PartialEq, JsonSchema)]
 #[serde(untagged)]
 pub enum PropertyValue {
     // === PRIMITIVES (order critical for untagged deserialization) ===

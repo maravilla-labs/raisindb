@@ -19,6 +19,7 @@
 //! - `geojson` - `GeoJson` geometry types
 //! - `position` - `Position`, a single GeoJSON coordinate with optional altitude
 
+mod deserialize;
 mod domain_types;
 mod element;
 mod from_json;
@@ -28,6 +29,8 @@ mod property_value;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_deserialize;
 
 // Re-export all public types to preserve the existing public API
 pub use domain_types::{RaisinReference, RaisinUrl, Resource};
