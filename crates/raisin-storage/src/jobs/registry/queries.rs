@@ -19,7 +19,7 @@ use chrono::{DateTime, Utc};
 use std::sync::Arc;
 
 use super::JobRegistry;
-use crate::jobs::{JobId, JobInfo, JobStatus};
+use crate::jobs::{JobId, JobInfo, JobStatus, JobType};
 use raisin_error::{Error as RaisinError, Result};
 
 impl JobRegistry {
@@ -70,6 +70,24 @@ impl JobRegistry {
         let jobs = self.jobs.read().await;
         jobs.values()
             .filter(|job| job.tenant == tenant)
+            .map(|job| job.to_job_info())
+            .collect()
+    }
+
+    /// [`Self::list_jobs_by_tenant`], keeping only jobs whose type matches.
+    ///
+    /// The filter runs BEFORE the conversion to `JobInfo`, which clones each
+    /// job's result payload. A caller after one kind of job — the scheduler
+    /// looking for pending invocations — otherwise copied every job the tenant
+    /// had run in the retention window, on every call.
+    pub async fn list_jobs_by_tenant_where(
+        &self,
+        tenant: &str,
+        mut keep: impl FnMut(&JobType) -> bool,
+    ) -> Vec<JobInfo> {
+        let jobs = self.jobs.read().await;
+        jobs.values()
+            .filter(|job| job.tenant == tenant && keep(&job.job_type))
             .map(|job| job.to_job_info())
             .collect()
     }

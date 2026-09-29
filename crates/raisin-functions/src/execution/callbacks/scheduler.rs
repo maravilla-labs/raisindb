@@ -77,12 +77,13 @@ async fn list_repo_invocations(
     tenant_id: &str,
     repo_id: &str,
 ) -> Vec<(JobInfo, JobContext)> {
-    let jobs = registry.list_jobs_by_tenant(tenant_id).await;
+    let jobs = registry
+        .list_jobs_by_tenant_where(tenant_id, |job_type| {
+            matches!(job_type, JobType::ScheduledInvocation { .. })
+        })
+        .await;
     let mut out = Vec::new();
     for job in jobs {
-        if !matches!(job.job_type, JobType::ScheduledInvocation { .. }) {
-            continue;
-        }
         let Ok(Some(context)) = data_store.get(tenant_id, &job.id) else {
             continue;
         };
