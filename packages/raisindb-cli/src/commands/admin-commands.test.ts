@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { aiProviderList, aiProviderSet } from './ai.js';
 import { corsAdd, corsRemove, validateOrigin, addOrigin, removeOrigin } from './cors.js';
 import { userRegister, resolvePassword } from './user.js';
-import { repoCreate, repoDelete } from './repo.js';
+import { repoCreate, repoDelete, repoLanguages, repoList, parseLanguageList } from './repo.js';
 import type { FetchLike } from './admin-util.js';
 
 /**
@@ -477,6 +477,40 @@ describe('repo create/delete', () => {
     expect(calls[0].body).toEqual({ repo_id: 'newrepo' });
   });
 
+  it('posts default_language and supported_languages, default first', async () => {
+    const { fetchImpl, calls } = mockFetch([
+      { match: (u, m) => m === 'POST', status: 201, body: { repo_id: 'site' } },
+    ]);
+    await repoCreate('site', { defaultLanguage: 'de', languages: 'fr, de,en,fr' }, fetchImpl);
+    expect(calls[0].body).toEqual({
+      repo_id: 'site',
+      default_language: 'de',
+      supported_languages: ['de', 'fr', 'en'],
+    });
+  });
+
+  it('refuses --languages without --default-language', async () => {
+    const { fetchImpl, calls } = mockFetch([]);
+    await expect(repoCreate('site', { languages: 'de,fr' }, fetchImpl)).rejects.toThrow(
+      /--default-language de --languages de,fr/
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  it('--exists-ok fails when the existing default language differs', async () => {
+    const { fetchImpl } = mockFetch([
+      { match: (u, m) => m === 'POST', status: 409, body: { message: 'already exists' } },
+      {
+        match: (u, m) => m === 'GET' && u.endsWith('/api/repositories/site/translation-config'),
+        status: 200,
+        body: { default_language: 'en', supported_languages: ['en'], locale_fallback_chains: {} },
+      },
+    ]);
+    await expect(
+      repoCreate('site', { existsOk: true, defaultLanguage: 'de', languages: 'de,fr' }, fetchImpl)
+    ).rejects.toThrow(/default language 'en', not 'de'.*cannot be changed/);
+  });
+
   it('409 fails without --exists-ok and succeeds with it', async () => {
     const make = () =>
       mockFetch([
@@ -499,5 +533,68 @@ describe('repo create/delete', () => {
     await repoDelete('r', { yes: true }, fetchImpl);
     expect(calls[0].url).toBe('http://test-server:1234/api/repositories/r');
     expect(calls[0].method).toBe('DELETE');
+  });
+});
+
+describe('repo languages', () => {
+  const tc = 'http://test-server:1234/api/repositories/site/translation-config';
+
+  it('parses language lists', () => {
+    expect(parseLanguageList(' de, fr,,de ,en')).toEqual(['de', 'fr', 'en']);
+    expect(parseLanguageList(undefined)).toEqual([]);
+  });
+
+  it('shows the languages without writing', async () => {
+    const { fetchImpl, calls } = mockFetch([
+      {
+        match: (u, m) => m === 'GET' && u === tc,
+        status: 200,
+        body: { default_language: 'de', supported_languages: ['de', 'fr'], locale_fallback_chains: {} },
+      },
+    ]);
+    await repoLanguages('site', {}, fetchImpl);
+    expect(calls.map((c) => c.method)).toEqual(['GET']);
+    expect(console.log).toHaveBeenCalledWith(expect.stringMatching(/Default language:\s+de/));
+  });
+
+  it('--add PATCHes only the new languages onto the existing list', async () => {
+    const { fetchImpl, calls } = mockFetch([
+      {
+        match: (u, m) => m === 'GET' && u === tc,
+        status: 200,
+        body: { default_language: 'de', supported_languages: ['de', 'fr'], locale_fallback_chains: {} },
+      },
+      { match: (u, m) => m === 'PATCH' && u === tc, status: 204, body: null },
+    ]);
+    await repoLanguages('site', { add: 'fr,en' }, fetchImpl);
+    const patch = calls.find((c) => c.method === 'PATCH')!;
+    expect(patch.body).toEqual({ supported_languages: ['de', 'fr', 'en'] });
+  });
+
+  it('404 names the repository', async () => {
+    const { fetchImpl } = mockFetch([
+      { match: () => true, status: 404, body: { message: 'not found' } },
+    ]);
+    await expect(repoLanguages('nope', {}, fetchImpl)).rejects.toThrow(/Repository 'nope' not found/);
+  });
+
+  it('repo list shows the languages column', async () => {
+    const { fetchImpl } = mockFetch([
+      {
+        match: (u, m) => m === 'GET' && u.endsWith('/api/repositories'),
+        status: 200,
+        body: [
+          {
+            repo_id: 'site',
+            created_at: '2026-09-29',
+            config: { default_branch: 'main', default_language: 'de', supported_languages: ['de', 'fr', 'en'] },
+          },
+        ],
+      },
+    ]);
+    await repoList({}, fetchImpl);
+    const out = (console.log as unknown as { mock: { calls: unknown[][] } }).mock.calls.flat().join('\n');
+    expect(out).toMatch(/LANGUAGES/);
+    expect(out).toMatch(/de \(default\), fr, en/);
   });
 });

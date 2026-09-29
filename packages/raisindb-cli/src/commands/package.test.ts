@@ -8,6 +8,7 @@ import {
   createIgnoreFilter,
   createZipPackage,
   DEFAULT_IGNORE_PATTERNS,
+  formatInstallFailure,
 } from './package.js';
 
 function makeTempDir(): string {
@@ -261,5 +262,32 @@ describe('DEFAULT_IGNORE_PATTERNS', () => {
     expect(DEFAULT_IGNORE_PATTERNS).toContain('.DS_Store');
     expect(DEFAULT_IGNORE_PATTERNS).toContain('node_modules');
     expect(DEFAULT_IGNORE_PATTERNS).toContain('*.log');
+  });
+});
+
+describe('formatInstallFailure', () => {
+  const detail = [
+    "Package 'site' installed 40 content node(s) but 3 were rejected (1 root cause(s); 2 more only because they reference a rejected entry):",
+    '  - stories:/bap/a (studio:Page): Validation failed: Referenced node not found: assets:/x.jpg (at hero.image)',
+    'Rejected because they reference a rejected entry:',
+    '  - stories:/bap/b (studio:Page): references stories:/bap/a, which was rejected in this install (root cause: ...)',
+  ].join('\n');
+
+  it('prints the rejection reasons, not just "failed"', () => {
+    const msg = formatInstallFailure('site', detail, 'job-1');
+    expect(msg).toContain('Referenced node not found: assets:/x.jpg (at hero.image)');
+    expect(msg).toContain('references stories:/bap/a, which was rejected');
+  });
+
+  it('says where to look when the server gave no reason', () => {
+    expect(formatInstallFailure('site', undefined, 'job-1')).toMatch(/no reason for job job-1.*content entry rejected/);
+  });
+
+  it('cuts a very long list and says how much was left out', () => {
+    const long = ['head', ...Array.from({ length: 100 }, (_, i) => `  - entry ${i}`)].join('\n');
+    const msg = formatInstallFailure('site', long);
+    expect(msg).toContain('  - entry 58');
+    expect(msg).not.toContain('  - entry 59\n');
+    expect(msg).toContain('41 more line(s)');
   });
 });

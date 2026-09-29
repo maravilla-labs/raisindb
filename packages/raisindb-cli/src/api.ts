@@ -455,8 +455,19 @@ export async function getJobInfo(jobId: string): Promise<{ status?: string; erro
     if (!response.ok) return null;
     const body = await response.json() as Record<string, unknown>;
     // Endpoint may wrap the payload in { data: ... }
-    const info = (body.data ?? body) as { status?: string; error?: string };
-    return info;
+    const info = (body.data ?? body) as { status?: unknown; error?: string | null };
+    // JobStatus serializes as a bare string ("Completed") or, for a failure,
+    // as { "Failed": "<detail>" }; the detail may be only there.
+    let status: string | undefined;
+    let error = info.error ?? undefined;
+    if (typeof info.status === 'string') {
+      status = info.status;
+    } else if (info.status && typeof info.status === 'object') {
+      const [key, value] = Object.entries(info.status as Record<string, unknown>)[0] ?? [];
+      status = key;
+      if (!error && typeof value === 'string') error = value;
+    }
+    return { status, error };
   } catch {
     return null;
   }

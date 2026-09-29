@@ -696,6 +696,39 @@ export async function listPackages(serverUrl?: string, repo?: string): Promise<v
   }
 }
 
+/** Lines of install-failure detail printed before the rest is summarized. */
+const MAX_FAILURE_LINES = 60;
+
+/**
+ * The message for a failed install. The server's detail lists every rejected
+ * content entry with its reason, root causes first; that list is the whole
+ * point, so print it rather than just "failed". A very long list is cut after
+ * MAX_FAILURE_LINES with a count and where to read the rest.
+ */
+export function formatInstallFailure(
+  packageName: string,
+  detail: string | undefined,
+  jobId?: string | null
+): string {
+  if (!detail) {
+    const where = jobId ? `job ${jobId}` : 'the install job';
+    return (
+      `Package '${packageName}' install failed, and the server reported no reason for ${where}. ` +
+      'The server log has the rejected entries (search for "content entry rejected").'
+    );
+  }
+  const lines = detail.split('\n');
+  if (lines.length <= MAX_FAILURE_LINES) {
+    return `Package '${packageName}' install failed: ${detail}`;
+  }
+  const shown = lines.slice(0, MAX_FAILURE_LINES).join('\n');
+  return (
+    `Package '${packageName}' install failed: ${shown}\n` +
+    `  … ${lines.length - MAX_FAILURE_LINES} more line(s). The full list is in the 'error' property ` +
+    `of the package node (raisindb package list shows it).`
+  );
+}
+
 /** How long to wait for an install job to reach a terminal state */
 const INSTALL_POLL_TIMEOUT_MS = 180_000;
 const INSTALL_POLL_INTERVAL_MS = 1_000;
@@ -743,9 +776,7 @@ async function waitForInstalled(
         const job = await apiGetJobInfo(jobId);
         detail = job?.error || undefined;
       }
-      throw new Error(
-        `Package '${packageName}' install failed${detail ? `: ${detail}` : ''}`
-      );
+      throw new Error(formatInstallFailure(packageName, detail, jobId));
     }
   }
 

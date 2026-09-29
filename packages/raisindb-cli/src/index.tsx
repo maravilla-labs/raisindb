@@ -17,7 +17,7 @@ import { functionRun, functionTest } from './commands/function-run.js';
 import { deployPackage } from './commands/deploy.js';
 import { serverInstall, serverStart, serverVersion, serverUpdate, serverStop, serverStatus, serverLogs } from './commands/server.js';
 import { flowDoctor, flowExplain } from './commands/flow.js';
-import { repoCreate, repoList, repoDelete } from './commands/repo.js';
+import { repoCreate, repoList, repoDelete, repoLanguages } from './commands/repo.js';
 import { aiProviderSet, aiProviderList, aiProviderTest } from './commands/ai.js';
 import { userRegister } from './commands/user.js';
 import { corsAdd, corsList, corsRemove } from './commands/cors.js';
@@ -587,16 +587,54 @@ function collect(value: string, previous: string[]): string[] {
 // work identically against local and remote servers)
 const repoCmd = program
   .command('repo')
-  .description('Repository administration (create/list/delete via server API)');
+  .description('Repository administration (create/list/languages/delete via server API)');
 
 repoCmd
   .command('create <name>')
   .description('Create a repository')
   .option('-d, --description <text>', 'Repository description')
   .option('--exists-ok', 'Succeed if the repository already exists')
+  .option(
+    '--default-language <code>',
+    'Base language of the content (e.g. de). Cannot be changed after creation. Server default: en'
+  )
+  .option('--languages <codes>', 'Comma-separated supported languages, e.g. de,fr,en (requires --default-language)')
+  .addHelpText(
+    'after',
+    `
+The default language is IMMUTABLE. Content in the default language is the base
+node; every other language is stored as a translation overlay on top of it. A
+repository created with the wrong default treats that language's overlays as
+the base, so pick it before the first install. To change it, delete and
+recreate the repository. Translation languages can be added later with
+\`raisindb repo languages <name> --add <codes>\`.
+
+Example:
+  raisindb repo create website --default-language de --languages de,fr,en`
+  )
   .action((name, options) =>
-    runAdmin(() => repoCreate(name, { description: options.description, existsOk: options.existsOk }))
+    runAdmin(() =>
+      repoCreate(name, {
+        description: options.description,
+        existsOk: options.existsOk,
+        defaultLanguage: options.defaultLanguage,
+        languages: options.languages,
+      })
+    )
   );
+
+repoCmd
+  .command('languages <name>')
+  .description("Show a repository's languages, or add translation languages")
+  .option('--add <codes>', 'Comma-separated languages to add to the supported languages, e.g. fr,en')
+  .option('--json', 'Machine-readable JSON output')
+  .addHelpText(
+    'after',
+    `
+The default language is shown but cannot be changed: it is fixed when the
+repository is created. Only supported (translation) languages can be added.`
+  )
+  .action((name, options) => runAdmin(() => repoLanguages(name, { add: options.add, json: options.json })));
 
 repoCmd
   .command('list')
