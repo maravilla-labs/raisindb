@@ -92,10 +92,18 @@ way to clear the flag and is effectively locked out.
 
 The management routes under `/api/admin/management/database/{tenant}/{repo}` (see `routes.rs`) let you:
 
-- `fulltext/verify|rebuild|optimize|purge|health`
+- `fulltext/verify|rebuild|reconcile|optimize|purge|health|errors`
 - `vector/verify|rebuild|regenerate|optimize|restore|health`
 
-These handlers call into `raisin-indexer` and `raisin-embeddings` for Tantivy and vector index maintenance.
+These handlers call into `raisin-indexer` and `raisin-embeddings` for Tantivy and vector index maintenance. Each takes an optional `?branch=` (default: the repository's default branch). Which one to run:
+
+- `fulltext/rebuild` after recreating a repository or changing its languages. It indexes base content under the repository's `default_language` and `supported_languages`; up to v0.6.45 rebuild and reconcile used `en` for every repository, so rebuild once on a newer server.
+- `vector/rebuild` re-adds the stored embeddings to the HNSW index, with no embedding provider calls.
+- `vector/regenerate` queues re-embedding for stored vectors with the wrong dimensions and, from v0.6.46, for embedding-eligible nodes that have no embedding; `?force=true` re-embeds every stored embedding.
+
+## Deleting a Repository
+
+`DELETE /api/repositories/{repo_id}` (or `raisindb repo delete <repo> --yes`) is irreversible. From v0.6.46 it removes all of the repository's data: every key it owns in every column family (nodes, revisions, branches, tags, translations, types, embeddings, indexes), the registry entry, its jobs including queued full-text and embedding jobs, and the full-text and vector index directories. In a cluster the delete is replicated and each peer removes its own copy. It keeps tenant-wide data (identities, sessions, admin users, tenant AI/auth/embedding configuration), the query-embedding cache, and uploaded binaries in the binary store, whose files can be referenced from more than one place. Up to v0.6.45 the delete removed only the registry entry, so a repository recreated under the same id came back with the old data.
 
 ## Global & Tenant Maintenance
 

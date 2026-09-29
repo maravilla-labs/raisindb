@@ -97,7 +97,9 @@ Without `--default-language` the server uses `en`, and `--languages` alone is
 refused rather than guessing which entry is the base. `--exists-ok` fails when
 the existing repository has a different default language, and warns about
 missing translation languages. The default language cannot be changed later;
-the only way to change it is to delete and recreate the repository. After
+the only way to change it is to delete and recreate the repository. From
+v0.6.46, `raisindb repo delete` removes all of the repository's data
+(irreversibly), so a recreated repository starts empty. After
 recreating a repository or adding languages, rebuild its full-text index
 (`POST /api/admin/management/database/{tenant}/{repo}/fulltext/rebuild`).
 

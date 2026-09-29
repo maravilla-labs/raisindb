@@ -279,7 +279,10 @@ These all fail silently. They cost real debugging time.
   `fulltext/rebuild` after recreating a repository or changing its languages;
   `vector/rebuild` (or `REBUILD VECTOR INDEX`) re-adds the stored embeddings to
   the index, no embedder calls; `vector/regenerate` queues re-embedding for
-  nodes whose stored vector has the wrong dimensions (`?force=true`: every node).
+  nodes whose stored vector has the wrong dimensions and, from v0.6.46, for
+  every embedding-eligible node that has no stored embedding (e.g. its job
+  died while the embedder was down), skipping nodes with a pending job
+  (`?force=true`: every stored embedding too).
   An unreadable vector index file is set aside as `*.unreadable-<ts>` and
   rebuilt from the stored embeddings automatically.
 

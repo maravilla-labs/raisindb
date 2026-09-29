@@ -35,7 +35,8 @@ raisindb repo languages website              # check: default + supported langua
 raisindb repo languages website --add it     # translation languages can be added later
 ```
 
-The wrong default means deleting and recreating the repository. Full-text search
+The wrong default means deleting and recreating the repository; from v0.6.46 a
+delete removes all of its data, so re-import the content afterwards. Full-text search
 indexes base content under the default language, so after recreating a
 repository or changing its languages, rebuild the full-text index
 (`POST /api/admin/management/database/{tenant}/{repo}/fulltext/rebuild`).

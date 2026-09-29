@@ -735,10 +735,15 @@ REBUILD VECTOR INDEX;
 ```
 
 Run it after changing `DIMENSIONS`, `DISTANCE_METRIC` or `quantization`, and after a
-`VERIFY` mismatch. It is idempotent and it covers every workspace on the branch. To
-re-embed from source text — after a model change — use
-`POST /api/admin/management/database/{tenant}/{repo}/vector/regenerate`, which requeues
-the embedding jobs.
+`VERIFY` mismatch. It is idempotent and it covers every workspace on the branch, and
+it makes no embedding provider calls. To re-embed from source text use
+`POST /api/admin/management/database/{tenant}/{repo}/vector/regenerate`. It queues an
+embedding job for every node whose stored vector has the wrong dimensions and, from
+v0.6.46, for every node eligible for an embedding (the same rule as on write) that has
+none stored — for instance because its job hit max retries while the embedder was
+down. Nodes that already have a pending job are skipped; the job result reports
+`missing`, `missing_queued` and `missing_already_pending`. A model change that keeps
+the dimensions needs `?force=true`, which re-embeds every stored embedding.
 
 ### The ~60 second snapshot lag
 
@@ -748,6 +753,11 @@ the lag is not a query-visibility delay. What it means is that a process killed 
 a minute of a write can lose that vector from the on-disk index while the RocksDB row
 survives. The next embedding job for that node repairs it (the job asks both "is it
 stored?" and "is it indexed?"), and `REBUILD VECTOR INDEX` repairs it wholesale.
+
+Snapshots are written to a temporary file and renamed into place, so a save that
+fails part way (a full disk, a crash) leaves the previous files intact. An index file
+that cannot be read is renamed to `*.unreadable-<timestamp>` (never deleted), replaced
+by an empty index, and rebuilt from the stored embeddings in the background.
 
 If a freshly written document is not searchable, the embedding job has not drained yet.
 Watch the job queue, not the snapshot.

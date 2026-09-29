@@ -151,7 +151,7 @@ Manage repositories at the tenant level.
 | POST | `/api/repositories` | Create a new repository |
 | GET | `/api/repositories/{repo_id}` | Get a specific repository |
 | PUT | `/api/repositories/{repo_id}` | Update a repository |
-| DELETE | `/api/repositories/{repo_id}` | Delete a repository |
+| DELETE | `/api/repositories/{repo_id}` | Delete a repository and all of its data (irreversible) |
 
 ---
 
@@ -315,13 +315,13 @@ way for the user to clear the flag, setting it locks them out.
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/api/admin/management/database/{tenant}/{repo}/fulltext/verify` | Validate full-text index state |
-| POST | `/api/admin/management/database/{tenant}/{repo}/fulltext/rebuild` | Rebuild full-text index |
+| POST | `/api/admin/management/database/{tenant}/{repo}/fulltext/rebuild` | Rebuild full-text index in the repository's languages |
 | POST | `/api/admin/management/database/{tenant}/{repo}/fulltext/optimize` | Optimize segments |
 | POST | `/api/admin/management/database/{tenant}/{repo}/fulltext/purge` | Purge deleted documents |
 | GET | `/api/admin/management/database/{tenant}/{repo}/fulltext/health` | Inspect health metrics |
 | POST | `/api/admin/management/database/{tenant}/{repo}/vector/verify` | Verify vector index consistency |
-| POST | `/api/admin/management/database/{tenant}/{repo}/vector/rebuild` | Rebuild vector index |
-| POST | `/api/admin/management/database/{tenant}/{repo}/vector/regenerate` | Recompute embeddings |
+| POST | `/api/admin/management/database/{tenant}/{repo}/vector/rebuild` | Rebuild vector index from stored embeddings (no re-embedding) |
+| POST | `/api/admin/management/database/{tenant}/{repo}/vector/regenerate` | Re-embed nodes with wrong-dimension or missing embeddings (`?force=true`: all) |
 | POST | `/api/admin/management/database/{tenant}/{repo}/vector/optimize` | Optimize HNSW index |
 | POST | `/api/admin/management/database/{tenant}/{repo}/vector/restore` | Restore from backup |
 | GET | `/api/admin/management/database/{tenant}/{repo}/vector/health` | Vector index health report |

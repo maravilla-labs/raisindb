@@ -151,13 +151,21 @@ GET /api/repositories/{repo}/translation-config
 }
 ```
 
+The `default_language` is set when the repository is created
+(`default_language` and `supported_languages` in the `POST /api/repositories`
+body, or `raisindb repo create <repo> --default-language de --languages de,fr,en`)
+and cannot be changed afterwards. Base content is stored in it, and full-text
+search indexes base content under it. To change it, delete and recreate the
+repository, then run `POST /api/admin/management/database/{tenant}/{repo}/fulltext/rebuild`.
+
 ### Update Translation Configuration
 
-Configure supported languages and fallback chains.
+Configure supported languages and fallback chains. The default language cannot
+be changed here.
 
 **Endpoint:**
 ```
-PUT /api/repositories/{repo}
+PATCH /api/repositories/{repo}/translation-config
 ```
 
 **Body:**
