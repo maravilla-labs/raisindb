@@ -193,7 +193,9 @@ where
                 WsError::InvalidRequest(format!("Invalid repository configuration: {}", e))
             })?;
 
-        // Preserve immutable fields
+        // A general update keeps the default language: changing it needs an
+        // overlay check and a full-text rebuild, which only
+        // PATCH /api/repositories/{repo}/translation-config does.
         new_config.default_language = existing.config.default_language;
         new_config
     } else {
@@ -202,7 +204,7 @@ where
             default_branch: existing.config.default_branch,
             description: payload.description.or(existing.config.description),
             tags: existing.config.tags,
-            default_language: existing.config.default_language, // IMMUTABLE
+            default_language: existing.config.default_language,
             supported_languages: existing.config.supported_languages,
             locale_fallback_chains: existing.config.locale_fallback_chains,
         }

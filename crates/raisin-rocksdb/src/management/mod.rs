@@ -44,9 +44,16 @@ pub mod vector;
 // Fulltext (Tantivy) index management
 pub mod fulltext;
 
+// Changing a repository's default language (collision check, re-index, peers)
+pub mod default_language;
+
 // Re-exports for direct imports
 pub use background::{
     BackgroundJobStats, BackgroundJobs as BackgroundJobsImpl, BackgroundJobsConfig,
+};
+pub use default_language::{
+    count_translation_overlays, enqueue_fulltext_job, enqueue_fulltext_rebuild_all_branches,
+    DefaultLanguageReindexHandler, OverlayCount, ReindexJob,
 };
 pub use fulltext::{rebuild_fulltext_index, reconcile_fulltext_index};
 pub use helpers::{

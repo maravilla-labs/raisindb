@@ -438,6 +438,13 @@ async fn main() {
         ),
     ));
 
+    // A default-language change replicated from a peer rebuilds this node's
+    // full-text index too (the node that took the change queues its own).
+    #[cfg(feature = "storage-rocksdb")]
+    storage.event_bus().subscribe(std::sync::Arc::new(
+        raisin_rocksdb::management::DefaultLanguageReindexHandler::new(storage.clone()),
+    ));
+
     // The query-side partner of the HNSW engine above, installed process-wide so
     // that EVERY SQL surface can embed query text — not just the one that
     // remembered to.

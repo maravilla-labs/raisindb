@@ -160,3 +160,33 @@ fn test_repository_config_default_language_in_supported() {
         .contains(&config.default_language));
     assert!(config.validate_locale_fallback_chains().is_ok());
 }
+
+#[test]
+fn test_set_default_language_adds_new_and_keeps_old() {
+    let mut config = RepositoryConfig {
+        supported_languages: vec!["en".to_string(), "fr".to_string()],
+        ..RepositoryConfig::default()
+    };
+    assert_eq!(config.set_default_language("de"), Some("en".to_string()));
+    assert_eq!(config.default_language, "de");
+    assert_eq!(config.supported_languages, vec!["en", "fr", "de"]);
+    assert!(config.validate_locale_fallback_chains().is_ok());
+}
+
+#[test]
+fn test_set_default_language_to_a_supported_language_does_not_duplicate() {
+    let mut config = RepositoryConfig {
+        supported_languages: vec!["en".to_string(), "de".to_string()],
+        ..RepositoryConfig::default()
+    };
+    assert_eq!(config.set_default_language("de"), Some("en".to_string()));
+    assert_eq!(config.supported_languages, vec!["en", "de"]);
+}
+
+#[test]
+fn test_set_default_language_to_the_same_language_is_a_no_op() {
+    let mut config = RepositoryConfig::default();
+    let before = config.clone();
+    assert_eq!(config.set_default_language("en"), None);
+    assert_eq!(config, before);
+}

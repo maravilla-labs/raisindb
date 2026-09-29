@@ -5,6 +5,7 @@
 use axum::{
     extract::{Path, State},
     http::StatusCode,
+    response::{IntoResponse, Response},
     Extension, Json,
 };
 use raisin_context::{RepositoryConfig, RepositoryInfo};
@@ -30,7 +31,9 @@ pub struct CreateRepositoryRequest {
     #[serde(default)]
     pub default_branch: Option<String>,
 
-    /// Default language (IMMUTABLE after creation, defaults to "en")
+    /// Default language: the language base content is stored in (defaults to
+    /// "en"). Normalized as a BCP-47 tag (`EN-us` -> `en-US`). Can be changed
+    /// later with `PATCH /api/repositories/{repo}/translation-config`.
     #[serde(default)]
     pub default_language: Option<String>,
 
@@ -50,7 +53,8 @@ pub struct UpdateRepositoryRequest {
     #[serde(default)]
     pub default_branch: Option<String>,
 
-    /// Supported languages for translations (default_language is IMMUTABLE and cannot be changed)
+    /// Supported languages for translations. The default language is kept as it
+    /// is; change it with `PATCH /api/repositories/{repo}/translation-config`.
     #[serde(default)]
     pub supported_languages: Option<Vec<String>>,
 }
@@ -58,8 +62,15 @@ pub struct UpdateRepositoryRequest {
 /// Request to update translation configuration
 #[derive(Debug, Deserialize)]
 pub struct UpdateTranslationConfigRequest {
-    /// Supported languages for translations
-    /// Must always include the default_language (which is immutable)
+    /// New default language (BCP-47, normalized like repository create).
+    ///
+    /// Changing it is refused with 409 while translation overlays in the new
+    /// language exist, and queues a full-text rebuild of every branch.
+    #[serde(default)]
+    pub default_language: Option<String>,
+
+    /// Supported languages for translations.
+    /// The default language is always added when missing.
     #[serde(default)]
     pub supported_languages: Option<Vec<String>>,
 
@@ -187,8 +198,11 @@ pub async fn create_repository(
                 ))
             })?
     } else {
-        // Determine default language (IMMUTABLE after creation)
-        let default_language = req.default_language.unwrap_or_else(|| "en".to_string());
+        // Determine default language, normalized as a BCP-47 tag
+        let default_language = match req.default_language.as_deref() {
+            Some(code) => normalize_language(code)?,
+            None => "en".to_string(),
+        };
 
         // Ensure supported languages includes default language
         let mut supported_languages = req
@@ -289,7 +303,8 @@ pub async fn update_repository(
         default_branch: req.default_branch.unwrap_or(existing.config.default_branch),
         description: req.description.or(existing.config.description),
         tags: existing.config.tags, // Preserve existing tags
-        default_language: existing.config.default_language, // IMMUTABLE - always preserve
+        // Kept as it is: changing it is a re-index, done by PATCH translation-config
+        default_language: existing.config.default_language,
         supported_languages,
         locale_fallback_chains: existing.config.locale_fallback_chains, // Preserve existing fallback chains
     };
@@ -310,8 +325,10 @@ pub async fn update_repository(
 /// X-Tenant-ID: {tenant_id}
 ///
 /// # Body
+/// Every field is optional.
 /// ```json
 /// {
+///   "default_language": "de",
 ///   "supported_languages": ["en", "fr", "fr-CA", "de", "de-CH"],
 ///   "locale_fallback_chains": {
 ///     "fr-CA": ["fr", "en"],
@@ -320,9 +337,29 @@ pub async fn update_repository(
 /// }
 /// ```
 ///
+/// # Response
+/// 200 with the stored repository configuration, plus `reindex_jobs` (the
+/// full-text rebuilds queued by a default-language change, one per branch;
+/// empty otherwise) and `previous_default_language` (only when it changed).
+///
+/// # Changing the default language
+/// - `default_language` is normalized as a BCP-47 tag, like repository create.
+/// - Without `supported_languages`, the new default is added to the existing
+///   list and the old default stays in it; with it, the new default is added
+///   when missing.
+/// - While translation overlays in the NEW default exist, the change is refused
+///   with 409 (`DEFAULT_LANGUAGE_CONFLICT`, naming `language` and
+///   `overlay_count`) and nothing is changed: those overlays would collide with
+///   the base content, which is now in that language.
+/// - On success a full-text rebuild of every branch is queued, so base content
+///   moves from the old language's index to the new one's. Vector embeddings
+///   are language-agnostic and are left alone.
+/// - The change replicates as an ordinary repository update; peers rebuild
+///   their own full-text indexes.
+/// - Sending the current default is a no-op.
+///
 /// # Validation
 /// - All locales in fallback chains must exist in supported_languages
-/// - default_language is immutable and cannot be changed
 /// - supported_languages must always include default_language
 /// - No circular references in fallback chains
 pub async fn update_translation_config(
@@ -330,7 +367,7 @@ pub async fn update_translation_config(
     Path(repo_id): Path<String>,
     Extension(tenant_info): Extension<TenantInfo>,
     Json(req): Json<UpdateTranslationConfigRequest>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Response, ApiError> {
     let tenant_id = tenant_info.tenant_id.as_str();
     let storage = state.storage();
     let repo_mgmt = storage.repository_management();
@@ -341,30 +378,22 @@ pub async fn update_translation_config(
         .await?
         .ok_or_else(|| ApiError::repository_not_found(&repo_id))?;
 
-    // Update supported_languages if provided
-    let supported_languages = if let Some(mut langs) = req.supported_languages {
-        // Ensure default_language is always included
-        if !langs.contains(&existing.config.default_language) {
-            langs.push(existing.config.default_language.clone());
+    let mut config = existing.config.clone();
+    if let Some(langs) = req.supported_languages {
+        config.supported_languages = langs;
+    }
+    if let Some(chains) = req.locale_fallback_chains {
+        config.locale_fallback_chains = chains;
+    }
+
+    // Switching the default adds the new one to the supported languages; not
+    // switching still makes sure the current one is in them.
+    let previous_default_language = match req.default_language.as_deref() {
+        Some(code) => config.set_default_language(&normalize_language(code)?),
+        None => {
+            let current = config.default_language.clone();
+            config.set_default_language(&current)
         }
-        langs
-    } else {
-        existing.config.supported_languages
-    };
-
-    // Update locale_fallback_chains if provided
-    let locale_fallback_chains = req
-        .locale_fallback_chains
-        .unwrap_or(existing.config.locale_fallback_chains);
-
-    // Build new config
-    let config = RepositoryConfig {
-        default_branch: existing.config.default_branch,
-        description: existing.config.description,
-        tags: existing.config.tags,
-        default_language: existing.config.default_language, // IMMUTABLE
-        supported_languages,
-        locale_fallback_chains,
     };
 
     // Validate the configuration
@@ -372,12 +401,142 @@ pub async fn update_translation_config(
         return Err(ApiError::validation_failed(validation_error));
     }
 
-    // Apply the update
-    repo_mgmt
-        .update_repository_config(tenant_id, &repo_id, config)
-        .await?;
+    let reindex_jobs = match &previous_default_language {
+        None => {
+            repo_mgmt
+                .update_repository_config(tenant_id, &repo_id, config.clone())
+                .await?;
+            Vec::new()
+        }
+        Some(previous) => {
+            match change_default_language(&state, tenant_id, &repo_id, previous, &config).await? {
+                Ok(jobs) => jobs,
+                Err(conflict) => return Ok(conflict),
+            }
+        }
+    };
 
-    Ok(StatusCode::NO_CONTENT)
+    Ok(Json(UpdateTranslationConfigResponse {
+        config,
+        previous_default_language,
+        reindex_jobs,
+    })
+    .into_response())
+}
+
+/// Store a config whose default language differs from the stored one: refuse
+/// while overlays in the new default exist (the inner `Err` is the 409 to send),
+/// then store it and queue a full-text rebuild of every branch.
+#[cfg(feature = "storage-rocksdb")]
+async fn change_default_language(
+    state: &AppState,
+    tenant_id: &str,
+    repo_id: &str,
+    previous: &str,
+    config: &RepositoryConfig,
+) -> Result<Result<Vec<ReindexJobResponse>, Response>, ApiError> {
+    use raisin_rocksdb::management::default_language as dl;
+
+    let storage = state.storage();
+    let language = config.default_language.as_str();
+
+    let overlays = dl::count_translation_overlays(storage, tenant_id, repo_id, language).await?;
+    if overlays.total() > 0 {
+        let body = serde_json::json!({
+            "code": "DEFAULT_LANGUAGE_CONFLICT",
+            "message": format!(
+                "Cannot make '{language}' the default language of '{repo_id}': {} translation \
+                 overlay(s) in '{language}' exist and would collide with the base content. \
+                 Delete those translations first.",
+                overlays.total()
+            ),
+            "language": language,
+            "overlay_count": overlays.total(),
+            "node_overlays": overlays.node_overlays,
+            "block_overlays": overlays.block_overlays,
+            "current_default_language": previous,
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+        });
+        return Ok(Err((StatusCode::CONFLICT, Json(body)).into_response()));
+    }
+
+    storage
+        .repository_management()
+        .update_repository_config(tenant_id, repo_id, config.clone())
+        .await?;
+    tracing::warn!(
+        tenant_id,
+        repo_id,
+        previous,
+        current = language,
+        "Repository default language changed; queueing full-text rebuilds"
+    );
+
+    let jobs = dl::enqueue_fulltext_rebuild_all_branches(storage, tenant_id, repo_id)
+        .await
+        .map_err(|e| {
+            ApiError::internal(format!(
+                "The default language of '{repo_id}' is now '{language}', but queueing the \
+                 full-text rebuild failed: {e}. Rebuild each branch with \
+                 POST /api/admin/management/database/{tenant_id}/{repo_id}/fulltext/rebuild"
+            ))
+        })?;
+    Ok(Ok(jobs
+        .into_iter()
+        .map(|j| ReindexJobResponse {
+            branch: j.branch,
+            job_id: j.job_id,
+        })
+        .collect()))
+}
+
+/// Without RocksDB there is no full-text index and no overlay store to check.
+#[cfg(not(feature = "storage-rocksdb"))]
+async fn change_default_language(
+    _state: &AppState,
+    _tenant_id: &str,
+    _repo_id: &str,
+    _previous: &str,
+    _config: &RepositoryConfig,
+) -> Result<Result<Vec<ReindexJobResponse>, Response>, ApiError> {
+    Err(ApiError::new(
+        StatusCode::NOT_IMPLEMENTED,
+        "NOT_IMPLEMENTED",
+        "Changing the default language requires the RocksDB storage backend",
+    ))
+}
+
+/// Validate and normalize a language code the way repository create does:
+/// as a BCP-47 tag, language lowercased and region uppercased (`DE-ch` -> `de-CH`).
+fn normalize_language(code: &str) -> Result<String, ApiError> {
+    raisin_models::translations::LocaleCode::parse(code.trim())
+        .map(|locale| locale.as_str().to_string())
+        .map_err(|e| {
+            let mut err =
+                ApiError::validation_failed(format!("Invalid language code '{code}': {e}"));
+            err.field = Some("default_language".to_string());
+            err
+        })
+}
+
+/// Response of `PATCH /api/repositories/{repo}/translation-config`
+#[derive(Debug, serde::Serialize)]
+pub struct UpdateTranslationConfigResponse {
+    /// The repository configuration as stored after the update
+    #[serde(flatten)]
+    pub config: RepositoryConfig,
+    /// The default language before this request, when it changed it
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_default_language: Option<String>,
+    /// Full-text rebuilds queued by a default-language change (one per branch)
+    pub reindex_jobs: Vec<ReindexJobResponse>,
+}
+
+/// A full-text rebuild queued for one branch
+#[derive(Debug, serde::Serialize)]
+pub struct ReindexJobResponse {
+    pub branch: String,
+    pub job_id: String,
 }
 
 /// Get translation configuration for a repository
@@ -422,7 +581,7 @@ pub async fn get_translation_config(
 /// Response for translation configuration
 #[derive(Debug, serde::Serialize)]
 pub struct TranslationConfigResponse {
-    /// Default language (immutable)
+    /// Default language (change it with PATCH translation-config)
     pub default_language: String,
     /// List of supported languages
     pub supported_languages: Vec<String>,

@@ -22,6 +22,7 @@ mod http_audit_logs;
 mod http_branches_tags;
 mod http_collisions;
 mod http_comprehensive_e2e;
+mod http_default_language;
 mod http_edges;
 mod http_error_handling;
 mod http_node_creation;

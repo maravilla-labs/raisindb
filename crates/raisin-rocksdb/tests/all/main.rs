@@ -32,6 +32,7 @@ mod cluster_move_node_test;
 mod compare_put_vs_add;
 mod create_path_uniqueness_test;
 mod debug_msgpack_issue;
+mod default_language_change_test;
 mod delete_event_publish_test;
 mod embedding_spec_hash_test;
 mod encrypted_field_vaulting_test;
