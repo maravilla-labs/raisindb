@@ -274,7 +274,7 @@ These all fail silently. They cost real debugging time.
   sit under `'en'`. For a visitor in another locale, search the base content
   semantically (`KNN` with a multilingual embedder) instead of lexically. Up to
   v0.6.45 a full-text `rebuild` / `reconcile` filed everything under `en`
-  whatever the repository said; rebuild once on a newer server.
+  whatever the repository said; rebuild once on v0.6.46 or later.
 - **Which repair?** `POST /api/admin/management/database/{tenant}/{repo}/…`:
   `fulltext/rebuild` after recreating a repository or changing its languages;
   `vector/rebuild` (or `REBUILD VECTOR INDEX`) re-adds the stored embeddings to
