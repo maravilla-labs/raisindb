@@ -364,6 +364,23 @@ impl TantivyIndexingEngine {
         }
     }
 
+    /// Drop every index of a repository: close its cached readers and
+    /// writers, branch by branch, then remove its directory. Called when the
+    /// repository is deleted, so one recreated under the same id does not
+    /// inherit the old repository's full-text indexes.
+    pub fn purge_repository(&self, tenant_id: &str, repo_id: &str) -> std::io::Result<()> {
+        let dir = self.base_path().join(tenant_id).join(repo_id);
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Ok(());
+        };
+        for entry in entries.flatten() {
+            if let Some(branch) = entry.file_name().to_str() {
+                self.invalidate_cached_index(tenant_id, repo_id, branch);
+            }
+        }
+        std::fs::remove_dir_all(&dir)
+    }
+
     /// Read-only access to the on-disk root for this engine. Needed
     /// by management/rebuild paths that have to `remove_dir_all` the
     /// directory belonging to a specific (tenant, repo, branch).

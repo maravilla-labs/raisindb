@@ -257,6 +257,31 @@ mod tests {
         );
     }
 
+    /// Deleting a repository removes its full-text indexes, every branch, and
+    /// nothing of another repository's.
+    #[test]
+    fn purge_repository_removes_every_branch_of_that_repository_only() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let engine =
+            TantivyIndexingEngine::new(dir.path().to_path_buf(), 512 * 1024 * 1024).unwrap();
+        for branch in ["main", "feature"] {
+            let n = node(0);
+            let mut j = job(&n.id);
+            j.branch = branch.to_string();
+            engine.do_index_node_with_plan(&j, &n, &plan()).unwrap();
+        }
+        let n = node(1);
+        let mut other = job(&n.id);
+        other.repo_id = "other".to_string();
+        engine.do_index_node_with_plan(&other, &n, &plan()).unwrap();
+
+        engine.purge_repository("t", "r").unwrap();
+        assert!(!dir.path().join("t").join("r").exists());
+        assert!(dir.path().join("t").join("other").exists());
+        // Purging what is already gone is not an error.
+        engine.purge_repository("t", "r").unwrap();
+    }
+
     /// Regression: indexing one node at a time must not leave one segment per
     /// commit behind forever.
     ///

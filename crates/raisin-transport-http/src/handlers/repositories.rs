@@ -453,8 +453,34 @@ pub async fn delete_repository(
     let deleted = repo_mgmt.delete_repository(tenant_id, &repo_id).await?;
 
     if deleted {
+        purge_repository_indexes(&state, tenant_id, &repo_id);
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::repository_not_found(&repo_id))
     }
 }
+
+/// Remove a deleted repository's full-text and vector indexes from disk.
+///
+/// They live outside RocksDB, so deleting the registry entry left them behind:
+/// a repository recreated under the same id found the old repository's index
+/// directories — including branches it does not have — and zero-byte vector
+/// index files that failed every embedding job until they were removed by
+/// hand. A failure here is logged, not returned: the repository IS deleted,
+/// and a leftover directory is a disk-space matter the next rebuild replaces.
+#[cfg(feature = "storage-rocksdb")]
+fn purge_repository_indexes(state: &AppState, tenant_id: &str, repo_id: &str) {
+    if let Some(engine) = state.indexing_engine.as_ref() {
+        if let Err(e) = engine.purge_repository(tenant_id, repo_id) {
+            tracing::warn!(tenant_id, repo_id, error = %e, "could not remove the deleted repository's full-text indexes");
+        }
+    }
+    if let Some(engine) = state.hnsw_engine.as_ref() {
+        if let Err(e) = engine.purge_repository(tenant_id, repo_id) {
+            tracing::warn!(tenant_id, repo_id, error = %e, "could not remove the deleted repository's vector indexes");
+        }
+    }
+}
+
+#[cfg(not(feature = "storage-rocksdb"))]
+fn purge_repository_indexes(_state: &AppState, _tenant_id: &str, _repo_id: &str) {}
