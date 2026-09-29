@@ -125,6 +125,58 @@ pub(crate) async fn handle_large_multipart_upload(
     ))
 }
 
+/// Properties of the placeholder `raisin:Package` node a streamed upload
+/// creates before its manifest has been read.
+///
+/// `name` and `version` are REQUIRED by `raisin:Package`, and as PROPERTIES:
+/// the `Node.name` struct field does not satisfy validation. Without them the
+/// node is refused with "Missing required property 'name'" only after the
+/// whole body has been streamed into storage. The PackageProcess job replaces
+/// both with the manifest's values when it renames the node.
+fn processing_package_properties(
+    temp_name: &str,
+    stored: &raisin_binary::StoredObject,
+) -> std::collections::HashMap<String, models::nodes::properties::PropertyValue> {
+    use models::nodes::properties::PropertyValue;
+
+    // Object, not Resource: see the `resource` property of raisin:Package.
+    let mut resource_obj = std::collections::HashMap::new();
+    resource_obj.insert("key".to_string(), PropertyValue::String(stored.key.clone()));
+    resource_obj.insert("url".to_string(), PropertyValue::String(stored.url.clone()));
+    if let Some(mime) = &stored.mime_type {
+        resource_obj.insert("mime_type".to_string(), PropertyValue::String(mime.clone()));
+    }
+    resource_obj.insert("size".to_string(), PropertyValue::Integer(stored.size));
+
+    let mut props = std::collections::HashMap::new();
+    props.insert(
+        "name".to_string(),
+        PropertyValue::String(temp_name.to_string()),
+    );
+    props.insert(
+        "version".to_string(),
+        PropertyValue::String("0.0.0".to_string()),
+    );
+    props.insert(
+        "title".to_string(),
+        PropertyValue::String(temp_name.to_string()),
+    );
+    props.insert("resource".to_string(), PropertyValue::Object(resource_obj));
+    props.insert(
+        "status".to_string(),
+        PropertyValue::String("processing".to_string()),
+    );
+    props.insert("installed".to_string(), PropertyValue::Boolean(false));
+    props.insert(
+        "upload_state".to_string(),
+        PropertyValue::String("new".to_string()),
+    );
+    // Tells the PackageProcess job to read the manifest and rename the node.
+    props.insert("large_upload".to_string(), PropertyValue::Boolean(true));
+    props.insert("progress".to_string(), PropertyValue::Float(0.0));
+    props
+}
+
 /// Handle large package uploads by creating a processing node and background job.
 async fn handle_large_package_upload<S: Storage + TransactionalStorage + 'static>(
     state: &AppState,
@@ -143,55 +195,7 @@ async fn handle_large_package_upload<S: Storage + TransactionalStorage + 'static
     );
     let temp_path = format!("/{}", temp_name);
 
-    // Build resource property (Object format for packages)
-    let mut resource_obj = std::collections::HashMap::new();
-    resource_obj.insert(
-        "key".to_string(),
-        raisin_models::nodes::properties::PropertyValue::String(stored.key.clone()),
-    );
-    resource_obj.insert(
-        "url".to_string(),
-        raisin_models::nodes::properties::PropertyValue::String(stored.url.clone()),
-    );
-    if let Some(mime) = &stored.mime_type {
-        resource_obj.insert(
-            "mime_type".to_string(),
-            raisin_models::nodes::properties::PropertyValue::String(mime.clone()),
-        );
-    }
-    resource_obj.insert(
-        "size".to_string(),
-        raisin_models::nodes::properties::PropertyValue::Integer(stored.size),
-    );
-    let resource_value = raisin_models::nodes::properties::PropertyValue::Object(resource_obj);
-
-    // Create initial properties for the processing package
-    let mut props = std::collections::HashMap::new();
-    props.insert(
-        "title".to_string(),
-        raisin_models::nodes::properties::PropertyValue::String(temp_name.clone()),
-    );
-    props.insert("resource".to_string(), resource_value);
-    props.insert(
-        "status".to_string(),
-        raisin_models::nodes::properties::PropertyValue::String("processing".to_string()),
-    );
-    props.insert(
-        "installed".to_string(),
-        raisin_models::nodes::properties::PropertyValue::Boolean(false),
-    );
-    props.insert(
-        "upload_state".to_string(),
-        raisin_models::nodes::properties::PropertyValue::String("new".to_string()),
-    );
-    props.insert(
-        "large_upload".to_string(),
-        raisin_models::nodes::properties::PropertyValue::Boolean(true),
-    );
-    props.insert(
-        "progress".to_string(),
-        raisin_models::nodes::properties::PropertyValue::Float(0.0),
-    );
+    let props = processing_package_properties(&temp_name, stored);
 
     let node_id = nanoid::nanoid!();
 
@@ -409,4 +413,53 @@ async fn handle_large_asset_upload<S: Storage + TransactionalStorage + 'static>(
             "node_id": node_id
         })),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::processing_package_properties;
+
+    /// The streamed-upload placeholder must pass the strict `raisin:Package`
+    /// schema: every required property present, nothing undeclared. A missing
+    /// `name` made every package above the 100MB threshold fail after upload.
+    #[test]
+    fn processing_package_node_satisfies_raisin_package_schema() {
+        let package_type = raisin_core::nodetype_init::load_global_nodetypes()
+            .into_iter()
+            .find(|nt| nt.name == "raisin:Package")
+            .expect("raisin:Package global NodeType should be embedded");
+        let schema = package_type
+            .properties
+            .expect("raisin:Package should declare properties");
+
+        let now = chrono::Utc::now();
+        let stored = raisin_binary::StoredObject {
+            key: "tenant/blob/key".to_string(),
+            url: "/files/tenant/blob/key".to_string(),
+            name: Some("big.rap".to_string()),
+            size: 200 * 1024 * 1024,
+            mime_type: Some("application/zip".to_string()),
+            created_at: now,
+            updated_at: now,
+        };
+        let props = processing_package_properties("upload_1_abcdefgh", &stored);
+
+        for prop in &schema {
+            let name = prop.name.as_deref().unwrap_or_default();
+            if prop.required == Some(true) {
+                assert!(
+                    props.contains_key(name),
+                    "streamed raisin:Package placeholder is missing required property '{name}'"
+                );
+            }
+        }
+        for key in props.keys() {
+            assert!(
+                schema
+                    .iter()
+                    .any(|p| p.name.as_deref() == Some(key.as_str())),
+                "streamed raisin:Package placeholder writes undeclared property '{key}'"
+            );
+        }
+    }
 }
