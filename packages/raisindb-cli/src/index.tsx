@@ -578,6 +578,18 @@ async function runAdmin(action: () => Promise<void>): Promise<never> {
   }
 }
 
+/** Ask a yes/no question on the terminal; only an explicit "y"/"yes" is yes. */
+async function askYesNo(question: string): Promise<boolean> {
+  const { createInterface } = await import('node:readline/promises');
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = (await rl.question(question)).trim().toLowerCase();
+    return answer === 'y' || answer === 'yes';
+  } finally {
+    rl.close();
+  }
+}
+
 /** Commander collector for repeatable options (e.g. --model). */
 function collect(value: string, previous: string[]): string[] {
   return [...previous, value];
@@ -596,18 +608,17 @@ repoCmd
   .option('--exists-ok', 'Succeed if the repository already exists')
   .option(
     '--default-language <code>',
-    'Base language of the content (e.g. de). Cannot be changed after creation. Server default: en'
+    'Base language of the content (e.g. de). Server default: en'
   )
   .option('--languages <codes>', 'Comma-separated supported languages, e.g. de,fr,en (requires --default-language)')
   .addHelpText(
     'after',
     `
-The default language is IMMUTABLE. Content in the default language is the base
-node; every other language is stored as a translation overlay on top of it. A
-repository created with the wrong default treats that language's overlays as
-the base, so pick it before the first install. To change it, delete and
-recreate the repository. Translation languages can be added later with
-\`raisindb repo languages <name> --add <codes>\`.
+Content in the default language is the base node; every other language is
+stored as a translation overlay on top of it, so pick it before the first
+install. Translation languages can be added later with
+\`raisindb repo languages <name> --add <codes>\`, and the default can be changed
+with \`raisindb repo languages <name> --default <code>\` (this re-indexes).
 
 Example:
   raisindb repo create website --default-language de --languages de,fr,en`
@@ -625,16 +636,36 @@ Example:
 
 repoCmd
   .command('languages <name>')
-  .description("Show a repository's languages, or add translation languages")
+  .description("Show a repository's languages, add translation languages, or change the default language")
   .option('--add <codes>', 'Comma-separated languages to add to the supported languages, e.g. fr,en')
+  .option('--default <code>', 'Make this language the default (base) language; queues a full-text rebuild')
+  .option('-y, --yes', 'Confirm --default without asking')
   .option('--json', 'Machine-readable JSON output')
   .addHelpText(
     'after',
     `
-The default language is shown but cannot be changed: it is fixed when the
-repository is created. Only supported (translation) languages can be added.`
+--default changes the language the base content is stored in. The content is
+not rewritten: it is from then on treated as the new language. The new default
+is added to the supported languages and the old one kept. The server refuses
+while translations in the new language exist (they would collide with the base
+content), and queues a full-text rebuild of every branch so search finds the
+base content under the new language. Vector embeddings are not affected.
+Asks for confirmation at a terminal; elsewhere pass --yes.
+
+Example:
+  raisindb repo languages website --default de`
   )
-  .action((name, options) => runAdmin(() => repoLanguages(name, { add: options.add, json: options.json })));
+  .action((name, options) =>
+    runAdmin(() =>
+      repoLanguages(name, {
+        add: options.add,
+        default: options.default,
+        yes: options.yes,
+        json: options.json,
+        confirm: process.stdin.isTTY ? askYesNo : undefined,
+      })
+    )
+  );
 
 repoCmd
   .command('list')
