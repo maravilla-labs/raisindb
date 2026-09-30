@@ -241,6 +241,7 @@ fn operation(input: &str) -> IResult<&str, Operation> {
         value(Operation::Translate, tag_no_case("TRANSLATE")),
         value(Operation::Relate, tag_no_case("RELATE")),
         value(Operation::Unrelate, tag_no_case("UNRELATE")),
+        value(Operation::Execute, tag_no_case("EXECUTE")),
     ))
     .parse(input)
 }
@@ -1553,6 +1554,17 @@ mod tests {
                 );
             }
             other => panic!("Expected CreateRole, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_execute_is_an_operation() {
+        let sql = "ALTER ROLE 'editor' ADD PERMISSION ALLOW EXECUTE PATH '/lib/studio/**'";
+        match parse_acl(sql).unwrap().unwrap() {
+            AclStatement::AlterRole(ar) => {
+                assert!(format!("{ar:?}").contains("Execute"), "{ar:?}");
+            }
+            other => panic!("Expected AlterRole, got {:?}", other),
         }
     }
 

@@ -114,6 +114,31 @@ mod inner {
         Ok((node, DEFAULT_BRANCH.to_string()))
     }
 
+    /// Refuse a client invoke the caller may not make: invoking needs
+    /// `execute` on the function node (see
+    /// `raisin_core::services::function_invoke_access`). Decided from the
+    /// node, before any code loads.
+    fn authorize_client_invoke(
+        connection_state: &Arc<RwLock<ConnectionState>>,
+        function_node: &raisin_models::nodes::Node,
+        branch: &str,
+    ) -> Result<(), WsError> {
+        let auth = connection_state.read().auth_context().cloned();
+        raisin_core::services::function_invoke_access::authorize_invoke(
+            auth.as_ref(),
+            function_node,
+            branch,
+        )
+        .map_err(|refusal| {
+            tracing::debug!(
+                function = %function_node.path,
+                reason = %refusal,
+                "function invoke refused"
+            );
+            WsError::PermissionDenied
+        })
+    }
+
     // -----------------------------------------------------------------------
     // Async invoke (background job)
     // -----------------------------------------------------------------------
@@ -146,6 +171,7 @@ mod inner {
             &payload.function_name,
         )
         .await?;
+        authorize_client_invoke(connection_state, &function_node, &code_branch)?;
         // A job loads the function from the branch it runs on.
         if code_branch != branch {
             return Err(WsError::InvalidRequest(format!(
@@ -389,6 +415,7 @@ mod inner {
             &payload.function_name,
         )
         .await?;
+        authorize_client_invoke(connection_state, &function_node, &code_branch)?;
 
         // Load function code via canonical code_loader (resolves entry_file property)
         let (code, metadata) = raisin_functions::execution::code_loader::load_function_code(
@@ -634,4 +661,152 @@ where
         "NOT_IMPLEMENTED".to_string(),
         "Function invocation requires RocksDB backend".to_string(),
     )))
+}
+
+/// Client invokes over the socket, against a real RocksDB state: the gate
+/// decides from the caller and the function node before any code loads.
+#[cfg(all(test, feature = "storage-rocksdb"))]
+mod invoke_gate_tests {
+    use super::*;
+    use raisin_models::auth::AuthContext;
+    use raisin_models::nodes::properties::PropertyValue;
+    use raisin_models::nodes::Node;
+    use raisin_models::permissions::{Operation, Permission, ResolvedPermissions};
+    use raisin_storage::{
+        BranchRepository, CreateNodeOptions, NodeRepository, Storage, StorageScope,
+    };
+
+    const TENANT: &str = "t_invoke_gate";
+    const REPO: &str = "r_invoke_gate";
+
+    type St = raisin_rocksdb::RocksDBStorage;
+    type Bn = raisin_binary::FilesystemBinaryStorage;
+
+    async fn state(dir: &std::path::Path) -> Arc<WsState<St, Bn>> {
+        let storage = Arc::new(St::new(dir.join("db")).unwrap());
+        let _ = storage
+            .branches()
+            .create_branch(TENANT, REPO, "main", "test", None, None, false, false)
+            .await;
+        // A system function under /lib/studio, and a public one.
+        for (path, system) in [("/studio-fn", true), ("/public-fn", false)] {
+            let mut node = Node {
+                id: format!("fn{path}"),
+                name: path.trim_start_matches('/').to_string(),
+                path: path.to_string(),
+                node_type: "raisin:Function".to_string(),
+                ..Default::default()
+            };
+            node.properties.insert(
+                "language".into(),
+                PropertyValue::String("javascript".into()),
+            );
+            if system {
+                node.properties.insert(
+                    "execution_context".into(),
+                    PropertyValue::String("system".into()),
+                );
+            }
+            storage
+                .nodes()
+                .create(
+                    StorageScope::new(TENANT, REPO, "main", "functions"),
+                    node,
+                    CreateNodeOptions {
+                        validate_schema: false,
+                        validate_parent_allows_child: false,
+                        validate_workspace_allows_type: false,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let audit = Arc::new(storage.audit_repository());
+        Arc::new(WsState::new(
+            storage.clone(),
+            Arc::new(raisin_core::RaisinConnection::with_storage(storage.clone())),
+            Arc::new(raisin_core::WorkspaceService::new(storage.clone())),
+            Arc::new(Bn::new(dir.join("bin"), Some("/files".into()))),
+            crate::handler::WsConfig::default(),
+            None,
+            Some(storage.clone()),
+            None,
+            None,
+            None,
+            None,
+            audit,
+        ))
+    }
+
+    fn conn(auth: Option<AuthContext>) -> Arc<RwLock<ConnectionState>> {
+        let mut c = ConnectionState::new(TENANT.to_string(), Some(REPO.to_string()), 4, 100);
+        if let Some(a) = auth {
+            c.set_auth_context(a);
+        }
+        Arc::new(RwLock::new(c))
+    }
+
+    fn request(function: &str) -> RequestEnvelope {
+        serde_json::from_value(serde_json::json!({
+            "request_id": "r1",
+            "type": "function_invoke_sync",
+            "context": { "tenant_id": TENANT, "repository": REPO },
+            "payload": { "function_name": format!("/{function}"), "input": {} }
+        }))
+        .unwrap()
+    }
+
+    fn grant(path: &str, op: Operation) -> Permission {
+        Permission::new(path, vec![op]).with_workspace("functions")
+    }
+
+    fn user(grants: Vec<Permission>) -> AuthContext {
+        let mut p = ResolvedPermissions::empty("u1");
+        p.permissions = grants;
+        AuthContext::for_user("u1").with_permissions(p)
+    }
+
+    fn anonymous(grants: Vec<Permission>) -> AuthContext {
+        AuthContext::anonymous_user("anon").with_permissions(ResolvedPermissions::anonymous(grants))
+    }
+
+    /// `true` when the gate refused; any later failure (the probe nodes carry
+    /// no code) means the gate let the call through.
+    async fn refused(state: &Arc<WsState<St, Bn>>, auth: Option<AuthContext>, f: &str) -> bool {
+        matches!(
+            handle_function_invoke_sync(state, &conn(auth), request(f)).await,
+            Err(WsError::PermissionDenied)
+        )
+    }
+
+    #[tokio::test]
+    async fn socket_invokes_are_gated_by_caller() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path()).await;
+
+        // "studio-fn" runs as the system; "public-fn" as the caller.
+        // A signed-in caller: user functions yes, system functions no.
+        let signed_in = user(vec![grant("/studio-fn", Operation::Execute)]);
+        assert!(!refused(&s, Some(signed_in.clone()), "public-fn").await);
+        assert!(refused(&s, Some(signed_in), "studio-fn").await);
+
+        // Anonymous: nothing.
+        for who in [
+            None,
+            Some(anonymous(vec![])),
+            Some(anonymous(vec![grant("/public-fn", Operation::Execute)])),
+        ] {
+            assert!(refused(&s, who.clone(), "studio-fn").await);
+            assert!(refused(&s, who, "public-fn").await);
+        }
+
+        // Administrators and the system: everything.
+        let admin =
+            AuthContext::for_user("root").with_permissions(ResolvedPermissions::system_admin());
+        for who in [admin, AuthContext::system()] {
+            assert!(!refused(&s, Some(who.clone()), "studio-fn").await);
+            assert!(!refused(&s, Some(who), "public-fn").await);
+        }
+    }
 }

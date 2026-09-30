@@ -31,7 +31,7 @@ type PermissionDraft = {
   condition: string
 }
 
-const OPERATIONS = ['create', 'read', 'update', 'delete', 'translate', 'relate', 'unrelate']
+const OPERATIONS = ['create', 'read', 'update', 'delete', 'translate', 'relate', 'unrelate', 'execute']
 
 function formatOperationLabel(operation: string) {
   return operation.charAt(0).toUpperCase() + operation.slice(1)

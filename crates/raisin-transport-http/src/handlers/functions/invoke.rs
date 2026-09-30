@@ -98,6 +98,21 @@ pub async fn invoke_function(
     .await?;
     let lookup_ms = t_lookup.elapsed().as_micros() as f64 / 1000.0;
 
+    // Who may invoke it at all (see
+    // `raisin_core::services::function_invoke_access`).
+    if let Err(refusal) = raisin_core::services::function_invoke_access::authorize_invoke(
+        auth_context.as_ref(),
+        &function_node,
+        &code_branch,
+    ) {
+        use raisin_core::services::function_invoke_access::InvokeRefusal;
+        let status = match refusal {
+            InvokeRefusal::Unauthenticated => axum::http::StatusCode::UNAUTHORIZED,
+            InvokeRefusal::Forbidden => axum::http::StatusCode::FORBIDDEN,
+        };
+        return Err(ApiError::new(status, "FORBIDDEN", refusal.to_string()));
+    }
+
     let execution_mode = parse_execution_mode(function_node.properties.get("execution_mode"));
     if req.sync && !execution_mode.allows_sync() {
         return Err(ApiError::validation_failed(format!(
