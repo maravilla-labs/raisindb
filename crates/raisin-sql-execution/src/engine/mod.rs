@@ -12,6 +12,8 @@
 //! - `restore` - RESTORE statement execution
 
 mod acl;
+#[cfg(test)]
+mod admin_statement_gate_tests;
 mod ai_config;
 mod batch;
 mod branch;

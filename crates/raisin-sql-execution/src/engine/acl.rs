@@ -45,7 +45,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         }
 
         // Anonymous users cannot perform any ACL operations
-        if auth.is_anonymous {
+        if auth.is_anonymous_principal() {
             return Err(Error::Forbidden(
                 "Anonymous users cannot perform access control operations".to_string(),
             ));

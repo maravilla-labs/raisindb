@@ -22,6 +22,23 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
     ) -> Result<RowStream, Error> {
         tracing::info!("Executing BRANCH statement: {}", branch_stmt.operation());
 
+        // CREATE/DROP/ALTER/MERGE change the repository's branches for every
+        // user (DROP BRANCH 'main' deletes the working tree; MERGE writes into
+        // the target past row-level security). They used to run for any caller,
+        // anonymous `/api/sql` included. Reads and USE stay open.
+        if matches!(
+            branch_stmt,
+            BranchStatement::Create(_)
+                | BranchStatement::Drop(_)
+                | BranchStatement::Alter(_)
+                | BranchStatement::Merge(_)
+        ) {
+            crate::schema_auth::require_operator(
+                self.auth_context.as_ref(),
+                branch_stmt.operation(),
+            )?;
+        }
+
         match branch_stmt {
             BranchStatement::UseBranch { name, scope } => {
                 self.execute_use_branch(name, scope).await

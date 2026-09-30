@@ -45,7 +45,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             return Ok(());
         }
 
-        if auth.is_anonymous {
+        if auth.is_anonymous_principal() {
             return Err(Error::Forbidden(
                 "Anonymous users cannot administer the spatial index".to_string(),
             ));
