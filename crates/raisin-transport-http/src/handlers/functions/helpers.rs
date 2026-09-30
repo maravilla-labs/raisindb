@@ -607,6 +607,35 @@ pub(super) fn job_belongs_to_repo(
     }
 }
 
+/// Refuse unless the caller may access flow instance `instance_id` (see
+/// [`raisin_core::services::flow_instance_access`]). One 403 for "not yours"
+/// and "no such instance", so the answer does not reveal which ids exist.
+pub(crate) async fn authorize_flow_instance(
+    state: &AppState,
+    tenant_id: &str,
+    repo: &str,
+    instance_id: &str,
+    auth: Option<&AuthContext>,
+) -> Result<(), ApiError> {
+    let allowed = raisin_core::services::flow_instance_access::authorize_flow_instance(
+        state.storage.as_ref(),
+        tenant_id,
+        repo,
+        instance_id,
+        auth,
+    )
+    .await;
+    if allowed {
+        return Ok(());
+    }
+    tracing::debug!(%repo, %instance_id, "Flow instance access refused");
+    Err(ApiError::new(
+        axum::http::StatusCode::FORBIDDEN,
+        "FORBIDDEN",
+        "not allowed to access this flow instance",
+    ))
+}
+
 #[cfg(test)]
 mod module_loading_invariant {
     //! Every inline execution path must fill `LoadedFunction::files`.

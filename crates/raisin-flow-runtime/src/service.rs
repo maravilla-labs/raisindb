@@ -191,6 +191,23 @@ async fn load_instance<S: Storage>(
     Ok((instance_node, instance))
 }
 
+/// Remember who started `instance_id`, so they may follow it before its node
+/// is written (see `raisin_storage::jobs::flow_starters`). Anonymous callers
+/// and the system are not recorded: neither is an owner a check can match.
+fn record_starter(
+    tenant_id: &str,
+    repo: &str,
+    instance_id: &str,
+    auth_context: Option<&raisin_models::auth::AuthContext>,
+) {
+    let Some(auth) = auth_context.filter(|a| !a.is_system && !a.is_anonymous_principal()) else {
+        return;
+    };
+    if let Some(user_id) = auth.user_id.as_deref().filter(|id| !id.is_empty()) {
+        raisin_storage::jobs::record_flow_instance_starter(tenant_id, repo, instance_id, user_id);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Public service functions
 // ---------------------------------------------------------------------------
@@ -296,6 +313,7 @@ pub async fn run_flow<S: Storage>(
     let job_id = scheduler
         .schedule_flow_job(tenant_id, repo, job_type, metadata)
         .await?;
+    record_starter(tenant_id, repo, &instance_id, auth_context);
 
     tracing::info!(
         job_id = %job_id,
@@ -396,6 +414,7 @@ pub async fn run_flow_test<S: Storage>(
     let job_id = scheduler
         .schedule_flow_job(tenant_id, repo, job_type, metadata)
         .await?;
+    record_starter(tenant_id, repo, &instance_id, auth_context);
 
     tracing::info!(
         job_id = %job_id,

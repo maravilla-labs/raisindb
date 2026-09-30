@@ -15,7 +15,7 @@ use raisin_storage::{DeleteNodeOptions, NodeRepository, Storage, StorageScope};
 use crate::middleware::TenantInfo;
 use crate::{error::ApiError, state::AppState};
 
-use super::helpers::map_storage_error;
+use super::helpers::{authorize_flow_instance, map_storage_error};
 use super::types::{
     CancelFlowInstanceResponse, FlowInstanceStatusResponse, ResumeFlowRequest, RunFlowRequest,
     RunFlowResponse, RunFlowTestRequest,
@@ -147,6 +147,14 @@ pub async fn resume_flow(
     auth_context: Option<Extension<AuthContext>>,
     Json(req): Json<ResumeFlowRequest>,
 ) -> Result<Json<RunFlowResponse>, ApiError> {
+    authorize_flow_instance(
+        &state,
+        &tenant_info.tenant_id,
+        &repo,
+        &instance_id,
+        auth_context.as_ref().map(|Extension(ctx)| ctx),
+    )
+    .await?;
     let scheduler = get_scheduler(&state)?;
 
     // Human-task waits must be completed through the inbox API
@@ -217,8 +225,16 @@ pub async fn get_flow_instance(
     State(state): State<AppState>,
     Extension(tenant_info): Extension<TenantInfo>,
     Path((repo, instance_id)): Path<(String, String)>,
-    _auth_context: Option<Extension<AuthContext>>,
+    auth_context: Option<Extension<AuthContext>>,
 ) -> Result<Json<FlowInstanceStatusResponse>, ApiError> {
+    authorize_flow_instance(
+        &state,
+        &tenant_info.tenant_id,
+        &repo,
+        &instance_id,
+        auth_context.as_ref().map(|Extension(ctx)| ctx),
+    )
+    .await?;
     let status = raisin_flow_runtime::service::get_instance_status(
         state.storage.as_ref(),
         &tenant_info.tenant_id,
@@ -260,8 +276,16 @@ pub async fn cancel_flow_instance(
     State(state): State<AppState>,
     Extension(tenant_info): Extension<TenantInfo>,
     Path((repo, instance_id)): Path<(String, String)>,
-    _auth_context: Option<Extension<AuthContext>>,
+    auth_context: Option<Extension<AuthContext>>,
 ) -> Result<Json<CancelFlowInstanceResponse>, ApiError> {
+    authorize_flow_instance(
+        &state,
+        &tenant_info.tenant_id,
+        &repo,
+        &instance_id,
+        auth_context.as_ref().map(|Extension(ctx)| ctx),
+    )
+    .await?;
     let scheduler = get_scheduler(&state)?;
 
     raisin_flow_runtime::service::cancel_instance(
@@ -302,8 +326,16 @@ pub async fn delete_flow_instance(
     State(state): State<AppState>,
     Extension(tenant_info): Extension<TenantInfo>,
     Path((repo, instance_id)): Path<(String, String)>,
-    _auth_context: Option<Extension<AuthContext>>,
+    auth_context: Option<Extension<AuthContext>>,
 ) -> Result<axum::http::StatusCode, ApiError> {
+    authorize_flow_instance(
+        &state,
+        &tenant_info.tenant_id,
+        &repo,
+        &instance_id,
+        auth_context.as_ref().map(|Extension(ctx)| ctx),
+    )
+    .await?;
     let scope = StorageScope::new(
         &tenant_info.tenant_id,
         &repo,

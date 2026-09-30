@@ -17,6 +17,7 @@
 
 pub mod conversation_events;
 pub mod flow_events;
+pub mod flow_starters;
 pub mod monitor;
 pub mod mount_events;
 pub mod persistence;
@@ -32,6 +33,7 @@ pub use conversation_events::{
 pub use flow_events::{
     global_flow_broadcaster, FlowEvent, FlowEventBroadcaster, FlowEventSubscription, StepUsage,
 };
+pub use flow_starters::{flow_instance_starter, record_flow_instance_starter};
 pub use monitor::{
     JobEvent, JobLogEntry, JobMonitor, JobMonitorGuard, JobMonitorHub, LogEmitter, LoggingMonitor,
     MonitorId,

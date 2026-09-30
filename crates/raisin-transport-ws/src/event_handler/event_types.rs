@@ -101,6 +101,23 @@ impl<S: Storage> WsEventHandler<S> {
         // Fetch node for RLS evaluation if needed
         let node_for_rls: Option<Node> = self.resolve_node_for_rls(event, connections).await;
 
+        // Without a node there is nothing to check row-level security
+        // against, and forwarding skips the check. For a NODE event that must
+        // not mean "deliver to everyone": the payload still names the path
+        // (and whatever metadata came along). Only system connections, which
+        // RLS would pass anyway, receive an event whose node is unresolvable.
+        let system_only;
+        let connections = if node_for_rls.is_some() {
+            connections
+        } else {
+            system_only = connections
+                .iter()
+                .filter(|c| c.read().auth_context().is_some_and(|a| a.is_system))
+                .cloned()
+                .collect::<Vec<_>>();
+            &system_only[..]
+        };
+
         self.forward_to_matching_connections(
             workspace,
             &event.branch,

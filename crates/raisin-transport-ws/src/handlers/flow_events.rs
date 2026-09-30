@@ -44,8 +44,12 @@ struct FlowUnsubscribePayload {
 /// forwards events through the connection's event channel. The task
 /// automatically stops when the flow reaches a terminal state or the
 /// broadcast channel closes.
+///
+/// The caller must be allowed to access the instance (see
+/// [`raisin_core::services::flow_instance_access`]); a refusal reads the same
+/// whether the instance exists or not.
 pub async fn handle_flow_subscribe_events<S, B>(
-    _state: &Arc<WsState<S, B>>,
+    state: &Arc<WsState<S, B>>,
     connection_state: &Arc<RwLock<ConnectionState>>,
     request: RequestEnvelope,
 ) -> Result<Option<ResponseEnvelope>, WsError>
@@ -54,6 +58,8 @@ where
     B: raisin_binary::BinaryStorage + 'static,
 {
     let payload: FlowSubscribePayload = serde_json::from_value(request.payload.clone())?;
+    authorize_flow_instance_request(state, connection_state, &request, &payload.instance_id)
+        .await?;
     let subscription_id = Uuid::new_v4().to_string();
 
     let broadcaster = raisin_storage::jobs::global_flow_broadcaster();
@@ -137,6 +143,43 @@ where
         request.request_id,
         serde_json::json!({ "subscription_id": subscription_id }),
     )))
+}
+
+/// Refuse unless the connection may access `instance_id` in the request's
+/// tenant and repository. Shared with the other instance-id handlers.
+pub(crate) async fn authorize_flow_instance_request<S, B>(
+    state: &Arc<WsState<S, B>>,
+    connection_state: &Arc<RwLock<ConnectionState>>,
+    request: &RequestEnvelope,
+    instance_id: &str,
+) -> Result<(), WsError>
+where
+    S: raisin_storage::Storage + raisin_storage::transactional::TransactionalStorage + 'static,
+    B: raisin_binary::BinaryStorage + 'static,
+{
+    let auth = connection_state.read().auth_context().cloned();
+    let repo = request
+        .context
+        .repository
+        .as_deref()
+        .ok_or_else(|| WsError::InvalidRequest("Repository required".to_string()))?;
+    let allowed = raisin_core::services::flow_instance_access::authorize_flow_instance(
+        state.storage.as_ref(),
+        &request.context.tenant_id,
+        repo,
+        instance_id,
+        auth.as_ref(),
+    )
+    .await;
+    if allowed {
+        Ok(())
+    } else {
+        tracing::debug!(
+            instance_id = %instance_id,
+            "Flow instance access refused over WS"
+        );
+        Err(WsError::PermissionDenied)
+    }
 }
 
 /// Unsubscribe from flow events.

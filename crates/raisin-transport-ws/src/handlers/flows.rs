@@ -46,6 +46,7 @@ struct FlowInstanceIdPayload {
 #[cfg(feature = "storage-rocksdb")]
 mod inner {
     use super::*;
+    use crate::handlers::flow_events::authorize_flow_instance_request;
     use raisin_flow_runtime::service;
     use raisin_rocksdb::get_flow_job_scheduler;
     use raisin_storage::Storage;
@@ -120,9 +121,33 @@ mod inner {
         B: raisin_binary::BinaryStorage + 'static,
     {
         let payload: FlowResumePayload = serde_json::from_value(request.payload.clone())?;
+        authorize_flow_instance_request(state, connection_state, &request, &payload.instance_id)
+            .await?;
         let tenant = require_tenant(&request);
         let repo = require_repo(&request)?;
         let scheduler = get_flow_job_scheduler(&state.rocksdb_storage)?;
+
+        // As over HTTP: a human-task wait is completed through the inbox, which
+        // checks the assignee and records the decision. Only the system and
+        // administrators may force-resume one.
+        let wait_type = service::get_instance_wait_type(
+            state.storage.as_ref(),
+            &tenant,
+            &repo,
+            &payload.instance_id,
+        )
+        .await?;
+        if wait_type == Some(raisin_flow_runtime::types::WaitType::HumanTask) {
+            let caller_is_admin = extract_auth(connection_state)
+                .is_some_and(|a| a.is_system || a.permissions().is_some_and(|p| p.is_system_admin));
+            if !caller_is_admin {
+                return Err(WsError::InvalidRequest(
+                    "This flow is waiting for a human task. Complete the task through \
+                     the inbox instead."
+                        .to_string(),
+                ));
+            }
+        }
 
         let result = service::resume_flow(
             state.storage.as_ref(),
@@ -146,7 +171,7 @@ mod inner {
 
     pub async fn handle_flow_get_instance_status<S, B>(
         state: &Arc<WsState<S, B>>,
-        _connection_state: &Arc<RwLock<ConnectionState>>,
+        connection_state: &Arc<RwLock<ConnectionState>>,
         request: RequestEnvelope,
     ) -> Result<Option<ResponseEnvelope>, WsError>
     where
@@ -154,6 +179,8 @@ mod inner {
         B: raisin_binary::BinaryStorage + 'static,
     {
         let payload: FlowInstanceIdPayload = serde_json::from_value(request.payload.clone())?;
+        authorize_flow_instance_request(state, connection_state, &request, &payload.instance_id)
+            .await?;
         let tenant = require_tenant(&request);
         let repo = require_repo(&request)?;
 
@@ -173,7 +200,7 @@ mod inner {
 
     pub async fn handle_flow_cancel<S, B>(
         state: &Arc<WsState<S, B>>,
-        _connection_state: &Arc<RwLock<ConnectionState>>,
+        connection_state: &Arc<RwLock<ConnectionState>>,
         request: RequestEnvelope,
     ) -> Result<Option<ResponseEnvelope>, WsError>
     where
@@ -181,6 +208,8 @@ mod inner {
         B: raisin_binary::BinaryStorage + 'static,
     {
         let payload: FlowInstanceIdPayload = serde_json::from_value(request.payload.clone())?;
+        authorize_flow_instance_request(state, connection_state, &request, &payload.instance_id)
+            .await?;
         let tenant = require_tenant(&request);
         let repo = require_repo(&request)?;
         let scheduler = get_flow_job_scheduler(&state.rocksdb_storage)?;

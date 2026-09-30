@@ -51,9 +51,24 @@ pub async fn run_file(
     Path(repo): Path<String>,
     auth: Option<Extension<AuthContext>>,
     Json(req): Json<RunFileRequest>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
     use super::api_factory::build_function_api;
     use super::file_helpers::find_parent_function_config;
+
+    // The file runs with the system's authority (and may be inline code the
+    // caller wrote), so only the system and administrators may run one. This
+    // route sits behind optional auth: without this check an anonymous caller
+    // could execute arbitrary code as the system.
+    let is_admin = auth
+        .as_deref()
+        .is_some_and(|a| a.is_system || a.permissions().is_some_and(|p| p.is_system_admin));
+    if !is_admin {
+        return Err(ApiError::new(
+            axum::http::StatusCode::FORBIDDEN,
+            "FORBIDDEN",
+            "running a file requires an administrator",
+        ));
+    }
 
     let execution_id = nanoid::nanoid!();
     let started_at = Utc::now();
@@ -361,11 +376,11 @@ pub async fn run_file(
         ));
     };
 
-    Sse::new(stream).keep_alive(
+    Ok(Sse::new(stream).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
-    )
+    ))
 }
 
 /// Stub `run_file` without RocksDB.

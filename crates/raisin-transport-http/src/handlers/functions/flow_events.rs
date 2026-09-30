@@ -2,12 +2,16 @@
 
 //! SSE streaming for flow instance execution events.
 
+use crate::error::ApiError;
+use crate::middleware::TenantInfo;
 use crate::state::AppState;
 use axum::{
     extract::{Path, State},
     response::sse::{Event, KeepAlive, Sse},
+    Extension,
 };
 use futures::stream::Stream;
+use raisin_models::auth::AuthContext;
 use std::convert::Infallible;
 use std::time::Duration;
 
@@ -25,10 +29,24 @@ use std::time::Duration;
 /// flow parked on a human task can stay live for days, and an open SSE response
 /// is an open connection that `axum::serve`'s graceful shutdown waits for. So
 /// it also ends on the server shutdown signal.
+///
+/// Only a caller allowed to access the instance may follow it (see
+/// [`raisin_core::services::flow_instance_access`]); everyone else, and every
+/// unknown id, gets the same 403.
 pub async fn stream_flow_events(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path((repo, instance_id)): Path<(String, String)>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    auth: Option<Extension<AuthContext>>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    super::helpers::authorize_flow_instance(
+        &state,
+        &tenant_info.tenant_id,
+        &repo,
+        &instance_id,
+        auth.as_ref().map(|Extension(ctx)| ctx),
+    )
+    .await?;
     let shutdown = state.shutdown_signal();
     tracing::debug!(
         repo = %repo,
@@ -96,9 +114,9 @@ pub async fn stream_flow_events(
 
     let stream = futures::StreamExt::take_until(stream, shutdown);
 
-    Sse::new(stream).keep_alive(
+    Ok(Sse::new(stream).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
-    )
+    ))
 }

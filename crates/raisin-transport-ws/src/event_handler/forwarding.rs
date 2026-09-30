@@ -210,14 +210,33 @@ mod tests {
     use raisin_storage_memory::InMemoryStorage;
     use std::sync::Arc;
 
-    /// Registers a connection for `tenant_id`, subscribed (no path/type filter)
-    /// to `workspace`, and returns its event receiver.
+    /// Registers a SYSTEM connection for `tenant_id`, subscribed (no path/type
+    /// filter) to `workspace`, and returns its event receiver. System, because
+    /// the in-memory store holds no node for these events and a non-system
+    /// connection receives no event whose node it cannot be checked against.
     fn register_subscriber(
         registry: &ConnectionRegistry,
         tenant_id: &str,
         workspace: &str,
     ) -> tokio::sync::mpsc::UnboundedReceiver<crate::protocol::EventMessage> {
-        let conn = ConnectionState::new(tenant_id.to_string(), None, 4, 100);
+        register_subscriber_as(
+            registry,
+            tenant_id,
+            workspace,
+            Some(raisin_models::auth::AuthContext::system()),
+        )
+    }
+
+    fn register_subscriber_as(
+        registry: &ConnectionRegistry,
+        tenant_id: &str,
+        workspace: &str,
+        auth: Option<raisin_models::auth::AuthContext>,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<crate::protocol::EventMessage> {
+        let mut conn = ConnectionState::new(tenant_id.to_string(), None, 4, 100);
+        if let Some(auth) = auth {
+            conn.set_auth_context(auth);
+        }
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         conn.set_event_channel(tx);
         let connection_id = conn.connection_id.clone();
@@ -291,7 +310,8 @@ mod tests {
     async fn a_remaining_subscription_still_receives_after_a_sibling_unsubscribes() {
         let registry = Arc::new(ConnectionRegistry::new());
 
-        let conn = ConnectionState::new("tenant-a".to_string(), None, 4, 100);
+        let mut conn = ConnectionState::new("tenant-a".to_string(), None, 4, 100);
+        conn.set_auth_context(raisin_models::auth::AuthContext::system());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         conn.set_event_channel(tx);
         let connection_id = conn.connection_id.clone();
@@ -326,5 +346,32 @@ mod tests {
             rx.try_recv().is_ok(),
             "the subscription that is still open must still receive the event"
         );
+    }
+
+    /// A node event whose node cannot be resolved (nothing in storage, no
+    /// `node_data`) cannot be checked against row-level security. It used to
+    /// reach every subscriber anyway, path and metadata included; now only a
+    /// system connection receives it.
+    #[tokio::test]
+    async fn an_unresolvable_node_event_reaches_only_system_connections() {
+        let registry = Arc::new(ConnectionRegistry::new());
+        let ws = "raisin:access_control";
+        let mut system_rx = register_subscriber(&registry, "tenant-a", ws);
+        let user = raisin_models::auth::AuthContext::for_user("bob").with_permissions(
+            raisin_models::permissions::ResolvedPermissions::empty("bob"),
+        );
+        let mut user_rx = register_subscriber_as(&registry, "tenant-a", ws, Some(user));
+        let mut anon_rx = register_subscriber_as(&registry, "tenant-a", ws, None);
+
+        let storage = Arc::new(InMemoryStorage::default());
+        let handler = WsEventHandler::new(Arc::clone(&registry), storage);
+        handler
+            .handle(&Event::Node(node_event_for_tenant("tenant-a")))
+            .await
+            .expect("event handling failed");
+
+        assert!(system_rx.try_recv().is_ok());
+        assert!(user_rx.try_recv().is_err());
+        assert!(anon_rx.try_recv().is_err());
     }
 }
