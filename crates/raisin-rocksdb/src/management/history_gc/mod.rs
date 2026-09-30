@@ -37,10 +37,27 @@
 //! Afterwards the touched column families are compacted with a forced
 //! bottommost pass, so the space is actually returned rather than waiting for
 //! RocksDB to pick the files up on its own.
+//!
+//! # What else a run reclaims
+//!
+//! * Job results persisted before results were bounded are bounded in place
+//!   (`GcOptions::bound_job_results`).
+//! * Upload blobs nothing mentions any more — superseded package `.rap`
+//!   files, assets whose history was pruned by an earlier run — are swept
+//!   from the binary store ([`run_gc_and_sweep_blobs`]).
+//!
+//! # Reading the numbers
+//!
+//! `bytes_deleted` is logical (uncompressed key + value), so it is not the
+//! SST bytes returned: most pruned versions are small index rows. Versions
+//! still inside the retention window are counted as `versions_retained` —
+//! when a database's history is younger than the window, that is where it
+//! is, and a run reclaims little by design.
 
 mod blobs;
 mod layout;
 pub mod retention;
+mod sweep;
 #[cfg(test)]
 mod tests;
 
@@ -87,6 +104,15 @@ pub struct GcOptions {
     pub job_retention: Option<Duration>,
     /// Report binary blobs that only pruned versions referenced.
     pub collect_orphaned_blobs: bool,
+    /// Bound the stored results of finished jobs written before results were
+    /// bounded (see `jobs::metadata_store::MAX_PERSISTED_RESULT_BYTES`).
+    pub bound_job_results: bool,
+    /// Also delete every blob the binary store lists that nothing in the
+    /// database mentions, not just the ones pruned history named.
+    pub sweep_unreferenced_blobs: bool,
+    /// A listed blob younger than this is never swept: an upload is stored
+    /// before the node that names it is written.
+    pub blob_min_age: Duration,
     /// Compact the touched column families afterwards.
     pub compact: bool,
 }
@@ -103,6 +129,9 @@ impl Default for GcOptions {
             purge_oplog: false,
             job_retention: None,
             collect_orphaned_blobs: true,
+            bound_job_results: true,
+            sweep_unreferenced_blobs: true,
+            blob_min_age: Duration::from_secs(24 * 3600),
             compact: true,
         }
     }
@@ -114,6 +143,10 @@ pub struct CfGcStats {
     pub keys_scanned: u64,
     pub versions_deleted: u64,
     pub bytes_deleted: u64,
+    /// Superseded versions kept because they are newer than the cutoff (or
+    /// pinned): history the retention policy still holds.
+    pub versions_retained: u64,
+    pub bytes_retained: u64,
     pub live_sst_bytes_before: u64,
     pub live_sst_bytes_after: u64,
 }
@@ -141,7 +174,13 @@ pub struct GcReport {
     pub bytes_deleted: u64,
     pub oplog_entries_deleted: u64,
     pub oplog_bytes_deleted: u64,
+    /// Superseded versions the policy still retains, across column families.
+    pub versions_retained: u64,
+    pub bytes_retained: u64,
     pub jobs_deleted: u64,
+    /// Oversized stored job results bounded in place, and the bytes saved.
+    pub job_results_bounded: u64,
+    pub job_result_bytes_saved: u64,
     /// Blob keys that only pruned versions referenced. The caller owns the
     /// binary store and deletes them.
     pub orphaned_blobs: Vec<String>,
@@ -506,8 +545,12 @@ impl Pass<'_> {
             let revs: Vec<HLC> = versions.iter().map(|v| v.rev).collect();
             let tomb: Vec<bool> = versions.iter().map(|v| v.tomb).collect();
             let keep = select_survivors(&revs, &tomb, plan, self.target.drop_orphan_tombstones);
-            for (v, kept) in versions.into_iter().zip(keep) {
+            for (i, (v, kept)) in versions.into_iter().zip(keep).enumerate() {
                 if kept {
+                    if i > 0 {
+                        self.stats.versions_retained += 1;
+                        self.stats.bytes_retained += v.size;
+                    }
                     continue;
                 }
                 self.stats.versions_deleted += 1;
@@ -667,31 +710,51 @@ fn add_version(
     Ok(())
 }
 
-/// Which pruned blob candidates are still mentioned by surviving data.
-fn blobs_still_referenced(
+/// Column families derived from node versions and rebuilt from them. A blob
+/// mentioned only here is named by no node version: the row is stale. Object
+/// values used to be indexed under an unstable encoding, so a superseded
+/// value's tombstone missed its row and the row never went away — on one dev
+/// database that kept 162 replaced package archives (3.2 GB) alive.
+const DERIVED_INDEXES: &[&str] = &[
+    cf::PATH_INDEX,
+    cf::NODE_PATH,
+    cf::PROPERTY_INDEX,
+    cf::REFERENCE_INDEX,
+    cf::RELATION_INDEX,
+    cf::ORDERED_CHILDREN,
+    cf::SPATIAL_INDEX,
+    cf::COMPOUND_INDEX,
+    cf::UNIQUE_INDEX,
+    cf::EMBEDDINGS,
+];
+
+/// Which blob candidates (by id) are still mentioned by surviving data: any
+/// key or value in every column family except the [`DERIVED_INDEXES`]. A
+/// tombstone row is not a mention either — it says the value is gone.
+fn blobs_still_referenced<V>(
     db: &DB,
-    candidates: &HashMap<String, String>,
+    candidates: &HashMap<String, V>,
     pruned_keys: &HashSet<Vec<u8>>,
 ) -> Result<HashSet<String>> {
     let mut seen = HashSet::new();
     if candidates.is_empty() {
         return Ok(seen);
     }
-    for cf_name in [
-        cf::NODES,
-        cf::REVISIONS,
-        cf::TRANSLATION_DATA,
-        cf::BLOCK_TRANSLATIONS,
-        cf::JOB_DATA,
-    ] {
-        let cf = cf_handle(db, cf_name)?;
+    for cf_name in crate::all_column_families() {
+        if DERIVED_INDEXES.contains(&cf_name) {
+            continue;
+        }
+        let Some(cf) = db.cf_handle(cf_name) else {
+            continue;
+        };
         let mut read_opts = rocksdb::ReadOptions::default();
         read_opts.fill_cache(false);
         let mut it = db.raw_iterator_cf_opt(cf, read_opts);
         it.seek_to_first();
         while it.valid() {
             if let (Some(key), Some(value)) = (it.key(), it.value()) {
-                if !pruned_keys.contains(key) {
+                if value != TOMBSTONE && !pruned_keys.contains(key) {
+                    blobs::mentioned_ids(key, candidates, &mut seen);
                     blobs::mentioned_ids(value, candidates, &mut seen);
                 }
             }
@@ -824,6 +887,8 @@ pub(crate) fn run_history_gc_on_db(
         }
         report.versions_deleted += stats.versions_deleted;
         report.bytes_deleted += stats.bytes_deleted;
+        report.versions_retained += stats.versions_retained;
+        report.bytes_retained += stats.bytes_retained;
         report.column_families.insert(target.cf.to_string(), stats);
     }
 
@@ -833,6 +898,22 @@ pub(crate) fn run_history_gc_on_db(
         report.oplog_bytes_deleted = bytes;
         if n > 0 {
             touched.push(cf::OPERATION_LOG);
+        }
+    }
+
+    if let (true, Some(storage)) = (opts.bound_job_results, storage) {
+        // Callers poll a finished job's full result from the in-memory
+        // registry for a few minutes; the stored copy is for history only.
+        let finished_before = chrono::Utc::now() - chrono::Duration::minutes(10);
+        let (n, saved) = storage.job_metadata_store().bound_stored_results(
+            opts.tenant.as_deref(),
+            finished_before,
+            opts.dry_run,
+        )?;
+        report.job_results_bounded = n;
+        report.job_result_bytes_saved = saved;
+        if n > 0 && !touched.contains(&cf::JOB_METADATA) {
+            touched.push(cf::JOB_METADATA);
         }
     }
 
@@ -848,8 +929,11 @@ pub(crate) fn run_history_gc_on_db(
             };
             report.jobs_deleted = deleted as u64;
             if deleted > 0 {
-                touched.push(cf::JOB_METADATA);
-                touched.push(cf::JOB_DATA);
+                for c in [cf::JOB_METADATA, cf::JOB_DATA] {
+                    if !touched.contains(&c) {
+                        touched.push(c);
+                    }
+                }
             }
         }
     }
@@ -897,6 +981,12 @@ pub(crate) fn run_history_gc_on_db(
 pub struct GcRunOutcome {
     #[serde(flatten)]
     pub report: GcReport,
+    /// Blobs the store listed; `None` when the sweep did not run (disabled, or
+    /// a backend that cannot enumerate what it owns).
+    pub blobs_listed: Option<u64>,
+    /// Listed blobs nothing mentions (deleted unless dry), and their bytes.
+    pub unreferenced_blobs: u64,
+    pub unreferenced_blob_bytes: u64,
     pub blobs_deleted: u64,
     /// Bytes of the deleted blobs, where the store reports a size.
     pub blob_bytes_deleted: u64,
@@ -917,8 +1007,10 @@ pub fn configured_options(storage: &RocksDBStorage) -> GcOptions {
     }
 }
 
-/// Run history GC off the async runtime, then delete the blobs only pruned
-/// history referenced (skipped on a dry run).
+/// Run history GC off the async runtime, then delete the blobs nothing
+/// references any more (skipped on a dry run): the ones only pruned history
+/// named, and — with [`GcOptions::sweep_unreferenced_blobs`] — every listed
+/// blob no key or value mentions.
 pub async fn run_gc_and_sweep_blobs<B>(
     storage: std::sync::Arc<RocksDBStorage>,
     bin: &B,
@@ -928,7 +1020,9 @@ where
     B: raisin_binary::BinaryStorage + ?Sized,
 {
     let dry_run = opts.dry_run;
-    let report = tokio::task::spawn_blocking(move || run_history_gc(&storage, &opts))
+    let gc_storage = storage.clone();
+    let gc_opts = opts.clone();
+    let report = tokio::task::spawn_blocking(move || run_history_gc(&gc_storage, &gc_opts))
         .await
         .map_err(|e| Error::storage(format!("history GC task failed: {e}")))??;
 
@@ -936,16 +1030,45 @@ where
         report,
         ..Default::default()
     };
+
+    // key -> size, where known
+    let mut doomed: BTreeMap<String, Option<u64>> = outcome
+        .report
+        .orphaned_blobs
+        .iter()
+        .map(|k| (k.clone(), None))
+        .collect();
+
+    if opts.sweep_unreferenced_blobs {
+        match bin.list_blobs().await {
+            Ok(Some(listed)) => {
+                outcome.blobs_listed = Some(listed.len() as u64);
+                let found = sweep::unreferenced(storage, listed, &opts).await?;
+                for blob in found {
+                    outcome.unreferenced_blobs += 1;
+                    outcome.unreferenced_blob_bytes += blob.size;
+                    doomed.insert(blob.key, Some(blob.size));
+                }
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(error = %e, "history GC: could not list blobs; sweep skipped"),
+        }
+    }
+
     if dry_run {
         return Ok(outcome);
     }
-    for key in &outcome.report.orphaned_blobs {
-        // Size first; a key that no longer resolves is already gone (or was
-        // never this store's), so there is nothing to delete.
-        let Ok((size, _stream)) = bin.get_stream(key).await else {
-            continue;
+    for (key, size) in doomed {
+        let size = match size {
+            Some(size) => size,
+            // Size first; a key that no longer resolves is already gone (or
+            // was never this store's), so there is nothing to delete.
+            None => match bin.get_stream(&key).await {
+                Ok((size, _stream)) => size,
+                Err(_) => continue,
+            },
         };
-        match bin.delete(key).await {
+        match bin.delete(&key).await {
             Ok(()) => {
                 outcome.blobs_deleted += 1;
                 outcome.blob_bytes_deleted += size;

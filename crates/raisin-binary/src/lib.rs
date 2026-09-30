@@ -59,6 +59,15 @@ pub struct StoredObject {
     pub updated_at: DateTime<Utc>,
 }
 
+/// One stored blob, as [`BinaryStorage::list_blobs`] enumerates it.
+#[derive(Debug, Clone)]
+pub struct ListedBlob {
+    pub key: String,
+    pub size: u64,
+    /// Last modification, where the backend reports one.
+    pub modified: Option<DateTime<Utc>>,
+}
+
 /// Trait for binary storage backends
 ///
 /// Provides functionality for storing, retrieving, and deleting binary data.
@@ -190,6 +199,18 @@ pub trait BinaryStorage: Send + Sync {
         &self,
         key: &str,
     ) -> impl std::future::Future<Output = anyhow::Result<(PathBuf, bool)>> + Send;
+
+    /// Every blob this store holds, or `None` when the backend cannot say.
+    ///
+    /// Garbage collection deletes the blobs no database key mentions, so a
+    /// backend must only list what it owns outright. The default is `None`:
+    /// an object store may share its bucket with other applications, and
+    /// "unreferenced by this database" would then say nothing about an object.
+    fn list_blobs(
+        &self,
+    ) -> impl std::future::Future<Output = anyhow::Result<Option<Vec<ListedBlob>>>> + Send {
+        async { Ok(None) }
+    }
 }
 
 pub struct FilesystemBinaryStorage {
@@ -341,6 +362,53 @@ impl BinaryStorage for FilesystemBinaryStorage {
             Ok((path, false))
         }
     }
+
+    fn list_blobs(
+        &self,
+    ) -> impl std::future::Future<Output = anyhow::Result<Option<Vec<ListedBlob>>>> + Send {
+        let base = self.base_dir.clone();
+        async move {
+            tokio::task::spawn_blocking(move || list_files(&base).map(Some))
+                .await
+                .map_err(|e| anyhow::anyhow!("listing blobs failed: {e}"))?
+        }
+    }
+}
+
+/// Every regular file under `base`, keyed by its `/`-separated relative path.
+/// A missing directory holds nothing.
+fn list_files(base: &Path) -> anyhow::Result<Vec<ListedBlob>> {
+    let mut out = Vec::new();
+    if !base.exists() {
+        return Ok(out);
+    }
+    let mut dirs = vec![base.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            let path = entry.path();
+            if file_type.is_dir() {
+                dirs.push(path);
+            } else if file_type.is_file() {
+                let Ok(rel) = path.strip_prefix(base) else {
+                    continue;
+                };
+                let key = rel
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                let meta = entry.metadata()?;
+                out.push(ListedBlob {
+                    key,
+                    size: meta.len(),
+                    modified: meta.modified().ok().map(DateTime::<Utc>::from),
+                });
+            }
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(feature = "s3")]
@@ -533,5 +601,36 @@ impl BinaryStorage for S3BinaryStorage {
             // S3: return temp path, is_temp=true (caller must cleanup)
             Ok((temp_path, true))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn the_filesystem_store_lists_what_it_wrote() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FilesystemBinaryStorage::new(dir.path(), None);
+        let a = store
+            .put_bytes(b"abc", None, Some("rap"), None, Some("t1"))
+            .await
+            .unwrap();
+        let b = store
+            .put_bytes(b"de", None, Some("jpg"), None, None)
+            .await
+            .unwrap();
+
+        let mut listed = store.list_blobs().await.unwrap().expect("filesystem lists");
+        listed.sort_by(|x, y| x.key.cmp(&y.key));
+        let mut expected = vec![(a.key, 3), (b.key, 2)];
+        expected.sort();
+        let got: Vec<(String, u64)> = listed.iter().map(|l| (l.key.clone(), l.size)).collect();
+        assert_eq!(got, expected);
+        assert!(listed.iter().all(|l| l.modified.is_some()));
+
+        // A store whose directory was never created holds nothing.
+        let empty = FilesystemBinaryStorage::new(dir.path().join("missing"), None);
+        assert!(empty.list_blobs().await.unwrap().unwrap().is_empty());
     }
 }

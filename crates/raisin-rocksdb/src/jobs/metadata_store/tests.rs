@@ -207,3 +207,85 @@ fn history_backfill_is_bounded_and_resumable() {
     assert_eq!(second_indexed, 1);
     assert!(next_cursor.is_some());
 }
+
+/// A result persisted verbatim, as before results were bounded.
+fn put_legacy(store: &JobMetadataStore, entry: &PersistedJobEntry) {
+    let cf = crate::cf_handle(&store.db, crate::cf::JOB_METADATA).unwrap();
+    let key = crate::keys::job_key(&entry.tenant, &entry.id);
+    store
+        .db
+        .put_cf(cf, key, rmp_serde::to_vec(entry).unwrap())
+        .unwrap();
+}
+
+#[test]
+fn stored_results_written_before_the_bound_are_bounded_in_place() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let store = JobMetadataStore::new(Arc::new(crate::open_db(temp_dir.path()).unwrap()));
+    let big = serde_json::json!({
+        "node_id": "n1",
+        "node": "x".repeat(MAX_PERSISTED_RESULT_BYTES * 3),
+    });
+    let finished_at = Utc::now() - chrono::Duration::hours(2);
+
+    let mut done = create_test_entry("done");
+    done.status = JobStatus::Completed;
+    done.completed_at = Some(finished_at);
+    done.result = Some(big.clone());
+    put_legacy(&store, &done);
+
+    // Still running: its result is not final and must not be rewritten.
+    let mut running = create_test_entry("running");
+    running.status = JobStatus::Running;
+    running.result = Some(big.clone());
+    put_legacy(&store, &running);
+
+    // Finished inside the window: left for the callers still polling it.
+    let mut fresh = create_test_entry("fresh");
+    fresh.status = JobStatus::Completed;
+    fresh.completed_at = Some(Utc::now());
+    fresh.result = Some(big.clone());
+    put_legacy(&store, &fresh);
+
+    let cutoff = Utc::now() - chrono::Duration::minutes(10);
+    let (n, saved) = store.bound_stored_results(None, cutoff, true).unwrap();
+    assert_eq!(n, 1);
+    assert!(saved > (MAX_PERSISTED_RESULT_BYTES * 2) as u64);
+    let untouched = store
+        .get("test-tenant", &JobId("done".into()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        untouched.result,
+        Some(big.clone()),
+        "a dry run writes nothing"
+    );
+
+    assert_eq!(
+        store.bound_stored_results(None, cutoff, false).unwrap(),
+        (n, saved)
+    );
+    let bounded = store
+        .get("test-tenant", &JobId("done".into()))
+        .unwrap()
+        .unwrap();
+    let result = bounded.result.expect("result kept");
+    assert_eq!(result["node_id"], "n1");
+    assert!(result.get("node").is_none());
+    assert!(result["_truncated"]["original_bytes"].as_u64().unwrap() > 40_000);
+    assert_eq!(bounded.status, JobStatus::Completed);
+
+    for id in ["running", "fresh"] {
+        let e = store
+            .get("test-tenant", &JobId(id.into()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(e.result, Some(big.clone()), "{id} must be untouched");
+    }
+
+    // Nothing left to do on a second pass.
+    assert_eq!(
+        store.bound_stored_results(None, cutoff, false).unwrap().0,
+        0
+    );
+}

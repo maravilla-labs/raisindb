@@ -3,14 +3,16 @@
 //! ```text
 //! cargo run -p raisin-rocksdb --release --example history_gc -- <data_dir> \
 //!     [--dry-run] [--keep-days N] [--keep-revisions N] [--keep-oplog] [--job-retention-hours N]
+//!     [--blob-min-age-hours N] [--no-blob-sweep]
 //! ```
 //!
 //! Opens `<data_dir>` (the directory holding the RocksDB files and `uploads/`),
 //! prunes revision history under the given retention (default: 7 days / 100
 //! revisions, overriding stored policies only when a flag is given), purges the
 //! operation log unless `--keep-oplog`, deletes finished jobs older than the
-//! job retention, deletes upload blobs only pruned history referenced, compacts,
-//! and prints the report as JSON.
+//! job retention, bounds oversized stored job results, deletes the upload blobs
+//! nothing in the database mentions (older than `--blob-min-age-hours`,
+//! default 24), compacts, and prints the report as JSON.
 //!
 //! Never point this at a directory a running server has open: RocksDB's LOCK
 //! file refuses a second writer, and that is the only thing standing between
@@ -33,13 +35,14 @@ fn arg_value<T: std::str::FromStr>(args: &[String], flag: &str) -> Option<T> {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(data_dir) = args.first().filter(|a| !a.starts_with("--")).cloned() else {
-        eprintln!("usage: history_gc <data_dir> [--dry-run] [--keep-days N] [--keep-revisions N] [--keep-oplog] [--job-retention-hours N]");
+        eprintln!("usage: history_gc <data_dir> [--dry-run] [--keep-days N] [--keep-revisions N] [--keep-oplog] [--job-retention-hours N] [--blob-min-age-hours N] [--no-blob-sweep]");
         std::process::exit(2);
     };
     let dry_run = args.iter().any(|a| a == "--dry-run");
     let keep_days: Option<u32> = arg_value(&args, "--keep-days");
     let keep_revisions: Option<u64> = arg_value(&args, "--keep-revisions");
     let job_hours: u64 = arg_value(&args, "--job-retention-hours").unwrap_or(24);
+    let blob_hours: u64 = arg_value(&args, "--blob-min-age-hours").unwrap_or(24);
 
     let config = RocksDBConfig::production().with_path(&data_dir);
     let storage = Arc::new(RocksDBStorage::with_config(config)?);
@@ -59,6 +62,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         purge_oplog: !args.iter().any(|a| a == "--keep-oplog"),
         job_retention: Some(Duration::from_secs(job_hours * 3600)),
+        sweep_unreferenced_blobs: !args.iter().any(|a| a == "--no-blob-sweep"),
+        blob_min_age: Duration::from_secs(blob_hours * 3600),
         ..GcOptions::default()
     };
 

@@ -18,6 +18,10 @@
 //!
 //! So a blob is only ever reported when the pruned history named it by key and
 //! nothing that survives mentions it in any form.
+//!
+//! The same rule drives the retroactive sweep ([`super::sweep`]): a blob the
+//! store lists is deleted only when its key has the blob shape and no key or
+//! value outside the derived indexes mentions its id.
 
 use regex::bytes::Regex as BytesRegex;
 use regex::Regex;
@@ -69,10 +73,18 @@ pub(super) fn exact_keys_in_msgpack(value: &[u8], out: &mut HashMap<String, Stri
     }
 }
 
+/// The id of a blob-shaped storage key (`None` for anything else).
+pub(super) fn identity_of_key(key: &str) -> Option<&str> {
+    exact_key_re()
+        .captures(key)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str())
+}
+
 /// Every blob id mentioned anywhere in `value`, in any form.
-pub(super) fn mentioned_ids(
+pub(super) fn mentioned_ids<V>(
     value: &[u8],
-    candidates: &HashMap<String, String>,
+    candidates: &HashMap<String, V>,
     out: &mut HashSet<String>,
 ) {
     if candidates.is_empty() {
@@ -116,6 +128,21 @@ mod tests {
         // A URL is a reference, never a deletion candidate.
         assert!(!out.contains_key("2026/09/29/bWtyQ89hhuq2JkcY9fK_N"));
         assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn only_blob_shaped_keys_have_an_identity() {
+        assert_eq!(
+            identity_of_key("default/2026/09/29/aWtyQ89hhuq2JkcY9fK_N.rap"),
+            Some("2026/09/29/aWtyQ89hhuq2JkcY9fK_N")
+        );
+        assert_eq!(
+            identity_of_key("2026/09/29/aWtyQ89hhuq2JkcY9fK_N"),
+            Some("2026/09/29/aWtyQ89hhuq2JkcY9fK_N")
+        );
+        assert_eq!(identity_of_key(".DS_Store"), None);
+        assert_eq!(identity_of_key("2026/09/29/short.rap"), None);
+        assert_eq!(identity_of_key("default/notes/readme.md"), None);
     }
 
     #[test]

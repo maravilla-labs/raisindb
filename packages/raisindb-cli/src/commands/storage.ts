@@ -7,8 +7,9 @@ import { apiCall, type FetchLike } from './admin-util.js';
  * Every write keeps the previous version of the node and of each index row it
  * touches. GC removes versions older than the retention window — keeping HEAD,
  * every revision inside the window, and every tag and branch fork point —
- * deletes the upload blobs only those versions referenced, and compacts the
- * database so the space is returned to the disk.
+ * bounds oversized stored job results, deletes the upload blobs nothing
+ * references any more, and compacts the database so the space is returned to
+ * the disk.
  */
 
 export interface GcOptions {
@@ -31,6 +32,13 @@ export interface GcOutcome {
   oplog_entries_deleted: number;
   jobs_deleted: number;
   orphaned_blobs: string[];
+  /** Absent from servers older than the blob sweep. */
+  versions_retained?: number;
+  bytes_retained?: number;
+  job_results_bounded?: number;
+  job_result_bytes_saved?: number;
+  unreferenced_blobs?: number;
+  unreferenced_blob_bytes?: number;
   blobs_deleted: number;
   blob_bytes_deleted: number;
   live_sst_bytes_before: number;
@@ -103,8 +111,24 @@ export async function repoGc(repo: string, options: GcOptions = {}, fetchImpl?: 
   }
   if (o.oplog_entries_deleted > 0) console.log(`  operation log       ${o.oplog_entries_deleted} entries`);
   if (o.jobs_deleted > 0) console.log(`  job history         ${o.jobs_deleted} finished jobs`);
+  if (o.job_results_bounded) {
+    console.log(
+      `  job results         ${o.job_results_bounded} bounded (${formatBytes(o.job_result_bytes_saved ?? 0)})`
+    );
+  }
+  if (o.versions_retained) {
+    console.log(
+      `Still inside the retention window: ${o.versions_retained} superseded versions ` +
+        `(${formatBytes(o.bytes_retained ?? 0)}).`
+    );
+  }
   if (o.dry_run) {
     console.log(`Blobs only old versions reference: ${o.orphaned_blobs.length}`);
+    if (o.unreferenced_blobs) {
+      console.log(
+        `Blobs nothing references: ${o.unreferenced_blobs} (${formatBytes(o.unreferenced_blob_bytes ?? 0)})`
+      );
+    }
     console.log('Dry run: nothing was changed.');
   } else {
     console.log(`Deleted ${o.blobs_deleted} orphaned blobs (${formatBytes(o.blob_bytes_deleted)}).`);

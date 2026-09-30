@@ -313,3 +313,123 @@ async fn orphaned_blobs_are_reported_only_when_nothing_mentions_them() -> Result
     assert_eq!(report.orphaned_blobs, vec![old_key.to_string()]);
     Ok(())
 }
+
+#[tokio::test]
+async fn the_sweep_deletes_listed_blobs_nothing_mentions() -> Result<()> {
+    use raisin_binary::{BinaryStorage, FilesystemBinaryStorage};
+    use raisin_rocksdb::management::history_gc::run_gc_and_sweep_blobs;
+
+    let (storage, tmp) = setup().await?;
+    let uploads = tmp.path().join("uploads");
+    let bin = FilesystemBinaryStorage::new(&uploads, None);
+    let stored = |ext: &'static str, tenant: &'static str| {
+        let bin = &bin;
+        async move {
+            bin.put_bytes(b"bytes", None, Some(ext), None, Some(tenant))
+                .await
+                .unwrap()
+                .key
+        }
+    };
+    let named = stored("rap", TENANT).await;
+    let as_url = stored("jpg", TENANT).await;
+    let orphan = stored("rap", TENANT).await;
+    let other_tenant = stored("rap", "other").await;
+    std::fs::write(uploads.join("notes.txt"), b"not a blob").unwrap();
+
+    let mut n = node("pkg", "pkg");
+    n.properties
+        .insert("key".into(), PropertyValue::String(named.clone()));
+    n.properties.insert(
+        "thumb_url".into(),
+        PropertyValue::String(format!("http://localhost/files/{as_url}")),
+    );
+    put(&storage, &n).await?;
+
+    let exists = |key: &str| uploads.join(key).exists();
+    let opts = GcOptions {
+        min_age: Duration::ZERO,
+        blob_min_age: Duration::ZERO,
+        ..GcOptions::default()
+    };
+
+    // Too young: an upload is stored before the node that names it.
+    let young = run_gc_and_sweep_blobs(storage.clone(), &bin, GcOptions::default()).await?;
+    assert_eq!(young.unreferenced_blobs, 0);
+    assert!(exists(&orphan));
+
+    let dry = run_gc_and_sweep_blobs(
+        storage.clone(),
+        &bin,
+        GcOptions {
+            dry_run: true,
+            ..opts.clone()
+        },
+    )
+    .await?;
+    assert_eq!(dry.blobs_listed, Some(5));
+    assert_eq!(dry.unreferenced_blobs, 2);
+    assert_eq!(dry.blobs_deleted, 0);
+    assert!(exists(&orphan) && exists(&other_tenant));
+
+    // A tenant-scoped run only judges that tenant's blobs.
+    let scoped = run_gc_and_sweep_blobs(
+        storage.clone(),
+        &bin,
+        GcOptions {
+            tenant: Some(TENANT.into()),
+            ..opts.clone()
+        },
+    )
+    .await?;
+    assert_eq!(scoped.blobs_deleted, 1);
+    assert!(!exists(&orphan));
+    assert!(exists(&other_tenant));
+
+    // A stale derived-index row names no node version: it does not keep a blob.
+    let stale = format!(
+        "{TENANT}\0{REPO}\0{BRANCH}\0{WORKSPACE}\0prop\0resource\0{{\"key\":\"{other_tenant}\"}}\0rev\0pkg"
+    );
+    let cf = storage.db().cf_handle("property_index").unwrap();
+    storage.db().put_cf(cf, stale.as_bytes(), b"").unwrap();
+
+    let global = run_gc_and_sweep_blobs(storage.clone(), &bin, opts).await?;
+    assert_eq!(global.blobs_deleted, 1);
+    assert_eq!(global.blob_bytes_deleted, 5);
+    assert!(!exists(&other_tenant));
+
+    // Named by key, mentioned as a URL, or not blob-shaped: all kept.
+    assert!(exists(&named));
+    assert!(exists(&as_url));
+    assert!(uploads.join("notes.txt").exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn retained_history_is_reported_not_deleted() -> Result<()> {
+    let (storage, _tmp) = setup().await?;
+    for v in 1..=3 {
+        put(&storage, &node("page", &format!("v{v}"))).await?;
+    }
+    // A window reaching past every write keeps the history and says so.
+    let report = run_history_gc(
+        &storage,
+        &GcOptions {
+            retention_override: Some(HistoryRetention {
+                keep_days: Some(1),
+                keep_revisions: None,
+            }),
+            min_age: Duration::ZERO,
+            ..GcOptions::default()
+        },
+    )?;
+    assert_eq!(report.versions_deleted, 0);
+    assert_eq!(report.column_families["nodes"].versions_retained, 2);
+    assert!(report.bytes_retained > 0);
+    assert_eq!(node_versions(&storage, "page"), 3);
+
+    let report = run_history_gc(&storage, &aggressive())?;
+    assert_eq!(report.column_families["nodes"].versions_deleted, 2);
+    assert_eq!(report.column_families["nodes"].versions_retained, 0);
+    Ok(())
+}

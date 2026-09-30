@@ -119,6 +119,85 @@ impl JobMetadataStore {
         Ok(deleted_count)
     }
 
+    /// Bound the persisted result of every finished job that completed
+    /// before `completed_before` (see [`super::MAX_PERSISTED_RESULT_BYTES`]).
+    ///
+    /// Results written before the bound existed can be tens of kilobytes each
+    /// (a trigger evaluation carried the whole changed node); this rewrites
+    /// them in place with the same truncation new results get. Only terminal
+    /// jobs are touched — nothing updates them any more, so the rewrite does
+    /// not race a status change. Returns the number of results bounded and
+    /// the stored bytes that saved.
+    pub fn bound_stored_results(
+        &self,
+        tenant_filter: Option<&str>,
+        completed_before: DateTime<Utc>,
+        dry_run: bool,
+    ) -> Result<(u64, u64)> {
+        let cf_metadata = cf_handle(&self.db, cf::JOB_METADATA)?;
+        let prefix = tenant_filter.map(job_tenant_prefix);
+        let iter = if let Some(ref p) = prefix {
+            crate::prefix_scan(&self.db, cf_metadata, p.as_slice())
+        } else {
+            self.db
+                .iterator_cf(cf_metadata, rocksdb::IteratorMode::Start)
+        };
+
+        let (mut bounded, mut saved) = (0u64, 0u64);
+        let mut batch = WriteBatch::default();
+        let mut pending = 0usize;
+        for item in iter {
+            let (key_bytes, value_bytes) = item.map_err(|e| {
+                raisin_error::Error::storage(format!("Failed to iterate job metadata: {}", e))
+            })?;
+            if let Some(ref p) = prefix {
+                if !key_bytes.starts_with(p) {
+                    break;
+                }
+            }
+            // Small values cannot hold an oversized result; skip the decode.
+            if is_job_history_key(&key_bytes)
+                || value_bytes.len() <= super::MAX_PERSISTED_RESULT_BYTES
+            {
+                continue;
+            }
+            let Ok(entry) = rmp_serde::from_slice::<PersistedJobEntry>(&value_bytes) else {
+                continue;
+            };
+            let finished = matches!(
+                entry.status,
+                JobStatus::Completed | JobStatus::Failed(_) | JobStatus::Cancelled
+            ) && entry.completed_at.is_some_and(|at| at < completed_before);
+            if !finished {
+                continue;
+            }
+            let std::borrow::Cow::Owned(entry) = super::result_bounds::bounded(&entry) else {
+                continue;
+            };
+            let value = rmp_serde::to_vec(&entry).map_err(|e| {
+                raisin_error::Error::storage(format!("Failed to serialize job metadata: {}", e))
+            })?;
+            bounded += 1;
+            saved += value_bytes.len().saturating_sub(value.len()) as u64;
+            if !dry_run {
+                batch.put_cf(cf_metadata, &key_bytes, value);
+                pending += 1;
+                if pending >= 1_000 {
+                    self.db.write(std::mem::take(&mut batch)).map_err(|e| {
+                        raisin_error::Error::storage(format!("Failed to bound job results: {}", e))
+                    })?;
+                    pending = 0;
+                }
+            }
+        }
+        if pending > 0 {
+            self.db.write(batch).map_err(|e| {
+                raisin_error::Error::storage(format!("Failed to bound job results: {}", e))
+            })?;
+        }
+        Ok((bounded, saved))
+    }
+
     /// Delete specific job metadata and context for a tenant.
     pub fn delete(&self, tenant: &str, job_id: &JobId) -> Result<()> {
         let cf_metadata = cf_handle(&self.db, cf::JOB_METADATA)?;

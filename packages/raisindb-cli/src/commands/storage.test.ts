@@ -37,6 +37,24 @@ describe('repoGc', () => {
     expect(JSON.parse(String(calls[0].init.body))).toEqual({ dry_run: true, keep_days: 3 });
   });
 
+  it('reports retained history, bounded job results and unreferenced blobs', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { impl } = fakeFetch(200, {
+      ...outcome,
+      versions_retained: 7,
+      bytes_retained: 2048,
+      job_results_bounded: 3,
+      job_result_bytes_saved: 1024,
+      unreferenced_blobs: 2,
+      unreferenced_blob_bytes: 3 * 1024 ** 2,
+    });
+    await repoGc('website', { dryRun: true }, impl);
+    const printed = log.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(printed).toContain('Still inside the retention window: 7 superseded versions (2.0 KB)');
+    expect(printed).toContain('job results         3 bounded (1.0 KB)');
+    expect(printed).toContain('Blobs nothing references: 2 (3.0 MB)');
+  });
+
   it('rejects a malformed count before calling the server', async () => {
     const { impl, calls } = fakeFetch(200, outcome);
     await expect(repoGc('website', { keepRevisions: 'many' }, impl)).rejects.toThrow(/--keep-revisions/);
