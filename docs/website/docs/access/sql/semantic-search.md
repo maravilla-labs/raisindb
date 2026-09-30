@@ -631,6 +631,17 @@ document_prefix
 max_embeddings_per_repo  unlimited
 ```
 
+`SHOW EMBEDDING CONFIG` is for administrators (and the system). Code that only
+needs the cutoff, for example to scale its own distance bands to the model, reads
+it with `EMBEDDING_MAX_DISTANCE()`. Any caller may: it returns the configured
+`DEFAULT_MAX_DISTANCE`, else the engine default, i.e. the cutoff that caller's own
+`KNN` / `HYBRID_SEARCH` get when they name no `max_distance`. It works inside
+functions too, also under a visitor's tool grant:
+
+```sql
+SELECT EMBEDDING_MAX_DISTANCE() AS d;   -- 0.78 with EmbeddingGemma configured
+```
+
 ```sql
 TEST EMBEDDING CONNECTION;
 -- result "Connection successful"  dimensions 1024  model bge-m3  success true

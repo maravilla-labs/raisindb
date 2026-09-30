@@ -183,6 +183,53 @@ impl SqlFunction for RaisinCurrentUserFunction {
     }
 }
 
+/// The vector cutoff this tenant's KNN / HYBRID_SEARCH apply when a query
+/// names no `max_distance`: the configured `DEFAULT_MAX_DISTANCE`, else the
+/// engine default.
+///
+/// Distances depend on the embedding model (EmbeddingGemma answers ~1.3x
+/// farther than bge-m3), so code that derives its own cuts and bands from a
+/// calibrated distance needs this number to scale them. Unlike
+/// `SHOW EMBEDDING CONFIG` (administrators only) it is readable by every
+/// caller, including a function running under a visitor's tool grant: it is
+/// the cutoff that caller's own queries get anyway.
+///
+/// # SQL Signature
+/// `EMBEDDING_MAX_DISTANCE() -> DOUBLE`
+///
+/// # Examples
+/// ```sql
+/// SELECT EMBEDDING_MAX_DISTANCE();  -- 0.78 with EmbeddingGemma configured
+/// ```
+pub struct EmbeddingMaxDistanceFunction;
+
+impl SqlFunction for EmbeddingMaxDistanceFunction {
+    fn name(&self) -> &str {
+        "EMBEDDING_MAX_DISTANCE"
+    }
+
+    fn category(&self) -> FunctionCategory {
+        FunctionCategory::System
+    }
+
+    fn signature(&self) -> &str {
+        "EMBEDDING_MAX_DISTANCE() -> DOUBLE"
+    }
+
+    #[inline]
+    fn evaluate(&self, args: &[TypedExpr], _row: &Row) -> Result<Literal, Error> {
+        if !args.is_empty() {
+            return Err(Error::Validation(
+                "EMBEDDING_MAX_DISTANCE requires exactly 0 arguments".to_string(),
+            ));
+        }
+        let configured = get_function_context().and_then(|ctx| ctx.default_max_distance);
+        Ok(Literal::Double(f64::from(
+            configured.unwrap_or(raisin_hnsw::DEFAULT_MAX_DISTANCE),
+        )))
+    }
+}
+
 /// Return session user name (PostgreSQL compatibility)
 ///
 /// # SQL Signature
@@ -249,6 +296,7 @@ pub fn register_functions(registry: &mut FunctionRegistry) {
     registry.register(Box::new(CurrentSchemaFunction));
     registry.register(Box::new(CurrentDatabaseFunction));
     registry.register(Box::new(RaisinCurrentUserFunction));
+    registry.register(Box::new(EmbeddingMaxDistanceFunction));
     registry.register(Box::new(SessionUserFunction));
     registry.register(Box::new(CurrentCatalogFunction));
 }

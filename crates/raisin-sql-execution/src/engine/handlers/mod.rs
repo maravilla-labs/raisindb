@@ -559,8 +559,14 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
     /// Call this from EVERY path that sets the function context — `execute` and
     /// the batch path had verbatim copies of this logic before.
     pub(crate) async fn install_function_context(&self, sql: &str, branch: &str) {
+        // Not a secret and not per user: every caller may learn the distance
+        // its own vector queries are cut at (`EMBEDDING_MAX_DISTANCE()`).
+        let default_max_distance = self.tenant_default_max_distance();
         let Some(auth) = self.auth_context.as_ref() else {
-            set_function_context(FunctionContext::default());
+            set_function_context(FunctionContext {
+                default_max_distance,
+                ..FunctionContext::default()
+            });
             return;
         };
 
@@ -574,6 +580,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         set_function_context(FunctionContext {
             user_id: auth.user_id.clone(),
             user_node,
+            default_max_distance,
         });
     }
 

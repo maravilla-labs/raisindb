@@ -578,6 +578,14 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             AnalyzedStatement::SpatialAdmin(ref stmt) => {
                 return self.execute_spatial_admin(stmt).await;
             }
+            AnalyzedStatement::Query(ref q) if q.from.is_empty() => {
+                // A SELECT without FROM (`SELECT RAISIN_CURRENT_USER()`,
+                // `SELECT EMBEDDING_MAX_DISTANCE()`): nothing to plan. The batch
+                // path already evaluated these; a function's `sql.query` comes
+                // through here and failed with "FROM clause has no tables".
+                self.install_function_context(sql, &self.branch).await;
+                return self.execute_query(&analyzed).await;
+            }
             AnalyzedStatement::Query(_) => {
                 // Continue with query execution below
             }
