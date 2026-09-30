@@ -30,6 +30,7 @@ impl TenantAuthConfigResponse {
             tenant_id: config.tenant_id.clone(),
             local_auth: LocalAuthConfig {
                 enabled: config.local_auth_enabled(),
+                allow_registration: config.access_settings.allow_registration,
             },
             magic_link: MagicLinkConfig {
                 enabled: config.magic_link_enabled(),
@@ -73,6 +74,11 @@ impl TenantAuthConfigResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LocalAuthConfig {
     pub enabled: bool,
+    /// Open, repo-less self-registration (`POST /auth/register`). Stored as
+    /// `AccessSettings.allow_registration`. Repo-scoped sign-up is governed by
+    /// each repo's `RepoAuthConfig.allow_registration` instead.
+    #[serde(default)]
+    pub allow_registration: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

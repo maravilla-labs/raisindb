@@ -15,6 +15,35 @@
 #[cfg(test)]
 mod tests {
     use crate::auth::config::{AuthProviderConfig, PasswordPolicy, TenantAuthConfig};
+    use crate::auth::{AccessSettings, RepoAuthConfig};
+
+    /// Self-registration is closed unless a repo opts in, and nobody is handed
+    /// the blanket-read `viewer` role by default.
+    #[test]
+    fn repo_auth_defaults_are_closed_and_never_viewer() {
+        let d = RepoAuthConfig::default();
+        assert!(!d.allow_registration);
+        assert_eq!(d.default_roles, vec!["authenticated_user".to_string()]);
+
+        // A stored config that omits the properties reads the same way.
+        let stored: RepoAuthConfig =
+            serde_json::from_value(serde_json::json!({ "repo_id": "shop" })).unwrap();
+        assert!(!stored.allow_registration);
+        assert_eq!(stored.default_roles, vec!["authenticated_user".to_string()]);
+
+        let open: RepoAuthConfig = serde_json::from_value(
+            serde_json::json!({ "repo_id": "shop", "allow_registration": true }),
+        )
+        .unwrap();
+        assert!(open.allow_registration);
+    }
+
+    #[test]
+    fn tenant_open_registration_defaults_off() {
+        let d = AccessSettings::default();
+        assert!(!d.allow_registration);
+        assert_eq!(d.default_roles, vec!["authenticated_user".to_string()]);
+    }
 
     #[test]
     fn test_password_policy_validation() {

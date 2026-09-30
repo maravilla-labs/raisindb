@@ -61,6 +61,41 @@ async fn http_post(base_url: &str, path: &str, token: &str, body: Value) -> Resu
     serde_json::from_str(&text).map_err(|_| text)
 }
 
+/// Write `/config/repos/{repo}` in `raisin:system` with `allow_registration:
+/// true`, creating the parent folders first (a 409 means one already exists).
+async fn open_registration(base_url: &str, repo: &str, token: &str) {
+    let ws = format!("/api/repository/{}/main/head/raisin:system", repo);
+    let commit = json!({ "message": "open registration", "actor": "test" });
+    for (parent, name) in [
+        (format!("{}/", ws), "config"),
+        (format!("{}/config", ws), "repos"),
+    ] {
+        if let Err(e) = http_post(
+            base_url,
+            &parent,
+            token,
+            json!({ "name": name, "node_type": "raisin:Folder", "properties": {}, "commit": commit }),
+        )
+        .await
+        {
+            assert!(e.starts_with("409"), "creating folder {name} failed: {e}");
+        }
+    }
+    http_post(
+        base_url,
+        &format!("{}/config/repos", ws),
+        token,
+        json!({
+            "name": repo,
+            "node_type": "raisin:RepoAuthConfig",
+            "properties": { "repo_id": repo, "allow_registration": true },
+            "commit": commit
+        }),
+    )
+    .await
+    .expect("creating the RepoAuthConfig failed");
+}
+
 async fn http_put(base_url: &str, path: &str, token: &str, body: Value) -> Result<Value, String> {
     let response = Client::new()
         .put(format!("{}{}", base_url, path))
@@ -751,7 +786,10 @@ async fn spatial_admin_denies_non_admin_callers() {
 
     insert_places(&base, REPO, &admin_token).await;
 
-    // A registered identity user: authenticated, but only viewer/authenticated_user.
+    // Self-registration is off unless the repo opts in, so open it first.
+    open_registration(&base, REPO, &admin_token).await;
+
+    // A registered identity user: authenticated, but only authenticated_user.
     let registered: Value = http_post(
         &base,
         &format!("/auth/{}/register", REPO),
