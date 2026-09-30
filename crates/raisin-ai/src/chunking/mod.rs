@@ -39,6 +39,42 @@ use text_splitter::{ChunkConfig, ChunkSizer, TextSplitter};
 /// token count for reporting.
 const CHARS_PER_TOKEN: usize = 4;
 
+/// Whether a chunk of EXTRACTED document text carries enough language to be
+/// worth a vector.
+///
+/// A PDF's text layer is not always prose: a statistics sheet is a grid of
+/// numbers, a site plan is parcel ids, a scanned form is OCR debris. Embedded,
+/// such a chunk means nothing in particular — and a vector that means nothing in
+/// particular sits close to EVERY short query. Measured on a real corpus, the
+/// number tables of two passenger-statistics PDFs were the nearest neighbours of
+/// "CEO", "Palma", "Barrierefrei" and "Führung" alike, pushing the actual answers
+/// down the list.
+///
+/// The gate: at least half of the non-whitespace characters are letters, and
+/// there are at least [`MIN_CONTENT_WORDS`] words of two or more letters.
+/// Deliberately generous — a sentence with a date and a price passes easily.
+pub fn is_contentful(text: &str) -> bool {
+    let mut non_space = 0usize;
+    let mut letters = 0usize;
+    for c in text.chars().filter(|c| !c.is_whitespace()) {
+        non_space += 1;
+        if c.is_alphabetic() {
+            letters += 1;
+        }
+    }
+    if non_space == 0 || letters * 2 < non_space {
+        return false;
+    }
+    let words = text
+        .split(|c: char| !c.is_alphabetic())
+        .filter(|w| w.chars().count() >= 2)
+        .count();
+    words >= MIN_CONTENT_WORDS
+}
+
+/// See [`is_contentful`].
+pub const MIN_CONTENT_WORDS: usize = 4;
+
 /// Represents a single text chunk with metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextChunk {
@@ -322,6 +358,35 @@ pub enum ChunkingError {
 // =============================================================================
 // Tests
 // =============================================================================
+
+#[cfg(test)]
+mod contentful_tests {
+    use super::is_contentful;
+
+    #[test]
+    fn prose_passes_even_with_numbers_in_it() {
+        assert!(is_contentful(
+            "Die Anteile an der Gesellschaft liegen zu 66% bei der Flughafen Stuttgart GmbH."
+        ));
+        assert!(is_contentful(
+            "Ab 01.02.2026 kostet der Wochentarif 73,00 € auf P3."
+        ));
+    }
+
+    #[test]
+    fn number_grids_parcel_ids_and_debris_fail() {
+        assert!(!is_contentful(
+            "Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dez TOTAL 384 346 403 1404 4145 2829 3266 3454 1370 1792 1093 2095"
+        ));
+        assert!(!is_contentful(
+            "3126/7\n\n3 3 3 3\n\n1 1 1\n\n1 1 1 1 1 9 1 1 1 1 1"
+        ));
+        assert!(!is_contentful("ag/R 42"));
+        assert!(!is_contentful("![Image 1 from page 1]()"));
+        assert!(!is_contentful(""));
+        assert!(!is_contentful("   \n  "));
+    }
+}
 
 #[cfg(test)]
 mod tests {

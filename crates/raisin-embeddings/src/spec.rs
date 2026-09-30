@@ -53,7 +53,10 @@ use ring::digest::SHA256;
 /// Do NOT bump it for a change that already shows up in another spec component
 /// (the text, the embedder, the chunking config) — that would re-embed the whole
 /// fleet's corpus for nothing.
-pub const EMBEDDING_PIPELINE_VERSION: u32 = 1;
+///
+/// History: `2` — the embedding text became deterministic (schema order, not
+/// map order) and contentless document chunks stopped being embedded.
+pub const EMBEDDING_PIPELINE_VERSION: u32 = 2;
 
 /// `JobContext` metadata key meaning "re-embed even if the spec says nothing
 /// changed".

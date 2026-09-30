@@ -517,6 +517,44 @@ impl HnswIndex {
         self.node_to_key.contains_key(node_id)
     }
 
+    /// How many vectors one spec of one node holds in this index.
+    ///
+    /// `1` for an unchunked default-spec entry (the bare node id), the length
+    /// of the dense run `{node}[#{spec}]#0, #1, …` otherwise, `0` when nothing
+    /// is indexed. Chunk ids are written dense from 0 (see
+    /// [`crate::chunk_id_set`]), so the count is found by probing: doubling,
+    /// then bisecting — O(log n) map lookups, no scan of the index.
+    ///
+    /// A pure read, like [`Self::contains`].
+    pub fn chunk_count(&self, node_id: &str, spec: Option<&str>) -> usize {
+        let has = |i: usize| {
+            self.node_to_key
+                .contains_key(&crate::chunk_index_id(node_id, spec, i))
+        };
+        if !has(0) {
+            return usize::from(spec.is_none() && self.contains(node_id));
+        }
+        // Invariant: has(lo) and !has(hi).
+        let mut lo = 0usize;
+        let mut hi = 1usize;
+        while has(hi) {
+            lo = hi;
+            hi = hi.saturating_mul(2);
+            if hi > 1 << 24 {
+                return lo + 1;
+            }
+        }
+        while hi - lo > 1 {
+            let mid = lo + (hi - lo) / 2;
+            if has(mid) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        lo + 1
+    }
+
     /// Search for k nearest neighbors, with no workspace restriction.
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<SearchResult>> {
         Ok(self.search_scoped(query, k, &[])?.results)
@@ -823,6 +861,50 @@ mod tests {
 
     fn create_test_vector(dims: usize, seed: f32) -> Vec<f32> {
         (0..dims).map(|i| (i as f32 + seed) / dims as f32).collect()
+    }
+
+    #[test]
+    fn chunk_count_counts_each_spec_of_a_node() {
+        let mut index = HnswIndex::new(8);
+        let mut add = |id: String| {
+            index
+                .add(
+                    id,
+                    "ws".to_string(),
+                    HLC::new(1, 0),
+                    create_test_vector(8, 1.0),
+                )
+                .unwrap()
+        };
+        add("single".to_string());
+        for i in 0..37 {
+            add(crate::chunk_index_id("page", None, i));
+        }
+        add("page".to_string()); // not a chunk: an unchunked sibling id must not confuse the count
+        for i in 0..5 {
+            add(crate::chunk_index_id("pdf", Some("doc"), i));
+        }
+        add("pdf".to_string());
+
+        assert_eq!(index.chunk_count("single", None), 1);
+        assert_eq!(index.chunk_count("page", None), 37);
+        assert_eq!(index.chunk_count("pdf", Some("doc")), 5);
+        assert_eq!(index.chunk_count("pdf", None), 1);
+        assert_eq!(index.chunk_count("missing", None), 0);
+        assert_eq!(index.chunk_count("single", Some("doc")), 0);
+        for n in 1..=9 {
+            let mut idx = HnswIndex::new(8);
+            for i in 0..n {
+                idx.add(
+                    crate::chunk_index_id("x", None, i),
+                    "ws".to_string(),
+                    HLC::new(1, 0),
+                    create_test_vector(8, i as f32),
+                )
+                .unwrap();
+            }
+            assert_eq!(idx.chunk_count("x", None), n, "n = {n}");
+        }
     }
 
     #[test]

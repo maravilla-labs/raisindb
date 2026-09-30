@@ -237,6 +237,35 @@ impl FusedHit {
     }
 }
 
+/// The distance a vector hit is RANKED by in a fused search: its own distance
+/// scaled by how many vectors its document had a chance with.
+///
+/// `vectors` is the number of vectors the winning spec of that document holds
+/// (1 for an unchunked one). A single vector is unchanged. The reported
+/// `vector_distance` is never this value — it stays the measurement.
+pub fn length_prior_distance(distance: f32, vectors: usize, strength: f32) -> f32 {
+    distance * (1.0 + strength * (vectors.max(1) as f32).ln())
+}
+
+/// Stable re-rank of one vector leg's hits by [`length_prior_distance`].
+///
+/// `counts[i]` belongs to `hits[i]`. Stable, so equal adjusted distances keep
+/// the index's own order.
+pub fn rank_by_length_prior<T>(
+    hits: Vec<T>,
+    counts: &[usize],
+    distance: impl Fn(&T) -> f32,
+    strength: f32,
+) -> Vec<T> {
+    let mut keyed: Vec<(f32, T)> = hits
+        .into_iter()
+        .zip(counts.iter().copied().chain(std::iter::repeat(1)))
+        .map(|(h, n)| (length_prior_distance(distance(&h), n, strength), h))
+        .collect();
+    keyed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    keyed.into_iter().map(|(_, h)| h).collect()
+}
+
 /// `score = Σ_legs weight_leg / (RRF_K + rank_leg)`.
 ///
 /// With one full-text and one vector leg at the default `1.0` weights this is
@@ -383,6 +412,41 @@ mod tests {
 
     /// The two-leg default must stay numerically identical to what shipped, or
     /// every published score changes under a refactor that promised not to.
+    #[test]
+    fn one_vector_is_unchanged_and_more_vectors_rank_further() {
+        assert_eq!(length_prior_distance(0.4, 1, 0.05), 0.4);
+        assert_eq!(length_prior_distance(0.4, 0, 0.05), 0.4);
+        assert!(length_prior_distance(0.4, 60, 0.05) > length_prior_distance(0.4, 2, 0.05));
+        assert_eq!(length_prior_distance(0.4, 60, 0.0), 0.4);
+    }
+
+    /// The case the prior exists for: a long PDF whose best chunk is a hair
+    /// closer than a short page's must not outrank it on chunk count alone,
+    /// while a clearly closer long document still wins.
+    #[test]
+    fn a_long_document_wins_only_when_clearly_closer() {
+        // (name, distance, vectors)
+        let hits = vec![("pdf", 0.44_f32, 60usize), ("page", 0.45, 2)];
+        let counts: Vec<usize> = hits.iter().map(|h| h.2).collect();
+        let ranked = rank_by_length_prior(hits, &counts, |h| h.1, 0.05);
+        assert_eq!(ranked[0].0, "page");
+
+        let hits = vec![("pdf", 0.30_f32, 60usize), ("page", 0.45, 2)];
+        let counts: Vec<usize> = hits.iter().map(|h| h.2).collect();
+        let ranked = rank_by_length_prior(hits, &counts, |h| h.1, 0.05);
+        assert_eq!(ranked[0].0, "pdf");
+    }
+
+    #[test]
+    fn ties_keep_the_index_order() {
+        let hits = vec![("a", 0.5_f32), ("b", 0.5), ("c", 0.5)];
+        let ranked = rank_by_length_prior(hits, &[1, 1, 1], |h| h.1, 0.05);
+        assert_eq!(
+            ranked.iter().map(|h| h.0).collect::<Vec<_>>(),
+            vec!["a", "b", "c"]
+        );
+    }
+
     #[test]
     fn default_weights_reproduce_plain_rrf() {
         let a = key("w", "a");

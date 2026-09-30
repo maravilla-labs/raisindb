@@ -71,3 +71,24 @@ pub const SEARCH_LEG_CAP: usize = 2000;
 ///   very code presented as plausible ranking with a NULL `vector_rank` and
 ///   nothing logged.
 pub const RRF_K: f64 = 60.0;
+
+/// Strength of the vector leg's LENGTH PRIOR in a fused (`HYBRID_SEARCH`)
+/// ranking — see [`fusion::length_prior_distance`].
+///
+/// A document's vector-leg distance is its BEST chunk's. A 60-chunk PDF gets
+/// sixty draws at a short query and a one-screen page gets two, so the long
+/// document wins the leg on the number of its chunks, not on how well it
+/// answers — the same bias BM25's length normalisation removes from the
+/// lexical leg. The prior ranks the vector leg by
+/// `distance × (1 + LENGTH_PRIOR × ln(vectors))`.
+///
+/// Measured on a labelled set (43 judged queries, pages + PDFs, two
+/// different embedders): hybrid MRR +0.05 with bge-m3 and +0.04 with
+/// EmbeddingGemma at 0.05, flat between 0.03 and 0.06, and falling off past
+/// 0.10. Multiplicative rather than additive so it scales with the model's
+/// distance range (bge-m3 answers around 0.45, EmbeddingGemma around 0.65).
+///
+/// Applied only when a lexical leg is fused in. `KNN` alone keeps pure
+/// distance order: it is a similarity query, and `vector_distance` means what
+/// it says. Not an argument, for the reasons [`RRF_K`] is not one.
+pub const LENGTH_PRIOR: f32 = 0.05;

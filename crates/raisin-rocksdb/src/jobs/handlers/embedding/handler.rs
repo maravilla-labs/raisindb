@@ -455,6 +455,39 @@ impl EmbeddingJobHandler {
             whole(text)
         };
 
+        // Contentless chunks of a DOCUMENT body are not embedded (see
+        // `raisin_ai::chunking::is_contentful`): a number grid or OCR debris
+        // is a near neighbour of every short query. Only the `doc` spec — a
+        // page's own fields are authored text, and a table row of prices must
+        // stay findable. Never down to nothing: a document whose every chunk
+        // fails keeps them, so the spec does not silently lose all vectors.
+        let chunks: Vec<Chunk> = if spans_are_durable && chunks.len() > 1 {
+            let kept: Vec<Chunk> = chunks
+                .iter()
+                .filter(|(content, _, _)| raisin_ai::chunking::is_contentful(content))
+                .cloned()
+                .collect();
+            if kept.is_empty() || kept.len() == chunks.len() {
+                chunks
+            } else {
+                tracing::info!(
+                    node_id = %node_id,
+                    spec = %spec.unwrap_or("(default)"),
+                    dropped = chunks.len() - kept.len(),
+                    kept = kept.len(),
+                    "Skipped contentless document chunks"
+                );
+                // Renumbered so chunk ids stay dense; each chunk keeps its own
+                // byte span, so `chunk_text` still slices the right passage.
+                kept.into_iter()
+                    .enumerate()
+                    .map(|(i, (content, _, span))| (content, i, span))
+                    .collect()
+            }
+        } else {
+            chunks
+        };
+
         let total_chunks = chunks.len();
 
         // THE staleness identity: every input that decided these vectors, in one

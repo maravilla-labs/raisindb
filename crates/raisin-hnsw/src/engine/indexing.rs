@@ -104,6 +104,24 @@ impl HnswIndexingEngine {
         Ok(index.contains(node_id))
     }
 
+    /// [`crate::HnswIndex::chunk_count`] for several `(node_id, spec)` pairs,
+    /// under one read lock.
+    pub fn chunk_counts(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        partition: &PartitionId,
+        sources: &[(&str, Option<&str>)],
+    ) -> Result<Vec<usize>> {
+        let index_arc = self.get_or_load_index(tenant_id, repo_id, branch, partition)?;
+        let index = index_arc.read().unwrap();
+        Ok(sources
+            .iter()
+            .map(|(node_id, spec)| index.chunk_count(node_id, *spec))
+            .collect())
+    }
+
     /// Remove an embedding from one partition's index.
     ///
     /// Note: workspace_id is no longer needed as parameter since all workspaces

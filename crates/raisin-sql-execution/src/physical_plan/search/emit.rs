@@ -34,13 +34,16 @@ use crate::physical_plan::executor::{ExecutionContext, ExecutionError, Row, RowS
 
 use super::args::{parse_search_args, QueryInput, SearchArgs, SearchFunction};
 use super::chunk_text;
-use super::fusion::{fuse, FusedHit, HitKey, LegId, LegResult, VectorDetail, VectorDetails};
+use super::fusion::{
+    fuse, rank_by_length_prior, FusedHit, HitKey, LegId, LegResult, VectorDetail, VectorDetails,
+};
 use super::legs::{
     embed_query, resolve_vector_partitions, run_fulltext_leg, run_vector_leg, shape_type_pushdown,
     LegContext,
 };
 use super::scope::{resolve_scope, WorkspaceSet};
 use super::vector_of::{resolve_source, stored_vector_for_partition};
+use super::LENGTH_PRIOR;
 use super::{SEARCH_LEG_CAP, SEARCH_OVERFETCH};
 
 /// Row-level security for the search table functions.
@@ -613,6 +616,31 @@ pub async fn execute_parsed<S: Storage + 'static>(
                         max_distance,
                         granularity,
                     )?;
+                    // Fused with a lexical leg: rank by the length prior, so a
+                    // long document does not win the vector leg on its chunk
+                    // count (see `LENGTH_PRIOR`). KNN alone keeps pure distance.
+                    let results = if wants_fulltext {
+                        let sources: Vec<(&str, Option<&str>)> = results
+                            .iter()
+                            .map(|r| (r.node_id.as_str(), r.spec.as_deref()))
+                            .collect();
+                        let counts = engine
+                            .chunk_counts(
+                                &leg_context.tenant_id,
+                                &leg_context.repo_id,
+                                &leg_context.branch,
+                                partition,
+                                &sources,
+                            )
+                            .map_err(|e| {
+                                ExecutionError::Backend(format!(
+                                    "vector leg over partition {partition}: chunk counts: {e}"
+                                ))
+                            })?;
+                        rank_by_length_prior(results, &counts, |r| r.distance, LENGTH_PRIOR)
+                    } else {
+                        results
+                    };
                     let leg_id = LegId::Vector {
                         kind: partition.kind_char().unwrap_or('?'),
                         partition: partition.to_string(),
