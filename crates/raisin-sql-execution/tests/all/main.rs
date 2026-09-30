@@ -39,6 +39,7 @@ mod path_like_prefix_scan;
 mod pgq_paths_rocksdb;
 mod pgq_rls;
 mod profiling_test;
+mod rag_retrieval_sql;
 mod references_compose_tests;
 mod references_integration_tests;
 mod regex_and_quantified_ops;
