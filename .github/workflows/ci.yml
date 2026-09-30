@@ -195,3 +195,19 @@ jobs:
 
       - name: raisin-sql-execution ai-tools retrieval SQL
         run: cargo test -p raisin-sql-execution --test all rag_retrieval_sql
+
+      # Anonymous visitor chat: the visitor zone in row-level security, the
+      # anonymous tool grant, the WebSocket visitor chat (limits, leases,
+      # replies reaching only the owning session), and the conversation events
+      # those replies travel as.
+      - name: raisin-core visitor sessions and anonymous tool rights
+        run: cargo test -p raisin-core --lib -- rls_filter:: agent_auth::
+
+      - name: raisin-core agent auth (visitor turns)
+        run: cargo test -p raisin-core --test all agent_auth
+
+      - name: raisin-transport-ws visitor chat and token principals
+        run: cargo test -p raisin-transport-ws --lib
+
+      - name: raisin-storage conversation events
+        run: cargo test -p raisin-storage --lib conversation_events
