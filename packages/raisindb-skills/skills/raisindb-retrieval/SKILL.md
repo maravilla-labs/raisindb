@@ -232,9 +232,22 @@ ask({ question,
   gehört der Flughafen?" without the shareholder passage answered by making the
   towns on a directions page the owners.
 - `candidates` (default 24) — each leg's draw before filters, fusion and the
-  per-document cap (`max_per_document`, 3 in `ask`). It is the retrieval's
+  per-document cap (`max_per_document`, 2 in `ask`). It is the retrieval's
   cost: the engine draws 20x it per leg and redraws wider when a scope leaves
   it short.
+- **Confidence gating.** When the question's own words are in the top three
+  passages and the best one matched on words, `ask` skips expansion and the
+  grader (`attempts[0].confident`, `timings.grade_skipped`). Otherwise
+  expansion (short questions) adds ONE full-text query to the retrieval it
+  already has — no second hybrid search, no second query embedding.
+- **Term-coverage rerank.** After passage text (tables included) is read,
+  candidates are re-ordered by how many of the question's distinctive words
+  they contain (weighted by rarity among the candidates), so the Parken page
+  whose table has "Wochentarif" beats AGB PDFs that only share "Parken".
+- `ask` and `search-documents` run synchronously too (`execution_mode:
+  both`): a request/response caller need not poll.
+- The claim check also drops sentences that lean on a dropped one ("Diese
+  wird … genannt" after the sentence naming "diese" went).
 - `rewrite` (ask, default on) — the grader call and its one retry;
   `rewrite: false`, `expand: false` and `verify: false` leave `ask` with the
   answer call alone. The host gateway is synchronous, so these calls run in

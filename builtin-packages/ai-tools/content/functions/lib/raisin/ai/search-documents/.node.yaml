@@ -19,7 +19,7 @@ properties:
     `node_type`, `title` and a short `snippet` for building a link.
 
     Example: search-documents(query="what is the notice period for termination")
-  execution_mode: "async"
+  execution_mode: "both"
   enabled: true
   language: "wasm"
   entry_file: "../ask/main.wasm:search-documents"

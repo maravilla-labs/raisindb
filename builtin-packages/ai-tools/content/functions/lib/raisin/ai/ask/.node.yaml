@@ -24,7 +24,7 @@ properties:
     documents' own vocabulary and tried once more before giving up.
 
     Example: ask(question="how much notice do we have to give to terminate?")
-  execution_mode: "async"
+  execution_mode: "both"
   enabled: true
   language: "wasm"
   entry_file: "main.wasm:ask"
@@ -76,7 +76,7 @@ properties:
         description: "Extra full-text analyzers to search the base content with, e.g. ['en']."
       expand:
         type: "boolean"
-        description: "Widen the question with the documents' own terms before searching. Defaults to on for short or abbreviated questions."
+        description: "Widen the question with the documents' own terms (one model call, searched as one extra full-text query). Default: only for a short or abbreviated question whose first retrieval is not confident; true always, false never."
       limit:
         type: "integer"
         description: "How many passages to ground the answer in. Defaults to 8."
@@ -85,7 +85,7 @@ properties:
         description: "How many passages each search leg draws before filtering and ranking. Defaults to 24."
       max_per_document:
         type: "integer"
-        description: "At most this many passages from one document. Defaults to 3; 0 = no cap."
+        description: "At most this many passages from one document. Defaults to 2; 0 = no cap."
       model:
         type: "string"
         description: "Optional model id, as 'slug:model'. Defaults to the tenant's configured chat model."
@@ -94,10 +94,10 @@ properties:
         description: "Also include the graph neighbourhood of the question's subject. Costs a graph walk; off by default."
       rewrite:
         type: "boolean"
-        description: "Grade the first retrieval and, when it does not answer the question, rewrite the query and retrieve once more. One model call; on by default."
+        description: "Grade the first retrieval and, when it does not answer the question, rewrite the query and retrieve once more. One model call; on by default, and skipped when the first retrieval is confident (the question's words are in its top passages)."
       verify:
         type: "boolean"
-        description: "Check every sentence of the drafted answer against the passages and drop what they do not state. One extra model call; on by default."
+        description: "Check every sentence of the drafted answer against the passages and drop what they do not state, together with sentences that only make sense after a dropped one. One extra model call; on by default."
     required:
       - question
   output_schema:

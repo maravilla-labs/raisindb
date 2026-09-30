@@ -949,6 +949,14 @@ the indexed chunk never contained them. Passages and snippets are plain text, an
 citation markers are normalized to `[n]` whatever style the model used (`【1】`,
 `【1†L3-L5】`, `[1, 2]`).
 
+**Fewer model calls when the answer is plainly there.** When the question's own words
+appear in the top passages and the best passage matched on words, `ask` skips the
+expansion and the grader. Expansion, when it runs, adds one full-text query to the
+first retrieval instead of repeating it. After passage text (tables included) is read,
+candidates are re-ranked by how many of the question's rarer words they contain.
+The claim check drops a sentence together with the ones that refer back to it. Both
+functions can be invoked synchronously (`execution_mode: both`).
+
 **Timings.** Both functions return `timings`: milliseconds for every SQL leg, the
 batched passage reads and the total, and for `ask` each model call (`expand_ms`,
 `grade_ms`, `answer_ms`, `verify_ms`). Model calls run one after another (the
@@ -962,7 +970,7 @@ differently:
 - **image assets are not returned as passages** unless `include_kinds` names them;
 - lexical-only hits appear (with an excerpt) instead of being dropped;
 - `title` is the node's `title` property when it has one, else its name, as before;
-- each leg draws 24 candidates rather than `limit`, and `ask` takes at most three
+- each leg draws 24 candidates rather than `limit`, and `ask` takes at most two
   passages from one document;
 - a `workspaces` list is honoured — it used to be ignored in favour of `'ALL READABLE'`;
 - on a tenant with no embedder, retrieval runs full-text only (`mode: "fulltext"`)

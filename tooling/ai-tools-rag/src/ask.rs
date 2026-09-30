@@ -46,7 +46,9 @@
 
 use crate::backend::Backend;
 use crate::options::SearchOptions;
-use crate::retrieve::{ms_since, retrieve, Passage, Retrieval};
+use crate::retrieve::{
+    add_expansion_leg, assemble, confident, ms_since, retrieve, run_legs, Passage,
+};
 use serde_json::{json, Value};
 
 const GRAPH_FUNCTION: &str = "/lib/raisin/ai/graph-context";
@@ -58,7 +60,7 @@ pub const MAX_ATTEMPTS: usize = 2;
 
 /// Passages per document handed to the model. One long PDF must not fill the
 /// whole context while the page that answers sits at rank nine.
-const MAX_PER_DOCUMENT: usize = 3;
+const MAX_PER_DOCUMENT: usize = 2;
 
 pub const SYSTEM_PROMPT: &str = "You answer questions using only the numbered passages provided.
 
@@ -82,7 +84,7 @@ pub const VERIFIER_PROMPT: &str =
     "You check a drafted answer, sentence by sentence, against the passages it was drafted from.
 
 Return ONLY JSON, no prose and no code fence:
-{\"sentences\": [{\"n\": 1, \"supported\": true|false}]}
+{\"sentences\": [{\"n\": 1, \"supported\": true|false, \"depends_on\": []}]}
 
 Rules:
 - A sentence is supported only when one passage, or passages together,
@@ -92,6 +94,9 @@ Rules:
   the airport, a person named in a caption does not lead the company.
 - A sentence that makes no factual claim (it says the documents do not
   cover something, or points the reader to a document) is supported.
+- `depends_on` lists the earlier sentences a sentence only makes sense
+  after: it refers back to their subject (this, it, diese, dort, cette)
+  instead of naming it.
 - Judge every numbered sentence exactly once.";
 
 pub const GRADER_PROMPT: &str = "You judge whether retrieved passages can answer a question.
@@ -344,6 +349,26 @@ pub fn sentences(answer: &str) -> Vec<Vec<String>> {
     lines
 }
 
+/// Does the sentence open by pointing back ("Diese …", "It …", "Cette …")
+/// rather than naming its subject? Pure. Deliberately leaves out words that
+/// are just as often something else: German "Sie" (formal you), "Es gibt",
+/// "Das" as an article.
+pub fn opens_with_reference(sentence: &str) -> bool {
+    const REFERENCES: [&str; 38] = [
+        "diese", "dieser", "dieses", "diesem", "diesen", "dies", "er", "dort", "dabei", "damit",
+        "daher", "deshalb", "dazu", "ihr", "ihre", "sein", "seine", "letztere", "erstere", "this",
+        "these", "that", "those", "it", "its", "they", "their", "he", "she", "there", "ce",
+        "cette", "ces", "cela", "il", "elle", "ils", "elles",
+    ];
+    let first: String = sentence
+        .trim_start_matches(|c: char| !c.is_alphabetic())
+        .chars()
+        .take_while(|c| c.is_alphabetic())
+        .collect::<String>()
+        .to_lowercase();
+    REFERENCES.contains(&first.as_str())
+}
+
 /// Does this sentence cite a passage (`[3]`)? Pure.
 fn cites(sentence: &str) -> bool {
     let b = sentence.as_bytes();
@@ -416,6 +441,43 @@ fn verify(b: &dyn Backend, model: &str, question: &str, context: &str, draft: &s
         .filter_map(|v| v.get("n").and_then(Value::as_u64))
         .map(|n| n as usize)
         .collect();
+    // A sentence that leans on a dropped one goes with it: "Diese wird in den
+    // Stellenanzeigen als Betreiberin genannt" is supported on its own and
+    // meaningless once the sentence naming "diese" is gone. The checker's
+    // `depends_on` says so explicitly; a sentence opening with a pronoun or
+    // demonstrative right after a dropped one is caught even when it does not.
+    let depends: Vec<(usize, Vec<usize>)> = verdicts
+        .iter()
+        .filter_map(|v| {
+            let n = v.get("n").and_then(Value::as_u64)? as usize;
+            let on = v
+                .get("depends_on")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_u64)
+                        .map(|d| d as usize)
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some((n, on))
+        })
+        .collect();
+    let mut unsupported = unsupported;
+    for (i, sentence) in numbered.iter().enumerate() {
+        let n = i + 1;
+        if unsupported.contains(&n) {
+            continue;
+        }
+        let leans_on_dropped = depends
+            .iter()
+            .find(|(m, _)| *m == n)
+            .is_some_and(|(_, on)| on.iter().any(|d| unsupported.contains(d)));
+        let dangling = n > 1 && unsupported.contains(&(n - 1)) && opens_with_reference(sentence);
+        if leans_on_dropped || dangling {
+            unsupported.push(n);
+        }
+    }
     if unsupported.is_empty() {
         return Checked {
             answer: draft.to_string(),
@@ -546,67 +608,75 @@ pub fn ask(b: &dyn Backend, input: &Value) -> Result<Value, String> {
     let started = std::time::Instant::now();
     let mut timings = json!({});
 
-    // Expansion: "auto" (default) for short or abbreviated questions, or
-    // forced with true / off with false.
-    let wants_expansion = match input.get("expand") {
-        Some(Value::Bool(b)) => *b,
-        Some(Value::String(s)) if s == "always" => true,
-        Some(Value::String(s)) if s == "never" || s == "off" => false,
-        _ => needs_expansion(&question),
+    // Expansion: `true` always, `false` never, and by default ("auto") only
+    // for a short or abbreviated question whose first retrieval is not
+    // already confident — so the common case pays no expansion call, and the
+    // one that needs it (CEO -> Geschäftsführer) pays one full-text query on
+    // top of the retrieval it already has, not a second hybrid search.
+    let expand_mode = match input.get("expand") {
+        Some(Value::Bool(true)) => Some(true),
+        Some(Value::String(s)) if s == "always" => Some(true),
+        Some(Value::Bool(false)) => Some(false),
+        Some(Value::String(s)) if s == "never" || s == "off" => Some(false),
+        _ => None,
     };
-    if wants_expansion && opts.expansions.is_empty() {
-        let t = std::time::Instant::now();
-        opts.expansions = expand(b, &model, &question, opts.base_language.as_deref());
-        timings["expand_ms"] = json!(ms_since(t));
-    }
-    // The grader and its one rewrite: on by default, `rewrite: false` skips
-    // the model call when one retrieval is all a caller will wait for.
+    // The grader and its one rewrite: on by default but skipped when the
+    // retrieval is confident; `rewrite: false` never grades.
     let wants_rewrite = input
         .get("rewrite")
         .and_then(Value::as_bool)
         .unwrap_or(true);
 
-    let mut search_for = question.clone();
-    let mut found = Retrieval {
-        passages: Vec::new(),
-        mode: "hybrid",
-        terms: Vec::new(),
-        timings: json!({}),
-    };
     let mut attempts: Vec<Value> = Vec::new();
     let mut retrieval_timings: Vec<Value> = Vec::new();
-    let mut grade_ms = 0.0;
 
-    for attempt in 1..=MAX_ATTEMPTS {
-        let mut o = opts.clone();
-        o.query = search_for.clone();
-        found = retrieve(b, &o).map_err(|e| format!("Retrieval failed: {e}"))?;
-        retrieval_timings.push(found.timings.clone());
-        let mut entry = json!({ "query": search_for, "passages": found.passages.len() });
-        if attempt == 1 && !opts.expansions.is_empty() {
-            entry["expansions"] = json!(opts.expansions);
+    let first_retrieval = std::time::Instant::now();
+    let mut legs = run_legs(b, &opts).map_err(|e| format!("Retrieval failed: {e}"))?;
+    let mut found = assemble(b, &opts, &legs).map_err(|e| format!("Retrieval failed: {e}"))?;
+    let sure_at_first = confident(&found.passages, &question);
+    let expand_now = opts.expansions.is_empty()
+        && expand_mode.unwrap_or(needs_expansion(&question) && !sure_at_first);
+    if expand_now {
+        let t = std::time::Instant::now();
+        let terms = expand(b, &model, &question, opts.base_language.as_deref());
+        timings["expand_ms"] = json!(ms_since(t));
+        if !terms.is_empty() {
+            opts.expansions = terms;
+            add_expansion_leg(b, &opts, &mut legs, &opts.expansions.clone())
+                .map_err(|e| format!("Retrieval failed: {e}"))?;
+            found = assemble(b, &opts, &legs).map_err(|e| format!("Retrieval failed: {e}"))?;
         }
-        attempts.push(entry);
+    }
+    let mut first_timing = found.timings.clone();
+    first_timing["total_ms"] = json!(ms_since(first_retrieval));
+    retrieval_timings.push(first_timing);
+    let mut entry = json!({ "query": question, "passages": found.passages.len() });
+    if !opts.expansions.is_empty() {
+        entry["expansions"] = json!(opts.expansions);
+    }
+    let sure = confident(&found.passages, &question);
+    entry["confident"] = json!(sure);
+    attempts.push(entry);
 
-        if attempt == MAX_ATTEMPTS || !wants_rewrite {
-            break;
-        }
+    if wants_rewrite && sure {
+        timings["grade_skipped"] = json!("confident");
+    } else if wants_rewrite {
         let t = std::time::Instant::now();
         let verdict = grade(b, &model, &question, &found.passages);
-        grade_ms += ms_since(t);
-        if verdict.sufficient || verdict.rewrite.is_empty() {
-            break;
+        timings["grade_ms"] = json!(ms_since(t));
+        if !verdict.sufficient && !verdict.rewrite.is_empty() && MAX_ATTEMPTS > 1 {
+            b.log(&format!(
+                "[ask] rewriting \"{question}\" → \"{}\"",
+                verdict.rewrite
+            ));
+            let mut o = opts.clone();
+            o.query = verdict.rewrite.clone();
+            found = retrieve(b, &o).map_err(|e| format!("Retrieval failed: {e}"))?;
+            retrieval_timings.push(found.timings.clone());
+            attempts.push(json!({ "query": verdict.rewrite, "passages": found.passages.len() }));
         }
-        b.log(&format!(
-            "[ask] rewriting \"{search_for}\" → \"{}\"",
-            verdict.rewrite
-        ));
-        search_for = verdict.rewrite;
     }
     timings["retrieval"] = json!(retrieval_timings);
-    if wants_rewrite {
-        timings["grade_ms"] = json!(grade_ms);
-    }
 
     if found.passages.is_empty() {
         b.log(&format!(
@@ -1495,5 +1565,101 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("You judge")));
+    }
+
+    // ---- confidence, dependent sentences ---------------------------------
+
+    #[test]
+    fn a_sentence_leaning_on_a_dropped_one_is_dropped_with_it() {
+        let lines = "Betreiberin des Flughafens ist die Gemeinde Rheinmünster [2]. Diese wird in den Stellenanzeigen als Betreiberin genannt [1][6]. Die Anteile liegen zu 66% bei der Flughafen Stuttgart GmbH [3].";
+        let mut f = stub(HashMap::from([(LONG_Q, Ok(vec![msa()]))]), sufficient());
+        f.completion_fn = Box::new(move |req| {
+            let system = req["messages"][0]["content"].as_str().unwrap_or("");
+            let content = if system.contains("You judge") {
+                "{\"sufficient\": true}".to_string()
+            } else if system.contains("You check") {
+                // sentence 2 is "supported" on its own, and says nothing of depends_on
+                "{\"sentences\": [{\"n\": 1, \"supported\": false}, {\"n\": 2, \"supported\": true}, {\"n\": 3, \"supported\": true}]}".to_string()
+            } else {
+                lines.to_string()
+            };
+            Ok(json!({ "content": content, "model": "m" }))
+        });
+        let out = ask(&f, &json!({ "question": LONG_Q })).unwrap();
+        assert_eq!(out["verification"], json!("trimmed"));
+        assert_eq!(
+            out["answer"],
+            json!("Die Anteile liegen zu 66% bei der Flughafen Stuttgart GmbH [3].")
+        );
+        assert_eq!(out["dropped_claims"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn the_checkers_depends_on_drops_a_sentence_without_a_pronoun_too() {
+        let mut f = stub(HashMap::from([(LONG_Q, Ok(vec![msa()]))]), sufficient());
+        f.completion_fn = Box::new(|req| {
+            let system = req["messages"][0]["content"].as_str().unwrap_or("");
+            let content = if system.contains("You judge") {
+                "{\"sufficient\": true}"
+            } else if system.contains("You check") {
+                "{\"sentences\": [{\"n\": 1, \"supported\": true}, {\"n\": 2, \"supported\": false}, {\"n\": 3, \"supported\": true, \"depends_on\": [2]}]}"
+            } else {
+                "Notice is thirty days [1]. The landlord is Acme [1]. Acme also requires it in writing [1]."
+            };
+            Ok(json!({ "content": content, "model": "m" }))
+        });
+        let out = ask(&f, &json!({ "question": LONG_Q })).unwrap();
+        assert_eq!(out["answer"], json!("Notice is thirty days [1]."));
+    }
+
+    #[test]
+    fn a_confident_first_retrieval_skips_expansion_and_grading() {
+        let q = "Kündigungsfrist Vertrag";
+        let row = passage_row(
+            "/contracts/msa",
+            "n1",
+            0,
+            "Die Kündigungsfrist für diesen Vertrag beträgt dreißig Tage.",
+            true,
+        );
+        let f = stub(HashMap::from([(q, Ok(vec![row]))]), sufficient());
+        let out = ask(&f, &json!({ "question": q })).unwrap();
+        let systems: Vec<String> = f
+            .completions
+            .borrow()
+            .iter()
+            .map(|c| c["messages"][0]["content"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            !systems
+                .iter()
+                .any(|s| s.contains("You widen") || s.contains("You judge")),
+            "{systems:?}"
+        );
+        assert_eq!(out["timings"]["grade_skipped"], json!("confident"));
+        assert_eq!(out["attempts"][0]["confident"], json!(true));
+    }
+
+    #[test]
+    fn a_late_expansion_adds_one_full_text_query_not_a_second_hybrid_search() {
+        let f = ownership_site(MIXED_DRAFT);
+        ask(&f, &json!({ "question": OWNERSHIP, "base_language": "de" })).unwrap();
+        let legs: Vec<String> = f
+            .sqls()
+            .into_iter()
+            .filter(|s| s.contains("HYBRID_SEARCH"))
+            .collect();
+        assert_eq!(legs.len(), 2, "{legs:?}");
+        assert!(!legs[0].contains("vector_weight => 0") && legs[1].contains("vector_weight => 0"));
+    }
+
+    #[test]
+    fn references_are_recognised_but_formal_you_is_not() {
+        assert!(opens_with_reference("Diese wird genannt [1]."));
+        assert!(opens_with_reference("It is run by Acme [1]."));
+        assert!(!opens_with_reference("Sie können online reservieren [1]."));
+        assert!(!opens_with_reference(
+            "Das Parkhaus P3 liegt am Terminal [1]."
+        ));
     }
 }

@@ -1,5 +1,5 @@
 name: ai-tools
-version: 1.0.38
+version: 1.0.39
 title: AI Tools Package
 description: >
   Provides AI-powered node types and tools for RaisinDB.

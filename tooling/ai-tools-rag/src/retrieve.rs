@@ -293,40 +293,57 @@ fn fuse(lists: &[Vec<Value>]) -> Vec<Candidate> {
     folded
 }
 
-/// Run every leg, fuse, filter, cap and fill in text.
-pub fn retrieve(b: &dyn Backend, o: &SearchOptions) -> Result<Retrieval, String> {
-    let started = std::time::Instant::now();
-    let mut legs: Vec<Value> = Vec::new();
-    let mut timed = |name: &str, query: &str, leg: Leg| -> Result<Vec<Value>, String> {
-        let t = std::time::Instant::now();
-        let out = run_leg(b, o, query, leg);
-        legs.push(json!({
-            "leg": name,
-            "ms": ms_since(t),
-            "rows": out.as_ref().map(|r| r.len()).unwrap_or(0),
-        }));
-        out
+/// The ranked rows of every search leg run so far, before fusion.
+#[derive(Debug, Clone)]
+pub struct Legs {
+    lists: Vec<Vec<Value>>,
+    timings: Vec<Value>,
+    mode: &'static str,
+    started: std::time::Instant,
+}
+
+fn timed_leg(
+    b: &dyn Backend,
+    o: &SearchOptions,
+    legs: &mut Legs,
+    name: &str,
+    query: &str,
+    leg: Leg,
+) -> Result<(), String> {
+    let t = std::time::Instant::now();
+    let out = run_leg(b, o, query, leg);
+    legs.timings.push(json!({
+        "leg": name,
+        "ms": ms_since(t),
+        "rows": out.as_ref().map(|r| r.len()).unwrap_or(0),
+    }));
+    legs.lists.push(out?);
+    Ok(())
+}
+
+/// Run the search legs: hybrid, the expansion terms (lexical), and one
+/// lexical leg per extra full-text language.
+pub fn run_legs(b: &dyn Backend, o: &SearchOptions) -> Result<Legs, String> {
+    let mut legs = Legs {
+        lists: Vec::new(),
+        timings: Vec::new(),
+        mode: "hybrid",
+        started: std::time::Instant::now(),
     };
-    let mut lists: Vec<Vec<Value>> = Vec::new();
-    let mut mode = "hybrid";
-    match timed("hybrid", &o.query, Leg::Hybrid) {
-        Ok(rows) => lists.push(rows),
+    match timed_leg(b, o, &mut legs, "hybrid", &o.query, Leg::Hybrid) {
+        Ok(()) => {}
         // No embedder: the engine refuses rather than silently running half a
         // hybrid query. For answering, keyword search is far better than no
         // answer, so it runs deliberately and the result says so.
         Err(e) if is_no_embedder(&e) => {
             b.log(&format!("[search] no embedder, full text only: {e}"));
-            mode = "fulltext";
-            lists.push(timed("fulltext", &o.query, Leg::Lexical(None))?);
+            legs.mode = "fulltext";
+            timed_leg(b, o, &mut legs, "fulltext", &o.query, Leg::Lexical(None))?;
         }
         Err(e) => return Err(e),
     }
     if !o.expansions.is_empty() {
-        lists.push(timed(
-            "expansions",
-            &o.expansions.join(" "),
-            Leg::Lexical(None),
-        )?);
+        add_expansion_leg(b, o, &mut legs, &o.expansions)?;
     }
     for lang in &o.fulltext_languages {
         let q = if o.expansions.is_empty() {
@@ -334,16 +351,56 @@ pub fn retrieve(b: &dyn Backend, o: &SearchOptions) -> Result<Retrieval, String>
         } else {
             format!("{} {}", o.query, o.expansions.join(" "))
         };
-        lists.push(timed(
+        timed_leg(
+            b,
+            o,
+            &mut legs,
             &format!("fulltext:{lang}"),
             &q,
             Leg::Lexical(Some(lang.as_str())),
-        )?);
+        )?;
     }
+    Ok(legs)
+}
 
+/// Add the lexical leg for expansion terms to legs already run — so an
+/// expansion decided AFTER a first look costs one full-text query, not a
+/// second hybrid one (and no second query embedding).
+pub fn add_expansion_leg(
+    b: &dyn Backend,
+    o: &SearchOptions,
+    legs: &mut Legs,
+    expansions: &[String],
+) -> Result<(), String> {
+    if expansions.is_empty() {
+        return Ok(());
+    }
+    timed_leg(
+        b,
+        o,
+        legs,
+        "expansions",
+        &expansions.join(" "),
+        Leg::Lexical(None),
+    )
+}
+
+/// Run every leg, fuse, filter, cap and fill in text.
+pub fn retrieve(b: &dyn Backend, o: &SearchOptions) -> Result<Retrieval, String> {
+    let legs = run_legs(b, o)?;
+    assemble(b, o, &legs)
+}
+
+/// Weight of the term-coverage rerank, in RRF units: at full coverage a
+/// passage gains about what two top ranks in one leg are worth.
+const COVERAGE_WEIGHT: f64 = 0.03;
+
+/// Fuse the legs, filter, cap per document, read passage text, rerank by
+/// term coverage and cut to `limit`.
+pub fn assemble(b: &dyn Backend, o: &SearchOptions, legs: &Legs) -> Result<Retrieval, String> {
     let mut per_doc: HashMap<(String, String), usize> = HashMap::new();
     let mut picked: Vec<Passage> = Vec::new();
-    for c in fuse(&lists) {
+    for c in fuse(&legs.lists) {
         let p = c.passage;
         if !o.admits(&p.workspace, &p.path, &p.node_type, p.kind) {
             continue;
@@ -363,29 +420,97 @@ pub fn retrieve(b: &dyn Backend, o: &SearchOptions) -> Result<Retrieval, String>
     let terms = text::terms(&o.query, &o.expansions);
 
     // Text is filled for a margin beyond `limit`, because a candidate whose
-    // text turns out to be empty is dropped and the next one takes its place.
+    // text turns out to be empty is dropped and the next one takes its place
+    // — and because the rerank below can lift a candidate from the margin.
     let reach = (o.limit * 2 + 4).min(picked.len());
     let mut head: Vec<Passage> = picked.drain(..reach).collect();
     let t = std::time::Instant::now();
     let reads = fill_text(b, o, &terms, &mut head)?;
     let fill_ms = ms_since(t);
-    let passages: Vec<Passage> = head
-        .into_iter()
-        .filter(|p| !p.text.trim().is_empty())
-        .take(o.limit)
-        .collect();
+    head.retain(|p| !p.text.trim().is_empty());
+    rerank_by_coverage(&mut head, &terms);
+    head.truncate(o.limit);
 
     Ok(Retrieval {
-        passages,
-        mode,
+        passages: head,
+        mode: legs.mode,
         terms,
         timings: json!({
-            "legs": legs,
+            "legs": legs.timings,
             "reads": reads,
             "reads_ms": fill_ms,
-            "total_ms": ms_since(started),
+            "total_ms": ms_since(legs.started),
         }),
     })
+}
+
+/// Lift passages that contain the question's distinctive words, now that
+/// their full text — tables included — is known. Pure.
+///
+/// Fusion ranks what the INDEXES saw. A page's tariff table is not in them,
+/// so "Was kostet Parken für eine Woche?" ranked two AGB PDFs (which say
+/// "Parken" everywhere) above the Parken page whose table has the
+/// "Wochentarif" rows. Here every term is weighted by how FEW of the
+/// candidates contain it (a word all of them share decides nothing), and a
+/// passage gains up to [`COVERAGE_WEIGHT`] for the share of that weight it
+/// covers. Terms match as substrings, so "woche" finds "Wochentarif".
+pub fn rerank_by_coverage(passages: &mut [Passage], terms: &[String]) {
+    if passages.len() < 2 || terms.is_empty() {
+        return;
+    }
+    let texts: Vec<String> = passages
+        .iter()
+        .map(|p| format!("{}\n{}", p.title, p.text).to_lowercase())
+        .collect();
+    let n = texts.len() as f64;
+    let weights: Vec<(usize, f64)> = terms
+        .iter()
+        .enumerate()
+        .filter_map(|(i, t)| {
+            let df = texts.iter().filter(|x| x.contains(t.as_str())).count();
+            (df > 0).then(|| (i, (1.0 + n / (1.0 + df as f64)).ln()))
+        })
+        .collect();
+    let total: f64 = weights.iter().map(|(_, w)| w).sum();
+    if total <= 0.0 {
+        return;
+    }
+    for (p, text) in passages.iter_mut().zip(&texts) {
+        let got: f64 = weights
+            .iter()
+            .filter(|(i, _)| text.contains(terms[*i].as_str()))
+            .map(|(_, w)| w)
+            .sum();
+        p.score += COVERAGE_WEIGHT * got / total;
+    }
+    passages.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
+/// Is this retrieval good enough to answer without asking a model? Pure.
+///
+/// The question's own content words must mostly (two thirds) appear in the
+/// top three passages, and the best passage must have matched on its words,
+/// not only on meaning. Used by `ask` to skip expansion and grading — each a
+/// model call — when the first look already found the vocabulary asked about.
+pub fn confident(passages: &[Passage], question: &str) -> bool {
+    let terms = text::terms(question, &[]);
+    if terms.is_empty() || passages.is_empty() || !passages[0].lexical {
+        return false;
+    }
+    let top: Vec<String> = passages
+        .iter()
+        .take(3)
+        .map(|p| format!("{}\n{}", p.title, p.text).to_lowercase())
+        .collect();
+    let covered = terms
+        .iter()
+        .filter(|t| top.iter().any(|x| x.contains(t.as_str())))
+        .count();
+    covered * 3 >= terms.len() * 2
 }
 
 /// Give every passage text, and overlay text when a locale was asked for.
@@ -959,5 +1084,87 @@ mod tests {
             "one batched read for the page hits"
         );
         assert!(r.timings["total_ms"].is_number());
+    }
+
+    /// "Was kostet Parken für eine Woche?" on the real site: two AGB PDFs say
+    /// "Parken" in every chunk and outrank the Parken page, whose week price
+    /// is only in its table ("1 Wochentarif (8 Tage)").
+    fn week_site() -> Fake {
+        Fake {
+            sql_fn: Box::new(|sql, _| {
+                if sql.contains("HYBRID_SEARCH") {
+                    let mut rows = Vec::new();
+                    for (doc, n) in [("agb-p3", 3), ("agb-p11", 3)] {
+                        for i in 0..n {
+                            let mut r = chunk(&format!("/bap/downloads/{doc}.pdf"), doc, i,
+                                "Allgemeine Einstellbedingungen: Das Parken erfolgt auf eigene Gefahr. Die Parkgebühr ist bei Ausfahrt zu entrichten.");
+                            r["node_type"] = json!("raisin:Asset");
+                            r["file_type"] = json!("application/pdf");
+                            r["workspace_id"] = json!("assets");
+                            r["fulltext_rank"] = json!(1);
+                            rows.push(r);
+                        }
+                    }
+                    rows.push(chunk(
+                        "/bap/parken",
+                        "parken",
+                        0,
+                        "Parken am Flughafen: drei Parkhäuser direkt am Terminal.",
+                    ));
+                    return Ok(rows);
+                }
+                if sql.contains("FROM 'stories'") {
+                    return Ok(vec![json!({ "path": "/bap/parken", "properties": {
+                        "title": "Title parken",
+                        "content": [{ "element_type": "bap:Table", "tables": [{ "title": "Parktarife",
+                            "data": { "header_row": true, "header_col": true, "rows": [
+                                ["", "P3", "P11"], ["1 Tag", "19,00 €", "25,00 €"], ["1 Wochentarif (8 Tage)", "59,00 €", "79,00 €"]] } }] }]
+                    }})]);
+                }
+                Ok(vec![])
+            }),
+            ..Fake::default()
+        }
+    }
+
+    #[test]
+    fn a_table_that_answers_lifts_its_page_above_documents_that_only_share_the_topic() {
+        let fake = week_site();
+        let o = opts(
+            json!({ "query": "Was kostet Parken für eine Woche?", "limit": 4, "max_per_document": 2 }),
+        );
+        let r = retrieve(&fake, &o).unwrap();
+        assert_eq!(
+            r.passages[0].path,
+            "/bap/parken",
+            "{:?}",
+            r.passages.iter().map(|p| &p.path).collect::<Vec<_>>()
+        );
+        assert!(
+            r.passages[0]
+                .text
+                .contains("1 Wochentarif (8 Tage) — P3: 59,00 €"),
+            "{}",
+            r.passages[0].text
+        );
+    }
+
+    #[test]
+    fn confidence_needs_the_questions_words_in_the_top_passages() {
+        let fake = week_site();
+        let r = retrieve(
+            &fake,
+            &opts(json!({ "query": "Was kostet Parken für eine Woche?" })),
+        )
+        .unwrap();
+        assert!(
+            !confident(&r.passages, "Was kostet Parken für eine Woche?"),
+            "'kostet' is nowhere"
+        );
+        assert!(
+            confident(&r.passages[1..], "Parkgebühr bei Ausfahrt"),
+            "the PDFs matched on their words"
+        );
+        assert!(!confident(&[], "Parken"));
     }
 }
