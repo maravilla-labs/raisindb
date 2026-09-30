@@ -80,3 +80,31 @@ test('a visitor run is not offered memory or delegation tools', async () => {
   assert.ok(!offered.some((p) => VISITOR_EXCLUDED_TOOLS.includes(p)), `no memory tools: ${offered}`);
   void api;
 });
+
+test('stream_tool_results puts each result in its tool_call_completed event; off, it does not', async () => {
+  const { writeToolResults, streamedResult, STREAMED_RESULT_MAX_CHARS } = await import(
+    '../content/functions/lib/raisin/ai/agent-shared/run-transcript.js'
+  );
+  for (const streamResults of [true, false]) {
+    const { put, events } = fakeRaisin();
+    const chatPath = '/agents/site/inbox/chats/vchat-3';
+    put('ai', chatPath, { node_type: 'raisin:Conversation', properties: {} });
+    const prev = put('ai', `${chatPath}/turn-1`, {
+      node_type: 'raisin:Message',
+      properties: { run_tool_calls: [{ call_id: 'c1', name: 'find-flights', args: {} }] },
+    });
+    await writeToolResults(
+      { workspace: 'ai', chatPath, streamChannel: 'chat:vchat-3', runId: 'r1' },
+      prev,
+      [{ call_id: 'c1', content: { flights: [{ flight_no: 'LH1' }] } }],
+      { streamResults },
+    );
+    const done = events.find((e) => e.type === 'conversation:tool_call_completed');
+    assert.ok(done, 'the event is emitted');
+    if (streamResults) assert.deepEqual(done.payload.result, { flights: [{ flight_no: 'LH1' }] });
+    else assert.equal('result' in done.payload, false);
+  }
+  const big = streamedResult({ text: 'x'.repeat(STREAMED_RESULT_MAX_CHARS + 10) });
+  assert.equal(big.truncated, true);
+  assert.equal(big.preview.length, STREAMED_RESULT_MAX_CHARS);
+});

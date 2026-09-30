@@ -191,6 +191,18 @@ properties:
       type: string
     description: Group ids this agent belongs to when running under its own permissions.
 
+  - name: stream_tool_results
+    title: Stream Tool Results
+    type: boolean
+    default: false
+    required: false
+    description: >-
+      Include each tool's result (up to 20000 JSON characters, else a
+      truncated preview) in the `tool_call_completed` conversation event, for
+      chat UIs that render tool results as cards or sources. Off by default:
+      a result can hold more than the answer shows, and the chatting party
+      cannot otherwise read the agent's side of the conversation.
+
   # ANONYMOUS VISITORS — a public website's chat, straight from the browser.
   #
   # Off unless set. With it, an anonymous WebSocket session may start a chat

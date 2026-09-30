@@ -131,7 +131,9 @@ export async function handler(input = {}) {
     // 2. Transcript: the previous turn's answers, and consumed steers.
     const facts = request.context && request.context.facts;
     const prev = await findPreviousTurn(ctx.workspace, ctx.chatPath, ctx.runId, facts && facts.last_turn_op);
-    await writeToolResults(ctx, prev, request.tool_results);
+    await writeToolResults(ctx, prev, request.tool_results, {
+      streamResults: agentProps.stream_tool_results === true,
+    });
     await syncSteers(ctx);
     const excluded = await queuedSteerPaths(ctx);
 

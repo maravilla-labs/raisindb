@@ -84,11 +84,35 @@ function resultProps(content) {
   return { failed, error };
 }
 
+/** Largest tool result (JSON characters) a `tool_call_completed` event carries. */
+export const STREAMED_RESULT_MAX_CHARS = 20000;
+
+/**
+ * The `result` a `tool_call_completed` event carries when the agent streams
+ * tool results (`stream_tool_results: true`): the result itself, or — past
+ * {@link STREAMED_RESULT_MAX_CHARS} — `{truncated: true, preview}`.
+ */
+export function streamedResult(content) {
+  let json;
+  try {
+    json = JSON.stringify(content === undefined ? null : content);
+  } catch (_) {
+    return { truncated: true, preview: '' };
+  }
+  if (json.length <= STREAMED_RESULT_MAX_CHARS) return content === undefined ? null : content;
+  return { truncated: true, preview: json.slice(0, STREAMED_RESULT_MAX_CHARS) };
+}
+
 /**
  * Write the answers to the previous turn's tool calls under its message:
  * one `raisin:AIToolCall` (final status) + one `raisin:AIToolResult` each.
+ *
+ * With `options.streamResults` (the agent's `stream_tool_results`), each
+ * `tool_call_completed` event also carries the result, so a chat UI can
+ * render tool results (cards, sources) without reading the agent's side of
+ * the conversation, which the chatting party cannot read.
  */
-export async function writeToolResults(ctx, prevMsg, toolResults) {
+export async function writeToolResults(ctx, prevMsg, toolResults, options = {}) {
   if (!prevMsg || !Array.isArray(toolResults) || toolResults.length === 0) return 0;
   const calls = Array.isArray(prevMsg.properties && prevMsg.properties.run_tool_calls)
     ? prevMsg.properties.run_tool_calls : [];
@@ -126,6 +150,7 @@ export async function writeToolResults(ctx, prevMsg, toolResults) {
       status: failed ? 'failed' : 'completed',
       synthetic: tr.synthetic === true,
       runId: ctx.runId,
+      ...(options.streamResults ? { result: streamedResult(tr.content), ...(error ? { error } : {}) } : {}),
       timestamp: nowIso(),
     }, ctx.chatPath, ctx.streamChannel);
   }

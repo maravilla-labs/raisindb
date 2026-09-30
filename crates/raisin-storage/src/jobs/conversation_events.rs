@@ -67,6 +67,7 @@ pub enum ConversationEvent {
         tool_call_id: String,
         #[serde(rename = "functionName")]
         function_name: String,
+        #[serde(default)]
         arguments: serde_json::Value,
         timestamp: String,
     },
@@ -76,6 +77,11 @@ pub enum ConversationEvent {
         tool_call_id: String,
         #[serde(skip_serializing_if = "Option::is_none", rename = "functionName")]
         function_name: Option<String>,
+        /// The tool's result, when the agent streams tool results
+        /// (`stream_tool_results`); null otherwise. Defaulted: the agent-run
+        /// transcript emits the event without one, and a missing field used to
+        /// make the whole event fail to parse, so it was never delivered.
+        #[serde(default)]
         result: serde_json::Value,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
@@ -297,6 +303,35 @@ impl Default for ConversationEventBroadcaster {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The agent-run transcript emits tool_call_completed without a result
+    /// unless the agent streams results; the event must still parse.
+    #[test]
+    fn a_tool_call_completed_without_a_result_still_parses() {
+        let ev: ConversationEvent = serde_json::from_value(serde_json::json!({
+            "type": "tool_call_completed",
+            "toolCallId": "c1",
+            "functionName": "search",
+            "status": "completed",
+            "timestamp": "t",
+        }))
+        .expect("parses");
+        assert!(
+            matches!(ev, ConversationEvent::ToolCallCompleted { ref result, .. } if result.is_null())
+        );
+
+        let ev: ConversationEvent = serde_json::from_value(serde_json::json!({
+            "type": "tool_call_completed",
+            "toolCallId": "c1",
+            "result": {"flights": [1]},
+            "timestamp": "t",
+        }))
+        .expect("parses");
+        assert!(matches!(
+            ev,
+            ConversationEvent::ToolCallCompleted { ref result, .. } if result["flights"][0] == 1
+        ));
+    }
 
     #[tokio::test]
     async fn test_subscribe_and_emit() {
