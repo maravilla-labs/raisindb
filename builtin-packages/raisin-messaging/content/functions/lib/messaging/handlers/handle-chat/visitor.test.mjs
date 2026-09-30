@@ -131,3 +131,19 @@ test('a session bound to one agent cannot talk to another', async () => {
     /belongs to another agent/,
   );
 });
+
+test('visitor paths and ids with traversal payloads name no session', async () => {
+  const f = world();
+  for (const [path, id] of [
+    ['/visitors/../users/internal/alice', `visitor:${KEY_A}`],
+    [`/visitors/${KEY_A}/../${KEY_B}`, null],
+    ['/visitors/%2e%2e/users', null],
+    [null, 'visitor:../../users/internal/alice'],
+    [null, `visitor:${KEY_A}/../${KEY_B}`],
+  ]) {
+    const m = visitorMessage(KEY_A, 'vchat-9');
+    m.properties.sender_path = path;
+    m.properties.sender_id = id;
+    await assert.rejects(send(f, m), /Sender not found/, JSON.stringify([path, id]));
+  }
+});

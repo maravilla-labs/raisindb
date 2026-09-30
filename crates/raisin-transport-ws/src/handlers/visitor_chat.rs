@@ -75,17 +75,82 @@ fn refuse(request_id: String, code: &str, message: impl Into<String>) -> Respons
 }
 
 /// `/agents/<name>` for `/agents/<name>` or `agent:<name>`; `None` otherwise.
+///
+/// The name is ONE path segment of a strict charset (`[A-Za-z0-9_-]{1,64}`):
+/// no `/`, no `.`, no `%`, no NUL, nothing a path could be steered with. It is
+/// then only a candidate: the handlers accept it only if it loads as a
+/// `raisin:AIAgent` that allows anonymous visitors.
 pub(crate) fn agent_path_of(agent: &str) -> Option<String> {
     let name = agent
         .strip_prefix("agent:")
         .or_else(|| agent.strip_prefix("/agents/"))?;
-    let ok = !name.is_empty()
-        && name.len() <= 128
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
-        && !name.starts_with('.');
-    ok.then(|| format!("/agents/{name}"))
+    is_safe_segment(name, 64).then(|| format!("/agents/{name}"))
+}
+
+/// `[A-Za-z0-9_-]{1,max}`.
+pub(crate) fn is_safe_segment(s: &str, max: usize) -> bool {
+    !s.is_empty()
+        && s.len() <= max
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Whether `path` is `home` or below it. Every node the handlers write on a
+/// visitor's behalf is checked against this before the write.
+pub(crate) fn under_home(home: &str, path: &str) -> bool {
+    raisin_models::auth::visitor::is_valid_visitor_key(
+        home.strip_prefix("/visitors/").unwrap_or_default(),
+    ) && (path == home
+        || path.strip_prefix(home).is_some_and(|rest| {
+            rest.starts_with('/') && !rest.split('/').any(|seg| seg == ".." || seg == ".")
+        }))
+}
+
+/// Which conversation a start binds, from the ids the SERVER knows.
+///
+/// * `requested` — what the client asked for. Anything that is not exactly a
+///   server-minted id (`vchat-` + 32 hex) is refused, never repaired.
+/// * `existing` — this session's conversations (its own home on disk, plus
+///   the ones minted on this connection).
+/// * `agent_side_owner` — who the agent's copy of `requested` belongs to, if
+///   it exists: a conversation of ANOTHER party is refused.
+pub(crate) fn choose_conversation(
+    requested: Option<&str>,
+    existing: &HashSet<String>,
+    max_conversations: u32,
+    agent_side_owner: Option<&str>,
+    me: &str,
+) -> Result<String, (&'static str, &'static str)> {
+    let requested = match requested {
+        None => None,
+        Some(c) if session::is_conversation_id(c) => Some(c),
+        Some(_) => {
+            return Err((
+                "INVALID_CONVERSATION",
+                "conversation_id is not a visitor conversation id",
+            ))
+        }
+    };
+    if let Some(c) = requested {
+        if existing.contains(c) {
+            return Ok(c.to_string());
+        }
+        if agent_side_owner.is_some_and(|owner| owner != me) {
+            return Err((
+                "UNKNOWN_CONVERSATION",
+                "no such conversation in this visitor session",
+            ));
+        }
+    }
+    if existing.len() >= max_conversations as usize {
+        return Err((
+            "CONVERSATION_LIMIT",
+            "this visitor session has reached its conversation limit",
+        ));
+    }
+    Ok(requested
+        .map(str::to_string)
+        .unwrap_or_else(session::new_conversation_id))
 }
 
 fn node_service<S, B>(
@@ -286,10 +351,7 @@ where
 
     // The conversation: one of this session's, or a new one.
     let chats = format!("{home}/inbox/chats");
-    let requested = payload
-        .conversation_id
-        .as_deref()
-        .filter(|c| session::is_conversation_id(c));
+    let requested = payload.conversation_id.as_deref();
     let known_here = bound
         .as_ref()
         .map(|b| b.conversations.clone())
@@ -305,25 +367,35 @@ where
         None => HashSet::new(),
     };
     existing.extend(known_here);
-    // A requested id is always one UNDER THIS SESSION'S HOME, so it can only
-    // ever name this session's conversation (the agent side refuses a thread
-    // that belongs to someone else). An id that has no node yet was minted
-    // for this session on an earlier connection and never used.
-    let conversation_id = match requested {
-        Some(c) if existing.contains(c) => c.to_string(),
-        requested => {
-            if existing.len() >= cfg.max_conversations as usize {
-                return Ok(Some(refuse(
-                    id,
-                    "CONVERSATION_LIMIT",
-                    "this visitor session has reached its conversation limit",
-                )));
-            }
-            requested
-                .map(str::to_string)
-                .unwrap_or_else(session::new_conversation_id)
-        }
+    // A well-formed id this session has not used yet is accepted (one minted
+    // on a connection that dropped before its first message) unless the agent
+    // already holds that thread for someone else.
+    let agent_side_owner = match requested.filter(|c| session::is_conversation_id(c)) {
+        Some(c) if !existing.contains(c) => load_node(
+            &state.storage,
+            &tenant,
+            &repo,
+            "ai",
+            &format!("{agent_path}/inbox/chats/{c}"),
+        )
+        .await
+        .map(|n| match n.properties.get("human_sender_id") {
+            Some(PropertyValue::String(owner)) => owner.clone(),
+            _ => String::new(),
+        }),
+        _ => None,
     };
+    let conversation_id = match choose_conversation(
+        requested,
+        &existing,
+        cfg.max_conversations,
+        agent_side_owner.as_deref(),
+        &visitor_participant_id(&key),
+    ) {
+        Ok(c) => c,
+        Err((code, msg)) => return Ok(Some(refuse(id, code, msg))),
+    };
+    debug_assert!(under_home(&home, &format!("{chats}/{conversation_id}")));
 
     // Bind the connection: its auth context now reads this home (and only it).
     let start_forwarding = {
@@ -407,7 +479,11 @@ where
     let Some(binding) = binding else {
         return Ok(Some(refuse(id, "NO_SESSION", "start a visitor chat first")));
     };
-    if !binding.conversations.contains(&payload.conversation_id) {
+    // Only ids this connection was bound to at start (server-minted or
+    // validated there) are ever used to build a path.
+    if !session::is_conversation_id(&payload.conversation_id)
+        || !binding.conversations.contains(&payload.conversation_id)
+    {
         return Ok(Some(refuse(
             id,
             "UNKNOWN_CONVERSATION",
@@ -642,6 +718,14 @@ where
     S: Storage + TransactionalStorage + 'static,
     B: raisin_binary::BinaryStorage + 'static,
 {
+    // Everything below is derived server-side from the proven session key and
+    // server-minted ids; check it anyway before writing a single node.
+    let outbox = format!("{}/outbox", binding.home);
+    if !under_home(&binding.home, &outbox) || !session::is_conversation_id(conversation_id) {
+        return Err(raisin_error::Error::PermissionDenied(
+            "visitor chat: refusing a write outside the session home".to_string(),
+        ));
+    }
     let svc = node_service(state, tenant, repo, VISITOR_WORKSPACE);
     let now = chrono::Utc::now();
     let ttl =
@@ -812,6 +896,144 @@ pub(crate) fn spawn_forwarder(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TRAVERSALS: &[&str] = &[
+        "../users/alice",
+        "..",
+        "../../etc/passwd",
+        "%2e%2e/users/alice",
+        "%2e%2e%2fusers",
+        "..%2f..%2fusers",
+        "/users/internal/alice",
+        "/visitors/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "a/b",
+        "a\\b",
+        "a\0b",
+        "site\u{0}",
+        ".hidden",
+        "a.b",
+        "",
+        " ",
+    ];
+
+    #[test]
+    fn agent_names_refuse_every_traversal_payload() {
+        for p in TRAVERSALS {
+            assert_eq!(agent_path_of(&format!("/agents/{p}")), None, "{p:?}");
+            assert_eq!(agent_path_of(&format!("agent:{p}")), None, "{p:?}");
+        }
+        assert_eq!(
+            agent_path_of(&format!("agent:{}", "a".repeat(65))),
+            None,
+            "oversized"
+        );
+        assert_eq!(
+            agent_path_of(&format!("agent:{}", "a".repeat(64))).as_deref(),
+            Some(format!("/agents/{}", "a".repeat(64)).as_str())
+        );
+        assert_eq!(
+            agent_path_of("agent:website-assistant_2").as_deref(),
+            Some("/agents/website-assistant_2")
+        );
+    }
+
+    #[test]
+    fn conversation_ids_refuse_every_traversal_payload() {
+        let existing = HashSet::new();
+        // (`""` appended to a valid id is that valid id, not a payload.)
+        for p in TRAVERSALS.iter().filter(|p| !p.is_empty()) {
+            for candidate in [
+                p.to_string(),
+                format!("vchat-{p}"),
+                format!("vchat-{}{p}", "a".repeat(32)),
+            ] {
+                assert_eq!(
+                    choose_conversation(Some(&candidate), &existing, 5, None, "visitor:me")
+                        .unwrap_err()
+                        .0,
+                    "INVALID_CONVERSATION",
+                    "{candidate:?}"
+                );
+            }
+        }
+        let oversized = format!("vchat-{}", "a".repeat(64));
+        assert!(choose_conversation(Some(&oversized), &existing, 5, None, "visitor:me").is_err());
+    }
+
+    /// Another session's conversation id is refused: the agent already holds
+    /// that thread for someone else.
+    #[test]
+    fn another_sessions_conversation_is_refused() {
+        let theirs = session::new_conversation_id();
+        let err = choose_conversation(
+            Some(&theirs),
+            &HashSet::new(),
+            5,
+            Some("visitor:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+            "visitor:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap_err();
+        assert_eq!(err.0, "UNKNOWN_CONVERSATION");
+    }
+
+    #[test]
+    fn own_and_new_conversations_are_chosen_within_the_limit() {
+        let mine = session::new_conversation_id();
+        let existing = HashSet::from([mine.clone()]);
+        assert_eq!(
+            choose_conversation(Some(&mine), &existing, 1, None, "visitor:me").unwrap(),
+            mine
+        );
+        // An unused id minted for this session earlier (no agent-side thread).
+        let unused = session::new_conversation_id();
+        assert_eq!(
+            choose_conversation(Some(&unused), &HashSet::new(), 5, None, "visitor:me").unwrap(),
+            unused
+        );
+        assert!(session::is_conversation_id(
+            &choose_conversation(None, &HashSet::new(), 5, None, "visitor:me").unwrap()
+        ));
+        assert_eq!(
+            choose_conversation(None, &existing, 1, None, "visitor:me")
+                .unwrap_err()
+                .0,
+            "CONVERSATION_LIMIT"
+        );
+    }
+
+    #[test]
+    fn writes_stay_under_the_session_home() {
+        let home = format!("/visitors/{}", "a".repeat(32));
+        assert!(under_home(&home, &format!("{home}/outbox")));
+        assert!(under_home(&home, &home));
+        for bad in [
+            format!("{home}/../bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/outbox"),
+            format!("{home}/./outbox"),
+            format!("{home}x/outbox"),
+            "/visitors/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/outbox".to_string(),
+            "/users/alice/outbox".to_string(),
+        ] {
+            assert!(!under_home(&home, &bad), "{bad}");
+        }
+        // A home that is not a minted key is no home at all.
+        assert!(!under_home(
+            "/visitors/../users",
+            "/visitors/../users/outbox"
+        ));
+        assert!(!under_home("/users/alice", "/users/alice/outbox"));
+    }
+
+    /// Session homes are derived from the secret, never taken from the client:
+    /// a key (or a home path) presented as a secret proves nothing.
+    #[test]
+    fn a_session_key_or_path_is_not_a_secret() {
+        let key = session::key_of(&session::new_secret()).unwrap();
+        assert_eq!(session::key_of(&key), None);
+        assert_eq!(session::key_of(&format!("/visitors/{key}")), None);
+        for p in TRAVERSALS {
+            assert_eq!(session::key_of(p), None, "{p:?}");
+        }
+    }
 
     #[test]
     fn only_agent_paths_name_agents() {

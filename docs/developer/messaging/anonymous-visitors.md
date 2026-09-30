@@ -118,6 +118,7 @@ const store = new ConversationStore({
   | `CONVERSATION_LIMIT` | `max_conversations` reached for this session |
   | `SESSION_EXPIRED` / `SESSION_MISMATCH` | the session is gone, or belongs to another agent |
   | `NOT_ANONYMOUS` | a signed-in connection: use `conversations.create` |
+  | `INVALID_AGENT` / `INVALID_CONVERSATION` | an agent name outside `[A-Za-z0-9_-]{1,64}`, or a conversation id the server did not mint |
 
 ## How the session is keyed
 

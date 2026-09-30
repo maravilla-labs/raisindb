@@ -211,10 +211,10 @@ export class VisitorChat {
         (conversationId || sessionToken) &&
         !options.conversationId &&
         !options.sessionToken &&
-        ['UNKNOWN_CONVERSATION', 'SESSION_EXPIRED', 'SESSION_MISMATCH'].includes(e.code)
+        ['UNKNOWN_CONVERSATION', 'INVALID_CONVERSATION', 'SESSION_EXPIRED', 'SESSION_MISMATCH'].includes(e.code)
       ) {
         store?.remove(`${key}:conversation`);
-        if (e.code !== 'UNKNOWN_CONVERSATION') {
+        if (e.code !== 'UNKNOWN_CONVERSATION' && e.code !== 'INVALID_CONVERSATION') {
           store?.remove(`${key}:session`);
           this.token = null;
         }

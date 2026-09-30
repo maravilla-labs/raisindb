@@ -340,7 +340,12 @@ function isVisitorPath(path) {
  */
 async function resolveVisitor(path, id) {
   const fromId = isVisitorId(id) ? id.slice(VISITOR_ID_PREFIX.length) : null;
-  const fromPath = isVisitorPath(path) ? path.split('/')[2] : null;
+  // A visitor is named by its HOME, exactly `/visitors/<key>`: any longer or
+  // stranger path is refused rather than trimmed to a prefix.
+  const fromPath = isVisitorPath(path)
+    ? (/^\/visitors\/([0-9a-f]{16,128})$/.exec(path) || [])[1] || ''
+    : null;
+  if (fromPath === '') return null;
   if (fromId && fromPath && fromId !== fromPath) return null;
   const key = fromId || fromPath;
   if (!key || !VISITOR_KEY.test(key)) return null;
