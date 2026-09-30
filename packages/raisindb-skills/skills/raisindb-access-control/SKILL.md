@@ -383,6 +383,20 @@ properties:
 
 The system user at `/users/system/anonymous` is automatically used for unauthenticated requests when anonymous access is enabled.
 
+### Anonymous chat: the visitor zone
+
+Do NOT grant the anonymous role write (or read) access to chat folders so a
+public website can chat: every visitor could then list every conversation.
+Anonymous chat is native (see `raisindb-messaging-agents`, "Anonymous
+visitors"): each anonymous session gets an ephemeral home
+`/visitors/<key>` in `raisin:access_control`, and that **visitor zone is
+decided before any role grant** — only the session bound to a home reads it,
+nobody but the server writes it, and no role (not even `read` on `**` of the
+workspace) can widen that. `system_admin` and the system are unaffected. The
+agent's tools act for a visitor under the agent's `anonymous.tool_roles` —
+give that role exactly what the tools need (typically read-only on the
+public content).
+
 ## workspace_patches in manifest.yaml
 
 When your package needs to store custom node types in the `raisin:access_control` workspace (e.g., messages, conversations, AI nodes), declare them in `workspace_patches` in your `manifest.yaml`:

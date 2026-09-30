@@ -26,19 +26,26 @@ properties:
     default: Visitor
   - name: created_at
     title: Created
-    type: Date
+    type: String
+    description: RFC 3339 timestamp.
     required: false
   - name: last_activity_at
     title: Last Activity
-    type: Date
+    type: String
+    description: RFC 3339 timestamp.
     required: false
   - name: expires_at
     title: Expires
-    type: Date
+    type: String
     required: false
     description: >
-      When the session and its conversations are purged
+      RFC 3339. When the session and its conversations are purged
       (/lib/messaging/visitor/purge-expired). Moved forward on every message.
+  - name: message_counts
+    title: Messages per Conversation
+    type: Object
+    required: false
+    description: Visitor messages sent per conversation id (the max_messages limit).
   - name: origin
     title: Origin
     type: String

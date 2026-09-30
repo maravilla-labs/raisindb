@@ -76,7 +76,16 @@ Add custom message types:
 - Best practices and patterns
 - Troubleshooting
 
-### 6. [Implementation Status](./implementation-status.md)
+### 6. [Anonymous Visitors](./anonymous-visitors.md)
+
+Agent chat on a public website, without login:
+- Enabling it per agent (`anonymous`: origins, limits, tool roles)
+- `db.conversations.startAnonymous` in the JS SDK
+- How the visitor session is keyed, and the isolation rule
+- Tool rights, token budgets, rate limits, expiry
+- Migrating a site that used one service identity
+
+### 7. [Implementation Status](./implementation-status.md)
 
 Track what's implemented vs planned:
 - Node types status

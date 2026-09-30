@@ -369,6 +369,38 @@ addition to) `createOptions` and call `store.loadMessages()` for history. To
 build an inbox-style list of conversations, use `ConversationListStore`
 (`load()`, `createConversation()`, `markAsRead()`, `realtime: true`).
 
+### Chat without login (a public website)
+
+An anonymous connection can chat with an agent that allows anonymous visitors
+(`anonymous.enabled: true` on its `raisin:AIAgent`). No login, no server
+endpoint of your own: the conversation lives in an ephemeral visitor session
+that only this browser tab can read.
+
+```typescript
+const client = new RaisinClient('wss://db.example.com/ws/website');
+await client.connect();                        // anonymous
+const db = client.database('website');
+
+const convo = await db.conversations.startAnonymous('/agents/website-assistant');
+for await (const ev of db.conversations.sendMessage(convo.conversationPath, 'Hello')) {
+  if (ev.type === 'text_chunk') append(ev.text);
+  if (ev.type === 'failed') showLimit(ev.code); // RATE_LIMITED, BUSY, LIMIT_REACHED, …
+}
+
+// Or the store / hooks, with one extra option:
+new ConversationStore({
+  database: db,
+  createOptions: { participant: '/agents/website-assistant', anonymous: true },
+});
+```
+
+The session secret and the conversation id are kept in `sessionStorage`
+(`options.store` to change that), so a reload continues the chat, and the SDK
+re-proves the session after a reconnect. Server-side limits (message size and
+count, token budget, rate, one turn at a time) surface as `failed` events with
+a `code`, or as a thrown `VisitorChatError`. See
+`docs/developer/messaging/anonymous-visitors.md` in the RaisinDB repository.
+
 ### Listen to the inbox (notifications without an extra API)
 
 Server-side messaging delivers items into the logged-in user's home inbox in

@@ -42,6 +42,7 @@
 - [Job Management](./guides/job-management.md)
 - [Working with Transactions](./guides/transactions.md)
 - [AI, Embeddings, and Vector Search](./guides/ai-and-embeddings.md)
+- [Agent Chat for Anonymous Visitors](./guides/anonymous-chat.md)
 - [Graph Queries and Algorithms](./guides/graph-queries.md)
 - [Serverless Functions and Workflows](./guides/functions-and-flows.md)
 - [Indexing and Full-Text Search](./guides/indexing-and-search.md)

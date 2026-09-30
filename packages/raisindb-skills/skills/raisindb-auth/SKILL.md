@@ -58,6 +58,15 @@ When `initSession()` finds no stored token, the server issues an anonymous sessi
 
 If queries return 0 rows with `isAuthenticated: false`, the anonymous role is missing read permissions for your workspace.
 
+**Chat without login.** An anonymous session can chat with an agent that
+allows it: `db.conversations.startAnonymous('/agents/x')`. No login, no site
+server endpoint, no shared service identity — see `raisindb-messaging-agents`
+("Anonymous visitors"). The connection's anonymous status is what makes this
+available; a signed-in connection uses `db.conversations.create` instead.
+
+The server hands an anonymous connection **no token** (the `connected`
+message's `token` is always null): anonymous HTTP calls need none.
+
 ## Login
 
 ```typescript

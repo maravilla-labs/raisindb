@@ -300,6 +300,9 @@ export interface ChatToolCallStartedEvent {
 export interface ChatToolCallCompletedEvent {
   type: 'tool_call_completed';
   toolCallId: string;
+  /** The tool's name, when the server knows it */
+  functionName?: string;
+  /** The tool's result — null unless the agent streams tool results (`stream_tool_results`) */
   result: unknown;
   /** Error message if the tool call failed */
   error?: string;

@@ -1,6 +1,6 @@
 ---
 name: raisindb-messaging-agents
-description: "Build AI chat and messaging on RaisinDB: AI agents with tools, the inbox/outbox chat pipeline, agents that proactively message users and coordinate between them, human-in-the-loop task UIs, chatbox frontends with the JS SDK, and token safeguards (budgets, auto-compaction). Use this whenever the user wants a chatbot, AI assistant, agent with tools, notifications, an inbox, agent-to-user messaging, multi-user coordination ('agent asks staff one by one'), an assistant that answers from the user's own documents (pair it with raisindb-retrieval for the search side), or anything involving raisin:AIAgent, conversations, or message nodes — even if they just say 'add AI to my app'."
+description: "Build AI chat and messaging on RaisinDB: AI agents with tools, the inbox/outbox chat pipeline, agents that proactively message users and coordinate between them, human-in-the-loop task UIs, chatbox frontends with the JS SDK, and token safeguards (budgets, auto-compaction). Use this whenever the user wants a chatbot, AI assistant, agent with tools, notifications, an inbox, agent-to-user messaging, multi-user coordination ('agent asks staff one by one'), an assistant that answers from the user's own documents (pair it with raisindb-retrieval for the search side), a public website's chat for anonymous visitors without login (db.conversations.startAnonymous, agent `anonymous` settings — never a shared service identity), or anything involving raisin:AIAgent, conversations, or message nodes — even if they just say 'add AI to my app'."
 ---
 
 # Messaging & AI Agents
@@ -181,15 +181,73 @@ for await (const ev of db.conversations.sendMessage(convo.conversationPath, text
   watchdog, request queueing during reconnects. Skip `networkidle`-style
   waits in tests — persistent SSE keeps the network busy by design.
 
+## Anonymous visitors (a public website's chat, no login)
+
+A public site runs the agent chat **straight from the browser** over the WS
+SDK: no site server endpoint, no service identity, no credential in the page.
+Do NOT build a server endpoint that logs in as one shared "chat user" — that
+is what this replaces (and it mixes visitors up in one home).
+
+```yaml
+# the agent (functions:/agents/website-assistant)
+anonymous:
+  enabled: true                      # REQUIRED; agents without it refuse visitors
+  allowed_origins: [https://www.example.com]
+  tool_roles: [site_assistant]       # what the TOOLS may do for a visitor
+  max_messages: 20                   # per conversation
+  max_conversation_tokens: 50000     # hard budget per conversation
+  rate_per_session_per_minute: 6
+  rate_per_ip_per_minute: 30
+  max_concurrent_turns: 1            # lease; a hung turn frees it after turn_lease_seconds
+  session_ttl_hours: 24              # purged after inactivity
+stream_tool_results: true            # tool_call_completed carries `result` (for cards)
+```
+
+```ts
+const client = new RaisinClient('wss://db.example.com/ws/website');
+await client.connect();                              // anonymous, no login
+const db = client.database('website');
+const convo = await db.conversations.startAnonymous('/agents/website-assistant');
+for await (const ev of db.conversations.sendMessage(convo.conversationPath, text)) {
+  if (ev.type === 'text_chunk') append(ev.text);
+  if (ev.type === 'tool_call_completed') renderCard(ev.functionName, ev.result);
+  if (ev.type === 'failed') showLimit(ev.code);      // RATE_LIMITED, BUSY, LIMIT_REACHED, TOO_MANY_MESSAGES, …
+}
+// ConversationStore / useConversation: createOptions: { participant, anonymous: true }
+```
+
+What the platform guarantees (don't re-implement it in the site):
+- **Session home** `/visitors/<key>` in `raisin:access_control`, keyed by a
+  256-bit secret the SDK keeps in sessionStorage (reload = same chat). Only
+  that session reads it; nobody but the server writes it; no role grant can
+  widen that. Another visitor, a user, a broad `read` role: nothing.
+- **Delivery** is structural: a conversation's events go to the one WS
+  connection that proved its session; the SSE endpoint needs read access.
+- **Tool rights**: a visitor's turn runs tools under `anonymous.tool_roles`
+  (else the agent's `roles`), NEVER as the visitor or the system, whatever
+  `execution_context` says; no grant → tools refused. A tool that writes
+  (e.g. files an inquiry) uses its own `execution_context: system` function
+  and validates its input. Memory and delegation tools are not offered.
+- **Expiry**: `purge-expired-visitors` (every 15 min) deletes expired sessions
+  and their conversations; cost records + tool audit stay on the agent side.
+- Rate limits / leases are per server process; the IP is the last
+  `X-Forwarded-For` entry — run behind a proxy that sets it.
+
+Full reference and the migration from a service identity:
+`docs/developer/messaging/anonymous-visitors.md`.
+
 ## Tokens, cost, safety
 
 - Every AI call writes a `raisin:AICostRecord` child (input/output tokens,
   model, provider) under the assistant reply in the `ai` workspace — your
   usage dashboard is one SQL query away.
-- `max_conversation_tokens` enforces a hard budget per conversation
-  (`finish_reason: budget_exceeded`, no provider call); `auto_compact`
-  summarizes old turns into a persisted `raisin:AICompaction` node so facts
-  survive but tokens don't.
+- `max_conversation_tokens` sizes the model's context window per turn
+  (history is trimmed to fit); it is NOT a hard stop for signed-in users —
+  cap a run with `run_budgets` (`max_total_tokens`, `max_model_calls`).
+  For anonymous visitors, `anonymous.max_conversation_tokens` IS a hard
+  per-conversation budget (see below). `auto_compact` summarizes old turns
+  into a persisted `raisin:AICompaction` node so facts survive but tokens
+  don't.
 - Configure providers per tenant with the CLI:
   `raisindb ai provider set groq --api-key-stdin && raisindb ai provider test groq`.
 - Repeatable proof scripts in `examples/shiftboard/`: `npm run smoke`
