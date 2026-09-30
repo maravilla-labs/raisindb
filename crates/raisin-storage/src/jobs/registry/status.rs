@@ -53,7 +53,16 @@ impl JobRegistry {
                 }
                 // Track when the current execution attempt started so the
                 // watchdog can enforce a wall-clock execution cap.
-                if matches!(status, JobStatus::Running | JobStatus::Executing)
+                //
+                // Running -> Executing restarts the clock: a claimed job waits
+                // in Running for a handler permit, and that wait is not
+                // execution. Counting it let a burst of claims (thousands of
+                // trigger evaluations from one import) time out while still
+                // queued, and after the last retry they were failed without
+                // their handler ever running.
+                if matches!(status, JobStatus::Executing) && !matches!(old, JobStatus::Executing) {
+                    job.executing_since = Some(Utc::now());
+                } else if matches!(status, JobStatus::Running | JobStatus::Executing)
                     && job.executing_since.is_none()
                 {
                     job.executing_since = Some(Utc::now());

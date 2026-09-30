@@ -88,8 +88,8 @@ impl TimeoutWatchdog {
     /// Check all running jobs for timeouts
     ///
     /// A job is considered timed out when either:
-    /// 1. Its total execution time (since the current attempt was claimed)
-    ///    exceeds `timeout_seconds`. This is the primary check: the worker
+    /// 1. Its handler has run longer than `timeout_seconds` (since it got
+    ///    its permit; the wait for one does not count). This is the primary check: the worker
     ///    auto-renews heartbeats from an independent task, so a handler that
     ///    is stuck (e.g. parked in a blocking call) keeps a fresh heartbeat
     ///    forever and would never be reaped by heartbeat staleness alone.
@@ -113,13 +113,23 @@ impl TimeoutWatchdog {
             // existed (restored from older persisted state).
             let exec_start = job.executing_since.unwrap_or(job.started_at);
             let running_secs = now.signed_duration_since(exec_start).num_seconds().max(0) as u64;
+            // The runtime cap applies to a job whose handler is running. A
+            // worker-claimed job sits in Running (with a heartbeat) while it
+            // waits for a handler permit; that wait is not execution, and the
+            // heartbeat check below still reaps it if its heartbeat task dies.
+            // Capping the wait timed out whole bursts of trigger evaluations
+            // before any of them ran. A Running job WITHOUT a heartbeat was
+            // marked running by code that executes it inline (no worker, no
+            // permit), so its runtime is still capped.
+            let handler_running =
+                matches!(job.status, JobStatus::Executing) || job.last_heartbeat.is_none();
 
             // Heartbeat staleness (catches dead heartbeat tasks quickly).
             let heartbeat_stale_secs = job
                 .last_heartbeat
                 .map(|hb| now.signed_duration_since(hb).num_seconds().max(0) as u64);
 
-            let exceeded_runtime = running_secs > job.timeout_seconds;
+            let exceeded_runtime = handler_running && running_secs > job.timeout_seconds;
             let exceeded_heartbeat = heartbeat_stale_secs
                 .map(|s| s > job.timeout_seconds)
                 .unwrap_or(false);
@@ -312,6 +322,7 @@ mod tests {
         // Normal retry semantics: a timed-out job with retries left goes
         // back to Scheduled (with backoff), not to Failed.
         let (registry, job_id, timeout) = running_job(3).await;
+        registry.mark_executing(&job_id).await.unwrap();
 
         registry
             .set_heartbeat_for_test(&job_id, Some(Utc::now()))
@@ -360,5 +371,71 @@ mod tests {
 
         let status = registry.get_status(&job_id).await.unwrap();
         assert!(matches!(status, JobStatus::Running));
+    }
+
+    #[tokio::test]
+    async fn test_watchdog_still_caps_a_job_run_inline_without_a_heartbeat() {
+        // mark_running without a worker (e.g. an inline reindex): no heartbeat,
+        // no permit wait, so the runtime cap is all that bounds it.
+        let (registry, job_id, timeout) = running_job(0).await;
+        registry
+            .set_heartbeat_for_test(&job_id, None)
+            .await
+            .unwrap();
+        registry
+            .set_execution_start_for_test(
+                &job_id,
+                Some(Utc::now() - chrono::Duration::seconds(timeout + 100)),
+            )
+            .await
+            .unwrap();
+
+        let watchdog = TimeoutWatchdog::new(registry.clone(), CancellationToken::new());
+        watchdog.check_timeouts().await.unwrap();
+
+        assert!(matches!(
+            registry.get_status(&job_id).await.unwrap(),
+            JobStatus::Failed(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_watchdog_does_not_time_out_a_job_waiting_for_a_permit() {
+        // Claimed (Running), heartbeat alive, waiting far longer than the
+        // timeout for a handler permit: not a stuck handler, so not reaped.
+        let (registry, job_id, timeout) = running_job(0).await;
+        registry
+            .set_heartbeat_for_test(&job_id, Some(Utc::now()))
+            .await
+            .unwrap();
+        registry
+            .set_execution_start_for_test(
+                &job_id,
+                Some(Utc::now() - chrono::Duration::seconds(timeout + 100)),
+            )
+            .await
+            .unwrap();
+
+        let watchdog = TimeoutWatchdog::new(registry.clone(), CancellationToken::new());
+        watchdog.check_timeouts().await.unwrap();
+
+        assert!(matches!(
+            registry.get_status(&job_id).await.unwrap(),
+            JobStatus::Running
+        ));
+
+        // Once it gets its permit the execution clock starts from zero.
+        registry.mark_executing(&job_id).await.unwrap();
+        let info = registry.get_job_info(&job_id).await.unwrap();
+        let since = info.executing_since.expect("executing_since set");
+        assert!(
+            Utc::now().signed_duration_since(since).num_seconds() < 5,
+            "the wait for a permit must not count as execution time"
+        );
+        watchdog.check_timeouts().await.unwrap();
+        assert!(matches!(
+            registry.get_status(&job_id).await.unwrap(),
+            JobStatus::Executing
+        ));
     }
 }
