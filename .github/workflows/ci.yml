@@ -11,6 +11,9 @@ on:
     paths-ignore:
       - 'book/**'
       - 'book.toml'
+  # Lets a branch run the suites before it lands:
+  #   gh workflow run ci.yml -R maravilla-labs/raisindb --ref <branch>
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -135,3 +138,56 @@ jobs:
         run: make wasm-sdks-test
         env:
           WASM_SDKS_STRICT: '1'
+
+  security-tests:
+    name: Auth and RLS tests
+    runs-on: ubuntu-latest
+    # Targeted suites for the access-control paths no other job compiles: the
+    # sign-up policy and default roles (raisin-transport-http identity_auth,
+    # raisin-models auth), COUNT(*) under row-level security, and the SQL the
+    # ai-tools retrieval component sends. The whole workspace is too heavy to
+    # test on every push; these are the tests whose failure is a data leak or a
+    # locked-out user rather than a wrong number.
+    env:
+      # raisin-server's build script builds the admin console with pnpm. None of
+      # these crates depends on raisin-server, but a stray `-p` should not start
+      # a frontend build either.
+      SKIP_ADMIN_BUILD: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      # A debug build of the rocksdb + tantivy + wasmtime graph needs more than
+      # the runner's free disk. These preinstalled SDKs are unused here.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      # Must MATCH rust-toolchain.toml — see the note in the Format job.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.1
+
+      # Same reason as in the WebAssembly SDKs job: raisin-ai (with `ocr`) is in
+      # the dependency graph of raisin-transport-http, and librocksdb-sys wants
+      # clang.
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libleptonica-dev libtesseract-dev clang pkg-config
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: security-tests
+
+      - name: raisin-models auth
+        run: cargo test -p raisin-models --lib 'auth::'
+
+      - name: raisin-transport-http identity_auth
+        run: cargo test -p raisin-transport-http --lib identity_auth
+
+      - name: raisin-sql-execution COUNT(*) under RLS
+        run: cargo test -p raisin-sql-execution --test all count_scan_rls
+
+      - name: raisin-sql-execution ai-tools retrieval SQL
+        run: cargo test -p raisin-sql-execution --test all rag_retrieval_sql
