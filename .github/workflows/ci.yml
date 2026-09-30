@@ -141,6 +141,10 @@ jobs:
 
   security-tests:
     name: Auth and RLS tests
+    # Manual only (Actions → CI → Run workflow, or `gh workflow run ci.yml
+    # --ref <branch>`): a cold build of this graph costs too much to repeat on
+    # every push.
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     # Targeted suites for the access-control paths no other job compiles: the
     # sign-up policy and default roles (raisin-transport-http identity_auth,
