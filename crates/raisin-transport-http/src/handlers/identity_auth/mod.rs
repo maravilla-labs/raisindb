@@ -40,6 +40,7 @@ mod oidc;
 mod password;
 pub mod policy;
 mod profile;
+pub mod repo_auth_config;
 mod session;
 mod sessions;
 mod types;

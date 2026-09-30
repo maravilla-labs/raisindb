@@ -30,8 +30,10 @@ use serde::Deserialize;
 use crate::management::types::ApiResponse;
 
 /// Roles applied when the caller does not specify any, matching the
-/// customer-facing create endpoint.
-const DEFAULT_ROLES: [&str; 2] = ["viewer", "authenticated_user"];
+/// customer-facing create endpoint. `authenticated_user` only — never the
+/// blanket-read `viewer` (see RepoAuthConfig::default_roles); an admin who
+/// wants more grants it explicitly.
+const DEFAULT_ROLES: [&str; 1] = ["authenticated_user"];
 
 /// Cap on a single list page. Provisioning control planes list to render an
 /// admin table, not to bulk-export.

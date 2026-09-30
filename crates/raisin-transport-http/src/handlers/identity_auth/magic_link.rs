@@ -33,6 +33,8 @@ use crate::error::ApiError;
 use crate::state::AppState;
 
 use super::helpers::{mask_email, validate_email};
+#[cfg(feature = "storage-rocksdb")]
+use super::repo_auth_config::resolve_repo_auth;
 use super::types::{MagicLinkRequest, MagicLinkSentResponse, MagicLinkVerifyQuery};
 
 /// Workspace holding per-tenant auth and email configuration.
@@ -398,39 +400,17 @@ fn resolve_redirect(config: &LinkConfig, requested: Option<&str>) -> Result<Stri
 
 /// Whether this repo accepts sign-ins from addresses it has never seen.
 ///
-/// Absent config means the [`raisin_models::auth::RepoAuthConfig`] default,
-/// which is permissive — the same answer the registration endpoints give.
-/// Disagreeing with them would make magic-link either a way around a closed
-/// repo or a way to be locked out of an open one.
+/// Reads the same `RepoAuthConfig.allow_registration` the repo-scoped
+/// password-registration endpoint now enforces (`register_for_repo`), through
+/// the shared [`resolve_repo_auth`] resolver, so magic-link and password
+/// registration always give the SAME answer for a repo. (They did not before:
+/// only magic-link consulted the config, and the password endpoints ignored it
+/// entirely — the note here used to claim they agreed, and they did not.)
 #[cfg(feature = "storage-rocksdb")]
 async fn allow_registration(state: &AppState, tenant_id: &str, repo: &str) -> bool {
-    use raisin_models::auth::AuthContext;
-    use raisin_models::nodes::properties::PropertyValue;
-
-    let service = state.node_service_for_context(
-        tenant_id,
-        repo,
-        CONFIG_BRANCH,
-        CONFIG_WORKSPACE,
-        Some(AuthContext::system()),
-    );
-
-    let node = service
-        .get_by_path(&format!("/config/repos/{repo}"))
+    resolve_repo_auth(state, tenant_id, repo)
         .await
-        .ok()
-        .flatten();
-
-    let configured = node.as_ref().and_then(|n| {
-        (n.node_type == "raisin:RepoAuthConfig")
-            .then(|| n.properties.get("allow_registration"))
-            .flatten()
-    });
-
-    match configured {
-        Some(PropertyValue::Boolean(allowed)) => *allowed,
-        _ => raisin_models::auth::RepoAuthConfig::default().allow_registration,
-    }
+        .allow_registration
 }
 
 // ============================================================================
@@ -745,7 +725,9 @@ async fn verify_magic_link_core(
     // Just-in-time provisioning, exactly as the password login path does: a
     // repo the user has never visited still needs a raisin:User node for RLS to
     // have anything to resolve. A failure here is logged, not fatal — the
-    // session is already valid.
+    // session is already valid. Default roles come from the repo config (never
+    // `viewer`), matching the password paths.
+    let repo_auth = resolve_repo_auth(state, tenant_id, repo).await;
     let home = match ensure_user_node(
         &repos.storage,
         tenant_id,
@@ -753,7 +735,7 @@ async fn verify_magic_link_core(
         &identity.identity_id,
         &identity.email,
         identity.display_name.as_deref(),
-        &["viewer".to_string(), "authenticated_user".to_string()],
+        &repo_auth.default_roles,
     )
     .await
     {

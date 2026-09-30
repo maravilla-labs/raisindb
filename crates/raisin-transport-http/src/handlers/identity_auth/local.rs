@@ -26,6 +26,7 @@ use super::helpers::{
     validate_email, AuthRepositories,
 };
 use super::policy::{load_auth_policy, EffectiveAuthPolicy};
+use super::repo_auth_config::resolve_repo_auth;
 use super::types::{AuthTokensResponse, LocalLoginRequest, RegisterRequest};
 use super::user_node::ensure_user_node;
 
@@ -244,6 +245,13 @@ pub async fn register(
     let repos = extract_repos(&state)?;
     let tenant_id = &tenant_info.tenant_id;
 
+    // The repo-less endpoint has no `RepoAuthConfig` to consult, so it is gated
+    // by the tenant-level policy and refused unless it explicitly opts in. See
+    // `tenant_allows_open_registration`.
+    if !tenant_allows_open_registration(&state, tenant_id).await {
+        return Err(registration_disabled_error());
+    }
+
     let policy = load_auth_policy(&state, tenant_id).await;
     let (identity, session, _expires_at) =
         create_identity_and_session(&repos, tenant_id, &req, &policy).await?;
@@ -252,6 +260,42 @@ pub async fn register(
     let tokens = generate_tokens_with_policy(&state, &identity, &session, None, None, &policy)?;
 
     Ok(Json(build_auth_response(&identity, tokens, None)))
+}
+
+/// The 403 both register endpoints return when registration is closed.
+#[cfg(feature = "storage-rocksdb")]
+fn registration_disabled_error() -> ApiError {
+    ApiError::new(
+        StatusCode::FORBIDDEN,
+        "REGISTRATION_DISABLED",
+        "Self-registration is not enabled",
+    )
+}
+
+/// Whether the tenant permits open, repo-less self-registration.
+///
+/// Reads `AccessSettings.allow_registration` from the tenant's stored auth
+/// config. A missing config or a read error means "not configured", which is
+/// `false`: the repo-less endpoint stays closed until an admin opts in.
+#[cfg(feature = "storage-rocksdb")]
+async fn tenant_allows_open_registration(state: &AppState, tenant_id: &str) -> bool {
+    match state
+        .storage()
+        .tenant_auth_config_repository()
+        .get_config(tenant_id)
+        .await
+    {
+        Ok(Some(config)) => config.access_settings.allow_registration,
+        Ok(None) => false,
+        Err(e) => {
+            tracing::warn!(
+                tenant_id = %tenant_id,
+                error = %e,
+                "Failed to load tenant auth config; refusing open registration"
+            );
+            false
+        }
+    }
 }
 
 /// Register a new user for a specific repository.
@@ -271,6 +315,14 @@ pub async fn register_for_repo(
     let repos = extract_repos(&state)?;
     let tenant_id = &tenant_info.tenant_id;
 
+    // Registration must be enabled for this repo, and the new user's roles come
+    // from its `RepoAuthConfig.default_roles` (never `viewer`). Resolved before
+    // the identity is created so a closed repo never leaves an orphan identity.
+    let repo_auth = resolve_repo_auth(&state, tenant_id, &repo).await;
+    if !repo_auth.allow_registration {
+        return Err(registration_disabled_error());
+    }
+
     let policy = load_auth_policy(&state, tenant_id).await;
     let (identity, session, _expires_at) =
         create_identity_and_session(&repos, tenant_id, &req, &policy).await?;
@@ -283,7 +335,7 @@ pub async fn register_for_repo(
         &identity.identity_id,
         &req.email,
         req.display_name.as_deref(),
-        &["viewer".to_string(), "authenticated_user".to_string()], // Default roles
+        &repo_auth.default_roles,
     )
     .await
     {
@@ -377,7 +429,11 @@ pub async fn login_for_repo(
     )
     .await?;
 
-    // Just-in-time user provisioning: ensure user node exists in repository
+    // Just-in-time user provisioning: ensure user node exists in repository.
+    // JIT default roles come from the repo config (never `viewer`), matching
+    // registration. `union_roles` only ADDS these to an existing node, so this
+    // never downgrades a user who already holds broader roles.
+    let repo_auth = resolve_repo_auth(&state, tenant_id, &repo).await;
     let home = match ensure_user_node(
         &repos.storage,
         tenant_id,
@@ -385,7 +441,7 @@ pub async fn login_for_repo(
         &identity.identity_id,
         &identity.email,
         identity.display_name.as_deref(),
-        &["viewer".to_string(), "authenticated_user".to_string()], // Default roles for JIT provisioned users
+        &repo_auth.default_roles,
     )
     .await
     {

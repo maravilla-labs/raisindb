@@ -314,7 +314,11 @@ async fn authenticate_owner(
         .record_successful_login(tenant_id, &identity.identity_id, "system:oauth-authorize")
         .await;
 
-    // Just-in-time user-node provisioning in the resource's repository.
+    // Just-in-time user-node provisioning in the resource's repository. Default
+    // roles come from the repo config (never `viewer`), as on every other path.
+    let repo_auth =
+        crate::handlers::identity_auth::repo_auth_config::resolve_repo_auth(state, tenant_id, repo)
+            .await;
     let _home = ensure_user_node(
         &repos.storage,
         tenant_id,
@@ -322,7 +326,7 @@ async fn authenticate_owner(
         &identity.identity_id,
         &identity.email,
         identity.display_name.as_deref(),
-        &["viewer".to_string(), "authenticated_user".to_string()],
+        &repo_auth.default_roles,
     )
     .await
     .ok();
