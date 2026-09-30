@@ -1,6 +1,12 @@
 import http from 'http';
 import open from 'open';
-import { loadConfig, saveConfig } from './config.js';
+import {
+  getEffectiveServer,
+  loadConfig,
+  normalizeServerUrl,
+  sameServer,
+  saveConfig,
+} from './config.js';
 
 const CALLBACK_PORT = 9999;
 const CALLBACK_PATH = '/auth/callback';
@@ -136,20 +142,50 @@ export function isAuthenticated(): boolean {
   return !!config.token;
 }
 
+/** Targets already warned about, so a command's many requests warn once. */
+const warnedTargets = new Set<string>();
+
+/** Forget which targets were warned about (tests). */
+export function resetTokenWarnings(): void {
+  warnedTargets.clear();
+}
+
 /**
- * Gets the current authentication token.
+ * Gets the authentication token for a request to `targetServer` (default: the
+ * server this command talks to, `getEffectiveServer()`).
  *
- * Resolution order (env wins over config file, CI-friendly):
- *   1. RAISINDB_TOKEN environment variable
- *   2. .raisinrc config file
+ * Resolution order:
+ *   1. RAISINDB_TOKEN environment variable — an explicit choice, sent as is
+ *   2. the .raisinrc token, but ONLY when `targetServer` is the server that
+ *      token was issued for (the one stored next to it by `raisindb login`)
+ *
+ * A saved login for another server yields `null` and a one-time hint on
+ * stderr — sending server A's token to server B would hand B a credential
+ * for A.
  */
-export function getToken(): string | null {
+export function getToken(targetServer?: string | null): string | null {
   const envToken = process.env.RAISINDB_TOKEN;
   if (envToken && envToken.trim() !== '') {
     return envToken.trim();
   }
   const config = loadConfig();
-  return config.token;
+  if (!config.token) {
+    return null;
+  }
+  const target = targetServer || getEffectiveServer();
+  if (sameServer(target, config.server)) {
+    return config.token;
+  }
+  const key = normalizeServerUrl(target);
+  if (!warnedTargets.has(key)) {
+    warnedTargets.add(key);
+    console.error(
+      `Note: the saved login is for ${config.server ?? 'an unknown server'}, not ${target}; ` +
+        'sending no credentials.\n' +
+        `  Log in to it with: raisindb login -s ${target}   (or set RAISINDB_TOKEN)`
+    );
+  }
+  return null;
 }
 
 export interface PasswordLoginResult {

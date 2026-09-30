@@ -5,7 +5,7 @@ import AdmZip from 'adm-zip';
 import ignore, { Ignore } from 'ignore';
 import React from 'react';
 import { render } from 'ink';
-import { getServer, getDefaultRepo } from '../config.js';
+import { announceWriteTarget, getServer, getDefaultRepo, setServerOverride } from '../config.js';
 import { getToken } from '../auth.js';
 import {
   type PackageInstallMode,
@@ -454,6 +454,32 @@ interface UploadState {
 }
 
 /**
+ * The server a package command talks to, and the token for it.
+ *
+ * An explicit `serverUrl` is pinned process-wide (`setServerOverride`) so that
+ * EVERY request of the command — the upload, the job SSE stream, the install,
+ * the status polling — goes there. It used to be computed here and then
+ * ignored, while the HTTP layer went to the `.raisinrc` server: a deploy aimed
+ * at `--server http://localhost:8080` landed on whatever the last login was.
+ */
+export function resolvePackageTarget(serverUrl?: string): { server: string; token: string } {
+  if (serverUrl) {
+    setServerOverride(serverUrl);
+  }
+  const server = getServer();
+  if (!server) {
+    throw new Error('No server configured. Use --server <url>, set RAISINDB_SERVER, or run "raisindb login -s <url>".');
+  }
+  const token = getToken(server);
+  if (!token) {
+    throw new Error(
+      `Not authenticated for ${server}. Run "raisindb login -s ${server}" or set RAISINDB_TOKEN.`
+    );
+  }
+  return { server, token };
+}
+
+/**
  * Uploads a .rap package file to the server with animated progress display
  *
  * @param filePath - Path to the .rap file
@@ -472,15 +498,7 @@ export async function uploadPackage(filePath: string, serverUrl?: string, repo?:
     throw new Error('File must have .rap extension');
   }
 
-  const server = serverUrl || getServer();
-  if (!server) {
-    throw new Error('No server configured. Use --server option or run "raisindb shell" and use /connect first.');
-  }
-
-  const token = getToken();
-  if (!token) {
-    throw new Error('Not authenticated. Run "raisindb shell" and use /login first.');
-  }
+  const { server } = resolvePackageTarget(serverUrl);
 
   // Get repo from env/config - require explicit specification if not configured
   const targetRepo = repo || getDefaultRepo();
@@ -488,6 +506,8 @@ export async function uploadPackage(filePath: string, serverUrl?: string, repo?:
   if (!targetRepo) {
     throw new Error('No repository specified. Use --repo <name>, set RAISINDB_REPO, or set a default in "raisindb shell" with "use <database>".');
   }
+
+  announceWriteTarget(`repo ${targetRepo}, branch ${branch}`, server);
 
   const fileName = path.basename(resolvedFile);
 
@@ -653,15 +673,7 @@ export async function uploadPackage(filePath: string, serverUrl?: string, repo?:
  * Lists installed packages (requires server connection)
  */
 export async function listPackages(serverUrl?: string, repo?: string): Promise<void> {
-  const server = serverUrl || getServer();
-  if (!server) {
-    throw new Error('No server configured. Use --server option or run /connect first.');
-  }
-
-  const token = getToken();
-  if (!token) {
-    throw new Error('Not authenticated. Run /login first.');
-  }
+  resolvePackageTarget(serverUrl);
 
   // Get repo from env/config or use 'default'
   const targetRepo = repo || getDefaultRepo() || 'default';
@@ -798,19 +810,12 @@ export async function installPackage(
   branch = 'main',
   mode?: PackageInstallMode
 ): Promise<void> {
-  const server = serverUrl || getServer();
-  if (!server) {
-    throw new Error('No server configured. Use --server option or run /connect first.');
-  }
-
-  const token = getToken();
-  if (!token) {
-    throw new Error('Not authenticated. Run "raisindb login" first.');
-  }
+  const { server } = resolvePackageTarget(serverUrl);
 
   // Get repo from env/config or use 'default'
   const targetRepo = repo || getDefaultRepo() || 'default';
 
+  announceWriteTarget(`repo ${targetRepo}, branch ${branch}`, server);
   console.log(`Installing package '${packageName}' in repository '${targetRepo}' (branch: ${branch})...`);
 
   try {

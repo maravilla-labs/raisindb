@@ -7,7 +7,14 @@ import Shell from './components/Shell.js';
 import SqlShell from './components/SqlShell.js';
 import PackageCreator from './components/PackageCreator.js';
 import LoginScreen from './components/LoginScreen.js';
-import { loadConfig, saveConfig, Config } from './config.js';
+import {
+  loadConfig,
+  saveConfig,
+  sameServer,
+  setDefaultRepo,
+  setServerOverride,
+  Config,
+} from './config.js';
 import { logout, cancelLogin } from './auth.js';
 import {
   listRepositories,
@@ -68,10 +75,19 @@ const App: React.FC<AppProps> = ({ serverUrl, database }) => {
           return { type: 'error', message: 'Usage: /connect <url>' };
         }
         const newServer = args[0];
-        const updatedConfig = { ...state.config, server: newServer };
+        // A saved token belongs to the server it was issued by. Switching
+        // servers keeps it only when the server is the same one; otherwise it
+        // would be re-bound to (and sent to) the new server.
+        const saved = loadConfig();
+        const keepToken = sameServer(newServer, saved.server);
+        const updatedConfig = { ...saved, server: newServer, token: keepToken ? saved.token : null };
         saveConfig(updatedConfig);
+        setServerOverride(newServer);
         setState((prev) => ({ ...prev, config: updatedConfig, connected: true }));
-        return { type: 'success', message: `Connected to ${newServer}` };
+        return {
+          type: 'success',
+          message: `Connected to ${newServer}${keepToken || !saved.token ? '' : ' (not logged in there: use /login)'}`,
+        };
 
       case '/login':
         setState((prev) => ({ ...prev, mode: 'login' }));
@@ -80,7 +96,6 @@ const App: React.FC<AppProps> = ({ serverUrl, database }) => {
       case '/logout':
         logout();
         const logoutConfig = { ...state.config, token: null };
-        saveConfig(logoutConfig);
         setState((prev) => ({ ...prev, config: logoutConfig }));
         return { type: 'success', message: 'Logged out successfully' };
 
@@ -90,8 +105,10 @@ const App: React.FC<AppProps> = ({ serverUrl, database }) => {
         }
         const dbName = args[0];
         setState((prev) => ({ ...prev, currentDatabase: dbName }));
-        const dbConfig = { ...state.config, default_repo: dbName };
-        saveConfig(dbConfig);
+        // Only the default repo changes on disk. Saving the whole in-memory
+        // config would write a `--server` override into .raisinrc next to a
+        // token issued by a different server.
+        setDefaultRepo(dbName);
         return { type: 'success', message: `Switched to database: ${dbName}` };
 
       case '/databases':
