@@ -99,8 +99,35 @@ pub(crate) fn hash_property_value(value: &PropertyValue) -> String {
             format!("geometry:{}", geom_type)
         }
         PropertyValue::Array(_) | PropertyValue::Object(_) => {
-            // For complex types, use JSON serialization as hash
-            serde_json::to_string(value).unwrap_or_else(|_| "invalid".to_string())
+            // JSON with object keys sorted at every level. An object is a
+            // HashMap, whose iteration order differs between two copies of the
+            // same value: plain serialization put a value's tombstone under a
+            // different key than the row it was meant to hide, so superseded
+            // rows stayed visible to the index — and survived history GC —
+            // forever.
+            serde_json::to_value(value)
+                .map(|v| canonical_json(v).to_string())
+                .unwrap_or_else(|_| "invalid".to_string())
         }
+    }
+}
+
+/// `v` with every object's keys in sorted order.
+fn canonical_json(v: serde_json::Value) -> serde_json::Value {
+    match v {
+        serde_json::Value::Object(map) => {
+            let mut entries: Vec<(String, serde_json::Value)> = map.into_iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            serde_json::Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(k, v)| (k, canonical_json(v)))
+                    .collect(),
+            )
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(canonical_json).collect())
+        }
+        other => other,
     }
 }

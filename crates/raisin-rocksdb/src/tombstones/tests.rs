@@ -33,3 +33,33 @@ fn test_hash_property_value_integer() {
     let value = PropertyValue::Integer(42);
     assert_eq!(hash_property_value(&value), "42");
 }
+
+#[test]
+fn object_values_hash_the_same_whatever_their_key_order() {
+    use std::collections::HashMap;
+    // Enough keys that two maps built in opposite orders iterate differently.
+    let keys: Vec<String> = (0..32).map(|i| format!("k{i:02}")).collect();
+    let build = |order: &mut dyn Iterator<Item = &String>| {
+        let mut inner = HashMap::new();
+        for k in order {
+            inner.insert(k.clone(), PropertyValue::Integer(1));
+        }
+        let mut outer = HashMap::new();
+        outer.insert("nested".to_string(), PropertyValue::Object(inner.clone()));
+        outer.insert(
+            "list".to_string(),
+            PropertyValue::Array(vec![PropertyValue::Object(inner)]),
+        );
+        PropertyValue::Object(outer)
+    };
+    let a = hash_property_value(&build(&mut keys.iter()));
+    let b = hash_property_value(&build(&mut keys.iter().rev()));
+    assert_eq!(a, b);
+    // Keys come out sorted at every level.
+    assert!(a.starts_with(r#"{"list":[{"k00":"#), "{a}");
+    // The tombstone encoding is the index writers' encoding.
+    assert_eq!(
+        a,
+        crate::repositories::hash_property_value(&build(&mut keys.iter()))
+    );
+}

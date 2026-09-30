@@ -3,44 +3,10 @@
 use raisin_models::nodes::properties::PropertyValue;
 use std::collections::HashMap;
 
-/// Hash a property value for indexing
-///
-/// Creates a stable string representation suitable for use in property index keys.
+/// Hash a property value for indexing — the SAME encoding the index writers
+/// use, or a tombstone would not land on the row it is meant to hide.
 pub(super) fn hash_property_value(value: &PropertyValue) -> String {
-    match value {
-        PropertyValue::Null => "null".to_string(),
-        PropertyValue::String(s) => s.clone(),
-        PropertyValue::Integer(i) => i.to_string(),
-        PropertyValue::Float(f) => f.to_string(),
-        PropertyValue::Decimal(d) => d.to_string(),
-        PropertyValue::Boolean(b) => b.to_string(),
-        PropertyValue::Date(d) => {
-            let nanos = d.timestamp_nanos_opt().unwrap_or(0);
-            format!("{:020}", nanos as i128)
-        }
-        PropertyValue::Url(u) => u.url.clone(),
-        PropertyValue::Reference(r) => format!("ref:{}", r.id),
-        PropertyValue::Resource(res) => format!("resource:{}", res.uuid),
-        PropertyValue::Element(block) => format!("block:{}", block.uuid),
-        PropertyValue::Composite(container) => format!("container:{}", container.uuid),
-        PropertyValue::Vector(v) => format!("vector:{}d", v.len()),
-        PropertyValue::Geometry(g) => {
-            use raisin_models::nodes::properties::GeoJson;
-            let geom_type = match g {
-                GeoJson::Point { .. } => "Point",
-                GeoJson::LineString { .. } => "LineString",
-                GeoJson::Polygon { .. } => "Polygon",
-                GeoJson::MultiPoint { .. } => "MultiPoint",
-                GeoJson::MultiLineString { .. } => "MultiLineString",
-                GeoJson::MultiPolygon { .. } => "MultiPolygon",
-                GeoJson::GeometryCollection { .. } => "GeometryCollection",
-            };
-            format!("geometry:{}", geom_type)
-        }
-        PropertyValue::Array(_) | PropertyValue::Object(_) => {
-            serde_json::to_string(value).unwrap_or_else(|_| "invalid".to_string())
-        }
-    }
+    crate::repositories::hash_property_value(value)
 }
 
 /// Reference info extracted from properties
