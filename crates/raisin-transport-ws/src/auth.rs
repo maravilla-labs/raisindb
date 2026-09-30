@@ -31,6 +31,33 @@ pub struct Claims {
 
     /// Token type (access or refresh)
     pub token_type: TokenType,
+
+    /// WHO the token speaks for, and therefore what it may become.
+    ///
+    /// A valid signature proves only that this service minted the token, not
+    /// that its holder is an administrator. Anonymous WebSocket connections
+    /// used to receive a token from this same service, and the upgrade path
+    /// turned every valid access token into `AuthContext::system()`, so a
+    /// visitor could reconnect with its own anonymous token and bypass
+    /// row-level security. The principal is now part of the signed claims and
+    /// the upgrade path grants system only for [`TokenPrincipal::Admin`].
+    ///
+    /// Defaulted so tokens minted before this claim existed still decode, as
+    /// [`TokenPrincipal::Unscoped`]: they grant nothing, and their holder signs
+    /// in again.
+    #[serde(default)]
+    pub principal: TokenPrincipal,
+}
+
+/// The principal a WebSocket JWT was issued to.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TokenPrincipal {
+    /// An administrator who signed in with admin credentials.
+    Admin,
+    /// No claim (a token minted before the claim existed). Grants nothing.
+    #[default]
+    Unscoped,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -88,12 +115,26 @@ impl JwtAuthService {
         }
     }
 
-    /// Generate a token pair (access + refresh) for a user
-    pub fn generate_token_pair(
+    /// Generate a token pair (access + refresh) for an ADMINISTRATOR who has
+    /// just proven admin credentials.
+    ///
+    /// The only issuer of admin tokens. Never call it for anyone else: an admin
+    /// token becomes `AuthContext::system()` on the WebSocket upgrade.
+    pub fn generate_admin_token_pair(
         &self,
         user_id: String,
         tenant_id: String,
         repository: Option<String>,
+    ) -> Result<TokenPair, AuthError> {
+        self.issue(user_id, tenant_id, repository, TokenPrincipal::Admin)
+    }
+
+    fn issue(
+        &self,
+        user_id: String,
+        tenant_id: String,
+        repository: Option<String>,
+        principal: TokenPrincipal,
     ) -> Result<TokenPair, AuthError> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -108,6 +149,7 @@ impl JwtAuthService {
             iat: now,
             exp: now + self.access_token_expiration,
             token_type: TokenType::Access,
+            principal,
         };
 
         let access_token = encode(&Header::default(), &access_claims, &self.encoding_key)
@@ -121,6 +163,7 @@ impl JwtAuthService {
             iat: now,
             exp: now + self.refresh_token_expiration,
             token_type: TokenType::Refresh,
+            principal,
         };
 
         let refresh_token = encode(&Header::default(), &refresh_claims, &self.encoding_key)
@@ -168,7 +211,13 @@ impl JwtAuthService {
     pub fn refresh_access_token(&self, refresh_token: &str) -> Result<TokenPair, AuthError> {
         let claims = self.validate_refresh_token(refresh_token)?;
 
-        self.generate_token_pair(claims.sub, claims.tenant_id, claims.repository)
+        // A refresh keeps the principal it was issued with; it never upgrades.
+        self.issue(
+            claims.sub,
+            claims.tenant_id,
+            claims.repository,
+            claims.principal,
+        )
     }
 
     /// Extract token from WebSocket headers or query parameters
@@ -223,7 +272,7 @@ mod tests {
         let auth_service = JwtAuthService::new("test_secret_key_1234567890");
 
         let token_pair = auth_service
-            .generate_token_pair(
+            .generate_admin_token_pair(
                 "user123".to_string(),
                 "tenant1".to_string(),
                 Some("repo1".to_string()),
@@ -254,7 +303,7 @@ mod tests {
         let auth_service = JwtAuthService::new("test_secret_key_1234567890");
 
         let token_pair = auth_service
-            .generate_token_pair("user123".to_string(), "tenant1".to_string(), None)
+            .generate_admin_token_pair("user123".to_string(), "tenant1".to_string(), None)
             .unwrap();
 
         // Refresh the access token
@@ -271,11 +320,65 @@ mod tests {
     }
 
     #[test]
+    fn admin_tokens_carry_the_admin_principal_and_refresh_keeps_it() {
+        let auth_service = JwtAuthService::new("test_secret_key_1234567890");
+        let pair = auth_service
+            .generate_admin_token_pair("admin".to_string(), "tenant1".to_string(), None)
+            .unwrap();
+        let claims = auth_service
+            .validate_access_token(&pair.access_token)
+            .unwrap();
+        assert_eq!(claims.principal, TokenPrincipal::Admin);
+
+        let refreshed = auth_service
+            .refresh_access_token(&pair.refresh_token)
+            .unwrap();
+        let claims = auth_service
+            .validate_access_token(&refreshed.access_token)
+            .unwrap();
+        assert_eq!(claims.principal, TokenPrincipal::Admin);
+    }
+
+    /// A token signed by this service but without a principal claim — what
+    /// anonymous connections used to be handed — decodes as Unscoped, and a
+    /// refresh cannot turn it into an admin token.
+    #[test]
+    fn a_token_without_a_principal_claim_is_unscoped() {
+        let secret = "test_secret_key_1234567890";
+        let auth_service = JwtAuthService::new(secret);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let legacy = serde_json::json!({
+            "sub": "anonymous-node-id",
+            "tenant_id": "tenant1",
+            "iat": now,
+            "exp": now + 3600,
+            "token_type": "refresh",
+        });
+        let token = encode(
+            &Header::default(),
+            &legacy,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .unwrap();
+        let claims = auth_service.validate_refresh_token(&token).unwrap();
+        assert_eq!(claims.principal, TokenPrincipal::Unscoped);
+
+        let refreshed = auth_service.refresh_access_token(&token).unwrap();
+        let claims = auth_service
+            .validate_access_token(&refreshed.access_token)
+            .unwrap();
+        assert_eq!(claims.principal, TokenPrincipal::Unscoped);
+    }
+
+    #[test]
     fn test_wrong_token_type() {
         let auth_service = JwtAuthService::new("test_secret_key_1234567890");
 
         let token_pair = auth_service
-            .generate_token_pair("user123".to_string(), "tenant1".to_string(), None)
+            .generate_admin_token_pair("user123".to_string(), "tenant1".to_string(), None)
             .unwrap();
 
         // Try to validate refresh token as access token

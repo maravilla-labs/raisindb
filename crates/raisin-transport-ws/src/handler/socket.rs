@@ -234,22 +234,19 @@ where
         AuthContext::anonymous_user(&user_id).with_permissions(resolved_permissions),
     );
 
-    // Generate anonymous JWT token for HTTP API calls
-    let anonymous_token = state
-        .auth_service
-        .generate_token_pair(user_id.clone(), tenant_id.to_string(), repository.clone())
-        .ok();
-
-    if let Some(ref token_pair) = anonymous_token {
-        conn.set_anonymous_token(Some(token_pair.access_token.clone()));
-    }
+    // No token is minted for an anonymous connection. One used to be, "for
+    // HTTP API calls", signed by the same service that signs admin tokens —
+    // and the upgrade path honoured any valid token from that service as an
+    // administrator, so a visitor who reconnected with it became the system.
+    // HTTP needs no token for anonymous access (the middleware resolves the
+    // anonymous user when none is sent), and no SDK ever used it.
+    conn.set_anonymous(true);
 
     info!(
         connection_id = %conn.connection_id,
         tenant_id = %tenant_id,
         repository = ?repository,
         user_id = %user_id,
-        has_token = anonymous_token.is_some(),
         "WebSocket connection auto-authenticated as physical anonymous user with resolved permissions"
     );
     conn
@@ -260,22 +257,16 @@ async fn send_connected_message(
     connection_state: &Arc<parking_lot::RwLock<ConnectionState>>,
     ws_sender: &mut futures::stream::SplitSink<WebSocket, Message>,
 ) {
-    let (connection_id, anonymous_token, user_id) = {
+    let (connection_id, anonymous, user_id) = {
         let conn = connection_state.read();
         (
             conn.connection_id.clone(),
-            conn.anonymous_token().cloned(),
+            conn.is_anonymous(),
             conn.user_id.clone(),
         )
     };
 
-    let connected_message = serde_json::json!({
-        "type": "connected",
-        "connection_id": connection_id,
-        "anonymous": anonymous_token.is_some(),
-        "token": anonymous_token,
-        "user_id": user_id,
-    });
+    let connected_message = connected_payload(&connection_id, anonymous, user_id.as_deref());
 
     if let Ok(data) = rmp_serde::encode::to_vec_named(&connected_message) {
         if let Err(e) = ws_sender.send(Message::Binary(Bytes::from(data))).await {
@@ -283,11 +274,27 @@ async fn send_connected_message(
         } else {
             debug!(
                 connection_id = %connection_id,
-                has_token = anonymous_token.is_some(),
+                anonymous = anonymous,
                 "Sent connected message to client"
             );
         }
     }
+}
+
+/// The "connected" message. It never carries a credential: `token` stays in
+/// the shape for older clients, and is always null.
+fn connected_payload(
+    connection_id: &str,
+    anonymous: bool,
+    user_id: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": "connected",
+        "connection_id": connection_id,
+        "anonymous": anonymous,
+        "token": serde_json::Value::Null,
+        "user_id": user_id,
+    })
 }
 
 /// Spawn the task that sends responses and events back to the client.
@@ -476,5 +483,20 @@ where
                 return false;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::connected_payload;
+
+    /// An anonymous connection is told it is anonymous and is handed no token:
+    /// a token here is a credential a visitor can replay on the upgrade.
+    #[test]
+    fn the_connected_message_hands_out_no_token() {
+        let msg = connected_payload("c-1", true, Some("anon-node"));
+        assert_eq!(msg["anonymous"], true);
+        assert!(msg["token"].is_null());
+        assert_eq!(msg["user_id"], "anon-node");
     }
 }

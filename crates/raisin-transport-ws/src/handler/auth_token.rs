@@ -23,6 +23,21 @@ use raisin_models::{auth::AuthContext, permissions::ResolvedPermissions};
 
 use super::state::WsState;
 
+/// The auth context a token minted by the WebSocket JWT service grants.
+///
+/// Derived from the SIGNED claims, never from the mere fact that the signature
+/// verified: only a token issued to an administrator
+/// ([`TokenPrincipal::Admin`], minted by `generate_admin_token_pair` after an
+/// admin password check) becomes the RLS-bypassing system context. Anything
+/// else this service signed, such as the tokens anonymous connections used to
+/// be handed, grants nothing.
+pub(crate) fn context_for_ws_token(claims: &crate::auth::Claims) -> Option<AuthContext> {
+    match claims.principal {
+        crate::auth::TokenPrincipal::Admin => Some(AuthContext::system()),
+        crate::auth::TokenPrincipal::Unscoped => None,
+    }
+}
+
 /// Authenticate using a JWT token
 pub(super) async fn authenticate_with_token<S, B>(
     state: &WsState<S, B>,
@@ -32,8 +47,16 @@ where
     S: raisin_storage::Storage,
     B: raisin_binary::BinaryStorage,
 {
-    // 1. Try WebSocket JWT validation first (admin users)
-    if let Ok(claims) = state.auth_service.validate_access_token(token) {
+    // 1. Try WebSocket JWT validation first (admin users). Only a token that
+    //    carries the admin principal is honoured here; any other token this
+    //    service signed grants nothing, and falls through to the identity
+    //    branches below, which validate it on their own terms.
+    if let Some((claims, auth_context)) = state
+        .auth_service
+        .validate_access_token(token)
+        .ok()
+        .and_then(|claims| context_for_ws_token(&claims).map(|ctx| (claims, ctx)))
+    {
         debug!("Authenticated as admin user: {}", claims.sub);
 
         let mut conn_state = ConnectionState::new(
@@ -44,9 +67,7 @@ where
         );
 
         conn_state.set_user_id(claims.sub.clone());
-
-        // Admin users get system auth context (bypasses RLS)
-        conn_state.set_auth_context(AuthContext::system());
+        conn_state.set_auth_context(auth_context);
 
         return Ok(conn_state);
     }
@@ -294,4 +315,58 @@ fn decode_identity_jwt(token: &str) -> Result<JwtIdentityClaims, String> {
         .map(String::from);
 
     Ok((sub, email, tenant_id, repository, home))
+}
+
+#[cfg(test)]
+mod ws_token_tests {
+    use super::context_for_ws_token;
+    use crate::auth::{JwtAuthService, TokenPrincipal};
+
+    const SECRET: &str = "test_secret_key_1234567890";
+
+    /// The regression: anonymous WebSocket connections were handed an access
+    /// token signed by the same service, and presenting ANY valid access token
+    /// on the upgrade yielded `AuthContext::system()`. A token without the
+    /// admin principal must grant no context at all.
+    #[test]
+    fn an_anonymous_issued_token_grants_no_system_or_admin_context() {
+        use jsonwebtoken::{encode, EncodingKey, Header};
+        let now = chrono::Utc::now().timestamp();
+        // Exactly the claims the anonymous path used to sign.
+        let anonymous = serde_json::json!({
+            "sub": "anonymous-user-node-id",
+            "tenant_id": "default",
+            "repository": "website",
+            "iat": now,
+            "exp": now + 3600,
+            "token_type": "access",
+        });
+        let token = encode(
+            &Header::default(),
+            &anonymous,
+            &EncodingKey::from_secret(SECRET.as_bytes()),
+        )
+        .unwrap();
+
+        let service = JwtAuthService::new(SECRET);
+        let claims = service
+            .validate_access_token(&token)
+            .expect("the signature is valid; that alone must not be enough");
+        assert_eq!(claims.principal, TokenPrincipal::Unscoped);
+        assert!(
+            context_for_ws_token(&claims).is_none(),
+            "a non-admin token must not become a system context"
+        );
+    }
+
+    #[test]
+    fn an_admin_token_grants_the_system_context() {
+        let service = JwtAuthService::new(SECRET);
+        let pair = service
+            .generate_admin_token_pair("admin-1".into(), "default".into(), None)
+            .unwrap();
+        let claims = service.validate_access_token(&pair.access_token).unwrap();
+        let ctx = context_for_ws_token(&claims).expect("admin token");
+        assert!(ctx.is_system);
+    }
 }

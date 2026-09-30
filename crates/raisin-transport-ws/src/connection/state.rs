@@ -61,8 +61,8 @@ pub struct ConnectionState {
     /// Active transaction context (if a transaction is in progress)
     transaction_context: Arc<Mutex<Option<Arc<dyn TransactionalContext>>>>,
 
-    /// Anonymous JWT token (for HTTP API calls when using anonymous access)
-    anonymous_token: Option<String>,
+    /// Whether this connection was auto-authenticated as the anonymous user.
+    anonymous: bool,
 }
 
 impl ConnectionState {
@@ -88,7 +88,7 @@ impl ConnectionState {
             event_tx: Arc::new(RwLock::new(None)),
             credits: Arc::new(RwLock::new(initial_credits)),
             transaction_context: Arc::new(Mutex::new(None)),
-            anonymous_token: None,
+            anonymous: false,
         }
     }
 
@@ -107,14 +107,14 @@ impl ConnectionState {
         self.auth_context.as_ref()
     }
 
-    /// Set the anonymous JWT token (for HTTP API calls)
-    pub fn set_anonymous_token(&mut self, token: Option<String>) {
-        self.anonymous_token = token;
+    /// Mark this connection as the auto-authenticated anonymous user.
+    pub fn set_anonymous(&mut self, anonymous: bool) {
+        self.anonymous = anonymous;
     }
 
-    /// Get the anonymous JWT token
-    pub fn anonymous_token(&self) -> Option<&String> {
-        self.anonymous_token.as_ref()
+    /// Whether this connection is the auto-authenticated anonymous user.
+    pub fn is_anonymous(&self) -> bool {
+        self.anonymous
     }
 
     /// Set the session-level branch (from USE BRANCH / SET app.branch)

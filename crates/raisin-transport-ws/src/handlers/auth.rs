@@ -51,7 +51,7 @@ where
                 })?;
 
             // Generate JWT token pair
-            let token_pair = state.auth_service.generate_token_pair(
+            let token_pair = state.auth_service.generate_admin_token_pair(
                 admin_user.user_id.clone(),
                 conn_tenant_id.clone(),
                 conn_repository.clone(),
@@ -65,6 +65,7 @@ where
                 let mut conn = connection_state.write();
                 conn.set_user_id(admin_user.user_id.clone());
                 conn.set_auth_context(raisin_models::auth::AuthContext::system());
+                conn.set_anonymous(false);
             }
 
             info!(
@@ -230,6 +231,7 @@ where
         let mut conn = connection_state.write();
         conn.set_user_id(user_id.clone());
         conn.set_auth_context(auth_context.clone());
+        conn.set_anonymous(false);
         info!(
             user_id = %user_id,
             auth_context_user_id = ?auth_context.user_id,

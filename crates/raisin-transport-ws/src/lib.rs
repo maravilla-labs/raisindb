@@ -50,7 +50,7 @@ pub mod registry;
 pub mod shutdown;
 
 // Re-exports
-pub use auth::{Claims, JwtAuthService, TokenType};
+pub use auth::{Claims, JwtAuthService, TokenPrincipal, TokenType};
 pub use connection::ConnectionState;
 pub use error::WsError;
 pub use event_handler::WsEventHandler;
