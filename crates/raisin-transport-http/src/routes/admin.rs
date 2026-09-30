@@ -17,115 +17,10 @@ pub(crate) fn admin_routes(state: &AppState) -> Router<AppState> {
     use axum::routing::{delete, get, post};
 
     Router::new()
-        // ----------------------------------------------------------------
-        // Replication synchronization
-        // ----------------------------------------------------------------
-        .route(
-            "/api/replication/{tenant_id}/{repo_id}/operations",
-            get(crate::handlers::replication::get_operations),
-        )
-        .route(
-            "/api/replication/{tenant_id}/{repo_id}/operations/batch",
-            post(crate::handlers::replication::apply_operations_batch),
-        )
-        .route(
-            "/api/replication/{tenant_id}/{repo_id}/vector-clock",
-            get(crate::handlers::replication::get_vector_clock),
-        )
-        // ----------------------------------------------------------------
-        // Tenant embedding configuration
-        // ----------------------------------------------------------------
-        .route(
-            "/api/tenants/{tenant_id}/embeddings/config",
-            get(crate::handlers::embeddings::get_tenant_embedding_config)
-                .post(crate::handlers::embeddings::set_tenant_embedding_config),
-        )
-        .route(
-            "/api/tenants/{tenant_id}/embeddings/config/test",
-            post(crate::handlers::embeddings::test_embedding_connection),
-        )
-        // ----------------------------------------------------------------
-        // Unified AI configuration (tenant-scoped)
-        // ----------------------------------------------------------------
-        .route(
-            "/api/tenants/{tenant_id}/ai/config",
-            get(crate::handlers::ai::get_ai_config).put(crate::handlers::ai::set_ai_config),
-        )
-        .route(
-            "/api/tenants/{tenant_id}/ai/providers",
-            get(crate::handlers::ai::list_providers),
-        )
-        // The `{provider}` segment is a provider SLUG on all three routes below. It
-        // keeps the name `provider` because matchit rejects two routes that give the
-        // same path position different parameter names, and the `/test` and
-        // `/capabilities` URLs predate slugs.
-        .route(
-            "/api/tenants/{tenant_id}/ai/providers/{provider}",
-            delete(crate::handlers::ai::delete_ai_provider),
-        )
-        .route(
-            "/api/tenants/{tenant_id}/ai/providers/{provider}/test",
-            post(crate::handlers::ai::test_provider_connection),
-        )
-        .route(
-            "/api/tenants/{tenant_id}/ai/models",
-            get(crate::handlers::ai::list_all_models),
-        )
-        .route(
-            "/api/tenants/{tenant_id}/ai/models/{use_case}",
-            get(crate::handlers::ai::list_models_by_use_case),
-        )
-        .route(
-            "/api/tenants/{tenant_id}/ai/providers/{provider}/models/{model}/capabilities",
-            get(crate::handlers::ai::get_model_capabilities),
-        )
-        // HuggingFace model management
-        .route(
-            "/api/tenants/{tenant_id}/ai/models/huggingface",
-            get(crate::handlers::ai::list_huggingface_models),
-        )
-        .route(
-            "/api/tenants/{tenant_id}/ai/models/huggingface/{model_id}",
-            get(crate::handlers::ai::get_huggingface_model)
-                .delete(crate::handlers::ai::delete_huggingface_model),
-        )
-        .route(
-            "/api/tenants/{tenant_id}/ai/models/huggingface/{model_id}/download",
-            post(crate::handlers::ai::download_huggingface_model),
-        )
         // Local model registry (tenant-independent)
         .route(
             "/api/ai/models/local/caption",
             get(crate::handlers::ai::list_local_caption_models),
-        )
-        // ----------------------------------------------------------------
-        // Processing Rules (repository-scoped)
-        // ----------------------------------------------------------------
-        .route(
-            "/api/repository/{repo}/ai/rules",
-            get(crate::handlers::processing_rules::list_rules)
-                .post(crate::handlers::processing_rules::create_rule),
-        )
-        .route(
-            "/api/repository/{repo}/ai/rules/reorder",
-            axum::routing::put(crate::handlers::processing_rules::reorder_rules),
-        )
-        .route(
-            "/api/repository/{repo}/ai/rules/test",
-            post(crate::handlers::processing_rules::test_rule_match),
-        )
-        // The task vocabulary WITH this server's availability per task. Placed
-        // above the `{rule_id}` route: axum would otherwise be free to read
-        // `tasks` as a rule id.
-        .route(
-            "/api/repository/{repo}/ai/rules/tasks",
-            get(crate::handlers::processing_rules::list_tasks),
-        )
-        .route(
-            "/api/repository/{repo}/ai/rules/{rule_id}",
-            get(crate::handlers::processing_rules::get_rule)
-                .put(crate::handlers::processing_rules::update_rule)
-                .delete(crate::handlers::processing_rules::delete_rule),
         )
         // ----------------------------------------------------------------
         // Full-text search and SQL query
@@ -160,13 +55,6 @@ pub(crate) fn admin_routes(state: &AppState) -> Router<AppState> {
         // ----------------------------------------------------------------
         // Management API - Database Level (repository-specific indexes)
         // ----------------------------------------------------------------
-        // What this box can DO with a binary — loaded plugins, REFUSED plugin
-        // files, and the resolved per-media-kind table. A rejected plugin
-        // otherwise leaves a green server with no `raisin.media.*`.
-        .route(
-            "/api/admin/management/plugins",
-            get(crate::handlers::plugins::list_plugins),
-        )
         .route(
             "/api/admin/management/database/{tenant}/{repo}/fulltext/verify",
             post(crate::handlers::management::verify_fulltext_index)
@@ -347,26 +235,6 @@ pub(crate) fn admin_routes(state: &AppState) -> Router<AppState> {
                 crate::middleware::require_admin_auth_middleware,
             )),
         )
-        // RocksDB index reindex
-        .route(
-            "/api/admin/management/database/{tenant}/{repo}/reindex/start",
-            post(crate::handlers::management::reindex_start),
-        )
-        // PATH_INDEX reconstruction from NODE_PATH. Write-only, so it is safe
-        // to re-run and cannot deepen the damage it repairs.
-        .route(
-            "/api/admin/management/database/{tenant}/{repo}/path-index/repair",
-            post(crate::handlers::management::repair_path_index),
-        )
-        // Relation index integrity
-        .route(
-            "/api/admin/management/database/{tenant}/{repo}/relations/verify",
-            post(crate::handlers::management::verify_relation_integrity),
-        )
-        .route(
-            "/api/admin/management/database/{tenant}/{repo}/relations/repair",
-            post(crate::handlers::management::repair_relation_integrity),
-        )
         // Revision-history GC and retention policy for one repository
         .route(
             "/api/admin/management/database/{tenant}/{repo}/history/gc",
@@ -403,10 +271,6 @@ pub(crate) fn admin_routes(state: &AppState) -> Router<AppState> {
             )),
         )
         .route(
-            "/api/admin/management/global/rocksdb/backup",
-            post(crate::handlers::management::backup_rocksdb),
-        )
-        .route(
             "/api/admin/management/global/rocksdb/stats",
             get(crate::handlers::management::get_rocksdb_stats).layer(from_fn_with_state(
                 state.clone(),
@@ -419,6 +283,156 @@ pub(crate) fn admin_routes(state: &AppState) -> Router<AppState> {
                 state.clone(),
                 crate::middleware::require_admin_auth_middleware,
             )),
+        )
+        .merge(gated_admin_routes(state))
+}
+
+/// Routes that had no gate of their own: replication, the tenant's embedding
+/// and AI configuration, processing rules, plugin listing, index repair,
+/// backup, tenant cleanup, system updates and system definitions. Each is
+/// decided by `admin_gate`'s policy on the identity `optional_auth_middleware`
+/// resolves (administrator credentials for everything that changes or exposes
+/// configuration; signed-in users for what Studio editors read).
+fn gated_admin_routes(state: &AppState) -> Router<AppState> {
+    use axum::middleware::{from_fn, from_fn_with_state};
+    use axum::routing::{delete, get, post};
+
+    Router::new()
+        // ----------------------------------------------------------------
+        // Replication synchronization
+        // ----------------------------------------------------------------
+        .route(
+            "/api/replication/{tenant_id}/{repo_id}/operations",
+            get(crate::handlers::replication::get_operations),
+        )
+        .route(
+            "/api/replication/{tenant_id}/{repo_id}/operations/batch",
+            post(crate::handlers::replication::apply_operations_batch),
+        )
+        .route(
+            "/api/replication/{tenant_id}/{repo_id}/vector-clock",
+            get(crate::handlers::replication::get_vector_clock),
+        )
+        // ----------------------------------------------------------------
+        // Tenant embedding configuration
+        // ----------------------------------------------------------------
+        .route(
+            "/api/tenants/{tenant_id}/embeddings/config",
+            get(crate::handlers::embeddings::get_tenant_embedding_config)
+                .post(crate::handlers::embeddings::set_tenant_embedding_config),
+        )
+        .route(
+            "/api/tenants/{tenant_id}/embeddings/config/test",
+            post(crate::handlers::embeddings::test_embedding_connection),
+        )
+        // ----------------------------------------------------------------
+        // Unified AI configuration (tenant-scoped)
+        // ----------------------------------------------------------------
+        .route(
+            "/api/tenants/{tenant_id}/ai/config",
+            get(crate::handlers::ai::get_ai_config).put(crate::handlers::ai::set_ai_config),
+        )
+        .route(
+            "/api/tenants/{tenant_id}/ai/providers",
+            get(crate::handlers::ai::list_providers),
+        )
+        // The `{provider}` segment is a provider SLUG on all three routes below. It
+        // keeps the name `provider` because matchit rejects two routes that give the
+        // same path position different parameter names, and the `/test` and
+        // `/capabilities` URLs predate slugs.
+        .route(
+            "/api/tenants/{tenant_id}/ai/providers/{provider}",
+            delete(crate::handlers::ai::delete_ai_provider),
+        )
+        .route(
+            "/api/tenants/{tenant_id}/ai/providers/{provider}/test",
+            post(crate::handlers::ai::test_provider_connection),
+        )
+        .route(
+            "/api/tenants/{tenant_id}/ai/models",
+            get(crate::handlers::ai::list_all_models),
+        )
+        .route(
+            "/api/tenants/{tenant_id}/ai/models/{use_case}",
+            get(crate::handlers::ai::list_models_by_use_case),
+        )
+        .route(
+            "/api/tenants/{tenant_id}/ai/providers/{provider}/models/{model}/capabilities",
+            get(crate::handlers::ai::get_model_capabilities),
+        )
+        // HuggingFace model management
+        .route(
+            "/api/tenants/{tenant_id}/ai/models/huggingface",
+            get(crate::handlers::ai::list_huggingface_models),
+        )
+        .route(
+            "/api/tenants/{tenant_id}/ai/models/huggingface/{model_id}",
+            get(crate::handlers::ai::get_huggingface_model)
+                .delete(crate::handlers::ai::delete_huggingface_model),
+        )
+        .route(
+            "/api/tenants/{tenant_id}/ai/models/huggingface/{model_id}/download",
+            post(crate::handlers::ai::download_huggingface_model),
+        )
+        // ----------------------------------------------------------------
+        // Processing Rules (repository-scoped)
+        // ----------------------------------------------------------------
+        .route(
+            "/api/repository/{repo}/ai/rules",
+            get(crate::handlers::processing_rules::list_rules)
+                .post(crate::handlers::processing_rules::create_rule),
+        )
+        .route(
+            "/api/repository/{repo}/ai/rules/reorder",
+            axum::routing::put(crate::handlers::processing_rules::reorder_rules),
+        )
+        .route(
+            "/api/repository/{repo}/ai/rules/test",
+            post(crate::handlers::processing_rules::test_rule_match),
+        )
+        // The task vocabulary WITH this server's availability per task. Placed
+        // above the `{rule_id}` route: axum would otherwise be free to read
+        // `tasks` as a rule id.
+        .route(
+            "/api/repository/{repo}/ai/rules/tasks",
+            get(crate::handlers::processing_rules::list_tasks),
+        )
+        .route(
+            "/api/repository/{repo}/ai/rules/{rule_id}",
+            get(crate::handlers::processing_rules::get_rule)
+                .put(crate::handlers::processing_rules::update_rule)
+                .delete(crate::handlers::processing_rules::delete_rule),
+        )
+        // What this box can DO with a binary — loaded plugins, REFUSED plugin
+        // files, and the resolved per-media-kind table. A rejected plugin
+        // otherwise leaves a green server with no `raisin.media.*`.
+        .route(
+            "/api/admin/management/plugins",
+            get(crate::handlers::plugins::list_plugins),
+        )
+        // RocksDB index reindex
+        .route(
+            "/api/admin/management/database/{tenant}/{repo}/reindex/start",
+            post(crate::handlers::management::reindex_start),
+        )
+        // PATH_INDEX reconstruction from NODE_PATH. Write-only, so it is safe
+        // to re-run and cannot deepen the damage it repairs.
+        .route(
+            "/api/admin/management/database/{tenant}/{repo}/path-index/repair",
+            post(crate::handlers::management::repair_path_index),
+        )
+        // Relation index integrity
+        .route(
+            "/api/admin/management/database/{tenant}/{repo}/relations/verify",
+            post(crate::handlers::management::verify_relation_integrity),
+        )
+        .route(
+            "/api/admin/management/database/{tenant}/{repo}/relations/repair",
+            post(crate::handlers::management::repair_relation_integrity),
+        )
+        .route(
+            "/api/admin/management/global/rocksdb/backup",
+            post(crate::handlers::management::backup_rocksdb),
         )
         // ----------------------------------------------------------------
         // Management API - Tenant Level
@@ -467,4 +481,9 @@ pub(crate) fn admin_routes(state: &AppState) -> Router<AppState> {
             "/api/management/system-definitions/registries/{name}/fetch",
             post(crate::handlers::system_definitions::fetch_from_registry),
         )
+        .layer(from_fn(crate::middleware::admin_gate))
+        .layer(from_fn_with_state(
+            state.clone(),
+            crate::middleware::optional_auth_middleware,
+        ))
 }

@@ -3,6 +3,8 @@
 //! HTTP middleware layers for authentication, CORS, tenant initialization,
 //! and path parsing.
 
+#[cfg(feature = "storage-rocksdb")]
+mod admin_gate;
 mod auth;
 mod cors;
 mod parsing;
@@ -18,6 +20,8 @@ pub use scoped_tenant::ScopedTenant;
 pub use tenant::ensure_tenant_middleware;
 pub use types::{RaisinContext, TenantInfo};
 
+#[cfg(feature = "storage-rocksdb")]
+pub use admin_gate::admin_gate;
 #[cfg(feature = "storage-rocksdb")]
 pub use auth::{
     optional_auth_middleware, require_admin_auth_middleware, require_auth_middleware,

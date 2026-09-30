@@ -264,10 +264,20 @@ impl ReplicationSyncHandler {
 
         debug!(url = %url, "Fetching operations from peer");
 
-        let response =
-            self.http_client.get(&url).send().await.map_err(|e| {
-                Error::Backend(format!("Failed to fetch operations from peer: {}", e))
-            })?;
+        // The peer's replication routes accept administrator credentials
+        // only. Nodes of one cluster share the operator's superadmin bearer
+        // (`RAISIN_SUPERADMIN_TOKEN`), so present it when it is configured.
+        let mut request = self.http_client.get(&url);
+        if let Some(token) = std::env::var("RAISIN_SUPERADMIN_TOKEN")
+            .ok()
+            .filter(|t| !t.is_empty())
+        {
+            request = request.bearer_auth(token);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|e| Error::Backend(format!("Failed to fetch operations from peer: {}", e)))?;
 
         if !response.status().is_success() {
             return Err(Error::Backend(format!(

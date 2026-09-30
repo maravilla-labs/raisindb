@@ -26,7 +26,8 @@ fn test_router() -> axum::Router {
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let storage =
         Arc::new(RocksDBStorage::new(temp_dir.path()).expect("Failed to create RocksDBStorage"));
-    router(storage)
+    // Branch and tag management is an administrator's: speak as the operator.
+    crate::support::as_admin(router(storage))
 }
 
 /// Helper to parse JSON response

@@ -10,7 +10,7 @@ use crate::state::AppState;
 
 /// Build routes for schema management, branch/tag/revision management,
 /// repository CRUD, and registry endpoints.
-pub(crate) fn management_routes(_state: &AppState) -> Router<AppState> {
+pub(crate) fn management_routes(state: &AppState) -> Router<AppState> {
     let mut router = Router::new()
         // ----------------------------------------------------------------
         // NodeType management
@@ -244,6 +244,20 @@ pub(crate) fn management_routes(_state: &AppState) -> Router<AppState> {
             "/api/management/registry/deployments/{tenant_id}/{deployment_key}",
             get(crate::handlers::registry::get_deployment),
         );
+
+    // None of these routes checked their caller: an anonymous request could
+    // delete a repository or a branch. `admin_gate` decides per method and
+    // path (see its `policy`), on the identity `optional_auth_middleware`
+    // resolves. Without RocksDB there is no identity to resolve.
+    #[cfg(feature = "storage-rocksdb")]
+    let router = router
+        .layer(axum::middleware::from_fn(crate::middleware::admin_gate))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::middleware::optional_auth_middleware,
+        ));
+    #[cfg(not(feature = "storage-rocksdb"))]
+    let _ = state;
 
     router
 }
