@@ -294,45 +294,34 @@ where
         .as_ref()
         .map(|b| b.conversations.clone())
         .unwrap_or_default();
+    // Every conversation this session has: on disk, plus the ones minted on
+    // this connection that have no message yet.
+    let mut existing: HashSet<String> = match home_node {
+        Some(_) => node_service(state, &tenant, &repo, VISITOR_WORKSPACE)
+            .list_children(&chats)
+            .await
+            .map(|c| c.into_iter().map(|n| n.name).collect())
+            .unwrap_or_default(),
+        None => HashSet::new(),
+    };
+    existing.extend(known_here);
+    // A requested id is always one UNDER THIS SESSION'S HOME, so it can only
+    // ever name this session's conversation (the agent side refuses a thread
+    // that belongs to someone else). An id that has no node yet was minted
+    // for this session on an earlier connection and never used.
     let conversation_id = match requested {
-        Some(c)
-            if known_here.contains(c)
-                || load_node(
-                    &state.storage,
-                    &tenant,
-                    &repo,
-                    VISITOR_WORKSPACE,
-                    &format!("{chats}/{c}"),
-                )
-                .await
-                .is_some() =>
-        {
-            c.to_string()
-        }
-        Some(_) => {
-            return Ok(Some(refuse(
-                id,
-                "UNKNOWN_CONVERSATION",
-                "no such conversation in this visitor session",
-            )))
-        }
-        None => {
-            let existing = match home_node {
-                Some(_) => node_service(state, &tenant, &repo, VISITOR_WORKSPACE)
-                    .list_children(&chats)
-                    .await
-                    .map(|c| c.len())
-                    .unwrap_or(0),
-                None => 0,
-            };
-            if existing + known_here.len() >= cfg.max_conversations as usize {
+        Some(c) if existing.contains(c) => c.to_string(),
+        requested => {
+            if existing.len() >= cfg.max_conversations as usize {
                 return Ok(Some(refuse(
                     id,
                     "CONVERSATION_LIMIT",
                     "this visitor session has reached its conversation limit",
                 )));
             }
-            session::new_conversation_id()
+            requested
+                .map(str::to_string)
+                .unwrap_or_else(session::new_conversation_id)
         }
     };
 

@@ -20,6 +20,8 @@ allowed_node_types:
   # Human-in-the-loop inbox primitives (tasks live under users/**/inbox)
   - raisin:InboxTask
   - raisin:Notification
+  # Anonymous chat sessions under /visitors (raisin-messaging)
+  - raisin:VisitorSession
 allowed_root_node_types:
   - raisin:User
   - raisin:Role

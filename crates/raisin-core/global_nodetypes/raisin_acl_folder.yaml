@@ -1,7 +1,7 @@
 name: raisin:AclFolder
 description: Access control folder for organizing users, roles, and groups
 icon: shield
-version: 1
+version: 2
 extends: raisin:Folder
 indexable: true
 index_types: [Fulltext]
@@ -43,6 +43,10 @@ allowed_children:
   - raisin:Conversation
   - raisin:InboxTask
   - raisin:Notification
+  # /visitors/<key>: anonymous chat sessions (raisin-messaging). Named here
+  # although it extends raisin:Folder: the update path checks the list by
+  # the child's own type.
+  - raisin:VisitorSession
 versionable: true
 publishable: true
 auditable: true
