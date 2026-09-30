@@ -56,7 +56,7 @@ dirs = { version = "5", optional = true }
 
 # PDF processing
 pdf-extract = { version = "0.10", optional = true }
-pdf_oxide = { version = "0.3.78", optional = true }
+pdf_oxide = { version = "0.3.78", optional = true, features = ["rendering"] }
 # Not used directly: pins pdf_oxide's own dependency. pdf_oxide 0.3.78 asks for
 # office_oxide ^0.1.9, but office_oxide 0.1.10+ added a field to DocumentIR that
 # pdf_oxide's converter does not initialise, so any newer resolution fails to

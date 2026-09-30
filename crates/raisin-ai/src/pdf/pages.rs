@@ -11,21 +11,24 @@
 //! a production tenant: 30 of ~5,100 PDFs processed in a week came back empty,
 //! every one of them a scan.
 //!
-//! # How the fallback works without a rasterizer
+//! # How the fallback works
 //!
-//! Core ships no page renderer (no pdfium, no poppler), and must not grow one
-//! for this. It does not need to: a scanned page IS an image XObject, and
-//! `pdf_oxide` can hand that image back as bytes. So the fallback is
+//! A scanned page IS an image XObject, and `pdf_oxide` can hand that image
+//! back as bytes, so most pages need no rendering. The fallback is
 //!
 //! 1. read the text layer of every page (`to_markdown`);
 //! 2. for a page the strategy says to OCR — always under `force_ocr` /
 //!    `ocr_only`, only when the text layer is (near-)empty under `auto` —
 //!    take the LARGEST image on the page and keep its bytes as the OCR
 //!    candidate (JPEG passes through untouched; raw pixel data is PNG-encoded);
-//! 3. run the configured [`OcrProvider`] over the candidates.
+//! 3. if that page has no image, or none that decodes, render the page with
+//!    pdf_oxide's pure-Rust renderer (tiny-skia) at [`OCR_RENDER_DPI`] and
+//!    use the rendering: a flyer whose text is drawn as outlines has neither
+//!    a text layer nor an image;
+//! 4. run the configured [`OcrProvider`] over the candidates.
 //!
-//! A page whose text layer is empty and that carries no image stays empty:
-//! there is nothing to read.
+//! Only pages that need OCR are ever rendered; a page with a good text layer
+//! costs nothing extra.
 //!
 //! A text layer can also be present and useless: some generators place every
 //! glyph on its own, so the layer reads as single letters separated by spaces
@@ -190,7 +193,17 @@ pub(crate) fn extract_pages_from_path(
             // A failure to find the page's image is not a failure to extract:
             // the text layer already answered, and a malformed resource
             // dictionary should not turn a readable PDF into `failed`.
-            match scan::largest_page_image(&mut doc, &mut page_tree, page_idx) {
+            let largest = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                scan::largest_page_image(&mut doc, &mut page_tree, page_idx)
+                    .map_err(|e| e.to_string())
+            }))
+            .unwrap_or_else(|panic| {
+                Err(format!(
+                    "pdf_oxide panicked while decoding: {}",
+                    panic_reason(&*panic)
+                ))
+            });
+            match largest {
                 Ok(Some(img)) => {
                     let bytes = match img.data() {
                         ImageData::Jpeg(jpeg) => Ok(jpeg.clone()),
@@ -212,6 +225,19 @@ pub(crate) fn extract_pages_from_path(
                     "PDF page images could not be read for OCR; keeping text layer"
                 ),
             }
+
+            // No image to read: the page is drawn (outlined text, a poster
+            // made of paths) or its image cannot be decoded. Render it.
+            if page.ocr_candidate.is_none() {
+                match render_page_for_ocr(&doc, page_idx) {
+                    Ok(png) => page.ocr_candidate = Some(png),
+                    Err(e) => tracing::warn!(
+                        page = page_idx,
+                        error = %e,
+                        "PDF page could not be rendered for OCR; keeping text layer"
+                    ),
+                }
+            }
         }
 
         pages.push(page);
@@ -226,6 +252,50 @@ pub(crate) fn extract_pages_from_path(
     Ok(PdfPages { pages })
 }
 
+/// Resolution a page is rendered at for OCR. Tesseract reads body text best
+/// at 300 dpi; below ~200 small print starts to break up.
+#[cfg(feature = "pdf-markdown")]
+const OCR_RENDER_DPI: u32 = 300;
+
+/// Pixel budget for one rendered page. A4 at 300 dpi is 8.7 Mpx; a larger
+/// page (a poster-sized flyer) is rendered at a lower resolution to fit
+/// rather than allocating hundreds of megabytes.
+#[cfg(feature = "pdf-markdown")]
+const OCR_RENDER_MAX_PIXELS: u64 = 16_000_000;
+
+/// Render one page to PNG for OCR, the fallback for a page with no usable
+/// text layer and no decodable image. Errors and panics inside the renderer
+/// come back as an error for this page only.
+#[cfg(feature = "pdf-markdown")]
+fn render_page_for_ocr(doc: &pdf_oxide::PdfDocument, page_idx: usize) -> Result<Vec<u8>, String> {
+    use pdf_oxide::rendering::{render_page, RenderOptions};
+
+    let mut options = RenderOptions::with_dpi(OCR_RENDER_DPI);
+    options.max_output_pixels = OCR_RENDER_MAX_PIXELS;
+    // Annotations are stamps and form widgets, not page text.
+    options.render_annotations = false;
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        render_page(doc, page_idx, &options)
+    }))
+    .map_err(|panic| {
+        format!(
+            "pdf_oxide panicked while rendering: {}",
+            panic_reason(&*panic)
+        )
+    })?
+    .map(|image| image.data)
+    .map_err(|e| e.to_string())
+}
+
+#[cfg(feature = "pdf-markdown")]
+fn panic_reason(panic: &(dyn std::any::Any + Send)) -> String {
+    panic
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".to_string())
+}
+
 /// One page's text layer as markdown. A panic inside pdf_oxide (it has had
 /// sort comparators that panic on a NaN font size) becomes an error for this
 /// page instead of unwinding through the extraction job.
@@ -238,14 +308,7 @@ fn read_text_layer(
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         doc.to_markdown(page_idx, options)
     }))
-    .map_err(|panic| {
-        let reason = panic
-            .downcast_ref::<&str>()
-            .map(|s| s.to_string())
-            .or_else(|| panic.downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "unknown panic".to_string());
-        format!("pdf_oxide panicked: {reason}")
-    })?
+    .map_err(|panic| format!("pdf_oxide panicked: {}", panic_reason(&*panic)))?
     .map_err(|e| e.to_string())
 }
 
@@ -265,7 +328,7 @@ fn read_text_layer(
 /// XObjects, where some scanner drivers wrap the page image.
 #[cfg(feature = "pdf-markdown")]
 mod scan {
-    use pdf_oxide::extractors::images::{extract_image_from_xobject, PdfImage};
+    use pdf_oxide::extractors::images::{extract_image_from_xobject, ImageData, PdfImage};
     use pdf_oxide::object::{Object, ObjectRef};
     use pdf_oxide::{Error, PdfDocument, Result};
     use std::collections::HashMap;
@@ -415,6 +478,125 @@ mod scan {
         w * h
     }
 
+    /// Apply a JPEG 2000 image's `/Decode` array to its samples.
+    ///
+    /// pdf_oxide applies `/Decode` on its raw-sample path but not to JPX
+    /// images, and Acrobat writes CMYK JPX images with `[1 0 1 0 1 0 1 0]`
+    /// (inverted inks). Undecoded, white paper and black text both come out
+    /// black and OCR reads nothing (Tour-de-Murg-Flyer: two full-page CMYK
+    /// JPX scans). Poppler applies the array; so does this, per ISO 32000-1
+    /// §8.9.5.2, for 8-bit samples.
+    fn apply_jpx_decode(xobj: &Object, img: PdfImage) -> PdfImage {
+        let Some(dict) = xobj.as_dict() else {
+            return img;
+        };
+        let is_jpx = match dict.get("Filter") {
+            Some(Object::Name(n)) => n == "JPXDecode",
+            Some(Object::Array(a)) => a.iter().any(|f| f.as_name() == Some("JPXDecode")),
+            _ => false,
+        };
+        let ranges: Vec<(f64, f64)> = dict
+            .get("Decode")
+            .and_then(Object::as_array)
+            .map(|a| {
+                a.chunks(2)
+                    .filter_map(|pair| match pair {
+                        [lo, hi] => Some((number(lo)?, number(hi)?)),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !is_jpx || img.bits_per_component() != 8 || ranges.iter().all(|&r| r == (0.0, 1.0)) {
+            return img;
+        }
+        let ImageData::Raw { pixels, format } = img.data() else {
+            return img;
+        };
+        let components = format.bytes_per_pixel();
+        if ranges.len() != components {
+            return img;
+        }
+        let mut pixels = pixels.clone();
+        for (i, v) in pixels.iter_mut().enumerate() {
+            let (lo, hi) = ranges[i % components];
+            let x = lo + (*v as f64 / 255.0) * (hi - lo);
+            *v = (x.clamp(0.0, 1.0) * 255.0).round() as u8;
+        }
+        PdfImage::new(
+            img.width(),
+            img.height(),
+            img.color_space().clone(),
+            8,
+            ImageData::Raw {
+                pixels,
+                format: *format,
+            },
+        )
+    }
+
+    fn number(obj: &Object) -> Option<f64> {
+        obj.as_real().or_else(|| obj.as_integer().map(|i| i as f64))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use pdf_oxide::extractors::images::{ColorSpace, PixelFormat};
+
+        fn cmyk_pixel(filter: &str, decode: Option<[f64; 8]>) -> (Object, PdfImage) {
+            let mut dict = Dict::new();
+            dict.insert("Filter".to_string(), Object::Name(filter.to_string()));
+            if let Some(d) = decode {
+                dict.insert(
+                    "Decode".to_string(),
+                    Object::Array(d.iter().map(|v| Object::Real(*v)).collect()),
+                );
+            }
+            let img = PdfImage::new(
+                1,
+                1,
+                ColorSpace::DeviceCMYK,
+                8,
+                ImageData::Raw {
+                    pixels: vec![255, 255, 255, 0],
+                    format: PixelFormat::CMYK,
+                },
+            );
+            (Object::Dictionary(dict), img)
+        }
+
+        fn pixels(img: &PdfImage) -> Vec<u8> {
+            match img.data() {
+                ImageData::Raw { pixels, .. } => pixels.clone(),
+                ImageData::Jpeg(_) => unreachable!(),
+            }
+        }
+
+        #[test]
+        fn an_inverting_decode_array_is_applied_to_a_jpx_image() {
+            let inverted = [1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0];
+            let (xobj, img) = cmyk_pixel("JPXDecode", Some(inverted));
+            // Stored (255, 255, 255, 0) under [1 0 ...] is pure black ink.
+            assert_eq!(pixels(&apply_jpx_decode(&xobj, img)), vec![0, 0, 0, 255]);
+        }
+
+        #[test]
+        fn other_images_and_the_default_decode_are_left_alone() {
+            let inverted = [1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0];
+            let (xobj, img) = cmyk_pixel("FlateDecode", Some(inverted));
+            assert_eq!(
+                pixels(&apply_jpx_decode(&xobj, img)),
+                vec![255, 255, 255, 0]
+            );
+            let (xobj, img) = cmyk_pixel("JPXDecode", None);
+            assert_eq!(
+                pixels(&apply_jpx_decode(&xobj, img)),
+                vec![255, 255, 255, 0]
+            );
+        }
+    }
+
     /// The largest image on `page_index`, decoded — or `None` when the page
     /// has no image, or none that pdf_oxide can decode (each such failure is
     /// logged, not swallowed).
@@ -436,7 +618,7 @@ mod scan {
         for (xobj, obj_ref) in found {
             let xobj = with_direct_color_space(doc, xobj)?;
             match extract_image_from_xobject(Some(&*doc), &xobj, obj_ref, None) {
-                Ok(img) => return Ok(Some(img)),
+                Ok(img) => return Ok(Some(apply_jpx_decode(&xobj, img))),
                 Err(e) => tracing::warn!(
                     page = page_index,
                     error = %e,
@@ -817,6 +999,23 @@ mod probe {
                 "{path}: {count} pages, {total:?} total, {:?}/page mean, {slowest:?} slowest",
                 total / count.max(1) as u32
             );
+            // The whole synchronous pass under `auto`, including picking or
+            // rendering the OCR candidates (OCR itself is not timed).
+            let t = std::time::Instant::now();
+            let pages = super::extract_pages_from_path(
+                std::path::Path::new(path),
+                &crate::pdf::PdfProcessingOptions::auto(),
+            )
+            .unwrap();
+            let candidates = pages
+                .pages
+                .iter()
+                .filter(|p| p.ocr_candidate.is_some())
+                .count();
+            println!(
+                "  auto pass: {:?}, {candidates} page(s) with an OCR candidate",
+                t.elapsed()
+            );
         }
     }
 }
@@ -968,6 +1167,70 @@ mod scan_tests {
         opts.strategy = PdfStrategy::ForceOcr;
         let pages = extract_pages_from_path(pdf.path(), &opts).unwrap();
         assert!(pages.pages[0].ocr_candidate.is_some());
+    }
+
+    /// One page whose text is drawn as filled outlines: no text layer, no
+    /// font, no image. Made with Ghostscript from Helvetica text:
+    ///
+    /// ```sh
+    /// gs -dNOPAUSE -dBATCH -dSAFER -sDEVICE=pdfwrite -dNoOutputFonts \
+    ///    -sOutputFile=outlined-text.pdf outline.ps
+    /// ```
+    ///
+    /// where `outline.ps` shows "Tour de Murg", "Radweg entlang der Murg",
+    /// "von Rastatt nach Baiersbronn" and "Rheinebene und Schwarzwald" on a
+    /// 420 x 300 pt page.
+    const OUTLINED_TEXT_PDF: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/pdf/outlined-text.pdf"
+    ));
+
+    #[test]
+    fn a_page_drawn_as_outlines_is_rendered_for_ocr() {
+        let pdf = write_temp(OUTLINED_TEXT_PDF);
+        let pages = extract_pages_from_path(pdf.path(), &PdfProcessingOptions::auto()).unwrap();
+        assert_eq!(readable_chars(&pages.pages[0].text), 0, "no text layer");
+        let png = pages.pages[0]
+            .ocr_candidate
+            .as_ref()
+            .expect("the rendered page is the OCR candidate");
+        let img = image::load_from_memory(png).expect("a decodable PNG");
+        // 420 x 300 pt at OCR_RENDER_DPI.
+        assert_eq!(img.width(), 420 * OCR_RENDER_DPI / 72);
+        assert_eq!(img.height(), 300 * OCR_RENDER_DPI / 72);
+    }
+
+    #[test]
+    fn a_page_with_a_good_text_layer_is_never_rendered() {
+        let content = "BT /F1 12 Tf 20 600 Td (A typed page with a real text layer, long enough to count as native text.) Tj ET";
+        let pdf = write_temp(&one_page_pdf("5 0 R", vec![content_stream(content)]));
+        let pages = extract_pages_from_path(pdf.path(), &PdfProcessingOptions::auto()).unwrap();
+        assert!(pages.pages[0].ocr_candidate.is_none());
+    }
+
+    /// End to end with the real Tesseract: the outlined page reads as text.
+    #[cfg(feature = "ocr")]
+    #[tokio::test]
+    async fn an_outlined_page_reads_through_tesseract() {
+        use crate::pdf::ocr::TesseractOcrProvider;
+        let provider = TesseractOcrProvider::english();
+        if !provider.is_available().await {
+            eprintln!("skipped: tesseract is not installed");
+            return;
+        }
+        let pdf = write_temp(OUTLINED_TEXT_PDF);
+        let pages = extract_pages_from_path(pdf.path(), &PdfProcessingOptions::auto()).unwrap();
+        let out = finish_with_ocr(pages, &provider, &OcrOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(out.method_used, ExtractionMethod::Ocr);
+        for word in ["Tour de Murg", "Radweg", "Rastatt", "Schwarzwald"] {
+            assert!(
+                out.text.contains(word),
+                "{word} missing from {:?}",
+                out.text
+            );
+        }
     }
 
     /// `/Contents [5 0 R 6 0 R]` where object 6 is `null`. pdf_oxide 0.2 failed
