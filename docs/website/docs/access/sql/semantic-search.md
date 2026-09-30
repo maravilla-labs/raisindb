@@ -585,6 +585,8 @@ Every key `ALTER EMBEDDING CONFIG` accepts:
 | `DEFAULT_MAX_DISTANCE` | the tenant default for the `KNN` / `HYBRID_SEARCH` cutoff; `'default'` restores 0.6 |
 | `DISTANCE_METRIC` | changing it requires `REBUILD VECTOR INDEX` |
 | `MAX_EMBEDDINGS_PER_REPO` | integer or `'unlimited'` |
+| `QUERY_PREFIX` | text prepended to every query before it is embedded; `''` clears it. See [Query and document prefixes](#query-and-document-prefixes) |
+| `DOCUMENT_PREFIX` | text prepended to every stored chunk; changing it re-embeds each node on its next job |
 
 Read it back, and test that the job will actually succeed:
 
@@ -603,6 +605,8 @@ include_name             false
 include_path             false
 default_max_distance     0.60 (default)
 distance_metric          Cosine
+query_prefix
+document_prefix
 max_embeddings_per_repo  unlimited
 ```
 
@@ -684,6 +688,80 @@ is close to every query and specific to none, and nothing anywhere reports a fau
 the job succeeds and `SHOW VECTOR INDEX HEALTH` stays green. Configure `chunking` to
 choose different sizes; a processing rule can set it per path, workspace, node type or
 mimetype.
+### Contextual chunks: `context_fields`
+
+A chunk cut from the middle of a page has lost what it is about. The paragraph
+"Claus Grunow. Geschäftsführer. Eric Blechschmidt. Bereichsleiter Aviation." no
+longer says it belongs to the airport's *Management* page, and a whole page embedded
+as one vector averages its topics until none of them stands out. `context_fields`
+names node properties whose values head **every** chunk before it is embedded:
+
+```json
+"chunking": {
+  "chunk_size": 256,
+  "overlap": { "type": "Tokens", "value": 32 },
+  "splitter": "recursive",
+  "tokenizer_id": "text-embedding-3-small",
+  "context_fields": ["title"]
+}
+```
+
+Each chunk is then embedded as `"{title}\n\n{chunk}"`. Only the embedded text changes:
+`chunk_index`, the stored passage and `chunk_text` still describe the chunk as cut
+from the source. Values come from the node's top-level string properties (`name` falls
+back to the node name); a missing or empty one is skipped. The context is part of the
+embedding's identity, so retitling a page re-embeds it even though its body is
+unchanged.
+
+The chunking a node gets is routed: a **processing rule** matching its node type,
+path, workspace or mimetype wins over the tenant value. That is how pages get
+sections with their title while everything else keeps the tenant default:
+
+```yaml
+- id: pages-contextual-chunks
+  name: Pages — title-prefixed chunks
+  order: 5
+  matcher: { type: node_type, node_type: 'studio:Page' }
+  settings:
+    tasks: []
+    chunking:
+      chunk_size: 256
+      overlap: { type: Tokens, value: 32 }
+      splitter: recursive
+      tokenizer_id: text-embedding-3-small
+      context_fields: [title]
+```
+
+The text a node embeds to is deterministic: the fields a type marks `VECTOR` in the
+order the type declares them, blocks in document order. Put the title first in the
+schema and it opens chunk 0.
+
+### Query and document prefixes
+
+Instruction-tuned embedders are trained on asymmetric pairs — a query carrying a task
+instruction against a passage carrying none — and retrieve measurably worse when the
+query arrives bare. The prefix each model expects is on its model card:
+
+| Model | `QUERY_PREFIX` | `DOCUMENT_PREFIX` |
+|---|---|---|
+| `Qwen/Qwen3-Embedding-*` | `Instruct: Given a web search query, retrieve relevant passages that answer the query` + newline + `Query:` | — |
+| `bge-multilingual-gemma2` | `<instruct>Given a web search query, retrieve relevant passages that answer the query` + newline + `<query>` | — |
+| e5 family | `query: ` | `passage: ` |
+| `nomic-embed-text` | `search_query: ` | `search_document: ` |
+| `bge-m3`, OpenAI, Voyage | — | — |
+
+```sql
+ALTER EMBEDDING CONFIG SET QUERY_PREFIX = 'Instruct: Given a web search query, retrieve relevant passages that answer the query
+Query:';
+```
+
+The query prefix is applied on every query surface (`KNN`, `HYBRID_SEARCH`,
+`EMBEDDING()`, pgwire, WebSocket, `raisin.sql()`) and never to stored content, so it
+takes effect on the next query and re-embeds nothing. The document prefix is part of
+every stored vector and of its spec hash: set it before the first embed, or expect the
+corpus to re-embed. On the REST endpoint both are `query_prefix` / `document_prefix`;
+leaving a field out of the payload keeps the stored value, `""` clears it.
+
 `quantization` (`F32` \| `F16` \| `Int8`) is on the same payload and takes effect on
 the next index build — the scalar kind is baked into the graph, so an existing index
 keeps the precision it was written with until a rebuild.
