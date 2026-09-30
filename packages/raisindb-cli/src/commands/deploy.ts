@@ -2,8 +2,8 @@ import fs from 'fs';
 import path from 'path';
 import yaml from 'yaml';
 import { createPackage } from './package.js';
-import { uploadPackage, installPackage } from './package.js';
-import { getDefaultRepo } from '../config.js';
+import { uploadPackage, installPackage, resolvePackageTarget } from './package.js';
+import { announceWriteTarget, getDefaultRepo } from '../config.js';
 import { getWorkspaceRaw, putWorkspaceRaw, type PackageInstallMode } from '../api.js';
 import { EnvContext, emptyEnvContext, substituteEnvTokens } from '../env/substitute.js';
 import { assertEnvFilesExist, loadEnvContext } from '../env/load.js';
@@ -65,8 +65,19 @@ export async function deployPackage(folder: string, options: DeployOptions): Pro
 
   const rapFile = path.join(process.cwd(), `${manifest.name}-${manifest.version}.rap`);
 
+  // Pin the target server for EVERY request that follows (upload, job stream,
+  // install, status polling, workspace reconcile), refuse early when there is
+  // no credential for it, and say where it is before anything is written.
+  const { server } = resolvePackageTarget(options.server);
+  const targetRepo = options.repo || getDefaultRepo();
+  if (!targetRepo) {
+    throw new Error('No repository specified. Use --repo <name> or set RAISINDB_REPO.');
+  }
+
   // Step 1+2: Validate and create .rap (createPackage does both)
-  console.log(`\nDeploying ${manifest.name} v${manifest.version}...\n`);
+  console.log(`\nDeploying ${manifest.name} v${manifest.version}...`);
+  announceWriteTarget(`repo ${targetRepo}, branch ${options.branch || 'main'}`, server);
+  console.log('');
   await createPackage(resolvedFolder, rapFile, {
     env: options.env,
     envFile: options.envFile,
@@ -96,7 +107,6 @@ export async function deployPackage(folder: string, options: DeployOptions): Pro
     // registered workspace it does not update allowed_root_node_types (and only
     // partially allowed_node_types), so the package YAML drifts from the server.
     // Re-apply both from each workspaces/*.yaml over the (operator) HTTP API.
-    const targetRepo = options.repo || getDefaultRepo() || 'default';
     await reconcileWorkspaceAllowedTypes(resolvedFolder, targetRepo, env);
   }
 

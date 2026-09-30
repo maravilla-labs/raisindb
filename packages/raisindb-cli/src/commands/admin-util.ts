@@ -1,4 +1,5 @@
 import { getBaseUrl, getHeaders } from '../api.js';
+import { announceWriteTarget } from '../config.js';
 
 /**
  * Shared helpers for the gh-style administrative commands
@@ -32,9 +33,13 @@ export interface ApiCallResult<T> {
 export async function apiCall<T>(path: string, opts: ApiCallOptions = {}): Promise<ApiCallResult<T>> {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const url = `${getBaseUrl()}${path}`;
+  const method = opts.method ?? 'GET';
+  if (!['GET', 'HEAD'].includes(method.toUpperCase())) {
+    announceWriteTarget();
+  }
 
   const response = await fetchImpl(url, {
-    method: opts.method ?? 'GET',
+    method,
     headers: getHeaders(),
     body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
   });

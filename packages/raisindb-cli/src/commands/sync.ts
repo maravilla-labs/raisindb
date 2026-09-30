@@ -7,7 +7,13 @@ import path from 'path';
 import yaml from 'yaml';
 import React from 'react';
 import { render } from 'ink';
-import { getServer, loadConfig } from '../config.js';
+import {
+  announceWriteTarget,
+  getEffectiveServer,
+  getServer,
+  loadConfig,
+  setServerOverride,
+} from '../config.js';
 import { getToken } from '../auth.js';
 import { getServerFilesForWorkspaces } from '../api.js';
 import {
@@ -38,6 +44,7 @@ import {
   ConflictStrategy,
   SyncOperationOptions,
   Conflict,
+  toHttpUrl,
 } from '../sync/operations.js';
 import { EnvContext } from '../env/substitute.js';
 import { assertEnvFilesExist, loadEnvContext } from '../env/load.js';
@@ -115,13 +122,23 @@ export async function syncPackage(
   if (options.repo) config.repository = options.repo;
   if (options.branch) config.branch = options.branch;
 
-  // Verify authentication
-  const token = getToken();
+  // Pin the sync target process-wide: the file operations read config.server,
+  // but the server listing (getServerFilesForWorkspaces) and every token lookup
+  // go through getServer() — without this they went to the `.raisinrc` server.
+  if (config.server) {
+    setServerOverride(toHttpUrl(config.server));
+  }
+  const target = getEffectiveServer();
+
+  // Verify authentication — for the server we are about to talk to
+  const token = getToken(target);
   if (!token) {
     throw new Error(
-      'Not authenticated. Run "raisindb login --server <url>" first (or set RAISINDB_TOKEN).'
+      `Not authenticated for ${target}. Run "raisindb login -s ${target}" first (or set RAISINDB_TOKEN).`
     );
   }
+
+  announceWriteTarget(`repo ${config.repository}, branch ${config.branch}`, target);
 
   // Execute appropriate sync mode
   if (options.watch) {

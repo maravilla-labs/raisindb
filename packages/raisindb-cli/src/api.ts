@@ -1,5 +1,5 @@
 import { getToken } from './auth.js';
-import { getServer } from './config.js';
+import { getEffectiveServer } from './config.js';
 import { EventSource as EventSourcePolyfill } from 'eventsource';
 import { computeHash, ServerFileInfo } from './sync/compare.js';
 import { createReadStream } from 'node:fs';
@@ -83,14 +83,18 @@ export interface JobEvent {
  * Get the base URL for API calls
  */
 export function getBaseUrl(): string {
-  return getServer() || 'http://localhost:8081';
+  // An explicit --server (setServerOverride) wins, then RAISINDB_SERVER, then
+  // .raisinrc, so every request of one command goes to the same server — and
+  // getToken() only hands out a saved token for that same server.
+  return getEffectiveServer().replace(/\/+$/, '');
 }
 
 /**
  * Get auth headers
  */
 export function getHeaders(): Record<string, string> {
-  const token = getToken();
+  // Only a token issued by the server this request goes to (or RAISINDB_TOKEN).
+  const token = getToken(getBaseUrl());
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };

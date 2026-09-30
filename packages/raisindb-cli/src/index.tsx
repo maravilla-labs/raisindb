@@ -23,7 +23,7 @@ import { userRegister } from './commands/user.js';
 import { corsAdd, corsList, corsRemove } from './commands/cors.js';
 import { secretSet, secretList, secretShow, secretRotate, secretRemove } from './commands/secret.js';
 import { login, logout, isAuthenticated, loginWithPassword, loginWithToken } from './auth.js';
-import { getServer } from './config.js';
+import { getServer, pinServerFromOptions } from './config.js';
 import { HelpDisplay } from './components/HelpDisplay.js';
 
 const require = createRequire(import.meta.url);
@@ -34,7 +34,12 @@ const program = new Command();
 program
   .name('raisindb')
   .description('RaisinDB CLI - Interactive terminal interface for RaisinDB')
-  .version(pkg.version);
+  .version(pkg.version)
+  // A command's -s/--server is pinned before its action runs, so every HTTP
+  // call it makes goes there — not to RAISINDB_SERVER or the `.raisinrc` login.
+  .hook('preAction', (_program, actionCommand) => {
+    pinServerFromOptions(actionCommand.opts());
+  });
 
 // Package commands (offline)
 const packageCmd = program

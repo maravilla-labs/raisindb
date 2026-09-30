@@ -61,11 +61,13 @@ export function resolveServerContext(dir: string, options: ServerOptions = {}): 
       'No repository. Pass --repo, set one in .raisindb-cli.yaml, or run `raisindb repo use <name>`.'
     );
   }
+  const baseUrl = toHttpUrl(server).replace(/\/$/, '');
   return {
-    baseUrl: toHttpUrl(server).replace(/\/$/, ''),
+    baseUrl,
     repo,
     branch: options.branch || sync?.branch || 'main',
-    token: getToken(),
+    // Scoped to baseUrl: a saved login for another server is not sent here.
+    token: getToken(baseUrl),
     fetchImpl: fetch,
   };
 }
