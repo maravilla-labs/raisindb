@@ -39,6 +39,7 @@ pub(super) async fn handle_socket<S, B>(
     initial_token: Option<String>,
     tenant_id: String,
     repository: Option<String>,
+    (origin, client_ip): (Option<String>, Option<String>),
 ) where
     S: raisin_storage::Storage + raisin_storage::transactional::TransactionalStorage + 'static,
     B: raisin_binary::BinaryStorage + 'static,
@@ -95,6 +96,9 @@ pub(super) async fn handle_socket<S, B>(
             conn
         }
     };
+
+    let mut connection_state = connection_state;
+    connection_state.set_request_origin(origin, client_ip);
 
     // Create channels for sending responses and events
     let (response_tx, mut response_rx) = mpsc::unbounded_channel::<ResponseEnvelope>();

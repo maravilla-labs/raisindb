@@ -35,6 +35,8 @@ chrono = { workspace = true }
 # Authentication
 jsonwebtoken = "9.3"
 base64 = "0.22"
+sha2 = "0.10"
+hex = { workspace = true }
 
 # RaisinDB core crates
 raisin-storage = { path = "../raisin-storage" }

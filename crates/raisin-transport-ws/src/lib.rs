@@ -51,6 +51,7 @@ pub mod shutdown;
 
 // Re-exports
 pub use auth::{Claims, JwtAuthService, TokenPrincipal, TokenType};
+pub mod visitor;
 pub use connection::ConnectionState;
 pub use error::WsError;
 pub use event_handler::WsEventHandler;

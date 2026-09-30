@@ -66,6 +66,7 @@ where
                 conn.set_user_id(admin_user.user_id.clone());
                 conn.set_auth_context(raisin_models::auth::AuthContext::system());
                 conn.set_anonymous(false);
+                conn.unbind_visitor();
             }
 
             info!(
@@ -232,6 +233,7 @@ where
         conn.set_user_id(user_id.clone());
         conn.set_auth_context(auth_context.clone());
         conn.set_anonymous(false);
+        conn.unbind_visitor();
         info!(
             user_id = %user_id,
             auth_context_user_id = ?auth_context.user_id,

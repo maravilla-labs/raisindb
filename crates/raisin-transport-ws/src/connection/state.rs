@@ -12,6 +12,9 @@ use raisin_models::auth::AuthContext;
 use raisin_storage::transactional::TransactionalContext;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Semaphore};
+use tokio_util::sync::CancellationToken;
+
+use crate::visitor::VisitorBinding;
 use uuid::Uuid;
 
 use super::errors::{AcquireError, SendError, TransactionError};
@@ -63,6 +66,18 @@ pub struct ConnectionState {
 
     /// Whether this connection was auto-authenticated as the anonymous user.
     anonymous: bool,
+
+    /// The page origin of the upgrade request (`Origin` header), if any.
+    origin: Option<String>,
+
+    /// The client IP of the upgrade request, best effort (rate-limit key).
+    client_ip: Option<String>,
+
+    /// The visitor chat session this (anonymous) connection is bound to.
+    visitor: Option<VisitorBinding>,
+
+    /// Cancelled on disconnect: stops this connection's visitor forwarders.
+    visitor_cancel: CancellationToken,
 }
 
 impl ConnectionState {
@@ -89,6 +104,10 @@ impl ConnectionState {
             credits: Arc::new(RwLock::new(initial_credits)),
             transaction_context: Arc::new(Mutex::new(None)),
             anonymous: false,
+            origin: None,
+            client_ip: None,
+            visitor: None,
+            visitor_cancel: CancellationToken::new(),
         }
     }
 
@@ -115,6 +134,51 @@ impl ConnectionState {
     /// Whether this connection is the auto-authenticated anonymous user.
     pub fn is_anonymous(&self) -> bool {
         self.anonymous
+    }
+
+    /// Record where the upgrade request came from.
+    pub fn set_request_origin(&mut self, origin: Option<String>, client_ip: Option<String>) {
+        self.origin = origin;
+        self.client_ip = client_ip;
+    }
+
+    /// The page origin of the upgrade request.
+    pub fn origin(&self) -> Option<&str> {
+        self.origin.as_deref()
+    }
+
+    /// The client IP of the upgrade request (best effort).
+    pub fn client_ip(&self) -> Option<&str> {
+        self.client_ip.as_deref()
+    }
+
+    /// The visitor chat session this connection is bound to.
+    pub fn visitor(&self) -> Option<&VisitorBinding> {
+        self.visitor.as_ref()
+    }
+
+    /// Bind this anonymous connection to a visitor session. From here on its
+    /// auth context may read that session's home (and nothing else of the
+    /// visitor zone): see `raisin_models::auth::visitor`.
+    pub fn bind_visitor(&mut self, binding: VisitorBinding) {
+        if let Some(auth) = self.auth_context.take() {
+            self.auth_context = Some(auth.with_visitor_home(binding.home.clone()));
+        }
+        self.visitor = Some(binding);
+    }
+
+    /// Drop the visitor binding (the connection signed in) and stop its
+    /// forwarders.
+    pub fn unbind_visitor(&mut self) {
+        if self.visitor.take().is_some() {
+            self.visitor_cancel.cancel();
+            self.visitor_cancel = CancellationToken::new();
+        }
+    }
+
+    /// The token that stops this connection's visitor forwarders.
+    pub fn visitor_cancel_token(&self) -> CancellationToken {
+        self.visitor_cancel.clone()
     }
 
     /// Set the session-level branch (from USE BRANCH / SET app.branch)
@@ -291,5 +355,6 @@ impl ConnectionState {
         *self.response_tx.write() = None;
         *self.event_tx.write() = None;
         *self.transaction_context.lock() = None;
+        self.visitor_cancel.cancel();
     }
 }

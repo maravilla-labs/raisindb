@@ -71,9 +71,20 @@ where
 
     // Extract authentication token from headers (if present)
     let token = JwtAuthService::extract_token_from_headers(&headers);
+    let origin = crate::visitor::origin(&headers);
+    let client_ip = crate::visitor::client_ip(&headers);
 
     // Upgrade the connection
-    ws.on_upgrade(move |socket| handle_socket(socket, state, token, tenant_id, repository))
+    ws.on_upgrade(move |socket| {
+        handle_socket(
+            socket,
+            state,
+            token,
+            tenant_id,
+            repository,
+            (origin, client_ip),
+        )
+    })
 }
 
 /// Tenant-less WebSocket upgrade handler
@@ -113,9 +124,20 @@ where
 
     // Extract authentication token from headers (if present)
     let token = JwtAuthService::extract_token_from_headers(&headers);
+    let origin = crate::visitor::origin(&headers);
+    let client_ip = crate::visitor::client_ip(&headers);
 
     // Upgrade the connection
-    ws.on_upgrade(move |socket| handle_socket(socket, state, token, tenant_id, repository))
+    ws.on_upgrade(move |socket| {
+        handle_socket(
+            socket,
+            state,
+            token,
+            tenant_id,
+            repository,
+            (origin, client_ip),
+        )
+    })
 }
 
 /// WebSocket state shared across all connections
@@ -177,6 +199,9 @@ where
     /// `audit_query` request to read a node's audit-log entries. Audit *writes*
     /// are produced globally by the event-bus `AuditEventHandler`, not here.
     pub audit: Arc<WsAuditRepo>,
+
+    /// Rate limits and turn leases of anonymous visitor chats.
+    pub visitor_limits: Arc<crate::visitor::VisitorLimits>,
 
     /// Fired by the process's signal handler when the server is shutting down.
     ///
@@ -255,6 +280,7 @@ where
             schema_stats_cache,
             lock_manager,
             audit,
+            visitor_limits: Arc::new(crate::visitor::VisitorLimits::new()),
             shutdown: tokio_util::sync::CancellationToken::new(),
         }
     }

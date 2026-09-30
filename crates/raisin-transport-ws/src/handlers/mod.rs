@@ -35,6 +35,7 @@ mod subscriptions;
 mod tags;
 mod transactions;
 mod translations;
+mod visitor_chat;
 mod workspaces;
 
 #[cfg(feature = "storage-rocksdb")]
@@ -56,6 +57,7 @@ pub use subscriptions::*;
 pub use tags::*;
 pub use transactions::*;
 pub use translations::*;
+pub use visitor_chat::*;
 pub use workspaces::*;
 
 /// Route a request to the appropriate handler
@@ -385,6 +387,14 @@ where
         RequestType::SecretList => handle_secret_list(state, connection_state, request).await,
         RequestType::SecretGet => handle_secret_get(state, connection_state, request).await,
         RequestType::SecretDelete => handle_secret_delete(state, connection_state, request).await,
+
+        // Anonymous visitor chat
+        RequestType::VisitorChatStart => {
+            handle_visitor_chat_start(state, connection_state, request).await
+        }
+        RequestType::VisitorChatSend => {
+            handle_visitor_chat_send(state, connection_state, request).await
+        }
 
         // Not yet implemented
         _ => Ok(Some(ResponseEnvelope::error(

@@ -446,4 +446,8 @@ pub enum RequestType {
     SecretList,
     SecretGet,
     SecretDelete,
+
+    // Anonymous visitor chat (see `crate::visitor`)
+    VisitorChatStart,
+    VisitorChatSend,
 }
