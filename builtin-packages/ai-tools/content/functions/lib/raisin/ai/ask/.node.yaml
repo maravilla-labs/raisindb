@@ -1,3 +1,6 @@
+# Handler `ask` of the ai-tools retrieval component (Rust -> wasm32-wasip2).
+# Source: tooling/ai-tools-rag. Rebuild main.wasm with `make ai-tools-rag`;
+# the raisin-functions artifact test fails when it is stale.
 node_type: "raisin:Function"
 properties:
   title: "Ask Documents"
@@ -11,17 +14,24 @@ properties:
     reason over them yourself.
 
     The answer is drawn ONLY from what was retrieved. When nothing relevant is
-    found it says so rather than answering from general knowledge.
+    found it says so rather than answering from general knowledge, and every
+    sentence of the answer is checked against the passages: a claim they do
+    not state is dropped.
 
-    If the first retrieval does not answer the question, the query is rewritten
-    in the documents' own vocabulary and tried once more before giving up.
+    Short or abbreviated questions are first widened with the documents' own
+    words (CEO -> Geschaeftsfuehrer) for the keyword search. If the first
+    retrieval does not answer the question, the query is rewritten in the
+    documents' own vocabulary and tried once more before giving up.
 
     Example: ask(question="how much notice do we have to give to terminate?")
   execution_mode: "async"
   enabled: true
-  language: "javascript"
-  entry_file: "index.js:handler"
-  version: 1
+  language: "wasm"
+  entry_file: "main.wasm:ask"
+  version: 2
+  resource_limits:
+    timeout_ms: 60000
+    max_memory_bytes: 134217728
   input_schema:
     type: "object"
     additionalProperties: false
@@ -31,16 +41,60 @@ properties:
         description: "The question to answer, in natural language."
       workspaces:
         type: "string"
-        description: "Where to look: a workspace name, a comma-separated list, a glob, or 'ALL READABLE'. Defaults to 'ALL READABLE'."
+        description: "Where to look: a workspace name, a comma-separated list, a glob, or 'ALL READABLE'. Defaults to 'ALL READABLE'. A list of names is accepted too."
+      paths:
+        type: "array"
+        items:
+          type: "string"
+        description: "Only content under these path prefixes, e.g. ['/site']. A prefix applies in every searched workspace; 'assets:/site' limits it to one. Applied inside the search, not after it."
+      include_kinds:
+        type: "array"
+        items:
+          type: "string"
+          enum: ["page", "document", "image", "media", "all"]
+        description: "Which kinds of content may answer. Default: page, document, media — images carry no answer text and are excluded unless named here."
+      node_types:
+        type: "array"
+        items:
+          type: "string"
+        description: "Only these node types."
+      exclude_node_types:
+        type: "array"
+        items:
+          type: "string"
+        description: "Never these node types (blueprints, demo types)."
+      locale:
+        type: "string"
+        description: "The reader's locale, e.g. 'fr'. Titles, passages and URL hints come from that locale's translation where one exists."
+      base_language:
+        type: "string"
+        description: "The language the content is written and full-text indexed in, e.g. 'de'. Defaults to the repository default. Also the language short questions are expanded into."
+      fulltext_languages:
+        type: "array"
+        items:
+          type: "string"
+        description: "Extra full-text analyzers to search the base content with, e.g. ['en']."
+      expand:
+        type: "boolean"
+        description: "Widen the question with the documents' own terms before searching. Defaults to on for short or abbreviated questions."
       limit:
         type: "integer"
         description: "How many passages to ground the answer in. Defaults to 8."
+      candidates:
+        type: "integer"
+        description: "How many passages each search leg draws before filtering and ranking. Defaults to 40."
+      max_per_document:
+        type: "integer"
+        description: "At most this many passages from one document. Defaults to 3; 0 = no cap."
       model:
         type: "string"
         description: "Optional model id, as 'slug:model'. Defaults to the tenant's configured chat model."
       use_graph:
         type: "boolean"
         description: "Also include the graph neighbourhood of the question's subject. Costs a graph walk; off by default."
+      verify:
+        type: "boolean"
+        description: "Check every sentence of the drafted answer against the passages and drop what they do not state. One extra model call; on by default."
     required:
       - question
   output_schema:
@@ -65,16 +119,44 @@ properties:
               type: "string"
             node_id:
               type: "string"
+            workspace:
+              type: "string"
+            node_type:
+              type: "string"
+            kind:
+              type: "string"
             title:
+              type: "string"
+            snippet:
               type: "string"
             chunk_index:
               type: "integer"
             text_is_exact:
               type: "boolean"
+            matched:
+              type: "string"
+              description: "both, text (keywords only) or meaning (vector only)."
+            source:
+              type: "string"
+              description: "chunk (the engine's passage) or excerpt (cut from the node's own text)."
+            locale:
+              type: ["string", "null"]
+              description: "Set when the title and passage come from this locale's translation."
+            url_hint:
+              type: ["string", "null"]
+              description: "A URL the node itself carries (url_<locale>, url, href), when it has one."
       attempts:
         type: "array"
-        description: "One entry per retrieval attempt, with the query used. A second entry means the first retrieval was graded insufficient and the query rewritten."
+        description: "One entry per retrieval attempt, with the query used. A second entry means the first retrieval was graded insufficient and the query rewritten. `expansions` on the first entry lists the extra search terms."
         items:
           type: "object"
       model:
         type: "string"
+      verification:
+        type: "string"
+        description: "The claim check: passed, trimmed (unsupported sentences removed), rejected (nothing supported survived; grounded is false), unavailable (the check failed and the draft is returned unchecked) or skipped."
+      dropped_claims:
+        type: "array"
+        description: "The sentences the claim check removed, when it removed any."
+        items:
+          type: "string"

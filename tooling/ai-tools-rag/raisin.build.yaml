@@ -1,0 +1,12 @@
+# `raisindb function build tooling/ai-tools-rag` (or `make ai-tools-rag`)
+# builds the component and copies it next to /lib/raisin/ai/ask, where both
+# Function nodes point: `main.wasm:ask` and `../ask/main.wasm:search-documents`.
+lang: rust
+node_dir: ../../builtin-packages/ai-tools/content/functions/lib/raisin/ai/ask
+artifact: main.wasm
+handlers:
+  - default            # probe: version + source fingerprint
+  - ask                # /lib/raisin/ai/ask
+  - search-documents   # /lib/raisin/ai/search-documents
+command: cargo build --release --target wasm32-wasip2
+output: target/wasm32-wasip2/release/ai_tools_rag.wasm

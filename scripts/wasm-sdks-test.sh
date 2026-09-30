@@ -6,6 +6,7 @@
 # CI on every push.
 #
 #   sdks/rust/raisin-sdk   cargo test      (its own workspace)
+#   tooling/ai-tools-rag   cargo test      (a guest on that SDK: ask / search-documents)
 #   sdks/go/raisin         go test ./...
 #   sdks/ts/function-wasm  vitest run
 #
@@ -50,6 +51,9 @@ run_suite() {
 }
 
 run_suite "Rust SDK"       cargo sdks/rust/raisin-sdk  cargo test
+# The ai-tools retrieval component is a guest built on the Rust SDK; its native
+# suite is the ported JavaScript tests of ask / search-documents plus their own.
+run_suite "ai-tools RAG"   cargo tooling/ai-tools-rag  cargo test
 run_suite "Go SDK"         go    sdks/go/raisin        go test ./...
 # `--config.verify-deps-before-run=false`: pnpm >= 10 runs a workspace-wide
 # dependency check before `run`, and on a mismatch it wants to PURGE and

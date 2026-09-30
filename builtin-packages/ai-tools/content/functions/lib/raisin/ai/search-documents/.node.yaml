@@ -1,3 +1,6 @@
+# Handler `search-documents` of the ai-tools retrieval component, which lives
+# next to /lib/raisin/ai/ask (one artifact, two handlers).
+# Source: tooling/ai-tools-rag. Rebuild with `make ai-tools-rag`.
 node_type: "raisin:Function"
 properties:
   title: "Search Documents"
@@ -12,14 +15,15 @@ properties:
     already know where the answer lives.
 
     Each result carries `path`, `node_id` and `chunk_index`, which together
-    identify the passage — quote those when citing.
+    identify the passage — quote those when citing — plus `workspace`,
+    `node_type`, `title` and a short `snippet` for building a link.
 
     Example: search-documents(query="what is the notice period for termination")
   execution_mode: "async"
   enabled: true
-  language: "javascript"
-  entry_file: "index.js:handler"
-  version: 1
+  language: "wasm"
+  entry_file: "../ask/main.wasm:search-documents"
+  version: 2
   input_schema:
     type: "object"
     additionalProperties: false
@@ -29,10 +33,53 @@ properties:
         description: "What to look for, in natural language. A question works better than a single keyword."
       workspaces:
         type: "string"
-        description: "Where to look: a workspace name, a comma-separated list, a glob such as 'content-*', or 'ALL READABLE' for everything the caller may read. Defaults to 'ALL READABLE'."
+        description: "Where to look: a workspace name, a comma-separated list, a glob such as 'content-*', or 'ALL READABLE' for everything the caller may read. Defaults to 'ALL READABLE'. A list of names is accepted too."
+      paths:
+        type: "array"
+        items:
+          type: "string"
+        description: "Only content under these path prefixes, e.g. ['/site']. A prefix applies in every searched workspace; 'assets:/site' limits it to one. Applied inside the search, not after it."
+      include_kinds:
+        type: "array"
+        items:
+          type: "string"
+          enum: ["page", "document", "image", "media", "all"]
+        description: "Which kinds of content to return. Default: page, document, media — images carry no passage text and are excluded unless named here."
+      node_types:
+        type: "array"
+        items:
+          type: "string"
+        description: "Only these node types."
+      exclude_node_types:
+        type: "array"
+        items:
+          type: "string"
+        description: "Never these node types."
+      locale:
+        type: "string"
+        description: "The reader's locale, e.g. 'fr'. Titles, passages and URL hints come from that locale's translation where one exists."
+      base_language:
+        type: "string"
+        description: "The language the content is full-text indexed in, e.g. 'de'. Defaults to the repository default."
+      fulltext_languages:
+        type: "array"
+        items:
+          type: "string"
+        description: "Extra full-text analyzers to search the base content with, e.g. ['en']."
+      expansions:
+        type: "array"
+        items:
+          type: "string"
+        description: "Extra terms to search for on the keyword leg only, e.g. ['Geschaeftsfuehrer'] for 'CEO'."
       limit:
         type: "integer"
         description: "How many passages to return. Defaults to 8; 20 is a sensible maximum for filling a context window."
+      candidates:
+        type: "integer"
+        description: "How many passages each search leg draws before filtering and ranking. Defaults to 40."
+      max_per_document:
+        type: "integer"
+        description: "At most this many passages from one document. Defaults to 0 (no cap)."
       max_distance:
         type: "number"
         description: "Optional vector-distance ceiling. Leave unset unless you are deliberately tightening precision."
@@ -53,16 +100,42 @@ properties:
               type: "string"
             node_id:
               type: "string"
+            workspace:
+              type: "string"
+            node_type:
+              type: "string"
+            kind:
+              type: "string"
+              description: "page, document, image or media."
             title:
               type: "string"
             chunk_index:
               type: "integer"
             text:
               type: "string"
+            snippet:
+              type: "string"
             text_is_exact:
               type: "boolean"
               description: "False when only a short preview of the passage was available, so do not quote it verbatim."
             score:
               type: "number"
+            matched:
+              type: "string"
+              description: "both, text (keywords only) or meaning (vector only)."
+            source:
+              type: "string"
+              description: "chunk (the engine's passage) or excerpt (cut from the node's own text around the match)."
+            locale:
+              type: ["string", "null"]
+            url_hint:
+              type: ["string", "null"]
       count:
         type: "integer"
+      mode:
+        type: "string"
+        description: "hybrid, or fulltext when the tenant has no embedder."
+      expansions:
+        type: "array"
+        items:
+          type: "string"
