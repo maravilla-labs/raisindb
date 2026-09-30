@@ -59,6 +59,8 @@ export interface ChunkingSettings {
   overlap: OverlapConfig
   splitter: SplitterType
   tokenizer_id?: string
+  /** Node properties whose values head every chunk before it is embedded (e.g. ["title"]). */
+  context_fields?: string[]
 }
 
 /**

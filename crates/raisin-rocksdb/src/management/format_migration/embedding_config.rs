@@ -99,6 +99,8 @@ fn migrate_tenant_embedding_config_cf(db: &Arc<DB>) -> Result<()> {
             distance_metric: Default::default(),
             base_url: None,
             quantization: Default::default(),
+            query_prefix: None,
+            document_prefix: None,
         };
 
         let new_value = rmp_serde::to_vec(&new_config).map_err(|e| {

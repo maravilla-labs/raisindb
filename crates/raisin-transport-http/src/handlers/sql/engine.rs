@@ -481,7 +481,7 @@ async fn configure_embedding_provider(
         .map_err(|e| ApiError::internal(format!("Invalid master key: {}", e)))?
         .ok_or_else(|| ApiError::internal("RAISIN_MASTER_KEY not set"))?;
 
-    let provider = raisin_rocksdb::embedding_provider::resolve_provider(
+    let provider = raisin_rocksdb::embedding_provider::resolve_query_provider(
         rocksdb_storage,
         tenant_id,
         config,

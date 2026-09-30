@@ -344,6 +344,7 @@ mod tests {
             overlap: OverlapConfig::Tokens(10),
             splitter: crate::config::SplitterType::Recursive,
             tokenizer_id: Some("gpt-3.5-turbo".to_string()),
+            context_fields: Vec::new(),
         };
 
         let text = "This is a test document. ".repeat(20);
@@ -369,6 +370,7 @@ mod tests {
             overlap: OverlapConfig::Tokens(5),
             splitter: crate::config::SplitterType::FixedSize,
             tokenizer_id: None, // Use char-based fallback
+            context_fields: Vec::new(),
         };
 
         let text = "Short text for testing fixed-size chunking behavior.";
@@ -386,6 +388,7 @@ mod tests {
             overlap: OverlapConfig::Percentage(0.2),
             splitter: crate::config::SplitterType::Recursive,
             tokenizer_id: None,
+            context_fields: Vec::new(),
         };
 
         let text = "Lorem ipsum dolor sit amet. ".repeat(30);
@@ -406,6 +409,7 @@ mod tests {
             overlap: OverlapConfig::Tokens(0),
             splitter: crate::config::SplitterType::Recursive,
             tokenizer_id: None,
+            context_fields: Vec::new(),
         };
 
         let text = "Small text.";
@@ -425,6 +429,7 @@ mod tests {
             overlap: OverlapConfig::Tokens(5),
             splitter: crate::config::SplitterType::Recursive,
             tokenizer_id: None,
+            context_fields: Vec::new(),
         };
 
         let text = "First sentence here. Second sentence here. Third sentence here.";
@@ -474,6 +479,7 @@ mod offset_tests {
             overlap: OverlapConfig::Tokens(0),
             splitter: SplitterType::Recursive,
             tokenizer_id: None,
+            context_fields: Vec::new(),
         }
     }
 
@@ -563,6 +569,7 @@ mod offset_tests {
             overlap: OverlapConfig::Tokens(10),
             splitter: SplitterType::Recursive,
             tokenizer_id: None,
+            context_fields: Vec::new(),
         };
         let text = "one two three four five six seven eight nine ten eleven twelve \
                     thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty";
@@ -646,6 +653,7 @@ mod document_default_tests {
         let text = document();
         let config = ChunkingConfig {
             tokenizer_id: Some("nomic-embed-text".to_string()),
+            context_fields: Vec::new(),
             ..ChunkingConfig::for_documents()
         };
 

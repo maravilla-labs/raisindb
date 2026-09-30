@@ -114,6 +114,31 @@ pub struct TenantEmbeddingConfig {
     /// sidecar, so an existing index keeps the precision it was built with.
     #[serde(default)]
     pub quantization: EmbeddingQuantization,
+
+    /// Text prepended to every QUERY before it is embedded.
+    ///
+    /// Instruction-tuned embedders are trained on asymmetric pairs: a short
+    /// query carrying a task instruction against a passage carrying none.
+    /// Qwen3-Embedding expects `"Instruct: {task}\nQuery:{query}"`, the e5
+    /// family `"query: "`, nomic `"search_query: "`. Embedding the bare query
+    /// with such a model measurably lowers retrieval quality, and nothing
+    /// reports it.
+    ///
+    /// Applied on every query path — `KNN`, `HYBRID_SEARCH`, `EMBEDDING()` —
+    /// and never to stored content, so changing it takes effect on the next
+    /// query and re-embeds nothing. `None` (the default) sends the query as
+    /// typed, which is right for symmetric models such as bge-m3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_prefix: Option<String>,
+
+    /// Text prepended to every stored chunk before it is embedded.
+    ///
+    /// The document-side half of [`Self::query_prefix`], for models that want
+    /// one (`"passage: "`, `"search_document: "`). Unlike the query prefix it
+    /// is part of every stored vector, so it is part of the embedding spec
+    /// hash: changing it re-embeds the corpus on the next job for each node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_prefix: Option<String>,
 }
 
 /// Scalar precision an HNSW index stores its vectors at.
@@ -236,6 +261,8 @@ impl TenantEmbeddingConfig {
             distance_metric: EmbeddingDistanceMetric::default(),
             base_url: None,
             quantization: EmbeddingQuantization::default(),
+            query_prefix: None,
+            document_prefix: None,
         }
     }
 

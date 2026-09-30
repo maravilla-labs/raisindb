@@ -70,7 +70,8 @@ pub use models::{
 };
 pub use provider::{
     create_provider, create_provider_full, create_provider_with_url,
-    EmbeddingProvider as EmbeddingProviderTrait, OllamaProvider, OpenAIProvider, VoyageProvider,
+    EmbeddingProvider as EmbeddingProviderTrait, OllamaProvider, OpenAIProvider, PrefixedProvider,
+    VoyageProvider,
 };
 pub use query_embedder::{
     configure_embedding_store, configure_query_embedder, embedding_store, query_embedder,
@@ -83,6 +84,8 @@ pub use query_embedder::{
 // not re-exporting them meant every caller took a `raisin-ai` dependency just
 // to spell a field type of a struct this crate owns.
 pub use raisin_ai::config::{EmbedderId, EmbeddingKind};
-pub use resolve::{resolve_provider, resolve_settings, ResolvedEmbeddingProvider};
+pub use resolve::{
+    resolve_provider, resolve_query_provider, resolve_settings, ResolvedEmbeddingProvider,
+};
 pub use spec::{EmbeddingSpec, EMBEDDING_PIPELINE_VERSION, FORCE_REEMBED_KEY};
 pub use storage::{StorageError, TenantEmbeddingConfigStore};

@@ -81,6 +81,20 @@ impl ResolvedEmbeddingProvider {
         )
     }
 
+    /// Build the client that embeds QUERIES: [`Self::build`] plus the tenant's
+    /// query prefix.
+    ///
+    /// Every read path (the SQL query embedder, the HTTP SQL engine) builds
+    /// through this and nothing else, so a query is embedded the same way on
+    /// every surface. The write path uses [`Self::build`]: stored content must
+    /// never receive the query instruction.
+    pub fn build_for_queries(&self) -> Result<Box<dyn EmbeddingProviderTrait>> {
+        Ok(crate::provider::PrefixedProvider::wrap(
+            self.build()?,
+            self.query_prefix.as_deref(),
+        ))
+    }
+
     /// Which embedder produced (or will produce) these vectors.
     ///
     /// [`EmbedderId::to_key_hash`] is the `{embedder_hash}` segment of every
@@ -141,6 +155,16 @@ pub fn resolve_provider(
     resolve_settings(config, ai_config, master_key)?.build()
 }
 
+/// [`resolve_provider`] for QUERY text: the same client, with the tenant's
+/// `query_prefix` applied. What every search surface should call.
+pub fn resolve_query_provider(
+    config: &TenantEmbeddingConfig,
+    ai_config: Option<&TenantAIConfig>,
+    master_key: &[u8; 32],
+) -> Result<Box<dyn EmbeddingProviderTrait>> {
+    resolve_settings(config, ai_config, master_key)?.build_for_queries()
+}
+
 /// Resolve the parts without building a client.
 ///
 /// Only for callers that genuinely need to inspect the resolution (logging,
@@ -178,7 +202,15 @@ pub fn resolve_settings(
         model: shape.model,
         base_url: shape.base_url,
         dimensions: config.dimensions,
+        query_prefix: non_empty(config.query_prefix.as_deref()),
+        document_prefix: non_empty(config.document_prefix.as_deref()),
     })
+}
+
+/// An empty prefix is no prefix: a console that clears the field sends `""`,
+/// and that must not change the spec hash of every stored vector.
+fn non_empty(s: Option<&str>) -> Option<String> {
+    s.filter(|s| !s.is_empty()).map(str::to_string)
 }
 
 /// Where the API key for a resolution comes from.
@@ -375,6 +407,41 @@ mod tests {
             enabled: true,
             models: Vec::new(),
         }
+    }
+
+    // ── Query / document prefixes ─────────────────────────────────────────────
+
+    #[test]
+    fn prefixes_are_carried_into_the_resolution_and_empty_means_none() {
+        let mut c = base_config();
+        c.provider = EmbeddingProvider::Ollama;
+        c.model = "bge-m3".to_string();
+        c.dimensions = 1024;
+        let r = resolve_settings(&c, None, &KEY).unwrap();
+        assert_eq!(r.query_prefix, None);
+        assert_eq!(r.document_prefix, None);
+
+        c.query_prefix = Some("Instruct: find it\nQuery:".to_string());
+        c.document_prefix = Some(String::new());
+        let r = resolve_settings(&c, None, &KEY).unwrap();
+        assert_eq!(r.query_prefix.as_deref(), Some("Instruct: find it\nQuery:"));
+        assert_eq!(r.document_prefix, None, "an empty prefix is no prefix");
+    }
+
+    /// The prefix changes how queries are embedded, never which model they are
+    /// embedded with: the embedder identity, and with it every storage key and
+    /// index partition, is unmoved.
+    #[test]
+    fn a_query_prefix_does_not_move_the_embedder_identity() {
+        let mut c = base_config();
+        c.provider = EmbeddingProvider::Ollama;
+        c.model = "bge-m3".to_string();
+        c.dimensions = 1024;
+        let before = resolve_settings(&c, None, &KEY).unwrap().embedder_id();
+        c.query_prefix = Some("query: ".to_string());
+        c.document_prefix = Some("passage: ".to_string());
+        let after = resolve_settings(&c, None, &KEY).unwrap().embedder_id();
+        assert_eq!(before.to_key_hash(), after.to_key_hash());
     }
 
     // ── The key requirement is asked once, of the provider variant ──────────

@@ -86,26 +86,65 @@ pub async fn extract_embeddable_content(
 /// ancestor's inclusion. An unknown element type contributes no values. Arrays
 /// and Objects inherit their parent's include flag. NO shape identity tokens are
 /// emitted. Returns the joined text (empty string if nothing was collected).
+///
+/// # The output is ORDERED, and that is load-bearing
+///
+/// `properties` is a `HashMap`, and every map gets its own random iteration
+/// order — two reads of the same unchanged node iterated it differently. This
+/// walk used to follow that order, which had two costs:
+///
+/// - the text is the input of the spec hash, so an unchanged node hashed
+///   differently on every job: the "already current" and carry-forward checks
+///   never matched, and every re-save or re-publish called the provider again;
+/// - the embedded text was shuffled, so a page's title landed anywhere in it,
+///   and a chunk boundary fell at a different place each time.
+///
+/// So selected properties are emitted in PLAN order (schema order: the order
+/// the type declares its fields, title before body), then the unselected ones
+/// — which can still carry Vector-marked element fields — by name; object keys
+/// and element fields by name too. The same node always yields the same text.
 pub(crate) fn collect_plan_values(
     plan: &NodeIndexPlan,
     properties: &HashMap<String, PropertyValue>,
 ) -> String {
     let mut out: Vec<String> = Vec::new();
 
-    let selected: Option<std::collections::HashSet<&str>> = plan
-        .top_level_props
-        .as_ref()
-        .map(|p| p.iter().map(|s| s.as_str()).collect());
-
-    for (name, value) in properties {
-        let index_value = match &selected {
-            Some(set) => set.contains(name.as_str()),
-            None => plan.legacy_index_all_strings && matches!(value, PropertyValue::String(_)),
-        };
-        walk_values(value, index_value, plan, &mut out);
+    match &plan.top_level_props {
+        Some(selected) => {
+            let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            for name in selected {
+                if !seen.insert(name.as_str()) {
+                    continue;
+                }
+                if let Some(value) = properties.get(name) {
+                    walk_values(value, true, plan, &mut out);
+                }
+            }
+            for (_, value) in sorted_entries(properties)
+                .into_iter()
+                .filter(|(name, _)| !seen.contains(name.as_str()))
+            {
+                walk_values(value, false, plan, &mut out);
+            }
+        }
+        None => {
+            for (_, value) in sorted_entries(properties) {
+                let index_value =
+                    plan.legacy_index_all_strings && matches!(value, PropertyValue::String(_));
+                walk_values(value, index_value, plan, &mut out);
+            }
+        }
     }
 
     out.join("\n")
+}
+
+/// A map's entries sorted by key — the one deterministic order a `HashMap`
+/// can be read in.
+fn sorted_entries<V>(map: &HashMap<String, V>) -> Vec<(&String, &V)> {
+    let mut entries: Vec<(&String, &V)> = map.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    entries
 }
 
 /// Iterative, overflow-safe walk emitting scalar VALUES (gated). Element/Composite
@@ -169,7 +208,8 @@ fn walk_values(
                 }
             }
             PropertyValue::Object(obj) => {
-                for v in obj.values() {
+                // Reversed onto the LIFO stack so they pop in key order.
+                for (_, v) in sorted_entries(obj).into_iter().rev() {
                     stack.push((v, idx));
                 }
             }
@@ -177,7 +217,8 @@ fn walk_values(
                 push_element_content(&block.element_type, &block.content, plan, &mut stack);
             }
             PropertyValue::Composite(bc) => {
-                for block in &bc.items {
+                // Reversed so the blocks pop in document order.
+                for block in bc.items.iter().rev() {
                     push_element_content(&block.element_type, &block.content, plan, &mut stack);
                 }
             }
@@ -192,7 +233,7 @@ fn walk_values(
 
 /// Pushes an element block's content fields onto the walk stack, gating each
 /// field by the element type's `include_fields` plan. An unknown element type
-/// contributes none of its values.
+/// contributes none of its values. Fields are pushed so they pop in name order.
 fn push_element_content<'a>(
     element_type: &str,
     block_content: &'a HashMap<String, PropertyValue>,
@@ -200,7 +241,7 @@ fn push_element_content<'a>(
     stack: &mut Vec<(&'a PropertyValue, bool)>,
 ) {
     let element_plan = plan.element_plans.get(element_type);
-    for (field_name, field_value) in block_content {
+    for (field_name, field_value) in sorted_entries(block_content).into_iter().rev() {
         let include = element_plan
             .map(|p| p.include_fields.contains(field_name))
             .unwrap_or(false);
@@ -474,6 +515,108 @@ mod tests {
             !out.contains("deadbeef"),
             "engine bookkeeping must never reach an embedding: {out}"
         );
+    }
+
+    /// The text a node embeds to is a pure function of the node: selected
+    /// properties in PLAN order, blocks in document order, the rest by name.
+    ///
+    /// Each iteration builds the maps afresh, and every `HashMap` gets its own
+    /// random iteration order — the condition under which the old walk returned
+    /// a different string for the same node, and so a different spec hash on
+    /// every job.
+    #[test]
+    fn the_same_node_always_yields_the_same_text_in_schema_order() {
+        let mut element_plans = HashMap::new();
+        element_plans.insert(
+            "ns:Text".to_string(),
+            ElementFieldPlan {
+                include_fields: ["heading", "body"].iter().map(|s| s.to_string()).collect(),
+            },
+        );
+        let plan = NodeIndexPlan {
+            node_type: "ns:Page".to_string(),
+            archetype: None,
+            // Schema order, deliberately NOT alphabetical.
+            top_level_props: Some(vec![
+                "title".to_string(),
+                "summary".to_string(),
+                "content".to_string(),
+            ]),
+            element_plans,
+            legacy_index_all_strings: false,
+        };
+
+        let build = || {
+            let mut props = HashMap::new();
+            for i in 0..20 {
+                props.insert(format!("noise_{i}"), PropertyValue::String(format!("n{i}")));
+            }
+            props.insert(
+                "summary".to_string(),
+                PropertyValue::String("Summary".to_string()),
+            );
+            props.insert(
+                "title".to_string(),
+                PropertyValue::String("Title".to_string()),
+            );
+            props.insert(
+                "content".to_string(),
+                PropertyValue::Array(vec![
+                    element(
+                        "ns:Text",
+                        &[("heading", "First heading"), ("body", "First body")],
+                    ),
+                    element(
+                        "ns:Text",
+                        &[("heading", "Second heading"), ("body", "Second body")],
+                    ),
+                ]),
+            );
+            props
+        };
+
+        let first = collect_plan_values(&plan, &build());
+        assert_eq!(
+            first, "Title\nSummary\nFirst body\nFirst heading\nSecond body\nSecond heading",
+            "title first, then summary, then the blocks in document order"
+        );
+        for _ in 0..50 {
+            assert_eq!(collect_plan_values(&plan, &build()), first);
+        }
+    }
+
+    #[test]
+    fn composite_blocks_keep_document_order() {
+        use raisin_models::nodes::properties::value::Composite;
+
+        let mut element_plans = HashMap::new();
+        element_plans.insert(
+            "ns:Text".to_string(),
+            ElementFieldPlan {
+                include_fields: ["body"].iter().map(|s| s.to_string()).collect(),
+            },
+        );
+        let plan = NodeIndexPlan {
+            node_type: "ns:Page".to_string(),
+            archetype: None,
+            top_level_props: Some(vec![]),
+            element_plans,
+            legacy_index_all_strings: false,
+        };
+        let block = |b: &str| match element("ns:Text", &[("body", b)]) {
+            PropertyValue::Element(e) => e,
+            _ => unreachable!(),
+        };
+        let mut props = HashMap::new();
+        props.insert(
+            "blocks".to_string(),
+            PropertyValue::Composite(Composite {
+                uuid: "c".to_string(),
+                items: vec![block("one"), block("two"), block("three")],
+            }),
+        );
+
+        assert_eq!(collect_plan_values(&plan, &props), "one\ntwo\nthree");
     }
 
     #[test]

@@ -76,6 +76,15 @@ pub struct SetConfigRequest {
     /// keeps the precision it was written with until `REBUILD VECTOR INDEX`.
     #[serde(default)]
     pub quantization: Option<EmbeddingQuantization>,
+
+    /// Absent = keep the stored value (a client that predates the field must
+    /// not clear it on every save); `""` = clear it.
+    #[serde(default)]
+    pub query_prefix: Option<String>,
+
+    /// Same contract as `query_prefix`.
+    #[serde(default)]
+    pub document_prefix: Option<String>,
 }
 
 /// Response body for GET config (no API key exposed)
@@ -183,6 +192,8 @@ pub async fn get_tenant_embedding_config(
                 chunking: cfg.chunking,
                 base_url: cfg.base_url,
                 quantization: cfg.quantization,
+                query_prefix: cfg.query_prefix,
+                document_prefix: cfg.document_prefix,
             };
             Ok(Json(response))
         }
@@ -204,6 +215,8 @@ pub async fn get_tenant_embedding_config(
                 chunking: None,
                 base_url: None,
                 quantization: default_config.quantization,
+                query_prefix: None,
+                document_prefix: None,
             };
             Ok(Json(response))
         }
@@ -239,7 +252,34 @@ pub async fn set_tenant_embedding_config(
         distance_metric: req.distance_metric.unwrap_or_default(),
         base_url: req.base_url,
         quantization: req.quantization.unwrap_or_default(),
+        query_prefix: req.query_prefix.clone().filter(|p| !p.is_empty()),
+        document_prefix: req.document_prefix.clone().filter(|p| !p.is_empty()),
     };
+
+    // Prefixes the request does not mention are kept. The admin console's save
+    // payload predates them, and a save that silently dropped a document prefix
+    // would re-embed the whole corpus without one.
+    if req.query_prefix.is_none() || req.document_prefix.is_none() {
+        match repo.get_config(&tenant_id) {
+            Ok(Some(existing)) => {
+                if req.query_prefix.is_none() {
+                    config.query_prefix = existing.query_prefix;
+                }
+                if req.document_prefix.is_none() {
+                    config.document_prefix = existing.document_prefix;
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("Could not read the existing configuration: {}", e),
+                    }),
+                ));
+            }
+        }
+    }
 
     // Encrypt API key if provided
     if let Some(plain_key) = req.api_key_plain {

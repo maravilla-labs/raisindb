@@ -107,6 +107,8 @@ impl Env {
             model: "nomic-embed-text".to_string(),
             base_url: Some(BASE_URL.to_string()),
             dimensions: 768,
+            query_prefix: None,
+            document_prefix: None,
         })
     }
 
@@ -293,6 +295,7 @@ mod chunking_per_spec {
             overlap: OverlapConfig::Tokens(128),
             splitter: SplitterType::Recursive,
             tokenizer_id: None,
+            context_fields: Vec::new(),
         };
 
         for spec in [Some(EXTRACTED_TEXT_SPEC), None] {
@@ -303,5 +306,103 @@ mod chunking_per_spec {
                 "spec {spec:?} ignored the configured chunk size"
             );
         }
+    }
+}
+
+/// What each chunk is prefixed with before it is embedded — the chunk context
+/// (e.g. the page title) and the tenant's document prefix.
+///
+/// Silent in both directions: a chunk that loses its title still embeds and
+/// still matches something, only worse; a prefix that leaks where none was
+/// configured moves every spec hash and re-embeds a whole corpus. Both halves
+/// are pinned here.
+mod chunk_context {
+    use super::super::handler::{chunk_input_prefix, embedding_input};
+    use raisin_ai::config::ChunkingConfig;
+    use raisin_models::nodes::properties::PropertyValue;
+    use raisin_models::nodes::Node;
+
+    fn page() -> Node {
+        let mut node = Node {
+            name: "management".to_string(),
+            ..Default::default()
+        };
+        node.properties.insert(
+            "title".to_string(),
+            PropertyValue::String("Management".to_string()),
+        );
+        node.properties.insert(
+            "subtitle".to_string(),
+            PropertyValue::String("  ".to_string()),
+        );
+        node.properties
+            .insert("count".to_string(), PropertyValue::Integer(4));
+        node
+    }
+
+    fn with_context(fields: &[&str]) -> ChunkingConfig {
+        ChunkingConfig {
+            context_fields: fields.iter().map(|f| f.to_string()).collect(),
+            ..ChunkingConfig::for_documents()
+        }
+    }
+
+    #[test]
+    fn nothing_configured_means_no_prefix() {
+        assert_eq!(chunk_input_prefix(&page(), None, None), None);
+        assert_eq!(
+            chunk_input_prefix(&page(), None, Some(&ChunkingConfig::default())),
+            None
+        );
+        assert_eq!(chunk_input_prefix(&page(), Some(""), None), None);
+    }
+
+    #[test]
+    fn the_title_heads_every_chunk() {
+        let prefix = chunk_input_prefix(&page(), None, Some(&with_context(&["title"])));
+        assert_eq!(prefix.as_deref(), Some("Management\n\n"));
+        assert_eq!(
+            embedding_input(prefix.as_deref(), "Claus Grunow. Geschäftsführer."),
+            "Management\n\nClaus Grunow. Geschäftsführer."
+        );
+    }
+
+    /// Missing, blank and non-string fields are skipped rather than rendered
+    /// as empty lines or type names; `name` falls back to the node name.
+    #[test]
+    fn unusable_fields_are_skipped_and_name_falls_back_to_the_node() {
+        let prefix = chunk_input_prefix(
+            &page(),
+            None,
+            Some(&with_context(&[
+                "missing", "subtitle", "count", "name", "title",
+            ])),
+        );
+        assert_eq!(prefix.as_deref(), Some("management\nManagement\n\n"));
+
+        let only_unusable = chunk_input_prefix(
+            &page(),
+            None,
+            Some(&with_context(&["missing", "subtitle", "count"])),
+        );
+        assert_eq!(only_unusable, None);
+    }
+
+    #[test]
+    fn the_document_prefix_comes_first_and_applies_without_chunking() {
+        assert_eq!(
+            chunk_input_prefix(&page(), Some("passage: "), None).as_deref(),
+            Some("passage: ")
+        );
+        assert_eq!(
+            chunk_input_prefix(&page(), Some("passage: "), Some(&with_context(&["title"])))
+                .as_deref(),
+            Some("passage: Management\n\n")
+        );
+    }
+
+    #[test]
+    fn no_prefix_sends_the_chunk_verbatim() {
+        assert_eq!(embedding_input(None, "text"), "text");
     }
 }

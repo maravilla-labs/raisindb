@@ -34,6 +34,10 @@ export interface ConfigResponse {
   base_url?: string
   default_max_distance?: number
   quantization?: 'F32' | 'F16' | 'Int8'
+  /** Prepended to every query before embedding (instruction-tuned models). Omit to keep, '' to clear. */
+  query_prefix?: string
+  /** Prepended to every stored chunk before embedding. Changing it re-embeds the corpus. */
+  document_prefix?: string
 }
 
 export interface SetConfigRequest {
@@ -58,6 +62,10 @@ export interface SetConfigRequest {
   base_url?: string
   default_max_distance?: number
   quantization?: 'F32' | 'F16' | 'Int8'
+  /** Prepended to every query before embedding (instruction-tuned models). Omit to keep, '' to clear. */
+  query_prefix?: string
+  /** Prepended to every stored chunk before embedding. Changing it re-embeds the corpus. */
+  document_prefix?: string
 }
 
 export interface TestConnectionResponse {

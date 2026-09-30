@@ -274,12 +274,21 @@ impl EmbeddingJobHandler {
             // See `chunking_for_spec`.
             let spec_chunking = Self::chunking_for_spec(task.spec, chunking.as_ref());
 
+            // What every chunk of this spec is prefixed with: the tenant's
+            // document prefix, then the chunk context (e.g. the page title).
+            let input_prefix = chunk_input_prefix(
+                &node,
+                resolved.document_prefix.as_deref(),
+                spec_chunking.as_deref(),
+            );
+
             self.embed_one_spec(
                 node_id,
                 task,
                 &config,
                 &embedder_id,
                 spec_chunking.as_deref(),
+                input_prefix.as_deref(),
                 provider.as_ref(),
                 &upstream,
                 context,
@@ -362,6 +371,7 @@ impl EmbeddingJobHandler {
         config: &TenantEmbeddingConfig,
         embedder_id: &raisin_ai::config::EmbedderId,
         chunking: Option<&raisin_ai::config::ChunkingConfig>,
+        input_prefix: Option<&str>,
         provider: &dyn raisin_embeddings::EmbeddingProviderTrait,
         upstream: &str,
         context: &JobContext,
@@ -455,6 +465,7 @@ impl EmbeddingJobHandler {
         // happens to sit.
         let spec_hash = raisin_embeddings::EmbeddingSpec::new(text, embedder_id, chunking)
             .for_spec(spec)
+            .with_input_prefix(input_prefix)
             .hash();
         let embedder_hash = embedder_id.to_key_hash();
         let kind_char = raisin_ai::config::EmbeddingKind::Text.to_key_char();
@@ -606,9 +617,12 @@ impl EmbeddingJobHandler {
         }
 
         let carried_forward = carried.is_some();
+        // What is SENT to the provider. The prefix reaches the vector and
+        // nothing else: the stored passage, its span and its text hash all
+        // describe the chunk as cut from the source.
         let chunk_texts: Vec<String> = chunks
             .iter()
-            .map(|(content, _, _)| content.clone())
+            .map(|(content, _, _)| embedding_input(input_prefix, content))
             .collect();
         let embeddings = match carried {
             Some(vectors) => {
@@ -1461,6 +1475,55 @@ impl EmbeddingJobHandler {
             &self.master_key,
         )
         .await
+    }
+}
+
+/// What every chunk of one node's spec is prefixed with before it is embedded,
+/// or `None` when nothing is.
+///
+/// The tenant's `document_prefix` (an instruction some embedders expect on
+/// stored text), then the CHUNK CONTEXT: the values of the chunking config's
+/// `context_fields`, read from the node's top-level string properties (`name`
+/// falls back to the node name), one per line and separated from the chunk by a
+/// blank line. That is what makes a chunk cut from the middle of a page still
+/// say which page it is: `"Management\n\nClaus Grunow. Geschäftsführer. …"`.
+///
+/// Pure and storage-free, and the ONE derivation: the job hashes exactly the
+/// prefix it sends, so a retitled page re-embeds and an unchanged one does not.
+pub(super) fn chunk_input_prefix(
+    node: &raisin_models::nodes::Node,
+    document_prefix: Option<&str>,
+    chunking: Option<&raisin_ai::config::ChunkingConfig>,
+) -> Option<String> {
+    use raisin_models::nodes::properties::PropertyValue;
+
+    let context: Vec<&str> = chunking
+        .map(|c| c.context_fields.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|field| match node.properties.get(field) {
+            Some(PropertyValue::String(v)) => Some(v.as_str()),
+            None if field == "name" => Some(node.name.as_str()),
+            _ => None,
+        })
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .collect();
+
+    let mut prefix = document_prefix.unwrap_or_default().to_string();
+    if !context.is_empty() {
+        prefix.push_str(&context.join("\n"));
+        prefix.push_str("\n\n");
+    }
+
+    (!prefix.is_empty()).then_some(prefix)
+}
+
+/// The text sent to the provider for one chunk.
+pub(super) fn embedding_input(input_prefix: Option<&str>, chunk: &str) -> String {
+    match input_prefix {
+        Some(prefix) => format!("{prefix}{chunk}"),
+        None => chunk.to_string(),
     }
 }
 

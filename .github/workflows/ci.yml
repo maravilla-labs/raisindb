@@ -211,3 +211,54 @@ jobs:
 
       - name: raisin-storage conversation events
         run: cargo test -p raisin-storage --lib conversation_events
+
+  embedding-tests:
+    name: Embedding tests
+    # Manual only, like the auth job and for the same reason: raisin-rocksdb and
+    # raisin-transport-http are a cold build of the heavy graph.
+    #   gh workflow run ci.yml -R maravilla-labs/raisindb --ref <branch>
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    # The write path of semantic search: how node text becomes embedding input
+    # (deterministic order, chunk context), the spec hash that decides what is
+    # stale, query/document prefixes, and the config surfaces that set them.
+    # A regression here does not fail a query — it silently ranks worse, or
+    # re-embeds a whole corpus — so it has to be caught by a test.
+    env:
+      SKIP_ADMIN_BUILD: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      # Must MATCH rust-toolchain.toml — see the note in the Format job.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.1
+
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libleptonica-dev libtesseract-dev clang pkg-config
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: embedding-tests
+
+      - name: raisin-ai chunking
+        run: cargo test -p raisin-ai --lib chunking
+
+      - name: raisin-embeddings
+        run: cargo test -p raisin-embeddings --lib
+
+      - name: raisin-rocksdb embedding job
+        run: cargo test -p raisin-rocksdb --lib embedding
+
+      - name: raisin-sql-execution embedding config
+        run: cargo test -p raisin-sql-execution --lib ai_config
+
+      - name: raisin-transport-http embedding config
+        run: cargo test -p raisin-transport-http --lib embeddings

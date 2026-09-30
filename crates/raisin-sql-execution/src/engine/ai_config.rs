@@ -77,6 +77,11 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
                     .unwrap_or_else(|| "0.60 (default)".to_string()),
             ),
             config_row("distance_metric", &format!("{:?}", config.distance_metric)),
+            config_row("query_prefix", config.query_prefix.as_deref().unwrap_or("")),
+            config_row(
+                "document_prefix",
+                config.document_prefix.as_deref().unwrap_or(""),
+            ),
             config_row(
                 "max_embeddings_per_repo",
                 &config
@@ -180,6 +185,16 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
                 }
                 "DISTANCE_METRIC" => {
                     config.distance_metric = parse_distance_metric(&setting.value)?;
+                }
+                // Instruction text for asymmetric embedders; `''` clears it.
+                // The query prefix applies from the next query on; the
+                // document prefix is part of every stored vector and re-embeds
+                // each node on its next embedding job.
+                "QUERY_PREFIX" => {
+                    config.query_prefix = Some(setting.value.clone()).filter(|p| !p.is_empty());
+                }
+                "DOCUMENT_PREFIX" => {
+                    config.document_prefix = Some(setting.value.clone()).filter(|p| !p.is_empty());
                 }
                 "MAX_EMBEDDINGS_PER_REPO" => {
                     config.max_embeddings_per_repo = if setting.value.to_lowercase() == "unlimited"

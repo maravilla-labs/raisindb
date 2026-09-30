@@ -314,6 +314,7 @@ mod tests {
             overlap: OverlapConfig::Tokens(50),
             splitter: SplitterType::Recursive,
             tokenizer_id: None,
+            context_fields: Vec::new(),
         };
 
         let settings = ProcessingSettings {

@@ -26,6 +26,26 @@ pub struct ChunkingConfig {
     /// If None, uses a default tokenizer based on the embedding model.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub tokenizer_id: Option<String>,
+
+    /// Node properties whose values head EVERY chunk ("contextual chunks").
+    ///
+    /// A chunk cut from the middle of a page has lost what it is about: the
+    /// paragraph listing four names and job titles no longer says it is the
+    /// airport's management page. With `["title"]` each chunk is embedded as
+    /// `"{title}\n\n{chunk}"`, so every piece carries the page's subject and
+    /// the page is found by any one of its passages, not by the average of all
+    /// of them.
+    ///
+    /// Only the EMBEDDED text changes: chunk offsets, the stored passage and
+    /// `chunk_text` still describe the chunk as cut from the source. Values are
+    /// read from the node's top-level string properties (`name` falls back to
+    /// the node name); a missing or empty one is skipped.
+    ///
+    /// Empty by default and not serialized when empty, so a configuration that
+    /// does not use it hashes byte-identically to one written before it
+    /// existed — no corpus is re-embedded for a field nobody set.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub context_fields: Vec<String>,
 }
 
 fn default_chunk_size() -> usize {
@@ -39,6 +59,7 @@ impl Default for ChunkingConfig {
             overlap: OverlapConfig::Tokens(64),
             splitter: SplitterType::Recursive,
             tokenizer_id: None,
+            context_fields: Vec::new(),
         }
     }
 }
@@ -77,6 +98,7 @@ impl ChunkingConfig {
             overlap: OverlapConfig::Tokens(64),
             splitter: SplitterType::Recursive,
             tokenizer_id: Some(COUNTING_TOKENIZER.to_string()),
+            context_fields: Vec::new(),
         }
     }
 

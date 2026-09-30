@@ -668,6 +668,62 @@ struct OllamaEmbedResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Query prompts
+// ---------------------------------------------------------------------------
+
+/// A provider that prepends a fixed prefix to every text it embeds.
+///
+/// This is how a QUERY gets the instruction an asymmetric embedder was trained
+/// with (see `TenantEmbeddingConfig::query_prefix`). It wraps the built client
+/// rather than threading a flag through every query surface, so `KNN`,
+/// `HYBRID_SEARCH` and `EMBEDDING()` on every transport get the prefix from the
+/// one resolver they already share, and cannot disagree about it.
+pub struct PrefixedProvider {
+    inner: Box<dyn EmbeddingProvider>,
+    prefix: String,
+}
+
+impl PrefixedProvider {
+    /// Wrap `inner`, or return it unchanged when there is no prefix.
+    pub fn wrap(
+        inner: Box<dyn EmbeddingProvider>,
+        prefix: Option<&str>,
+    ) -> Box<dyn EmbeddingProvider> {
+        match prefix {
+            Some(p) if !p.is_empty() => Box::new(Self {
+                inner,
+                prefix: p.to_string(),
+            }),
+            _ => inner,
+        }
+    }
+
+    fn prefixed(&self, text: &str) -> String {
+        format!("{}{}", self.prefix, text)
+    }
+}
+
+#[async_trait]
+impl EmbeddingProvider for PrefixedProvider {
+    async fn generate_embedding(&self, text: &str) -> Result<Vec<f32>> {
+        self.inner.generate_embedding(&self.prefixed(text)).await
+    }
+
+    async fn generate_embeddings_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let texts: Vec<String> = texts.iter().map(|t| self.prefixed(t)).collect();
+        self.inner.generate_embeddings_batch(&texts).await
+    }
+
+    fn max_batch_size(&self) -> usize {
+        self.inner.max_batch_size()
+    }
+
+    fn dimensions(&self) -> usize {
+        self.inner.dimensions()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
 
@@ -737,6 +793,47 @@ pub fn create_provider_full(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Query prefixes ──────────────────────────────────────────────────────────
+
+    /// Records what it was asked to embed.
+    struct Recording(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    #[async_trait]
+    impl EmbeddingProvider for Recording {
+        async fn generate_embedding(&self, text: &str) -> Result<Vec<f32>> {
+            self.0.lock().unwrap().push(text.to_string());
+            Ok(vec![0.0; 3])
+        }
+        fn dimensions(&self) -> usize {
+            3
+        }
+    }
+
+    #[tokio::test]
+    async fn a_prefixed_provider_prefixes_single_and_batch_inputs() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let p = PrefixedProvider::wrap(Box::new(Recording(seen.clone())), Some("query: "));
+        p.generate_embedding("wer ist der CEO?").await.unwrap();
+        p.generate_embeddings_batch(&["a".to_string(), "b".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["query: wer ist der CEO?", "query: a", "query: b"]
+        );
+        assert_eq!(p.dimensions(), 3);
+    }
+
+    #[tokio::test]
+    async fn no_or_empty_prefix_leaves_the_text_alone() {
+        for prefix in [None, Some("")] {
+            let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let p = PrefixedProvider::wrap(Box::new(Recording(seen.clone())), prefix);
+            p.generate_embedding("CEO").await.unwrap();
+            assert_eq!(*seen.lock().unwrap(), vec!["CEO"]);
+        }
+    }
 
     // ── base_url and dimension overrides ────────────────────────────────────────
     //

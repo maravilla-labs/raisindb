@@ -82,6 +82,8 @@ mod tests {
             model: "text-embedding-3-small".to_string(),
             base_url: base_url.map(str::to_string),
             dimensions: 1536,
+            query_prefix: None,
+            document_prefix: None,
         }
     }
 

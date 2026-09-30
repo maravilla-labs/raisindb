@@ -58,13 +58,18 @@ pub async fn resolve_settings(
     raisin_embeddings::resolve_settings(config, ai_config.as_ref(), master_key)
 }
 
-/// Resolve a tenant's embedding provider and build the client.
+/// Resolve a tenant's embedding provider and build the client that embeds
+/// QUERY text — with the tenant's `query_prefix` applied.
 ///
 /// Returns a built provider rather than its parts, so `base_url` and
 /// `dimensions` cannot be dropped on the way to the constructor again — the
 /// failure mode that made three read-path call sites work only on a host where
 /// Ollama happened to sit at its default `localhost:11434`.
-pub async fn resolve_provider(
+///
+/// Query-side only, by name: the embedding job builds its DOCUMENT client from
+/// [`resolve_settings`], because stored content must never receive the query
+/// instruction.
+pub async fn resolve_query_provider(
     storage: &RocksDBStorage,
     tenant_id: &str,
     config: &TenantEmbeddingConfig,
@@ -72,7 +77,7 @@ pub async fn resolve_provider(
 ) -> Result<Box<dyn EmbeddingProviderTrait>> {
     resolve_settings(storage, tenant_id, config, master_key)
         .await?
-        .build()
+        .build_for_queries()
 }
 
 /// Load the tenant's embedding config, requiring it to exist and be enabled.
@@ -109,10 +114,10 @@ pub fn require_enabled_config(
 /// all; the other four wired the HNSW engine, found no provider beside it, and
 /// silently ran `HYBRID_SEARCH` as a plain fulltext search.
 ///
-/// It is a thin shell on purpose: the decision is [`resolve_provider`]'s, which
+/// It is a thin shell on purpose: the decision is [`resolve_settings`]'s, which
 /// is also what the `EmbeddingGenerate` job handler uses to embed the DOCUMENT
-/// side. Queries and documents therefore cannot be embedded by two different
-/// models — a failure with no error message anywhere, since two same-width
+/// side — the two differ only in which prefix they apply. Queries and documents
+/// therefore cannot be embedded by two different models — a failure with no error message anywhere, since two same-width
 /// models produce vectors that simply occupy unrelated regions of the space and
 /// every resulting ranking is confident noise.
 pub struct TenantQueryEmbedderResolver {
@@ -169,7 +174,8 @@ impl raisin_embeddings::TenantQueryEmbedder for TenantQueryEmbedderResolver {
                 )
             })?;
 
-        let provider = resolve_provider(&self.storage, tenant_id, &config, &master_key).await?;
+        let provider =
+            resolve_query_provider(&self.storage, tenant_id, &config, &master_key).await?;
 
         Ok(Some(std::sync::Arc::from(provider)))
     }

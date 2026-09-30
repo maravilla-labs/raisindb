@@ -92,6 +92,14 @@ pub struct EmbeddingSpec<'a> {
     /// so a row can be checked against the spec it CLAIMS to be, not only
     /// against where it happens to sit.
     pub spec_name: Option<&'a str>,
+    /// Text prepended to every chunk before it is embedded, or `None`.
+    ///
+    /// The tenant's `document_prefix` followed by the chunk context (the values
+    /// of `ChunkingConfig::context_fields`). It is an input to every vector but
+    /// not part of `text` — a page's title can change while its body does not —
+    /// so without its own component a retitled page would read as current and
+    /// keep vectors that still carry the old title.
+    pub input_prefix: Option<&'a str>,
 }
 
 impl<'a> EmbeddingSpec<'a> {
@@ -106,6 +114,7 @@ impl<'a> EmbeddingSpec<'a> {
             embedder,
             chunking,
             spec_name: None,
+            input_prefix: None,
         }
     }
 
@@ -117,6 +126,16 @@ impl<'a> EmbeddingSpec<'a> {
     /// corpus for a field nobody set.
     pub fn for_spec(mut self, spec_name: Option<&'a str>) -> Self {
         self.spec_name = spec_name;
+        self
+    }
+
+    /// Record what every chunk is prefixed with before it is embedded.
+    ///
+    /// `None` and `Some("")` both mean "nothing", and leave the hash
+    /// byte-identical to a build without prefixes — a tenant that configures
+    /// neither a document prefix nor chunk context re-embeds nothing.
+    pub fn with_input_prefix(mut self, prefix: Option<&'a str>) -> Self {
+        self.input_prefix = prefix.filter(|p| !p.is_empty());
         self
     }
 
@@ -151,6 +170,11 @@ impl<'a> EmbeddingSpec<'a> {
         // spec, whose digest must not move.
         if let Some(name) = self.spec_name {
             field(&mut ctx, "spec", name.as_bytes());
+        }
+
+        // Only when present, for the same reason as the spec name.
+        if let Some(prefix) = self.input_prefix {
+            field(&mut ctx, "prefix", prefix.as_bytes());
         }
 
         let out = ctx.finish();
@@ -239,6 +263,58 @@ mod tests {
         assert_ne!(
             EmbeddingSpec::new("ab", &e, None).hash(),
             EmbeddingSpec::new("a", &e, None).hash(),
+        );
+    }
+
+    /// A retitled page must re-embed even though its extracted body did not
+    /// change: the title reaches every vector through the chunk context.
+    #[test]
+    fn the_input_prefix_is_part_of_the_identity_and_absent_means_unmoved() {
+        let e = embedder();
+        let c = ChunkingConfig::default();
+        let base = EmbeddingSpec::new("body", &e, Some(&c)).hash();
+
+        assert_eq!(
+            base,
+            EmbeddingSpec::new("body", &e, Some(&c))
+                .with_input_prefix(None)
+                .hash()
+        );
+        assert_eq!(
+            base,
+            EmbeddingSpec::new("body", &e, Some(&c))
+                .with_input_prefix(Some(""))
+                .hash(),
+            "an empty prefix is no prefix"
+        );
+
+        let old_title = EmbeddingSpec::new("body", &e, Some(&c))
+            .with_input_prefix(Some("Management\n\n"))
+            .hash();
+        let new_title = EmbeddingSpec::new("body", &e, Some(&c))
+            .with_input_prefix(Some("Geschäftsführung\n\n"))
+            .hash();
+        assert_ne!(base, old_title);
+        assert_ne!(old_title, new_title);
+    }
+
+    /// `context_fields` rides the chunking config, and an EMPTY list must not
+    /// serialize — or every configured tenant's corpus would re-embed on
+    /// upgrade for a field nobody set.
+    #[test]
+    fn empty_context_fields_leave_the_chunking_component_unmoved() {
+        let c = ChunkingConfig::default();
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(!json.contains("context_fields"), "{json}");
+
+        let e = embedder();
+        let with_ctx = ChunkingConfig {
+            context_fields: vec!["title".to_string()],
+            ..ChunkingConfig::default()
+        };
+        assert_ne!(
+            EmbeddingSpec::new("x", &e, Some(&c)).hash(),
+            EmbeddingSpec::new("x", &e, Some(&with_ctx)).hash()
         );
     }
 
