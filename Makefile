@@ -1,4 +1,4 @@
-.PHONY: help disk prune prune-tests clean-hard build test fmt lint gen-bindings gen-bindings-check wasm-fixtures wasm-sdks-test wasm-sdks-build wasm-smoke wasm-check
+.PHONY: help disk prune prune-tests clean-hard build test fmt lint gen-bindings gen-bindings-check wasm-fixtures ai-tools-rag wasm-sdks-test wasm-sdks-build wasm-smoke wasm-check
 
 # Keep this first so a bare `make` is informative.
 help:
@@ -16,6 +16,7 @@ help:
 	@echo "WebAssembly:"
 	@echo "  make wasm-check       Lint + unit-test the wasm work (the exact gate commands)"
 	@echo "  make wasm-fixtures    Rebuild the guest test fixtures (needs wasm32-wasip2)"
+	@echo "  make ai-tools-rag     Test + rebuild the ask/search-documents component (needs wasm32-wasip2)"
 	@echo "  make wasm-sdks-test   Run the three guest SDK suites natively (no wasm needed)"
 	@echo "  make wasm-sdks-build  Build the example artifacts (LANGS=\"rust go ts\")"
 	@echo "  make wasm-smoke       Deploy + invoke the example against a running server"
@@ -68,6 +69,27 @@ wasm-fixtures:
 	rustup target add wasm32-wasip2
 	cd fixtures/wasm-guests && cargo build --release --target wasm32-wasip2
 	./fixtures/wasm-guests/copy-fixtures.sh
+
+# The ai-tools retrieval component: /lib/raisin/ai/ask + /lib/raisin/ai/search-documents.
+# Source in tooling/ai-tools-rag (its own cargo workspace); the artifact is
+# committed next to the ask Function node and embedded in the server with the
+# rest of the builtin package. `raisindb function build` is the same command a
+# package author uses; the cargo fallback does the same build and copy.
+# raisin-functions' `the_committed_component_matches_its_sources` fails when the
+# committed artifact is older than the sources.
+AI_TOOLS_RAG := tooling/ai-tools-rag
+AI_TOOLS_RAG_OUT := builtin-packages/ai-tools/content/functions/lib/raisin/ai/ask/main.wasm
+
+ai-tools-rag:
+	rustup target add wasm32-wasip2
+	cd $(AI_TOOLS_RAG) && cargo test
+	@if command -v raisindb >/dev/null 2>&1; then \
+		raisindb function build $(AI_TOOLS_RAG); \
+	else \
+		cd $(AI_TOOLS_RAG) && cargo build --release --target wasm32-wasip2 && \
+		cp target/wasm32-wasip2/release/ai_tools_rag.wasm ../../$(AI_TOOLS_RAG_OUT); \
+	fi
+	@ls -l $(AI_TOOLS_RAG_OUT)
 
 # ---------------------------------------------------------------------------
 # The wasm gate — run these two, in exactly these spellings

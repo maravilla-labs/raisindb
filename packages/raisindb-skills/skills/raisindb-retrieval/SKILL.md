@@ -22,6 +22,7 @@ Versions, because these are recent and the answer changes:
 | Feature | Needs |
 |---|---|
 | Automatic document chunking, `granularity => 'chunk'`, the built-in functions, `NEIGHBORS('ws:/path', …)` | server **v0.6.34+** |
+| `ask` / `search-documents` in Rust: `paths`, `include_kinds`, `locale`, expansion, the claim check, lexical-only passages | server **after v0.6.47** (ai-tools 1.0.37) |
 | `db.search()` / `db.ask()` on the WebSocket client | **@raisindb/client 0.5.4+** |
 | `db.search()` / `db.ask()` on the Node-safe HTTP client | **@raisindb/client 0.5.5+** |
 
@@ -166,25 +167,77 @@ them, replace them:
 
 | Path | Does |
 |---|---|
-| `/lib/raisin/ai/search-documents` | Passages with `path`, `node_id`, `chunk_index` as citation handles |
-| `/lib/raisin/ai/ask` | Retrieve → grade → rewrite once → answer from those passages, with citations |
+| `/lib/raisin/ai/search-documents` | Passages with `path`, `node_id`, `chunk_index`, `workspace`, `node_type`, `kind`, `title`, `snippet` |
+| `/lib/raisin/ai/ask` | Expand → retrieve → grade → rewrite once → answer → check each claim, with citations |
 | `/lib/raisin/ai/graph-context` | Seeds by meaning, walks the graph outward |
 | `/lib/raisin/ai/extract-entities` | Builds the graph from a document (see `references/graph-rag.md`) |
+
+`search-documents` and `ask` are one Rust WebAssembly component (source in
+`tooling/ai-tools-rag`, rebuilt with `make ai-tools-rag`), shipped inside the
+server; `ask` runs retrieval in-process. Their paths and output shapes are the
+ones the JavaScript versions had, plus fields.
 
 `ask` returns:
 
 ```json
 { "answer": "Either party may terminate on thirty days written notice [1].",
   "grounded": true,
-  "citations": [{ "marker": 1, "path": "/contracts/msa", "chunk_index": 0,
-                  "text_is_exact": true }],
-  "attempts": [{ "query": "…", "passages": 8 }] }
+  "citations": [{ "marker": 1, "path": "/contracts/msa", "workspace": "docs",
+                  "node_type": "raisin:Document", "kind": "page", "title": "MSA",
+                  "snippet": "Either party may terminate…", "chunk_index": 0,
+                  "text_is_exact": true, "matched": "both", "source": "chunk",
+                  "locale": null, "url_hint": null }],
+  "attempts": [{ "query": "…", "passages": 8, "expansions": ["…"] }],
+  "verification": "passed" }
 ```
 
-**`grounded: false` means the model was never called.** When retrieval finds
-nothing, `ask` refuses rather than putting an empty context in front of a model
-— which would answer from its own training, fluently, with nothing marking it
-invented. Branch on this flag before showing an answer.
+**`grounded: false` means no answer.** When retrieval finds nothing, the model
+is never called — it would answer from its own training, fluently, with nothing
+marking it invented. When the claim check drops every sentence that cites a
+passage (`verification: "rejected"`), the result is `grounded: false` too, with
+the dropped sentences in `dropped_claims`. Branch on this flag before showing an
+answer; `verification: "unavailable"` means the check itself failed and the
+draft is unchecked.
+
+### Scoping a site's chatbot
+
+A Studio `stories` workspace holds several sites, `/demo` and blueprints; the
+library holds images whose captions embed closer to a short question than any
+page. The call a site makes:
+
+```js
+ask({ question,
+      workspaces: ['stories', 'assets'],   // a list works (it used to mean ALL READABLE)
+      paths: ['/bap'],                     // this site only, in every workspace
+      locale: 'fr',                        // passages/titles/url_hint from the FR overlay
+      base_language: 'de',                 // content language: lexical leg + expansion target
+      include_kinds: ['page', 'document'] })
+```
+
+- `paths` — prefixes applied per workspace (`'assets:/bap'` binds one to one
+  workspace). They reach the engine as a `WHERE` over `HYBRID_SEARCH`, which is
+  evaluated inside its fetch loop, so the limit counts in-scope rows.
+- `include_kinds` — `page`, `document`, `image`, `media`, `all`. **Default:
+  everything but `image`** — the one change for callers that pass nothing new.
+  `node_types` / `exclude_node_types` narrow by type.
+- `locale` — retrieval stays locale-blind (overlays are in neither index); the
+  multilingual vector leg finds the base page, and its text comes back from the
+  overlay where one exists.
+- `expand` (ask, default on up to eight words) — one model call widens the
+  question with the words documents use to STATE the answer: "CEO" →
+  "Geschäftsführer", "who owns it" → shareholders, shares. Searched on the
+  lexical leg only; never shown to the model as facts.
+- `verify` (ask, default on) — one model call judges each sentence against the
+  passages; unsupported ones are dropped. It exists because a model asked "Wem
+  gehört der Flughafen?" without the shareholder passage answered by making the
+  towns on a directions page the owners.
+- `candidates` (default 40) — each leg's draw before filters, fusion and the
+  per-document cap (`max_per_document`, 3 in `ask`).
+
+A lexical-only hit (the vector leg missed it) has NULL `chunk_text`; it now
+gets a passage cut around the matched words (`source: "excerpt"`) instead of
+being dropped. Without an embedder, retrieval runs full-text only and says
+`mode: "fulltext"`.
 
 **`attempts` shows the retry.** When the graded passages do not answer the
 question, the query is rewritten in the documents' own vocabulary and tried once
@@ -290,8 +343,9 @@ These all fail silently. They cost real debugging time.
 
 ## 8. Cost
 
-- `ask` is one model call, up to three when the grader asks for a retry.
-  `search-documents` costs no model call — reach for it when you want passages.
+- `ask` is up to four model calls: expansion (short questions), grader, answer,
+  claim check. `expand: false` and `verify: false` take it back to two. `search-documents`
+  costs no model call — reach for it when you want passages.
 - Embedding happens on write, once per chunk. A bulk import is the moment to
   check provider rate limits.
 - `extract-entities` is one call per *changed* document; unchanged documents

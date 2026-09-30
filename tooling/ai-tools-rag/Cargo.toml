@@ -1,0 +1,35 @@
+# The retrieval functions of the `ai-tools` builtin package, as ONE WebAssembly
+# component: `/lib/raisin/ai/ask` (handler `ask`) and
+# `/lib/raisin/ai/search-documents` (handler `search-documents`).
+#
+# Its OWN workspace on purpose (the repo root excludes `tooling/*`): it builds
+# for `wasm32-wasip2` with its own release profile, and inside the main
+# workspace it would inherit `.cargo/config.toml`'s `split-debuginfo=unpacked`,
+# which does not exist on wasm32.
+#
+# Build with `make ai-tools-rag` — never from a build.rs. The artifact is
+# committed at
+# builtin-packages/ai-tools/content/functions/lib/raisin/ai/ask/main.wasm and
+# embedded in the server with the rest of the package.
+[workspace]
+
+[package]
+name = "ai-tools-rag"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "BSL-1.1"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+raisin-sdk = { path = "../../sdks/rust/raisin-sdk" }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+strip = true
+codegen-units = 1

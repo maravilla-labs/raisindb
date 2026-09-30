@@ -29,6 +29,8 @@ mod runtime_impl;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_ai_tools_rag;
+#[cfg(test)]
 mod tests_cache;
 #[cfg(test)]
 mod tests_validation;

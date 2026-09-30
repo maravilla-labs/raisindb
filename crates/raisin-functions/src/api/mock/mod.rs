@@ -54,6 +54,26 @@ pub struct MockFunctionApi {
     /// and body a function produced (a magic link in particular) without a
     /// provider account.
     emails_sent: std::sync::Mutex<Vec<Value>>,
+    /// Scripted answers for `sql_query`, `ai_completion` and `function_call`.
+    /// Unset, each keeps its historical canned answer. Set, it answers every
+    /// call — which is what lets a real function (the ai-tools retrieval
+    /// component, say) be driven through fixture search rows and a stubbed
+    /// model without a server.
+    responders: Responders,
+}
+
+/// `(sql, params) -> rows`.
+pub type SqlResponder = Box<dyn Fn(&str, &[Value]) -> Result<Value> + Send + Sync>;
+/// `request -> completion response`.
+pub type CompletionResponder = Box<dyn Fn(&Value) -> Result<Value> + Send + Sync>;
+/// `(function_path, arguments) -> function output`.
+pub type FunctionCallResponder = Box<dyn Fn(&str, &Value) -> Result<Value> + Send + Sync>;
+
+#[derive(Default)]
+struct Responders {
+    sql: Option<SqlResponder>,
+    completion: Option<CompletionResponder>,
+    function_call: Option<FunctionCallResponder>,
 }
 
 impl MockFunctionApi {
@@ -70,7 +90,35 @@ impl MockFunctionApi {
             http_calls: std::sync::Mutex::new(Vec::new()),
             secrets: std::sync::Mutex::new(std::collections::HashMap::new()),
             emails_sent: std::sync::Mutex::new(Vec::new()),
+            responders: Responders::default(),
         }
+    }
+
+    /// Answer every `sql_query` with `f(sql, params)` instead of the canned row.
+    pub fn with_sql_responder(
+        mut self,
+        f: impl Fn(&str, &[Value]) -> Result<Value> + Send + Sync + 'static,
+    ) -> Self {
+        self.responders.sql = Some(Box::new(f));
+        self
+    }
+
+    /// Answer every `ai_completion` with `f(request)`.
+    pub fn with_completion_responder(
+        mut self,
+        f: impl Fn(&Value) -> Result<Value> + Send + Sync + 'static,
+    ) -> Self {
+        self.responders.completion = Some(Box::new(f));
+        self
+    }
+
+    /// Answer every `function_call` with `f(path, arguments)`.
+    pub fn with_function_call_responder(
+        mut self,
+        f: impl Fn(&str, &Value) -> Result<Value> + Send + Sync + 'static,
+    ) -> Self {
+        self.responders.function_call = Some(Box::new(f));
+        self
     }
 
     /// Every `{ to, subject, text, html? }` handed to `email_send` so far.
@@ -266,6 +314,9 @@ impl FunctionApi for MockFunctionApi {
             .lock()
             .unwrap()
             .push(serde_json::json!({ "sql": sql, "params": params }));
+        if let Some(f) = &self.responders.sql {
+            return f(sql, &params);
+        }
         Ok(serde_json::json!([
             { "id": "1", "name": "test" }
         ]))
@@ -304,6 +355,9 @@ impl FunctionApi for MockFunctionApi {
             .get("messages")
             .and_then(|m| m.as_array())
             .ok_or_else(|| raisin_error::Error::Validation("Missing messages".to_string()))?;
+        if let Some(f) = &self.responders.completion {
+            return f(&request);
+        }
         Ok(mock_ai_completion(&request))
     }
 
@@ -499,6 +553,9 @@ impl FunctionApi for MockFunctionApi {
 
     async fn function_call(&self, function_path: &str, arguments: Value) -> Result<Value> {
         tracing::info!(function_path = %function_path, arguments = ?arguments, "Mock function call");
+        if let Some(f) = &self.responders.function_call {
+            return f(function_path, &arguments);
+        }
         Ok(
             serde_json::json!({ "success": true, "function_path": function_path, "arguments": arguments, "result": "mock call result" }),
         )

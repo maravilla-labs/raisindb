@@ -790,14 +790,72 @@ copy or replace:
 
 | Function | What it does |
 |---|---|
-| `/lib/raisin/ai/search-documents` | Wraps `HYBRID_SEARCH(..., granularity => 'chunk')` and returns passages with `path`, `node_id` and `chunk_index` as citation handles |
-| `/lib/raisin/ai/ask` | Calls the above, then answers from those passages only, returning the numbered citations it was given |
+| `/lib/raisin/ai/search-documents` | Runs `HYBRID_SEARCH(..., granularity => 'chunk')` and returns passages with `path`, `node_id`, `chunk_index`, `workspace`, `node_type`, `title` and a `snippet` |
+| `/lib/raisin/ai/ask` | Retrieves the same way, answers from those passages only, checks every sentence of the answer against them, and returns the numbered citations |
 
-Both work as agent tools: list the path in an agent's `tools:` array.
+Both work as agent tools: list the path in an agent's `tools:` array. Both are one
+WebAssembly component (Rust, source in `tooling/ai-tools-rag`), so a call costs no
+JavaScript runtime and `ask` reaches retrieval in-process rather than through a second
+function execution.
 
 `ask` does not call the model at all when retrieval returned nothing — it answers
 `grounded: false` instead. That is deliberate: a model asked to answer from an empty
 context answers from its own weights, fluently, and nothing in the output says so.
+
+### Scoping a site's chatbot
+
+A Studio `stories` workspace usually holds several sites, a demo tree and
+blueprints, and a library of images. Every option below is optional; together they
+are what keeps a site's answers to that site's text:
+
+```js
+await raisin.functions.call('/lib/raisin/ai/ask', {
+  question,                               // what the visitor typed
+  workspaces: ['stories', 'assets'],      // a list, or 'stories, assets'
+  paths: ['/bap'],                        // only this site, in every workspace
+  locale: 'fr',                           // titles, passages, URL hints in French where translated
+  base_language: 'de',                    // the language the content is written in
+  include_kinds: ['page', 'document'],    // the default already leaves images out
+})
+```
+
+| Option | Does |
+|---|---|
+| `paths` | Path prefixes, applied in every searched workspace; `'assets:/bap'` binds one to one workspace. A prefix is a path segment: `/bap` does not match `/bapx`. |
+| `include_kinds` | `page` (anything not an asset), `document` (PDFs, office and text files), `image`, `media` (video, audio), or `all`. **Default: everything but `image`.** |
+| `node_types` / `exclude_node_types` | Only / never these node types. |
+| `locale` | Retrieval is locale-blind (overlay text is not in either index); the passage, title and `url_hint` of a page come from that locale's overlay where one exists, and `locale` on the passage says so. |
+| `base_language` | The full-text analyzer for the lexical leg (default: the repository's) and the language `ask` expands short questions into. |
+| `fulltext_languages` | Extra lexical legs with other analyzers, fused by rank. |
+| `candidates` | Passages each leg draws before filtering and ranking (default 40). |
+| `expand` (`ask`) | Widen short questions with the documents' own words before searching: "CEO" also searches "Geschäftsführer", "who owns the airport" also searches shareholders and shares. The terms go to the lexical leg only. On by default for questions of up to eight words. |
+| `verify` (`ask`) | Check each sentence of the draft against the passages and drop what they do not state (default on). `verification` reports `passed`, `trimmed`, `rejected` (then `grounded: false`) or `unavailable`. |
+
+The scope reaches the engine as a `WHERE` over the table function, which is
+evaluated inside its fetch loop — a row counts toward the limit only once it passes —
+so `paths: ['/bap']` returns the best `/bap` passages, not the `/bap` survivors of a
+global top 40.
+
+**Hybrid means both legs answer.** A hit the full-text leg found and the vector leg did
+not has no chunk (`chunk_text` is NULL). Such a hit used to be dropped as "no text";
+it now gets a passage cut from the node's own text around the matched words
+(`source: "excerpt"`), which is exactly the "Geschäftsführer" news item a vector search
+misses.
+
+For existing callers every new option is optional, and the input and output shapes
+are a superset of the old ones. What a call that passes nothing new now does
+differently:
+
+- **image assets are not returned as passages** unless `include_kinds` names them;
+- lexical-only hits appear (with an excerpt) instead of being dropped;
+- `title` is the node's `title` property when it has one, else its name, as before;
+- each leg draws 40 candidates rather than `limit`, and `ask` takes at most three
+  passages from one document;
+- a `workspaces` list is honoured — it used to be ignored in favour of `'ALL READABLE'`;
+- on a tenant with no embedder, retrieval runs full-text only (`mode: "fulltext"`)
+  instead of failing;
+- `ask` expands short questions and checks its answer: up to two more model calls,
+  switched off with `expand: false` and `verify: false`.
 
 Neither is exposed to external MCP clients by default. Add `mcp: { enabled: true }` to
 the function node to promote it to a tool on your MCP servers.
