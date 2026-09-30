@@ -102,7 +102,7 @@ pub use transaction::Transaction;
 
 /// The imports most functions want.
 pub mod prelude {
-    pub use crate::context::Context;
+    pub use crate::context::{Caller, Context};
     pub use crate::transaction::Transaction;
     pub use crate::{Error, LogLevel, Result};
 }

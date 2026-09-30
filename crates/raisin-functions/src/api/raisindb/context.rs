@@ -149,6 +149,11 @@ impl RaisinFunctionApi {
             ctx["event"] = event_data.clone();
         }
 
+        // Who invoked it, as the server resolved it (see `ExecutionContext::caller`).
+        if let Some(caller) = &self.context.caller {
+            ctx["caller"] = serde_json::to_value(caller).unwrap_or(serde_json::Value::Null);
+        }
+
         // Include trigger name if available
         if let Some(trigger_name) = &self.context.trigger_name {
             ctx["trigger_name"] = serde_json::json!(trigger_name);

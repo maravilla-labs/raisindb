@@ -211,6 +211,18 @@ interface ExecutionContext {
   workspace_id: string;
   actor?: string;
   execution_id?: string;
+  /**
+   * Who invoked this function, as the server resolved it. Present even when
+   * the function runs as the system, so it can refuse callers; absent when
+   * nobody invoked it (trigger, schedule, flow).
+   */
+  caller?: {
+    user_id?: string | null;
+    roles: string[];
+    is_system: boolean;
+    is_system_admin: boolean;
+    anonymous: boolean;
+  };
 }
 
 /** Context passed to every function handler */

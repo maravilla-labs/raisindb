@@ -556,6 +556,8 @@ async fn execute_function_inline(
     // in from `optional_auth_middleware` above. Mirrors the same branch in
     // `execution::executor::execute_function` — this path is a second,
     // hand-rolled funnel that does not go through it.
+    // Who asked, before "system" replaces the identity the function runs as.
+    let caller = raisin_functions::types::FunctionCaller::from_auth(auth_context.as_ref());
     let auth_context = match loaded.metadata.execution_context {
         raisin_functions::types::FunctionExecutionContext::System => {
             let system = AuthContext::system();
@@ -600,6 +602,7 @@ async fn execute_function_inline(
         branch,
         &loaded.metadata,
         tx_auth_context,
+        Some(caller),
     );
     let executor = FunctionExecutor::new();
 

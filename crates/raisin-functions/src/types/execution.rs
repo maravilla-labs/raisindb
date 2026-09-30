@@ -10,6 +10,45 @@ use raisin_models::auth::AuthContext;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// The identity that invoked a function: exposed to the function as
+/// `context.caller` (`raisin.context.caller` in JavaScript).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FunctionCaller {
+    /// The caller's user id; `None` when it has none.
+    pub user_id: Option<String>,
+    /// Effective roles (direct and through groups).
+    pub roles: Vec<String>,
+    /// The system itself (an admin credential, an API key, the superadmin).
+    pub is_system: bool,
+    /// Holds `system_admin`.
+    pub is_system_admin: bool,
+    /// Not signed in.
+    pub anonymous: bool,
+}
+
+impl FunctionCaller {
+    /// Describe the caller an invoke request carried (`None`: no identity).
+    pub fn from_auth(auth: Option<&AuthContext>) -> Self {
+        let Some(auth) = auth else {
+            return Self {
+                anonymous: true,
+                ..Self::default()
+            };
+        };
+        let roles = match auth.permissions() {
+            Some(p) if !p.effective_roles.is_empty() => p.effective_roles.clone(),
+            _ => auth.roles.clone(),
+        };
+        Self {
+            user_id: auth.user_id.clone(),
+            roles,
+            is_system: auth.is_system,
+            is_system_admin: auth.permissions().is_some_and(|p| p.is_system_admin),
+            anonymous: auth.is_anonymous_principal(),
+        }
+    }
+}
+
 /// Context provided to function execution
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ExecutionContext {
@@ -69,6 +108,14 @@ pub struct ExecutionContext {
     #[serde(skip)]
     pub log_emitter: Option<raisin_storage::LogEmitter>,
 
+    /// Who invoked this function, as the SERVER resolved it (never read from
+    /// the input). Kept even when `execution_context: "system"` replaces the
+    /// identity the function runs with, so a system function can still
+    /// decide whether this caller may ask for what it does. `None` for runs
+    /// with no invoking caller (triggers, schedules, flows).
+    #[serde(default)]
+    pub caller: Option<FunctionCaller>,
+
     /// What the execution may touch beyond its input. Every runtime honours it
     /// (see [`ExecutionPolicy`]); it is never read from the function's input.
     #[serde(skip)]
@@ -121,6 +168,7 @@ impl std::fmt::Debug for ExecutionContext {
             .field("started_at", &self.started_at)
             .field("auth_context", &self.auth_context)
             .field("allows_admin_escalation", &self.allows_admin_escalation)
+            .field("caller", &self.caller)
             .field(
                 "log_emitter",
                 &self.log_emitter.as_ref().map(|_| "<LogEmitter>"),
@@ -153,6 +201,7 @@ impl ExecutionContext {
             started_at: Utc::now(),
             auth_context: None,
             allows_admin_escalation: false,
+            caller: None,
             log_emitter: None,
             policy: ExecutionPolicy::Standard,
         }
@@ -217,6 +266,12 @@ impl ExecutionContext {
     /// Set authentication context for RLS filtering
     pub fn with_auth(mut self, auth: AuthContext) -> Self {
         self.auth_context = Some(auth);
+        self
+    }
+
+    /// Record who invoked this function (see [`ExecutionContext::caller`]).
+    pub fn with_caller(mut self, caller: Option<FunctionCaller>) -> Self {
+        self.caller = caller;
         self
     }
 

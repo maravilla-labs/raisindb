@@ -969,3 +969,66 @@ fn identity_patch_debug_redacts_the_password() {
     assert!(!rendered.contains("correct horse"), "{rendered}");
     assert!(rendered.contains("<redacted>"), "{rendered}");
 }
+
+// ---- context.caller ------------------------------------------------------
+
+mod caller_context {
+    use super::super::RaisinFunctionApi;
+    use crate::api::callbacks::RaisinFunctionApiCallbacks;
+    use crate::types::{ExecutionContext, FunctionCaller, NetworkPolicy};
+    use raisin_models::auth::AuthContext;
+    use raisin_models::permissions::ResolvedPermissions;
+
+    fn context_of(caller: Option<FunctionCaller>) -> serde_json::Value {
+        // A "system" function: runs as the system, but knows who asked.
+        let ctx = ExecutionContext::new("t", "r", "main", "system")
+            .with_auth(AuthContext::system())
+            .with_caller(caller);
+        RaisinFunctionApi::new(
+            ctx,
+            NetworkPolicy::default(),
+            RaisinFunctionApiCallbacks::default(),
+        )
+        .impl_get_context()
+    }
+
+    #[test]
+    fn a_system_function_sees_the_user_who_invoked_it() {
+        let mut perms = ResolvedPermissions::empty("editor-1");
+        perms.effective_roles = vec!["studio_editor".into(), "authenticated_user".into()];
+        let user = AuthContext::for_user("editor-1").with_permissions(perms);
+        let ctx = context_of(Some(FunctionCaller::from_auth(Some(&user))));
+        assert_eq!(ctx["actor"], "system");
+        assert_eq!(ctx["caller"]["user_id"], "editor-1");
+        assert_eq!(ctx["caller"]["roles"][0], "studio_editor");
+        assert_eq!(ctx["caller"]["anonymous"], false);
+        assert_eq!(ctx["caller"]["is_system"], false);
+        assert_eq!(ctx["caller"]["is_system_admin"], false);
+    }
+
+    #[test]
+    fn anonymous_and_missing_callers_are_marked_anonymous() {
+        let anon = AuthContext::anonymous_user("anon")
+            .with_permissions(ResolvedPermissions::anonymous(vec![]));
+        assert_eq!(
+            context_of(Some(FunctionCaller::from_auth(Some(&anon))))["caller"]["anonymous"],
+            true
+        );
+        assert_eq!(
+            context_of(Some(FunctionCaller::from_auth(None)))["caller"]["anonymous"],
+            true
+        );
+        // A run with no invoking caller (trigger, schedule) carries none.
+        assert!(context_of(None).get("caller").is_none());
+    }
+
+    #[test]
+    fn administrators_are_marked() {
+        let admin =
+            AuthContext::for_user("root").with_permissions(ResolvedPermissions::system_admin());
+        let c = FunctionCaller::from_auth(Some(&admin));
+        assert!(c.is_system_admin && !c.anonymous);
+        let c = FunctionCaller::from_auth(Some(&AuthContext::system()));
+        assert!(c.is_system && !c.anonymous);
+    }
+}

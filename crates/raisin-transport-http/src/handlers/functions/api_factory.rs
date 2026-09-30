@@ -57,6 +57,7 @@ pub(crate) fn build_function_api(
         DEFAULT_BRANCH,
         metadata,
         auth_context,
+        None,
     )
 }
 
@@ -73,6 +74,7 @@ pub(crate) fn build_function_api_on_branch(
     branch: &str,
     metadata: &FunctionMetadata,
     auth_context: Option<AuthContext>,
+    caller: Option<raisin_functions::types::FunctionCaller>,
 ) -> Arc<RaisinFunctionApi> {
     let repo_id = repo.to_string();
     let tenant = tenant_id.to_string();
@@ -117,7 +119,8 @@ pub(crate) fn build_function_api_on_branch(
     Arc::new(
         RaisinFunctionApi::new(
             ExecutionContext::new(tenant_id, repo, branch, "system")
-                .with_workspace(FUNCTIONS_WORKSPACE),
+                .with_workspace(FUNCTIONS_WORKSPACE)
+                .with_caller(caller),
             metadata.network_policy.clone(),
             callbacks,
         )

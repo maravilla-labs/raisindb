@@ -204,6 +204,8 @@ where
     // unchanged, including `None` for an anonymous or not-yet-wired caller:
     // RLS then narrows to whatever that identity (or lack of one) can see,
     // rather than silently promoting to System.
+    // Who asked, before "system" replaces the identity the function runs as.
+    let caller = crate::types::FunctionCaller::from_auth(auth_context.as_ref());
     let auth_context = match metadata.execution_context {
         crate::types::FunctionExecutionContext::System => {
             let system = AuthContext::system();
@@ -322,7 +324,8 @@ where
         .with_execution_id(execution_id)
         .with_workspace(workspace)
         .with_input(input)
-        .with_admin_escalation(requires_admin);
+        .with_admin_escalation(requires_admin)
+        .with_caller(Some(caller));
 
     // Set log emitter for real-time log streaming
     if let Some(emitter) = log_emitter {

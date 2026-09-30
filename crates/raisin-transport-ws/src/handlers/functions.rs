@@ -496,6 +496,10 @@ mod inner {
         // its `agent` marker, if any, for attribution); "user" (the default)
         // runs as the WS connection's own resolved identity, or as nobody if
         // the connection never authenticated — never silently as "system".
+        // Who asked, before "system" replaces the identity the function runs as.
+        let caller = raisin_functions::types::FunctionCaller::from_auth(
+            connection_state.read().auth_context(),
+        );
         let auth_context = match metadata.execution_context {
             raisin_functions::types::FunctionExecutionContext::System => {
                 let system = raisin_models::auth::AuthContext::system();
@@ -530,7 +534,8 @@ mod inner {
         );
 
         let mut api_context = ExecutionContext::new(&tenant_id, &repo, &branch, actor)
-            .with_workspace(FUNCTIONS_WORKSPACE);
+            .with_workspace(FUNCTIONS_WORKSPACE)
+            .with_caller(Some(caller));
         if let Some(auth) = auth_context.clone() {
             api_context = api_context.with_auth(auth);
         }

@@ -86,4 +86,72 @@ impl Context {
     pub fn input(&self) -> Option<&Value> {
         self.0.get("input")
     }
+
+    /// Who invoked this function, as the server resolved it — present even
+    /// when the function runs as the system (`execution_context: "system"`),
+    /// so it can refuse a caller who may not ask for what it does. `None`
+    /// when nobody invoked it (a trigger, a schedule, a flow step).
+    pub fn caller(&self) -> Option<Caller> {
+        self.0
+            .get("caller")
+            .and_then(|c| serde_json::from_value(c.clone()).ok())
+    }
+}
+
+/// The invoking identity; see [`Context::caller`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct Caller {
+    /// The caller's user id, if it has one.
+    #[serde(default)]
+    pub user_id: Option<String>,
+    /// Effective roles (direct and through groups).
+    #[serde(default)]
+    pub roles: Vec<String>,
+    /// The system itself (admin credential, API key, superadmin).
+    #[serde(default)]
+    pub is_system: bool,
+    /// Holds `system_admin`.
+    #[serde(default)]
+    pub is_system_admin: bool,
+    /// Not signed in.
+    #[serde(default)]
+    pub anonymous: bool,
+}
+
+impl Caller {
+    /// Whether the caller holds any of `roles`, or is the system or a
+    /// `system_admin` (who may do anything).
+    pub fn has_any_role(&self, roles: &[&str]) -> bool {
+        if self.anonymous {
+            return false;
+        }
+        self.is_system
+            || self.is_system_admin
+            || self.roles.iter().any(|r| roles.contains(&r.as_str()))
+    }
+}
+
+#[cfg(test)]
+mod caller_tests {
+    use super::*;
+
+    #[test]
+    fn caller_is_read_from_the_context() {
+        let ctx = Context(serde_json::json!({
+            "actor": "system",
+            "caller": {"user_id": "u1", "roles": ["studio_editor"], "is_system": false,
+                       "is_system_admin": false, "anonymous": false}
+        }));
+        let c = ctx.caller().unwrap();
+        assert_eq!(c.user_id.as_deref(), Some("u1"));
+        assert!(c.has_any_role(&["studio_admin", "studio_editor"]));
+        assert!(!c.has_any_role(&["studio_admin"]));
+        assert!(Context(serde_json::json!({})).caller().is_none());
+        let anon = Caller {
+            anonymous: true,
+            roles: vec!["studio_admin".into()],
+            ..Caller::default()
+        };
+        assert!(!anon.has_any_role(&["studio_admin"]));
+    }
 }
