@@ -1446,7 +1446,11 @@ export class RaisinClient extends EventEmitter {
       undefined,
       () => this.getUploadManager(),
       (options) => this.signAssetUrl(options),
-      { httpBaseUrl: this._httpBaseUrl, authManager: this.authManager },
+      {
+        httpBaseUrl: this._httpBaseUrl,
+        authManager: this.authManager,
+        onReconnected: (callback) => this.onReconnected(callback),
+      },
     );
   }
 

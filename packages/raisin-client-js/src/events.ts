@@ -41,6 +41,13 @@ interface FilterSubscriptionEntry {
   callbacks: Set<EventCallback>;
   /** Set while the entry still needs to be re-subscribed after a reconnect */
   restorePending?: boolean;
+  /**
+   * A direct listener for a server-assigned stream (flow events, visitor
+   * chats), not a filter subscription. Its owner restores it; the reconnect
+   * restore must leave it alone — re-subscribing its empty filters would
+   * subscribe to EVERY event the connection may read.
+   */
+  synthetic?: boolean;
 }
 
 /** Default deduplication window in milliseconds (5 seconds) */
@@ -386,6 +393,7 @@ export class EventHandler {
       serverId: subscriptionId,
       filters: {} as SubscriptionFilters,
       callbacks: new Set([callback]),
+      synthetic: true,
     });
     this.subscriptions.set(subscriptionId, hash);
     this.callbackToHash.set(callback, hash);
@@ -425,6 +433,7 @@ export class EventHandler {
       // Fresh restore session: every entry needs a new server-side
       // subscription; drop stale routing IDs from the old connection.
       for (const entry of this.filterSubscriptions.values()) {
+        if (entry.synthetic) continue;
         this.subscriptions.delete(entry.serverId);
         entry.restorePending = true;
       }
@@ -432,7 +441,7 @@ export class EventHandler {
 
     // Collect entries to restore (can't modify map while iterating)
     const entriesToRestore = Array.from(this.filterSubscriptions.entries())
-      .filter(([, entry]) => entry.restorePending);
+      .filter(([, entry]) => entry.restorePending && !entry.synthetic);
 
     let failureCount = 0;
     let lastError: unknown;

@@ -23,6 +23,7 @@ import type {
   SearchPassage,
 } from './search-api';
 import { ConversationManager } from './conversations';
+import { VisitorChat } from './visitor-chat';
 import { FlowClient } from './flow-client';
 import { InboxApi } from './inbox';
 import type { AuthManager } from './auth';
@@ -38,6 +39,8 @@ export interface DatabaseHttpOptions {
   httpBaseUrl?: string;
   /** Auth manager for token access */
   authManager?: AuthManager;
+  /** Called after every successful reconnect (visitor chats re-prove their session). */
+  onReconnected?: (callback: () => void) => () => void;
 }
 
 /**
@@ -440,6 +443,12 @@ export class Database {
         this.httpOptions.authManager,
         {},
         (query: string, params?: unknown[]) => this.executeSql(query, params),
+        new VisitorChat(
+          this.repository,
+          (payload, requestType) => this.sendRequest(payload, requestType),
+          this.eventHandler,
+          this.httpOptions.onReconnected,
+        ),
       );
     }
     return this._conversationManager;

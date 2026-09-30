@@ -465,6 +465,15 @@ export type {
 
 // Conversation management (unified API)
 export { ConversationManager, DEFAULT_SEND_MESSAGE_INACTIVITY_TIMEOUT_MS } from './conversations';
+
+// Anonymous visitor chat (a public website's chat without login)
+export { VisitorChatError, defaultVisitorSessionStore } from './visitor-chat';
+export type {
+  AnonymousConversation,
+  StartAnonymousOptions,
+  VisitorChatLimits,
+  VisitorSessionStore,
+} from './visitor-chat';
 export type {
   ListConversationsOptions,
   CreateConversationOptions as CreateConvoOptions,

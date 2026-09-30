@@ -260,6 +260,8 @@ export interface ChatFailedEvent {
   type: 'failed';
   /** Error description */
   error: string;
+  /** Machine-readable reason, when the server gave one (visitor chat refusals) */
+  code?: string;
   timestamp: string;
 }
 

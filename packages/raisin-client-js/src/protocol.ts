@@ -307,6 +307,10 @@ export enum RequestType {
   ScheduledInvocationCancel = 'scheduled_invocation_cancel',
   ScheduledInvocationList = 'scheduled_invocation_list',
   ScheduledInvocationGet = 'scheduled_invocation_get',
+
+  // Anonymous visitor chat (db.conversations.startAnonymous)
+  VisitorChatStart = 'visitor_chat_start',
+  VisitorChatSend = 'visitor_chat_send',
 }
 
 /**

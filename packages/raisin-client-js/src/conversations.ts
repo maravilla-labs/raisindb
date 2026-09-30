@@ -42,6 +42,7 @@ import { RaisinAbortError, RaisinTimeoutError, classifyHttpError } from './error
 import type { SqlResult } from './protocol';
 import { isRecoveredDoneEvent } from './utils/chat-events';
 import { normalizeHomePath } from './utils/home-path';
+import type { AnonymousConversation, StartAnonymousOptions, VisitorChat } from './visitor-chat';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -158,6 +159,7 @@ export class ConversationManager {
   private requestTimeout: number;
 
   private executeSql?: (query: string, params?: unknown[]) => Promise<SqlResult>;
+  private visitor?: VisitorChat;
   private cachedUserId?: string;
   private cachedUserHome?: string;
 
@@ -167,7 +169,9 @@ export class ConversationManager {
     authManager: AuthManager,
     options: ConversationManagerOptions = {},
     executeSql?: (query: string, params?: unknown[]) => Promise<SqlResult>,
+    visitor?: VisitorChat,
   ) {
+    this.visitor = visitor;
     this.baseUrl = baseUrl.replace(/\/$/, '');
     this.repository = repository;
     this.authManager = authManager;
@@ -311,6 +315,52 @@ export class ConversationManager {
   }
 
   /**
+   * Start (or resume) an ANONYMOUS conversation with an agent — a public
+   * website's chat, without login.
+   *
+   * Works on an anonymous connection only, and only with an agent that allows
+   * anonymous visitors (`anonymous.enabled: true` on its raisin:AIAgent). The
+   * server keeps the conversation in an ephemeral visitor session that only
+   * this browser session can read; the session secret is kept in
+   * sessionStorage (override with `options.store`), so a reload continues the
+   * same conversation. Then use `sendMessage`, `getMessages`, `subscribe` and
+   * `ConversationStore` / `useConversation` exactly as for a signed-in user.
+   *
+   * @example
+   * ```typescript
+   * const convo = await db.conversations.startAnonymous('/agents/website-assistant');
+   * for await (const ev of db.conversations.sendMessage(convo.conversationPath, 'Hello')) {
+   *   if (ev.type === 'text_chunk') append(ev.text);
+   *   if (ev.type === 'failed') showLimit(ev.code); // e.g. RATE_LIMITED, LIMIT_REACHED
+   * }
+   * ```
+   */
+  async startAnonymous(
+    agent: string,
+    options?: StartAnonymousOptions,
+  ): Promise<AnonymousConversation> {
+    if (!this.visitor) {
+      throw new Error('Anonymous chat needs a WebSocket database: use client.database(repo).');
+    }
+    return this.visitor.start(this.normalizeAgentPath(agent), options);
+  }
+
+  /** Forget the stored anonymous session for `agent` (the next start begins a new one). */
+  forgetAnonymous(agent: string, options?: StartAnonymousOptions): void {
+    this.visitor?.forget(this.normalizeAgentPath(agent), options);
+  }
+
+  /** Whether this tab remembers an anonymous conversation with `agent`. */
+  hasStoredAnonymous(agent: string, options?: StartAnonymousOptions): boolean {
+    return this.visitor?.remembers(this.normalizeAgentPath(agent), options) ?? false;
+  }
+
+  /** Whether `conversationPath` is an anonymous conversation of this client. */
+  isAnonymous(conversationPath: string): boolean {
+    return this.visitor?.isAnonymous(conversationPath) ?? false;
+  }
+
+  /**
    * Open an existing conversation by path.
    * Returns null if not found.
    */
@@ -360,6 +410,8 @@ export class ConversationManager {
    * Mark a conversation as read by setting unread_count to 0.
    */
   async markAsRead(conversationPath: string): Promise<void> {
+    // A visitor writes nothing itself; its unread state is not tracked.
+    if (this.isAnonymous(conversationPath)) return;
     const workspace = 'raisin:access_control';
     await this.sqlQuery(
       `UPDATE '${workspace}' SET properties = jsonb_set(properties, '{unread_count}', '0'::jsonb) WHERE path = $1 AND node_type = 'raisin:Conversation'`,
@@ -371,6 +423,7 @@ export class ConversationManager {
    * Mark a single message as read by the current user.
    */
   async markMessageAsRead(messagePath: string): Promise<void> {
+    if (messagePath.startsWith('/visitors/')) return;
     const workspace = 'raisin:access_control';
     const now = new Date().toISOString();
     await this.sqlQuery(
@@ -402,6 +455,21 @@ export class ConversationManager {
     options?: SendMessageOptions,
   ): AsyncIterable<ChatEvent> {
     const shouldStream = options?.stream !== false;
+
+    // Anonymous conversations stream over the WebSocket (see startAnonymous).
+    if (this.visitor?.isAnonymous(conversationPath)) {
+      if (!shouldStream) {
+        await this.visitor.post(conversationPath, content);
+        yield { type: 'waiting', timestamp: new Date().toISOString() };
+        return;
+      }
+      yield* this.visitor.stream(conversationPath, content, {
+        signal: options?.signal,
+        inactivityTimeoutMs:
+          options?.inactivityTimeoutMs ?? DEFAULT_SEND_MESSAGE_INACTIVITY_TIMEOUT_MS,
+      });
+      return;
+    }
 
     logger.debug('[ConversationManager] Starting SSE stream for message send');
 
@@ -511,6 +579,10 @@ export class ConversationManager {
    */
   async createUserMessage(conversationPath: string, content: string): Promise<void> {
     logger.debug('[ConversationManager] Creating user message', { path: conversationPath });
+    if (this.visitor?.isAnonymous(conversationPath)) {
+      await this.visitor.post(conversationPath, content);
+      return;
+    }
     const workspace = 'raisin:access_control';
     const properties = await this.loadConversationProperties(conversationPath, workspace);
     const flowInstanceId = typeof properties?.flow_instance_id === 'string'
@@ -586,6 +658,11 @@ export class ConversationManager {
     onEvent: (event: ChatEvent) => void,
     options?: { signal?: AbortSignal },
   ): ConversationSubscription {
+    if (this.visitor?.isAnonymous(conversationPath)) {
+      const stop = this.visitor.listen(conversationPath, onEvent);
+      options?.signal?.addEventListener('abort', stop, { once: true });
+      return { unsubscribe: stop, waitUntilConnected: async () => {} };
+    }
     logger.info('[ConversationManager] Subscribing to SSE', { path: conversationPath });
     const sseUrl = `${this.baseUrl}/api/conversations/${this.repository}/events`;
     const headers: Record<string, string> = {};

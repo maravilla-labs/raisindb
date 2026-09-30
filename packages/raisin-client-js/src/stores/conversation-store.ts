@@ -20,6 +20,7 @@
  */
 
 import type { ConversationManager, ConversationSubscription } from '../conversations';
+import type { StartAnonymousOptions } from '../visitor-chat';
 import type { Database } from '../database';
 import type { ChatMessage, ChatEvent, ChatLogEvent } from '../types/chat';
 import { logger, getLogLevel, LogLevel } from '../logger';
@@ -74,6 +75,12 @@ export interface ConversationStoreOptions {
   createOptions?: {
     participant: string;
     input?: Record<string, unknown>;
+    /**
+     * Chat WITHOUT login (a public website): starts or resumes an anonymous
+     * visitor conversation (`db.conversations.startAnonymous`). `true`, or the
+     * start options. The agent must allow anonymous visitors.
+     */
+    anonymous?: boolean | StartAnonymousOptions;
   };
   /** Callback for individual chat events */
   onEvent?: (event: ChatEvent) => void;
@@ -100,7 +107,7 @@ export class ConversationStore {
   private manager: ConversationManager;
   private subscribers = new Set<Subscriber>();
   private onEvent?: (event: ChatEvent) => void;
-  private createOptions?: { participant: string; input?: Record<string, unknown> };
+  private createOptions?: ConversationStoreOptions['createOptions'];
 
   // Persistent SSE subscription
   private subscription: ConversationSubscription | null = null;
@@ -135,6 +142,37 @@ export class ConversationStore {
     // Auto-subscribe to existing conversation
     if (this._conversationPath) {
       this.ensureSubscription();
+    } else if (this.createOptions?.anonymous) {
+      // An anonymous store resumes the tab's visitor conversation, if any.
+      void this.resumeAnonymous();
+    }
+  }
+
+  private anonymousOptions(): StartAnonymousOptions | null {
+    const a = this.createOptions?.anonymous;
+    if (!a) return null;
+    return a === true ? {} : a;
+  }
+
+  /**
+   * Resume the visitor conversation this tab already has (the session secret
+   * and conversation id live in sessionStorage), and load its history. A tab
+   * without one starts nothing until the first message.
+   */
+  private async resumeAnonymous(): Promise<void> {
+    const opts = this.anonymousOptions();
+    if (!opts || !this.createOptions || this._conversationPath) return;
+    const agent = this.createOptions.participant;
+    try {
+      if (!this.manager.hasStoredAnonymous(agent, opts)) return;
+      const convo = await this.manager.startAnonymous(agent, opts);
+      if (this._conversationPath) return;
+      this._conversationPath = convo.conversationPath;
+      this._conversationType = convo.type;
+      this.ensureSubscription();
+      await this.loadMessages();
+    } catch (err) {
+      logger.debug('[ConversationStore] No visitor conversation to resume', err);
     }
   }
 
@@ -197,10 +235,13 @@ export class ConversationStore {
         throw new Error('No conversationPath and no createOptions provided');
       }
       try {
-        const convo = await this.manager.create({
-          participant: this.createOptions.participant,
-          input: this.createOptions.input,
-        });
+        const anonymous = this.anonymousOptions();
+        const convo = anonymous
+          ? await this.manager.startAnonymous(this.createOptions.participant, anonymous)
+          : await this.manager.create({
+              participant: this.createOptions.participant,
+              input: this.createOptions.input,
+            });
         this._conversationPath = convo.conversationPath;
         this._conversationType = convo.type;
 
