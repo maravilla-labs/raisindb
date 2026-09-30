@@ -204,6 +204,27 @@ partition and every vector leg carries the caller's full `vector_weight`, so a
 document found by two towers outranks one found by either alone — which is the point
 of asking for both.
 
+### Long documents do not win the vector leg on length
+
+A document's place in the vector leg comes from its BEST chunk. A sixty-chunk PDF
+gets sixty draws at a short query and a one-screen page gets two, so without a
+correction the long document wins on the number of its chunks rather than on how well
+it answers — the bias BM25's length normalisation already removes from the lexical
+leg. In `HYBRID_SEARCH` the vector leg is therefore ranked by
+
+```text
+distance × (1 + 0.05 × ln(vectors of that document))
+```
+
+A single-vector document is unchanged. The reported `vector_distance` stays the
+measured distance, and `KNN` on its own keeps pure distance order. On a labelled set
+of 43 queries over pages and PDFs this raised hybrid MRR by 0.04–0.05 with three
+different embedders.
+
+Chunks of extracted document text that carry no language — number grids, parcel ids,
+OCR debris (under half letters, or fewer than four words) — are not embedded at all:
+such a vector sits close to every short query.
+
 ### Turning a leg off
 
 `vector_weight => 0` skips the vector leg entirely, including embedding-provider
