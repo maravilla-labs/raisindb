@@ -285,3 +285,26 @@ pub(super) fn scan_needs_properties<S: Storage>(
             })
     })
 }
+
+/// Would row-level security filter this caller's reads?
+///
+/// The COUNT fast paths (`CountScan` / `PropertyIndexCountScan`) count storage
+/// keys directly, without ever materializing a node or passing it through
+/// `rls_filter`. That is correct ONLY for a caller RLS would wave through
+/// wholesale — a system caller or a system admin. For anyone else it leaks the
+/// row count (and, with a property filter, an existence oracle) of workspaces
+/// the caller cannot read a single row of. So the count executors must fall
+/// back to an RLS-aware count whenever this returns true.
+///
+/// Mirrors the allow-all short-circuits in `rls_filter::filter_node`:
+///   - no `auth_context`  -> internal caller, no RLS (same as every scan
+///     executor, which only filters when `auth_context` is `Some`);
+///   - `is_system`        -> bypasses RLS;
+///   - `is_system_admin`  -> bypasses RLS;
+///   - permissions unresolved (`None`) -> RLS denies every node, so the count
+///     must be filtered (it will be 0), never answered from the raw key count.
+pub(super) fn auth_requires_rls<S: Storage>(ctx: &ExecutionContext<S>) -> bool {
+    ctx.auth_context.as_ref().is_some_and(|auth| {
+        !auth.is_system && auth.permissions().is_none_or(|p| !p.is_system_admin)
+    })
+}

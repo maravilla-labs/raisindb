@@ -19,6 +19,7 @@
 
 mod bulk_sql_rls;
 mod compound_index_hierarchy;
+mod count_scan_rls;
 mod created_event_nonsystem;
 mod current_user_gating;
 mod dml_index_and_predicate_maintenance;

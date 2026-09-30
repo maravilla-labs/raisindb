@@ -18,6 +18,7 @@ use super::scan_executors::node_to_row;
 use futures::stream::StreamExt;
 use indexmap::IndexMap;
 use raisin_models::nodes::properties::PropertyValue;
+use raisin_models::permissions::PermissionScope;
 use raisin_sql::analyzer::JoinType;
 use raisin_storage::{NodeRepository, Storage, StorageScope};
 
@@ -264,6 +265,25 @@ async fn lookup_by_id<S: Storage>(
                 tracing::debug!("lookup_by_id: Skipping root node");
                 return Ok(None);
             }
+            // Apply RLS: the inner side is a workspace table, and this O(1)
+            // lookup must not hand back a node the caller could not read through
+            // an ordinary scan. Without it, a JOIN whose key resolves to a
+            // hidden node's id/path leaks that node's columns.
+            let node = match filter_lookup_rls(
+                &**storage,
+                node,
+                ctx,
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                max_revision,
+            )
+            .await
+            {
+                Some(n) => n,
+                None => return Ok(None),
+            };
             // Convert node to row
             let row = node_to_row(
                 &node, qualifier, workspace, projection, ctx, "default", None,
@@ -312,6 +332,22 @@ async fn lookup_by_path<S: Storage>(
             if node.path == "/" {
                 return Ok(None);
             }
+            // Apply RLS (see lookup_by_id).
+            let node = match filter_lookup_rls(
+                &**storage,
+                node,
+                ctx,
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                max_revision,
+            )
+            .await
+            {
+                Some(n) => n,
+                None => return Ok(None),
+            };
             // Convert node to row
             let row = node_to_row(
                 &node, qualifier, workspace, projection, ctx, "default", None,
@@ -323,6 +359,41 @@ async fn lookup_by_path<S: Storage>(
             Ok(Some(row))
         }
         None => Ok(None),
+    }
+}
+
+/// Apply row-level security to a node fetched by the inner O(1) lookup.
+///
+/// Returns the node unchanged when there is no auth context (an internal
+/// caller, exactly as the scan executors treat `auth_context: None`), and
+/// otherwise the RLS-filtered node — or `None` when the caller may not read it.
+#[allow(clippy::too_many_arguments)]
+async fn filter_lookup_rls<S: Storage>(
+    storage: &S,
+    node: raisin_models::nodes::Node,
+    ctx: &ExecutionContext<S>,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    workspace: &str,
+    max_revision: Option<&raisin_hlc::HLC>,
+) -> Option<raisin_models::nodes::Node> {
+    match ctx.auth_context.as_ref() {
+        Some(auth) => {
+            let scope = PermissionScope::new(workspace, branch);
+            crate::physical_plan::scan_executors::helpers::rls_filter_node_graph(
+                storage,
+                node,
+                auth,
+                &scope,
+                tenant_id,
+                repo_id,
+                branch,
+                max_revision,
+            )
+            .await
+        }
+        None => Some(node),
     }
 }
 
