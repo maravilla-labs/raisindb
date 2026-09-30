@@ -18,16 +18,52 @@ use crate::{
     },
 };
 
+/// Who may change branches over the socket.
+///
+/// These handlers ran for any connection, anonymous included: a visitor could
+/// delete `main`. Studio editors (identity users, not administrators)
+/// legitimately create a scratch branch, copy nodes from it into `main` and
+/// delete it again (deletion recovery), and create the `publish` branch, so
+/// those stay open to signed-in callers. Deleting `main` or `publish`,
+/// `delete_missing` copies, merges and head moves are administrators' only.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BranchAccess {
+    SignedIn,
+    Admin,
+}
+
+/// Branches a signed-in non-administrator may not delete.
+const GUARDED_BRANCHES: &[&str] = &["main", "publish"];
+
+pub(crate) fn authorize_branch_change(
+    connection_state: &Arc<RwLock<ConnectionState>>,
+    access: BranchAccess,
+) -> Result<(), WsError> {
+    let conn = connection_state.read();
+    let Some(auth) = conn.auth_context() else {
+        return Err(WsError::NotAuthenticated);
+    };
+    let is_admin = auth.is_system || auth.permissions().is_some_and(|p| p.is_system_admin);
+    if is_admin {
+        return Ok(());
+    }
+    if auth.is_anonymous_principal() || access == BranchAccess::Admin {
+        return Err(WsError::PermissionDenied);
+    }
+    Ok(())
+}
+
 /// Handle branch creation
 pub async fn handle_branch_create<S, B>(
     state: &Arc<WsState<S, B>>,
-    _connection_state: &Arc<RwLock<ConnectionState>>,
+    connection_state: &Arc<RwLock<ConnectionState>>,
     request: RequestEnvelope,
 ) -> Result<Option<ResponseEnvelope>, WsError>
 where
     S: Storage + TransactionalStorage,
     B: raisin_binary::BinaryStorage,
 {
+    authorize_branch_change(connection_state, BranchAccess::SignedIn)?;
     let payload: BranchCreatePayload = serde_json::from_value(request.payload.clone())?;
 
     let tenant_id = &request.context.tenant_id;
@@ -132,14 +168,18 @@ where
 /// Handle branch deletion
 pub async fn handle_branch_delete<S, B>(
     state: &Arc<WsState<S, B>>,
-    _connection_state: &Arc<RwLock<ConnectionState>>,
+    connection_state: &Arc<RwLock<ConnectionState>>,
     request: RequestEnvelope,
 ) -> Result<Option<ResponseEnvelope>, WsError>
 where
     S: Storage + TransactionalStorage,
     B: raisin_binary::BinaryStorage,
 {
+    authorize_branch_change(connection_state, BranchAccess::SignedIn)?;
     let payload: BranchDeletePayload = serde_json::from_value(request.payload.clone())?;
+    if GUARDED_BRANCHES.contains(&payload.name.as_str()) {
+        authorize_branch_change(connection_state, BranchAccess::Admin)?;
+    }
 
     let tenant_id = &request.context.tenant_id;
     let repo = request
@@ -194,13 +234,14 @@ where
 /// Handle update branch HEAD revision
 pub async fn handle_branch_update_head<S, B>(
     state: &Arc<WsState<S, B>>,
-    _connection_state: &Arc<RwLock<ConnectionState>>,
+    connection_state: &Arc<RwLock<ConnectionState>>,
     request: RequestEnvelope,
 ) -> Result<Option<ResponseEnvelope>, WsError>
 where
     S: Storage + TransactionalStorage,
     B: raisin_binary::BinaryStorage,
 {
+    authorize_branch_change(connection_state, BranchAccess::Admin)?;
     let payload: BranchUpdateHeadPayload = serde_json::from_value(request.payload.clone())?;
 
     let tenant_id = &request.context.tenant_id;
@@ -351,16 +392,20 @@ where
 /// per-caller loop here.
 pub async fn handle_branch_copy_nodes<S, B>(
     state: &Arc<WsState<S, B>>,
-    _connection_state: &Arc<RwLock<ConnectionState>>,
+    connection_state: &Arc<RwLock<ConnectionState>>,
     request: RequestEnvelope,
 ) -> Result<Option<ResponseEnvelope>, WsError>
 where
     S: Storage + TransactionalStorage,
     B: raisin_binary::BinaryStorage,
 {
+    authorize_branch_change(connection_state, BranchAccess::SignedIn)?;
     use raisin_storage::NodeRepository;
 
     let payload: BranchCopyNodesPayload = serde_json::from_value(request.payload.clone())?;
+    if payload.delete_missing {
+        authorize_branch_change(connection_state, BranchAccess::Admin)?;
+    }
 
     let tenant_id = &request.context.tenant_id;
     let repo = request
@@ -405,13 +450,14 @@ where
 #[cfg(feature = "storage-rocksdb")]
 pub async fn handle_branch_merge<S, B>(
     state: &Arc<WsState<S, B>>,
-    _connection_state: &Arc<RwLock<ConnectionState>>,
+    connection_state: &Arc<RwLock<ConnectionState>>,
     request: RequestEnvelope,
 ) -> Result<Option<ResponseEnvelope>, WsError>
 where
     S: Storage + TransactionalStorage,
     B: raisin_binary::BinaryStorage,
 {
+    authorize_branch_change(connection_state, BranchAccess::Admin)?;
     let payload: BranchMergePayload = serde_json::from_value(request.payload.clone())?;
 
     let tenant_id = &request.context.tenant_id;
@@ -471,4 +517,53 @@ where
         "NOT_SUPPORTED".to_string(),
         "Branch merging requires RocksDB storage feature".to_string(),
     )))
+}
+
+#[cfg(test)]
+mod branch_access_tests {
+    use super::*;
+    use raisin_models::auth::AuthContext;
+    use raisin_models::permissions::ResolvedPermissions;
+
+    fn conn(auth: Option<AuthContext>) -> Arc<RwLock<ConnectionState>> {
+        let mut c = ConnectionState::new("t".to_string(), None, 4, 100);
+        if let Some(a) = auth {
+            c.set_auth_context(a);
+        }
+        Arc::new(RwLock::new(c))
+    }
+
+    #[test]
+    fn anonymous_connections_change_no_branches() {
+        let anon = AuthContext::anonymous_user("anon")
+            .with_permissions(ResolvedPermissions::anonymous(vec![]));
+        for c in [
+            conn(None),
+            conn(Some(anon)),
+            conn(Some(AuthContext::deny_all())),
+        ] {
+            assert!(authorize_branch_change(&c, BranchAccess::SignedIn).is_err());
+            assert!(authorize_branch_change(&c, BranchAccess::Admin).is_err());
+        }
+    }
+
+    /// Studio editors: scratch branch, copy into main, delete it, publish.
+    #[test]
+    fn signed_in_editors_keep_their_branch_workflow() {
+        let editor = conn(Some(
+            AuthContext::for_user("editor").with_permissions(ResolvedPermissions::empty("editor")),
+        ));
+        assert!(authorize_branch_change(&editor, BranchAccess::SignedIn).is_ok());
+        assert!(authorize_branch_change(&editor, BranchAccess::Admin).is_err());
+    }
+
+    #[test]
+    fn administrators_may_do_everything() {
+        let admin =
+            AuthContext::for_user("root").with_permissions(ResolvedPermissions::system_admin());
+        for c in [conn(Some(AuthContext::system())), conn(Some(admin))] {
+            assert!(authorize_branch_change(&c, BranchAccess::SignedIn).is_ok());
+            assert!(authorize_branch_change(&c, BranchAccess::Admin).is_ok());
+        }
+    }
 }
