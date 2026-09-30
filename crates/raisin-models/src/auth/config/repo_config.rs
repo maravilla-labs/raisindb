@@ -19,7 +19,13 @@ fn default_true() -> bool {
 }
 
 fn default_roles() -> Vec<String> {
-    vec!["viewer".to_string()]
+    // `authenticated_user`, never `viewer`. `viewer` is `{ path: "**",
+    // operations: ["read"] }` with no workspace — read on EVERY workspace — so
+    // handing it to every self-registered user by default gave anyone who
+    // signed up a blanket cross-workspace read. `authenticated_user` grants
+    // only self-scoped access (own user node, own profile/inbox/outbox), the
+    // correct baseline for a brand-new account.
+    vec!["authenticated_user".to_string()]
 }
 
 /// Repository-level authentication configuration.
@@ -35,8 +41,9 @@ pub struct RepoAuthConfig {
     #[serde(default = "default_true")]
     pub allow_registration: bool,
 
-    /// Default roles to assign to new users (e.g., ["viewer"])
-    /// If empty, falls back to ["viewer"]
+    /// Default roles to assign to new users (e.g., ["authenticated_user"]).
+    /// If empty, falls back to ["authenticated_user"]. `viewer` is stripped
+    /// before these are applied (see the identity endpoints' resolver).
     #[serde(default = "default_roles")]
     pub default_roles: Vec<String>,
 

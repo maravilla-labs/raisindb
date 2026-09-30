@@ -235,6 +235,15 @@ pub struct AccessSettings {
     /// Allow invitations
     pub allow_invitations: bool,
 
+    /// Allow open, repo-less self-registration (`POST /auth/register`) for this
+    /// tenant. The repo-scoped endpoints are gated by the repo's own
+    /// `RepoAuthConfig.allow_registration`; the repo-less one has no repo to
+    /// consult, so it is refused unless this is explicitly set true. Defaults
+    /// to false so a tenant that never configured it does not expose an
+    /// unauthenticated account-creation endpoint by accident.
+    #[serde(default)]
+    pub allow_registration: bool,
+
     /// Default roles for new users (if auto-approved)
     #[serde(default)]
     pub default_roles: Vec<String>,
@@ -262,7 +271,8 @@ impl Default for AccessSettings {
             allow_access_requests: true,
             require_approval: true,
             allow_invitations: true,
-            default_roles: vec!["viewer".to_string()],
+            allow_registration: false,
+            default_roles: vec!["authenticated_user".to_string()],
             max_pending_requests: default_max_pending(),
             invitation_expiry_days: default_invitation_expiry(),
         }

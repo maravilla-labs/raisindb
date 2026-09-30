@@ -63,14 +63,6 @@ use super::user_node::ensure_user_node;
 #[cfg(feature = "storage-rocksdb")]
 use provider::{build_strategy, load_tenant_config, master_key};
 
-/// Roles granted to a person provisioned into a repository by an OIDC login.
-///
-/// The same pair local registration uses. Mapping a provider's group claims
-/// onto RaisinDB roles is a separate feature; until it exists, an OIDC login
-/// must not confer more than a local one.
-#[cfg(feature = "storage-rocksdb")]
-const DEFAULT_ROLES: [&str; 2] = ["viewer", "authenticated_user"];
-
 /// Query parameters for `GET /auth/oidc/{provider}`.
 #[derive(Debug, Deserialize)]
 pub struct OidcAuthorizeQuery {
@@ -217,25 +209,31 @@ pub async fn oidc_callback(
     // here is logged and not fatal: the person is authenticated either way, and
     // refusing the login would be a worse answer than a token with no home.
     let home = match &login_state.repo {
-        Some(repo) => ensure_user_node(
-            &repos.storage,
-            tenant_id,
-            repo,
-            &identity.identity_id,
-            &identity.email,
-            identity.display_name.as_deref(),
-            &DEFAULT_ROLES.map(String::from),
-        )
-        .await
-        .map_err(|e| {
-            tracing::warn!(
-                identity_id = %identity.identity_id,
-                repo = %repo,
-                error = %e,
-                "could not ensure the user node during an OIDC login"
-            );
-        })
-        .ok(),
+        Some(repo) => {
+            // Default roles come from the repo config (never `viewer`), as on
+            // every other identity path.
+            let repo_auth =
+                super::repo_auth_config::resolve_repo_auth(&state, tenant_id, repo).await;
+            ensure_user_node(
+                &repos.storage,
+                tenant_id,
+                repo,
+                &identity.identity_id,
+                &identity.email,
+                identity.display_name.as_deref(),
+                &repo_auth.default_roles,
+            )
+            .await
+            .map_err(|e| {
+                tracing::warn!(
+                    identity_id = %identity.identity_id,
+                    repo = %repo,
+                    error = %e,
+                    "could not ensure the user node during an OIDC login"
+                );
+            })
+            .ok()
+        }
         None => None,
     };
 

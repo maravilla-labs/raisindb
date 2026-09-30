@@ -70,7 +70,7 @@ pub struct CreateIdentityUserRequest {
     pub email_verified: Option<bool>,
     /// Repository IDs to create raisin:User nodes in
     pub repos: Option<Vec<String>>,
-    /// Default role_ids for created user nodes (defaults to ["viewer", "authenticated_user"])
+    /// Default role_ids for created user nodes (defaults to ["authenticated_user"])
     pub default_roles: Option<Vec<String>>,
 }
 
@@ -626,11 +626,14 @@ pub async fn create_identity_user(
             )
         })?;
 
-    // Create user nodes in specified repositories
+    // Create user nodes in specified repositories. When the caller names no
+    // roles, fall back to `authenticated_user` — never the blanket-read
+    // `viewer` (see RepoAuthConfig::default_roles). An admin who wants more
+    // passes `default_roles` explicitly.
     let repos = req.repos.unwrap_or_default();
     let default_roles = req
         .default_roles
-        .unwrap_or_else(|| vec!["viewer".to_string(), "authenticated_user".to_string()]);
+        .unwrap_or_else(|| vec!["authenticated_user".to_string()]);
 
     for repo_id in &repos {
         match ensure_user_node(
