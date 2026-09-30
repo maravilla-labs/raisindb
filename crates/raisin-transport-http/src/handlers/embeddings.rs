@@ -127,6 +127,12 @@ pub struct ConfigResponse {
     /// Echoed back so the console's `<select>` shows what was actually stored
     /// rather than what it last sent — the two used to differ silently.
     pub quantization: EmbeddingQuantization,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query_prefix: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_prefix: Option<String>,
 }
 
 /// Response for test connection
