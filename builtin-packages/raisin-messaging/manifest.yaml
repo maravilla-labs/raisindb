@@ -1,5 +1,5 @@
 name: raisin-messaging
-version: 1.0.5
+version: 1.0.6
 title: RaisinDB Messaging Package
 description: >
   Provides the core inbox/outbox messaging pipeline, chat delivery,
@@ -23,12 +23,14 @@ provides:
   nodetypes:
     - raisin:Conversation
     - raisin:MessagingConfig
+    - raisin:VisitorSession
 
   triggers:
     - /functions/triggers/raisin/messaging/process-chat
     - /functions/triggers/raisin/messaging/process-agent-chat
     - /functions/triggers/raisin/messaging/process-task-assignment
     - /functions/triggers/raisin/messaging/process-system-notification
+    - /functions/triggers/raisin/messaging/purge-expired-visitors
 
   functions:
     - /functions/lib/messaging/handlers/handle-chat
@@ -37,6 +39,7 @@ provides:
     - /functions/lib/messaging/handlers/send-push-notification
     - /functions/lib/messaging/handlers/send-email-notification
     - /functions/lib/messaging/permissions
+    - /functions/lib/messaging/visitor/purge-expired
 
 # Sync configuration for package updates
 # Defines which paths this package owns to prevent conflicts with other packages
@@ -54,6 +57,12 @@ sync:
         - "handle-system-notification/**"
         - "send-push-notification/**"
         - "send-email-notification/**"
+      mode: merge
+
+    # Anonymous visitor sessions
+    - root: /functions/lib/messaging/visitor
+      include:
+        - "**"
       mode: merge
 
     # Messaging permissions
@@ -75,6 +84,7 @@ sync:
         - "process-agent-chat/**"
         - "process-task-assignment/**"
         - "process-system-notification/**"
+        - "purge-expired-visitors/**"
       mode: merge
 
 workspace_patches:
@@ -87,6 +97,7 @@ workspace_patches:
         - raisin:Conversation
         - raisin:InboxTask
         - raisin:Notification
+        - raisin:VisitorSession
   default:
     allowed_node_types:
       add:

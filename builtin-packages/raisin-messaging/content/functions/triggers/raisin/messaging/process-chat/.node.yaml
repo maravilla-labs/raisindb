@@ -15,6 +15,9 @@ properties:
     paths:
       - "/users/**/outbox/**"
       - "/agents/**/outbox/**"
+      # Anonymous visitor sessions. Only the server writes here (see
+      # raisin_models::auth::visitor): a visitor cannot create outbox nodes.
+      - "/visitors/**/outbox/**"
     node_types:
       - raisin:Message
     property_filters:

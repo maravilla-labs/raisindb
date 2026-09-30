@@ -1,0 +1,54 @@
+name: raisin:VisitorSession
+title: Visitor Session
+description: >
+  The ephemeral home of an anonymous website visitor's chat with an agent that
+  allows anonymous visitors (raisin:AIAgent `anonymous.enabled`). Lives at
+  /visitors/<key> in raisin:access_control. Created by the server on the
+  visitor's first message; only that session (and administrators) can read
+  it; nobody but the server writes it; purged after `expires_at`.
+icon: user-round
+color: "#94a3b8"
+version: 1
+# Extends raisin:Folder so the /visitors folder (a raisin:AclFolder, which
+# lists raisin:Folder) accepts it: allowed_children matches a type's family.
+extends: raisin:Folder
+
+properties:
+  - name: agent_path
+    title: Agent
+    type: String
+    required: true
+    description: The agent this session may talk to (e.g. /agents/website-assistant).
+  - name: display_name
+    title: Display Name
+    type: String
+    required: false
+    default: Visitor
+  - name: created_at
+    title: Created
+    type: Date
+    required: false
+  - name: last_activity_at
+    title: Last Activity
+    type: Date
+    required: false
+  - name: expires_at
+    title: Expires
+    type: Date
+    required: false
+    description: >
+      When the session and its conversations are purged
+      (/lib/messaging/visitor/purge-expired). Moved forward on every message.
+  - name: origin
+    title: Origin
+    type: String
+    required: false
+    description: The page origin the session was opened from.
+
+allowed_children:
+  - raisin:Folder
+  - raisin:AclFolder
+
+versionable: false
+publishable: false
+auditable: false

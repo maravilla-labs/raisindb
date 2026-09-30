@@ -16,6 +16,12 @@
  *
  * Trigger: process-chat fires on raisin:Message creation in outbox paths
  *          with status "pending" and supported message_type values.
+ *
+ * Visitors (anonymous chat sessions, /visitors/<key> in raisin:access_control)
+ * are a third kind of party besides users and agents. Their outbox is written
+ * only by the server (the WebSocket transport, after the agent's anonymous
+ * checks), and a visitor may talk to exactly one kind of recipient: an agent
+ * that allows anonymous chat. Agents answer them like anyone else.
  */
 
 const AI_INTERMEDIATE_TYPES = new Set([
@@ -70,7 +76,9 @@ export async function handle_chat(input) {
   if (!recipient) throw new Error('Recipient not found');
 
   // 5. Check permissions
-  const perm = await checkPermission(sender.id, recipient.id, messageType);
+  const perm = sender.isVisitor || recipient.isVisitor
+    ? checkVisitorPermission(sender, recipient)
+    : await checkPermission(sender.id, recipient.id, messageType);
   if (!perm.allowed) throw new Error(perm.reason ?? 'Not allowed to message this user');
 
   // 6. Build conversation context
@@ -94,6 +102,14 @@ export async function handle_chat(input) {
 
   // 8. Upsert conversations
   const convBase = { conversationId, subject, participants, participantDetails, streamChannel, agentMeta };
+
+  // A conversation belongs to the two parties that started it. Before this
+  // check, a second person who reused a thread id (`body.thread_id`) with the
+  // same agent was merged into the agent's copy of the conversation: its
+  // human_sender_* was overwritten, and the agent's replies went to whoever
+  // wrote last. That is a cross-conversation mix-up made structural, so it is
+  // refused here for everyone, not only for visitors.
+  await assertSameHuman(sender, recipient, `${(sender.isAgent ? senderChats : recipientChats)}/${conversationId}`);
 
   await upsertConversation(sender.workspace, senderConvPath, convBase, body, sender.id, recipient.id,
     /* incrementUnread */ false, /* updateLastMessage */ !isIntermediate);
@@ -133,8 +149,9 @@ export async function handle_chat(input) {
     properties: { ...baseMessageProps, status: 'sent' },
   });
 
-  // 10. Create notification for human recipients (not agents, not AI intermediate)
-  if (!recipient.isAgent && !isIntermediate) {
+  // 10. Create notification for human recipients (not agents, not AI
+  //     intermediates, not visitors: a visitor's page streams the reply)
+  if (!recipient.isAgent && !recipient.isVisitor && !isIntermediate) {
     await createNotification(recipient, conversationId, sender.displayName, messageText, messageId);
   }
 
@@ -162,13 +179,18 @@ function extractAgentName(id, path) {
 
 function entityPathFromOutboxPath(nodePath) {
   const parts = nodePath.split('/');
-  if (parts.length > 2 && (parts[1] === 'users' || parts[1] === 'agents')) {
+  if (parts.length > 2 && (parts[1] === 'users' || parts[1] === 'agents' || parts[1] === 'visitors')) {
     return `/${parts[1]}/${parts[2]}`;
   }
   return null;
 }
 
 async function resolveSender(triggerWorkspace, hint) {
+  // A visitor session writes only from its own outbox (the server does that
+  // for it). Its identity is its home; the id in the message must agree.
+  if (isVisitorId(hint.id) || isVisitorPath(hint.path)) {
+    return resolveVisitor(hint.path, hint.id);
+  }
   // Try agent resolution first if workspace is ai or sender_id is agent:
   if (triggerWorkspace === 'ai' || isAgentId(hint.id)) {
     const agent = await resolveAgent(hint.path, hint.id);
@@ -180,6 +202,9 @@ async function resolveSender(triggerWorkspace, hint) {
 }
 
 async function resolveRecipient(hint) {
+  if (isVisitorId(hint.id) || isVisitorPath(hint.path)) {
+    return resolveVisitor(hint.path, hint.id);
+  }
   // Try user first
   const user = await resolveUser('raisin:access_control', hint.path, hint.id, hint.email);
   if (user) return user;
@@ -232,6 +257,7 @@ async function resolveAgent(agentPath, agentId) {
     workspace: 'ai',
     isAgent: true,
     properties: homeProps,
+    definition: agentDef,
   };
 }
 
@@ -291,6 +317,91 @@ function userNodeToEntity(node, workspace) {
     isAgent: false,
     properties: p,
   };
+}
+
+// ─── Visitors (anonymous chat sessions) ─────────────────────────────────────
+
+const VISITOR_ROOT = '/visitors';
+const VISITOR_ID_PREFIX = 'visitor:';
+const VISITOR_KEY = /^[0-9a-f]{16,128}$/;
+
+function isVisitorId(id) {
+  return typeof id === 'string' && id.startsWith(VISITOR_ID_PREFIX);
+}
+
+function isVisitorPath(path) {
+  return typeof path === 'string' && path.startsWith(VISITOR_ROOT + '/');
+}
+
+/**
+ * The visitor session named by a path and/or id. Both, when given, must name
+ * the SAME session: a message that claims one visitor's id from another's
+ * home is refused rather than delivered to either.
+ */
+async function resolveVisitor(path, id) {
+  const fromId = isVisitorId(id) ? id.slice(VISITOR_ID_PREFIX.length) : null;
+  const fromPath = isVisitorPath(path) ? path.split('/')[2] : null;
+  if (fromId && fromPath && fromId !== fromPath) return null;
+  const key = fromId || fromPath;
+  if (!key || !VISITOR_KEY.test(key)) return null;
+  const homePath = `${VISITOR_ROOT}/${key}`;
+  const home = await raisin.nodes.get('raisin:access_control', homePath);
+  if (!home || home.node_type !== 'raisin:VisitorSession') return null;
+  const props = home.properties ?? {};
+  return {
+    id: `${VISITOR_ID_PREFIX}${key}`,
+    path: homePath,
+    displayName: props.display_name || 'Visitor',
+    workspace: 'raisin:access_control',
+    isAgent: false,
+    isVisitor: true,
+    properties: props,
+  };
+}
+
+/**
+ * A visitor talks to agents that allow it, and agents answer visitors. Nothing
+ * else: no visitor-to-user and no visitor-to-visitor messages.
+ */
+function checkVisitorPermission(sender, recipient) {
+  if (sender.isVisitor && recipient.isVisitor) {
+    return { allowed: false, reason: 'Visitors cannot message each other' };
+  }
+  const agent = sender.isVisitor ? recipient : sender;
+  const visitor = sender.isVisitor ? sender : recipient;
+  if (!agent.isAgent) {
+    return { allowed: false, reason: 'Visitors can only chat with agents' };
+  }
+  if (!agentAllowsAnonymous(agent.definition)) {
+    return { allowed: false, reason: 'This agent does not accept anonymous visitors' };
+  }
+  const bound = visitor.properties?.agent_path;
+  if (bound && bound !== `/agents/${extractAgentName(agent.id, agent.path)}`) {
+    return { allowed: false, reason: 'This visitor session belongs to another agent' };
+  }
+  return { allowed: true };
+}
+
+/** `allow_anonymous: true`, or `anonymous: { enabled: true }`, on the agent. */
+function agentAllowsAnonymous(def) {
+  const p = def?.properties ?? {};
+  if (p.allow_anonymous === true) return true;
+  return !!(p.anonymous && typeof p.anonymous === 'object' && p.anonymous.enabled === true);
+}
+
+/**
+ * Refuse a message that would merge a second person into an existing
+ * agent-side conversation (see the call site).
+ */
+async function assertSameHuman(sender, recipient, agentConvPath) {
+  if (sender.isAgent === recipient.isAgent) return; // not an agent conversation
+  const agent = sender.isAgent ? sender : recipient;
+  const human = sender.isAgent ? recipient : sender;
+  const existing = await raisin.nodes.get(agent.workspace, agentConvPath);
+  const owner = existing?.properties?.human_sender_id;
+  if (owner && owner !== human.id) {
+    throw new Error('Conversation belongs to another participant');
+  }
 }
 
 // ─── Folder / Inbox Provisioning ────────────────────────────────────────────
@@ -466,6 +577,8 @@ async function copyToSentFolder(workspace, node) {
   // Path: /{users|agents}/{name}/outbox/{slug}
   if (parts.length < 5 || parts[3] !== 'outbox') return;
   const entityType = parts[1];
+  // Visitors keep no sent folder: their home is ephemeral, and the delivered
+  // copy in the conversation is the record.
   if (entityType !== 'users' && entityType !== 'agents') return;
 
   const entityName = parts[2];

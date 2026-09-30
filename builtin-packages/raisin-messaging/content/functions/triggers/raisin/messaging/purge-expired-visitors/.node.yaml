@@ -1,0 +1,14 @@
+node_type: raisin:Trigger
+properties:
+  title: Purge Expired Visitor Sessions
+  name: messaging-purge-expired-visitors
+  description: >
+    Every 15 minutes, deletes anonymous visitor sessions (/visitors/<key>) whose
+    expires_at has passed, with their conversations.
+  enabled: true
+  trigger_type: schedule
+  config:
+    cron_expression: "*/15 * * * *"
+  priority: 1
+  max_retries: 1
+  function_path: /lib/messaging/visitor/purge-expired

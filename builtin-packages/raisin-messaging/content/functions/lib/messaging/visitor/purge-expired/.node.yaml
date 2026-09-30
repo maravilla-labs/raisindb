@@ -1,0 +1,33 @@
+node_type: raisin:Function
+properties:
+  title: Purge Expired Visitor Sessions
+  description: >
+    Deletes anonymous visitor sessions (/visitors/<key> in raisin:access_control,
+    raisin:VisitorSession) whose expires_at has passed, together with their
+    conversations. The agent's side of each conversation (cost records and
+    tool-call audit in the ai workspace) is kept, as for every other chat.
+    Runs on the purge-expired-visitors schedule.
+  language: javascript
+  entry_file: index.js:purge_expired
+  execution_mode: Async
+  execution_context: "system"
+  enabled: true
+  resource_limits:
+    timeout_ms: 60000
+    max_memory_bytes: 33554432
+  input_schema:
+    type: object
+    properties:
+      now:
+        type: string
+        description: Override the current time (ISO 8601), for tests.
+      limit:
+        type: number
+        description: Most sessions to delete in one run (default 500).
+  output_schema:
+    type: object
+    properties:
+      purged:
+        type: number
+      failed:
+        type: number
