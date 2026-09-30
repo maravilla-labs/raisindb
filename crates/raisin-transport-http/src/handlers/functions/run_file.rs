@@ -59,16 +59,7 @@ pub async fn run_file(
     // caller wrote), so only the system and administrators may run one. This
     // route sits behind optional auth: without this check an anonymous caller
     // could execute arbitrary code as the system.
-    let is_admin = auth
-        .as_deref()
-        .is_some_and(|a| a.is_system || a.permissions().is_some_and(|p| p.is_system_admin));
-    if !is_admin {
-        return Err(ApiError::new(
-            axum::http::StatusCode::FORBIDDEN,
-            "FORBIDDEN",
-            "running a file requires an administrator",
-        ));
-    }
+    require_admin_to_run(auth.as_deref())?;
 
     let execution_id = nanoid::nanoid!();
     let started_at = Utc::now();
@@ -381,6 +372,51 @@ pub async fn run_file(
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
     ))
+}
+
+/// The caller may run a file: the system (admin console, CLI, API keys and the
+/// superadmin bearer all resolve to it) or a `system_admin` identity user.
+#[cfg(feature = "storage-rocksdb")]
+pub(crate) fn require_admin_to_run(auth: Option<&AuthContext>) -> Result<(), ApiError> {
+    let is_admin =
+        auth.is_some_and(|a| a.is_system || a.permissions().is_some_and(|p| p.is_system_admin));
+    if is_admin {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            axum::http::StatusCode::FORBIDDEN,
+            "FORBIDDEN",
+            "running a file requires an administrator",
+        ))
+    }
+}
+
+#[cfg(all(test, feature = "storage-rocksdb"))]
+mod run_gate_tests {
+    use super::require_admin_to_run;
+    use raisin_models::auth::AuthContext;
+    use raisin_models::permissions::ResolvedPermissions;
+
+    #[test]
+    fn only_the_system_and_administrators_may_run_a_file() {
+        // Admin console, CLI, API keys, superadmin bearer: all the system.
+        assert!(require_admin_to_run(Some(&AuthContext::system())).is_ok());
+        let admin =
+            AuthContext::for_user("root").with_permissions(ResolvedPermissions::system_admin());
+        assert!(require_admin_to_run(Some(&admin)).is_ok());
+
+        let user = AuthContext::for_user("bob").with_permissions(ResolvedPermissions::empty("bob"));
+        assert!(require_admin_to_run(Some(&user)).is_err());
+        let anon = AuthContext::anonymous_user("anon-node")
+            .with_permissions(ResolvedPermissions::anonymous(vec![]));
+        assert!(require_admin_to_run(Some(&anon)).is_err());
+        assert!(require_admin_to_run(Some(&AuthContext::anonymous())).is_err());
+        assert!(require_admin_to_run(None).is_err());
+        // An admin impersonating a user acts as that user.
+        let impersonated = AuthContext::impersonated("bob", "root")
+            .with_permissions(ResolvedPermissions::empty("bob"));
+        assert!(require_admin_to_run(Some(&impersonated)).is_err());
+    }
 }
 
 /// Stub `run_file` without RocksDB.

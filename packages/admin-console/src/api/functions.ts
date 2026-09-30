@@ -341,12 +341,17 @@ export function runFileStream(
   // Start the fetch in the background
   ;(async () => {
     try {
+      // Without impersonation: running a file is an administrator action
+      // (the file runs as the system either way), and an impersonated request
+      // acts as the impersonated user, which the server refuses.
+      const authHeaders = getAuthHeaders()
+      delete authHeaders['X-Raisin-Impersonate']
       const response = await fetch(`/api/files/${repo}/run`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Accept': 'text/event-stream',
-          ...getAuthHeaders(),
+          ...authHeaders,
         },
         body: JSON.stringify(request),
         signal: abortController.signal,
