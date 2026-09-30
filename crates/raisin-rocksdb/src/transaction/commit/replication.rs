@@ -2,7 +2,7 @@
 
 use super::super::RocksDBTransaction;
 use raisin_error::Result;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 impl RocksDBTransaction {
     /// Capture RevisionMeta and branch update operations for replication
@@ -100,14 +100,15 @@ impl RocksDBTransaction {
             // Push to peers (async, fire-and-forget)
             match coordinator.push_to_all_peers(ops_to_push).await {
                 Ok(_) => {
-                    info!("Successfully triggered replication push");
+                    debug!("Successfully triggered replication push");
                 }
                 Err(e) => {
                     warn!(error = %e, "Failed to push operations to peers");
                 }
             }
         } else {
-            warn!("No replication coordinator available");
+            // Per commit, and the normal state of a single-node server.
+            debug!("No replication coordinator available");
         }
 
         Ok(())

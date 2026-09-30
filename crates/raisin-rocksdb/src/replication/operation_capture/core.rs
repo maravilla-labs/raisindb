@@ -319,7 +319,7 @@ impl OperationCapture {
         // Push to peers if callback is set (real-time replication)
         let callback_guard = self.push_callback.read().await;
         if let Some(ref callback) = *callback_guard {
-            tracing::info!(
+            tracing::debug!(
                 op_id = %op.op_id,
                 op_seq = op.op_seq,
                 "INVOKING PUSH CALLBACK for real-time replication"
@@ -331,13 +331,15 @@ impl OperationCapture {
                     "PUSH CALLBACK FAILED"
                 );
             } else {
-                tracing::info!(
+                tracing::debug!(
                     op_id = %op.op_id,
                     "PUSH CALLBACK SUCCEEDED"
                 );
             }
         } else {
-            tracing::warn!(
+            // Per operation: at warn level this was most of a multi-GB server
+            // log on single-node servers, where it is the normal state.
+            tracing::debug!(
                 op_id = %op.op_id,
                 "NO PUSH CALLBACK SET - operation will not replicate in real-time"
             );
