@@ -75,6 +75,19 @@ pub struct ServerConfig {
     /// NEVER use in production.
     #[arg(long, env = "RAISIN_DEV_MODE")]
     pub dev_mode: bool,
+
+    /// Write logs to this file instead of stdout, rotating it by size.
+    /// Without it logs go to stdout and whoever captures them must rotate.
+    #[arg(long, env = "RAISIN_LOG_FILE")]
+    pub log_file: Option<String>,
+
+    /// Rotate the log file when it reaches this many megabytes.
+    #[arg(long, env = "RAISIN_LOG_MAX_SIZE_MB", default_value_t = 50)]
+    pub log_max_size_mb: u64,
+
+    /// Rotated log files to keep (`server.log.1` … `.N`); older ones are deleted.
+    #[arg(long, env = "RAISIN_LOG_MAX_FILES", default_value_t = 5)]
+    pub log_max_files: usize,
 }
 
 /// Merged configuration from all sources

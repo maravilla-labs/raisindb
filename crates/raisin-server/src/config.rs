@@ -272,6 +272,26 @@ pub struct StorageConfig {
     /// Default: 512MB.
     #[serde(default)]
     pub db_write_buffer_size: Option<usize>,
+    /// Keep every revision newer than this many days (per branch; a
+    /// repository or branch can override it through the management API).
+    /// Default: 30 (1 with `--dev-mode`). Env: `RAISIN_HISTORY_KEEP_DAYS`
+    /// (`none` = no age limit).
+    #[serde(default)]
+    pub history_keep_days: Option<u32>,
+    /// Always keep at least this many of a branch's latest revisions.
+    /// Default: 100. Env: `RAISIN_HISTORY_KEEP_REVISIONS` (`none` = no count
+    /// limit). With both limits `none`, history is never pruned.
+    #[serde(default)]
+    pub history_keep_revisions: Option<u64>,
+    /// How long finished jobs and their results stay in the job history.
+    /// Default: 24. Env: `RAISIN_JOB_RETENTION_HOURS`.
+    #[serde(default)]
+    pub job_retention_hours: Option<i64>,
+    /// Minutes between storage maintenance passes (history GC, orphaned
+    /// blobs, operation-log purge, compaction). Default: 360. `0` disables.
+    /// Env: `RAISIN_MAINTENANCE_INTERVAL_MINUTES`.
+    #[serde(default)]
+    pub maintenance_interval_minutes: Option<u64>,
 }
 
 /// Trigger circuit breaker configuration (TOML `[trigger_safety]` section).

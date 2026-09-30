@@ -35,6 +35,8 @@ pub fn init_storage(server_config: &MergedConfig) -> Arc<RocksDBStorage> {
     if let Some(size) = server_config.storage.db_write_buffer_size {
         config.db_write_buffer_size = size;
     }
+    apply_maintenance_settings(&mut config, &server_config.storage, server_config.dev_mode);
+
     tracing::info!(
         block_cache_mb = config.block_cache_size / (1024 * 1024),
         db_write_buffer_mb = config.db_write_buffer_size / (1024 * 1024),
@@ -43,6 +45,13 @@ pub fn init_storage(server_config: &MergedConfig) -> Arc<RocksDBStorage> {
         "RocksDB memory bounds"
     );
 
+    // The production preset turns operation capture ON, and this used to only
+    // ever turn it on further — never off. So every single-node server wrote
+    // every operation into `operation_log` with no peer to ship it to and
+    // nothing to trim it (a local dev database carried ~450 MB of it), and
+    // logged two warnings per write while doing so. Capture is a replication
+    // feature: off unless replication is actually configured below.
+    config.replication_enabled = false;
     if server_config.replication_enabled {
         if let Some(ref node_id) = server_config.cluster_node_id {
             config.cluster_node_id = Some(node_id.clone());
@@ -56,6 +65,66 @@ pub fn init_storage(server_config: &MergedConfig) -> Arc<RocksDBStorage> {
     }
 
     Arc::new(RocksDBStorage::with_config(config).expect("open rocksdb"))
+}
+
+/// A numeric override from the environment: `Some(Some(n))` for a number,
+/// `Some(None)` for `none`/`off`, `None` when unset or unparsable.
+#[cfg(feature = "storage-rocksdb")]
+fn env_limit<T: std::str::FromStr>(name: &str) -> Option<Option<T>> {
+    let raw = std::env::var(name).ok()?;
+    let raw = raw.trim();
+    if raw.eq_ignore_ascii_case("none") || raw.eq_ignore_ascii_case("off") {
+        return Some(None);
+    }
+    match raw.parse() {
+        Ok(v) => Some(Some(v)),
+        Err(_) => {
+            tracing::warn!(var = name, value = raw, "ignoring unparsable setting");
+            None
+        }
+    }
+}
+
+/// History retention, job retention and the maintenance schedule: environment
+/// over TOML `[storage]` over the defaults — 30 days (1 day with `--dev-mode`,
+/// where a local database churns through deploys and data ticks and nobody
+/// restores last month's page) or at least the last 100 revisions, 24 h of
+/// job history, a pass every 6 hours.
+#[cfg(feature = "storage-rocksdb")]
+fn apply_maintenance_settings(
+    config: &mut raisin_rocksdb::RocksDBConfig,
+    storage: &crate::config::StorageConfig,
+    dev_mode: bool,
+) {
+    use raisin_rocksdb::management::history_gc::HistoryRetention;
+
+    let default_days = if dev_mode { 1 } else { 30 };
+    let keep_days = env_limit::<u32>("RAISIN_HISTORY_KEEP_DAYS")
+        .unwrap_or(Some(storage.history_keep_days.unwrap_or(default_days)));
+    let keep_revisions = env_limit::<u64>("RAISIN_HISTORY_KEEP_REVISIONS")
+        .unwrap_or(Some(storage.history_keep_revisions.unwrap_or(100)));
+    config.history_retention = HistoryRetention {
+        keep_days,
+        keep_revisions,
+    };
+    config.job_retention_hours = env_limit::<i64>("RAISIN_JOB_RETENTION_HOURS")
+        .flatten()
+        .or(storage.job_retention_hours)
+        .unwrap_or(24)
+        .max(1);
+    let minutes = env_limit::<u64>("RAISIN_MAINTENANCE_INTERVAL_MINUTES")
+        .map(|v| v.unwrap_or(0))
+        .or(storage.maintenance_interval_minutes)
+        .unwrap_or(360);
+    config.maintenance_interval_secs = minutes * 60;
+
+    tracing::info!(
+        history_keep_days = ?config.history_retention.keep_days,
+        history_keep_revisions = ?config.history_retention.keep_revisions,
+        job_retention_hours = config.job_retention_hours,
+        maintenance_interval_minutes = minutes,
+        "Storage retention"
+    );
 }
 
 /// Restore replication state if enabled.

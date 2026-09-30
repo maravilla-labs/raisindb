@@ -6,6 +6,8 @@
 //! RocksDB property/reference/child_order) and relation integrity checks.
 
 mod fulltext;
+#[cfg(feature = "storage-rocksdb")]
+mod history;
 mod path_repair;
 mod reindex;
 mod relations;
@@ -33,6 +35,12 @@ pub use vector_embeddings::regenerate_vector_embeddings;
 
 #[cfg(feature = "storage-rocksdb")]
 pub use reindex::reindex_start;
+
+#[cfg(feature = "storage-rocksdb")]
+pub use history::{
+    delete_history_retention, get_history_retention, put_history_retention,
+    run_repository_history_gc,
+};
 
 #[cfg(feature = "storage-rocksdb")]
 pub use path_repair::repair_path_index;

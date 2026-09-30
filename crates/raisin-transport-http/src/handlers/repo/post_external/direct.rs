@@ -62,6 +62,26 @@ pub(super) async fn handle_external_upload_direct<S: Storage + TransactionalStor
         .map_err(ApiError::from)?;
 
     let created_node_id = if let Some(mut node) = existing_node {
+        // The `.rap` this upload replaces. Every deploy uploads a fresh blob,
+        // and the previous one used to stay on disk for good — on a local dev
+        // database, 223 superseded packages were 3.4 GB of the 4.9 GB upload
+        // directory. Only once its install has finished: an install still
+        // pending reads the blob its job was queued with.
+        let replaced_package_blob = if param_node_type == "raisin:Package"
+            && matches!(
+                node.properties.get("installed"),
+                Some(raisin_models::nodes::properties::PropertyValue::Boolean(
+                    true
+                ))
+            ) {
+            node.properties
+                .get(param_prop_path)
+                .and_then(super::resource::stored_key_of)
+                .filter(|old| old != &stored.key)
+        } else {
+            None
+        };
+
         let mut updated_props = node.properties.clone();
         updated_props.insert(param_prop_path.to_string(), resource_value);
         for (k, v) in extra_properties.clone() {
@@ -90,6 +110,19 @@ pub(super) async fn handle_external_upload_direct<S: Storage + TransactionalStor
         let node_id = node.id.clone();
         node.properties = updated_props;
         nodes_svc.update_node(node).await?;
+        if let Some(old_key) = replaced_package_blob {
+            use raisin_binary::BinaryStorage;
+            match state.bin.delete(&old_key).await {
+                Ok(()) => {
+                    tracing::info!(key = %old_key, "Deleted the package blob this upload replaced")
+                }
+                Err(e) => tracing::warn!(
+                    key = %old_key,
+                    error = %e,
+                    "Could not delete the replaced package blob (history GC will retry)"
+                ),
+            }
+        }
         node_id
     } else {
         let mut props = extra_properties.clone();

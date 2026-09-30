@@ -4,6 +4,29 @@
 
 use crate::upload_processors::StorageFormat;
 
+/// The blob key a resource property value (either storage format) points at.
+pub(super) fn stored_key_of(
+    value: &raisin_models::nodes::properties::PropertyValue,
+) -> Option<String> {
+    use raisin_models::nodes::properties::PropertyValue;
+    match value {
+        PropertyValue::Resource(r) => r
+            .metadata
+            .as_ref()
+            .and_then(|m| match m.get("storage_key") {
+                Some(PropertyValue::String(k)) => Some(k.clone()),
+                _ => None,
+            })
+            .or_else(|| r.url.clone()),
+        PropertyValue::Object(o) => match o.get("key") {
+            Some(PropertyValue::String(k)) => Some(k.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+    .filter(|k| !k.is_empty() && !k.contains("://"))
+}
+
 /// Build a resource property value based on the storage format.
 pub(super) fn build_resource_value(
     stored: &raisin_binary::StoredObject,

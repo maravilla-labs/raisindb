@@ -367,12 +367,40 @@ pub(crate) fn admin_routes(state: &AppState) -> Router<AppState> {
             "/api/admin/management/database/{tenant}/{repo}/relations/repair",
             post(crate::handlers::management::repair_relation_integrity),
         )
+        // Revision-history GC and retention policy for one repository
+        .route(
+            "/api/admin/management/database/{tenant}/{repo}/history/gc",
+            post(crate::handlers::management::run_repository_history_gc)
+                .layer(axum::middleware::from_fn(
+                    crate::middleware::require_path_tenant_scope,
+                ))
+                .layer(from_fn_with_state(
+                    state.clone(),
+                    crate::middleware::require_admin_auth_middleware,
+                )),
+        )
+        .route(
+            "/api/admin/management/database/{tenant}/{repo}/history/retention",
+            get(crate::handlers::management::get_history_retention)
+                .put(crate::handlers::management::put_history_retention)
+                .delete(crate::handlers::management::delete_history_retention)
+                .layer(axum::middleware::from_fn(
+                    crate::middleware::require_path_tenant_scope,
+                ))
+                .layer(from_fn_with_state(
+                    state.clone(),
+                    crate::middleware::require_admin_auth_middleware,
+                )),
+        )
         // ----------------------------------------------------------------
         // Management API - Global Level (RocksDB operations)
         // ----------------------------------------------------------------
         .route(
             "/api/admin/management/global/rocksdb/compact",
-            post(crate::handlers::management::compact_rocksdb),
+            post(crate::handlers::management::compact_rocksdb).layer(from_fn_with_state(
+                state.clone(),
+                crate::middleware::require_admin_auth_middleware,
+            )),
         )
         .route(
             "/api/admin/management/global/rocksdb/backup",
@@ -380,7 +408,17 @@ pub(crate) fn admin_routes(state: &AppState) -> Router<AppState> {
         )
         .route(
             "/api/admin/management/global/rocksdb/stats",
-            get(crate::handlers::management::get_rocksdb_stats),
+            get(crate::handlers::management::get_rocksdb_stats).layer(from_fn_with_state(
+                state.clone(),
+                crate::middleware::require_admin_auth_middleware,
+            )),
+        )
+        .route(
+            "/api/admin/management/global/gc",
+            post(crate::handlers::management::run_global_history_gc).layer(from_fn_with_state(
+                state.clone(),
+                crate::middleware::require_admin_auth_middleware,
+            )),
         )
         // ----------------------------------------------------------------
         // Management API - Tenant Level

@@ -25,6 +25,7 @@ mod encrypted_fields_event_handler;
 #[cfg(feature = "storage-rocksdb")]
 mod flow_sweeper;
 mod function_module_event_handler;
+mod log_rotation;
 mod management;
 #[cfg(feature = "storage-rocksdb")]
 mod migrations;
@@ -65,12 +66,47 @@ async fn main() {
     let cli_config = startup::ServerConfig::parse();
     let mut server_config = cli_config.merge().expect("Failed to load configuration");
 
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::new(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
-        ))
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    let env_filter = tracing_subscriber::EnvFilter::new(
+        std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
+    );
+    let log_file = cli_config.log_file.as_ref().and_then(|path| {
+        match log_rotation::RotatingFile::open(
+            path,
+            cli_config.log_max_size_mb.max(1) * 1024 * 1024,
+            cli_config.log_max_files,
+        ) {
+            Ok(file) => Some(file),
+            Err(e) => {
+                eprintln!("cannot open log file {path}: {e}; logging to stdout");
+                None
+            }
+        }
+    });
+    match log_file {
+        Some(file) => {
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_ansi(false)
+                        .with_writer(file),
+                )
+                .init();
+            // A panic message goes to stderr, which no longer ends up next to
+            // the log; record it in the log as well.
+            let default_hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                tracing::error!(panic = %info, "panic");
+                default_hook(info);
+            }));
+        }
+        None => {
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(tracing_subscriber::fmt::layer())
+                .init();
+        }
+    }
 
     tracing::info!("RaisinDB Server starting...");
     tracing::info!("  HTTP Port: {}", server_config.port);
@@ -496,6 +532,13 @@ async fn main() {
     let bin = startup::binary::init_binary_storage().await;
     #[cfg(not(feature = "s3"))]
     let bin = startup::binary::init_binary_storage(&server_config.data_dir);
+
+    // Revision-history GC, orphaned blobs, job history, operation log and
+    // compaction, on `[storage] maintenance_interval_minutes`. Without it
+    // every write stayed on disk forever as a superseded MVCC version.
+    #[cfg(feature = "storage-rocksdb")]
+    let _storage_maintenance =
+        raisin_rocksdb::management::history_gc::spawn_maintenance(storage.clone(), bin.clone());
 
     // ========================================================================
     // System definitions (built-in NodeTypes / Workspaces / packages)
