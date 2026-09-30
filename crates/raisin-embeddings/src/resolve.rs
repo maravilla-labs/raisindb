@@ -66,6 +66,12 @@ pub struct ResolvedEmbeddingProvider {
     /// Vector width. A one-way door: it is hashed into the embedder identity
     /// and the HNSW index is built at this width.
     pub dimensions: usize,
+    /// Prepended to every query — see `TenantEmbeddingConfig::query_prefix`.
+    pub query_prefix: Option<String>,
+    /// Prepended to every stored chunk — see
+    /// `TenantEmbeddingConfig::document_prefix`. Applied by the embedding job,
+    /// which also hashes it into the spec, not by [`Self::build`].
+    pub document_prefix: Option<String>,
 }
 
 impl ResolvedEmbeddingProvider {
