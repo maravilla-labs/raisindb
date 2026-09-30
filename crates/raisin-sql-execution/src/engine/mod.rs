@@ -16,6 +16,8 @@ mod ai_config;
 mod batch;
 mod branch;
 pub mod catalog_cache;
+#[cfg(test)]
+mod embedding_config_reader_tests;
 mod handlers;
 pub(crate) mod helpers;
 mod restore;
@@ -336,10 +338,28 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
     /// statement instead of the next restart. A read failure is deliberately not
     /// fatal: a search at the engine default beats a query that will not run.
     pub(crate) fn tenant_default_max_distance(&self) -> Option<f32> {
-        self.embedding_config_store
-            .as_ref()
-            .and_then(|store| store.get_config(&self.tenant_id).ok().flatten())
+        self.tenant_embedding_config()
+            .ok()
+            .flatten()
             .and_then(|config| config.default_max_distance)
+    }
+
+    /// The tenant's embedding config, for READING: the store wired into this
+    /// engine, else the process-wide read-only reader (see
+    /// [`raisin_embeddings::TenantEmbeddingConfigReader`]). Only the wired
+    /// store can be written, so `ALTER EMBEDDING CONFIG` never goes through
+    /// here. `Ok(None)` when the tenant has no config or no source exists.
+    pub(crate) fn tenant_embedding_config(
+        &self,
+    ) -> Result<Option<raisin_embeddings::TenantEmbeddingConfig>, raisin_embeddings::StorageError>
+    {
+        if let Some(store) = self.embedding_config_store.as_ref() {
+            return store.get_config(&self.tenant_id);
+        }
+        match raisin_embeddings::embedding_config_reader() {
+            Some(reader) => reader.get_config(&self.tenant_id),
+            None => Ok(None),
+        }
     }
 
     /// Wire the tenant AI config store, so `ai_provider_ref` resolves here the

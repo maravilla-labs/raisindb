@@ -140,3 +140,51 @@ pub fn configure_embedding_store(store: Arc<dyn crate::EmbeddingStorage>) -> boo
 pub fn embedding_store() -> Option<&'static Arc<dyn crate::EmbeddingStorage>> {
     EMBEDDING_STORE.get()
 }
+
+// ---------------------------------------------------------------------------
+// The tenant embedding config, READ-ONLY, installed the same way
+// ---------------------------------------------------------------------------
+
+/// Read access to a tenant's embedding configuration, and nothing else.
+///
+/// A search reads more from the tenant config than the embedder: the default
+/// vector-distance cutoff (`DEFAULT_MAX_DISTANCE`) decides which KNN and
+/// HYBRID_SEARCH hits survive when the query names no `max_distance`. Only
+/// `/api/sql` wired the config store into its engine, so inside a function
+/// (`raisin.sql()`), and on pgwire and the WebSocket `sql_query`, the cutoff
+/// fell back to the engine constant 0.6. With a model whose distances run
+/// larger (EmbeddingGemma, configured 0.78) the vector leg came back empty.
+///
+/// The installed reader serves every surface. It deliberately has no write
+/// method: `ALTER EMBEDDING CONFIG` still needs a store wired explicitly into
+/// the engine, which only the admin SQL surface does, so a function can read
+/// the tenant defaults and cannot change them.
+pub trait TenantEmbeddingConfigReader: Send + Sync {
+    /// The tenant's embedding configuration, `Ok(None)` when it has none.
+    fn get_config(
+        &self,
+        tenant_id: &str,
+    ) -> crate::storage::Result<Option<crate::TenantEmbeddingConfig>>;
+}
+
+impl<T: crate::TenantEmbeddingConfigStore + ?Sized> TenantEmbeddingConfigReader for T {
+    fn get_config(
+        &self,
+        tenant_id: &str,
+    ) -> crate::storage::Result<Option<crate::TenantEmbeddingConfig>> {
+        crate::TenantEmbeddingConfigStore::get_config(self, tenant_id)
+    }
+}
+
+static EMBEDDING_CONFIG_READER: OnceLock<Arc<dyn TenantEmbeddingConfigReader>> = OnceLock::new();
+
+/// Install the process-wide read-only embedding config reader. Called once,
+/// from startup. Returns `false` if one was already installed.
+pub fn configure_embedding_config_reader(reader: Arc<dyn TenantEmbeddingConfigReader>) -> bool {
+    EMBEDDING_CONFIG_READER.set(reader).is_ok()
+}
+
+/// The installed read-only embedding config reader, if startup installed one.
+pub fn embedding_config_reader() -> Option<&'static Arc<dyn TenantEmbeddingConfigReader>> {
+    EMBEDDING_CONFIG_READER.get()
+}

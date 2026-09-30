@@ -522,6 +522,18 @@ async fn main() {
         } else {
             tracing::warn!("Stored-vector reader was already installed; keeping the first one");
         }
+
+        // The tenant embedding config, READ-ONLY, for the same surfaces: a
+        // KNN/HYBRID_SEARCH without `max_distance` must use the tenant's
+        // DEFAULT_MAX_DISTANCE inside a function too, not the engine constant.
+        // Writing (ALTER EMBEDDING CONFIG) still needs the store wired into
+        // the engine explicitly, which only the admin SQL surface does.
+        let config_reader = std::sync::Arc::new(storage.tenant_embedding_config_repository());
+        if raisin_embeddings::configure_embedding_config_reader(config_reader) {
+            tracing::info!("Embedding config reader installed for all SQL surfaces");
+        } else {
+            tracing::warn!("Embedding config reader was already installed; keeping the first one");
+        }
     }
 
     // ========================================================================

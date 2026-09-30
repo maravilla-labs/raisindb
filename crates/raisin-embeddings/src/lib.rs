@@ -74,7 +74,8 @@ pub use provider::{
     VoyageProvider,
 };
 pub use query_embedder::{
-    configure_embedding_store, configure_query_embedder, embedding_store, query_embedder,
+    configure_embedding_config_reader, configure_embedding_store, configure_query_embedder,
+    embedding_config_reader, embedding_store, query_embedder, TenantEmbeddingConfigReader,
     TenantQueryEmbedder,
 };
 // `EmbeddingData` has PUBLIC fields of these two types, so anyone who can

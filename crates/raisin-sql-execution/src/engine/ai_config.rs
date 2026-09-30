@@ -19,6 +19,25 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
     ) -> Result<RowStream, Error> {
         tracing::info!("Executing AI config statement: {}", stmt.operation());
 
+        // Statements that change the tenant's AI setup, or make outbound calls
+        // with its keys, are for administrators. The engine is also reached by
+        // callers with no admin rights at all (e.g. `/api/sql` behind optional
+        // auth), and nothing upstream filtered these statements.
+        let privileged = !matches!(
+            stmt,
+            AIConfigStatement::ShowEmbeddingConfig
+                | AIConfigStatement::ShowAIProviders
+                | AIConfigStatement::ShowAIConfig
+                | AIConfigStatement::ShowVectorIndexHealth
+                | AIConfigStatement::VerifyVectorIndex
+        );
+        if privileged && !self.is_admin_caller() {
+            return Err(Error::Forbidden(format!(
+                "{} requires an administrator",
+                stmt.operation()
+            )));
+        }
+
         match stmt {
             AIConfigStatement::ShowEmbeddingConfig => self.execute_show_embedding_config().await,
             AIConfigStatement::AlterEmbeddingConfig { settings } => {
@@ -44,14 +63,26 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         }
     }
 
-    async fn execute_show_embedding_config(&self) -> Result<RowStream, Error> {
-        let store = self
-            .embedding_config_store
+    /// The engine runs for the system or an administrator.
+    fn is_admin_caller(&self) -> bool {
+        self.auth_context
             .as_ref()
-            .ok_or_else(|| Error::Validation("Embedding config store not available".to_string()))?;
+            .is_some_and(|a| a.is_system || a.permissions().is_some_and(|p| p.is_system_admin))
+    }
 
-        let config = store
-            .get_config(&self.tenant_id)
+    async fn execute_show_embedding_config(&self) -> Result<RowStream, Error> {
+        // Read-only: served by the installed reader where no store is wired
+        // (inside functions, pgwire, WebSocket SQL) -- there only for the
+        // system and administrators, who may read the config anyway.
+        if self.embedding_config_store.is_none()
+            && (raisin_embeddings::embedding_config_reader().is_none() || !self.is_admin_caller())
+        {
+            return Err(Error::Validation(
+                "Embedding config store not available".to_string(),
+            ));
+        }
+        let config = self
+            .tenant_embedding_config()
             .map_err(|e| Error::Backend(format!("Failed to read embedding config: {}", e)))?;
 
         let config = config.unwrap_or_else(|| {
@@ -98,10 +129,16 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         &self,
         settings: &[ConfigSetting],
     ) -> Result<RowStream, Error> {
-        let store = self
-            .embedding_config_store
-            .as_ref()
-            .ok_or_else(|| Error::Validation("Embedding config store not available".to_string()))?;
+        // Only a store wired into this engine can be written. The process-wide
+        // reader that lets functions SEE the tenant defaults is read-only by
+        // type, so ALTER from a function is refused here.
+        let store = self.embedding_config_store.as_ref().ok_or_else(|| {
+            Error::Validation(
+                "ALTER EMBEDDING CONFIG is not available here: the tenant embedding \
+                 config is read-only in this context"
+                    .to_string(),
+            )
+        })?;
 
         let mut config = store
             .get_config(&self.tenant_id)
