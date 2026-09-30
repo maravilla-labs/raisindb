@@ -29,7 +29,8 @@ impl JobMetadataStore {
         );
 
         // Serialize both metadata and context
-        let metadata_value = rmp_serde::to_vec(entry).map_err(|e| {
+        let entry = super::result_bounds::bounded(entry);
+        let metadata_value = rmp_serde::to_vec(entry.as_ref()).map_err(|e| {
             raisin_error::Error::storage(format!("Failed to serialize job metadata: {}", e))
         })?;
 
@@ -64,7 +65,8 @@ impl JobMetadataStore {
             job_id.as_str(),
         );
 
-        let value = rmp_serde::to_vec(entry).map_err(|e| {
+        let entry = super::result_bounds::bounded(entry);
+        let value = rmp_serde::to_vec(entry.as_ref()).map_err(|e| {
             raisin_error::Error::storage(format!("Failed to serialize job metadata: {}", e))
         })?;
 

@@ -150,7 +150,11 @@ impl TriggerEvaluationHandler {
             node_type: node_type.clone(),
             node_path: node_path.clone(),
             workspace: context.workspace_id.clone(),
-            node_properties: node_properties.clone(),
+            // Not the node itself: this report is the job's persisted result,
+            // and a copy of every changed node (one per write, per trigger
+            // evaluation) was most of the job history's size on disk. The
+            // node is one read away by id; nothing reads it from here.
+            node_properties: None,
             changed_properties: changed_properties.clone(),
         };
 

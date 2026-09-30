@@ -8,6 +8,7 @@ mod cleanup;
 mod crud;
 mod persistence_impl;
 mod queries;
+mod result_bounds;
 
 #[cfg(test)]
 mod tests;
@@ -17,6 +18,8 @@ use raisin_storage::jobs::{JobId, JobStatus, JobType};
 use rocksdb::DB;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+pub use result_bounds::MAX_PERSISTED_RESULT_BYTES;
 
 /// Persisted representation of job metadata (without runtime-only fields)
 ///
