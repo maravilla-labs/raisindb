@@ -217,3 +217,105 @@ fn execution_context_reads_exactly_one_word_as_own_rights() {
     let bare = node("/agents/a", "raisin:AIAgent", HashMap::new());
     assert_eq!(execution_of(&bare), AgentExecution::System);
 }
+
+// ---------------------------------------------------------------------------
+// Anonymous visitors: tools run under the agent's anonymous tool grant
+// ---------------------------------------------------------------------------
+
+const VISITOR: &str = "visitor:0123456789abcdef0123456789abcdef";
+
+async fn resolve_for_visitor(
+    storage: &Arc<InMemoryStorage>,
+    path: &str,
+) -> Result<Option<raisin_models::auth::AuthContext>, String> {
+    resolve_agent_context(
+        storage,
+        TENANT,
+        REPO,
+        BRANCH,
+        FUNCTIONS,
+        path,
+        MARKER,
+        Some(VISITOR),
+    )
+    .await
+}
+
+async fn seed_anonymous_agent(
+    storage: &Arc<InMemoryStorage>,
+    path: &str,
+    context: &str,
+    tool_roles: Option<&[&str]>,
+) {
+    let mut props = HashMap::new();
+    props.insert("title".to_string(), s("Site assistant"));
+    props.insert("execution_context".to_string(), s(context));
+    props.insert("roles".to_string(), list(&["editor"]));
+    let mut block = HashMap::from([("enabled".to_string(), PropertyValue::Boolean(true))]);
+    if let Some(roles) = tool_roles {
+        block.insert("tool_roles".to_string(), list(roles));
+    }
+    props.insert("anonymous".to_string(), PropertyValue::Object(block));
+    put(storage, FUNCTIONS, node(path, "raisin:AIAgent", props)).await;
+}
+
+/// Even an agent set to run as the SYSTEM answers a visitor with only the
+/// anonymous tool grant: "system" for the open internet is the one thing the
+/// visitor path must never produce.
+#[tokio::test]
+async fn a_visitor_turn_runs_tools_under_the_anonymous_grant_even_for_a_system_agent() {
+    let storage = Arc::new(InMemoryStorage::default());
+    seed_role(&storage).await;
+    seed_anonymous_agent(&storage, "/agents/site", "system", Some(&["ticket_reader"])).await;
+
+    let ctx = resolve_for_visitor(&storage, "/agents/site")
+        .await
+        .expect("resolution succeeds")
+        .expect("a visitor always gets an explicit context");
+
+    assert!(!ctx.is_system, "a visitor's tools never run as the system");
+    let permissions = ctx.permissions().expect("permissions resolved");
+    assert!(!permissions.is_system_admin);
+    assert_eq!(
+        permissions.direct_roles,
+        vec!["ticket_reader".to_string()],
+        "the anonymous tool grant, not the agent's own roles (editor)"
+    );
+}
+
+/// The same for an agent that runs with the caller's rights: a visitor has
+/// none to lend, so the anonymous grant applies.
+#[tokio::test]
+async fn a_visitor_turn_on_a_caller_rights_agent_uses_the_anonymous_grant() {
+    let storage = Arc::new(InMemoryStorage::default());
+    seed_role(&storage).await;
+    seed_anonymous_agent(&storage, "/agents/site", "user", Some(&["ticket_reader"])).await;
+
+    let ctx = resolve_for_visitor(&storage, "/agents/site")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        ctx.permissions().unwrap().direct_roles,
+        vec!["ticket_reader".to_string()]
+    );
+}
+
+/// No grant → the tools do not run. Falling back (to the caller, to the
+/// system) is exactly the widening this path exists to prevent.
+#[tokio::test]
+async fn a_visitor_turn_without_a_grant_fails_closed() {
+    let storage = Arc::new(InMemoryStorage::default());
+    seed_anonymous_agent(&storage, "/agents/site", "agent", Some(&[])).await;
+
+    let err = resolve_for_visitor(&storage, "/agents/site")
+        .await
+        .expect_err("no grant must refuse, not fall back");
+    assert!(err.contains("tool_roles"), "{err}");
+}
+
+#[tokio::test]
+async fn a_visitor_turn_for_a_missing_agent_fails_closed() {
+    let storage = Arc::new(InMemoryStorage::default());
+    assert!(resolve_for_visitor(&storage, "/agents/gone").await.is_err());
+}

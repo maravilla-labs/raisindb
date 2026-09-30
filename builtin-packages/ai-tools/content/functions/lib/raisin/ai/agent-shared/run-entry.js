@@ -32,6 +32,60 @@ export const DEFAULT_RUN_BUDGETS = Object.freeze({
   on_exceeded: 'pause',
 });
 
+/** An anonymous visitor session's participant id (`visitor:<key>`). */
+export function isVisitor(senderId) {
+  return typeof senderId === 'string' && senderId.startsWith('visitor:');
+}
+
+/**
+ * Tools that keep state PER ACTING PERSON, or act as the system on the run's
+ * behalf. A visitor is nobody in particular and outlives none of that state
+ * (its session is purged), so these are not offered in a visitor's run even
+ * when the agent lists them. Everything else runs under the agent's anonymous
+ * tool grant (core: `agent_auth::resolve_agent_context`).
+ */
+export const VISITOR_EXCLUDED_TOOLS = Object.freeze([
+  '/lib/raisin/ai/remember',
+  '/lib/raisin/ai/forget',
+  '/lib/raisin/ai/read-user-context',
+  '/lib/raisin/ai/spawn-agent',
+  '/lib/raisin/ai/delegate-task',
+  '/lib/raisin/ai/message-agent',
+  '/lib/raisin/ai/wait-for-agents',
+  '/lib/raisin/ai/interrupt-agent',
+  '/lib/raisin/ai/inspect-agent',
+  '/lib/raisin/ai/get-delegation-status',
+]);
+
+/** The agent's anonymous settings block (`anonymous: {...}`), or {}. */
+export function anonymousConfig(agentProps) {
+  const a = agentProps && agentProps.anonymous;
+  return a && typeof a === 'object' ? a : {};
+}
+
+/**
+ * The run budgets of a visitor's turn: the ordinary budgets, capped by what is
+ * left of the conversation's token budget (`anonymous.max_conversation_tokens`
+ * against the running `total_tokens_used` on the agent's copy of the chat).
+ * Exceeding it FAILS the run: a paused run would be resumed, with raised
+ * budgets, by the visitor's next message.
+ */
+export function visitorBudgets(base, agentProps, chat) {
+  const cfg = anonymousConfig(agentProps);
+  const out = { ...base, on_exceeded: 'fail' };
+  const cap = Number(cfg.max_conversation_tokens);
+  if (Number.isFinite(cap) && cap > 0) {
+    const used = Number(chat && chat.properties && chat.properties.total_tokens_used) || 0;
+    const left = Math.max(1, Math.floor(cap - used));
+    out.max_total_tokens = out.max_total_tokens ? Math.min(out.max_total_tokens, left) : left;
+  }
+  const calls = Number(cfg.max_model_calls_per_turn);
+  if (Number.isFinite(calls) && calls > 0) {
+    out.max_model_calls = Math.min(out.max_model_calls || calls, Math.floor(calls));
+  }
+  return out;
+}
+
 function messageText(message) {
   const p = (message && message.properties) || {};
   if (typeof p.content === 'string' && p.content.trim()) return p.content.trim();
@@ -86,8 +140,12 @@ export function nodeDevGrant(agentProps) {
 
 export function buildCreateRequest({ workspace, chatPath, chat, message, agentProps, agentRef, tools, plan, senderId, actingUser }) {
   const mode = getEffectiveExecutionMode(agentProps.execution_mode);
-  const grant = nodeDevGrant(agentProps);
+  const visitor = isVisitor(senderId);
+  // A visitor's run gets no node-development roots: those are the agent's
+  // working grant for its operators, not for the open internet.
+  const grant = visitor ? null : nodeDevGrant(agentProps);
   const agentName = chatPath.split('/')[2] || null;
+  const baseBudgets = { ...DEFAULT_RUN_BUDGETS, ...(agentProps.run_budgets && typeof agentProps.run_budgets === 'object' ? agentProps.run_budgets : {}) };
   return {
     subject: { workspace, path: chatPath, ...(chat && chat.id ? { node_id: chat.id } : {}) },
     input: {
@@ -108,7 +166,7 @@ export function buildCreateRequest({ workspace, chatPath, chat, message, agentPr
     as_agent: agentRef,
     ...((actingUser || senderId) ? { on_behalf_of: actingUser || senderId } : {}),
     create_key: `msg:${message.id || message.path}`,
-    budgets: { ...DEFAULT_RUN_BUDGETS, ...(agentProps.run_budgets && typeof agentProps.run_budgets === 'object' ? agentProps.run_budgets : {}) },
+    budgets: visitor ? visitorBudgets(baseBudgets, agentProps, chat) : baseBudgets,
     executor_config: {
       ...(grant ? { node_dev: grant } : {}),
       model_turn_function: agentProps.model_turn_function || DEFAULT_MODEL_TURN_FUNCTION,
@@ -163,8 +221,10 @@ async function steer(ctx, runId, view, message) {
     input: { text: messageText(message), message_path: message.path },
   }), `steer:${key}`);
   if (!ack || ack.ack === 'rejected') return null;
-  // A paused run takes the user's message as "continue": resume it.
-  if (view.status === 'paused') {
+  // A paused run takes the user's message as "continue": resume it. Not for a
+  // visitor: its budgets are the conversation's, and a message must not buy
+  // more of them.
+  if (view.status === 'paused' && !ctx.visitor) {
     await controlRun(runId, { command: 'resume', budget_increase: raisedBudgets(view) }, `resume:${key}`).catch(() => null);
   }
   await markMessage(ctx.workspace, message.path, { agent_run_id: runId, run_steer_state: 'queued' });
@@ -184,7 +244,9 @@ async function steer(ctx, runId, view, message) {
 export async function routeToAgentRun({
   workspace, chatPath, chat, message, agentProps, agentPath, agentWorkspace, outboxCtx, streamChannel, hasSkills,
 }) {
-  const ctx = { workspace, chatPath, streamChannel };
+  const humanId = (outboxCtx && outboxCtx.senderId)
+    || (chat && chat.properties && chat.properties.human_sender_id) || null;
+  const ctx = { workspace, chatPath, streamChannel, visitor: isVisitor(humanId) };
   const createKey = `msg:${message.id || message.path}`;
   const liveId = runIdOfChat(chat);
   if (liveId) {
@@ -196,7 +258,10 @@ export async function routeToAgentRun({
     }
   }
 
-  const { tools } = await resolveRunTools(agentProps, { hasSkills });
+  const resolved = await resolveRunTools(agentProps, { hasSkills });
+  const tools = ctx.visitor
+    ? resolved.tools.filter((t) => !VISITOR_EXCLUDED_TOOLS.includes(t.function_path))
+    : resolved.tools;
   const plan = await latestOpenPlan(workspace, chatPath).catch(() => null);
   const senderId = (outboxCtx && outboxCtx.senderId)
     || (chat && chat.properties && chat.properties.human_sender_id)

@@ -191,6 +191,48 @@ properties:
       type: string
     description: Group ids this agent belongs to when running under its own permissions.
 
+  # ANONYMOUS VISITORS — a public website's chat, straight from the browser.
+  #
+  # Off unless set. With it, an anonymous WebSocket session may start a chat
+  # with this agent (`db.conversations.startAnonymous(...)` in @raisindb/client):
+  # the server gives the session an ephemeral home (/visitors/<key>) that only
+  # that session can read, writes its messages for it after the checks below,
+  # and purges it after `session_ttl_hours` of inactivity.
+  #
+  # Tools in a visitor's turn NEVER run as the visitor and never as the system:
+  # they run under `tool_roles` / `tool_groups` (else the agent's own `roles` /
+  # `groups`), whatever `execution_context` says. An agent that grants nothing
+  # has its tools refused. A tool function with its own
+  # `execution_context: system` still elevates itself, as for everyone.
+  - name: allow_anonymous
+    title: Allow Anonymous Visitors
+    type: boolean
+    default: false
+    required: false
+    description: >-
+      Shorthand for `anonymous.enabled: true` (all limits at their defaults).
+
+  - name: anonymous
+    title: Anonymous Visitors
+    type: object
+    required: false
+    description: |
+      Settings for anonymous (not logged-in) visitors. Keys, with defaults:
+        enabled: false                  # the flag; required
+        allowed_origins: []             # e.g. ["https://www.example.com"]; empty = any
+        tool_roles: []                  # roles the tools run under (else `roles`)
+        tool_groups: []
+        max_messages: 20                # visitor messages per conversation
+        max_message_chars: 2000
+        max_conversation_tokens: 50000  # token budget per conversation
+        max_model_calls_per_turn: 0     # 0 = the run default
+        max_conversations: 5            # conversations per session
+        rate_per_session_per_minute: 6
+        rate_per_ip_per_minute: 30
+        max_concurrent_turns: 1         # per session
+        turn_lease_seconds: 120         # a hung turn frees its slot after this
+        session_ttl_hours: 24           # purge after this long without activity
+
   - name: provider
     title: Provider
     type: string

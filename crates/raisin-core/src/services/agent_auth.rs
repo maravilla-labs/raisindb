@@ -65,6 +65,43 @@ pub fn granted_ids(agent: &Node, key: &str) -> Vec<String> {
     }
 }
 
+/// The roles and groups an agent's tools hold when the agent answers an
+/// ANONYMOUS visitor: `anonymous.tool_roles` / `anonymous.tool_groups` when
+/// set, else the agent's own `roles` / `groups`.
+pub fn anonymous_tool_grant(agent: &Node) -> (Vec<String>, Vec<String>) {
+    let from_block = |key: &str| -> Option<Vec<String>> {
+        let Some(PropertyValue::Object(block)) = agent.properties.get("anonymous") else {
+            return None;
+        };
+        match block.get(key) {
+            Some(PropertyValue::Array(values)) => Some(
+                values
+                    .iter()
+                    .filter_map(|value| match value {
+                        PropertyValue::String(s) if !s.trim().is_empty() => {
+                            Some(s.trim().to_string())
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        }
+    };
+    let roles = from_block("tool_roles");
+    let groups = from_block("tool_groups");
+    if roles.is_none() && groups.is_none() {
+        return (granted_ids(agent, "roles"), granted_ids(agent, "groups"));
+    }
+    (roles.unwrap_or_default(), groups.unwrap_or_default())
+}
+
+/// Whether an acting identity is an anonymous visitor session
+/// (`visitor:<key>`, see `raisin_models::auth::visitor`).
+pub fn is_visitor_identity(id: Option<&str>) -> bool {
+    id.is_some_and(|id| id.starts_with(raisin_models::auth::visitor::VISITOR_ID_PREFIX))
+}
+
 /// The auth context a write BY THIS AGENT should carry.
 ///
 /// `triggering_user_id` is the raw actor id of whoever/whatever CAUSED this
@@ -112,8 +149,34 @@ where
     // good system context and a marker naming what tried. Refusing the whole
     // call because an agent node moved would break flows that work today.
     let Some(agent) = agent else {
+        // An anonymous visitor has no rights of its own to fall back to.
+        if is_visitor_identity(triggering_user_id) {
+            return Err(format!(
+                "agent '{}' not found; an anonymous visitor's tools cannot run",
+                agent_path
+            ));
+        }
         return Ok(None);
     };
+
+    // AN ANONYMOUS VISITOR IS NEVER THE PRINCIPAL OF A TOOL CALL.
+    //
+    // For a person, `execution_context: "user"` means "the tools act with the
+    // chatting user's rights". A visitor has none worth acting with, and
+    // "system" would hand the open internet the whole repository. So a turn
+    // made for a visitor always runs its tools under the agent's anonymous
+    // tool grant, whatever `execution_context` says: exactly the roles the
+    // site configured for this purpose (e.g. a read-only role over the pages
+    // the assistant may cite). A tool whose own function node says
+    // `execution_context: system` still elevates itself, as for everyone —
+    // that is how a narrowly written tool (creating an inquiry) writes.
+    if is_visitor_identity(triggering_user_id) {
+        return resolve_visitor_tool_context(
+            storage, tenant_id, repo_id, branch, &agent, agent_path, marker,
+        )
+        .await
+        .map(Some);
+    }
 
     match execution_of(&agent) {
         AgentExecution::System => Ok(None),
@@ -168,6 +231,65 @@ where
             ))
         }
     }
+}
+
+/// The context an anonymous visitor's tool calls run with: the agent's
+/// anonymous tool grant, resolved like a user's roles. An agent that grants
+/// nothing FAILS CLOSED — its tools do not run — instead of falling back to a
+/// wider context.
+async fn resolve_visitor_tool_context<S>(
+    storage: &Arc<S>,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    agent: &Node,
+    agent_path: &str,
+    marker: &str,
+) -> Result<AuthContext, String>
+where
+    S: Storage + 'static,
+{
+    let (roles, groups) = anonymous_tool_grant(agent);
+    if roles.is_empty() && groups.is_empty() {
+        return Err(format!(
+            "agent '{}' answers anonymous visitors but grants their tools no roles \
+             (set anonymous.tool_roles on the agent)",
+            agent_path
+        ));
+    }
+    let mut principal = agent.clone();
+    principal.properties.insert(
+        "roles".to_string(),
+        PropertyValue::Array(roles.into_iter().map(PropertyValue::String).collect()),
+    );
+    principal.properties.insert(
+        "groups".to_string(),
+        PropertyValue::Array(groups.into_iter().map(PropertyValue::String).collect()),
+    );
+    let resolved = PermissionService::new(storage.clone())
+        .resolve_for_principal_node(tenant_id, repo_id, branch, &principal)
+        .await
+        .map_err(|error| {
+            format!(
+                "Failed to resolve anonymous tool rights for '{}': {}",
+                agent_path, error
+            )
+        })?;
+    if resolved.is_system_admin {
+        return Err(format!(
+            "agent '{}' grants anonymous visitors' tools system_admin; refused",
+            agent_path
+        ));
+    }
+    tracing::info!(
+        agent_path = %agent_path,
+        roles = ?resolved.effective_roles,
+        permissions = resolved.permissions.len(),
+        "Agent tools executing for an anonymous visitor under the anonymous tool grant"
+    );
+    Ok(AuthContext::for_user(marker)
+        .with_permissions(resolved)
+        .with_agent(marker.to_string()))
 }
 
 /// Resolve `CallerRights`: run as whoever's write caused this execution.
@@ -233,4 +355,62 @@ where
             .with_permissions(resolved)
             .with_agent(marker.to_string()),
     ))
+}
+
+#[cfg(test)]
+mod visitor_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn agent(props: serde_json::Value) -> Node {
+        let properties: HashMap<String, PropertyValue> = props
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (k.clone(), PropertyValue::from_json(v)))
+            .collect();
+        Node {
+            path: "/agents/site".into(),
+            node_type: "raisin:AIAgent".into(),
+            properties,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn visitor_identities_are_recognised() {
+        assert!(is_visitor_identity(Some("visitor:0123456789abcdef")));
+        assert!(!is_visitor_identity(Some("user-1")));
+        assert!(!is_visitor_identity(None));
+    }
+
+    #[test]
+    fn the_anonymous_block_wins_over_the_agents_own_roles() {
+        let a = agent(serde_json::json!({
+            "roles": ["editor"],
+            "anonymous": { "enabled": true, "tool_roles": ["site_reader"] }
+        }));
+        assert_eq!(
+            anonymous_tool_grant(&a),
+            (vec!["site_reader".to_string()], vec![])
+        );
+    }
+
+    #[test]
+    fn without_an_anonymous_block_the_agents_roles_apply() {
+        let a = agent(serde_json::json!({ "roles": ["site_reader"], "groups": ["g"] }));
+        assert_eq!(
+            anonymous_tool_grant(&a),
+            (vec!["site_reader".to_string()], vec!["g".to_string()])
+        );
+    }
+
+    #[test]
+    fn an_explicitly_empty_grant_stays_empty() {
+        let a = agent(serde_json::json!({
+            "roles": ["editor"],
+            "anonymous": { "tool_roles": [] }
+        }));
+        assert_eq!(anonymous_tool_grant(&a), (vec![], vec![]));
+    }
 }
