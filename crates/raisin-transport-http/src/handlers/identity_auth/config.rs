@@ -148,6 +148,7 @@ pub async fn update_auth_config(
                 provider.enabled = local_auth.enabled;
             }
         }
+        config.access_settings.allow_registration = local_auth.allow_registration;
     }
 
     // Update magic link settings

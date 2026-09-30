@@ -20,15 +20,15 @@ properties:
     type: Boolean
     required: false
     title: Allow Registration
-    description: Whether user registration is allowed for this repository
-    default: true
+    description: Whether self-registration is allowed for this repository (off unless set true)
+    default: false
 
   - name: default_roles
     type: Array
     required: false
     title: Default Roles
-    description: Default roles to assign to new users (e.g., ["viewer"])
-    default: ["viewer"]
+    description: Default roles to assign to new users (viewer is never granted automatically)
+    default: ["authenticated_user"]
 
   - name: require_email_verification
     type: Boolean

@@ -37,8 +37,16 @@ pub struct RepoAuthConfig {
     /// Repository ID
     pub repo_id: String,
 
-    /// Whether user registration is allowed for this repository
-    #[serde(default = "default_true")]
+    /// Whether self-registration is allowed for this repository.
+    ///
+    /// Defaults to `false`: a repo that never stored a `RepoAuthConfig` (or
+    /// stored one without this property) does not accept sign-ups from
+    /// unknown callers. Users are added by an admin or an invitation, and a
+    /// repo that genuinely needs open sign-up (a storefront, a membership
+    /// site) opts in explicitly with `allow_registration: true`. Governs the
+    /// password endpoint `POST /auth/{repo}/register` and magic-link sign-in
+    /// for unknown addresses alike.
+    #[serde(default)]
     pub allow_registration: bool,
 
     /// Default roles to assign to new users (e.g., ["authenticated_user"]).
@@ -77,7 +85,7 @@ impl Default for RepoAuthConfig {
     fn default() -> Self {
         Self {
             repo_id: String::new(),
-            allow_registration: true,
+            allow_registration: false,
             default_roles: default_roles(),
             require_email_verification: false,
             auto_approve_access: true,
