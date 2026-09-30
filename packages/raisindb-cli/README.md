@@ -198,6 +198,49 @@ default_repo: mydb
 
 Configuration is automatically updated when you use `/connect`, `/login`, or `use` commands.
 
+## Server and Credentials
+
+### Which server a command talks to
+
+1. `-s, --server <url>` on the command
+2. the `RAISINDB_SERVER` environment variable
+3. `server` in `.raisinrc` (the server of the last `raisindb login`)
+4. `http://localhost:8081`
+
+`--server` applies to **every** request the command makes (for `deploy
+--install`: the upload, the job stream, the install, the status polling and the
+workspace reconcile). A login to another server never redirects it. `sync` uses
+the server from `--server`, else `.raisindb-cli.yaml`, else the list above.
+
+Every command that writes (`deploy`, `package upload`/`install`, `sync`,
+`repo create`/`delete`, `secret`, `cors`, `ai provider set`, `user register`)
+prints its target on stderr before the first write:
+
+```text
+→ http://localhost:8080 (repo studio, branch main)
+```
+
+### Which token is sent
+
+1. the `RAISINDB_TOKEN` environment variable, to whatever server the command
+   targets (an explicit choice)
+2. `token` in `.raisinrc`, **only** when the target is the server stored next
+   to it. Servers are compared after normalizing scheme and host case, default
+   ports and trailing slashes (`https://Host:443/` equals `https://host`).
+
+`.raisinrc` holds one login (one server, one token). When the target is a
+different server, the CLI sends no `Authorization` header and says so:
+
+```text
+Note: the saved login is for https://prod.example.com, not http://localhost:8080; sending no credentials.
+  Log in to it with: raisindb login -s http://localhost:8080   (or set RAISINDB_TOKEN)
+```
+
+`deploy`, `package upload`/`install`/`list` and `sync` stop at that point with
+the same hint instead of failing later on a 401. Logging in to a second server
+replaces the saved login; use `RAISINDB_TOKEN` to work with two servers from
+one shell.
+
 ## Development
 
 Build the package:
