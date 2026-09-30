@@ -5,27 +5,22 @@
 //! The WebSocket invoke paths found the function node without looking at the
 //! caller at all, so any connection — anonymous included — could run any
 //! function by path, including `execution_context: "system"` ones that bypass
-//! row-level security. SQL `INVOKE`/`INVOKE_SYNC` did the same.
+//! row-level security. HTTP invoke looked the node up under the caller's
+//! row-level security, so being able to READ a function meant being able to
+//! run it.
 //!
-//! Every CLIENT entry point (WS `function_invoke`/`function_invoke_sync`, HTTP
-//! invoke, SQL `INVOKE`/`INVOKE_SYNC`) asks this before loading any code:
-//! * the system and `system_admin` (admin console, API keys, CLI) may invoke
-//!   anything;
-//! * a caller who is not signed in may invoke nothing;
-//! * a signed-in caller may invoke `execution_context: "user"` functions,
-//!   which run under their own permissions, but not `"system"` ones.
-//!
-//! This is the interim rule. The permanent one is a grantable `execute`
-//! permission on the function node ([`Operation::Execute`]); this rule is a
-//! strict subset of what that grants by default. Internal runs (triggers,
-//! flows, schedules, agent tool calls, function-to-function calls) are not
-//! client invokes and never come here.
-//!
-//! [`Operation::Execute`]: raisin_models::permissions::Operation::Execute
+//! Invoking is now its own permission, [`Operation::Execute`], granted on the
+//! function node (workspace `functions`, the function's path) like any other
+//! operation — a Unix `x` bit. `read` does not imply it and it does not imply
+//! `read`. The system and `system_admin` (admin console, API keys, CLI) hold it
+//! everywhere; everyone else needs a grant, the anonymous principal through the
+//! `anonymous` role. Every CLIENT entry point asks this before loading any
+//! code. Internal runs (triggers, flows, schedules, agent tool calls,
+//! function-to-function calls) are not client invokes and never come here.
 
 use raisin_models::auth::AuthContext;
-use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
+use raisin_models::permissions::{Operation, PermissionScope};
 
 /// The workspace functions live in.
 pub const FUNCTIONS_WORKSPACE: &str = "functions";
@@ -33,9 +28,9 @@ pub const FUNCTIONS_WORKSPACE: &str = "functions";
 /// Why an invoke was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvokeRefusal {
-    /// Not signed in.
+    /// Not signed in, and no grant lets an anonymous caller run it.
     Unauthenticated,
-    /// Signed in, but the function runs as the system.
+    /// Signed in, without `execute` on this function.
     Forbidden,
 }
 
@@ -46,13 +41,6 @@ impl std::fmt::Display for InvokeRefusal {
             Self::Forbidden => "not allowed to execute this function",
         })
     }
-}
-
-fn runs_as_system(function: &Node) -> bool {
-    matches!(
-        function.properties.get("execution_context"),
-        Some(PropertyValue::String(c)) if c.eq_ignore_ascii_case("system")
-    )
 }
 
 /// The decision. `auth` is the invoking caller as the transport resolved it
@@ -71,75 +59,106 @@ pub fn authorize_invoke(
 pub fn authorize_invoke_in(
     auth: Option<&AuthContext>,
     function: &Node,
-    _workspace: &str,
-    _branch: &str,
+    workspace: &str,
+    branch: &str,
 ) -> Result<(), InvokeRefusal> {
     let Some(auth) = auth else {
         return Err(InvokeRefusal::Unauthenticated);
     };
-    if auth.is_system || auth.permissions().is_some_and(|p| p.is_system_admin) {
+    let scope = PermissionScope::new(workspace, branch);
+    if super::rls_filter::can_perform(function, Operation::Execute, auth, &scope) {
         return Ok(());
     }
-    if auth.is_anonymous_principal() {
-        return Err(InvokeRefusal::Unauthenticated);
-    }
-    if runs_as_system(function) {
-        return Err(InvokeRefusal::Forbidden);
-    }
-    Ok(())
+    Err(if auth.is_anonymous_principal() {
+        InvokeRefusal::Unauthenticated
+    } else {
+        InvokeRefusal::Forbidden
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use raisin_models::permissions::ResolvedPermissions;
+    use raisin_models::permissions::{Permission, ResolvedPermissions};
 
-    fn function(path: &str, system: bool) -> Node {
-        let mut node = Node {
+    fn function(path: &str) -> Node {
+        Node {
             id: format!("fn{path}"),
             name: path.rsplit('/').next().unwrap_or_default().to_string(),
             path: path.to_string(),
             node_type: "raisin:Function".to_string(),
             workspace: Some(FUNCTIONS_WORKSPACE.to_string()),
             ..Default::default()
-        };
-        if system {
-            node.properties.insert(
-                "execution_context".into(),
-                PropertyValue::String("system".into()),
-            );
         }
-        node
     }
 
-    fn user() -> AuthContext {
-        AuthContext::for_user("ed").with_permissions(ResolvedPermissions::empty("ed"))
+    fn with_grants(user: &str, grants: Vec<Permission>) -> AuthContext {
+        let mut p = ResolvedPermissions::empty(user);
+        p.permissions = grants;
+        AuthContext::for_user(user).with_permissions(p)
     }
+
+    fn grant(path: &str, ops: Vec<Operation>) -> Permission {
+        Permission::new(path, ops).with_workspace(FUNCTIONS_WORKSPACE)
+    }
+
+    const F: &str = "/lib/studio/collect-publish-tree";
 
     #[test]
-    fn signed_in_callers_invoke_user_functions_only() {
-        assert_eq!(
-            authorize_invoke(Some(&user()), &function("/f", false), "main"),
-            Ok(())
+    fn execute_granted_invokes() {
+        let editor = with_grants(
+            "ed",
+            vec![grant("/lib/studio/**", vec![Operation::Execute])],
         );
         assert_eq!(
-            authorize_invoke(Some(&user()), &function("/f", true), "main"),
+            authorize_invoke(Some(&editor), &function(F), "main"),
+            Ok(())
+        );
+        // The grant is by path: another tree stays closed.
+        assert_eq!(
+            authorize_invoke(Some(&editor), &function("/lib/other/x"), "main"),
             Err(InvokeRefusal::Forbidden)
         );
     }
 
+    /// `read` is not `execute`: seeing the code does not let you run it.
     #[test]
-    fn anonymous_callers_invoke_nothing() {
-        let anon = AuthContext::anonymous_user("anon")
+    fn read_only_is_refused() {
+        let reader = with_grants("rd", vec![grant("/**", vec![Operation::Read])]);
+        assert_eq!(
+            authorize_invoke(Some(&reader), &function(F), "main"),
+            Err(InvokeRefusal::Forbidden)
+        );
+        // ...and execute does not need read.
+        let runner = with_grants("rn", vec![grant("/**", vec![Operation::Execute])]);
+        assert_eq!(
+            authorize_invoke(Some(&runner), &function(F), "main"),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn anonymous_needs_an_explicit_grant() {
+        let bare = AuthContext::anonymous_user("anon")
             .with_permissions(ResolvedPermissions::anonymous(vec![]));
-        for who in [Some(&anon), None, Some(&AuthContext::deny_all())] {
-            for system in [false, true] {
-                assert_eq!(
-                    authorize_invoke(who, &function("/f", system), "main"),
-                    Err(InvokeRefusal::Unauthenticated)
-                );
-            }
+        for who in [Some(&bare), None, Some(&AuthContext::deny_all())] {
+            assert_eq!(
+                authorize_invoke(who, &function(F), "main"),
+                Err(InvokeRefusal::Unauthenticated)
+            );
         }
+        let public =
+            AuthContext::anonymous_user("anon").with_permissions(ResolvedPermissions::anonymous(
+                vec![grant("/lib/site/public/**", vec![Operation::Execute])],
+            ));
+        assert_eq!(
+            authorize_invoke(Some(&public), &function("/lib/site/public/search"), "main"),
+            Ok(())
+        );
+        assert_eq!(
+            authorize_invoke(Some(&public), &function(F), "main"),
+            Err(InvokeRefusal::Unauthenticated)
+        );
     }
 
     #[test]
@@ -147,18 +166,43 @@ mod tests {
         let admin =
             AuthContext::for_user("root").with_permissions(ResolvedPermissions::system_admin());
         for who in [admin, AuthContext::system()] {
-            for system in [false, true] {
-                assert_eq!(
-                    authorize_invoke(Some(&who), &function("/f", system), "main"),
-                    Ok(())
-                );
-            }
+            assert_eq!(authorize_invoke(Some(&who), &function(F), "main"), Ok(()));
+        }
+    }
+
+    /// The shape Studio's editor roles use: top-level functions by `*`, whole
+    /// groups by `**`, and nothing under a group that is not listed.
+    #[test]
+    fn a_single_segment_grant_does_not_reach_into_groups() {
+        let editor = with_grants(
+            "ed",
+            vec![
+                grant("/lib/studio/*", vec![Operation::Execute]),
+                grant("/lib/studio/commerce/**", vec![Operation::Execute]),
+            ],
+        );
+        for ok in [F, "/lib/studio/commerce/receive-stock"] {
+            assert_eq!(
+                authorize_invoke(Some(&editor), &function(ok), "main"),
+                Ok(()),
+                "{ok}"
+            );
+        }
+        for no in [
+            "/lib/studio/builder/execute-function",
+            "/lib/studio/automations/verify-automation",
+            "/lib/other/studio/x",
+        ] {
+            assert_eq!(
+                authorize_invoke(Some(&editor), &function(no), "main"),
+                Err(InvokeRefusal::Forbidden),
+                "{no}"
+            );
         }
     }
 
     #[test]
     fn execute_is_a_known_operation() {
-        use raisin_models::permissions::Operation;
         assert_eq!(Operation::parse("execute"), Some(Operation::Execute));
         assert_eq!(Operation::Execute.to_string(), "execute");
         assert!(Operation::all().contains(&Operation::Execute));

@@ -663,8 +663,8 @@ where
     )))
 }
 
-/// Client invokes over the socket, against a real RocksDB state: the gate
-/// decides from the caller and the function node before any code loads.
+/// Client invokes over the socket, against a real RocksDB state: invoking
+/// needs `execute` on the function node, decided before any code loads.
 #[cfg(all(test, feature = "storage-rocksdb"))]
 mod invoke_gate_tests {
     use super::*;
@@ -781,25 +781,34 @@ mod invoke_gate_tests {
     }
 
     #[tokio::test]
-    async fn socket_invokes_are_gated_by_caller() {
+    async fn socket_invokes_need_execute_on_the_function() {
         let dir = tempfile::tempdir().unwrap();
         let s = state(dir.path()).await;
 
-        // "studio-fn" runs as the system; "public-fn" as the caller.
-        // A signed-in caller: user functions yes, system functions no.
-        let signed_in = user(vec![grant("/studio-fn", Operation::Execute)]);
-        assert!(!refused(&s, Some(signed_in.clone()), "public-fn").await);
-        assert!(refused(&s, Some(signed_in), "studio-fn").await);
+        // Execute granted: runs. Only where granted.
+        let runner = user(vec![grant("/studio-fn", Operation::Execute)]);
+        assert!(!refused(&s, Some(runner.clone()), "studio-fn").await);
+        assert!(refused(&s, Some(runner), "public-fn").await);
 
-        // Anonymous: nothing.
-        for who in [
-            None,
-            Some(anonymous(vec![])),
-            Some(anonymous(vec![grant("/public-fn", Operation::Execute)])),
-        ] {
+        // Read-only: refused. A signed-in caller with nothing: refused.
+        assert!(
+            refused(
+                &s,
+                Some(user(vec![grant("/**", Operation::Read)])),
+                "studio-fn"
+            )
+            .await
+        );
+        assert!(refused(&s, Some(user(vec![])), "studio-fn").await);
+
+        // Anonymous: refused without a grant, runs with one.
+        for who in [None, Some(anonymous(vec![]))] {
             assert!(refused(&s, who.clone(), "studio-fn").await);
             assert!(refused(&s, who, "public-fn").await);
         }
+        let public = anonymous(vec![grant("/public-fn", Operation::Execute)]);
+        assert!(!refused(&s, Some(public.clone()), "public-fn").await);
+        assert!(refused(&s, Some(public), "studio-fn").await);
 
         // Administrators and the system: everything.
         let admin =

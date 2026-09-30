@@ -66,7 +66,22 @@ Each entry in a role's `permissions` array is an object with these fields:
 
 ### Operations
 
-`create`, `read`, `update`, `delete`, `translate`, `relate`, `unrelate`
+`create`, `read`, `update`, `delete`, `translate`, `relate`, `unrelate`, `execute`
+
+`execute` is the right to INVOKE a `raisin:Function` from a client (WebSocket
+`functions().invoke/invokeSync`, HTTP `/api/functions/{repo}/{name}/invoke`).
+Grant it in the `functions` workspace on the function's path. It is
+independent of `read`: a role may run a function without seeing its code, and
+reading the code does not let it run. System and `system_admin` callers (admin
+console, API keys, CLI) hold it everywhere; the `anonymous` role holds it only
+where granted. Triggers, flows, schedules and agent tools are internal runs and
+need no grant.
+
+```yaml
+- workspace: functions
+  path: "/lib/myapp/**"
+  operations: [execute]
+```
 
 ### Path Patterns
 
