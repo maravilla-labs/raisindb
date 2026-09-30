@@ -98,6 +98,17 @@ pub struct AuthContext {
     /// still deserialize.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+
+    /// The visitor-session home an ANONYMOUS session is bound to, if any
+    /// (`/visitors/<key>` in `raisin:access_control`).
+    ///
+    /// Set by the WebSocket transport once an anonymous session has proven its
+    /// session secret. It lets that session, and only that session, read its
+    /// own home (see [`crate::auth::visitor`]). It is deliberately NOT
+    /// [`Self::home`]: role conditions such as `node.path.startsWith(auth.home)`
+    /// were written for users and must never start matching for visitors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visitor_home: Option<String>,
 }
 
 impl Default for AuthContext {
@@ -126,6 +137,7 @@ impl AuthContext {
             active_stewardship_source: None,
             home: None,
             agent: None,
+            visitor_home: None,
         }
     }
 
@@ -152,6 +164,7 @@ impl AuthContext {
             active_stewardship_source: None,
             home: None,
             agent: None,
+            visitor_home: None,
         }
     }
 
@@ -196,6 +209,7 @@ impl AuthContext {
             active_stewardship_source: None,
             home: None,
             agent: None,
+            visitor_home: None,
         }
     }
 
@@ -218,6 +232,7 @@ impl AuthContext {
             active_stewardship_source: None,
             home: None,
             agent: None,
+            visitor_home: None,
         }
     }
 
@@ -255,6 +270,7 @@ impl AuthContext {
             active_stewardship_source: None,
             home: None,
             agent: None,
+            visitor_home: None,
         }
     }
 
@@ -279,6 +295,12 @@ impl AuthContext {
     /// Set the local user node ID (workspace-specific)
     pub fn with_local_user_id(mut self, local_user_id: impl Into<String>) -> Self {
         self.local_user_id = Some(local_user_id.into());
+        self
+    }
+
+    /// Bind this (anonymous) context to a visitor-session home.
+    pub fn with_visitor_home(mut self, home: impl Into<String>) -> Self {
+        self.visitor_home = Some(home.into());
         self
     }
 

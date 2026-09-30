@@ -13,6 +13,32 @@ use raisin_models::permissions::{Operation, PermissionScope};
 use raisin_rel::eval::RelationResolver;
 
 use context::{evaluate_rel_condition, evaluate_rel_condition_async};
+use raisin_models::auth::visitor::visitor_zone_decision;
+
+/// The visitor-session rule, decided BEFORE any role grant.
+///
+/// Visitor homes (`/visitors/<key>` in `raisin:access_control`) hold anonymous
+/// chats. Only the session bound to a home may read it, nobody may write it
+/// except the system, and no role grant can widen that: a site that grants
+/// its anonymous role `read` on the whole workspace must still not be able to
+/// list other visitors' conversations. `system_admin` falls through to the
+/// ordinary rules (which allow it). See [`raisin_models::auth::visitor`].
+fn visitor_zone(
+    auth: &AuthContext,
+    scope: &PermissionScope,
+    path: &str,
+    operation: Operation,
+) -> Option<bool> {
+    if auth.permissions().is_some_and(|p| p.is_system_admin) {
+        return None;
+    }
+    visitor_zone_decision(
+        &scope.workspace,
+        path,
+        operation,
+        auth.visitor_home.as_deref(),
+    )
+}
 use matching::{apply_field_filter, matching_permissions};
 
 /// Filter a single node based on RLS rules.
@@ -22,6 +48,9 @@ use matching::{apply_field_filter, matching_permissions};
 pub fn filter_node(node: Node, auth: &AuthContext, scope: &PermissionScope) -> Option<Node> {
     if auth.is_system {
         return Some(node);
+    }
+    if let Some(allowed) = visitor_zone(auth, scope, &node.path, Operation::Read) {
+        return allowed.then_some(node);
     }
 
     let permissions = match auth.permissions() {
@@ -191,6 +220,9 @@ pub async fn filter_node_async(
     if auth.is_system {
         return Some(node);
     }
+    if let Some(allowed) = visitor_zone(auth, scope, &node.path, Operation::Read) {
+        return allowed.then_some(node);
+    }
 
     let permissions = auth.permissions()?;
 
@@ -241,6 +273,9 @@ pub fn can_perform(
     if auth.is_system {
         return true;
     }
+    if let Some(allowed) = visitor_zone(auth, scope, &node.path, operation) {
+        return allowed;
+    }
 
     let permissions = match auth.permissions() {
         Some(p) => p,
@@ -274,6 +309,9 @@ pub async fn can_perform_async(
 ) -> bool {
     if auth.is_system {
         return true;
+    }
+    if let Some(allowed) = visitor_zone(auth, scope, &node.path, operation) {
+        return allowed;
     }
 
     let permissions = match auth.permissions() {
@@ -322,6 +360,9 @@ pub fn can_create_at_path(
     if auth.is_system {
         tracing::debug!("RLS: system context - allowing create");
         return true;
+    }
+    if let Some(allowed) = visitor_zone(auth, scope, path, Operation::Create) {
+        return allowed;
     }
 
     let permissions = match auth.permissions() {
@@ -390,6 +431,9 @@ pub async fn can_create_at_path_async(
 ) -> bool {
     if auth.is_system {
         return true;
+    }
+    if let Some(allowed) = visitor_zone(auth, scope, path, Operation::Create) {
+        return allowed;
     }
 
     let permissions = match auth.permissions() {

@@ -40,6 +40,7 @@
 //! - `config` - TenantAuthConfig, AuthProviderConfig, PasswordPolicy
 
 pub mod agent_identity;
+pub mod visitor;
 
 mod access;
 mod claims;

@@ -451,3 +451,121 @@ fn the_most_specific_satisfied_grant_is_the_one_that_applies() {
         "the narrow grant's field filter must be the one applied"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Visitor sessions (anonymous chat homes)
+// ---------------------------------------------------------------------------
+
+mod visitor_sessions {
+    use super::*;
+
+    const WS: &str = "raisin:access_control";
+    const HOME_A: &str = "/visitors/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const HOME_B: &str = "/visitors/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn scope() -> PermissionScope {
+        PermissionScope::new(WS, "main")
+    }
+
+    /// The anonymous role of a CARELESS site: read on the whole
+    /// access-control workspace. The visitor rule must hold regardless.
+    fn anonymous_with_broad_read(home: Option<&str>) -> AuthContext {
+        let broad =
+            make_permission("**", vec![Operation::Read, Operation::Create]).with_workspace(WS);
+        let ctx = AuthContext::anonymous_user("anon-node")
+            .with_permissions(ResolvedPermissions::anonymous(vec![broad]));
+        match home {
+            Some(h) => ctx.with_visitor_home(h),
+            None => ctx,
+        }
+    }
+
+    fn chat(home: &str) -> Node {
+        make_node(
+            &format!("{home}/inbox/chats/vchat-1/msg-1"),
+            "raisin:Message",
+        )
+    }
+
+    #[test]
+    fn a_session_reads_its_own_conversation() {
+        let a = anonymous_with_broad_read(Some(HOME_A));
+        assert!(filter_node(chat(HOME_A), &a, &scope()).is_some());
+        assert!(can_perform(&chat(HOME_A), Operation::Read, &a, &scope()));
+    }
+
+    #[test]
+    fn two_sessions_cannot_see_each_others_homes_or_conversations() {
+        let a = anonymous_with_broad_read(Some(HOME_A));
+        let b = anonymous_with_broad_read(Some(HOME_B));
+        assert!(filter_node(chat(HOME_B), &a, &scope()).is_none());
+        assert!(filter_node(chat(HOME_A), &b, &scope()).is_none());
+        let home_b = make_node(HOME_B, "raisin:VisitorSession");
+        assert!(filter_node(home_b, &a, &scope()).is_none());
+    }
+
+    #[test]
+    fn an_unbound_anonymous_caller_sees_no_visitor_home() {
+        let anon = anonymous_with_broad_read(None);
+        assert!(filter_node(chat(HOME_A), &anon, &scope()).is_none());
+        let root = make_node("/visitors", "raisin:AclFolder");
+        assert!(filter_node(root, &anon, &scope()).is_none());
+    }
+
+    /// A logged-in user whose role reads the whole workspace still cannot
+    /// read a visitor's conversation.
+    #[test]
+    fn a_user_with_a_broad_grant_cannot_read_a_visitor_home() {
+        let broad = make_permission("**", vec![Operation::Read]).with_workspace(WS);
+        let user = make_auth("alice", vec![broad]);
+        assert!(filter_node(chat(HOME_A), &user, &scope()).is_none());
+    }
+
+    #[test]
+    fn a_session_cannot_write_its_home_directly() {
+        let a = anonymous_with_broad_read(Some(HOME_A));
+        let outbox = format!("{HOME_A}/outbox/msg-1");
+        assert!(!can_create_at_path(&outbox, "raisin:Message", &a, &scope()));
+        assert!(!can_perform(&chat(HOME_A), Operation::Update, &a, &scope()));
+        assert!(!can_perform(&chat(HOME_A), Operation::Delete, &a, &scope()));
+    }
+
+    #[test]
+    fn the_system_and_admins_see_every_visitor_home() {
+        assert!(filter_node(chat(HOME_A), &AuthContext::system(), &scope()).is_some());
+        let mut admin = ResolvedPermissions::empty("admin");
+        admin.is_system_admin = true;
+        let admin = AuthContext::for_user("admin").with_permissions(admin);
+        assert!(filter_node(chat(HOME_A), &admin, &scope()).is_some());
+    }
+
+    #[test]
+    fn the_same_path_in_another_workspace_is_not_the_visitor_zone() {
+        let a = anonymous_with_broad_read(Some(HOME_A));
+        let content = PermissionScope::new("content", "main");
+        // No grant in `content` → the ordinary rules deny, not the zone.
+        assert!(filter_node(chat(HOME_B), &a, &content).is_none());
+    }
+
+    #[tokio::test]
+    async fn the_async_paths_apply_the_same_rule() {
+        let a = anonymous_with_broad_read(Some(HOME_A));
+        assert!(filter_node_async(chat(HOME_A), &a, &scope(), None)
+            .await
+            .is_some());
+        assert!(filter_node_async(chat(HOME_B), &a, &scope(), None)
+            .await
+            .is_none());
+        assert!(!can_perform_async(&chat(HOME_B), Operation::Read, &a, &scope(), None).await);
+        assert!(
+            !can_create_at_path_async(
+                &format!("{HOME_A}/outbox/m"),
+                "raisin:Message",
+                &a,
+                &scope(),
+                None
+            )
+            .await
+        );
+    }
+}
