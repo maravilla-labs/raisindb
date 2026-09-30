@@ -18,6 +18,7 @@ import { deployPackage } from './commands/deploy.js';
 import { serverInstall, serverStart, serverVersion, serverUpdate, serverStop, serverStatus, serverLogs } from './commands/server.js';
 import { flowDoctor, flowExplain } from './commands/flow.js';
 import { repoCreate, repoList, repoDelete, repoLanguages } from './commands/repo.js';
+import { repoGc, repoRetention } from './commands/storage.js';
 import { aiProviderSet, aiProviderList, aiProviderTest } from './commands/ai.js';
 import { userRegister } from './commands/user.js';
 import { corsAdd, corsList, corsRemove } from './commands/cors.js';
@@ -677,6 +678,62 @@ repoCmd
   .description('List repositories')
   .option('--json', 'Machine-readable JSON output')
   .action((options) => runAdmin(() => repoList({ json: options.json })));
+
+repoCmd
+  .command('gc <name>')
+  .description('Remove revision history older than the retention policy and reclaim the disk space')
+  .option('--dry-run', 'Report what would be removed without changing anything')
+  .option('--keep-days <n>', 'Override the policy for this run: keep revisions newer than N days')
+  .option('--keep-revisions <n>', 'Override the policy for this run: keep at least the last N revisions')
+  .option('--tenant <id>', 'Tenant of the repository', 'default')
+  .option('--json', 'Machine-readable JSON output')
+  .addHelpText(
+    'after',
+    `
+Every write keeps the previous version of the node and of every index row it
+touched. GC deletes versions older than the retention window while keeping
+HEAD, everything inside the window, and every tag and branch fork point;
+deletes upload blobs only those versions referenced; and compacts the database.
+The server also runs this on its own every few hours ([storage]
+maintenance_interval_minutes).
+
+Example:
+  raisindb repo gc website --dry-run
+  raisindb repo gc website --keep-days 1`
+  )
+  .action((name, options) =>
+    runAdmin(() =>
+      repoGc(name, {
+        tenant: options.tenant,
+        dryRun: options.dryRun,
+        keepDays: options.keepDays,
+        keepRevisions: options.keepRevisions,
+        json: options.json,
+      })
+    )
+  );
+
+repoCmd
+  .command('retention <name>')
+  .description("Show or set a repository's revision-history retention policy")
+  .option('--branch <branch>', 'Set the policy of one branch instead of the whole repository')
+  .option('--keep-days <n>', 'Keep revisions newer than N days')
+  .option('--keep-revisions <n>', 'Keep at least the last N revisions')
+  .option('--clear', 'Remove the stored policy (fall back to the repository or server default)')
+  .option('--tenant <id>', 'Tenant of the repository', 'default')
+  .option('--json', 'Machine-readable JSON output')
+  .action((name, options) =>
+    runAdmin(() =>
+      repoRetention(name, {
+        tenant: options.tenant,
+        branch: options.branch,
+        keepDays: options.keepDays,
+        keepRevisions: options.keepRevisions,
+        clear: options.clear,
+        json: options.json,
+      })
+    )
+  );
 
 repoCmd
   .command('delete <name>')

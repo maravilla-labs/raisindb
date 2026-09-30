@@ -10,6 +10,13 @@ import React from 'react';
 import { render } from 'ink';
 import { ServerInstallUI, type InstallState } from '../components/ServerInstall.js';
 import { ServerReady } from '../components/ServerReady.js';
+import {
+  CONSOLE_LOG_MAX_BYTES,
+  SERVER_LOG_MAX_FILES,
+  SERVER_LOG_MAX_MB,
+  pickLogFile,
+  rotateIfLarger,
+} from './server-logs.js';
 
 const BIN_NAME = 'raisindb';
 // Distinct from RAISINDB_REPO, which names the default *content* repository for
@@ -46,8 +53,14 @@ function getPidPath(): string {
   return path.join(getRaisinDir(), 'server.pid');
 }
 
+/** The server's own, size-rotated log (`RAISIN_LOG_FILE`). */
 function getLogPath(): string {
   return path.join(getRaisinDir(), 'server.log');
+}
+
+/** stdout/stderr of the server process: start-up output and panics only. */
+function getConsoleLogPath(): string {
+  return path.join(getRaisinDir(), 'server.console.log');
 }
 
 // --- Platform / network helpers ---
@@ -452,13 +465,25 @@ export async function serverStart(args: string[], options: { verbose?: boolean; 
     ? 'info'
     : 'warn,raisin_server=info';
 
-  const logFile = getLogPath();
-  const logStream = fs.openSync(logFile, 'a');
+  // The server writes and rotates its own log (RAISIN_LOG_FILE). Its stdout
+  // and stderr — start-up output, panics, or everything from a server binary
+  // too old to know RAISIN_LOG_FILE — go to a separate console log that is
+  // rotated here at every start. Appending stdout to server.log for the life
+  // of the installation is how that file reached several GB.
+  const consoleLog = getConsoleLogPath();
+  rotateIfLarger(consoleLog, CONSOLE_LOG_MAX_BYTES, 1);
+  const logStream = fs.openSync(consoleLog, 'a');
 
   // Start server process — write directly to log file, no pipes
   const child: ChildProcess = spawn(installPath, serverArgs, {
     stdio: ['ignore', logStream, logStream],
-    env: { ...process.env, RUST_LOG: rustLog },
+    env: {
+      RAISIN_LOG_FILE: getLogPath(),
+      RAISIN_LOG_MAX_SIZE_MB: String(SERVER_LOG_MAX_MB),
+      RAISIN_LOG_MAX_FILES: String(SERVER_LOG_MAX_FILES),
+      ...process.env,
+      RUST_LOG: rustLog,
+    },
     detached: true,
   });
 
@@ -619,8 +644,8 @@ export async function serverStatus(): Promise<void> {
 // --- Server Logs ---
 
 export async function serverLogs(options: { follow?: boolean; lines?: string }): Promise<void> {
-  const logFile = getLogPath();
-  if (!fs.existsSync(logFile)) {
+  const logFile = pickLogFile(getLogPath(), getConsoleLogPath());
+  if (!logFile) {
     console.log('  No log file found. Start the server first.');
     return;
   }
@@ -628,7 +653,8 @@ export async function serverLogs(options: { follow?: boolean; lines?: string }):
   const numLines = parseInt(options.lines || '50', 10);
 
   if (options.follow) {
-    const tail = spawn('tail', ['-f', '-n', String(numLines), logFile], { stdio: 'inherit' });
+    // -F follows the NAME, so it keeps going across a rotation.
+    const tail = spawn('tail', ['-F', '-n', String(numLines), logFile], { stdio: 'inherit' });
     process.on('SIGINT', () => { tail.kill(); process.exit(0); });
     tail.on('exit', () => process.exit(0));
   } else {
