@@ -96,6 +96,15 @@ pub struct RocksDBConfig {
     pub auto_heal_enabled: bool,
     /// Enable background jobs
     pub background_jobs_enabled: bool,
+    /// How long finished (completed / failed / cancelled) jobs and their
+    /// results are kept in the job history, in hours.
+    pub job_retention_hours: i64,
+    /// Default revision-history retention for branches without a stored
+    /// policy (see `management::history_gc`). `KEEP_ALL` never prunes.
+    pub history_retention: crate::management::history_gc::HistoryRetention,
+    /// How often the storage maintenance pass (history GC, orphaned blobs,
+    /// operation-log purge, compaction) runs, in seconds. 0 disables it.
+    pub maintenance_interval_secs: u64,
     /// Per-tenant resource limits
     pub tenant_resource_limits: HashMap<String, TenantLimits>,
     /// Number of worker threads in the unified job worker pool

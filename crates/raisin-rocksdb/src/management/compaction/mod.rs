@@ -8,10 +8,8 @@
 //! Compaction is scoped to repositories to ensure data integrity and proper isolation.
 
 mod helpers;
-mod node_compaction;
-mod tree_compaction;
 
-use crate::{cf, cf_handle, keys, RocksDBStorage};
+use crate::RocksDBStorage;
 use raisin_error::Result;
 use raisin_storage::CompactionStats;
 use std::time::Duration;
@@ -29,7 +27,32 @@ pub enum RevisionRetentionPolicy {
     KeepAll,
 }
 
+impl RevisionRetentionPolicy {
+    /// The equivalent history-GC retention.
+    pub fn to_history_retention(&self) -> super::history_gc::HistoryRetention {
+        use super::history_gc::HistoryRetention;
+        match self {
+            RevisionRetentionPolicy::KeepLatest(n) => HistoryRetention {
+                keep_days: None,
+                keep_revisions: Some(*n as u64),
+            },
+            RevisionRetentionPolicy::KeepSince(d) => HistoryRetention {
+                // Whole days, rounded up so nothing inside the window is lost.
+                keep_days: Some(d.as_secs().div_ceil(86_400) as u32),
+                keep_revisions: None,
+            },
+            RevisionRetentionPolicy::KeepAll => HistoryRetention::KEEP_ALL,
+        }
+    }
+}
+
 /// Compact revisions for a specific repository
+///
+/// Prunes revision history with the MVCC-aware history GC (which honours
+/// tags and branch fork points and compacts the column families it touched).
+/// The previous implementation deleted node versions without regard to
+/// branches or tags, rescanned the whole repository once per node, and left
+/// every index family untouched.
 pub async fn compact_repository(
     storage: &RocksDBStorage,
     tenant_id: &str,
@@ -37,7 +60,6 @@ pub async fn compact_repository(
     policy: RevisionRetentionPolicy,
 ) -> Result<CompactionStats> {
     let start = std::time::Instant::now();
-
     tracing::info!(
         "Compacting repository {}/{} with policy {:?}",
         tenant_id,
@@ -45,54 +67,23 @@ pub async fn compact_repository(
         policy
     );
 
-    // 1. Get size before compaction
-    let bytes_before = get_repository_size(storage, tenant_id, repo_id)?;
-
-    // 2. For each node in repository, apply retention policy
-    let node_ids = helpers::list_all_node_ids(storage, tenant_id, repo_id).await?;
-    tracing::info!("Found {} unique nodes to compact", node_ids.len());
-
-    for node_id in &node_ids {
-        if let Err(e) =
-            node_compaction::compact_node_revisions(storage, tenant_id, repo_id, node_id, &policy)
-                .await
-        {
-            tracing::warn!("Failed to compact node {}: {}", node_id, e);
-        }
-    }
-
-    // 3. Compact tree storage (remove unreferenced trees)
-    tree_compaction::compact_trees(storage, tenant_id, repo_id).await?;
-
-    // 4. Run RocksDB compaction to reclaim space
-    tracing::info!(
-        "Running RocksDB compaction for repository {}/{}",
-        tenant_id,
-        repo_id
-    );
-    helpers::run_rocksdb_compaction(storage, tenant_id, repo_id)?;
-
-    // 5. Get size after compaction
-    let bytes_after = get_repository_size(storage, tenant_id, repo_id)?;
-    let duration_ms = start.elapsed().as_millis() as u64;
-
-    let stats = CompactionStats {
-        tenant: Some(format!("{}/{}", tenant_id, repo_id)),
-        bytes_before,
-        bytes_after,
-        duration_ms,
-        files_compacted: 0, // RocksDB doesn't expose this easily
+    let opts = super::history_gc::GcOptions {
+        retention_override: Some(policy.to_history_retention()),
+        tenant: Some(tenant_id.to_string()),
+        repo: Some(repo_id.to_string()),
+        // Blob deletion needs the binary store, which this layer does not own.
+        collect_orphaned_blobs: false,
+        ..Default::default()
     };
+    let report = super::history_gc::run_history_gc(storage, &opts)?;
 
-    tracing::info!(
-        "Compaction complete: {} -> {} bytes ({:.1}% reduction) in {}ms",
-        bytes_before,
-        bytes_after,
-        (1.0 - bytes_after as f64 / bytes_before.max(1) as f64) * 100.0,
-        duration_ms
-    );
-
-    Ok(stats)
+    Ok(CompactionStats {
+        tenant: Some(format!("{}/{}", tenant_id, repo_id)),
+        bytes_before: report.live_sst_bytes_before,
+        bytes_after: report.live_sst_bytes_after,
+        duration_ms: start.elapsed().as_millis() as u64,
+        files_compacted: 0,
+    })
 }
 
 /// Compact all repositories for a tenant

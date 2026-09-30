@@ -33,6 +33,9 @@ impl RocksDBConfig {
             integrity_check_interval: Duration::from_secs(24 * 60 * 60), // 24 hours
             auto_heal_enabled: false,
             background_jobs_enabled: false,
+            job_retention_hours: 24,
+            history_retention: crate::management::history_gc::HistoryRetention::KEEP_ALL,
+            maintenance_interval_secs: 0,
             tenant_resource_limits: HashMap::new(),
             worker_pool_size: 10,
             target_file_size_base: 64 * 1024 * 1024,
@@ -87,6 +90,9 @@ impl RocksDBConfig {
             integrity_check_interval: Duration::from_secs(6 * 60 * 60), // 6 hours
             auto_heal_enabled: true,
             background_jobs_enabled: true,
+            job_retention_hours: 24,
+            history_retention: crate::management::history_gc::HistoryRetention::KEEP_ALL,
+            maintenance_interval_secs: 0,
             tenant_resource_limits: HashMap::new(),
             worker_pool_size: 20,
             target_file_size_base: 64 * 1024 * 1024,
@@ -135,6 +141,9 @@ impl RocksDBConfig {
             integrity_check_interval: Duration::from_secs(3 * 60 * 60), // 3 hours
             auto_heal_enabled: true,
             background_jobs_enabled: true,
+            job_retention_hours: 24,
+            history_retention: crate::management::history_gc::HistoryRetention::KEEP_ALL,
+            maintenance_interval_secs: 0,
             tenant_resource_limits: HashMap::new(),
             worker_pool_size: 40,
             target_file_size_base: 128 * 1024 * 1024,

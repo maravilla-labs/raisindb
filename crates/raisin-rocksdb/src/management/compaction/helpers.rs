@@ -30,35 +30,6 @@ pub(super) fn compact_all_column_families(
     }
 }
 
-/// Exclusive upper bound for a prefix scan: the prefix with its last non-`0xFF`
-/// byte incremented. `None` when the prefix is all `0xFF` (unbounded above).
-fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
-    let mut end = prefix.to_vec();
-    while let Some(last) = end.pop() {
-        if last != 0xFF {
-            end.push(last + 1);
-            return Some(end);
-        }
-    }
-    None
-}
-
-/// Run RocksDB compaction for a specific repository key range
-pub(super) fn run_rocksdb_compaction(
-    storage: &RocksDBStorage,
-    tenant_id: &str,
-    repo_id: &str,
-) -> Result<()> {
-    let prefix = keys::repo_prefix(tenant_id, repo_id);
-    // The old call passed the same bound as start AND end, which is an empty
-    // range — compaction had nothing to do even on the CF it did reach.
-    let end = prefix_upper_bound(&prefix);
-
-    compact_all_column_families(storage, Some(&prefix), end.as_deref());
-
-    Ok(())
-}
-
 /// Get approximate size of a repository
 pub fn get_repository_size(
     storage: &RocksDBStorage,
@@ -99,39 +70,6 @@ pub fn get_total_db_size(storage: &RocksDBStorage) -> Result<u64> {
     }
 
     Ok(total_size)
-}
-
-/// List all unique node IDs in a repository
-pub(super) async fn list_all_node_ids(
-    storage: &RocksDBStorage,
-    tenant_id: &str,
-    repo_id: &str,
-) -> Result<Vec<String>> {
-    let cf_nodes = cf_handle(storage.db(), cf::NODES)?;
-    let prefix = keys::repo_prefix(tenant_id, repo_id);
-
-    let mut node_ids = std::collections::HashSet::new();
-    let iter = crate::prefix_scan(storage.db(), cf_nodes, &prefix);
-
-    for item in iter {
-        let (key, _) =
-            item.map_err(|e| raisin_error::Error::storage(format!("Iterator error: {}", e)))?;
-
-        let key_str = String::from_utf8_lossy(&key);
-        if !key_str.contains("\0nodes\0") {
-            continue;
-        }
-
-        // Extract node ID from key: ...nodes\0{node_id}\0{revision}
-        let parts: Vec<&str> = key_str.split('\0').collect();
-        if let Some(idx) = parts.iter().position(|&p| p == "nodes") {
-            if idx + 1 < parts.len() {
-                node_ids.insert(parts[idx + 1].to_string());
-            }
-        }
-    }
-
-    Ok(node_ids.into_iter().collect())
 }
 
 /// List all repositories for a tenant

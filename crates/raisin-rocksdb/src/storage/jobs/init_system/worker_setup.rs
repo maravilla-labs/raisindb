@@ -251,11 +251,11 @@ pub fn start_background_tasks(
         watchdog.run().await;
     });
 
-    // Start cleanup task (24 hour retention)
+    // Start cleanup task (`job_retention_hours`, 24 by default)
     let cleanup_shutdown = CancellationToken::new();
     let cleanup = crate::jobs::JobCleanupTask::new(
         storage.job_metadata_store.clone(),
-        24, // retention hours
+        storage.config().job_retention_hours.max(1),
         cleanup_shutdown.clone(),
     )
     .with_registry(storage.job_registry.clone());

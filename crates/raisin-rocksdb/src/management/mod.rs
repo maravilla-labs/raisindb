@@ -30,6 +30,9 @@ mod metrics;
 pub mod async_indexing;
 pub mod backup;
 pub mod compaction;
+
+// Revision-history garbage collection (retention per repo/branch)
+pub mod history_gc;
 pub mod integrity;
 
 // Background job orchestration

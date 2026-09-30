@@ -7606,6 +7606,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rmp-serde",
+ "rmpv",
  "rocksdb",
  "rrule",
  "serde",

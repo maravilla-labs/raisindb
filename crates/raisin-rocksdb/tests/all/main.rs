@@ -38,6 +38,7 @@ mod embedding_spec_hash_test;
 mod encrypted_field_vaulting_test;
 mod fulltext_job_store_integration;
 mod fulltext_rebuild_language_test;
+mod history_gc_test;
 mod hnsw_integration_test;
 mod immutable_nodetype_test;
 mod index_parity_test;
