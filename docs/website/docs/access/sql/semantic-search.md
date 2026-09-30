@@ -827,20 +827,34 @@ await raisin.functions.call('/lib/raisin/ai/ask', {
 | `locale` | Retrieval is locale-blind (overlay text is not in either index); the passage, title and `url_hint` of a page come from that locale's overlay where one exists, and `locale` on the passage says so. |
 | `base_language` | The full-text analyzer for the lexical leg (default: the repository's) and the language `ask` expands short questions into. |
 | `fulltext_languages` | Extra lexical legs with other analyzers, fused by rank. |
-| `candidates` | Passages each leg draws before filtering and ranking (default 40). |
+| `candidates` | Passages each leg draws before filtering and ranking (default 24). The engine draws 20x this per leg, so it is the retrieval's cost. |
+| `rewrite` (`ask`) | Grade the first retrieval and retry once with a rewritten query (default on; one model call). |
 | `expand` (`ask`) | Widen short questions with the documents' own words before searching: "CEO" also searches "Geschäftsführer", "who owns the airport" also searches shareholders and shares. The terms go to the lexical leg only. On by default for questions of up to eight words. |
 | `verify` (`ask`) | Check each sentence of the draft against the passages and drop what they do not state (default on). `verification` reports `passed`, `trimmed`, `rejected` (then `grounded: false`) or `unavailable`. |
 
 The scope reaches the engine as a `WHERE` over the table function, which is
 evaluated inside its fetch loop — a row counts toward the limit only once it passes —
 so `paths: ['/bap']` returns the best `/bap` passages, not the `/bap` survivors of a
-global top 40.
+global top 24.
 
 **Hybrid means both legs answer.** A hit the full-text leg found and the vector leg did
 not has no chunk (`chunk_text` is NULL). Such a hit used to be dropped as "no text";
 it now gets a passage cut from the node's own text around the matched words
 (`source: "excerpt"`), which is exactly the "Geschäftsführer" news item a vector search
 misses.
+
+**Tables and plain text.** A page passage also carries the page's tables — any
+`{rows: [[…]]}` grid in its properties, such as a tariff block — rendered row by row
+with their column headers and taken from the locale overlay when one is asked for;
+the indexed chunk never contained them. Passages and snippets are plain text, and
+citation markers are normalized to `[n]` whatever style the model used (`【1】`,
+`【1†L3-L5】`, `[1, 2]`).
+
+**Timings.** Both functions return `timings`: milliseconds for every SQL leg, the
+batched passage reads and the total, and for `ask` each model call (`expand_ms`,
+`grade_ms`, `answer_ms`, `verify_ms`). Model calls run one after another (the
+function host gateway is synchronous), so a latency budget is met by switching
+steps off: `expand: false`, `rewrite: false`, `verify: false`.
 
 For existing callers every new option is optional, and the input and output shapes
 are a superset of the old ones. What a call that passes nothing new now does
@@ -849,7 +863,7 @@ differently:
 - **image assets are not returned as passages** unless `include_kinds` names them;
 - lexical-only hits appear (with an excerpt) instead of being dropped;
 - `title` is the node's `title` property when it has one, else its name, as before;
-- each leg draws 40 candidates rather than `limit`, and `ask` takes at most three
+- each leg draws 24 candidates rather than `limit`, and `ask` takes at most three
   passages from one document;
 - a `workspaces` list is honoured — it used to be ignored in favour of `'ALL READABLE'`;
 - on a tenant with no embedder, retrieval runs full-text only (`mode: "fulltext"`)

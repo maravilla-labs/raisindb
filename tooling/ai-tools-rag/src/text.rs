@@ -87,7 +87,8 @@ fn skipped_key(k: &str) -> bool {
 }
 
 fn push_text(out: &mut Vec<String>, s: &str) {
-    let t = s.trim();
+    let plain = strip_html(s);
+    let t = plain.trim();
     if t.is_empty() || !reads_as_text(t) || out.iter().any(|o| o == t) {
         return;
     }
@@ -98,6 +99,11 @@ fn collect(v: &Value, out: &mut Vec<String>) {
     match v {
         Value::String(s) => push_text(out, s),
         Value::Array(items) => {
+            // A table's grid is rendered by `tables`, whole rows at a time; its
+            // cells one by one ("2,00 €") are neither prose nor searchable.
+            if is_grid(items) {
+                return;
+            }
             for i in items {
                 collect(i, out);
             }
@@ -270,7 +276,10 @@ pub fn window(segments: &[String], terms: &[String], max: usize) -> String {
 
 /// A snippet of at most [`SNIPPET_CHARS`] around the first matched term. Pure.
 pub fn snippet(text: &str, terms: &[String]) -> String {
-    let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let flat: String = strip_html(text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     let chars: Vec<char> = flat.chars().collect();
     if chars.len() <= SNIPPET_CHARS {
         return flat;
@@ -287,6 +296,272 @@ pub fn snippet(text: &str, terms: &[String]) -> String {
     } else {
         body
     }
+}
+
+/// Plain text from a rich-text value: tags removed (block-level ones become
+/// line breaks), the common entities decoded, `**bold**` markers dropped. Pure.
+///
+/// Rich-text fields hold HTML, and so did the snippets built from them — a
+/// site rendering a snippet as text showed `<p>` to the visitor, and one
+/// rendering it as HTML trusted markup that came out of a search.
+pub fn strip_html(s: &str) -> String {
+    if !s.contains('<') && !s.contains('&') && !s.contains("**") {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '<' {
+            let mut tag = String::new();
+            let mut closed = false;
+            for t in chars.by_ref() {
+                if t == '>' {
+                    closed = true;
+                    break;
+                }
+                tag.push(t);
+            }
+            let name: String = tag
+                .trim_start_matches('/')
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric())
+                .collect::<String>()
+                .to_ascii_lowercase();
+            if !closed || name.is_empty() {
+                // A lone '<' ("a < b") is text.
+                out.push('<');
+                out.push_str(&tag);
+                if closed {
+                    out.push('>');
+                }
+                continue;
+            }
+            match name.as_str() {
+                "br" | "p" | "div" | "li" | "tr" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+                | "ul" | "ol" | "table" => {
+                    if !out.ends_with('\n') && !out.is_empty() {
+                        out.push('\n');
+                    }
+                }
+                "td" | "th" => out.push(' '),
+                _ => {}
+            }
+        } else if c == '&' {
+            let mut ent = String::new();
+            while let Some(&n) = chars.peek() {
+                if n == ';' || ent.len() > 8 || n.is_whitespace() || n == '&' {
+                    break;
+                }
+                ent.push(n);
+                chars.next();
+            }
+            let semi = chars.peek() == Some(&';');
+            let decoded = match ent.as_str() {
+                "amp" => Some('&'),
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "quot" => Some('"'),
+                "apos" | "#39" => Some('\''),
+                "nbsp" | "#160" => Some(' '),
+                "shy" | "#173" => Some('\u{0}'),
+                _ => ent
+                    .strip_prefix('#')
+                    .and_then(|n| n.parse::<u32>().ok())
+                    .and_then(char::from_u32),
+            };
+            match (decoded, semi) {
+                (Some(d), true) => {
+                    chars.next();
+                    if d != '\u{0}' {
+                        out.push(d);
+                    }
+                }
+                _ => {
+                    out.push('&');
+                    out.push_str(&ent);
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out.replace("**", "")
+        .lines()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// An array of rows, each an array of scalars: a table's grid. Pure.
+fn is_grid(items: &[Value]) -> bool {
+    items.len() >= 2
+        && items.iter().all(|r| {
+            r.as_array().is_some_and(|cells| {
+                !cells.is_empty()
+                    && cells
+                        .iter()
+                        .all(|c| c.is_string() || c.is_number() || c.is_null())
+            })
+        })
+}
+
+fn cell(v: &Value) -> String {
+    match v {
+        Value::String(s) => strip_html(s).trim().to_string(),
+        Value::Number(n) => n.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// One table as lines a model can read: every row restates its column
+/// headers, so a passage cut anywhere still says which column a price is. Pure.
+fn render_grid(rows: &[Value], header_row: bool, header_col: bool) -> Vec<String> {
+    let grid: Vec<Vec<String>> = rows
+        .iter()
+        .map(|r| {
+            r.as_array()
+                .map(|c| c.iter().map(cell).collect())
+                .unwrap_or_default()
+        })
+        .collect();
+    let (head, body) = if header_row && grid.len() > 1 {
+        (Some(&grid[0]), &grid[1..])
+    } else {
+        (None, &grid[..])
+    };
+    let mut out = Vec::new();
+    for row in body {
+        let mut parts: Vec<String> = Vec::new();
+        let mut label = String::new();
+        for (j, c) in row.iter().enumerate() {
+            if header_col && j == 0 {
+                label = c.clone();
+                continue;
+            }
+            if c.is_empty() || c == "–" || c == "-" {
+                continue;
+            }
+            match head.and_then(|h| h.get(j)).filter(|h| !h.is_empty()) {
+                Some(h) => parts.push(format!("{h}: {c}")),
+                None => parts.push(c.clone()),
+            }
+        }
+        if parts.is_empty() {
+            continue;
+        }
+        out.push(if label.is_empty() {
+            parts.join("; ")
+        } else {
+            format!("{label} — {}", parts.join("; "))
+        });
+    }
+    out
+}
+
+/// The tables of a node — any `{rows: [[…]]}` object or bare grid, anywhere in
+/// its properties — each rendered as one text block, its caption fields
+/// (`title`, `subtitle`, `note`) first. Pure.
+///
+/// A page's indexed chunk carries its prose; its tariff tables are structured
+/// block content the chunker never saw. Asked for the parking price, `ask`
+/// answered "no concrete price" because the price only exists here.
+pub fn tables(properties: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    find_tables(properties, &mut Vec::new(), &mut out);
+    out
+}
+
+fn caption_of(map: &serde_json::Map<String, Value>) -> Vec<String> {
+    ["title", "subtitle", "caption", "heading", "note"]
+        .iter()
+        .filter_map(|k| map.get(*k).and_then(Value::as_str))
+        .map(strip_html)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn find_tables(v: &Value, captions: &mut Vec<Vec<String>>, out: &mut Vec<String>) {
+    match v {
+        Value::Object(map) => {
+            if map.contains_key("raisin:ref") {
+                return;
+            }
+            // `{rows: [[…]], header_row, header_col}` — the table control's shape.
+            if let Some(rows) = map
+                .get("rows")
+                .and_then(Value::as_array)
+                .filter(|r| is_grid(r))
+            {
+                let header_row = map
+                    .get("header_row")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                let header_col = map
+                    .get("header_col")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let mut block: Vec<String> = captions.last().cloned().unwrap_or_default();
+                block.extend(caption_of(map));
+                block.extend(render_grid(rows, header_row, header_col));
+                out.push(block.join("\n"));
+                return;
+            }
+            captions.push(caption_of(map));
+            for (k, child) in map {
+                if !k.starts_with("__") {
+                    find_tables(child, captions, out);
+                }
+            }
+            captions.pop();
+        }
+        Value::Array(items) => {
+            if is_grid(items) {
+                let mut block: Vec<String> = captions.last().cloned().unwrap_or_default();
+                block.extend(render_grid(items, true, false));
+                out.push(block.join("\n"));
+                return;
+            }
+            for i in items {
+                find_tables(i, captions, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Tables worth adding to a passage: those mentioning a term first, then the
+/// rest, while they fit in `budget` characters — and never one whose rows the
+/// passage already carries. Pure.
+pub fn pick_tables(all: &[String], passage: &str, terms: &[String], budget: usize) -> Vec<String> {
+    let lower_passage = passage.to_lowercase();
+    let mut ranked: Vec<(bool, &String)> = all
+        .iter()
+        .filter(|t| {
+            let probe = t.lines().last().unwrap_or("").to_lowercase();
+            probe.is_empty() || !lower_passage.contains(&probe)
+        })
+        .map(|t| {
+            let lt = t.to_lowercase();
+            (terms.iter().any(|term| lt.contains(term.as_str())), t)
+        })
+        .collect();
+    ranked.sort_by_key(|(hit, _)| !*hit);
+    let mut used = 0;
+    let mut out = Vec::new();
+    for (_, t) in ranked {
+        let n = t.chars().count();
+        if used + n > budget {
+            if out.is_empty() {
+                out.push(t.chars().take(budget).collect::<String>() + "…");
+            }
+            break;
+        }
+        used += n;
+        out.push(t.clone());
+    }
+    out
 }
 
 /// A link the site can use, when the node carries one: the locale's own URL
@@ -378,5 +653,71 @@ mod tests {
         let s = snippet(&text, &["ceo".to_string()]);
         assert!(s.contains("CEO"), "{s}");
         assert!(s.chars().count() <= SNIPPET_CHARS + 2);
+    }
+
+    /// The bap:Table block's shape: a composite of tables, each with a caption
+    /// and a `{header_row, header_col, rows}` grid.
+    fn parking_page() -> Value {
+        json!({
+            "title": "Parken am Flughafen",
+            "content": [
+                { "element_type": "bap:Text", "body": "<p>Parken direkt am <strong>Terminal</strong>.</p>" },
+                { "element_type": "bap:Table", "tables": [{
+                    "title": "Parktarife Kurzzeitparken",
+                    "subtitle": "gültig ab 01.02.2026",
+                    "note": "<p>P3 kann <em>nicht</em> online reserviert werden.</p>",
+                    "data": { "header_row": true, "header_col": true,
+                              "rows": [["", "P3", "P11"], ["bis 30 Minuten", "–", "2,00 €"], ["1 Tag", "**19,00 €**", "25,00 €"]] }
+                }]}
+            ]
+        })
+    }
+
+    #[test]
+    fn a_table_renders_as_rows_that_name_their_columns() {
+        let t = tables(&parking_page());
+        assert_eq!(t.len(), 1);
+        assert_eq!(
+            t[0],
+            "Parktarife Kurzzeitparken\ngültig ab 01.02.2026\nP3 kann nicht online reserviert werden.\n\
+             bis 30 Minuten — P11: 2,00 €\n1 Tag — P3: 19,00 €; P11: 25,00 €"
+        );
+    }
+
+    #[test]
+    fn table_cells_are_not_scattered_through_the_prose() {
+        let text = node_text(&parking_page()).join("\n");
+        assert!(!text.contains("25,00"), "{text}");
+        assert!(text.contains("Parken direkt am Terminal."), "{text}");
+    }
+
+    #[test]
+    fn tables_that_mention_the_question_go_first_within_the_budget() {
+        let all = vec![
+            "Frachttarife\nKilo — 1 €".to_string(),
+            "Parktarife\n1 Tag — P3: 19 €".to_string(),
+        ];
+        let picked = pick_tables(&all, "Parken am Flughafen", &["parktarife".to_string()], 30);
+        assert_eq!(picked, vec!["Parktarife\n1 Tag — P3: 19 €".to_string()]);
+        assert!(
+            pick_tables(&all, "Parktarife\n1 Tag — P3: 19 €", &[], 500)
+                .iter()
+                .all(|t| !t.starts_with("Parktarife")),
+            "a table the passage already carries is not added twice"
+        );
+    }
+
+    #[test]
+    fn html_becomes_plain_text() {
+        assert_eq!(
+            strip_html("<p>Parken &amp; Reisen</p><ul><li>P3</li><li>P11&nbsp;Nord</li></ul>"),
+            "Parken & Reisen\nP3\nP11 Nord"
+        );
+        assert_eq!(strip_html("a < b &unknown; c"), "a < b &unknown; c");
+        assert_eq!(strip_html("Preis: **19,00 €**"), "Preis: 19,00 €");
+        assert_eq!(
+            snippet("<p>Max Muster ist <b>CEO</b>.</p>", &[]),
+            "Max Muster ist CEO."
+        );
     }
 }

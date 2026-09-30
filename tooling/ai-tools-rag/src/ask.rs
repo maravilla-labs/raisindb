@@ -46,7 +46,7 @@
 
 use crate::backend::Backend;
 use crate::options::SearchOptions;
-use crate::retrieve::{retrieve, Passage, Retrieval};
+use crate::retrieve::{ms_since, retrieve, Passage, Retrieval};
 use serde_json::{json, Value};
 
 const GRAPH_FUNCTION: &str = "/lib/raisin/ai/graph-context";
@@ -543,6 +543,9 @@ pub fn ask(b: &dyn Backend, input: &Value) -> Result<Value, String> {
         })?,
     };
 
+    let started = std::time::Instant::now();
+    let mut timings = json!({});
+
     // Expansion: "auto" (default) for short or abbreviated questions, or
     // forced with true / off with false.
     let wants_expansion = match input.get("expand") {
@@ -552,31 +555,45 @@ pub fn ask(b: &dyn Backend, input: &Value) -> Result<Value, String> {
         _ => needs_expansion(&question),
     };
     if wants_expansion && opts.expansions.is_empty() {
+        let t = std::time::Instant::now();
         opts.expansions = expand(b, &model, &question, opts.base_language.as_deref());
+        timings["expand_ms"] = json!(ms_since(t));
     }
+    // The grader and its one rewrite: on by default, `rewrite: false` skips
+    // the model call when one retrieval is all a caller will wait for.
+    let wants_rewrite = input
+        .get("rewrite")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
 
     let mut search_for = question.clone();
     let mut found = Retrieval {
         passages: Vec::new(),
         mode: "hybrid",
         terms: Vec::new(),
+        timings: json!({}),
     };
     let mut attempts: Vec<Value> = Vec::new();
+    let mut retrieval_timings: Vec<Value> = Vec::new();
+    let mut grade_ms = 0.0;
 
     for attempt in 1..=MAX_ATTEMPTS {
         let mut o = opts.clone();
         o.query = search_for.clone();
         found = retrieve(b, &o).map_err(|e| format!("Retrieval failed: {e}"))?;
+        retrieval_timings.push(found.timings.clone());
         let mut entry = json!({ "query": search_for, "passages": found.passages.len() });
         if attempt == 1 && !opts.expansions.is_empty() {
             entry["expansions"] = json!(opts.expansions);
         }
         attempts.push(entry);
 
-        if attempt == MAX_ATTEMPTS {
+        if attempt == MAX_ATTEMPTS || !wants_rewrite {
             break;
         }
+        let t = std::time::Instant::now();
         let verdict = grade(b, &model, &question, &found.passages);
+        grade_ms += ms_since(t);
         if verdict.sufficient || verdict.rewrite.is_empty() {
             break;
         }
@@ -586,18 +603,24 @@ pub fn ask(b: &dyn Backend, input: &Value) -> Result<Value, String> {
         ));
         search_for = verdict.rewrite;
     }
+    timings["retrieval"] = json!(retrieval_timings);
+    if wants_rewrite {
+        timings["grade_ms"] = json!(grade_ms);
+    }
 
     if found.passages.is_empty() {
         b.log(&format!(
             "[ask] no passages for \"{}\"",
             question.chars().take(80).collect::<String>()
         ));
+        timings["total_ms"] = json!(ms_since(started));
         return Ok(json!({
             "answer": not_found(opts.locale.as_deref()),
             "grounded": false,
             "citations": [],
             "attempts": attempts,
             "model": "",
+            "timings": timings,
         }));
     }
 
@@ -649,6 +672,7 @@ pub fn ask(b: &dyn Backend, input: &Value) -> Result<Value, String> {
         }
     }
 
+    let t = std::time::Instant::now();
     let response = b.completion(&json!({
         "model": model,
         "messages": [
@@ -656,7 +680,10 @@ pub fn ask(b: &dyn Backend, input: &Value) -> Result<Value, String> {
             { "role": "user", "content": format!("Question: {question}\n\nPassages:\n\n{context}") },
         ],
     }))?;
-    let draft = content_of(&response);
+    timings["answer_ms"] = json!(ms_since(t));
+    // Models cite in their own house style (【1】, 【1†L3-L5】, [1†source],
+    // [1, 2]); callers resolve `[n]`, so that is what they get.
+    let draft = normalize_citations(&content_of(&response));
     let used_model = response
         .get("model")
         .and_then(Value::as_str)
@@ -665,7 +692,10 @@ pub fn ask(b: &dyn Backend, input: &Value) -> Result<Value, String> {
         .to_string();
 
     let checked = if input.get("verify").and_then(Value::as_bool).unwrap_or(true) {
-        verify(b, &model, &question, &context, &draft)
+        let t = std::time::Instant::now();
+        let c = verify(b, &model, &question, &context, &draft);
+        timings["verify_ms"] = json!(ms_since(t));
+        c
     } else {
         Checked {
             answer: draft.clone(),
@@ -673,14 +703,16 @@ pub fn ask(b: &dyn Backend, input: &Value) -> Result<Value, String> {
             verification: "skipped",
         }
     };
+    timings["total_ms"] = json!(ms_since(started));
     b.log(&format!(
-        "[ask] \"{}\" → {} passage(s) in {} attempt(s), {} chars from {model}, claim check {} ({} dropped)",
+        "[ask] \"{}\" → {} passage(s) in {} attempt(s), {} chars from {model}, claim check {} ({} dropped), timings {}",
         question.chars().take(80).collect::<String>(),
         found.passages.len(),
         attempts.len(),
         draft.chars().count(),
         checked.verification,
-        checked.dropped.len()
+        checked.dropped.len(),
+        timings
     ));
 
     if checked.verification == "rejected" {
@@ -694,6 +726,7 @@ pub fn ask(b: &dyn Backend, input: &Value) -> Result<Value, String> {
             "model": used_model,
             "verification": "rejected",
             "dropped_claims": checked.dropped,
+            "timings": timings,
         }));
     }
 
@@ -704,11 +737,57 @@ pub fn ask(b: &dyn Backend, input: &Value) -> Result<Value, String> {
         "attempts": attempts,
         "model": used_model,
         "verification": checked.verification,
+        "timings": timings,
     });
     if !checked.dropped.is_empty() {
         out["dropped_claims"] = json!(checked.dropped);
     }
     Ok(out)
+}
+
+/// Citation markers in the one form callers resolve: `[n]`. Pure.
+///
+/// `【1】`, `【1†L3-L5】`, `【1†source】` (the gpt-oss family), `[1†L3]`, and
+/// `[1, 2]` / `[1,2]` all become `[1]` / `[1][2]`. Anything bracketed that does
+/// not start with a number is left alone.
+pub fn normalize_citations(answer: &str) -> String {
+    let chars: Vec<char> = answer.chars().collect();
+    let mut out = String::with_capacity(answer.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let open = chars[i];
+        let close = match open {
+            '【' => Some('】'),
+            '[' => Some(']'),
+            _ => None,
+        };
+        if let Some(close) = close {
+            if let Some(len) = chars[i + 1..].iter().take(40).position(|c| *c == close) {
+                let inner: String = chars[i + 1..i + 1 + len].iter().collect();
+                // the part before any dagger / colon annotation
+                let head = inner.split(['†', ':']).next().unwrap_or("");
+                let numbers: Vec<&str> = head
+                    .split([',', ';', ' '])
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                    .collect();
+                let all_numbers = !numbers.is_empty()
+                    && numbers
+                        .iter()
+                        .all(|n| n.chars().all(|c| c.is_ascii_digit()));
+                if all_numbers && (open == '【' || inner != head || numbers.len() > 1) {
+                    for n in numbers {
+                        out.push_str(&format!("[{n}]"));
+                    }
+                    i += len + 2;
+                    continue;
+                }
+            }
+        }
+        out.push(open);
+        i += 1;
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1174,6 +1253,11 @@ mod tests {
                         "chunk_index": 0, "chunk_text": DIRECTIONS, "chunk_text_source": "exact", "title": "Anfahrt" }),
                     ]);
                 }
+                if sql.contains("FROM 'stories'") {
+                    // the directions page's own properties: no tables
+                    return Ok(vec![json!({ "path": "/bap/anfahrt",
+                        "properties": { "title": "Anfahrt", "body": DIRECTIONS } })]);
+                }
                 assert!(
                     sql.contains("SUBSTRING(properties->>'__extracted_text'"),
                     "{sql}"
@@ -1347,5 +1431,69 @@ mod tests {
                 vec!["- Parken: 3 Parkhäuser [3]".to_string()],
             ]
         );
+    }
+
+    // ---- output format and timings ---------------------------------------
+
+    #[test]
+    fn citation_markers_are_normalized_to_brackets() {
+        assert_eq!(
+            normalize_citations("Parken kostet 19 € 【1】."),
+            "Parken kostet 19 € [1]."
+        );
+        assert_eq!(
+            normalize_citations("Siehe 【2†L3-L5】 und 【3†source】"),
+            "Siehe [2] und [3]"
+        );
+        assert_eq!(
+            normalize_citations("A [1†L2] B [1, 2] C [4]"),
+            "A [1] B [1][2] C [4]"
+        );
+        assert_eq!(
+            normalize_citations("[Hinweis] bleibt [a, b]"),
+            "[Hinweis] bleibt [a, b]"
+        );
+    }
+
+    #[test]
+    fn the_answer_is_returned_with_normalized_markers_and_timings() {
+        let mut f = stub(HashMap::from([(LONG_Q, Ok(vec![msa()]))]), sufficient());
+        f.completion_fn = Box::new(|req| {
+            let system = req["messages"][0]["content"].as_str().unwrap_or("");
+            if system.contains("You judge") {
+                Ok(json!({ "content": "{\"sufficient\": true}" }))
+            } else if system.contains("You check") {
+                Ok(json!({ "content": "{\"sentences\": [{\"n\": 1, \"supported\": true}]}" }))
+            } else {
+                Ok(json!({ "content": "Thirty days 【1†L1-L2】.", "model": "m" }))
+            }
+        });
+        let out = ask(&f, &json!({ "question": LONG_Q })).unwrap();
+        assert_eq!(out["answer"], json!("Thirty days [1]."));
+        let t = &out["timings"];
+        for k in [
+            "retrieval",
+            "grade_ms",
+            "answer_ms",
+            "verify_ms",
+            "total_ms",
+        ] {
+            assert!(!t[k].is_null(), "timings lack {k}: {t}");
+        }
+        assert!(t.get("expand_ms").is_none(), "no expansion ran");
+    }
+
+    #[test]
+    fn rewrite_false_skips_the_grader() {
+        let f = stub(HashMap::from([(LONG_Q, Ok(vec![msa()]))]), sufficient());
+        ask(&f, &json!({ "question": LONG_Q, "rewrite": false })).unwrap();
+        assert!(!f
+            .completions
+            .borrow()
+            .iter()
+            .any(|c| c["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("You judge")));
     }
 }

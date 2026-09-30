@@ -76,7 +76,7 @@ properties:
         description: "How many passages to return. Defaults to 8; 20 is a sensible maximum for filling a context window."
       candidates:
         type: "integer"
-        description: "How many passages each search leg draws before filtering and ranking. Defaults to 40."
+        description: "How many passages each search leg draws before filtering and ranking. Defaults to 24."
       max_per_document:
         type: "integer"
         description: "At most this many passages from one document. Defaults to 0 (no cap)."
@@ -132,6 +132,9 @@ properties:
               type: ["string", "null"]
       count:
         type: "integer"
+      timings:
+        type: "object"
+        description: "Milliseconds per SQL leg, for the passage reads, and in total."
       mode:
         type: "string"
         description: "hybrid, or fulltext when the tenant has no embedder."

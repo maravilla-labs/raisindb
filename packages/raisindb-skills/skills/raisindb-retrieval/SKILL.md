@@ -231,8 +231,21 @@ ask({ question,
   passages; unsupported ones are dropped. It exists because a model asked "Wem
   gehört der Flughafen?" without the shareholder passage answered by making the
   towns on a directions page the owners.
-- `candidates` (default 40) — each leg's draw before filters, fusion and the
-  per-document cap (`max_per_document`, 3 in `ask`).
+- `candidates` (default 24) — each leg's draw before filters, fusion and the
+  per-document cap (`max_per_document`, 3 in `ask`). It is the retrieval's
+  cost: the engine draws 20x it per leg and redraws wider when a scope leaves
+  it short.
+- `rewrite` (ask, default on) — the grader call and its one retry;
+  `rewrite: false`, `expand: false` and `verify: false` leave `ask` with the
+  answer call alone. The host gateway is synchronous, so these calls run in
+  sequence; every result carries `timings` (ms per SQL leg, passage reads,
+  and each model call) to show which one to switch off.
+- **Tables are passage text.** A page passage carries the page's tables
+  (`{rows: [[…]]}` grids anywhere in its properties, e.g. a tariff block),
+  rendered row by row with their column headers, in the reader's locale —
+  the chunk the vector leg matched never contained them. Snippets and
+  passages are plain text (HTML stripped); citation markers come back as
+  `[n]` whatever style the model wrote (`【1】`, `【1†L3】`).
 
 A lexical-only hit (the vector leg missed it) has NULL `chunk_text`; it now
 gets a passage cut around the matched words (`source: "excerpt"`) instead of

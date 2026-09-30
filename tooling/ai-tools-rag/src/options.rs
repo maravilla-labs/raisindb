@@ -17,11 +17,14 @@ pub const MAX_LIMIT: usize = 50;
 /// How many passages each search leg draws before fusion, filtering and
 /// per-document capping cut it down to `limit`.
 ///
-/// Forty, because the failure this exists for was measured at eight: on a real
-/// site, "wer ist der CEO?" put three images and a garbled PDF above the right
-/// page, so a top-8 draw handed the model four useless passages of eight. A
-/// wider draw costs one bigger index walk, not more round trips.
-pub const DEFAULT_CANDIDATES: usize = 40;
+/// Twenty-four: wider than the answer, because on a real site "wer ist der
+/// CEO?" put three images and a garbled PDF above the right page, so a top-8
+/// draw handed the model four useless passages of eight. Not wider still: the
+/// engine draws 20x this per leg (every `WHERE` makes the draw a filtered
+/// one), fetches and permission-checks candidates until it has this many, and
+/// redraws 4x wider when a scope leaves it short — so the window is the
+/// retrieval's cost, and 40 was paying for passages `ask` never shows.
+pub const DEFAULT_CANDIDATES: usize = 24;
 
 /// Ceiling on the candidate window. The engine draws 20x the window per leg
 /// (capped at 2000), so past 100 the leg cap, not this number, decides.

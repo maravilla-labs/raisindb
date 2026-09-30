@@ -82,7 +82,7 @@ properties:
         description: "How many passages to ground the answer in. Defaults to 8."
       candidates:
         type: "integer"
-        description: "How many passages each search leg draws before filtering and ranking. Defaults to 40."
+        description: "How many passages each search leg draws before filtering and ranking. Defaults to 24."
       max_per_document:
         type: "integer"
         description: "At most this many passages from one document. Defaults to 3; 0 = no cap."
@@ -92,6 +92,9 @@ properties:
       use_graph:
         type: "boolean"
         description: "Also include the graph neighbourhood of the question's subject. Costs a graph walk; off by default."
+      rewrite:
+        type: "boolean"
+        description: "Grade the first retrieval and, when it does not answer the question, rewrite the query and retrieve once more. One model call; on by default."
       verify:
         type: "boolean"
         description: "Check every sentence of the drafted answer against the passages and drop what they do not state. One extra model call; on by default."
@@ -155,6 +158,9 @@ properties:
       verification:
         type: "string"
         description: "The claim check: passed, trimmed (unsupported sentences removed), rejected (nothing supported survived; grounded is false), unavailable (the check failed and the draft is returned unchecked) or skipped."
+      timings:
+        type: "object"
+        description: "Milliseconds per step: expand_ms, retrieval (per attempt: each SQL leg, the passage reads, total), grade_ms, answer_ms, verify_ms, total_ms."
       dropped_claims:
         type: "array"
         description: "The sentences the claim check removed, when it removed any."

@@ -295,7 +295,7 @@ async fn search_documents_scopes_filters_and_keeps_lexical_hits() {
     let sql: Vec<Value> = api.sql_queries();
     let main = sql[0]["sql"].as_str().unwrap();
     assert!(
-        main.contains("HYBRID_SEARCH($1, 40, workspaces => $2, granularity => 'chunk')"),
+        main.contains("HYBRID_SEARCH($1, 24, workspaces => $2, granularity => 'chunk')"),
         "{main}"
     );
     assert!(

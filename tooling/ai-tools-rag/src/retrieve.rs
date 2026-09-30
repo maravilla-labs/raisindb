@@ -26,6 +26,10 @@ use std::collections::HashMap;
 /// fused score here reads like one from `HYBRID_SEARCH`.
 const RRF_K: f64 = 60.0;
 
+/// How much table text one passage may carry, in characters. A tariff page's
+/// tables run to a few hundred characters each; this keeps two or three.
+const TABLE_CHARS: usize = 2000;
+
 /// How much of an uploaded document's text a lexical passage is cut from.
 const DOCUMENT_TEXT_CHARS: usize = 60_000;
 
@@ -94,6 +98,13 @@ pub struct Retrieval {
     pub mode: &'static str,
     /// Words the passages were cut around and snippets centred on.
     pub terms: Vec<String>,
+    /// Where the time went: every SQL leg, the passage reads, the total.
+    pub timings: Value,
+}
+
+/// Milliseconds since `t`, to a tenth.
+pub fn ms_since(t: std::time::Instant) -> f64 {
+    (t.elapsed().as_secs_f64() * 10_000.0).round() / 10.0
 }
 
 fn s(v: Option<&Value>) -> String {
@@ -222,7 +233,7 @@ fn fuse(lists: &[Vec<Value>]) -> Vec<Candidate> {
                         title,
                         chunk_index,
                         text_is_exact: source == "exact",
-                        text: chunk_text,
+                        text: text::strip_html(&chunk_text),
                         score: add,
                         lexical,
                         semantic,
@@ -284,9 +295,21 @@ fn fuse(lists: &[Vec<Value>]) -> Vec<Candidate> {
 
 /// Run every leg, fuse, filter, cap and fill in text.
 pub fn retrieve(b: &dyn Backend, o: &SearchOptions) -> Result<Retrieval, String> {
+    let started = std::time::Instant::now();
+    let mut legs: Vec<Value> = Vec::new();
+    let mut timed = |name: &str, query: &str, leg: Leg| -> Result<Vec<Value>, String> {
+        let t = std::time::Instant::now();
+        let out = run_leg(b, o, query, leg);
+        legs.push(json!({
+            "leg": name,
+            "ms": ms_since(t),
+            "rows": out.as_ref().map(|r| r.len()).unwrap_or(0),
+        }));
+        out
+    };
     let mut lists: Vec<Vec<Value>> = Vec::new();
     let mut mode = "hybrid";
-    match run_leg(b, o, &o.query, Leg::Hybrid) {
+    match timed("hybrid", &o.query, Leg::Hybrid) {
         Ok(rows) => lists.push(rows),
         // No embedder: the engine refuses rather than silently running half a
         // hybrid query. For answering, keyword search is far better than no
@@ -294,12 +317,16 @@ pub fn retrieve(b: &dyn Backend, o: &SearchOptions) -> Result<Retrieval, String>
         Err(e) if is_no_embedder(&e) => {
             b.log(&format!("[search] no embedder, full text only: {e}"));
             mode = "fulltext";
-            lists.push(run_leg(b, o, &o.query, Leg::Lexical(None))?);
+            lists.push(timed("fulltext", &o.query, Leg::Lexical(None))?);
         }
         Err(e) => return Err(e),
     }
     if !o.expansions.is_empty() {
-        lists.push(run_leg(b, o, &o.expansions.join(" "), Leg::Lexical(None))?);
+        lists.push(timed(
+            "expansions",
+            &o.expansions.join(" "),
+            Leg::Lexical(None),
+        )?);
     }
     for lang in &o.fulltext_languages {
         let q = if o.expansions.is_empty() {
@@ -307,7 +334,11 @@ pub fn retrieve(b: &dyn Backend, o: &SearchOptions) -> Result<Retrieval, String>
         } else {
             format!("{} {}", o.query, o.expansions.join(" "))
         };
-        lists.push(run_leg(b, o, &q, Leg::Lexical(Some(lang.as_str())))?);
+        lists.push(timed(
+            &format!("fulltext:{lang}"),
+            &q,
+            Leg::Lexical(Some(lang.as_str())),
+        )?);
     }
 
     let mut per_doc: HashMap<(String, String), usize> = HashMap::new();
@@ -335,7 +366,9 @@ pub fn retrieve(b: &dyn Backend, o: &SearchOptions) -> Result<Retrieval, String>
     // text turns out to be empty is dropped and the next one takes its place.
     let reach = (o.limit * 2 + 4).min(picked.len());
     let mut head: Vec<Passage> = picked.drain(..reach).collect();
-    fill_text(b, o, &terms, &mut head)?;
+    let t = std::time::Instant::now();
+    let reads = fill_text(b, o, &terms, &mut head)?;
+    let fill_ms = ms_since(t);
     let passages: Vec<Passage> = head
         .into_iter()
         .filter(|p| !p.text.trim().is_empty())
@@ -346,6 +379,12 @@ pub fn retrieve(b: &dyn Backend, o: &SearchOptions) -> Result<Retrieval, String>
         passages,
         mode,
         terms,
+        timings: json!({
+            "legs": legs,
+            "reads": reads,
+            "reads_ms": fill_ms,
+            "total_ms": ms_since(started),
+        }),
     })
 }
 
@@ -359,14 +398,16 @@ fn fill_text(
     o: &SearchOptions,
     terms: &[String],
     passages: &mut [Passage],
-) -> Result<(), String> {
+) -> Result<usize, String> {
     let overlay = o.overlay_locale();
     // (workspace, is_asset) -> indexes of passages that need a read
     let mut groups: Vec<((String, bool), Vec<usize>)> = Vec::new();
     for (i, p) in passages.iter().enumerate() {
         let needs_text = p.text.trim().is_empty();
-        let wants_overlay = overlay.is_some() && p.kind == Kind::Page;
-        if !(needs_text || wants_overlay) || !is_workspace_name(&p.workspace) {
+        // Every page is read: its tables and lists are structured block
+        // content that is not in the chunk the vector leg matched.
+        let is_page = p.kind == Kind::Page;
+        if !(needs_text || is_page) || !is_workspace_name(&p.workspace) {
             continue;
         }
         let key = (p.workspace.clone(), p.node_type == ASSET_TYPE);
@@ -376,6 +417,8 @@ fn fill_text(
         }
     }
 
+    let reads = groups.len();
+    let mut tabled: Vec<(String, String)> = Vec::new();
     for ((workspace, is_asset), idx) in groups {
         let mut paths: Vec<String> = Vec::new();
         for &i in &idx {
@@ -423,9 +466,19 @@ fn fill_text(
             if let Some(u) = text::url_hint(&props, overlay) {
                 p.url_hint = Some(u);
             }
+            // Tables go with the first passage of their page only: three
+            // passages of one page must not carry its price list three times.
+            let key = (p.workspace.to_ascii_lowercase(), p.node_id.clone());
+            if p.kind == Kind::Page && !p.text.trim().is_empty() && !tabled.contains(&key) {
+                let picked = text::pick_tables(&text::tables(&props), &p.text, terms, TABLE_CHARS);
+                if !picked.is_empty() {
+                    p.text = format!("{}\n\n{}", p.text, picked.join("\n\n"));
+                    tabled.push(key);
+                }
+            }
         }
     }
-    Ok(())
+    Ok(reads)
 }
 
 /// Read the text-bearing fields of `paths` in one workspace, in `locale` when
@@ -496,7 +549,7 @@ mod tests {
         let log = fake.sql_log.borrow();
         let (sql, params) = &log[0];
         assert!(
-            sql.contains("FROM HYBRID_SEARCH($1, 40, workspaces => $2, granularity => 'chunk')"),
+            sql.contains("FROM HYBRID_SEARCH($1, 24, workspaces => $2, granularity => 'chunk')"),
             "{sql}"
         );
         assert!(
@@ -541,7 +594,8 @@ mod tests {
         assert_eq!(news.source, "excerpt");
         assert_eq!(news.matched(), "text");
         assert!(
-            fake.sqls()[1].starts_with("SELECT path, properties FROM 'stories' WHERE path IN ($1)"),
+            fake.sqls()[1]
+                .starts_with("SELECT path, properties FROM 'stories' WHERE path IN ($1, $2)"),
             "{}",
             fake.sqls()[1]
         );
@@ -760,19 +814,19 @@ mod tests {
 
     pub const CONTRACT: [(&str, &str); 4] = [
         (
-            r#"{"workspaces": "stories, assets", "paths": ["/bap"]}"#,
+            r#"{"candidates": 40, "workspaces": "stories, assets", "paths": ["/bap"]}"#,
             " WHERE ((path = $3 OR path LIKE $4)) AND (node_type <> 'raisin:Asset' OR properties->>'file_type' IS NULL OR NOT (properties->>'file_type' LIKE 'image/%'))",
         ),
         (
-            r#"{"workspaces": "stories, assets", "paths": ["/bap"], "include_kinds": ["page", "document"], "exclude_node_types": ["studio:Blueprint"]}"#,
+            r#"{"candidates": 40, "workspaces": "stories, assets", "paths": ["/bap"], "include_kinds": ["page", "document"], "exclude_node_types": ["studio:Blueprint"]}"#,
             " WHERE ((path = $3 OR path LIKE $4)) AND (node_type <> 'raisin:Asset' OR (node_type = 'raisin:Asset' AND (properties->>'file_type' IS NULL OR NOT (properties->>'file_type' LIKE 'image/%' OR properties->>'file_type' LIKE 'video/%' OR properties->>'file_type' LIKE 'audio/%')))) AND node_type <> $5",
         ),
         (
-            r#"{"workspaces": "stories, assets", "paths": ["stories:/bap", "assets:/demo"]}"#,
+            r#"{"candidates": 40, "workspaces": "stories, assets", "paths": ["stories:/bap", "assets:/demo"]}"#,
             " WHERE ((workspace_id = $5 AND (path = $3 OR path LIKE $4)) OR (workspace_id = $8 AND (path = $6 OR path LIKE $7))) AND (node_type <> 'raisin:Asset' OR properties->>'file_type' IS NULL OR NOT (properties->>'file_type' LIKE 'image/%'))",
         ),
         (
-            r#"{"workspaces": "stories, assets", "paths": ["/bap"], "include_kinds": ["image"]}"#,
+            r#"{"candidates": 40, "workspaces": "stories, assets", "paths": ["/bap"], "include_kinds": ["image"]}"#,
             " WHERE ((path = $3 OR path LIKE $4)) AND ((node_type = 'raisin:Asset' AND properties->>'file_type' LIKE 'image/%'))",
         ),
     ];
@@ -799,5 +853,111 @@ mod tests {
                 json!("assets")
             ]
         );
+    }
+
+    fn parking_rows(sql: &str) -> Result<Vec<Value>, String> {
+        if sql.contains("HYBRID_SEARCH") {
+            return Ok(vec![
+                chunk(
+                    "/bap/parken",
+                    "p",
+                    0,
+                    "<p>Parken am Flughafen: drei Parkhäuser direkt am Terminal.</p>",
+                ),
+                chunk("/bap/parken", "p", 1, "Anreise mit dem Auto über die A5."),
+            ]);
+        }
+        let de = !sql.contains("locale = 'fr'");
+        Ok(vec![json!({ "path": "/bap/parken", "properties": {
+            "title": if de { "Title p" } else { "Parking à l'aéroport" },
+            "content": [{ "element_type": "bap:Table", "tables": [{
+                "title": if de { "Parktarife" } else { "Tarifs de stationnement" },
+                "data": { "header_row": true, "header_col": true,
+                          "rows": [["", "P3"], [if de { "1 Tag" } else { "1 jour" }, "19,00 €"]] }
+            }]}]
+        }})])
+    }
+
+    #[test]
+    fn a_page_passage_carries_its_tables_once() {
+        let fake = Fake {
+            sql_fn: Box::new(|sql, _| parking_rows(sql)),
+            ..Fake::default()
+        };
+        let r = retrieve(&fake, &opts(json!({"query": "Was kostet Parken?"}))).unwrap();
+        let with_table: Vec<&Passage> = r
+            .passages
+            .iter()
+            .filter(|p| p.text.contains("19,00 €"))
+            .collect();
+        assert_eq!(
+            with_table.len(),
+            1,
+            "the price list rides on one passage of the page"
+        );
+        assert!(
+            with_table[0]
+                .text
+                .contains("Parktarife\n1 Tag — P3: 19,00 €"),
+            "{}",
+            with_table[0].text
+        );
+        assert!(
+            !r.passages[0].text.contains("<p>"),
+            "chunk text is plain text: {}",
+            r.passages[0].text
+        );
+        let snippet = r.passages[0].to_json(&r.terms)["snippet"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(!snippet.contains('<'), "{snippet}");
+    }
+
+    #[test]
+    fn a_localized_page_carries_its_localized_tables() {
+        let fake = Fake {
+            sql_fn: Box::new(|sql, _| parking_rows(sql)),
+            ..Fake::default()
+        };
+        let r = retrieve(
+            &fake,
+            &opts(json!({"query": "prix parking", "locale": "fr", "base_language": "de"})),
+        )
+        .unwrap();
+        let p = &r.passages[0];
+        assert!(
+            p.text
+                .contains("Tarifs de stationnement\n1 jour — P3: 19,00 €"),
+            "{}",
+            p.text
+        );
+        assert_eq!(p.locale.as_deref(), Some("fr"));
+    }
+
+    #[test]
+    fn a_retrieval_reports_where_its_time_went() {
+        let fake = Fake {
+            sql_fn: Box::new(|sql, _| parking_rows(sql)),
+            ..Fake::default()
+        };
+        let r = retrieve(
+            &fake,
+            &opts(json!({"query": "Parken", "expansions": ["Parktarife"]})),
+        )
+        .unwrap();
+        let legs: Vec<&str> = r.timings["legs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["leg"].as_str().unwrap())
+            .collect();
+        assert_eq!(legs, vec!["hybrid", "expansions"]);
+        assert_eq!(
+            r.timings["reads"],
+            json!(1),
+            "one batched read for the page hits"
+        );
+        assert!(r.timings["total_ms"].is_number());
     }
 }

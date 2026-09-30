@@ -57,7 +57,12 @@ pub fn search_documents(b: &dyn Backend, input: &Value) -> Result<Value, String>
         results.len(),
         found.mode
     ));
-    let mut out = json!({ "count": results.len(), "results": results, "mode": found.mode });
+    let mut out = json!({
+        "count": results.len(),
+        "results": results,
+        "mode": found.mode,
+        "timings": found.timings,
+    });
     if !opts.expansions.is_empty() {
         out["expansions"] = json!(opts.expansions);
     }
