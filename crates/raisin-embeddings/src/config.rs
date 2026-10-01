@@ -131,6 +131,11 @@ pub struct TenantEmbeddingConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query_prefix: Option<String>,
 
+    /// Whether anonymous callers may have query text embedded (see
+    /// [`AnonymousQueryEmbeddings`]). Absent in stored configs = `Allow`.
+    #[serde(default)]
+    pub anonymous_query_embeddings: AnonymousQueryEmbeddings,
+
     /// Text prepended to every stored chunk before it is embedded.
     ///
     /// The document-side half of [`Self::query_prefix`], for models that want
@@ -169,6 +174,25 @@ pub enum EmbeddingQuantization {
     /// text index goes from ~222 MB to ~68 MB against the engine's shared
     /// 512 MB budget.
     Int8,
+}
+
+/// Whether an ANONYMOUS caller may have query text embedded.
+///
+/// Turning query text into a vector (`KNN(text)`, `HYBRID_SEARCH(text)`,
+/// `EMBEDDING(text)`) is a call to the embedding provider: money with a paid
+/// one, CPU with a local one. Any workspace the anonymous role may read is
+/// enough to trigger it over `/api/sql`. `Deny` refuses the embedding for the
+/// anonymous principal only; a literal vector and `VECTOR_OF(node)` cost
+/// nothing and stay allowed, and every signed-in caller, system context and
+/// agent tool (including a visitor's tools under the anonymous tool grant) is
+/// unaffected.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AnonymousQueryEmbeddings {
+    /// The behaviour before this setting existed.
+    #[default]
+    Allow,
+    Deny,
 }
 
 /// Supported embedding providers.
@@ -263,6 +287,7 @@ impl TenantEmbeddingConfig {
             quantization: EmbeddingQuantization::default(),
             query_prefix: None,
             document_prefix: None,
+            anonymous_query_embeddings: AnonymousQueryEmbeddings::default(),
         }
     }
 

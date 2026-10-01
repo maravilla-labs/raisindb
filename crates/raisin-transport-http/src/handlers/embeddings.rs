@@ -85,6 +85,11 @@ pub struct SetConfigRequest {
     /// Same contract as `query_prefix`.
     #[serde(default)]
     pub document_prefix: Option<String>,
+
+    /// `allow` / `deny`; absent keeps the stored value (the admin console's
+    /// save payload does not carry it).
+    #[serde(default)]
+    pub anonymous_query_embeddings: Option<raisin_embeddings::config::AnonymousQueryEmbeddings>,
 }
 
 /// Response body for GET config (no API key exposed)
@@ -260,12 +265,16 @@ pub async fn set_tenant_embedding_config(
         quantization: req.quantization.unwrap_or_default(),
         query_prefix: req.query_prefix.clone().filter(|p| !p.is_empty()),
         document_prefix: req.document_prefix.clone().filter(|p| !p.is_empty()),
+        anonymous_query_embeddings: req.anonymous_query_embeddings.unwrap_or_default(),
     };
 
     // Prefixes the request does not mention are kept. The admin console's save
     // payload predates them, and a save that silently dropped a document prefix
     // would re-embed the whole corpus without one.
-    if req.query_prefix.is_none() || req.document_prefix.is_none() {
+    if req.query_prefix.is_none()
+        || req.document_prefix.is_none()
+        || req.anonymous_query_embeddings.is_none()
+    {
         match repo.get_config(&tenant_id) {
             Ok(Some(existing)) => {
                 if req.query_prefix.is_none() {
@@ -273,6 +282,10 @@ pub async fn set_tenant_embedding_config(
                 }
                 if req.document_prefix.is_none() {
                     config.document_prefix = existing.document_prefix;
+                }
+                // A console save must not quietly re-open anonymous embedding.
+                if req.anonymous_query_embeddings.is_none() {
+                    config.anonymous_query_embeddings = existing.anonymous_query_embeddings;
                 }
             }
             Ok(None) => {}

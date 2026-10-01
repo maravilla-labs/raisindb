@@ -15,6 +15,8 @@ mod acl;
 #[cfg(test)]
 mod admin_statement_gate_tests;
 mod ai_config;
+#[cfg(test)]
+mod anonymous_query_embeddings_tests;
 mod batch;
 mod branch;
 pub mod catalog_cache;
@@ -339,6 +341,22 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
     /// `ALTER EMBEDDING CONFIG SET DEFAULT_MAX_DISTANCE` takes effect on the next
     /// statement instead of the next restart. A read failure is deliberately not
     /// fatal: a search at the engine default beats a query that will not run.
+    /// The tenant's embedding defaults on an execution context, from ONE read
+    /// of its config: the vector cutoff, and whether anonymous callers may have
+    /// query text embedded. Every path that builds a context calls this, so a
+    /// statement cannot reach the embedder by a path that forgot the policy.
+    pub(crate) fn apply_embedding_defaults<C: Storage + 'static>(
+        &self,
+        ctx: &mut ExecutionContext<C>,
+    ) {
+        let config = self.tenant_embedding_config().ok().flatten();
+        ctx.default_max_distance = config.as_ref().and_then(|c| c.default_max_distance);
+        ctx.deny_anonymous_query_embeddings = config.is_some_and(|c| {
+            c.anonymous_query_embeddings
+                == raisin_embeddings::config::AnonymousQueryEmbeddings::Deny
+        });
+    }
+
     pub(crate) fn tenant_default_max_distance(&self) -> Option<f32> {
         self.tenant_embedding_config()
             .ok()
@@ -740,7 +758,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         );
 
         ctx.default_language = Arc::from(self.default_language.as_str());
-        ctx.default_max_distance = self.tenant_default_max_distance();
+        self.apply_embedding_defaults(&mut ctx);
         ctx = ctx.with_max_revision(max_revision);
         ctx.locales = Arc::from(locales);
 

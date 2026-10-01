@@ -100,6 +100,7 @@ fn migrate_tenant_embedding_config_cf(db: &Arc<DB>) -> Result<()> {
             base_url: None,
             quantization: Default::default(),
             query_prefix: None,
+            anonymous_query_embeddings: Default::default(),
             document_prefix: None,
         };
 

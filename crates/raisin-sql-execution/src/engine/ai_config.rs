@@ -110,6 +110,13 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             config_row("distance_metric", &format!("{:?}", config.distance_metric)),
             config_row("query_prefix", config.query_prefix.as_deref().unwrap_or("")),
             config_row(
+                "anonymous_query_embeddings",
+                match config.anonymous_query_embeddings {
+                    raisin_embeddings::config::AnonymousQueryEmbeddings::Allow => "allow",
+                    raisin_embeddings::config::AnonymousQueryEmbeddings::Deny => "deny",
+                },
+            ),
+            config_row(
                 "document_prefix",
                 config.document_prefix.as_deref().unwrap_or(""),
             ),
@@ -229,6 +236,20 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
                 // each node on its next embedding job.
                 "QUERY_PREFIX" => {
                     config.query_prefix = Some(setting.value.clone()).filter(|p| !p.is_empty());
+                }
+                // Whether anonymous callers may have query text embedded:
+                // 'allow' (the default) or 'deny'.
+                "ANONYMOUS_QUERY_EMBEDDINGS" => {
+                    config.anonymous_query_embeddings = match setting.value.to_lowercase().as_str() {
+                        "allow" | "default" => raisin_embeddings::config::AnonymousQueryEmbeddings::Allow,
+                        "deny" => raisin_embeddings::config::AnonymousQueryEmbeddings::Deny,
+                        other => {
+                            return Err(Error::Validation(format!(
+                                "Invalid anonymous_query_embeddings value '{}': expected 'allow' or 'deny'",
+                                other
+                            )))
+                        }
+                    };
                 }
                 "DOCUMENT_PREFIX" => {
                     config.document_prefix = Some(setting.value.clone()).filter(|p| !p.is_empty());

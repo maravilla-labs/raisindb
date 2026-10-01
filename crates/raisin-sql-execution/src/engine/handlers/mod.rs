@@ -456,7 +456,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         );
 
         ctx.default_language = Arc::from(self.default_language.as_str());
-        ctx.default_max_distance = self.tenant_default_max_distance();
+        self.apply_embedding_defaults(&mut ctx);
         ctx = ctx.with_max_revision(max_revision);
         ctx.locales = Arc::from(locales.as_slice());
 
@@ -529,6 +529,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         if let Some(ref auth) = self.auth_context {
             ctx.auth_context = Some(auth.clone());
         }
+        self.apply_embedding_defaults(&mut ctx);
 
         let empty_row = Row::new();
         let mut result_columns = IndexMap::new();

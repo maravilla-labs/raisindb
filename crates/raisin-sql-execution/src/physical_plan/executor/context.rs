@@ -72,6 +72,11 @@ pub struct ExecutionContext<S: Storage> {
     /// Read at query time rather than cached on the engine, so an `ALTER` takes
     /// effect on the next statement instead of the next restart.
     pub default_max_distance: Option<f32>,
+    /// The tenant refuses to embed query text for anonymous callers
+    /// (`ALTER EMBEDDING CONFIG SET ANONYMOUS_QUERY_EMBEDDINGS = 'deny'`). Read
+    /// at query time like `default_max_distance`. See
+    /// [`ExecutionContext::refuse_query_embedding`].
+    pub deny_anonymous_query_embeddings: bool,
     /// Storage for materialized Common Table Expressions (CTEs)
     ///
     /// Maps CTE names to their materialized result sets, which may be
@@ -141,6 +146,7 @@ impl<S: Storage> ExecutionContext<S> {
             locales: Arc::from(Vec::new()), // Default: no locale filtering
             default_language: Arc::from("en"), // Default fallback, should be set by QueryEngine
             default_max_distance: None,     // Set by QueryEngine from the embedding config
+            deny_anonymous_query_embeddings: false, // Set by QueryEngine from the embedding config
             cte_storage: Arc::new(RwLock::new(HashMap::new())),
             cte_config: CTEConfig::default(),
             temp_files: Arc::new(RwLock::new(Vec::new())),
@@ -203,6 +209,25 @@ impl<S: Storage> ExecutionContext<S> {
     /// has switched it off. `Err` means one exists and is broken. Callers must
     /// keep those apart: reporting a broken config as "no vector search" is how
     /// a silent fulltext-only answer gets returned as if it were hybrid.
+    /// Why query text may NOT be embedded for this caller, or `None` when it
+    /// may. The one check every path that turns query text into a vector runs
+    /// first (the search surface, `EMBEDDING()`), so no provider is ever
+    /// called for a refused caller. Only the anonymous principal is refused,
+    /// and only when the tenant says so; no auth context (an internal engine)
+    /// is not anonymous.
+    pub fn refuse_query_embedding(&self) -> Option<String> {
+        let anonymous = self
+            .auth_context
+            .as_ref()
+            .is_some_and(|auth| auth.is_anonymous_principal());
+        (anonymous && self.deny_anonymous_query_embeddings).then(|| {
+            "Embedding query text is not available to anonymous callers on this \
+             tenant (ANONYMOUS_QUERY_EMBEDDINGS = 'deny'). Sign in, or search \
+             with a vector, VECTOR_OF(node) or FULLTEXT_SEARCH."
+                .to_string()
+        })
+    }
+
     pub async fn resolve_embedding_provider(
         &self,
     ) -> Result<Option<Arc<dyn EmbeddingProvider>>, raisin_error::Error> {
@@ -358,6 +383,7 @@ impl<S: Storage> Clone for ExecutionContext<S> {
             locales: self.locales.clone(), // Clone locales for multi-locale support
             default_language: self.default_language.clone(), // Clone default language
             default_max_distance: self.default_max_distance,
+            deny_anonymous_query_embeddings: self.deny_anonymous_query_embeddings,
             cte_storage: Arc::new(RwLock::new(HashMap::new())), // Note: CTEs are not cloned, each clone gets empty storage
             cte_config: self.cte_config.clone(),
             temp_files: Arc::new(RwLock::new(Vec::new())), // Note: temp_files are not shared across clones
