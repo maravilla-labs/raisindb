@@ -34,6 +34,15 @@ pub struct AnonymousChatConfig {
     pub turn_lease: Duration,
     /// Inactivity after which a session and its conversations are purged.
     pub session_ttl: Duration,
+    /// Tokens ALL of this agent's visitor conversations may use per UTC day,
+    /// as the pipeline records them (`raisin:AICostRecord`). `None`: no daily
+    /// budget. The hard stop on what anonymous chat may cost.
+    pub max_daily_tokens: Option<u64>,
+    /// Visitor messages per client IP per 24 hours, persisted. Generous: a
+    /// school or an office sends many visitors through one address.
+    pub max_messages_per_ip_per_day: u32,
+    /// New visitor sessions per client IP per hour, persisted. `None`: off.
+    pub max_new_sessions_per_ip_per_hour: Option<u32>,
 }
 
 impl Default for AnonymousChatConfig {
@@ -49,6 +58,9 @@ impl Default for AnonymousChatConfig {
             max_concurrent_turns: 1,
             turn_lease: Duration::from_secs(120),
             session_ttl: Duration::from_secs(24 * 3600),
+            max_daily_tokens: None,
+            max_messages_per_ip_per_day: 500,
+            max_new_sessions_per_ip_per_hour: None,
         }
     }
 }
@@ -131,6 +143,15 @@ impl AnonymousChatConfig {
         }
         if let Some(n) = int("session_ttl_hours", 24.0 * 90.0) {
             cfg.session_ttl = Duration::from_secs_f64(n * 3600.0);
+        }
+        if let Some(n) = int("max_daily_tokens", 1e12) {
+            cfg.max_daily_tokens = Some(n as u64);
+        }
+        if let Some(n) = int("max_messages_per_ip_per_day", 1e7) {
+            cfg.max_messages_per_ip_per_day = n as u32;
+        }
+        if let Some(n) = int("max_new_sessions_per_ip_per_hour", 1e6) {
+            cfg.max_new_sessions_per_ip_per_hour = Some(n as u32);
         }
         Some(cfg)
     }
@@ -224,5 +245,29 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.max_messages, 20);
         assert_eq!(cfg.max_message_chars, 2000);
+    }
+
+    #[test]
+    fn daily_limits_default_to_a_per_ip_cap_and_no_budget() {
+        let cfg = AnonymousChatConfig::from_agent_properties(&props(serde_json::json!({
+            "allow_anonymous": true
+        })))
+        .unwrap();
+        assert_eq!(cfg.max_daily_tokens, None);
+        assert_eq!(cfg.max_messages_per_ip_per_day, 500);
+        assert_eq!(cfg.max_new_sessions_per_ip_per_hour, None);
+
+        let cfg = AnonymousChatConfig::from_agent_properties(&props(serde_json::json!({
+            "anonymous": {
+                "enabled": true,
+                "max_daily_tokens": 2_000_000,
+                "max_messages_per_ip_per_day": 300,
+                "max_new_sessions_per_ip_per_hour": 40
+            }
+        })))
+        .unwrap();
+        assert_eq!(cfg.max_daily_tokens, Some(2_000_000));
+        assert_eq!(cfg.max_messages_per_ip_per_day, 300);
+        assert_eq!(cfg.max_new_sessions_per_ip_per_hour, Some(40));
     }
 }

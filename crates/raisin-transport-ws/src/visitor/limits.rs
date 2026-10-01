@@ -5,7 +5,8 @@
 //! In memory, per server process: a visitor's WebSocket lives on one server,
 //! and these limits exist to make abuse expensive, not to be exact across a
 //! cluster. (A cluster multiplies a per-IP allowance by its size; the
-//! per-conversation token budget and message cap are persisted and exact.)
+//! per-conversation token budget and message cap are persisted and exact.
+//! The daily limits are persisted too: see [`super::daily`].)
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -19,7 +20,24 @@ pub struct VisitorLimits {
     windows: DashMap<String, VecDeque<Instant>>,
     leases: DashMap<String, Vec<(String, Instant)>>,
     locks: DashMap<String, Arc<tokio::sync::Mutex<()>>>,
+    day_totals: DashMap<String, DayTotal>,
 }
+
+/// An agent's visitor tokens on one day, as last counted from storage.
+#[derive(Debug, Clone)]
+struct DayTotal {
+    day: String,
+    tokens: u64,
+    counted_at: Instant,
+    sends_since: u32,
+}
+
+/// A day total older than this is counted again before it decides.
+pub const DAY_TOTAL_MAX_AGE: Duration = Duration::from_secs(30);
+/// ... as is one that has let this many messages through since: what a burst
+/// can spend past the budget is bounded by these turns, not by 30 seconds of
+/// traffic.
+pub const DAY_TOTAL_MAX_SENDS: u32 = 20;
 
 /// Above this many tracked keys, stale ones are swept on the next hit.
 const SWEEP_ABOVE: usize = 50_000;
@@ -84,6 +102,38 @@ impl VisitorLimits {
         self.leases.remove_if(session, |_, slots| slots.is_empty());
     }
 
+    /// `agent`'s token total for `day` when the last count is recent enough
+    /// to decide on (same day, younger than [`DAY_TOTAL_MAX_AGE`], fewer
+    /// than [`DAY_TOTAL_MAX_SENDS`] messages let through since).
+    pub fn day_total(&self, agent: &str, day: &str, now: Instant) -> Option<u64> {
+        self.day_totals.get(agent).and_then(|t| {
+            (t.day == day
+                && now.saturating_duration_since(t.counted_at) < DAY_TOTAL_MAX_AGE
+                && t.sends_since < DAY_TOTAL_MAX_SENDS)
+                .then_some(t.tokens)
+        })
+    }
+
+    /// Record a fresh count of `agent`'s tokens on `day`.
+    pub fn set_day_total(&self, agent: &str, day: &str, tokens: u64, now: Instant) {
+        self.day_totals.insert(
+            agent.to_string(),
+            DayTotal {
+                day: day.to_string(),
+                tokens,
+                counted_at: now,
+                sends_since: 0,
+            },
+        );
+    }
+
+    /// A message of `agent`'s was let through on the last count.
+    pub fn note_send(&self, agent: &str) {
+        if let Some(mut t) = self.day_totals.get_mut(agent) {
+            t.sends_since += 1;
+        }
+    }
+
     /// The lock that serialises one session's writes (its counters live on
     /// its home node, read-modify-write).
     pub fn session_lock(&self, session: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -137,6 +187,32 @@ mod tests {
         assert!(!l.acquire_turn("s", "c3", 2, lease, t0), "the session cap");
         l.release_turn("s", "c1");
         assert!(l.acquire_turn("s", "c1", 2, lease, t0), "released on done");
+    }
+
+    #[test]
+    fn a_day_total_is_recounted_when_old_busy_or_from_another_day() {
+        let l = VisitorLimits::new();
+        let t0 = Instant::now();
+        assert_eq!(l.day_total("a", "2026-10-01", t0), None, "never counted");
+        l.set_day_total("a", "2026-10-01", 1234, t0);
+        assert_eq!(l.day_total("a", "2026-10-01", t0), Some(1234));
+        assert_eq!(l.day_total("b", "2026-10-01", t0), None, "per agent");
+        assert_eq!(l.day_total("a", "2026-10-02", t0), None, "a new day");
+        assert_eq!(
+            l.day_total("a", "2026-10-01", t0 + DAY_TOTAL_MAX_AGE),
+            None,
+            "too old"
+        );
+        for _ in 0..DAY_TOTAL_MAX_SENDS - 1 {
+            l.note_send("a");
+        }
+        assert_eq!(l.day_total("a", "2026-10-01", t0), Some(1234));
+        l.note_send("a");
+        assert_eq!(
+            l.day_total("a", "2026-10-01", t0),
+            None,
+            "too many messages let through since"
+        );
     }
 
     #[test]

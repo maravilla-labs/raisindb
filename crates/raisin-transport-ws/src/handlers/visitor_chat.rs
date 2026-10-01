@@ -11,7 +11,8 @@
 //!   and starts forwarding that conversation's events to THIS connection.
 //!   Nothing is written yet: the session home appears with the first message.
 //! * `visitor_chat_send {conversation_id, text}` applies the limits (message
-//!   size, per-session and per-IP rate, conversation length, the token budget,
+//!   size, per-session and per-IP rate, messages per IP per day, the agent's
+//!   daily token budget, conversation length, the conversation's token budget,
 //!   one turn at a time) and then writes the message into the session's outbox
 //!   AS THE SYSTEM. From there the ordinary pipeline delivers it to the agent
 //!   and the reply back into the session's conversation.
@@ -41,13 +42,15 @@ use crate::{
     error::WsError,
     handler::WsState,
     protocol::{EventMessage, RequestEnvelope, ResponseEnvelope},
-    visitor::{session, AnonymousChatConfig, VisitorBinding},
+    visitor::{daily, session, AnonymousChatConfig, VisitorBinding},
 };
 
 /// Visitor chats run on the main branch, where agents and triggers live.
 const BRANCH: &str = "main";
 const AGENT_WORKSPACE: &str = "functions";
 const MINUTE: Duration = Duration::from_secs(60);
+const HOUR: Duration = Duration::from_secs(3600);
+const DAY: Duration = Duration::from_secs(24 * 3600);
 
 #[derive(Debug, Deserialize)]
 struct StartPayload {
@@ -348,6 +351,25 @@ where
             )));
         }
     }
+    // A new session (nothing stored for it yet): the optional cap per address.
+    if bound.is_none() && home_node.is_none() {
+        if let (Some(limit), Some(ip)) = (cfg.max_new_sessions_per_ip_per_hour, ip.as_deref()) {
+            if !daily::hit(
+                state,
+                &format!("visitor-sessions:{tenant}:{ip}"),
+                limit,
+                HOUR,
+            )
+            .await
+            {
+                return Ok(Some(refuse(
+                    id,
+                    "RATE_LIMITED",
+                    "too many new chats from this address, try again later",
+                )));
+            }
+        }
+    }
 
     // The conversation: one of this session's, or a new one.
     let chats = format!("{home}/inbox/chats");
@@ -533,6 +555,36 @@ where
         .to_string();
     let conversation_id = payload.conversation_id.clone();
 
+    // The day's limits. An unattributed caller skips the per-IP one rather
+    // than sharing one bucket with every other such caller.
+    if let Some(ip) = ip.as_deref() {
+        let key = format!("visitor-messages:{tenant}:{ip}");
+        if !daily::hit(state, &key, cfg.max_messages_per_ip_per_day, DAY).await {
+            return Ok(Some(refuse(
+                id,
+                "DAILY_LIMIT_REACHED",
+                "this address has sent many messages today, try again tomorrow",
+            )));
+        }
+    }
+    let day_key = format!("{tenant}:{repo}:{agent_name}");
+    if let Some(budget) = cfg.max_daily_tokens {
+        let day = daily::today();
+        let counted = match limits.day_total(&day_key, &day, now) {
+            Some(tokens) => Some(tokens),
+            None => {
+                let tokens = daily::agent_tokens_on(state, &tenant, &repo, &agent_name, &day).await;
+                if let Some(tokens) = tokens {
+                    limits.set_day_total(&day_key, &day, tokens, now);
+                }
+                tokens
+            }
+        };
+        if let Err((code, msg)) = check_daily_budget(budget, counted) {
+            return Ok(Some(refuse(id, code, msg)));
+        }
+    }
+
     // The token budget, measured where the pipeline records it: the agent's
     // copy of the conversation.
     let agent_chat = load_node(
@@ -599,7 +651,10 @@ where
     )
     .await;
     let message_id = match written {
-        Ok(message_id) => message_id,
+        Ok(message_id) => {
+            limits.note_send(&day_key);
+            message_id
+        }
         Err(e) => {
             limits.release_turn(&session_key, &conversation_id);
             tracing::warn!(error = %e, "visitor chat: could not write the message");
@@ -664,6 +719,27 @@ pub(crate) fn check_budget(
         ));
     }
     Ok(())
+}
+
+/// Whether the agent's visitor conversations may take another message today:
+/// `counted` is the day's tokens so far, `None` when they could not be
+/// counted. A budget that cannot be checked refuses: it is the hard stop on
+/// what anonymous chat costs.
+pub(crate) fn check_daily_budget(
+    budget: u64,
+    counted: Option<u64>,
+) -> Result<(), (&'static str, String)> {
+    match counted {
+        Some(used) if used < budget => Ok(()),
+        Some(_) => Err((
+            "DAILY_LIMIT_REACHED",
+            "the assistant has reached its limit for today".to_string(),
+        )),
+        None => Err((
+            "UNAVAILABLE",
+            "the assistant cannot take messages right now".to_string(),
+        )),
+    }
 }
 
 fn message_counts(home: Option<&Node>) -> HashMap<String, i64> {
@@ -1076,6 +1152,19 @@ mod tests {
             check_budget(&cfg(), 1000.0, 0).unwrap_err().0,
             "LIMIT_REACHED"
         );
+    }
+
+    /// The agent's daily budget: every visitor conversation together. One it
+    /// cannot count refuses rather than letting spend run unchecked.
+    #[test]
+    fn the_daily_budget_closes_the_agent_for_the_day() {
+        assert!(check_daily_budget(1000, Some(0)).is_ok());
+        assert!(check_daily_budget(1000, Some(999)).is_ok());
+        assert_eq!(
+            check_daily_budget(1000, Some(1000)).unwrap_err().0,
+            "DAILY_LIMIT_REACHED"
+        );
+        assert_eq!(check_daily_budget(1000, None).unwrap_err().0, "UNAVAILABLE");
     }
 
     #[test]

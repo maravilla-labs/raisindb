@@ -48,14 +48,35 @@ properties:
     max_concurrent_turns: 1             # per session
     turn_lease_seconds: 120             # a hung turn frees its slot after this
     session_ttl_hours: 24               # purge after this long without activity
+    max_messages_per_ip_per_day: 500    # per client IP, 24 h window, persisted
+    max_daily_tokens: 2000000           # ALL visitor conversations per UTC day (default: none)
+    max_new_sessions_per_ip_per_hour: 60  # optional (default: none)
 ```
 
 Add `stream_tool_results: true` (a top-level agent property) when the page
 renders tool results itself, for example as cards: see
 [Tool results](#tool-rights).
 
-Every key except `enabled` has the default shown. `allow_anonymous: true`
-alone enables the defaults. Changing the agent takes effect on the next
+Every key except `enabled` has the default shown, except the two marked
+"default: none", which are off until set. `allow_anonymous: true` alone
+enables the defaults.
+
+**The daily limits** survive a restart. Per-IP windows live in a RocksDB next
+to the storage (`visitor-chat-limits`). `max_daily_tokens` is the hard stop
+on what anonymous chat may cost an agent per UTC day. It is counted from the
+pipeline's own ledger, the `raisin:AICostRecord` nodes under the agent's
+visitor conversations (`/agents/<name>/inbox/chats/vchat-*`), so every server
+sees the same spend. Each server caches the sum and recounts it every 30
+seconds or 20 accepted messages, whichever comes first. A burst can overshoot
+by those turns, never by an unbounded amount. A budget that cannot be counted
+refuses messages (`UNAVAILABLE`) instead of letting spend run unchecked.
+Model calls a TOOL makes on its own are not in that ledger: give such tools
+their own limits.
+
+Per-IP numbers are deliberately generous: a school, an office or an airport
+Wi-Fi sends many visitors through one address. A per-IP cap needs a proxy
+that sets `X-Forwarded-For`; a caller without an address skips it rather than
+sharing one bucket with every other such caller. Changing the agent takes effect on the next
 message: turning the flag off stops a running chat at its next send.
 
 Anonymous access must also be enabled for the repository (the same setting
@@ -110,7 +131,9 @@ const store = new ConversationStore({
   |---|---|
   | `ANONYMOUS_NOT_ALLOWED` | the agent does not accept visitors (or does not exist) |
   | `ORIGIN_NOT_ALLOWED` | the page's origin is not in `allowed_origins` |
-  | `RATE_LIMITED` | per-session or per-IP rate |
+  | `RATE_LIMITED` | per-session or per-IP rate, or `max_new_sessions_per_ip_per_hour` |
+  | `DAILY_LIMIT_REACHED` | `max_daily_tokens` used up for today, or `max_messages_per_ip_per_day` |
+  | `UNAVAILABLE` | the message could not be written, or the daily budget could not be counted |
   | `BUSY` | a turn of this conversation (or `max_concurrent_turns`) is still running |
   | `TOO_LONG` / `EMPTY_MESSAGE` | message size |
   | `TOO_MANY_MESSAGES` | `max_messages` reached: start a new conversation |

@@ -10,6 +10,8 @@
 //! * [`config`] — the agent's `anonymous` settings. An agent without the flag
 //!   refuses visitors.
 //! * [`limits`] — per-session and per-IP rate limits, and the turn lease.
+//! * [`daily`] — the limits that span a day and survive a restart: messages
+//!   and new sessions per IP, and the agent's daily token budget.
 //! * `crate::handlers::visitor_chat` — the two requests (`visitor_chat_start`,
 //!   `visitor_chat_send`) and the event forwarder that streams a conversation's
 //!   events to the one connection that owns it.
@@ -19,6 +21,7 @@
 //! but the server writes it.
 
 pub mod config;
+pub mod daily;
 pub mod limits;
 pub mod session;
 
