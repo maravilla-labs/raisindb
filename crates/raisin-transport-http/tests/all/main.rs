@@ -26,6 +26,7 @@ mod http_collisions;
 mod http_comprehensive_e2e;
 mod http_default_language;
 mod http_edges;
+mod http_embedding_config;
 mod http_error_handling;
 mod http_node_creation;
 mod http_pagination;

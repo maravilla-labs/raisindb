@@ -164,6 +164,17 @@ pub(crate) async fn handle_asset_command_internal(
     // security. Only when NOTHING was presented — a wrong, expired or
     // mismatched signature or grant is refused below and never lands here.
     if !presented_sig && !presented_grant {
+        // What the ANONYMOUS principal may read is public by definition (its
+        // role says so — for a site, assets on the published branch): any
+        // cache may keep it. Everything else stays private to its reader.
+        let cache_control = if principal
+            .as_ref()
+            .is_some_and(|p| p.is_anonymous_principal())
+        {
+            PUBLIC_CACHE_CONTROL
+        } else {
+            PRIVATE_CACHE_CONTROL
+        };
         let node =
             read_as_request_principal(state, tenant_id, repo, branch, ws, &node_path, principal)
                 .await?;
@@ -177,6 +188,7 @@ pub(crate) async fn handle_asset_command_internal(
             prop_name,
             command,
             range_header,
+            cache_control,
         )
         .await;
     }
@@ -224,9 +236,17 @@ pub(crate) async fn handle_asset_command_internal(
         prop_name,
         command,
         range_header,
+        PRIVATE_CACHE_CONTROL,
     )
     .await
 }
+
+/// A signed, granted or signed-in read: the reader's own, never a shared cache.
+const PRIVATE_CACHE_CONTROL: &str = "private, max-age=300";
+/// A read the anonymous principal may make: public content. An hour, because a
+/// published file changes only by being published again (and a new upload gets
+/// a new storage key).
+const PUBLIC_CACHE_CONTROL: &str = "public, max-age=3600";
 
 /// Serve one Resource property of an authorized node: mount hydration,
 /// external redirect, bytes with inline/attachment disposition and ranges.
@@ -242,6 +262,7 @@ async fn serve_asset_property(
     prop_name: &str,
     command: &str,
     range_header: Option<&str>,
+    cache_control: &'static str,
 ) -> Result<Response, ApiError> {
     // A mounted file whose bytes are not held right now is NOT a missing
     // property — it is a cache miss on a file that still exists at the provider.
@@ -356,7 +377,7 @@ async fn serve_asset_property(
     let base = Response::builder()
         .header(header::CONTENT_TYPE, mime_type)
         .header(header::CONTENT_DISPOSITION, disposition)
-        .header(header::CACHE_CONTROL, "private, max-age=300")
+        .header(header::CACHE_CONTROL, cache_control)
         .header(header::ACCEPT_RANGES, "bytes");
 
     let response = match resolution {

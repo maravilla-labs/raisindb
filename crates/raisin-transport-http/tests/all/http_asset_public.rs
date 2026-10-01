@@ -445,6 +445,11 @@ async fn an_anonymous_caller_reads_a_published_asset_inline_with_ranges() {
     assert_eq!(full.body, BYTES);
     assert_eq!(full.headers.get("content-disposition").unwrap(), "inline");
     assert_eq!(full.headers.get("accept-ranges").unwrap(), "bytes");
+    // what the anonymous principal may read is public: any cache may keep it
+    assert_eq!(
+        full.headers.get("cache-control").unwrap(),
+        "public, max-age=3600"
+    );
 
     let part = anon(
         &app,
@@ -587,6 +592,11 @@ async fn a_signed_link_works_and_a_bad_signature_never_falls_back() {
         String::from_utf8_lossy(&ok.body)
     );
     assert_eq!(ok.body, BYTES);
+    // a signed read stays private to its reader
+    assert_eq!(
+        ok.headers.get("cache-control").unwrap(),
+        "private, max-age=300"
+    );
 
     // a wrong signature on a PUBLIC asset is still refused: presenting a
     // credential means it must verify

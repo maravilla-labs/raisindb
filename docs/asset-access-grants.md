@@ -135,6 +135,11 @@ only, and the site links the bytes directly, with no signing round trip:
 Presenting a credential means it must verify: a wrong or expired signature, or a
 bad grant, is refused and never falls back to this read.
 
+A read the ANONYMOUS principal may make is public content, so it is answered with
+`Cache-Control: public, max-age=3600` and any cache (CDN, proxy, browser) may
+keep it. Every other read — signed, granted, or a signed-in session's — stays
+`private, max-age=300`.
+
 ## The four questions the design left open
 
 **1. Can one verifier accept both forms?** Yes, and it must.

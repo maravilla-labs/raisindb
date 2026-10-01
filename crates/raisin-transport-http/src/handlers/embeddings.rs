@@ -86,6 +86,13 @@ pub struct SetConfigRequest {
     #[serde(default)]
     pub document_prefix: Option<String>,
 
+    /// The vector-search cutoff; absent keeps the stored value. The admin
+    /// console's save payload does not carry it, and writing `None` on every
+    /// console save reset a tuned cutoff (0.78 for EmbeddingGemma) to the
+    /// engine's 0.6 — which empties that model's whole vector leg.
+    #[serde(default)]
+    pub default_max_distance: Option<f32>,
+
     /// `allow` / `deny`; absent keeps the stored value (the admin console's
     /// save payload does not carry it).
     #[serde(default)]
@@ -138,6 +145,10 @@ pub struct ConfigResponse {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub document_prefix: Option<String>,
+    /// The vector-search cutoff; `None` = the engine default.
+    pub default_max_distance: Option<f32>,
+    /// Whether anonymous callers may have query text embedded.
+    pub anonymous_query_embeddings: raisin_embeddings::config::AnonymousQueryEmbeddings,
 }
 
 /// Response for test connection
@@ -205,6 +216,8 @@ pub async fn get_tenant_embedding_config(
                 quantization: cfg.quantization,
                 query_prefix: cfg.query_prefix,
                 document_prefix: cfg.document_prefix,
+                default_max_distance: cfg.default_max_distance,
+                anonymous_query_embeddings: cfg.anonymous_query_embeddings,
             };
             Ok(Json(response))
         }
@@ -228,6 +241,8 @@ pub async fn get_tenant_embedding_config(
                 quantization: default_config.quantization,
                 query_prefix: None,
                 document_prefix: None,
+                default_max_distance: None,
+                anonymous_query_embeddings: Default::default(),
             };
             Ok(Json(response))
         }
@@ -259,7 +274,7 @@ pub async fn set_tenant_embedding_config(
         include_path: req.include_path,
         max_embeddings_per_repo: req.max_embeddings_per_repo,
         chunking: req.chunking,
-        default_max_distance: None,
+        default_max_distance: req.default_max_distance,
         distance_metric: req.distance_metric.unwrap_or_default(),
         base_url: req.base_url,
         quantization: req.quantization.unwrap_or_default(),
@@ -274,6 +289,7 @@ pub async fn set_tenant_embedding_config(
     if req.query_prefix.is_none()
         || req.document_prefix.is_none()
         || req.anonymous_query_embeddings.is_none()
+        || req.default_max_distance.is_none()
     {
         match repo.get_config(&tenant_id) {
             Ok(Some(existing)) => {
@@ -286,6 +302,9 @@ pub async fn set_tenant_embedding_config(
                 // A console save must not quietly re-open anonymous embedding.
                 if req.anonymous_query_embeddings.is_none() {
                     config.anonymous_query_embeddings = existing.anonymous_query_embeddings;
+                }
+                if req.default_max_distance.is_none() {
+                    config.default_max_distance = existing.default_max_distance;
                 }
             }
             Ok(None) => {}
