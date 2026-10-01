@@ -19,6 +19,7 @@
 
 mod http_admin_gates;
 mod http_asset_grants;
+mod http_asset_public;
 mod http_audit_logs;
 mod http_branches_tags;
 mod http_collisions;

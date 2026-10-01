@@ -1,8 +1,10 @@
 # Asset access: two audiences, two instruments
 
-Reading an asset's bytes over HTTP requires a credential in the URL, because the
-consumer is often an `<img>` tag, which can carry no header. There are two forms
-of that credential, and which one is right depends on WHO is reading.
+Reading an asset's bytes over HTTP needs a credential in the URL when the reader
+may not read the asset itself, because the consumer is often an `<img>` tag,
+which can carry no header. There are two forms of that credential, and which one
+is right depends on WHO is reading. A reader who MAY read the asset needs none:
+see [No credential: the request's own principal](#no-credential-the-requests-own-principal).
 
 | | Per-asset signature | Scoped grant |
 |---|---|---|
@@ -106,10 +108,32 @@ The response codes are the retry contract:
 | 403 | `GRANT_OUT_OF_SCOPE` | a valid grant for a different subtree — renewing the same grant will not help |
 | 404 | — | no such node, or none the subject may read (the two are deliberately indistinguishable) |
 
-A request presenting no grant keeps the answer it has always had —
-`401 INVALID_SIGNATURE` — whether its signature was absent, wrong or expired.
-The finer codes are reserved for grants, because only a grant client acts on the
-difference.
+A request presenting a signature that is wrong or expired keeps the answer it
+has always had — `401 INVALID_SIGNATURE`. The finer codes are reserved for
+grants, because only a grant client acts on the difference.
+
+## No credential: the request's own principal
+
+A request with neither `sig` nor `grant` is read as its OWN principal — the
+session of its `Authorization` header, else the repository's anonymous user —
+under that principal's row-level security, with the same serve path as the two
+credentials: range requests, `inline` for `raisin:display`, mount hydration.
+
+That is public delivery. Give the anonymous role read on the published branch
+only, and the site links the bytes directly, with no signing round trip:
+
+```yaml
+- { workspace: assets, path: "/**", operations: [read], branch_pattern: "publish" }
+```
+
+| Answer | When |
+|---|---|
+| 200 / 206 | the principal may read the node |
+| 404 | it may not, or the node does not exist — deliberately indistinguishable |
+| 401 `INVALID_SIGNATURE` | the principal may read nothing at all (anonymous access off, or an anonymous role without grants) — the answer an unsigned request always had |
+
+Presenting a credential means it must verify: a wrong or expired signature, or a
+bad grant, is refused and never falls back to this read.
 
 ## The four questions the design left open
 
@@ -165,9 +189,9 @@ an out-of-process media service would be a standing key to that subtree, which i
 strictly worse for that job than the one URL it needs.
 
 A grant is also not public delivery. A published site serving public assets to
-anonymous readers should serve them publicly; the grant is for editing and
-preview surfaces, where a real session exists and row-level security is what
-decides.
+anonymous readers serves them with no credential at all, under the anonymous
+role (above); the grant is for editing and preview surfaces, where a real session
+exists and row-level security is what decides.
 
 ## Related, and shipped separately
 
@@ -185,3 +209,6 @@ both credential forms.
   subject for a grant.
 * `crates/raisin-transport-http/tests/all/http_asset_grants.rs` — the refusals
   and the permitted read, end to end.
+* `crates/raisin-transport-http/tests/all/http_asset_public.rs` — the read with
+  no credential: a published asset for anonymous (inline, 206), 404 outside the
+  role, 401 for a role without grants, and no fallback for a bad signature.

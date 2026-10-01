@@ -271,6 +271,7 @@ pub async fn repo_get(
             exp,
             q.grant.as_deref(),
             headers.get(header::RANGE).and_then(|v| v.to_str().ok()),
+            auth.as_ref().map(|Extension(ctx)| ctx.clone()),
         )
         .await;
     }
