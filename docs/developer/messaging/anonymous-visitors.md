@@ -70,8 +70,14 @@ sees the same spend. Each server caches the sum and recounts it every 30
 seconds or 20 accepted messages, whichever comes first. A burst can overshoot
 by those turns, never by an unbounded amount. A budget that cannot be counted
 refuses messages (`UNAVAILABLE`) instead of letting spend run unchecked.
-Model calls a TOOL makes on its own are not in that ledger: give such tools
-their own limits.
+Model calls a TOOL makes on its own (a tool that drafts and checks an
+answer) are in it too: while an agent run executes a tool call, the runtime
+collects the tool's completions, and the run executor records them as one
+`raisin:AICostRecord` (`source: tool`, named `tool-cost-<op>-<attempt>`)
+under the message that requested the tool, adds them to the conversation's
+`total_tokens_used`, and reports them as the operation's usage, so the run's
+own token budget counts them. Recording is best effort: a failure is logged
+and never fails or holds up the tool's result for more than 2 seconds.
 
 Per-IP numbers are deliberately generous: a school, an office or an airport
 Wi-Fi sends many visitors through one address. A per-IP cap needs a proxy

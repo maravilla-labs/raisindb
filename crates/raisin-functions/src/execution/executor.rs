@@ -283,13 +283,20 @@ where
         })
         .unwrap_or(false);
 
-    let api_callbacks = callbacks::create_production_callbacks(
+    let mut api_callbacks = callbacks::create_production_callbacks(
         deps_arc,
         tenant_id.to_string(),
         repo_id.to_string(),
         branch.to_string(),
         auth_context.clone(),
     );
+    // A caller that records this execution's model usage (an agent run's tool
+    // call: raisin_storage::jobs::ai_usage) gets each completion's usage.
+    if raisin_storage::jobs::ai_usage::is_tracked(execution_id) {
+        if let Some(inner) = api_callbacks.ai_completion.take() {
+            api_callbacks.ai_completion = Some(track_completion_usage(inner, execution_id));
+        }
+    }
 
     // 4. Create execution context
     // Parse event data from input (supports both flow_input wrapper and direct format)
@@ -515,4 +522,106 @@ where
             })
         },
     )
+}
+
+/// `inner`, adding each successful completion's usage to `execution_id`'s
+/// tracked totals. Only the server-made execution id of THIS execution is
+/// ever used; the function cannot name another.
+fn track_completion_usage(
+    inner: crate::api::AICompletionCallback,
+    execution_id: &str,
+) -> crate::api::AICompletionCallback {
+    let execution_id = execution_id.to_string();
+    std::sync::Arc::new(move |request: serde_json::Value| {
+        let inner = inner.clone();
+        let execution_id = execution_id.clone();
+        Box::pin(async move {
+            let requested_model = request
+                .get("model")
+                .and_then(|m| m.as_str())
+                .map(str::to_string);
+            let response = inner(request).await?;
+            if let Some(call) = completion_usage(&response, requested_model) {
+                raisin_storage::jobs::ai_usage::add(&execution_id, call);
+            }
+            Ok(response)
+        })
+    })
+}
+
+/// The usage a completion response reports (`prompt_tokens`/`completion_tokens`
+/// or `input_tokens`/`output_tokens`), or `None` when it reports none.
+fn completion_usage(
+    response: &serde_json::Value,
+    requested_model: Option<String>,
+) -> Option<raisin_storage::jobs::ai_usage::ModelCall> {
+    let usage = response.get("usage").filter(|u| u.is_object())?;
+    let n = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|k| usage.get(*k).and_then(|v| v.as_u64()))
+            .unwrap_or(0)
+    };
+    let input_tokens = n(&["prompt_tokens", "input_tokens"]);
+    let output_tokens = n(&["completion_tokens", "output_tokens"]);
+    if input_tokens == 0 && output_tokens == 0 {
+        return None;
+    }
+    let model = response
+        .get("model")
+        .and_then(|m| m.as_str())
+        .map(str::to_string)
+        .or(requested_model)
+        .unwrap_or_else(|| "unknown".to_string());
+    Some(raisin_storage::jobs::ai_usage::ModelCall {
+        model,
+        input_tokens,
+        output_tokens,
+    })
+}
+
+#[cfg(test)]
+mod usage_tracking_tests {
+    use super::*;
+    use raisin_storage::jobs::ai_usage;
+
+    #[test]
+    fn both_usage_spellings_are_read() {
+        let a = completion_usage(
+            &serde_json::json!({"model": "gpt", "usage": {"prompt_tokens": 10, "completion_tokens": 3}}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            (a.model.as_str(), a.input_tokens, a.output_tokens),
+            ("gpt", 10, 3)
+        );
+        let b = completion_usage(
+            &serde_json::json!({"usage": {"input_tokens": 7, "output_tokens": 2}}),
+            Some("asked".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            (b.model.as_str(), b.input_tokens, b.output_tokens),
+            ("asked", 7, 2)
+        );
+        assert!(completion_usage(&serde_json::json!({"content": "x"}), None).is_none());
+    }
+
+    #[tokio::test]
+    async fn the_wrapper_adds_to_its_own_execution_only() {
+        let inner: crate::api::AICompletionCallback = std::sync::Arc::new(|_req| {
+            Box::pin(async {
+                Ok(
+                    serde_json::json!({"model": "m", "usage": {"prompt_tokens": 100, "completion_tokens": 20}}),
+                )
+            })
+        });
+        let mine = ai_usage::track("usage-wrap-test#0");
+        let other = ai_usage::track("usage-wrap-test-other#0");
+        let wrapped = track_completion_usage(inner, "usage-wrap-test#0");
+        wrapped(serde_json::json!({"model": "m"})).await.unwrap();
+        wrapped(serde_json::json!({"model": "m"})).await.unwrap();
+        assert_eq!(mine.take().total_tokens(), 240);
+        assert_eq!(other.take().total_tokens(), 0);
+    }
 }

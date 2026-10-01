@@ -312,6 +312,44 @@ mod tests {
             "2026-10-01T09:00:00.000+00:00",
         )
         .await;
+        // a tool's own usage, written by the run executor: its timestamp is
+        // stored as a Date, not a string
+        put(
+            &state,
+            &format!("{chat}/run-1-op-1/tool-cost-x"),
+            "raisin:AICostRecord",
+            &[
+                ("total_tokens", PropertyValue::Integer(600)),
+                (
+                    "timestamp",
+                    PropertyValue::Date(
+                        chrono::DateTime::parse_from_rfc3339("2026-10-01T08:00:01.000Z")
+                            .unwrap()
+                            .with_timezone(&chrono::Utc)
+                            .into(),
+                    ),
+                ),
+            ],
+        )
+        .await;
+        put(
+            &state,
+            &format!("{chat}/run-0-op-1/tool-cost-y"),
+            "raisin:AICostRecord",
+            &[
+                ("total_tokens", PropertyValue::Integer(900)),
+                (
+                    "timestamp",
+                    PropertyValue::Date(
+                        chrono::DateTime::parse_from_rfc3339("2026-09-30T23:00:00.000Z")
+                            .unwrap()
+                            .with_timezone(&chrono::Utc)
+                            .into(),
+                    ),
+                ),
+            ],
+        )
+        .await;
         // another agent's visitor
         cost(
             &state,
@@ -324,7 +362,7 @@ mod tests {
 
         assert_eq!(
             agent_tokens_on(&state, TENANT, REPO, "site", "2026-10-01").await,
-            Some(5000)
+            Some(5600)
         );
         assert_eq!(
             agent_tokens_on(&state, TENANT, REPO, "other", "2026-10-01").await,
