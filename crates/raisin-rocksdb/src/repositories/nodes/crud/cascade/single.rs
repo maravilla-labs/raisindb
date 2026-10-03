@@ -117,23 +117,24 @@ impl NodeRepositoryImpl {
             None => return Ok(false),
         };
 
-        // Check for children if requested. `list_children_impl` takes the
-        // parent's PATH; handing it the id looked up a path that never exists
-        // and failed every non-cascade delete with "Parent node not found".
-        if check_has_children {
-            let children = self
-                .list_children_impl(
-                    tenant_id, repo_id, branch, workspace, &node.path, None, // HEAD revision
-                )
-                .await?;
-
-            if !children.is_empty() {
-                return Err(Error::Validation(format!(
-                    "Cannot delete node '{}': it has {} children. Enable cascade to delete descendants.",
-                    node_id,
-                    children.len()
-                )));
-            }
+        // Check for children if requested, at HEAD. One existence probe: this
+        // used to load (and has_children-probe) every child just to test the
+        // list for emptiness.
+        if check_has_children
+            && self.probe_has_children(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                node_id,
+                Some(&node.path),
+                None,
+            )?
+        {
+            return Err(Error::Validation(format!(
+                "Cannot delete node '{}': it has children. Enable cascade to delete descendants.",
+                node_id
+            )));
         }
 
         // Delete the node itself using the standard delete_impl

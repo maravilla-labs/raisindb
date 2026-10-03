@@ -4,10 +4,8 @@
 //! materialized from the NODE_PATH index during reads. This module handles
 //! that process and backward compatibility with old Node format.
 
-use super::super::super::helpers::is_tombstone;
 use super::super::super::storage_node::PropertiesMode;
 use super::super::super::NodeRepositoryImpl;
-use crate::{cf, cf_handle, keys};
 use raisin_error::Result;
 use raisin_hlc::HLC;
 use raisin_models::nodes::Node;
@@ -20,6 +18,9 @@ impl NodeRepositoryImpl {
     /// this function is not called.
     /// Visible crate-wide because the INDEX REBUILDS need it too: they iterate
     /// the node blobs directly, and a blob deliberately carries no `path`.
+    ///
+    /// One seek, shared with the transaction read path: see
+    /// [`crate::mvcc_read::materialize_path`].
     pub(crate) fn materialize_path(
         &self,
         tenant_id: &str,
@@ -29,47 +30,15 @@ impl NodeRepositoryImpl {
         node_id: &str,
         target_revision: &HLC,
     ) -> Result<String> {
-        let prefix = keys::node_path_key_prefix(tenant_id, repo_id, branch, workspace, node_id);
-        let cf = cf_handle(&self.db, cf::NODE_PATH)?;
-
-        let iter = crate::prefix_scan(&self.db, cf, prefix.clone());
-
-        for item in iter {
-            let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
-
-            if !key.starts_with(&prefix) {
-                break;
-            }
-
-            let revision = match keys::extract_revision_from_key(&key) {
-                Ok(rev) => rev,
-                Err(_) => continue,
-            };
-
-            // Skip revisions beyond target_revision (due to descending encoding, newest first)
-            if &revision > target_revision {
-                continue;
-            }
-
-            // Check for tombstone - node was deleted at this revision
-            if is_tombstone(&value) {
-                return Err(raisin_error::Error::storage(format!(
-                    "Node {} was deleted (tombstone in NODE_PATH)",
-                    node_id
-                )));
-            }
-
-            let path = String::from_utf8(value.to_vec()).map_err(|e| {
-                raisin_error::Error::storage(format!("Invalid path encoding: {}", e))
-            })?;
-
-            return Ok(path);
-        }
-
-        Err(raisin_error::Error::storage(format!(
-            "Path not found for node_id={} at revision={}",
-            node_id, target_revision
-        )))
+        crate::mvcc_read::materialize_path(
+            &self.db,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            node_id,
+            target_revision,
+        )
     }
 
     /// Deserialize a node from bytes and materialize path if needed

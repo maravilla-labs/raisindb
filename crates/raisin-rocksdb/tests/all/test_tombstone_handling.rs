@@ -399,6 +399,7 @@ async fn test_deleted_node_not_in_property_index_find() -> Result<()> {
             "category",
             &PropertyValue::String("sports".to_string()),
             false, // not published_only
+            None,  // max_revision: branch HEAD
         )
         .await?;
 
@@ -420,6 +421,7 @@ async fn test_deleted_node_not_in_property_index_find() -> Result<()> {
             "category",
             &PropertyValue::String("sports".to_string()),
             false,
+            None, // max_revision: branch HEAD
         )
         .await?;
 
@@ -465,6 +467,7 @@ async fn test_deleted_node_not_in_property_index_count() -> Result<()> {
             "category",
             &PropertyValue::String("tech".to_string()),
             false,
+            None, // max_revision: branch HEAD
         )
         .await?;
 
@@ -482,6 +485,7 @@ async fn test_deleted_node_not_in_property_index_count() -> Result<()> {
             "category",
             &PropertyValue::String("tech".to_string()),
             false,
+            None, // max_revision: branch HEAD
         )
         .await?;
 
@@ -514,6 +518,7 @@ async fn test_deleted_node_not_in_property_index_find_with_limit() -> Result<()>
             "category",
             &PropertyValue::String("politics".to_string()),
             false,
+            None,     // max_revision: branch HEAD
             Some(10), // limit
         )
         .await?;
@@ -531,6 +536,7 @@ async fn test_deleted_node_not_in_property_index_find_with_limit() -> Result<()>
             "category",
             &PropertyValue::String("politics".to_string()),
             false,
+            None, // max_revision: branch HEAD
             Some(10),
         )
         .await?;

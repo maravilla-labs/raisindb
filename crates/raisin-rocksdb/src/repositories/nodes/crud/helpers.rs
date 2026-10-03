@@ -95,15 +95,18 @@ impl NodeRepositoryImpl {
         }
     }
 
-    /// Get the latest revision for a node at or before a target revision
+    /// The newest stored version of a node at or before a target revision,
+    /// with its blob.
     ///
-    /// Used for time-travel queries to find the most recent version of a node
-    /// that exists at or before a specific revision.
+    /// Used for time-travel reads. One seek to `{prefix}{~target}` lands on the
+    /// answer directly (see [`crate::mvcc_read`]); it used to walk every newer
+    /// revision first and then point-read the blob it had just passed.
     ///
     /// # Returns
-    /// - `Some(revision)` if the node existed at or before target_revision
-    /// - `None` if the node didn't exist at or before target_revision
-    pub(in super::super) fn get_revision_at_or_before(
+    /// - `Some((revision, blob))` if the node had a version at or before
+    ///   `target_revision` (the blob may be a tombstone)
+    /// - `None` if it had none
+    pub(in super::super) fn get_versioned_at_or_before(
         &self,
         tenant_id: &str,
         repo_id: &str,
@@ -111,67 +114,21 @@ impl NodeRepositoryImpl {
         workspace: &str,
         node_id: &str,
         target_revision: &HLC,
-    ) -> Result<Option<HLC>> {
-        tracing::debug!(
-            target: "rocksb::nodes::revision_lookup",
-            "get_revision_at_or_before: tenant={} repo={} branch={} workspace={} node_id={} target_revision={}",
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            node_id,
-            target_revision
-        );
-        let prefix = keys::KeyBuilder::new()
-            .push(tenant_id)
-            .push(repo_id)
-            .push(branch)
-            .push(workspace)
-            .push("nodes")
-            .push(node_id)
-            .build_prefix();
-
+    ) -> Result<Option<(HLC, Vec<u8>)>> {
+        let prefix = keys::node_key_prefix(tenant_id, repo_id, branch, workspace, node_id);
         let cf = cf_handle(&self.db, cf::NODES)?;
-        let iter = crate::prefix_scan(&self.db, cf, prefix);
+        let found =
+            crate::mvcc_read::newest_at_or_before(&self.db, cf, &prefix, Some(target_revision))?;
 
-        // Iterate through revisions (newest first due to descending encoding)
-        // Return the first revision that is <= target_revision
-        for item in iter {
-            let (key, _) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
-
-            let revision = match keys::extract_revision_from_key(&key) {
-                Ok(rev) => rev,
-                Err(e) => {
-                    tracing::warn!(
-                        target: "rocksb::nodes::revision_lookup",
-                        "Skipping key with invalid revision for node_id={}: {}",
-                        node_id,
-                        e
-                    );
-                    continue;
-                }
-            };
-
-            if &revision <= target_revision {
-                tracing::debug!(
-                    target: "rocksb::nodes::revision_lookup",
-                    "revision candidate found: node_id={} candidate={} target={}",
-                    node_id,
-                    revision,
-                    target_revision
-                );
-                return Ok(Some(revision));
-            }
-        }
-
-        tracing::debug!(
+        tracing::trace!(
             target: "rocksb::nodes::revision_lookup",
-            "no revision found at or before target: node_id={} target={}",
             node_id,
-            target_revision
+            target = %target_revision,
+            found = ?found.as_ref().map(|(revision, _)| *revision),
+            "get_versioned_at_or_before"
         );
 
-        Ok(None)
+        Ok(found)
     }
 
     /// Get all outgoing relations from a node (where THIS node points TO other nodes)

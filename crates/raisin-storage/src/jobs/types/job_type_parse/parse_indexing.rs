@@ -99,6 +99,20 @@ pub(crate) fn parse_index_build_variants(s: &str) -> Result<Option<JobType>, Str
             }
         }
     }
+    if let Some(rest) = s.strip_prefix("IndexRepair(") {
+        if let Some(c) = rest.strip_suffix(')') {
+            let p: Vec<&str> = c.split('/').collect();
+            if p.len() == 5 {
+                return Ok(Some(JobType::IndexRepair {
+                    tenant_id: p[0].to_string(),
+                    repo_id: p[1].to_string(),
+                    branch: (p[2] != "*").then(|| p[2].to_string()),
+                    repair: p[3].to_string(),
+                    dry_run: p[4] == "true",
+                }));
+            }
+        }
+    }
     if let Some(rest) = s.strip_prefix("CompoundIndexBuild(") {
         if let Some(c) = rest.strip_suffix(')') {
             let p: Vec<&str> = c.split('/').collect();

@@ -53,6 +53,9 @@ pub use nodes::NodeRepositoryImpl;
 pub(crate) use nodes::crud::indexing::unique_indexes::extract_unique_property_names;
 pub use oplog::{OpLogRepository, OpLogStats};
 pub use processing_rules::{ProcessingRulesRepositoryImpl, CF_PROCESSING_RULES};
+pub use property_index::orphans::{
+    detect_property_index_orphans, PropertyIndexOrphan, PropertyIndexOrphanReason,
+};
 pub use property_index::PropertyIndexRepositoryImpl;
 pub use reference_index::ReferenceIndexRepositoryImpl;
 pub use registry::RegistryRepositoryImpl;

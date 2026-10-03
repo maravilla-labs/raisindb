@@ -104,6 +104,20 @@ impl ColumnDef {
             generated: None,
         }
     }
+
+    /// Whether `SELECT *` leaves this column out. It stays selectable by name.
+    ///
+    /// The spatial pseudo-columns (see [`GeneratedExpr::hidden_from_wildcard`]),
+    /// and the virtual `embedding` vector: a storage read per row, and kilobytes
+    /// of floats in every row of every `SELECT *` on a repository that happens
+    /// to have embeddings configured.
+    pub fn hidden_from_wildcard(&self) -> bool {
+        self.name == "embedding"
+            || self
+                .generated
+                .as_ref()
+                .is_some_and(GeneratedExpr::hidden_from_wildcard)
+    }
 }
 
 /// Generated column expression

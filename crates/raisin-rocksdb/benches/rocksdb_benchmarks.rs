@@ -38,6 +38,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
 
+// Under a directory so Cargo does not discover it as a bench target itself.
+#[path = "read_path/mod.rs"]
+mod read_path;
+
 // ============================================================================
 // Test Constants
 // ============================================================================
@@ -682,4 +686,6 @@ criterion_group!(
     bench_tree_list_children,
 );
 
-criterion_main!(flat_benches, tree_benches);
+criterion_group!(read_benches, read_path::read_path_benches);
+
+criterion_main!(flat_benches, tree_benches, read_benches);

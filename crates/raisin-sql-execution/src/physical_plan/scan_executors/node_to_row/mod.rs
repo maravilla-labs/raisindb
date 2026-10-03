@@ -53,7 +53,8 @@ impl<'a> OrderContext<'a> {
 /// Convert a Node to a Row, populating virtual columns including embedding.
 ///
 /// This function is async because it may need to fetch the embedding from RocksDB storage
-/// when the `embedding` column is requested in the projection.
+/// when the `embedding` column is named in the projection. It is never fetched for a
+/// scan without a projection: `embedding` is opt-in, not part of `SELECT *`.
 ///
 /// The `effective_locale` parameter specifies which locale this node represents
 /// (for the virtual locale column). `order_ctx` supplies editorial-ordering
@@ -129,8 +130,13 @@ pub(crate) async fn node_to_row<S: Storage>(
         &should_include,
     );
 
-    // Virtual column: embedding (fetched from RocksDB embedding storage)
-    if should_include("embedding") {
+    // Virtual column: embedding (fetched from RocksDB embedding storage) —
+    // only when NAMED. It costs a storage read per row and returns a vector
+    // nobody asked for, so an unprojected scan (`SELECT *`) never fetches it.
+    if projection
+        .as_ref()
+        .is_some_and(|p| p.iter().any(|c| c == "embedding"))
+    {
         embedding::insert_embedding_field(&mut row, node, qualifier, workspace, ctx).await?;
     }
 

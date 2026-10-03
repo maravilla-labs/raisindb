@@ -5,9 +5,12 @@ use raisin_models::nodes::properties::PropertyValue;
 /// Tombstone marker (single byte 'T' for debugging visibility)
 pub(crate) const TOMBSTONE: &[u8] = b"T";
 
-/// Check if a node value represents a tombstone (deleted node)
+/// Check if a node value represents a tombstone (deleted node).
+///
+/// Delegates to [`crate::keys::is_tombstone_value`], which also accepts the
+/// legacy one-byte `\0` merge marker.
 pub(crate) fn is_tombstone(value: &[u8]) -> bool {
-    value == TOMBSTONE
+    crate::keys::is_tombstone_value(value)
 }
 
 /// Where a node inside a moved subtree lands, or `None` when it is not in that

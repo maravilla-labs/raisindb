@@ -193,6 +193,7 @@ pub(crate) const REPO_CF_REGISTRY: &[(&str, RepoScope)] = &[
         RepoScope::RepoPrefixed("{t}\0{r}\0{cluster_node}\0{seq}\0{ts}"),
     ),
     // ---- mixed layouts ---------------------------------------------------
+    // The kind-first records are the `INDEX_STATUS_KINDS` below.
     (
         cf::INDEX_STATUS,
         RepoScope::MixedLayout(
@@ -351,6 +352,42 @@ fn purge_by_segments(db: &DB, name: &str, tenant: &str, repo: &str) -> Result<()
     }
     it.status().map_err(storage_err)?;
     db.write(batch).map_err(storage_err)
+}
+
+/// The leading kind segments of the KIND-FIRST state records in a
+/// [`RepoScope::MixedLayout`] column family (`cf::INDEX_STATUS`):
+/// `{kind}\0{tenant}\0{repo}\0…`. Every other record there is tenant-first.
+///
+/// A new kind-first record kind MUST be added here, or a tenant wipe leaves it
+/// behind: a whole-tenant wipe cannot match "any first segment, tenant second"
+/// without also matching another tenant's repository that happens to share
+/// this tenant's name.
+pub(crate) const INDEX_STATUS_KINDS: &[&str] = &["prop_index", "compound_index", "spatial_index"];
+
+/// Remove every kind-first record of `tenant` (all repositories) from a
+/// mixed-layout column family: one range per kind,
+/// `{kind}\0{tenant}\0` .. `{kind}\0{tenant}\x01`. The tenant-first records
+/// are the caller's ordinary `{tenant}\0` range.
+pub(crate) fn purge_mixed_layout_tenant(db: &DB, name: &str, tenant: &str) -> Result<()> {
+    for kind in INDEX_STATUS_KINDS {
+        let mut lo = Vec::with_capacity(kind.len() + tenant.len() + 2);
+        lo.extend_from_slice(kind.as_bytes());
+        lo.push(0);
+        lo.extend_from_slice(tenant.as_bytes());
+        let mut hi = lo.clone();
+        lo.push(0);
+        hi.push(1);
+        purge_range(db, name, &lo, &hi)?;
+    }
+    Ok(())
+}
+
+/// The column families a [`RepoScope::MixedLayout`] classifies.
+pub(crate) fn mixed_layout_cfs() -> impl Iterator<Item = &'static str> {
+    REPO_CF_REGISTRY
+        .iter()
+        .filter(|(_, scope)| matches!(scope, RepoScope::MixedLayout(_)))
+        .map(|(name, _)| *name)
 }
 
 fn purge_registry(db: &DB, tenant: &str, repo: &str) -> Result<()> {

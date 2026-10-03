@@ -34,7 +34,7 @@ pub(super) async fn execute_path_order_scan<S: Storage + 'static>(
     target_rows: usize,
 ) -> Result<RowStream, ExecutionError> {
     Ok(Box::pin(try_stream! {
-        tracing::info!(
+        tracing::debug!(
             "   PropertyOrderScan: path ordering via ORDERED_CHILDREN (streaming DFS) direction={} limit_hint={}",
             if ascending { "ASC" } else { "DESC" },
             target_rows

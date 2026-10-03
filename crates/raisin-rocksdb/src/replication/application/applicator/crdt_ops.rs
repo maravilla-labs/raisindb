@@ -200,13 +200,24 @@ impl OperationApplicator {
             &normalized_node,
         );
 
-        // Diff against the locally-stored previous version and tombstone
+        // Diff against the version stored just BELOW this one and tombstone
         // stale index entries the snapshot supersedes. Without this a
         // replicated update/move leaves the peer's old path and old property
         // values live forever (reads by old path/value still match).
-        if let Some(old_node) =
-            self.load_latest_node(tenant_id, repo_id, branch, &normalized_node.id)?
-        {
+        //
+        // Below `revision`, not the newest: ops arrive out of order, and when a
+        // newer version is already stored the diff against IT would tombstone
+        // its values at an older revision (a no-op) and leave this version's
+        // own predecessor's values live. The newer version is handled after
+        // the write, by `tombstone_superseded_by_newer`.
+        if let Some(old_node) = self.load_node_before(
+            tenant_id,
+            repo_id,
+            branch,
+            super::WorkspaceHint::of(&normalized_node),
+            &normalized_node.id,
+            revision,
+        )? {
             crate::repositories::add_stale_property_tombstones(
                 &mut batch,
                 cf_property,
@@ -365,7 +376,11 @@ impl OperationApplicator {
                     "⚠️ Skipping ORDERED_CHILDREN update due to missing cf_order_key"
                 );
             } else {
-                let ordered_key = keys::ordered_child_key_versioned(
+                // The shared entry writer: the entry plus the parent's
+                // last-child metadata when this label sorts last.
+                crate::repositories::nodes::put_ordered_child(
+                    &mut batch,
+                    &self.db,
                     tenant_id,
                     repo_id,
                     branch,
@@ -374,28 +389,31 @@ impl OperationApplicator {
                     &cf_key_to_use,
                     revision,
                     &normalized_node.id,
-                );
-                batch.put_cf(cf_ordered, ordered_key, normalized_node.name.as_bytes());
-
-                let metadata_key =
-                    keys::last_child_metadata_key(tenant_id, repo_id, branch, workspace, pid);
-                let should_update = match self.db.get_cf(cf_ordered, &metadata_key) {
-                    Ok(Some(existing)) => {
-                        let existing_label = String::from_utf8_lossy(&existing);
-                        cf_key_to_use.as_str() > existing_label.as_ref()
-                    }
-                    _ => true,
-                };
-
-                if should_update {
-                    batch.put_cf(cf_ordered, metadata_key, cf_key_to_use.as_bytes());
-                }
+                    &normalized_node.name,
+                )?;
             }
         }
 
-        self.db.write(batch).map_err(|e| {
-            raisin_error::Error::storage(format!("Failed to apply replicated upsert: {}", e))
-        })?;
+        // Out of order: a newer version is already stored. Everything written
+        // above at `revision` that it does not carry ends at ITS revision.
+        self.tombstone_superseded_by_newer(
+            &mut batch,
+            &index_ctx,
+            &spatial_targets,
+            &spatial_policies,
+            &normalized_node,
+            parent_id.filter(|_| !cf_key_to_use.is_empty()).map(|pid| {
+                super::newer_version::OrderedPlacement {
+                    parent_id: pid,
+                    label: &cf_key_to_use,
+                }
+            }),
+            revision,
+        )?;
+
+        // This path writes no compound entries: the batch carries the mark that
+        // fails the workspace's compound indexes closed (see `compound_marker`).
+        self.write_marking_compound_stale(batch, tenant_id, repo_id, branch, workspace)?;
 
         // Event kind: forced by the caller, or derived from the SOURCE node's
         // timestamps. Deriving locally (e.g. "did load_latest_node find anything")
@@ -451,22 +469,20 @@ impl OperationApplicator {
     ) -> Result<()> {
         let mut batch = WriteBatch::default();
 
-        // The shared tombstone path derives the ORDERED_CHILDREN key from
-        // node.parent; replicated changes carry the parent separately.
-        let mut node_for_tombstones = node.clone();
-        if node_for_tombstones.parent.is_none() {
-            node_for_tombstones.parent = parent_id.map(|p| p.to_string());
-        }
-
+        // The ORDERED_CHILDREN tombstone is keyed by the parent's ID, which
+        // the replicated change carries: pass it UNCONDITIONALLY. (This used to
+        // feed `node.parent` — the parent's NAME — whenever the peer's node had
+        // one, so the fix for the delete tombstoner never reached replicas.)
         let ctx = crate::tombstones::TombstoneContext::new(tenant_id, repo_id, branch, workspace);
         let cfs = crate::tombstones::TombstoneColumnFamilies::from_arc_db(&self.db)?;
-        crate::tombstones::add_node_tombstones(
+        crate::tombstones::add_node_tombstones_with_parent(
             &mut batch,
             self.db.as_ref(),
             &ctx,
             &cfs,
-            &node_for_tombstones,
+            node,
             revision,
+            parent_id,
         )?;
 
         self.db.write(batch).map_err(|e| {
@@ -540,7 +556,14 @@ impl OperationApplicator {
         revision: &HLC,
         op: &Operation,
     ) -> Result<()> {
-        let node = match self.load_latest_node(tenant_id, repo_id, branch, node_id)? {
+        // A delete op names only the id, so the workspace is found by scan.
+        let node = match self.load_latest_node(
+            tenant_id,
+            repo_id,
+            branch,
+            super::WorkspaceHint::Unknown,
+            node_id,
+        )? {
             Some(n) => n,
             None => {
                 tracing::debug!(

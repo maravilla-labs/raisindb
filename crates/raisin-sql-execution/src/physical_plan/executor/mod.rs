@@ -8,9 +8,11 @@
 //! - `context`: `ExecutionContext` with storage, indexes, and query parameters
 //! - `plan_dispatch`: Top-level `execute_plan` / `execute_plan_batch` dispatch
 //! - `cte`: Common Table Expression materialization and scanning
+//! - `statement_state`: state shared by every clone of one statement's context
 
 mod cte;
 mod plan_dispatch;
+mod statement_state;
 
 pub mod context;
 pub(crate) mod row;

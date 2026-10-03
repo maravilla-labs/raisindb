@@ -1,8 +1,8 @@
 //! Index tombstone functions: property, reference, relation, compound, spatial, translation
 
 use super::helpers::{
-    extract_locale_from_translation_key, extract_node_id_from_key, extract_references,
-    hash_property_value, parse_relation_from_forward_key,
+    extract_locale_from_translation_key, extract_node_id_from_key, hash_property_value,
+    parse_relation_from_forward_key,
 };
 use super::{TombstoneColumnFamilies, TombstoneContext, TOMBSTONE};
 use crate::keys;
@@ -198,7 +198,9 @@ pub(super) fn tombstone_reference_indexes(
     revision: &HLC,
     is_published: bool,
 ) {
-    let refs = extract_references(&node.properties);
+    // The ONE reference walker: the writers index exactly these paths, so a
+    // tombstone written for any other path would shadow nothing.
+    let refs = crate::repositories::walk_references(&node.properties);
     for (property_path, reference) in refs {
         // Tombstone forward index
         let forward_key = keys::reference_forward_key_versioned(

@@ -16,7 +16,6 @@
 use super::UnifiedJobEventHandler;
 use crate::spatial_state::{BuildTrigger, SpatialStateStore};
 use raisin_events::NodeEvent;
-use raisin_models::nodes::properties::PropertyValue;
 use raisin_storage::jobs::{JobContext, JobType};
 
 impl UnifiedJobEventHandler {
@@ -59,20 +58,18 @@ impl UnifiedJobEventHandler {
             return;
         };
 
-        let geometry_properties: Vec<&String> = node
-            .properties
-            .iter()
-            .filter(|(_, v)| matches!(v, PropertyValue::Geometry(_)))
-            .map(|(k, _)| k)
-            .collect();
-
-        if geometry_properties.is_empty() {
+        // The SAME geometry paths the writer indexes and creates state records
+        // for — nested ones included. A top-level-only scan here never saw a
+        // geometry inside an object, element or block, so a policy change for
+        // such a path was never reconciled and it kept its old precisions.
+        let geometry_paths = crate::indexing::indexed_geometry_paths(&node.properties);
+        if geometry_paths.is_empty() {
             return;
         }
 
         let state_store = SpatialStateStore::new(self.storage_db());
 
-        for property in geometry_properties {
+        for property in &geometry_paths {
             let resolution = state_store.write_policy(
                 &node_event.tenant_id,
                 &node_event.repository_id,

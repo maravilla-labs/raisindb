@@ -9,6 +9,7 @@
 //! Optimal for queries like: `WHERE properties->>'status' = 'published'`
 
 use super::helpers::{get_locales_to_use, resolve_node_for_locale};
+use super::index_recheck::{is_pseudo_property, json_member_equals, node_still_matches};
 use super::node_to_row::node_to_row;
 use super::{SCAN_COUNT_CEILING, SCAN_TIME_LIMIT, TIME_CHECK_INTERVAL};
 use crate::physical_plan::executor::{ExecutionContext, ExecutionError, RowStream};
@@ -17,9 +18,7 @@ use async_stream::try_stream;
 use raisin_core::services::rls_filter;
 use raisin_error::Error;
 use raisin_models::permissions::PermissionScope;
-use raisin_storage::{
-    BranchRepository, NodeRepository, PropertyIndexRepository, Storage, StorageScope,
-};
+use raisin_storage::{NodeRepository, PropertyIndexRepository, Storage, StorageScope};
 use std::time::Instant;
 
 /// Execute a PropertyIndexScan operator.
@@ -40,6 +39,7 @@ pub async fn execute_property_index_scan<S: Storage + 'static>(
         property_value,
         projection,
         limit,
+        verifies_value,
     ) = match plan {
         PhysicalPlan::PropertyIndexScan {
             tenant_id,
@@ -52,6 +52,7 @@ pub async fn execute_property_index_scan<S: Storage + 'static>(
             property_value,
             projection,
             limit,
+            verifies_value,
         } => (
             tenant_id.clone(),
             repo_id.clone(),
@@ -63,6 +64,7 @@ pub async fn execute_property_index_scan<S: Storage + 'static>(
             property_value.clone(),
             projection.clone(),
             *limit,
+            *verifies_value,
         ),
         _ => {
             return Err(Error::Validation(
@@ -74,7 +76,7 @@ pub async fn execute_property_index_scan<S: Storage + 'static>(
     let storage = ctx.storage.clone();
     let ctx_clone = ctx.clone();
 
-    tracing::info!(
+    tracing::debug!(
         "   PropertyIndexScan: property='{}', value='{}', workspace='{}', branch='{}', limit={:?}",
         property_name,
         property_value,
@@ -87,93 +89,122 @@ pub async fn execute_property_index_scan<S: Storage + 'static>(
         let qualifier = alias.clone().unwrap_or_else(|| table.clone());
         let locales_to_use = get_locales_to_use(&ctx_clone);
 
-        let prop_value = raisin_models::nodes::properties::PropertyValue::String(property_value.clone());
-
-        tracing::debug!("   Looking up nodes by property index with limit...");
-        let node_ids = storage
-            .property_index()
-            .find_by_property_with_limit(StorageScope::new(&tenant_id, &repo_id, &branch, &workspace), &property_name, &prop_value, false, limit)
-            .await?;
-
-        tracing::info!("   PropertyIndexScan found {} node IDs", node_ids.len());
-
-        // Resolve the branch head ONCE for the whole scan.
-        //
-        // `NodeRepository::get` with `max_revision: None` resolves it per call,
-        // so a 16,700-row scan read the BRANCHES column family 16,700 times —
-        // pure overhead on the hottest loop in the engine. Hoisting it is also
-        // more CORRECT: per-call resolution means a head that advances mid-scan
-        // makes later rows come from a newer snapshot than earlier ones, which
-        // is a torn read. One revision for the whole scan is a consistent one.
-        //
-        // Falls back to `None` when the head cannot be resolved, because the
-        // per-call path also accepts a TAG name here and resolves it through a
-        // different repository; keeping that fallback means a tag-scoped query
-        // behaves exactly as before.
-        let scan_revision: Option<raisin_hlc::HLC> = match ctx_clone.max_revision.clone() {
-            Some(rev) => Some(rev),
-            None => storage
-                .branches()
-                .get_head(&tenant_id, &repo_id, &branch)
-                .await
-                .ok(),
+        // Timestamp pseudo-properties are planned as decimal microseconds and
+        // looked up as an Integer, which the storage reader encodes exactly as
+        // the timestamp writer keys them. Everything else is its stored text.
+        let prop_value = match (property_name.as_str(), property_value.parse::<i64>()) {
+            ("__created_at" | "__updated_at", Ok(micros)) => {
+                raisin_models::nodes::properties::PropertyValue::Integer(micros)
+            }
+            _ => raisin_models::nodes::properties::PropertyValue::String(property_value.clone()),
         };
+
+        // ONE revision for the whole scan, shared by the index read and every
+        // node decode — the statement's snapshot. Two separate HEAD reads (one
+        // in the index, one here) could straddle a commit and pair an index
+        // answer from one revision with node records from another.
+        let scan_revision = ctx_clone.statement_snapshot().await?;
+
+        // A pseudo-property is answered by the index alone (no JSON residual
+        // above this scan), so its candidates are re-checked against the decoded
+        // node — see `index_recheck`.
+        let pseudo = is_pseudo_property(&property_name);
 
         let mut emitted = 0;
         let mut safety_scanned = 0usize;
         let start_time = Instant::now();
 
-        for node_id in node_ids {
-            if let Some(lim) = limit {
-                if emitted >= lim {
+        // The index is first asked for `limit` ids. A candidate can still be
+        // dropped (missing at the snapshot, denied by RLS, an orphan entry), and
+        // a dropped candidate must not cost the caller a row: if the first pass
+        // came back full but delivered too few rows, a second, unlimited pass
+        // continues past the ids already seen.
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut index_limit = limit;
+        loop {
+            tracing::debug!("   Looking up nodes by property index with limit {:?}...", index_limit);
+            let node_ids = storage
+                .property_index()
+                .find_by_property_with_limit(
+                    StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
+                    &property_name,
+                    &prop_value,
+                    false,
+                    Some(&scan_revision),
+                    index_limit,
+                )
+                .await?;
+            tracing::debug!("   PropertyIndexScan found {} node IDs", node_ids.len());
+            let truncated = index_limit.is_some_and(|l| node_ids.len() >= l);
+
+            for node_id in node_ids {
+                if limit.is_some_and(|lim| emitted >= lim) {
                     break;
                 }
-            }
-
-            safety_scanned += 1;
-
-            if safety_scanned > SCAN_COUNT_CEILING {
-                tracing::warn!("PropertyIndexScan count limit reached: {} nodes checked", safety_scanned);
-                Err(super::scan_count_budget_exceeded(safety_scanned, start_time.elapsed()))?;
-            }
-
-            if safety_scanned % TIME_CHECK_INTERVAL == 0 && start_time.elapsed() > SCAN_TIME_LIMIT {
-                tracing::warn!("PropertyIndexScan time limit reached: {:?} elapsed, {} nodes checked",
-                               start_time.elapsed(), safety_scanned);
-                Err(super::scan_time_budget_exceeded(safety_scanned, start_time.elapsed()))?;
-            }
-
-            let node_opt = storage
-                .nodes()
-                .get(StorageScope::new(&tenant_id, &repo_id, &branch, &workspace), &node_id, scan_revision.as_ref())
-                .await?;
-
-            if let Some(node) = node_opt {
-                if node.path == "/" {
+                if !seen.insert(node_id.clone()) {
                     continue;
                 }
 
-                let node = if let Some(ref auth) = ctx_clone.auth_context {
-                    let scope = PermissionScope::new(&workspace, &branch);
-                    match crate::physical_plan::scan_executors::helpers::rls_filter_node_graph(&*storage, node, auth, &scope, &tenant_id, &repo_id, &branch, ctx_clone.max_revision.as_ref()).await {
-                        Some(n) => n,
-                        None => continue,
-                    }
-                } else {
-                    node
-                };
+                safety_scanned += 1;
 
-                for locale in &locales_to_use {
-                    let translated_node = match resolve_node_for_locale(node.clone(), &ctx_clone, locale).await? {
-                        Some(n) => n,
-                        None => continue,
+                if safety_scanned > SCAN_COUNT_CEILING {
+                    tracing::warn!("PropertyIndexScan count limit reached: {} nodes checked", safety_scanned);
+                    Err(super::scan_count_budget_exceeded(safety_scanned, start_time.elapsed()))?;
+                }
+
+                if safety_scanned % TIME_CHECK_INTERVAL == 0 && start_time.elapsed() > SCAN_TIME_LIMIT {
+                    tracing::warn!("PropertyIndexScan time limit reached: {:?} elapsed, {} nodes checked",
+                                   start_time.elapsed(), safety_scanned);
+                    Err(super::scan_time_budget_exceeded(safety_scanned, start_time.elapsed()))?;
+                }
+
+                let node_opt = storage
+                    .nodes()
+                    .get(StorageScope::new(&tenant_id, &repo_id, &branch, &workspace), &node_id, Some(&scan_revision))
+                    .await?;
+
+                if let Some(node) = node_opt {
+                    if node.path == "/" {
+                        continue;
+                    }
+                    if pseudo && !node_still_matches(&node, &property_name, &property_value) {
+                        continue;
+                    }
+
+                    let node = if let Some(ref auth) = ctx_clone.auth_context {
+                        let scope = PermissionScope::new(&workspace, &branch);
+                        match crate::physical_plan::scan_executors::helpers::rls_filter_node_graph(&*storage, node, auth, &scope, &tenant_id, &repo_id, &branch, Some(&scan_revision)).await {
+                            Some(n) => n,
+                            None => continue,
+                        }
+                    } else {
+                        node
                     };
 
-                    let row = node_to_row(&translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale, None,).await?;
-                    yield row;
-                    emitted += 1;
+                    for locale in &locales_to_use {
+                        let translated_node = match resolve_node_for_locale(node.clone(), &ctx_clone, locale).await? {
+                            Some(n) => n,
+                            None => continue,
+                        };
+                        // The driving equality, moved here from the residual
+                        // filter: checked on the row as emitted (translated,
+                        // field-filtered), exactly where the filter saw it.
+                        if verifies_value && !json_member_equals(&translated_node, &property_name, &property_value) {
+                            continue;
+                        }
+
+                        let row = node_to_row(&translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale, None,).await?;
+                        yield row;
+                        emitted += 1;
+                    }
                 }
             }
+
+            let short = limit.is_some_and(|lim| emitted < lim);
+            if !(truncated && short) {
+                break;
+            }
+            index_limit = None;
         }
     }))
 }

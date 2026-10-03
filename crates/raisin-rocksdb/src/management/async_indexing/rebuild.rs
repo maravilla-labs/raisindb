@@ -10,13 +10,13 @@
 use crate::{cf, cf_handle, keys, repositories::hash_property_value, RocksDBStorage};
 use raisin_error::{Error, Result};
 use raisin_hlc::HLC;
-use raisin_storage::compound::{CompoundBuildPhase, CompoundIndexState};
+use raisin_storage::compound::CompoundIndexState;
 use raisin_storage::{IndexType, RebuildStats};
 use rocksdb::WriteBatch;
 
 use super::helpers::{
     clear_compound_indexes, clear_path_indexes, clear_property_indexes, clear_reference_indexes,
-    extract_references, get_current_revision, scan_nodes,
+    get_current_revision, scan_nodes,
 };
 
 /// Rebuild indexes for a repository + workspace
@@ -483,7 +483,9 @@ async fn rebuild_reference_indexes(
         let is_published = node.published_at.is_some();
 
         // Extract and index all references from properties
-        let references = extract_references(&node.properties);
+        // The ONE reference walker, so a rebuild writes the same paths the
+        // live writers do (and reaches Element and Composite references).
+        let references = crate::repositories::walk_references(&node.properties);
 
         for (prop_path, reference) in references {
             // Forward index: source -> target
@@ -572,10 +574,23 @@ async fn rebuild_compound_indexes(
     // correct-but-slower rather than fast-but-wrong.
     let state_store = crate::compound_state::CompoundStateStore::new(storage.db.clone());
     let declared = declared_compound_indexes(storage, tenant_id, repo_id, branch).await?;
+    //
+    // `begin_rebuild` also returns the generation each build runs under: a
+    // replicated write that marks the index stale mid-rebuild advances it, and
+    // the `Ready` below then loses its compare-and-set instead of stamping over
+    // that mark. (These used to be plain puts of generation 0 — which both
+    // skipped the check and reset the counter, so an older mark could be
+    // forgotten and a later build's CAS pass against it.)
+    let mut started_under = Vec::with_capacity(declared.len());
     for definition in &declared {
-        let mut state = CompoundIndexState::ready(definition, HLC::new(0, 0));
-        state.phase = CompoundBuildPhase::Building;
-        state_store.put(tenant_id, repo_id, branch, workspace, &state)?;
+        started_under.push(state_store.begin_rebuild(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            definition,
+            HLC::new(0, 0),
+        )?);
     }
 
     clear_compound_indexes(storage, tenant_id, repo_id, branch, workspace).await?;
@@ -666,10 +681,15 @@ async fn rebuild_compound_indexes(
     // `Building` in place — which reads as unusable, not as ready-and-empty.
     // That asymmetry is the whole point: the failure mode of this record must be
     // "planner declines a good index", never "planner trusts a bad one".
-    for definition in &declared {
+    for (definition, started) in declared.iter().zip(started_under) {
         let mut state = CompoundIndexState::ready(definition, current_revision);
         state.nodes_indexed = stats.items_processed as u64;
-        state_store.put(tenant_id, repo_id, branch, workspace, &state)?;
+        if !state_store.complete_build(tenant_id, repo_id, branch, workspace, state, started)? {
+            tracing::info!(
+                index_name = %definition.name,
+                "compound rebuild finished behind a newer stale mark; left NotBuilt"
+            );
+        }
     }
 
     Ok(())

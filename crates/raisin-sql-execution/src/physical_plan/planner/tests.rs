@@ -878,7 +878,10 @@ fn test_compound_index_non_leading_column_no_prefix_match() {
 // ── COUNT pushdown over Union ────────────────────────────────────────────
 
 #[test]
-fn test_count_over_node_type_in_uses_summed_index_count() {
+fn test_count_over_node_type_in_is_not_pushed_down() {
+    // `node_type` is a pseudo-property: its index entries have no residual
+    // filter to mask an orphan, so COUNT(*) must not add them up blind. It runs
+    // as an aggregate over the (re-checked) PropertyIndexScans instead.
     use raisin_sql::analyzer::Expr;
     use raisin_sql::logical_plan::{AggregateExpr, AggregateFunction};
 
@@ -916,11 +919,8 @@ fn test_count_over_node_type_in_uses_summed_index_count() {
     };
     let physical = PhysicalPlanner::new().plan(&agg).unwrap();
     let explain = physical.explain();
-    assert!(
-        explain.contains("PropertyIndexCountScan: __node_type=post | __node_type=comment"),
-        "{}",
-        explain
-    );
+    assert!(!explain.contains("PropertyIndexCountScan"), "{}", explain);
+    assert!(explain.contains("PropertyIndexScan"), "{}", explain);
 }
 
 // ── Expression join keys ─────────────────────────────────────────────────

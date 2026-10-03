@@ -133,6 +133,25 @@ impl PhysicalPlanner {
             physical_input.describe()
         );
 
+        // NOT for pseudo-properties (`node_type`, `name`, `created_at`,
+        // `IS_A`/`HAS_MIXIN`, …). The pushed-down count adds up index entries
+        // without reading a node, and the property index can hold orphan LIVE
+        // entries from historically buggy writers (the read/index plan's
+        // critique, Phase 6 amendment). For a user property that is masked by
+        // the JSON residual on the row path; a pseudo-property has no residual,
+        // so the only guard is re-checking the decoded node
+        // (`scan_executors::index_recheck`) — which a key count cannot do, and
+        // which would cost exactly what the row path costs. So these COUNTs run
+        // as an aggregate over the PropertyIndexScan, whose rows ARE re-checked:
+        // an orphan can never inflate COUNT(*).
+        //
+        // The same holds for a JSON equality the scan verifies itself
+        // (`verifies_value`): its re-check replaced the residual filter that
+        // used to keep these COUNTs off the raw-key path, so they stay off it.
+        let pseudo = |name: &str| {
+            crate::physical_plan::scan_executors::index_recheck::is_pseudo_property(name)
+        };
+
         if let PhysicalPlan::PropertyIndexScan {
             tenant_id,
             repo_id,
@@ -140,9 +159,13 @@ impl PhysicalPlanner {
             workspace,
             property_name,
             property_value,
+            verifies_value,
             ..
         } = physical_input
         {
+            if pseudo(property_name.as_str()) || *verifies_value {
+                return None;
+            }
             tracing::debug!("Optimizing COUNT(*) over PropertyIndexScan to PropertyIndexCountScan");
             return Some(PhysicalPlan::PropertyIndexCountScan {
                 tenant_id: tenant_id.clone(),
@@ -167,6 +190,7 @@ impl PhysicalPlanner {
                         workspace,
                         property_name,
                         property_value,
+                        verifies_value,
                         ..
                     } => {
                         let branch_scope = (
@@ -179,6 +203,9 @@ impl PhysicalPlanner {
                             None => scope = Some(branch_scope),
                             Some(s) if *s == branch_scope => {}
                             _ => return None,
+                        }
+                        if pseudo(property_name.as_str()) || *verifies_value {
+                            return None;
                         }
                         properties.push((property_name.clone(), property_value.clone()));
                     }

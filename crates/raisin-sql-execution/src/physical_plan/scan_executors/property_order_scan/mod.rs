@@ -113,7 +113,7 @@ pub async fn execute_property_order_scan<S: Storage + 'static>(
             filter.is_some()
         );
         if filter.is_none() {
-            tracing::info!(
+            tracing::debug!(
                 "PropertyOrderScan: custom property '{}' without filter — may scan many index entries",
                 property_name
             );

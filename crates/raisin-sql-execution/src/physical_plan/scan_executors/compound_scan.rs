@@ -153,7 +153,7 @@ pub async fn execute_compound_index_scan<S: Storage + 'static>(
     let storage = ctx.storage.clone();
     let ctx_clone = ctx.clone();
 
-    tracing::info!(
+    tracing::debug!(
         "   CompoundIndexScan: index='{}', equality_cols={:?}, ascending={}, workspace='{}', branch='{}', limit={:?}",
         index_name, equality_columns, ascending, workspace, branch, limit
     );
@@ -196,7 +196,7 @@ pub async fn execute_compound_index_scan<S: Storage + 'static>(
             )
             .await?;
 
-        tracing::info!(
+        tracing::debug!(
             "   CompoundIndexScan returned {} node IDs from index",
             scan_results.len()
         );
@@ -279,7 +279,7 @@ pub async fn execute_compound_index_scan<S: Storage + 'static>(
             }
         }
 
-        tracing::info!(
+        tracing::debug!(
             "   CompoundIndexScan completed: {} rows emitted",
             emitted
         );

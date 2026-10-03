@@ -20,7 +20,7 @@ impl NodeRepositoryImpl {
         path: &str,
         max_revision: Option<&HLC>,
     ) -> Result<Option<Node>> {
-        tracing::info!(
+        tracing::debug!(
             "REPO get_by_path_impl: tenant={}, repo={}, branch={}, workspace={}, path={}",
             tenant_id,
             repo_id,
@@ -29,79 +29,10 @@ impl NodeRepositoryImpl {
             path
         );
 
-        // Build prefix for this path across all revisions
-        let prefix = keys::KeyBuilder::new()
-            .push(tenant_id)
-            .push(repo_id)
-            .push(branch)
-            .push(workspace)
-            .push("path")
-            .push(path)
-            .build_prefix();
-
-        let cf_path = cf_handle(&self.db, cf::PATH_INDEX)?;
-        let prefix_clone = prefix.clone();
-        let mut iter = crate::prefix_scan(&self.db, cf_path, prefix);
-
-        // MVCC semantics with time-travel support:
-        // Keys are sorted by revision descending (newest first)
-        // For HEAD queries (max_revision = None): first entry is current state
-        // For time-travel queries: skip entries newer than max_revision
-        // If the relevant entry is a tombstone → path is deleted → return None
-        // If the relevant entry is node_id → path exists → return that node
-        let node_id = loop {
-            match iter.next() {
-                Some(Ok((key, bytes))) => {
-                    // Verify key actually starts with our prefix
-                    if !key.starts_with(&prefix_clone) {
-                        tracing::info!(
-                            "REPO get_by_path_impl: key doesn't match prefix, path not found"
-                        );
-                        return Ok(None);
-                    }
-
-                    // For time-travel queries, skip entries newer than max_revision
-                    if let Some(max_rev) = max_revision {
-                        let revision = match keys::extract_revision_from_key(&key) {
-                            Ok(rev) => rev,
-                            Err(e) => {
-                                tracing::warn!(
-                                    "REPO get_by_path_impl: skipping key with invalid revision: {}",
-                                    e
-                                );
-                                continue;
-                            }
-                        };
-
-                        if &revision > max_rev {
-                            tracing::debug!(
-                                "REPO get_by_path_impl: skipping entry newer than max_revision ({} > {})",
-                                revision,
-                                max_rev
-                            );
-                            continue;
-                        }
-                    }
-
-                    // This is the relevant entry (newest at or before max_revision)
-                    // Check if it's a tombstone (path was deleted or moved at this point)
-                    if is_tombstone(&bytes) {
-                        tracing::info!(
-                            "REPO get_by_path_impl: relevant entry is tombstone, path is deleted/moved"
-                        );
-                        return Ok(None);
-                    }
-
-                    let node_id_str = String::from_utf8_lossy(&bytes).to_string();
-                    tracing::info!("REPO get_by_path_impl: found node_id={}", node_id_str);
-                    break node_id_str;
-                }
-                Some(Err(e)) => return Err(raisin_error::Error::storage(e.to_string())),
-                None => {
-                    tracing::info!("REPO get_by_path_impl: no entries found for path");
-                    return Ok(None);
-                }
-            }
+        let Some(node_id) =
+            self.resolve_path_index(tenant_id, repo_id, branch, workspace, path, max_revision)?
+        else {
+            return Ok(None);
         };
 
         // Public API - populate has_children for frontend display
@@ -129,57 +60,51 @@ impl NodeRepositoryImpl {
         path: &str,
         max_revision: Option<&HLC>,
     ) -> Result<Option<String>> {
-        // Build prefix for this path across all revisions
-        let prefix = keys::KeyBuilder::new()
-            .push(tenant_id)
-            .push(repo_id)
-            .push(branch)
-            .push(workspace)
-            .push("path")
-            .push(path)
-            .build_prefix();
+        self.resolve_path_index(tenant_id, repo_id, branch, workspace, path, max_revision)
+    }
 
+    /// The node id a path names at `max_revision` (HEAD when `None`).
+    ///
+    /// MVCC: PATH_INDEX keys run newest first, so the relevant entry is the
+    /// newest one at or before `max_revision` — found with one seek rather
+    /// than by walking every newer entry. If that entry is a tombstone the
+    /// path was deleted or moved away by then, and the answer is `None`.
+    fn resolve_path_index(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        path: &str,
+        max_revision: Option<&HLC>,
+    ) -> Result<Option<String>> {
+        let prefix = keys::path_index_key_prefix(tenant_id, repo_id, branch, workspace, path);
         let cf_path = cf_handle(&self.db, cf::PATH_INDEX)?;
-        let prefix_clone = prefix.clone();
-        let mut iter = crate::prefix_scan(&self.db, cf_path, prefix);
 
-        // MVCC semantics with time-travel support:
-        // Keys are sorted by revision descending (newest first)
-        // For HEAD queries (max_revision = None): first entry is current state
-        // For time-travel queries: skip entries newer than max_revision
-        // If the relevant entry is a tombstone → path is deleted → return None
-        // If the relevant entry is node_id → path exists → return that node
-        loop {
-            match iter.next() {
-                Some(Ok((key, bytes))) => {
-                    // Verify key actually starts with our prefix
-                    if !key.starts_with(&prefix_clone) {
-                        return Ok(None);
-                    }
+        let entry = crate::mvcc_read::newest_at_or_before_with(
+            &self.db,
+            cf_path,
+            &prefix,
+            max_revision,
+            |_, bytes| (!is_tombstone(bytes)).then(|| String::from_utf8_lossy(bytes).to_string()),
+        )?;
 
-                    // For time-travel queries, skip entries newer than max_revision
-                    if let Some(max_rev) = max_revision {
-                        let revision = match keys::extract_revision_from_key(&key) {
-                            Ok(rev) => rev,
-                            Err(_) => continue,
-                        };
-
-                        if &revision > max_rev {
-                            continue;
-                        }
-                    }
-
-                    // This is the relevant entry (newest at or before max_revision)
-                    // Check if it's a tombstone (path was deleted or moved at this point)
-                    if is_tombstone(&bytes) {
-                        return Ok(None);
-                    }
-
-                    let node_id_str = String::from_utf8_lossy(&bytes).to_string();
-                    return Ok(Some(node_id_str));
-                }
-                Some(Err(e)) => return Err(raisin_error::Error::storage(e.to_string())),
-                None => return Ok(None),
+        match entry {
+            Some(Some(node_id)) => {
+                tracing::trace!(
+                    "REPO resolve_path_index: path={} -> node_id={}",
+                    path,
+                    node_id
+                );
+                Ok(Some(node_id))
+            }
+            Some(None) => {
+                tracing::trace!("REPO resolve_path_index: path={} is deleted/moved", path);
+                Ok(None)
+            }
+            None => {
+                tracing::trace!("REPO resolve_path_index: no entries for path={}", path);
+                Ok(None)
             }
         }
     }

@@ -557,8 +557,16 @@ impl NodeRepository for NodeRepositoryImpl {
             branch,
             workspace,
         } = scope;
-        self.has_children_impl(tenant_id, repo_id, branch, workspace, node_id, max_revision)
-            .await
+        self.has_children_impl(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            node_id,
+            None,
+            max_revision,
+        )
+        .await
     }
 
     // -- Tree operations ------------------------------------------------------

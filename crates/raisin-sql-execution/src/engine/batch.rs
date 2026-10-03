@@ -20,7 +20,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
     /// the batch is routed to async job execution and returns a single row with
     /// `job_id`, `status`, `message` columns.
     pub async fn execute_batch(&self, sql: &str) -> Result<RowStream, Error> {
-        tracing::info!("SQL Query Engine starting batch execution");
+        tracing::debug!("SQL Query Engine starting batch execution");
 
         // 1. Analyze all statements
         let analyzer = Analyzer::with_catalog_arc(self.catalog.clone());
@@ -37,7 +37,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         // 2. Check if async routing is needed
         if let Some(ref registrar) = self.job_registrar {
             if batch_requires_async(&statements) {
-                tracing::info!("Batch requires async execution (complex WHERE clause detected)");
+                tracing::debug!("Batch requires async execution (complex WHERE clause detected)");
 
                 let job_id = registrar(sql.to_string(), self.default_actor.clone()).await?;
 
@@ -60,7 +60,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             }
         }
 
-        tracing::info!("Executing {} statements in batch (sync)", statements.len());
+        tracing::debug!("Executing {} statements in batch (sync)", statements.len());
 
         // 3. Execute each statement sequentially (sync path)
         self.execute_batch_sync_internal(sql, &statements).await
@@ -68,7 +68,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
 
     /// Execute a batch synchronously (force sync, no async routing)
     pub async fn execute_batch_sync(&self, sql: &str) -> Result<RowStream, Error> {
-        tracing::info!("SQL Query Engine starting batch execution (forced sync)");
+        tracing::debug!("SQL Query Engine starting batch execution (forced sync)");
 
         let analyzer = Analyzer::with_catalog_arc(self.catalog.clone());
         let statements = analyzer

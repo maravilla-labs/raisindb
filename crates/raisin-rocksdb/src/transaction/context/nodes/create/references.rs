@@ -27,30 +27,32 @@ use raisin_models::nodes::properties::{PropertyValue, RaisinReference};
 use std::collections::HashMap;
 
 use super::super::read::{get_node, get_node_by_path};
+use crate::indexing::walk_properties_mut;
 use crate::transaction::RocksDBTransaction;
 
-/// Location of a reference within the property tree
-#[derive(Debug)]
-struct RefLocation {
-    /// Path of keys to reach this reference (e.g., ["tags", "0"] for tags[0])
-    path: Vec<PathSegment>,
-    /// The reference to resolve
+/// A reference found in the property tree, with its dot path — the ONE path
+/// format every reference-index writer, tombstoner and rebuild uses.
+struct FoundReference {
+    path: String,
     reference: RaisinReference,
-}
-
-/// A segment in the path to a value
-#[derive(Debug, Clone)]
-enum PathSegment {
-    /// Key in an object/map
-    Key(String),
-    /// Index in an array
-    Index(usize),
+    /// Reached only through a `Composite` block, which this resolver did not
+    /// descend before the walk was shared (see `resolve_references`).
+    inside_composite: bool,
 }
 
 /// Resolve all path-based references in properties to UUIDs
 ///
-/// This function uses an iterative approach to traverse the properties map,
-/// finds all `RaisinReference` values, and resolves path-based references to UUIDs.
+/// Finds every `RaisinReference` — in arrays, objects, element content and
+/// composite blocks alike, through the shared property walker — and resolves
+/// path-based references to UUIDs.
+///
+/// # Dangling path references inside composite blocks are logged, not rejected
+///
+/// Composite blocks used to be skipped here entirely, so a path reference in
+/// one was stored verbatim and never checked. A dangling one now in such a
+/// block would turn writes that always succeeded into failures, so for this
+/// release it is logged and kept as written. Everywhere else a dangling path
+/// reference fails the write, as it always did.
 ///
 /// # Arguments
 ///
@@ -66,110 +68,86 @@ pub async fn resolve_references(
     properties: &mut HashMap<String, PropertyValue>,
     source_workspace: &str,
 ) -> Result<()> {
-    // Phase 1: Collect all references and their locations (iterative traversal)
-    let ref_locations = collect_references(properties);
-
-    if ref_locations.is_empty() {
+    // Phase 1: collect every reference with its path.
+    let found = collect_references(properties);
+    if found.is_empty() {
         return Ok(());
     }
 
-    // Phase 2: Resolve each reference
-    let mut resolved_refs = Vec::with_capacity(ref_locations.len());
-    for loc in ref_locations {
-        let resolved = resolve_single_reference(tx, loc.reference, source_workspace)
-            .await
-            .map_err(|e| match e {
-                // Name the property holding the dangling reference: on a page
-                // with forty blocks "Referenced node not found" alone does not
-                // say which image or link to fix.
-                Error::Validation(msg) => {
-                    Error::Validation(format!("{msg} (at {})", format_ref_path(&loc.path)))
-                }
-                other => other,
-            })?;
-        resolved_refs.push((loc.path, resolved));
+    // Phase 2: resolve each one.
+    let mut resolved: HashMap<String, RaisinReference> = HashMap::with_capacity(found.len());
+    for found in found {
+        let is_path_ref = found.reference.id.starts_with('/');
+        match resolve_single_reference(tx, found.reference, source_workspace).await {
+            Ok(reference) => {
+                resolved.insert(found.path, reference);
+            }
+            Err(Error::Validation(msg)) if is_path_ref && found.inside_composite => {
+                tracing::warn!(
+                    property = %found.path,
+                    "{msg}: dangling path reference inside a composite block kept as \
+                     written (log-only this release)"
+                );
+            }
+            // Name the property holding the dangling reference: on a page
+            // with forty blocks "Referenced node not found" alone does not
+            // say which image or link to fix.
+            Err(Error::Validation(msg)) => {
+                return Err(Error::Validation(format!(
+                    "{msg} (at {})",
+                    display_path(&found.path)
+                )));
+            }
+            Err(other) => return Err(other),
+        }
     }
 
-    // Phase 3: Apply resolved references back to properties
-    for (path, resolved_ref) in resolved_refs {
-        apply_resolved_reference(properties, &path, resolved_ref);
-    }
+    // Phase 3: write the resolved references back, addressed by the same path.
+    walk_properties_mut(properties, |cursor, value| {
+        if !matches!(value, PropertyValue::Reference(_)) {
+            return false;
+        }
+        if let Some(reference) = resolved.remove(cursor.path) {
+            *value = PropertyValue::Reference(reference);
+        }
+        true
+    });
 
     Ok(())
 }
 
-/// `content[0].items[2].image`, the spelling validation errors use.
-fn format_ref_path(path: &[PathSegment]) -> String {
+/// Every reference in `properties`, through the shared walker.
+fn collect_references(properties: &mut HashMap<String, PropertyValue>) -> Vec<FoundReference> {
+    let mut found = Vec::new();
+    walk_properties_mut(properties, |cursor, value| match value {
+        PropertyValue::Reference(reference) => {
+            found.push(FoundReference {
+                path: cursor.path.to_string(),
+                reference: reference.clone(),
+                inside_composite: cursor.inside_composite,
+            });
+            true
+        }
+        _ => false,
+    });
+    found
+}
+
+/// `content.0.items.2.image` as `content[0].items[2].image`, the spelling
+/// validation errors use.
+fn display_path(path: &str) -> String {
     let mut out = String::new();
-    for segment in path {
-        match segment {
-            PathSegment::Key(key) => {
-                if !out.is_empty() {
-                    out.push('.');
-                }
-                out.push_str(key);
+    for segment in path.split('.') {
+        if !segment.is_empty() && segment.bytes().all(|b| b.is_ascii_digit()) {
+            out.push_str(&format!("[{segment}]"));
+        } else {
+            if !out.is_empty() {
+                out.push('.');
             }
-            PathSegment::Index(idx) => out.push_str(&format!("[{idx}]")),
+            out.push_str(segment);
         }
     }
     out
-}
-
-/// Collect all references from properties using iterative traversal
-fn collect_references(properties: &HashMap<String, PropertyValue>) -> Vec<RefLocation> {
-    let mut refs = Vec::new();
-
-    // Stack of (current_path, value_to_process)
-    // We clone values for inspection but track paths for later mutation
-    let mut stack: Vec<(Vec<PathSegment>, &PropertyValue)> = Vec::new();
-
-    // Initialize stack with top-level properties
-    for (key, value) in properties {
-        stack.push((vec![PathSegment::Key(key.clone())], value));
-    }
-
-    // Iterative depth-first traversal
-    while let Some((current_path, value)) = stack.pop() {
-        match value {
-            PropertyValue::Reference(reference) => {
-                refs.push(RefLocation {
-                    path: current_path,
-                    reference: reference.clone(),
-                });
-            }
-            PropertyValue::Array(items) => {
-                // Add array items to stack in reverse order (so we process in order)
-                for (idx, item) in items.iter().enumerate().rev() {
-                    let mut item_path = current_path.clone();
-                    item_path.push(PathSegment::Index(idx));
-                    stack.push((item_path, item));
-                }
-            }
-            PropertyValue::Object(obj) => {
-                // Add object entries to stack
-                for (key, val) in obj {
-                    let mut obj_path = current_path.clone();
-                    obj_path.push(PathSegment::Key(key.clone()));
-                    stack.push((obj_path, val));
-                }
-            }
-            PropertyValue::Element(element) => {
-                // Element blocks (e.g. Studio content elements) carry their fields
-                // — including references like background_image/cta — in `content`,
-                // keyed like an object. Descend so element-nested refs are resolved
-                // too (otherwise path-based refs inside content are never normalized).
-                for (key, val) in &element.content {
-                    let mut el_path = current_path.clone();
-                    el_path.push(PathSegment::Key(key.clone()));
-                    stack.push((el_path, val));
-                }
-            }
-            // Other types don't contain references
-            _ => {}
-        }
-    }
-
-    refs
 }
 
 /// Resolve a single reference
@@ -238,63 +216,6 @@ async fn resolve_single_reference(
     Ok(reference)
 }
 
-/// Apply a resolved reference back to the properties at the given path
-fn apply_resolved_reference(
-    properties: &mut HashMap<String, PropertyValue>,
-    path: &[PathSegment],
-    resolved: RaisinReference,
-) {
-    if path.is_empty() {
-        return;
-    }
-
-    // Navigate to the parent and update the target
-    let mut current: &mut PropertyValue = match &path[0] {
-        PathSegment::Key(key) => {
-            if let Some(val) = properties.get_mut(key) {
-                val
-            } else {
-                return;
-            }
-        }
-        PathSegment::Index(_) => return, // Top-level can't be an index
-    };
-
-    // Navigate through intermediate path segments
-    for segment in &path[1..] {
-        current = match (current, segment) {
-            (PropertyValue::Object(obj), PathSegment::Key(key)) => {
-                if let Some(val) = obj.get_mut(key) {
-                    val
-                } else {
-                    return;
-                }
-            }
-            (PropertyValue::Array(arr), PathSegment::Index(idx)) => {
-                if let Some(val) = arr.get_mut(*idx) {
-                    val
-                } else {
-                    return;
-                }
-            }
-            (PropertyValue::Element(element), PathSegment::Key(key)) => {
-                // Mirror collect_references: descend into element content on write-back.
-                if let Some(val) = element.content.get_mut(key) {
-                    val
-                } else {
-                    return;
-                }
-            }
-            _ => return, // Path mismatch
-        };
-    }
-
-    // Update the reference at the final location
-    if let PropertyValue::Reference(ref_val) = current {
-        *current = PropertyValue::Reference(resolved);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,95 +238,75 @@ mod tests {
         assert!(reference.path.is_empty());
     }
 
-    #[test]
-    fn test_collect_references_empty() {
-        let properties = HashMap::new();
-        let refs = collect_references(&properties);
-        assert!(refs.is_empty());
+    fn reference(id: &str) -> PropertyValue {
+        PropertyValue::Reference(RaisinReference {
+            id: id.to_string(),
+            workspace: "social".to_string(),
+            path: String::new(),
+        })
     }
 
     #[test]
-    fn test_collect_references_flat() {
+    fn test_collect_references_empty() {
         let mut properties = HashMap::new();
-        properties.insert(
-            "ref1".to_string(),
-            PropertyValue::Reference(RaisinReference {
-                id: "/path/to/node".to_string(),
-                workspace: "social".to_string(),
-                path: String::new(),
-            }),
-        );
+        assert!(collect_references(&mut properties).is_empty());
+    }
+
+    #[test]
+    fn test_collect_references_flat_and_in_array() {
+        let mut properties = HashMap::new();
+        properties.insert("ref1".to_string(), reference("/path/to/node"));
         properties.insert(
             "name".to_string(),
             PropertyValue::String("test".to_string()),
         );
-
-        let refs = collect_references(&properties);
-        assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].reference.id, "/path/to/node");
-    }
-
-    #[test]
-    fn test_collect_references_in_array() {
-        let mut properties = HashMap::new();
         properties.insert(
             "tags".to_string(),
-            PropertyValue::Array(vec![
-                PropertyValue::Reference(RaisinReference {
-                    id: "/tag1".to_string(),
-                    workspace: "social".to_string(),
-                    path: String::new(),
-                }),
-                PropertyValue::Reference(RaisinReference {
-                    id: "/tag2".to_string(),
-                    workspace: "social".to_string(),
-                    path: String::new(),
-                }),
-            ]),
+            PropertyValue::Array(vec![reference("/tag1"), reference("/tag2")]),
         );
 
-        let refs = collect_references(&properties);
-        assert_eq!(refs.len(), 2);
+        let mut paths: Vec<String> = collect_references(&mut properties)
+            .into_iter()
+            .map(|f| f.path)
+            .collect();
+        paths.sort();
+        assert_eq!(paths, ["ref1", "tags.0", "tags.1"]);
     }
 
+    /// Composite blocks are reached now, and flagged as such.
     #[test]
-    fn test_apply_resolved_reference() {
+    fn test_collect_references_in_composite_blocks() {
+        use raisin_models::nodes::properties::value::{Composite, Element};
+        let block = Element {
+            uuid: "b1".to_string(),
+            element_type: "x:Teaser".to_string(),
+            content: HashMap::from([("link".to_string(), reference("/target"))]),
+        };
         let mut properties = HashMap::new();
         properties.insert(
-            "ref1".to_string(),
-            PropertyValue::Reference(RaisinReference {
-                id: "/path/to/node".to_string(),
-                workspace: "social".to_string(),
-                path: String::new(),
+            "blocks".to_string(),
+            PropertyValue::Composite(Composite {
+                uuid: "c1".to_string(),
+                items: vec![block],
             }),
         );
+        properties.insert("hero".to_string(), reference("/hero"));
 
-        let path = vec![PathSegment::Key("ref1".to_string())];
-        let resolved = RaisinReference {
-            id: "uuid-123".to_string(),
-            workspace: "social".to_string(),
-            path: "/path/to/node".to_string(),
-        };
-
-        apply_resolved_reference(&mut properties, &path, resolved);
-
-        if let Some(PropertyValue::Reference(r)) = properties.get("ref1") {
-            assert_eq!(r.id, "uuid-123");
-            assert_eq!(r.path, "/path/to/node");
-        } else {
-            panic!("Expected reference");
-        }
+        let mut found = collect_references(&mut properties);
+        found.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].path, "blocks.0.link");
+        assert!(found[0].inside_composite);
+        assert_eq!(found[1].path, "hero");
+        assert!(!found[1].inside_composite);
     }
 
     #[test]
-    fn test_format_ref_path_names_the_nested_property() {
-        let path = vec![
-            PathSegment::Key("content".to_string()),
-            PathSegment::Index(0),
-            PathSegment::Key("items".to_string()),
-            PathSegment::Index(2),
-            PathSegment::Key("image".to_string()),
-        ];
-        assert_eq!(format_ref_path(&path), "content[0].items[2].image");
+    fn test_display_path_names_the_nested_property() {
+        assert_eq!(
+            display_path("content.0.items.2.image"),
+            "content[0].items[2].image"
+        );
+        assert_eq!(display_path("hero"), "hero");
     }
 }

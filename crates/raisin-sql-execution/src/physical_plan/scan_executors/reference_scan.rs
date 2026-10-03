@@ -81,7 +81,7 @@ pub async fn execute_reference_index_scan<S: Storage + 'static>(
     let qualifier = alias.unwrap_or(table);
     let ctx_clone = ctx.clone();
 
-    tracing::info!(
+    tracing::debug!(
         "   ReferenceIndexScan: target='{}:{}', workspace='{}', branch='{}', limit={:?}",
         target_workspace,
         target_path,

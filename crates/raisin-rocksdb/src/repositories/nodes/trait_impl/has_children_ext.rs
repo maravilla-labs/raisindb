@@ -20,17 +20,19 @@
 use raisin_error::Result;
 use raisin_hlc::HLC;
 use raisin_models::nodes::Node;
-use raisin_storage::{NodeRepository, StorageScope};
 
 use crate::repositories::nodes::NodeRepositoryImpl;
 
 impl NodeRepositoryImpl {
     /// Populate `has_children` for every node in the list.
     ///
-    /// Calls `NodeRepository::has_children` for each node and stores the
+    /// Runs the `has_children` existence probe for each node and stores the
     /// result in `node.has_children`.  This is intentionally a separate
     /// helper so the main trait dispatcher does not repeat the same loop
     /// in `list_by_type`, `list_all`, and `list_children`.
+    ///
+    /// The node is in hand, so its path answers the root check — the
+    /// id-only `NodeRepository::has_children` would have to look it up.
     pub(crate) async fn populate_has_children(
         &self,
         tenant_id: &str,
@@ -41,14 +43,16 @@ impl NodeRepositoryImpl {
         max_revision: Option<&HLC>,
     ) -> Result<()> {
         for node in nodes.iter_mut() {
-            node.has_children = Some(
-                self.has_children(
-                    StorageScope::new(tenant_id, repo_id, branch, workspace),
-                    &node.id,
-                    max_revision,
-                )
-                .await?,
-            );
+            let has_children = self.probe_has_children(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                &node.id,
+                Some(&node.path),
+                max_revision,
+            )?;
+            node.has_children = Some(has_children);
         }
         Ok(())
     }

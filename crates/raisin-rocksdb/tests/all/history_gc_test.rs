@@ -150,6 +150,7 @@ async fn titled(storage: &Arc<RocksDBStorage>, title: &str) -> Result<Vec<String
             "title",
             &PropertyValue::String(title.to_string()),
             false,
+            None, // max_revision: branch HEAD
         )
         .await
 }

@@ -1157,3 +1157,19 @@ Same release: `Archetypes` / `ElementTypes` accept DML with the full JSON body
 (the DDL grammar cannot carry `$type` controls, `config` or `meta.editor`),
 `Workspaces` accepts INSERT / UPDATE through `WorkspaceService::put`, and a
 `sync` package install keeps the workspace types an installation added.
+
+### 2.121 [P2] A merge conflict resolution emits no node events
+
+`resolve_merge_with_resolutions` (`raisin-rocksdb/.../branches/merge/resolution.rs`)
+writes each resolved node, or its deletion, straight into the target branch at
+the merge revision (`merge/apply.rs`) and publishes nothing on the event bus.
+This predates the Phase 2.10 merge-apply rework (checked against the previous
+revision: no event emission anywhere in `merge/`).
+
+Consequence: everything that keeps itself current from `node:*` events misses a
+resolved node — fulltext and vector indexing, triggers, WebSocket subscriptions.
+A `keep-theirs` resolution therefore leaves the target's fulltext and vector
+index describing the losing side until the node is next written or the index is
+rebuilt. Fix: publish one `Updated` / `Deleted` (or `Created`) per resolution
+after the merge commit, with the merge revision — through the same emitter the
+repository write paths use.

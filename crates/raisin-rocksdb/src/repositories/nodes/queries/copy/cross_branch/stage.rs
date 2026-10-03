@@ -140,6 +140,49 @@ impl NodeRepositoryImpl {
             }
         }
 
+        // Stale OLD-value entries of the destination's previous version:
+        // property values and references the source no longer has, and its
+        // old geometries. This is an upsert, so without the diff a property
+        // or reference removed on the source stays LIVE on the target — a
+        // published page keeps matching `properties->>'k' = old` and
+        // `REFERENCES(...)` long after the source dropped them. Same diff as
+        // `update_impl`, from the same helpers; written before the new
+        // entries, which share keys with any unchanged value.
+        if let Some(old) = &old_dst {
+            let cf_property = crate::cf_handle(&self.db, crate::cf::PROPERTY_INDEX)?;
+            crate::repositories::add_stale_property_tombstones(
+                batch,
+                cf_property,
+                scope.tenant_id,
+                scope.repo_id,
+                scope.target_branch,
+                scope.workspace,
+                old,
+                &node,
+                scope.revision,
+            );
+            self.add_stale_reference_tombstones_to_batch(
+                batch,
+                old,
+                &node,
+                scope.tenant_id,
+                scope.repo_id,
+                scope.target_branch,
+                scope.workspace,
+                scope.revision,
+            )?;
+            self.add_spatial_tombstones_to_batch(
+                batch,
+                old,
+                Some(&node),
+                scope.tenant_id,
+                scope.repo_id,
+                scope.target_branch,
+                scope.workspace,
+                scope.revision,
+            )?;
+        }
+
         // Node blob + path/node_path/property/reference/relation/ordered
         // index entries, all at the shared revision.
         self.add_node_to_batch_with_parent_id(

@@ -59,7 +59,7 @@ pub async fn execute_table_scan<S: Storage + 'static>(
     if crate::physical_plan::pg_catalog_executor::is_pg_catalog_table(&table) {
         let simple_name =
             crate::physical_plan::pg_catalog_executor::get_simple_pg_catalog_table_name(&table);
-        tracing::info!("   PgCatalogScan: table='{}'", simple_name);
+        tracing::debug!("   PgCatalogScan: table='{}'", simple_name);
         return crate::physical_plan::pg_catalog_executor::execute_pg_catalog_scan(
             simple_name,
             ctx.storage.clone(),
@@ -90,7 +90,7 @@ pub async fn execute_table_scan<S: Storage + 'static>(
         "table_scan started"
     );
 
-    tracing::info!(
+    tracing::debug!(
         "   TableScan: workspace='{}', branch='{}', max_revision={:?}",
         workspace,
         branch,

@@ -5,6 +5,7 @@
 
 use crate::index_types::PropertyIndex;
 use raisin_error::Result;
+use raisin_hlc::HLC;
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_storage::scope::StorageScope;
 use raisin_storage::{PropertyIndexRepository, PropertyScanEntry};
@@ -155,6 +156,7 @@ impl PropertyIndexRepository for InMemoryPropertyIndexRepo {
         property_name: &str,
         property_value: &PropertyValue,
         published_only: bool,
+        _max_revision: Option<&HLC>,
     ) -> Result<Vec<String>> {
         let indexes = if published_only {
             &self.published_indexes
@@ -186,6 +188,7 @@ impl PropertyIndexRepository for InMemoryPropertyIndexRepo {
         scope: StorageScope<'_>,
         property_name: &str,
         published_only: bool,
+        _max_revision: Option<&HLC>,
     ) -> Result<Vec<String>> {
         let indexes = if published_only {
             &self.published_indexes
@@ -219,6 +222,7 @@ impl PropertyIndexRepository for InMemoryPropertyIndexRepo {
         scope: StorageScope<'_>,
         property_name: &str,
         published_only: bool,
+        _max_revision: Option<&HLC>,
         ascending: bool,
         limit: Option<usize>,
     ) -> Result<Vec<PropertyScanEntry>> {
@@ -320,6 +324,7 @@ mod tests {
                 "email",
                 &email_value,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -356,6 +361,7 @@ mod tests {
                 "email",
                 &email_value,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -368,6 +374,7 @@ mod tests {
                 "email",
                 &email_value,
                 true,
+                None,
             )
             .await
             .unwrap();
@@ -390,6 +397,7 @@ mod tests {
                 "email",
                 &email_value,
                 true,
+                None,
             )
             .await
             .unwrap();
@@ -402,6 +410,7 @@ mod tests {
                 "email",
                 &email_value,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -444,6 +453,7 @@ mod tests {
                 "email",
                 &email_value,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -457,6 +467,7 @@ mod tests {
                 "email",
                 &email_value,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -493,6 +504,7 @@ mod tests {
                 "email",
                 &email_value,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -510,6 +522,7 @@ mod tests {
                 "email",
                 &email_value,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -566,7 +579,12 @@ mod tests {
 
         // Should find node1 and node2 (both have email property)
         let results = repo
-            .find_nodes_with_property(scope("tenant1", "repo1", "main", "ws1"), "email", false)
+            .find_nodes_with_property(
+                scope("tenant1", "repo1", "main", "ws1"),
+                "email",
+                false,
+                None,
+            )
             .await
             .unwrap();
 

@@ -161,27 +161,31 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
         // This preserves the fractional index ordering at every level
         let mut result_nodes = Vec::new();
 
-        // Use a stack for depth-first traversal (iterative, not recursive)
-        // Each entry is a parent ID to process
+        // Depth-first traversal with an explicit stack of parent PATHS
+        // (`list_children` takes a path; pushing ids made every non-root
+        // lookup fail with "Parent node not found").
         let mut stack = vec!["/".to_string()];
 
-        while let Some(parent_id) = stack.pop() {
-            // Get ordered children from ORDERED_CHILDREN index
-            let options = if let Some(rev) = self.revision {
-                raisin_storage::ListOptions::at_revision(rev)
-            } else {
-                raisin_storage::ListOptions::for_api()
-            };
+        // `for_api*` populates `has_children`, so a leaf is known before it
+        // is visited and never costs a `list_children` call of its own.
+        let options = match self.revision {
+            Some(rev) => raisin_storage::ListOptions::for_api_at_revision(rev),
+            None => raisin_storage::ListOptions::for_api(),
+        };
+
+        while let Some(parent_path) = stack.pop() {
             let children = self
                 .storage
                 .nodes()
-                .list_children(self.scope(), &parent_id, options)
+                .list_children(self.scope(), &parent_path, options.clone())
                 .await?;
 
             // Push children onto stack in reverse order so they're processed in correct order
             // (stack is LIFO, so reverse order = correct depth-first left-to-right)
             for child in children.iter().rev() {
-                stack.push(child.id.clone());
+                if child.has_children != Some(false) {
+                    stack.push(child.path.clone());
+                }
             }
 
             // Add children to results in original order

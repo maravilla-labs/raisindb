@@ -51,6 +51,25 @@ use raisin_hlc::HLC;
 /// Key separator (null byte)
 const SEP: u8 = 0;
 
+/// The tombstone marker every writer emits: a single `T`.
+pub const TOMBSTONE_VALUE: &[u8] = b"T";
+
+/// Whether a stored value marks its key as deleted — the ONE answer for every
+/// versioned CF, and the only one a PATH_INDEX reader may use.
+///
+/// Branch-merge apply used to write a single `\0` byte as its index
+/// tombstone, which every reader comparing against `b"T"` took for a LIVE
+/// entry whose node id was `"\0"`: a path vacated by a merge resolution kept
+/// resolving. Merge now writes `T`, and the repair rewrites the old markers,
+/// but a checkpoint from an unrepaired or older peer brings them straight back
+/// — so readers accept both, permanently. No CF stores a one-byte `\0` as a
+/// live value (node ids, names, paths and node blobs are never that), so the
+/// wider test cannot misread a real entry.
+#[inline]
+pub fn is_tombstone_value(value: &[u8]) -> bool {
+    value == TOMBSTONE_VALUE || value == b"\x00"
+}
+
 /// Encode an HLC in descending order for RocksDB keys
 ///
 /// Uses bitwise NOT on both timestamp and counter components to achieve

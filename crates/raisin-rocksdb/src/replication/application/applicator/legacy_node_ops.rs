@@ -164,37 +164,18 @@ impl OperationApplicator {
             }
         }
 
-        // 5. Add reference indexes
-        for (prop_path, prop_value) in &node.properties {
-            if let raisin_models::nodes::properties::PropertyValue::Reference(ref_data) = prop_value
-            {
-                let fwd_key = keys::reference_forward_key_versioned(
-                    tenant_id,
-                    repo_id,
-                    branch,
-                    workspace,
-                    &node.id,
-                    prop_path,
-                    &revision,
-                    is_published,
-                );
-                batch.put_cf(cf_reference, fwd_key, ref_data.id.as_bytes());
-
-                let rev_key = keys::reference_reverse_key_versioned(
-                    tenant_id,
-                    repo_id,
-                    branch,
-                    workspace,
-                    &ref_data.workspace,
-                    &ref_data.id,
-                    &node.id,
-                    prop_path,
-                    &revision,
-                    is_published,
-                );
-                batch.put_cf(cf_reference, rev_key, node.id.as_bytes());
-            }
-        }
+        // 5. Add reference indexes through the shared writer: nested
+        // references included, keyed by the one dot-format path.
+        crate::repositories::add_reference_index_entries(
+            &mut batch,
+            cf_reference,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            &node,
+            &revision,
+        )?;
 
         // 6. Add relation indexes
         for relation in &node.relations {
@@ -265,9 +246,7 @@ impl OperationApplicator {
         }
 
         // Atomic commit
-        self.db.write(batch).map_err(|e| {
-            raisin_error::Error::storage(format!("Failed to apply create_node: {}", e))
-        })?;
+        self.write_marking_compound_stale(batch, tenant_id, repo_id, branch, workspace)?;
 
         tracing::info!(
             "✅ Node created successfully: {} (HEAD will be updated by separate UpdateBranch operation)",
@@ -312,7 +291,13 @@ impl OperationApplicator {
             revision
         );
 
-        let node_snapshot = match self.load_latest_node(tenant_id, repo_id, branch, node_id)? {
+        let node_snapshot = match self.load_latest_node(
+            tenant_id,
+            repo_id,
+            branch,
+            super::WorkspaceHint::Unknown,
+            node_id,
+        )? {
             Some(node) => node,
             None => {
                 tracing::warn!(

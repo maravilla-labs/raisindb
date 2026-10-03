@@ -38,8 +38,6 @@ use raisin_models::nodes::Node;
 use rocksdb::{ColumnFamily, WriteBatch, DB};
 use std::sync::Arc;
 
-pub use helpers::{extract_references, ExtractedReference};
-
 /// Tombstone marker (single byte 'T' for debugging visibility)
 pub const TOMBSTONE: &[u8] = b"T";
 
@@ -150,6 +148,9 @@ pub fn tombstone_compound_indexes_only(
 /// * `cfs` - Column family handles
 /// * `node` - The node being deleted
 /// * `revision` - Revision for tombstone markers
+///
+/// The ORDERED_CHILDREN parent is resolved from PATH_INDEX; a caller that
+/// already knows the parent's id uses [`add_node_tombstones_with_parent`].
 pub fn add_node_tombstones(
     batch: &mut WriteBatch,
     db: &DB,
@@ -157,6 +158,21 @@ pub fn add_node_tombstones(
     cfs: &TombstoneColumnFamilies,
     node: &Node,
     revision: &HLC,
+) -> Result<()> {
+    add_node_tombstones_with_parent(batch, db, ctx, cfs, node, revision, None)
+}
+
+/// [`add_node_tombstones`] with the ORDERED_CHILDREN parent key given:
+/// `parent_index_id` is the parent node's ID (`/` for a root child), never its
+/// name. The replicated delete passes the id its op carries, unconditionally.
+pub fn add_node_tombstones_with_parent(
+    batch: &mut WriteBatch,
+    db: &DB,
+    ctx: &TombstoneContext,
+    cfs: &TombstoneColumnFamilies,
+    node: &Node,
+    revision: &HLC,
+    parent_index_id: Option<&str>,
 ) -> Result<()> {
     let is_published = node.published_at.is_some();
 
@@ -180,7 +196,15 @@ pub fn add_node_tombstones(
     index_tombstones::tombstone_relation_indexes(batch, db, ctx, cfs, node, revision)?;
 
     // 7. ORDERED_CHILDREN - Tombstone child ordering entry
-    core_tombstones::tombstone_ordered_children(batch, ctx, cfs, node, revision);
+    core_tombstones::tombstone_ordered_children(
+        batch,
+        db,
+        ctx,
+        cfs,
+        node,
+        revision,
+        parent_index_id,
+    )?;
 
     // 8. COMPOUND_INDEX - Tombstone compound index entries (prefix scan)
     index_tombstones::tombstone_compound_indexes(batch, db, ctx, cfs, node)?;

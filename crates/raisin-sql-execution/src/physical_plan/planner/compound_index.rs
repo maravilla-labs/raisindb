@@ -319,6 +319,11 @@ impl PhysicalPlanner {
                 self.is_constant_expr(left) && self.is_constant_expr(right)
             }
             Expr::UnaryOp { expr, .. } => self.is_constant_expr(expr),
+            // `'2026-01-01T00:00:00Z'::TIMESTAMPTZ` — the only way to spell a
+            // timestamp bound, since text does not coerce implicitly. Without
+            // this arm such a predicate never became a RangeCompare and every
+            // timestamp range was a full scan.
+            Expr::Cast { expr, .. } => self.is_constant_expr(expr),
             Expr::Column { .. } => false,
             _ => false,
         }
@@ -343,6 +348,14 @@ impl PhysicalPlanner {
                     }
                     _ => None,
                 }
+            }
+            // A cast of a constant is a constant: `'2026-01-01T00:00:00Z'::TIMESTAMPTZ`
+            // is how a timestamp bound is spelled, since text does not coerce
+            // to a timestamp implicitly. Folding it lets the bound reach the
+            // index; an invalid one stays unfolded and fails at execution.
+            Expr::Cast { expr, target_type } => {
+                let inner = self.evaluate_constant_expr(expr)?;
+                crate::physical_plan::eval::cast_literal(inner, target_type).ok()
             }
             _ => None,
         }

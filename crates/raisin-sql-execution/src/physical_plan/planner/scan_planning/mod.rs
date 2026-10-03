@@ -10,12 +10,14 @@
 //! - `index_selection` - Best predicate selection with ordering heuristics
 //! - `build_scan` - Physical scan plan construction for each strategy
 //! - `build_spatial` - Spatial scan construction and the residual-filter rule
+//! - `timestamp_bounds` - `created_at`/`updated_at` bounds in the index's microseconds
 
 mod build_scan;
 mod build_spatial;
 mod build_spatial_fallback;
 mod index_selection;
 mod selectivity;
+pub(super) mod timestamp_bounds;
 
 use super::{
     CanonicalPredicate, Error, Expr, Literal, PhysicalPlan, PhysicalPlanner, PlanContext,
@@ -831,9 +833,11 @@ impl PhysicalPlanner {
                 CanonicalPredicate::ColumnIn { .. } => false,
                 CanonicalPredicate::JsonPropertyIn { .. } => false,
                 CanonicalPredicate::DepthEq { .. } => false,
-                CanonicalPredicate::RangeCompare { column, .. } => {
-                    let col_lower = column.to_lowercase();
-                    (col_lower == "created_at" || col_lower == "updated_at")
+                // Only when the bound can actually be encoded: a constant that
+                // does not evaluate to a timestamp (a bad cast, a text literal)
+                // must stay a row filter rather than fail `build_range_scan`.
+                CanonicalPredicate::RangeCompare { .. } => {
+                    self.range_target_and_bound(pred).is_some()
                         && self.index_catalog.has_property_index()
                 }
                 CanonicalPredicate::JsonPropertyRange { .. } => {

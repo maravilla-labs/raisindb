@@ -41,15 +41,18 @@ struct NodeTypeProbe {
 pub struct CompoundIndexJobHandler {
     db: Arc<DB>,
     node_type_repo: NodeTypeRepositoryImpl,
-    /// Cluster-wide build lease.
+    /// Build lease, scoped to THIS node (the key includes `node_id`).
     ///
-    /// `JobRegistry` dedup is per-PROCESS, so on an N-node deployment every
-    /// node queues and runs this job for the same index. Two nodes rebuilding
-    /// one keyspace concurrently interleave entries stamped at different
-    /// revisions and each stamps `Ready` over the other. `None` (locks
-    /// disabled, or the `inprocess` backend) serializes within ONE node only —
-    /// which is exactly the caveat in the `[locks]` docs.
+    /// The compound keyspace and its state record are LOCAL: every node builds
+    /// its own from its own records, nothing about them replicates. So the
+    /// lease only has to stop two builds of one index on the SAME node from
+    /// interleaving. It used to be cluster-wide, which let the node that did
+    /// not need a build hold the lease while the one that did — a replica its
+    /// replicated upserts had just marked `NotBuilt` — skipped with "being
+    /// built elsewhere" and stayed scan-only.
     lock_manager: Option<raisin_locks::LockManagerHandle>,
+    /// This node's identity in the lease key.
+    node_id: String,
 }
 
 impl CompoundIndexJobHandler {
@@ -69,7 +72,16 @@ impl CompoundIndexJobHandler {
             node_type_repo: NodeTypeRepositoryImpl::new(db.clone(), revision_repo, branch_repo),
             db,
             lock_manager: None,
+            // Unique per handler unless configured: a lease can then never be
+            // shared with another node by accident.
+            node_id: format!("process-{}", nanoid::nanoid!(8)),
         }
+    }
+
+    /// The cluster node id the build lease is scoped to.
+    pub fn with_node_id(mut self, node_id: impl Into<String>) -> Self {
+        self.node_id = node_id.into();
+        self
     }
 
     /// Attach the cluster lock manager. Without it the build is serialized
@@ -158,14 +170,18 @@ impl CompoundIndexJobHandler {
             "Processing compound index build job"
         );
 
-        // Take the cluster lease BEFORE any work. Another node already
-        // rebuilding this index means our copy is redundant, not failed — so
-        // this returns Ok, it does not error.
+        // Take this NODE's lease before any work. A build of this index
+        // already running here means ours is redundant, not failed — so this
+        // returns Ok, it does not error. Another node's build never blocks
+        // ours: see `lock_manager`.
         let lock_key = raisin_locks::scoped_key(
             tenant_id,
             repo_id,
             branch,
-            &format!("compound-index-build:{workspace}:{index_name}"),
+            &format!(
+                "compound-index-build:{}:{workspace}:{index_name}",
+                self.node_id
+            ),
         );
         let lease = match &self.lock_manager {
             Some(lm) => {
@@ -175,7 +191,7 @@ impl CompoundIndexJobHandler {
                     None => {
                         tracing::debug!(
                             index = %index_name,
-                            "compound index is being built elsewhere; skipping"
+                            "compound index is already being built on this node; skipping"
                         );
                         return Ok(());
                     }
@@ -250,6 +266,19 @@ impl CompoundIndexJobHandler {
             has_order_column = index_def.has_order_column,
             "Loaded compound index definition"
         );
+
+        // Register the build BEFORE reading any node: a mark that arrives
+        // after this point advances the generation and makes the final
+        // `Ready` lose — see `compound_state::marker`.
+        let state_store = crate::compound_state::CompoundStateStore::new(self.db.clone());
+        let started_under = state_store.begin_build(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            index_def,
+            self.branch_head(tenant_id, repo_id, branch)?,
+        )?;
 
         // Scan all nodes of this type using direct DB access
         let nodes =
@@ -341,11 +370,29 @@ impl CompoundIndexJobHandler {
         // `index_def` is stamped rather than the index NAME alone: the record
         // carries the declaration's fingerprint, which is how a later
         // declaration change is detected as stale instead of silently misread.
-        let state_store = crate::compound_state::CompoundStateStore::new(self.db.clone());
+        //
+        // Compare-and-set: a write this build may not have seen (a replicated
+        // upsert, a merge) marks the index stale while it runs, and then the
+        // record stays `NotBuilt` for the next build rather than reading Ready.
         let mut state =
             raisin_storage::compound::CompoundIndexState::ready(index_def, head_revision);
         state.nodes_indexed = indexed_count as u64;
-        state_store.put(tenant_id, repo_id, branch, workspace, &state)?;
+        if !state_store.complete_build(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            state,
+            started_under,
+        )? {
+            tracing::info!(
+                job_id = %job.id,
+                index = %index_name,
+                "Compound index build finished but a newer stale marker arrived during it; \
+                 leaving the index NotBuilt for the next build"
+            );
+            return Ok(());
+        }
 
         tracing::info!(
             job_id = %job.id,
@@ -498,3 +545,7 @@ impl CompoundIndexJobHandler {
         Ok(nodes)
     }
 }
+
+#[cfg(test)]
+#[path = "compound_index_tests.rs"]
+mod tests;

@@ -23,7 +23,7 @@ const REVISION_LEN: usize = 16;
 
 /// A parsed `ORDERED_CHILDREN` key. Borrows from the key buffer.
 #[derive(Debug)]
-pub(in crate::repositories::nodes) struct ParsedOrderedKey<'a> {
+pub(crate) struct ParsedOrderedKey<'a> {
     /// Full order label, including the `::{HLC}` suffix. Use
     /// [`crate::fractional_index::extract_fractional`] for the ordering part.
     pub order_label: &'a str,
@@ -34,7 +34,7 @@ pub(in crate::repositories::nodes) struct ParsedOrderedKey<'a> {
 
 impl ParsedOrderedKey<'_> {
     /// Decode the entry's revision.
-    pub(in crate::repositories::nodes) fn revision(&self) -> Option<HLC> {
+    pub(crate) fn revision(&self) -> Option<HLC> {
         crate::keys::decode_descending_revision(self.revision_bytes).ok()
     }
 }
@@ -45,7 +45,7 @@ impl ParsedOrderedKey<'_> {
 /// and for the per-parent metadata entries (the `LAST` child cache), which share
 /// the parent prefix but are not children. Callers should treat `None` as
 /// "skip this entry".
-pub(in crate::repositories::nodes) fn parse_ordered_child_key<'a>(
+pub(crate) fn parse_ordered_child_key<'a>(
     key: &'a [u8],
     prefix: &[u8],
 ) -> Option<ParsedOrderedKey<'a>> {

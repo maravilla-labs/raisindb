@@ -1,79 +1,11 @@
 //! Helper functions for tombstone operations
 
 use raisin_models::nodes::properties::PropertyValue;
-use std::collections::HashMap;
 
 /// Hash a property value for indexing — the SAME encoding the index writers
 /// use, or a tombstone would not land on the row it is meant to hide.
 pub(super) fn hash_property_value(value: &PropertyValue) -> String {
     crate::repositories::hash_property_value(value)
-}
-
-/// Reference info extracted from properties
-#[derive(Debug, Clone)]
-pub struct ExtractedReference {
-    pub workspace: String,
-    /// Target node id — used to key the reverse reference index (move-stable).
-    pub id: String,
-    pub path: String,
-}
-
-/// Extract references from node properties
-///
-/// Recursively walks properties to find Reference values and returns them
-/// with their property path (for nested references like "items[0].ref").
-pub fn extract_references(
-    properties: &HashMap<String, PropertyValue>,
-) -> Vec<(String, ExtractedReference)> {
-    let mut refs = Vec::new();
-    for (key, value) in properties {
-        extract_references_recursive(key, value, &mut refs);
-    }
-    refs
-}
-
-fn extract_references_recursive(
-    path: &str,
-    value: &PropertyValue,
-    refs: &mut Vec<(String, ExtractedReference)>,
-) {
-    match value {
-        PropertyValue::Reference(r) => {
-            refs.push((
-                path.to_string(),
-                ExtractedReference {
-                    workspace: r.workspace.clone(),
-                    id: r.id.clone(),
-                    path: r.path.clone(),
-                },
-            ));
-        }
-        PropertyValue::Array(arr) => {
-            for (i, item) in arr.iter().enumerate() {
-                // Dot format (`tags.0`) — MUST match the property-path format
-                // the live index writers use (see repositories
-                // `walk_references`), or these tombstones target keys that
-                // don't exist and the live entries are never shadowed.
-                let item_path = format!("{}.{}", path, i);
-                extract_references_recursive(&item_path, item, refs);
-            }
-        }
-        PropertyValue::Object(obj) => {
-            for (key, val) in obj {
-                let nested_path = format!("{}.{}", path, key);
-                extract_references_recursive(&nested_path, val, refs);
-            }
-        }
-        PropertyValue::Element(element) => {
-            // Element blocks carry their fields (incl. references) in
-            // `content` — the writers index them, so deletes must too.
-            for (key, val) in &element.content {
-                let nested_path = format!("{}.{}", path, key);
-                extract_references_recursive(&nested_path, val, refs);
-            }
-        }
-        _ => {}
-    }
 }
 
 /// Extract node_id from a key (last component after final \0)

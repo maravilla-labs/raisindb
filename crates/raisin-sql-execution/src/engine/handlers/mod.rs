@@ -36,7 +36,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         &self,
         explain_stmt: &ExplainStatement,
     ) -> Result<RowStream, Error> {
-        tracing::info!("Executing EXPLAIN query");
+        tracing::debug!("Executing EXPLAIN query");
 
         match explain_stmt.target.as_ref() {
             AnalyzedStatement::Query(query) => {
@@ -602,6 +602,8 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
                 "user_id",
                 &property_value,
                 false,
+                // HEAD: the caller's user node as it is now.
+                None,
             )
             .await
         {

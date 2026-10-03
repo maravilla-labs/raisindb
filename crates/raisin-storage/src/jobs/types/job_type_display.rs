@@ -110,6 +110,23 @@ impl fmt::Display for JobType {
                 property.as_deref().unwrap_or("*"),
                 rebuild
             ),
+            // Fixed 5-field shape; `*` for "every branch". Branch names and
+            // repair slugs carry no `/`, so the parser's split is exact.
+            Self::IndexRepair {
+                tenant_id,
+                repo_id,
+                branch,
+                repair,
+                dry_run,
+            } => write!(
+                f,
+                "IndexRepair({}/{}/{}/{}/{})",
+                tenant_id,
+                repo_id,
+                branch.as_deref().unwrap_or("*"),
+                repair,
+                dry_run
+            ),
             Self::CompoundIndexBuild {
                 tenant_id,
                 repo_id,

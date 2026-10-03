@@ -552,6 +552,7 @@ async fn updated_and_deleted_nodes_do_not_linger() {
                 "status",
                 &raisin_models::nodes::properties::PropertyValue::String("held".to_string()),
                 false,
+                None,
             )
             .await
             .expect("index count");

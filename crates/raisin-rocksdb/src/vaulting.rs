@@ -373,6 +373,7 @@ impl Vaulter {
                     let cursor = WalkCursor {
                         path: name,
                         enclosing_element_type: None,
+                        inside_composite: false,
                     };
                     vault_leaf(&cursor, value);
                 }

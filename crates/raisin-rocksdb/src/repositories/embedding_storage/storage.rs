@@ -10,6 +10,8 @@ use rocksdb::{WriteBatch, DB};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+mod v2_lookup;
+
 /// RocksDB-backed embedding storage
 ///
 /// Stores embedding vectors with revision awareness in the `embeddings` CF.
@@ -270,9 +272,10 @@ impl RocksDBEmbeddingStorage {
     /// CF that DOES have an extractor — and prescribes exactly this: seek, and
     /// compare the prefix yourself.
     ///
-    /// Note this is NOT the cause of the known NULL `SELECT embedding` column
+    /// Note this was NOT the cause of the NULL `SELECT embedding` column
     /// (`get_embedding` returning `None` for nodes that have a stored vector).
-    /// That reproduces with either form and is still open.
+    /// That was the v2 fallback demanding an EXACT revision match; it now
+    /// takes the newest row at or before the revision (`v2_lookup`).
     fn scan_from<'a>(
         &'a self,
         cf: &impl rocksdb::AsColumnFamilyRef,
@@ -635,38 +638,18 @@ impl EmbeddingStorage for RocksDBEmbeddingStorage {
             }
         }
 
-        // Try v2 format: scan workspace prefix and filter by source_id
-        let ws_prefix = Self::workspace_prefix(tenant_id, repo_id, branch, workspace_id);
-        let iter = self.scan_from(cf, &ws_prefix);
-
-        for result in iter {
-            let (key, value) = result.map_err(|e| {
-                raisin_error::Error::storage(format!("Failed to iterate embeddings: {}", e))
-            })?;
-
-            if !key.starts_with(&ws_prefix) {
-                break;
-            }
-
-            if let Some((_, _, source_id, _, _)) = Self::parse_key(&key) {
-                if source_id == node_id {
-                    // If a specific revision was requested, verify it matches
-                    if let Some(rev) = revision {
-                        if key.len() >= 16 {
-                            let key_rev_bytes = &key[key.len() - 16..];
-                            if key_rev_bytes == rev.encode_descending().as_slice() {
-                                return Ok(Some(Self::deserialize(&value)?));
-                            }
-                        }
-                    } else {
-                        // No specific revision, return latest (first match due to descending order)
-                        return Ok(Some(Self::deserialize(&value)?));
-                    }
-                }
-            }
-        }
-
-        Ok(None)
+        // v2 format: the first row of this source in key order, newest at or
+        // before `revision` — bounded seeks per (embedder, kind) partition,
+        // not a scan of the whole workspace. See `v2_lookup`.
+        self.find_v2_source_row(
+            cf,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace_id,
+            node_id,
+            revision,
+        )
     }
 
     fn delete_embedding(

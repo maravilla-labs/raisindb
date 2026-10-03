@@ -17,10 +17,15 @@
 //! 4. **Idempotency**: Operations are applied idempotently - applying the same operation
 //!    multiple times has the same effect as applying it once.
 
+mod compound_marker;
 mod crdt_ops;
 mod db_lookups;
 mod legacy_node_ops;
 mod move_node_ops;
+mod newer_version;
+mod node_baseline;
+
+pub use node_baseline::{scoped_miss_fallbacks, unknown_workspace_scans, WorkspaceHint};
 mod registry_ops;
 mod relation_ops;
 mod schema_ops;
@@ -40,8 +45,10 @@ use std::sync::Arc;
 
 const TOMBSTONE: &[u8] = b"T";
 
+/// The ONE tombstone predicate (`b"T"`, and the one-byte `b"\x00"` merge used
+/// to write) — see `crate::keys::is_tombstone_value`.
 fn is_tombstone(value: &[u8]) -> bool {
-    value == TOMBSTONE
+    crate::keys::is_tombstone_value(value)
 }
 
 fn node_workspace(node: &raisin_models::nodes::Node) -> &str {

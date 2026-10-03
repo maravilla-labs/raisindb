@@ -4,6 +4,7 @@
 //! indexing engines, and query-scoped configuration through the operator tree.
 
 use super::row::CachedEmbedding;
+use super::statement_state::StatementState;
 use crate::physical_plan::cte_storage::{CTEConfig, MaterializedCTE};
 use raisin_context::RepositoryConfig;
 use raisin_embeddings::provider::EmbeddingProvider;
@@ -113,6 +114,9 @@ pub struct ExecutionContext<S: Storage> {
     /// Atomic lock / inventory manager for RAISIN_TRY_ACQUIRE/RAISIN_CLAIM/etc.
     /// `None` when the locks subsystem is disabled.
     pub lock_manager: Option<Arc<dyn raisin_locks::LockManager>>,
+    /// Per-statement state every clone of this context shares (RESOLVE's memo,
+    /// the read snapshot, the translation resolver). See [`StatementState`].
+    pub(crate) statement: Arc<StatementState<S>>,
 }
 
 impl<S: Storage> ExecutionContext<S> {
@@ -150,12 +154,15 @@ impl<S: Storage> ExecutionContext<S> {
             function_invoke: None,
             function_invoke_sync: None,
             lock_manager: None,
+            statement: Arc::new(StatementState::default()),
         }
     }
 
     /// Set the authentication context for RLS filtering
     pub fn with_auth_context(mut self, auth: AuthContext) -> Self {
         self.auth_context = Some(auth);
+        // RESOLVE's memo holds rows filtered for the previous identity.
+        self.statement = Arc::new(StatementState::default());
         self
     }
 
@@ -254,6 +261,8 @@ impl<S: Storage> ExecutionContext<S> {
     /// None = HEAD (latest), Some(rev) = specific revision
     pub fn with_max_revision(mut self, max_revision: Option<raisin_hlc::HLC>) -> Self {
         self.max_revision = max_revision;
+        // A different snapshot is a different statement's reads.
+        self.statement = Arc::new(StatementState::default());
         self
     }
 
@@ -287,6 +296,8 @@ impl<S: Storage> ExecutionContext<S> {
     /// None uses the default branch, Some(name) queries a specific branch.
     pub fn with_branch(mut self, branch: String) -> Self {
         self.branch = Arc::from(branch);
+        // Neither the memo nor the snapshot is keyed by branch.
+        self.statement = Arc::new(StatementState::default());
         self
     }
 
@@ -367,6 +378,7 @@ impl<S: Storage> Clone for ExecutionContext<S> {
             function_invoke: self.function_invoke.clone(),
             function_invoke_sync: self.function_invoke_sync.clone(),
             lock_manager: self.lock_manager.clone(),
+            statement: self.statement.clone(), // Same statement, same state
         }
     }
 }

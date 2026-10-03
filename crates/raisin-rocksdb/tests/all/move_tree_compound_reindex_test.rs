@@ -235,3 +235,57 @@ async fn moving_a_folder_rekeys_every_descendant() {
         "every descendant must be re-keyed to the new folder path"
     );
 }
+
+/// The admin rebuild routine goes through the build CAS: it neither resets the
+/// stale generation nor stamps `Ready` over a mark newer than its start.
+#[tokio::test]
+async fn rebuild_routine_cannot_overwrite_newer_marker() {
+    use raisin_rocksdb::compound_state::{read_state, CompoundStateStore};
+    use raisin_storage::compound::CompoundBuildPhase;
+
+    let (storage, _tmp) = setup().await;
+    create(&storage, node("m1", "/m1", "/")).await;
+    let store = CompoundStateStore::new(storage.db().clone());
+    let state = || {
+        read_state(storage.db(), TENANT, REPO, BRANCH, WS, INDEX)
+            .unwrap()
+            .expect("record")
+    };
+
+    // Two replicated writes have marked the index since it was last built.
+    let rebuild = || {
+        raisin_rocksdb::management::async_indexing::rebuild_indexes(
+            &storage,
+            TENANT,
+            REPO,
+            BRANCH,
+            WS,
+            raisin_storage::IndexType::Compound,
+        )
+    };
+    rebuild().await.expect("first rebuild");
+    store
+        .mark_workspace_stale(TENANT, REPO, BRANCH, WS)
+        .unwrap();
+    store
+        .mark_workspace_stale(TENANT, REPO, BRANCH, WS)
+        .unwrap();
+    let marked = state().stale_generation;
+    assert!(marked >= 2);
+
+    // A rebuild started after those marks earns Ready AT that generation —
+    // it used to write generation 0, resetting the counter.
+    rebuild().await.expect("second rebuild");
+    let after = state();
+    assert_eq!(after.phase, CompoundBuildPhase::Ready);
+    assert_eq!(
+        after.stale_generation, marked,
+        "rebuild reset the generation"
+    );
+
+    // And no write may lower it again.
+    let mut stale = after.clone();
+    stale.stale_generation = 0;
+    assert!(store.put(TENANT, REPO, BRANCH, WS, &stale).is_err());
+    assert_eq!(state().stale_generation, marked);
+}

@@ -21,36 +21,18 @@ pub(super) async fn get_translation(
     locale: &LocaleCode,
     _revision: &HLC,
 ) -> Result<Option<LocaleOverlay>> {
-    let cf = crate::cf_handle(db, crate::cf::TRANSLATION_DATA)?;
-
-    // Use prefix iteration to find most recent translation at or before revision
-    let prefix = keys::translation_prefix(
+    // HEAD read: the newest version decides, and a tombstone there means the
+    // translation is deleted. One reader shared with the transaction path.
+    crate::translation_read::read_overlay(
+        db,
         tenant_id,
         repo_id,
         branch,
         workspace,
         node_id,
         locale.as_str(),
-    );
-
-    let mut iter = crate::prefix_scan(&db, &cf, &prefix);
-
-    // First key will be the most recent (descending revision order)
-    if let Some(Ok((key, value))) = iter.next() {
-        // Verify this key is within our prefix and at or before the requested revision
-        if key.starts_with(&prefix) {
-            // Check if this is a tombstone marker (deleted translation)
-            if value.as_ref() == b"T" {
-                return Ok(None);
-            }
-
-            // Deserialize the LocaleOverlay
-            let overlay = serialization::deserialize_overlay(&value)?;
-            return Ok(Some(overlay));
-        }
-    }
-
-    Ok(None)
+        None,
+    )
 }
 
 /// Store a node-level translation
@@ -145,6 +127,11 @@ pub(super) async fn store_translation(
 }
 
 /// List all translations for a node
+///
+/// One entry per locale whose NEWEST version is live — the same rule
+/// [`get_translation`] applies to a single locale, and the same reader the
+/// transaction path uses (`crate::translation_read`). Like `get_translation`,
+/// this reads HEAD; the revision is unused.
 pub(super) async fn list_translations_for_node(
     db: &Arc<DB>,
     tenant_id: &str,
@@ -154,34 +141,23 @@ pub(super) async fn list_translations_for_node(
     node_id: &str,
     _revision: &HLC,
 ) -> Result<Vec<LocaleCode>> {
-    let cf = crate::cf_handle(db, crate::cf::TRANSLATION_DATA)?;
+    let locales = crate::translation_read::live_locales(
+        db, tenant_id, repo_id, branch, workspace, node_id, None,
+    )?;
 
-    // Build prefix for all translations of this node
-    let prefix = format!(
-        "{}\0{}\0{}\0{}\0translations\0{}\0",
-        tenant_id, repo_id, branch, workspace, node_id
-    )
-    .into_bytes();
-
-    let mut locales = std::collections::HashSet::new();
-    let iter = crate::prefix_scan(&db, &cf, &prefix);
-
-    for item in iter {
-        let (key, _value) = item.rocksdb_err()?;
-
-        // Parse locale from key
-        // Key format: {prefix}{locale}\0{~revision}
-        if let Some(suffix) = key.strip_prefix(prefix.as_slice()) {
-            if let Ok(suffix_str) = std::str::from_utf8(suffix) {
-                // Extract locale (before the next \0)
-                if let Some(locale_str) = suffix_str.split('\0').next() {
-                    if let Ok(locale) = LocaleCode::parse(locale_str) {
-                        locales.insert(locale);
-                    }
-                }
+    Ok(locales
+        .into_iter()
+        .filter_map(|locale| match LocaleCode::parse(&locale) {
+            Ok(code) => Some(code),
+            Err(e) => {
+                tracing::warn!(
+                    node_id,
+                    "Skipping translation with an unparseable locale '{}': {}",
+                    locale,
+                    e
+                );
+                None
             }
-        }
-    }
-
-    Ok(locales.into_iter().collect())
+        })
+        .collect())
 }

@@ -11,7 +11,6 @@
 //! - Node translation resolution
 
 use raisin_core::services::rls_filter;
-use raisin_core::services::translation_resolver::TranslationResolver;
 use raisin_error::Error;
 use raisin_hlc::HLC;
 use raisin_models::auth::AuthContext;
@@ -21,7 +20,6 @@ use raisin_models::permissions::PermissionScope;
 use raisin_models::translations::LocaleCode;
 use raisin_sql::analyzer::{BinaryOperator, Expr, Literal, TypedExpr};
 use raisin_storage::{scope::BranchScope, Storage};
-use std::sync::Arc;
 
 use crate::physical_plan::executor::ExecutionContext;
 
@@ -41,14 +39,20 @@ pub(crate) async fn rls_filter_node_graph<S: Storage>(
     branch: &str,
     max_revision: Option<&HLC>,
 ) -> Option<Node> {
-    // Hot-path fast lane: when no permission uses a graph (`RELATES`) condition,
-    // skip resolver construction entirely and take the synchronous path.
+    // Fast lane without minting an HLC: no graph condition, no revision needed.
     if !auth.uses_graph_rls() {
         return rls_filter::filter_node(node, auth, scope);
     }
     let rev = max_revision.copied().unwrap_or_else(HLC::now);
-    let resolver = storage.graph_resolver(BranchScope::new(tenant_id, repo_id, branch), &rev);
-    rls_filter::filter_node_async(node, auth, scope, resolver.as_deref()).await
+    rls_filter::filter_node_with_graph(
+        storage,
+        node,
+        auth,
+        scope,
+        BranchScope::new(tenant_id, repo_id, branch),
+        &rev,
+    )
+    .await
 }
 
 /// Extract a property predicate from a filter expression for filter-first fallback.
@@ -178,13 +182,7 @@ pub(super) async fn resolve_node_for_locale_as<S: Storage>(
     // Skip translation if:
     // 1. No repository_config is set (translation not configured)
     // 2. The locale matches the default language (no translation needed)
-    let config = match &ctx.repository_config {
-        Some(config) => config,
-        None => return Ok(Some(node)), // No translation configured, return as-is
-    };
-
-    // If querying the default language, no translation needed
-    if locale == ctx.default_language.as_ref() {
+    if ctx.repository_config.is_none() || locale == ctx.default_language.as_ref() {
         return Ok(Some(node));
     }
 
@@ -195,9 +193,10 @@ pub(super) async fn resolve_node_for_locale_as<S: Storage>(
     // Get revision for translation lookup
     let revision = ctx.max_revision.unwrap_or_else(raisin_hlc::HLC::now);
 
-    // Create the translation resolver
-    let translation_repo = ctx.storage.translations();
-    let resolver = TranslationResolver::new(Arc::new(translation_repo.clone()), config.clone());
+    // The statement's resolver, built once rather than once per row.
+    let Some(resolver) = ctx.translation_resolver() else {
+        return Ok(Some(node));
+    };
 
     if !with_properties {
         let visible = resolver

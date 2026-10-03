@@ -189,18 +189,20 @@ impl PhysicalPlanner {
         context: &PlanContext,
     ) -> Result<PhysicalPlan, Error> {
         if let Some((prop_name, prop_value)) = self.extract_property_predicate(canonical) {
-            // JSON property equalities (JsonPropertyEq) stay in the residual
-            // filter even though they drive the scan: the property index keys
-            // hashed values (collisions possible) and pre-fix databases may
-            // carry stale old-value entries, so the fetched row is re-verified.
-            // (The nodes repository's own find_by_property does the same
-            // re-check.)
-            //
             // Pseudo-property equalities (node_type, archetype, name, ... —
-            // prop_name is "__"-prefixed) ARE removed: their index keys embed
-            // the RAW value (no hash, no collisions) and value changes
-            // tombstone the old entry, so the scan is exact — keeping them
-            // filter-free preserves the COUNT(*) index pushdown.
+            // prop_name is "__"-prefixed) are removed from the residual: the
+            // executor re-checks each candidate against the decoded node
+            // (`scan_executors::index_recheck`).
+            //
+            // A JSON property equality against a TEXT literal is removed too:
+            // the executor re-checks `properties->>key = value` on every row it
+            // emits (`verifies_value`), with exactly the residual's text
+            // semantics, on the translated and field-filtered row. Moving the
+            // check INTO the scan is what lets a LIMIT bound it — a check above
+            // the scan can drop rows the scan already counted. Any other
+            // literal type keeps the residual, whose comparison rules this
+            // re-check does not reproduce.
+            let mut verifies_value = false;
             let remaining: Vec<_> = if prop_name.starts_with("__") {
                 canonical
                     .iter()
@@ -227,7 +229,26 @@ impl PhysicalPlanner {
                     .cloned()
                     .collect()
             } else {
-                canonical.to_vec()
+                let mut dropped = false;
+                let remaining = canonical
+                    .iter()
+                    .filter(|p| {
+                        let driving = !dropped
+                            && matches!(
+                                p,
+                                CanonicalPredicate::JsonPropertyEq {
+                                    key,
+                                    value: serde_json::Value::String(v),
+                                    ..
+                                } if *key == prop_name && *v == prop_value
+                            );
+                        dropped |= driving;
+                        !driving
+                    })
+                    .cloned()
+                    .collect();
+                verifies_value = dropped;
+                remaining
             };
             let remaining_filter = self.combine_canonical_predicates(&remaining);
 
@@ -252,6 +273,7 @@ impl PhysicalPlanner {
                 property_value: prop_value,
                 projection,
                 limit: pushed_limit,
+                verifies_value,
             };
 
             if let Some(filter_expr) = remaining_filter {
@@ -684,11 +706,15 @@ impl PhysicalPlanner {
     /// Resolve the indexed property name for a range predicate, and encode its
     /// bound value in the property-index key encoding.
     ///
-    /// Returns `None` when the predicate is not a range on an indexable target.
-    fn range_target_and_bound(
+    /// Returns `(property, op, encoded bound, inclusive)`, or `None` when the
+    /// predicate is not a range on an indexable target. Timestamp bounds are
+    /// decimal MICROSECONDS, rounded so the scan is exact — see
+    /// `timestamp_bounds` — which is why inclusivity is returned rather than
+    /// read off `op`.
+    pub(super) fn range_target_and_bound(
         &self,
         pred: &CanonicalPredicate,
-    ) -> Option<(String, ComparisonOp, String)> {
+    ) -> Option<(String, ComparisonOp, String, bool)> {
         match pred {
             CanonicalPredicate::RangeCompare {
                 column, op, value, ..
@@ -699,21 +725,25 @@ impl PhysicalPlanner {
                     _ => return None,
                 };
                 let lit = self.evaluate_constant_expr(value)?;
-                let encoded = match lit {
-                    Literal::Timestamp(ts) => {
-                        let nanos = ts.timestamp_nanos_opt().unwrap_or(0);
-                        format!("{:020}", nanos as i128)
-                    }
-                    Literal::Int(i) => format!("{:020}", i),
+                let nanos: i128 = match lit {
+                    Literal::Timestamp(ts) => ts.timestamp_nanos_opt()? as i128,
+                    // A bare integer has always been read as nanoseconds.
+                    Literal::Int(i) => i as i128,
+                    Literal::BigInt(i) => i as i128,
                     _ => return None,
                 };
-                Some((property_name.to_string(), *op, encoded))
+                let (encoded, inclusive) = super::timestamp_bounds::timestamp_bound(
+                    nanos,
+                    op.is_lower_bound(),
+                    op.is_inclusive(),
+                );
+                Some((property_name.to_string(), *op, encoded, inclusive))
             }
             // JSON property ranges compare raw strings — the property index
             // stores `hash_property_value` (the raw string for text values), so
             // the bound is the literal itself.
             CanonicalPredicate::JsonPropertyRange { key, op, value, .. } => {
-                Some((key.clone(), *op, value.clone()))
+                Some((key.clone(), *op, value.clone(), op.is_inclusive()))
             }
             _ => None,
         }
@@ -739,7 +769,7 @@ impl PhysicalPlanner {
         projection: Option<Vec<String>>,
         context: &PlanContext,
     ) -> Result<PhysicalPlan, Error> {
-        let (property_name, _, _) =
+        let (property_name, _, _, _) =
             self.range_target_and_bound(best_predicate).ok_or_else(|| {
                 Error::Validation("Range scan not supported for this predicate".to_string())
             })?;
@@ -751,20 +781,22 @@ impl PhysicalPlanner {
         let mut consumed = vec![false; canonical.len()];
 
         for (i, pred) in canonical.iter().enumerate() {
-            let Some((prop, op, encoded)) = self.range_target_and_bound(pred) else {
+            let Some((prop, op, encoded, inclusive)) = self.range_target_and_bound(pred) else {
                 continue;
             };
             if prop != property_name {
                 continue;
             }
-            let inclusive = op.is_inclusive();
+            let cmp = |existing: &String| {
+                super::timestamp_bounds::cmp_bounds(&property_name, &encoded, existing)
+            };
             if op.is_lower_bound() {
                 // Keep the tightest (greatest) lower bound.
                 let tighter = match &lower_bound {
                     None => true,
                     Some((existing, existing_incl)) => {
-                        encoded > *existing
-                            || (encoded == *existing && *existing_incl && !inclusive)
+                        cmp(existing).is_gt()
+                            || (cmp(existing).is_eq() && *existing_incl && !inclusive)
                     }
                 };
                 if tighter {
@@ -775,8 +807,8 @@ impl PhysicalPlanner {
                 let tighter = match &upper_bound {
                     None => true,
                     Some((existing, existing_incl)) => {
-                        encoded < *existing
-                            || (encoded == *existing && *existing_incl && !inclusive)
+                        cmp(existing).is_lt()
+                            || (cmp(existing).is_eq() && *existing_incl && !inclusive)
                     }
                 };
                 if tighter {

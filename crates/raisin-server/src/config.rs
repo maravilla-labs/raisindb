@@ -16,6 +16,12 @@ pub struct ReplicationPeer {
     pub address: String,
     /// Peer's replication TCP port
     pub port: u16,
+    /// Base URL of the peer's HTTP API (e.g. `http://10.0.0.2:8080`). Only
+    /// cluster-wide admin operations use it — an index repair is enqueued on
+    /// every node by forwarding to this address. Without it the peer is
+    /// reported `unreachable` by those operations; replication is unaffected.
+    #[serde(default)]
+    pub http_url: Option<String>,
 }
 
 /// Replication configuration
@@ -442,6 +448,7 @@ impl ServerConfigFile {
                 peer_id,
                 address,
                 port,
+                http_url: None,
             });
         }
 

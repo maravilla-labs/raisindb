@@ -14,7 +14,7 @@ use raisin_sql::analyzer::{DataType, Literal};
 /// - JsonB to/from Text
 /// - Primitive types (Int, BigInt, Double, Boolean, Path, Timestamp) to JsonB
 /// - NULL handling (CAST(NULL AS any_type) = NULL per SQL standard)
-pub(super) fn cast_literal(value: Literal, target_type: &DataType) -> Result<Literal, Error> {
+pub(crate) fn cast_literal(value: Literal, target_type: &DataType) -> Result<Literal, Error> {
     match (value, target_type.base_type()) {
         // NULL can be cast to any type and remains NULL (SQL standard)
         (Literal::Null, _) => Ok(Literal::Null),

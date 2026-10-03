@@ -114,8 +114,10 @@ pub(in crate::replication::application) async fn apply_create_node(
         &revision,
     );
 
-    // 4. Add reference indexes (forward + reverse)
-    write_reference_indexes(
+    // 4. Add reference indexes (forward + reverse) through the shared writer:
+    // nested references included, keyed by the one dot-format path, so the
+    // entries line up with every tombstoner.
+    crate::repositories::add_reference_index_entries(
         &mut batch,
         cf_reference,
         tenant_id,
@@ -124,7 +126,7 @@ pub(in crate::replication::application) async fn apply_create_node(
         workspace,
         &node,
         &revision,
-    );
+    )?;
 
     // 5. Add relation indexes (forward + reverse)
     write_relation_indexes(
@@ -147,10 +149,7 @@ pub(in crate::replication::application) async fn apply_create_node(
     }
 
     // Atomic commit of all indexes
-    applicator
-        .db
-        .write(batch)
-        .map_err(|e| raisin_error::Error::storage(format!("Failed to apply create_node: {}", e)))?;
+    applicator.write_marking_compound_stale(batch, tenant_id, repo_id, branch, workspace)?;
 
     tracing::info!(
         "Node created successfully: {} (HEAD will be updated by separate UpdateBranch operation)",
@@ -250,52 +249,6 @@ fn write_property_indexes(
                 is_published,
             );
             batch.put_cf(cf_property, archetype_key, node.id.as_bytes());
-        }
-    }
-}
-
-/// Write forward and reverse reference indexes to a batch
-fn write_reference_indexes(
-    batch: &mut WriteBatch,
-    cf_reference: &rocksdb::ColumnFamily,
-    tenant_id: &str,
-    repo_id: &str,
-    branch: &str,
-    workspace: &str,
-    node: &Node,
-    revision: &raisin_hlc::HLC,
-) {
-    let is_published = node.published_at.is_some();
-
-    for (prop_path, prop_value) in &node.properties {
-        if let PropertyValue::Reference(ref_data) = prop_value {
-            // Forward reference
-            let fwd_key = keys::reference_forward_key_versioned(
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                &node.id,
-                prop_path,
-                revision,
-                is_published,
-            );
-            batch.put_cf(cf_reference, fwd_key, ref_data.id.as_bytes());
-
-            // Reverse reference
-            let rev_key = keys::reference_reverse_key_versioned(
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                &ref_data.workspace,
-                &ref_data.id,
-                &node.id,
-                prop_path,
-                revision,
-                is_published,
-            );
-            batch.put_cf(cf_reference, rev_key, node.id.as_bytes());
         }
     }
 }

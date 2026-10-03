@@ -102,6 +102,21 @@ pub struct CompoundIndexState {
     /// (`crud/indexing/compound_indexes.rs`), so this being lower than the node
     /// count is expected, not an error.
     pub nodes_indexed: u64,
+    /// How many times this node applied a write it could NOT index into this
+    /// keyspace (a replicated upsert or a merge, neither of which writes
+    /// compound entries yet) and therefore marked the index `NotBuilt`.
+    ///
+    /// Only ever increases. A build remembers the value it started under and
+    /// stamps `Ready` only if it is unchanged when it finishes: a marker set
+    /// DURING the build is for a write the build may not have seen, and a
+    /// `Ready` written over it would serve that write's stale entries. A
+    /// counter, not the applying revision, because replication applies
+    /// revisions out of order — an older revision arriving mid-build would not
+    /// move a revision-valued marker forward, and the build would not notice.
+    ///
+    /// Appended with a default so records written before it decode as `0`.
+    #[serde(default)]
+    pub stale_generation: u64,
 }
 
 impl CompoundIndexState {
@@ -116,6 +131,7 @@ impl CompoundIndexState {
             built_through,
             phase: CompoundBuildPhase::Ready,
             nodes_indexed: 0,
+            stale_generation: 0,
         }
     }
 

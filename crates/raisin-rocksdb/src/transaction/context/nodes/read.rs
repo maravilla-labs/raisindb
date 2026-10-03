@@ -30,65 +30,12 @@ use std::sync::Arc;
 
 use crate::transaction::types::is_tombstone;
 use crate::transaction::RocksDBTransaction;
-use crate::StorageNode;
 use crate::{cf, cf_handle, keys};
 
-/// Materialize path from NODE_PATH index
-///
-/// Used when reading nodes stored as StorageNode (without path).
-fn materialize_path(
-    db: &Arc<DB>,
-    tenant_id: &str,
-    repo_id: &str,
-    branch: &str,
-    workspace: &str,
-    node_id: &str,
-    target_revision: &HLC,
-) -> Result<String> {
-    let prefix = keys::node_path_key_prefix(tenant_id, repo_id, branch, workspace, node_id);
-    let cf = cf_handle(db, cf::NODE_PATH)?;
-
-    let iter = crate::prefix_scan(&db, cf, prefix.clone());
-
-    for item in iter {
-        let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
-
-        if !key.starts_with(&prefix) {
-            break;
-        }
-
-        let revision = match keys::extract_revision_from_key(&key) {
-            Ok(rev) => rev,
-            Err(_) => continue,
-        };
-
-        if &revision > target_revision {
-            continue;
-        }
-
-        // Check for tombstone - node was deleted at this revision
-        if is_tombstone(&value) {
-            return Err(raisin_error::Error::storage(format!(
-                "Node {} was deleted (tombstone in NODE_PATH)",
-                node_id
-            )));
-        }
-
-        let path = String::from_utf8(value.to_vec())
-            .map_err(|e| raisin_error::Error::storage(format!("Invalid path encoding: {}", e)))?;
-
-        return Ok(path);
-    }
-
-    Err(raisin_error::Error::storage(format!(
-        "Path not found for node_id={} at revision={}",
-        node_id, target_revision
-    )))
-}
-
-/// Deserialize node with path materialization support
-///
-/// Handles both old (Node) and new (StorageNode) formats.
+/// Deserialize node with path materialization support — the shared decoder
+/// (`crate::mvcc_read::deserialize_node_with_path`), kept under this name so
+/// the readers below read as before.
+#[allow(clippy::too_many_arguments)]
 fn deserialize_node_with_path(
     db: &Arc<DB>,
     bytes: &[u8],
@@ -99,52 +46,16 @@ fn deserialize_node_with_path(
     node_id: &str,
     target_revision: &HLC,
 ) -> Result<Node> {
-    // Debug: log the raw bytes being deserialized
-    let first_bytes: Vec<u8> = bytes.iter().take(20).copied().collect();
-    tracing::debug!(
-        node_id = %node_id,
-        bytes_len = bytes.len(),
-        first_bytes = ?first_bytes,
-        "Attempting to deserialize node"
-    );
-
-    // Try StorageNode first with path materialization
-    if let Ok(storage_node) = rmp_serde::from_slice::<StorageNode>(bytes) {
-        match materialize_path(
-            db,
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            node_id,
-            target_revision,
-        ) {
-            Ok(path) => {
-                return Ok(storage_node.into_node(path));
-            }
-            Err(_) => {
-                // Path materialization failed - try Node format
-            }
-        }
-    }
-
-    // Fallback: try Node format
-    let node: Node = rmp_serde::from_slice(bytes).map_err(|e| {
-        // Error: log detailed info when deserialization fails
-        let as_string = String::from_utf8_lossy(&bytes[..std::cmp::min(100, bytes.len())]);
-        tracing::error!(
-            node_id = %node_id,
-            workspace = %workspace,
-            bytes_len = bytes.len(),
-            first_bytes = ?first_bytes,
-            as_string = %as_string,
-            error = %e,
-            "Failed to deserialize node - raw bytes shown"
-        );
-        raisin_error::Error::storage(format!("Deserialization error: {}", e))
-    })?;
-
-    Ok(node)
+    crate::mvcc_read::deserialize_node_with_path(
+        db,
+        bytes,
+        tenant_id,
+        repo_id,
+        branch,
+        workspace,
+        node_id,
+        target_revision,
+    )
 }
 
 /// Get a node by ID with read-your-writes semantics
@@ -243,130 +154,90 @@ async fn get_node_bounded(
         .ok_or_else(|| raisin_error::Error::NotFound(format!("Branch {} not found", branch)))?
         .head;
 
-    // 3. Build key prefix for this node across all revisions
+    // 3. The newest version at or before HEAD: one seek to `{prefix}{~HEAD}`
+    // (see `crate::mvcc_read`), bounded to this node's prefix so a lookup for a
+    // NONEXISTENT id can never read the next node in the keyspace (observed
+    // once: put_node with a fresh id taking the UPDATE branch against an
+    // unrelated node). `bound_to_head == false` is the deliberate
+    // identity-resolution path (see `get_node_ignoring_head`), which must see
+    // stranded revisions, so it takes the newest version unbounded.
     let cf_nodes = cf_handle(&tx.db, cf::NODES)?;
     let prefix = keys::node_key_prefix(&tenant_id, &repo_id, &branch, workspace, node_id);
+    let max_revision = bound_to_head.then_some(&head_revision);
+    let Some((revision, value)) =
+        crate::mvcc_read::newest_at_or_before(&tx.db, cf_nodes, &prefix, max_revision)?
+    else {
+        return Ok(None);
+    };
 
-    // 4. Iterate to find latest version <= HEAD
-    let iter = crate::prefix_scan(&tx.db, cf_nodes, &prefix);
+    // A tombstone means the node is deleted.
+    if is_tombstone(&value) {
+        return Ok(None);
+    }
 
-    for item in iter {
-        let (key, value) =
-            item.map_err(|e| raisin_error::Error::storage(format!("Iterator error: {}", e)))?;
+    // Deserialize with StorageNode/Node compatibility
+    let node = deserialize_node_with_path(
+        &tx.db, &value, &tenant_id, &repo_id, &branch, workspace, node_id, &revision,
+    )?;
 
-        // CRITICAL: Verify the key actually starts with our prefix. RocksDB's
-        // prefix iterator seeks to the prefix but keeps iterating past it, so
-        // a lookup for a NONEXISTENT id would otherwise deserialize the next
-        // node in the keyspace and return a WRONG node (observed: put_node
-        // with a fresh id taking the UPDATE branch against an unrelated
-        // node). All matching keys are contiguous, so stop at the first
-        // non-matching key. Mirrors get_node_by_path / materialize_path.
-        if !key.starts_with(&prefix) {
-            break;
-        }
+    // RLS check - SECURITY: deny-by-default if no auth context.
+    // Clone the auth context out of the metadata guard so the guard is
+    // released before the async graph-resolver evaluation below.
+    let auth_opt = {
+        let meta = tx
+            .metadata
+            .lock()
+            .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
+        meta.auth_context.clone()
+    };
+    match auth_opt {
+        Some(auth) => {
+            use raisin_core::services::rls_filter;
+            use raisin_models::permissions::{Operation, PermissionScope};
+            use raisin_storage::{scope::BranchScope, Storage};
 
-        // Debug: log key/value info for each entry
-        tracing::debug!(
-            node_id = %node_id,
-            key_len = key.len(),
-            value_len = value.len(),
-            key_as_string = %String::from_utf8_lossy(&key),
-            "Processing NODES CF entry"
-        );
+            let (tid, rid, br): (&str, &str, &str) = (&tenant_id, &repo_id, &branch);
+            let scope = PermissionScope::new(workspace, br);
+            // Fast path: only build the cache-backed graph resolver when a
+            // permission actually carries a `RELATES … VIA` condition;
+            // otherwise evaluate synchronously with no per-read allocation.
+            let allowed = if auth.uses_graph_rls() {
+                let resolver = tx
+                    .storage
+                    .graph_resolver(BranchScope::new(tid, rid, br), &head_revision);
+                rls_filter::can_perform_async(
+                    &node,
+                    Operation::Read,
+                    &auth,
+                    &scope,
+                    resolver.as_deref(),
+                )
+                .await
+            } else {
+                rls_filter::can_perform(&node, Operation::Read, &auth, &scope)
+            };
 
-        // Decode revision from key (last 16 bytes for HLC)
-        if key.len() < 16 {
-            tracing::warn!(
-                node_id = %node_id,
-                key_len = key.len(),
-                key_as_string = %String::from_utf8_lossy(&key),
-                "Skipping NODES entry with key shorter than 16 bytes"
-            );
-            continue;
-        }
-        let rev_bytes = &key[key.len() - 16..];
-        let revision = keys::decode_descending_revision(rev_bytes)
-            .map_err(|e| raisin_error::Error::storage(format!("Revision decode error: {}", e)))?;
-
-        // Only consider revisions at or before HEAD. `bound_to_head == false`
-        // is the deliberate identity-resolution path (see
-        // `get_node_ignoring_head`), which must see stranded revisions.
-        if bound_to_head && revision > head_revision {
-            continue;
-        }
-
-        // Check if it's a tombstone (deleted node) - single byte 'T'
-        if value.as_ref() == b"T" {
-            // Tombstone - node is deleted
-            return Ok(None);
-        }
-
-        // Deserialize with StorageNode/Node compatibility
-        let node = deserialize_node_with_path(
-            &tx.db, &value, &tenant_id, &repo_id, &branch, workspace, node_id, &revision,
-        )?;
-
-        // RLS check - SECURITY: deny-by-default if no auth context.
-        // Clone the auth context out of the metadata guard so the guard is
-        // released before the async graph-resolver evaluation below.
-        let auth_opt = {
-            let meta = tx
-                .metadata
-                .lock()
-                .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
-            meta.auth_context.clone()
-        };
-        match auth_opt {
-            Some(auth) => {
-                use raisin_core::services::rls_filter;
-                use raisin_models::permissions::{Operation, PermissionScope};
-                use raisin_storage::{scope::BranchScope, Storage};
-
-                let (tid, rid, br): (&str, &str, &str) = (&tenant_id, &repo_id, &branch);
-                let scope = PermissionScope::new(workspace, br);
-                // Fast path: only build the cache-backed graph resolver when a
-                // permission actually carries a `RELATES … VIA` condition;
-                // otherwise evaluate synchronously with no per-read allocation.
-                let allowed = if auth.uses_graph_rls() {
-                    let resolver = tx
-                        .storage
-                        .graph_resolver(BranchScope::new(tid, rid, br), &head_revision);
-                    rls_filter::can_perform_async(
-                        &node,
-                        Operation::Read,
-                        &auth,
-                        &scope,
-                        resolver.as_deref(),
-                    )
-                    .await
-                } else {
-                    rls_filter::can_perform(&node, Operation::Read, &auth, &scope)
-                };
-
-                if !allowed {
-                    tracing::debug!(
-                        node_id = %node_id,
-                        workspace = %workspace,
-                        "RLS: denying read access to node"
-                    );
-                    return Ok(None);
-                }
-            }
-            None => {
-                // SECURITY: Deny read if no auth context set on transaction
-                tracing::warn!(
+            if !allowed {
+                tracing::debug!(
                     node_id = %node_id,
                     workspace = %workspace,
-                    "Transaction has no auth context - denying get_node read"
+                    "RLS: denying read access to node"
                 );
                 return Ok(None);
             }
         }
-
-        return Ok(Some(node));
+        None => {
+            // SECURITY: Deny read if no auth context set on transaction
+            tracing::warn!(
+                node_id = %node_id,
+                workspace = %workspace,
+                "Transaction has no auth context - denying get_node read"
+            );
+            return Ok(None);
+        }
     }
 
-    Ok(None)
+    Ok(Some(node))
 }
 
 /// Get a node by path with read-your-writes semantics
@@ -458,89 +329,46 @@ async fn get_node_by_path_bounded(
         .ok_or_else(|| raisin_error::Error::NotFound(format!("Branch {} not found", branch)))?
         .head;
 
-    // 3. Query path index to get node_id
+    // 3. Query path index to get node_id: the newest entry at or before HEAD,
+    // found with one seek (see `crate::mvcc_read`). Unbounded for the
+    // identity-resolution path (see `get_node_by_path_ignoring_head`).
     let cf_path = cf_handle(&tx.db, cf::PATH_INDEX)?;
     let prefix = keys::path_index_key_prefix(&tenant_id, &repo_id, &branch, workspace, path);
-
-    let iter = crate::prefix_scan(&tx.db, cf_path, &prefix);
+    let max_revision = bound_to_head.then_some(&head_revision);
 
     tracing::debug!(
-        "TX get_node_by_path: workspace={}, path={}, prefix_len={}, head_revision={}",
+        "TX get_node_by_path: workspace={}, path={}, head_revision={}",
         workspace,
         path,
-        prefix.len(),
         head_revision
     );
 
-    // Find the first (newest) NON-tombstone entry AT OR BEFORE HEAD revision
-    // Keys are sorted in descending revision order (newest first)
-    for item in iter {
-        let (key, value) =
-            item.map_err(|e| raisin_error::Error::storage(format!("Iterator error: {}", e)))?;
+    let Some((revision, value)) =
+        crate::mvcc_read::newest_at_or_before(&tx.db, cf_path, &prefix, max_revision)?
+    else {
+        tracing::debug!("TX get_node_by_path: no node found for path={}", path);
+        return Ok(None);
+    };
 
-        // CRITICAL: Verify key actually starts with our prefix
-        // This prevents false matches when paths share common prefixes
-        if !key.starts_with(&prefix) {
-            tracing::debug!("TX get_node_by_path: key doesn't match prefix, stopping iteration");
-            break;
-        }
-
-        // CRITICAL: Extract revision from key and filter by HEAD
-        // PATH_INDEX keys have descending revision as the last component
-        let revision = match keys::extract_revision_from_key(&key) {
-            Ok(rev) => rev,
-            Err(e) => {
-                tracing::warn!(
-                    "TX get_node_by_path: failed to extract revision from key: {}",
-                    e
-                );
-                continue;
-            }
-        };
-
-        // Skip entries with revision > HEAD (not yet visible). Skipped for the
-        // identity-resolution path (see `get_node_by_path_ignoring_head`).
-        if bound_to_head && revision > head_revision {
-            tracing::debug!(
-                "TX get_node_by_path: skipping entry with revision {} > head {}",
-                revision,
-                head_revision
-            );
-            continue;
-        }
-
+    // Check for tombstone - path was deleted, return None
+    if is_tombstone(&value) {
         tracing::debug!(
-            "TX get_node_by_path: found key_len={}, value_len={}, revision={}, is_tombstone={}",
-            key.len(),
-            value.len(),
-            revision,
-            is_tombstone(&value)
+            "TX get_node_by_path: tombstone found for path={}, node is deleted",
+            path
         );
-
-        // Check for tombstone - path was deleted, return None
-        if is_tombstone(&value) {
-            tracing::debug!(
-                "TX get_node_by_path: tombstone found for path={}, node is deleted",
-                path
-            );
-            return Ok(None);
-        }
-
-        // Found the node ID
-        let node_id = String::from_utf8(value.to_vec())
-            .map_err(|e| raisin_error::Error::storage(format!("Invalid node ID: {}", e)))?;
-
-        tracing::debug!(
-            "TX get_node_by_path: found node_id={} at revision={}",
-            node_id,
-            revision
-        );
-
-        // Now get the actual node
-        return get_node_bounded(tx, workspace, &node_id, bound_to_head).await;
+        return Ok(None);
     }
 
-    tracing::debug!("TX get_node_by_path: no node found for path={}", path);
+    // Found the node ID
+    let node_id = String::from_utf8(value)
+        .map_err(|e| raisin_error::Error::storage(format!("Invalid node ID: {}", e)))?;
 
-    Ok(None)
+    tracing::debug!(
+        "TX get_node_by_path: found node_id={} at revision={}",
+        node_id,
+        revision
+    );
+
+    // Now get the actual node
+    get_node_bounded(tx, workspace, &node_id, bound_to_head).await
 }

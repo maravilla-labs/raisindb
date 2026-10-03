@@ -8,7 +8,6 @@ use super::super::super::NodeRepositoryImpl;
 use crate::{cf, cf_handle, keys};
 use raisin_error::Result;
 use raisin_events::{EventBus, NodeEvent, NodeEventKind};
-use raisin_models::nodes::properties::PropertyValue;
 use raisin_storage::RevisionRepository;
 use rocksdb::WriteBatch;
 
@@ -62,22 +61,10 @@ impl NodeRepositoryImpl {
         )
         .await?;
 
-        // Ordered-children insurance: the shared module tombstones the entry
-        // under `node.order_key`, but the STORED label can differ (e.g. after
-        // rebalance/copy). Tombstone the looked-up label too when it differs.
-        if let Some(ref parent_id) = node.parent {
-            if let Some(label) = self
-                .get_order_label_for_child(tenant_id, repo_id, branch, workspace, parent_id, id)?
-            {
-                if label != node.order_key {
-                    let cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
-                    let ordered_key = keys::ordered_child_key_versioned(
-                        tenant_id, repo_id, branch, workspace, parent_id, &label, &revision, id,
-                    );
-                    batch.put_cf(cf_ordered, ordered_key, TOMBSTONE);
-                }
-            }
-        }
+        // (No separate ordered-children "insurance" here any more: the shared
+        // tombstoner resolves the parent's ID and tombstones the STORED label.
+        // The old insurance keyed its lookup by `node.parent` — the parent's
+        // NAME — so it never found the entry it meant to cover.)
 
         // Add revision indexing to batch (ATOMIC)
         self.revision_repo
@@ -296,6 +283,13 @@ impl NodeRepositoryImpl {
     }
 
     /// Add tombstone entries for reference indexes.
+    ///
+    /// Through the ONE reference tombstoner (`add_stale_reference_tombstones`,
+    /// diffed against no references at all), so nested references — arrays,
+    /// objects, element and composite content — are found by the same walker
+    /// and keyed by the same dot path the writers used. A top-level-only loop
+    /// here left every nested reference of a pruned node live forever. Both
+    /// published variants are tombstoned, so `is_published` no longer selects.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::repositories::nodes) fn add_reference_tombstones_to_batch(
         &self,
@@ -308,39 +302,20 @@ impl NodeRepositoryImpl {
         workspace: &str,
         id: &str,
         revision: &raisin_hlc::HLC,
-        is_published: bool,
+        _is_published: bool,
     ) {
-        for (prop_path, prop_value) in &node.properties {
-            if let PropertyValue::Reference(ref_data) = prop_value {
-                // Tombstone forward reference
-                let fwd_key = keys::reference_forward_key_versioned(
-                    tenant_id,
-                    repo_id,
-                    branch,
-                    workspace,
-                    id,
-                    prop_path,
-                    revision,
-                    is_published,
-                );
-                batch.put_cf(cf_reference, fwd_key, TOMBSTONE);
-
-                // Tombstone reverse reference
-                let rev_key = keys::reference_reverse_key_versioned(
-                    tenant_id,
-                    repo_id,
-                    branch,
-                    workspace,
-                    &ref_data.workspace,
-                    &ref_data.id,
-                    id,
-                    prop_path,
-                    revision,
-                    is_published,
-                );
-                batch.put_cf(cf_reference, rev_key, TOMBSTONE);
-            }
-        }
+        debug_assert_eq!(id, node.id, "reference tombstones keyed by another id");
+        crate::repositories::add_stale_reference_tombstones(
+            batch,
+            cf_reference,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            node,
+            &raisin_models::nodes::Node::default(),
+            revision,
+        );
     }
 
     /// Add tombstone entries for outgoing and incoming relations.

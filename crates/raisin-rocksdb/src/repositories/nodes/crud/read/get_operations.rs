@@ -3,7 +3,6 @@
 use super::super::super::helpers::is_tombstone;
 use super::super::super::storage_node::PropertiesMode;
 use super::super::super::NodeRepositoryImpl;
-use crate::{cf, cf_handle, keys};
 use raisin_error::Result;
 use raisin_hlc::HLC;
 use raisin_models::nodes::Node;
@@ -138,7 +137,9 @@ impl NodeRepositoryImpl {
         populate_has_children: bool,
         mode: PropertiesMode,
     ) -> Result<Option<Node>> {
-        let revision = match self.get_revision_at_or_before(
+        // The seek that finds the version also yields its blob: no second
+        // point read of the same key.
+        let (revision, bytes) = match self.get_versioned_at_or_before(
             tenant_id,
             repo_id,
             branch,
@@ -146,7 +147,7 @@ impl NodeRepositoryImpl {
             id,
             target_revision,
         )? {
-            Some(rev) => rev,
+            Some(found) => found,
             None => {
                 tracing::trace!(
                     "REPO get_at_revision_impl: node_id={} - no revision found at or before {}",
@@ -157,66 +158,45 @@ impl NodeRepositoryImpl {
             }
         };
 
+        if is_tombstone(&bytes) {
+            tracing::trace!(
+                "REPO get_at_revision_impl: node_id={} at revision={} is tombstone",
+                id,
+                revision
+            );
+            return Ok(None);
+        }
+
+        let mut node = self.deserialize_node_with_path_as(
+            &bytes,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            id,
+            target_revision,
+            mode,
+        )?;
         tracing::trace!(
-            "REPO get_at_revision_impl: node_id={}, found_revision={} (target={})",
+            "REPO get_at_revision_impl: node_id={}, found_revision={} (target={}), path={}",
             id,
             revision,
-            target_revision
+            target_revision,
+            node.path
         );
 
-        let key = keys::node_key_versioned(tenant_id, repo_id, branch, workspace, id, &revision);
-        let cf = cf_handle(&self.db, cf::NODES)?;
-
-        match self.db.get_cf(cf, key) {
-            Ok(Some(bytes)) => {
-                if is_tombstone(&bytes) {
-                    tracing::trace!(
-                        "REPO get_at_revision_impl: node_id={} at revision={} is tombstone",
-                        id,
-                        revision
-                    );
-                    return Ok(None);
-                }
-
-                let mut node = self.deserialize_node_with_path_as(
-                    &bytes,
-                    tenant_id,
-                    repo_id,
-                    branch,
-                    workspace,
-                    id,
-                    target_revision,
-                    mode,
-                )?;
-                tracing::debug!(
-                    "REPO get_at_revision_impl: node_id={} successfully deserialized, path={}",
-                    id,
-                    node.path
-                );
-
-                if populate_has_children {
-                    self.populate_node_has_children(
-                        tenant_id,
-                        repo_id,
-                        branch,
-                        workspace,
-                        &mut node,
-                        Some(target_revision),
-                    )
-                    .await?;
-                }
-
-                Ok(Some(node))
-            }
-            Ok(None) => {
-                tracing::debug!(
-                    "REPO get_at_revision_impl: node_id={} at revision={} - key not found in db",
-                    id,
-                    revision
-                );
-                Ok(None)
-            }
-            Err(e) => Err(raisin_error::Error::storage(e.to_string())),
+        if populate_has_children {
+            self.populate_node_has_children(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                &mut node,
+                Some(target_revision),
+            )
+            .await?;
         }
+
+        Ok(Some(node))
     }
 }

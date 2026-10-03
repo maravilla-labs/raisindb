@@ -6,6 +6,7 @@
 //! Property index repository trait for fast property-based lookups
 
 use raisin_error::Result;
+use raisin_hlc::HLC;
 use raisin_models as models;
 use std::collections::HashMap;
 
@@ -41,6 +42,18 @@ pub struct PropertyScanEntry {
 /// RocksDB example:
 /// - Draft: `/{tenant_id}/{deployment}prop:{workspace}:{property_name}:{value_hash}:{node_id}`
 /// - Published: `/{tenant_id}/{deployment}prop_pub:{workspace}:{property_name}:{value_hash}:{node_id}`
+///
+/// # Reads are revision-bounded, and return CANDIDATES
+///
+/// Every read takes `max_revision`: the index is read as of that revision, or
+/// as of the branch HEAD when `None`. A node matches when its newest index
+/// entry for `(property, value)` at or below that revision is live.
+///
+/// The index can hold orphan live entries left by historically buggy writers,
+/// so a result is the set of nodes the INDEX says match. A caller that must be
+/// exact re-checks the decoded node — in particular for pseudo-properties
+/// (`__node_type`, `__name`, `__created_at`, `__updated_at`, membership),
+/// which have no JSON residual filter downstream.
 pub trait PropertyIndexRepository: Send + Sync {
     /// Index properties for a node
     ///
@@ -85,6 +98,7 @@ pub trait PropertyIndexRepository: Send + Sync {
         property_name: &str,
         property_value: &models::nodes::properties::PropertyValue,
         published_only: bool,
+        max_revision: Option<&HLC>,
     ) -> impl std::future::Future<Output = Result<Vec<String>>> + Send;
 
     /// Find node IDs that have a specific property (any value)
@@ -98,6 +112,7 @@ pub trait PropertyIndexRepository: Send + Sync {
         scope: StorageScope<'_>,
         property_name: &str,
         published_only: bool,
+        max_revision: Option<&HLC>,
     ) -> impl std::future::Future<Output = Result<Vec<String>>> + Send;
 
     /// Find node IDs by property value with optional limit
@@ -110,12 +125,19 @@ pub trait PropertyIndexRepository: Send + Sync {
         property_name: &str,
         property_value: &models::nodes::properties::PropertyValue,
         published_only: bool,
+        max_revision: Option<&HLC>,
         limit: Option<usize>,
     ) -> impl std::future::Future<Output = Result<Vec<String>>> + Send {
         // Default implementation: call find_by_property and truncate
         async move {
             let mut node_ids = self
-                .find_by_property(scope, property_name, property_value, published_only)
+                .find_by_property(
+                    scope,
+                    property_name,
+                    property_value,
+                    published_only,
+                    max_revision,
+                )
                 .await?;
 
             if let Some(lim) = limit {
@@ -135,11 +157,18 @@ pub trait PropertyIndexRepository: Send + Sync {
         property_name: &str,
         property_value: &models::nodes::properties::PropertyValue,
         published_only: bool,
+        max_revision: Option<&HLC>,
     ) -> impl std::future::Future<Output = Result<usize>> + Send {
         // Default implementation: call find_by_property and return length
         async move {
             let node_ids = self
-                .find_by_property(scope, property_name, property_value, published_only)
+                .find_by_property(
+                    scope,
+                    property_name,
+                    property_value,
+                    published_only,
+                    max_revision,
+                )
                 .await?;
             Ok(node_ids.len())
         }
@@ -153,6 +182,7 @@ pub trait PropertyIndexRepository: Send + Sync {
         _scope: StorageScope<'_>,
         _property_name: &str,
         _published_only: bool,
+        _max_revision: Option<&HLC>,
         _ascending: bool,
         _limit: Option<usize>,
     ) -> impl std::future::Future<Output = Result<Vec<PropertyScanEntry>>> + Send {
@@ -172,6 +202,7 @@ pub trait PropertyIndexRepository: Send + Sync {
         _lower_bound: Option<(&models::nodes::properties::PropertyValue, bool)>,
         _upper_bound: Option<(&models::nodes::properties::PropertyValue, bool)>,
         _published_only: bool,
+        _max_revision: Option<&HLC>,
         _ascending: bool,
         _limit: Option<usize>,
     ) -> impl std::future::Future<Output = Result<Vec<PropertyScanEntry>>> + Send {

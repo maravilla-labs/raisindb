@@ -50,7 +50,7 @@ pub async fn upsert_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) 
         None => super::read::get_node_by_path_ignoring_head(tx, workspace, &node.path).await?,
     };
 
-    tracing::info!(
+    tracing::debug!(
         "UPSERT_NODE: workspace={}, path={}, input_id={}, existing_id={}",
         workspace,
         node.path,
@@ -63,7 +63,7 @@ pub async fn upsert_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) 
         let mut updated_node = node.clone();
         updated_node.id = existing_node.id.clone();
 
-        tracing::info!(
+        tracing::debug!(
             "UPSERT_NODE: Updating existing node at path '{}', preserving node_id={}",
             node.path,
             existing_node.id
@@ -74,7 +74,7 @@ pub async fn upsert_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) 
     } else {
         // CREATE: Use provided ID (build_node_from_columns generates UUID)
         // DIAGNOSTIC: Log when creating new node to help track duplicate creation issues
-        tracing::info!(
+        tracing::debug!(
             "UPSERT_NODE: Creating new node at path '{}' with node_id={} (no existing node found)",
             node.path,
             node.id

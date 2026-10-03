@@ -84,10 +84,15 @@ pub(in crate::replication::application) async fn apply_set_property(
     let value = rmp_serde::to_vec_named(&node)
         .map_err(|e| raisin_error::Error::storage(format!("Serialization error: {}", e)))?;
 
-    applicator
-        .db
-        .put_cf(cf_nodes, key, value)
-        .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+    let mut batch = rocksdb::WriteBatch::default();
+    batch.put_cf(cf_nodes, key, value);
+    applicator.write_marking_compound_stale(
+        batch,
+        tenant_id,
+        repo_id,
+        branch,
+        node.workspace.as_deref().unwrap_or("default"),
+    )?;
 
     // Update branch HEAD
     applicator

@@ -100,15 +100,19 @@ pub trait NodeRepository: Send + Sync {
     // Core CRUD Operations
     // ========================================================================
 
-    /// Get a single node by ID (does NOT compute has_children).
+    /// Get a single node by ID.
     ///
     /// Use this for:
     /// - Direct node lookups by ID
-    /// - SQL query results (where has_children is not needed)
+    /// - SQL query results
     /// - Internal operations
     ///
+    /// The RocksDB backend populates `has_children`, at the same revision as
+    /// the node. It is an existence probe (stops at the first live child), not
+    /// a child listing, so it is cheap enough to pay on every read.
+    ///
     /// # Returns
-    /// - `Ok(Some(node))` - Node found, has_children is None
+    /// - `Ok(Some(node))` - Node found
     /// - `Ok(None)` - Node not found
     fn get(
         &self,
@@ -530,8 +534,9 @@ pub trait NodeRepository: Send + Sync {
 
     /// Check if a node has children
     ///
-    /// This is more efficient than loading all children just to check if any exist.
-    /// Used to populate the `has_children` field in JSON responses.
+    /// An existence probe: it stops at the first live child rather than
+    /// loading or listing the children. This is what populates the
+    /// `has_children` field on node reads.
     ///
     /// # Arguments
     ///

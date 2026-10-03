@@ -380,6 +380,21 @@ LIMIT 20;
 | No references found | Returns the input unchanged |
 | `NULL` input | Returns `NULL` |
 | Unresolvable reference (deleted node) | Keeps the original reference object |
+| Reference the caller may not read | Keeps the original reference object — exactly like a deleted node |
+| Reference hidden in the row's locale | Keeps the original reference object |
+
+**Permissions, revision and limits:**
+
+- Every referenced node is checked against the caller's row-level security,
+  always. A node the caller cannot read is left as the bare reference, the same
+  as a node that does not exist, so `RESOLVE` cannot be used to probe for nodes
+  the caller may not see. A public site that resolves assets or tags needs read
+  grants on those workspaces (or a function running with `execution_context: system`).
+- Referenced nodes are read at the statement's revision: with `__revision = …`,
+  a historical page inlines the referenced nodes as they were then.
+- A statement may read at most 5,000 distinct referenced nodes and inline at
+  most 50,000 nodes (32 MB). Exceeding that is an error naming `RESOLVE`, never
+  a silently truncated result — lower the depth, pass `fields`, or select fewer rows.
 
 **Depth control:**
 
@@ -905,7 +920,8 @@ All workspace tables (e.g., `default`, `content`, `users`) provide these columns
 - `__revision` (bigint, virtual) - Same as version
 - `__branch` (text, virtual) - Branch name
 - `__workspace` (text, virtual) - Workspace name
-- `embedding` (vector, virtual) - Vector embedding if available
+- `embedding` (vector, virtual) - Vector embedding if available. Not part of
+  `SELECT *`: name it explicitly to read it.
 
 ## What's Next?
 

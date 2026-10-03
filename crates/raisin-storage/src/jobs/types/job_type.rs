@@ -118,6 +118,20 @@ pub enum JobType {
         /// only fills gaps (nodes not already covered by the current policy hash).
         rebuild: bool,
     },
+    /// Streaming, resumable repair of derived index data on THIS node
+    /// (`raisin_rocksdb::management::async_indexing::repair`). Admin-triggered
+    /// only — never enqueued at boot. Each node runs its own: derived data is
+    /// local, and job dedup is per process.
+    IndexRepair {
+        tenant_id: String,
+        repo_id: String,
+        /// `None` repairs every branch of the repository, forks included.
+        branch: Option<String>,
+        /// The repair's slug: `ordered_children` or `path_tombstone`.
+        repair: String,
+        /// Report what would be written; write nothing.
+        dry_run: bool,
+    },
     BulkSql {
         sql: String,
         actor: String,
@@ -499,6 +513,9 @@ impl JobType {
             // checkpoints its resume cursor so a timeout resumes rather than
             // restarts.
             JobType::SpatialIndexBuild { .. } => 600,
+            // Streams a whole branch's CF in bounded batches and checkpoints a
+            // resume cursor in the same write, so a timed-out attempt resumes.
+            JobType::IndexRepair { .. } => 3600,
             JobType::Backup => 600,
             JobType::Restore => 600,
             // A package install is one job that writes hundreds of content

@@ -195,11 +195,13 @@ impl ServerConfig {
         if let Some(ref peers_str) = self.replication_peers {
             let cli_peers = config::ServerConfigFile::parse_peers_string(peers_str)?;
             // Override any peers with same peer_id, add new ones
-            for cli_peer in cli_peers {
+            for mut cli_peer in cli_peers {
                 if let Some(existing) = replication_peers
                     .iter_mut()
                     .find(|p| p.peer_id == cli_peer.peer_id)
                 {
+                    // The CLI form has no HTTP address; keep the file's.
+                    cli_peer.http_url = cli_peer.http_url.or(existing.http_url.take());
                     *existing = cli_peer;
                 } else {
                     replication_peers.push(cli_peer);

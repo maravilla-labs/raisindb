@@ -23,11 +23,13 @@ bind_address = "127.0.0.1"
 peer_id = "node2"
 address = "127.0.0.1"
 port = 9002
+http_url = "http://127.0.0.1:8082"  # admin fan-out (index repairs)
 
 [[replication.peers]]
 peer_id = "node3"
 address = "127.0.0.1"
 port = 9003
+http_url = "http://127.0.0.1:8083"  # admin fan-out (index repairs)
 
 # Atomic locks / inventory subsystem (acquire / tie-breaker primitive).
 # Exposed to server-side functions (raisin.locks.* / raisin.inventory.*),

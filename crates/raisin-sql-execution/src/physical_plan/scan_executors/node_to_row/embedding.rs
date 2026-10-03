@@ -65,7 +65,8 @@ pub(super) async fn insert_embedding_field<S: Storage>(
                 );
             }
         }
-    } else {
+    } else if ctx.first_embedding_unavailable_warning() {
+        // Once per statement, not once per row.
         tracing::warn!(
             "embedding column requested but embedding_storage not configured in ExecutionContext"
         );

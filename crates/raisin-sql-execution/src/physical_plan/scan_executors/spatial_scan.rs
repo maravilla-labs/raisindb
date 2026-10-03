@@ -108,7 +108,7 @@ pub async fn execute_spatial_distance_scan<
     // PLANNER relied on that order to drop a `Sort`, so it is logged: if rows ever
     // come back mis-ordered, the trace says whether a Sort was elided on the
     // strength of a promise this scan no longer keeps.
-    tracing::info!(
+    tracing::debug!(
         "   SpatialDistanceScan: property='{}', center=({}, {}), radius={}m, workspace='{}', branch='{}', limit={:?}, claims_distance_order={}",
         property_name, center_lon, center_lat, radius_meters, workspace, branch, limit, claims_distance_order
     );
@@ -164,7 +164,7 @@ pub async fn execute_spatial_distance_scan<
         let qualifier = alias.clone().unwrap_or_else(|| table.clone());
         let locales_to_use = get_locales_to_use(&ctx_clone);
 
-        tracing::info!("   SpatialDistanceScan found {} nodes within {}m", results.len(), radius_meters);
+        tracing::debug!("   SpatialDistanceScan found {} nodes within {}m", results.len(), radius_meters);
 
         let mut emitted = 0;
 
@@ -286,7 +286,7 @@ pub async fn execute_spatial_knn_scan<S: Storage + 'static>(
     let ctx_clone = ctx.clone();
     let max_revision = ctx.max_revision.unwrap_or_else(raisin_hlc::HLC::now);
 
-    tracing::info!(
+    tracing::debug!(
         "   SpatialKnnScan: property='{}', center=({}, {}), k={}, workspace='{}', branch='{}'",
         property_name,
         center_lon,
@@ -308,7 +308,7 @@ pub async fn execute_spatial_knn_scan<S: Storage + 'static>(
                 &max_revision, &precisions, &SpatialPreFilter::default(),
             )?;
 
-        tracing::info!("   SpatialKnnScan found {} nearest neighbors", results.len());
+        tracing::debug!("   SpatialKnnScan found {} nearest neighbors", results.len());
 
         let mut emitted = 0;
 

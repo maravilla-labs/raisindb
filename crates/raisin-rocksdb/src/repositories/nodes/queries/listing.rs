@@ -7,13 +7,13 @@
 //! - List children
 //! - Check if node has children
 
-use super::super::helpers::is_tombstone;
 use super::super::ordering::OrderedScanStart;
 use super::super::storage_node::PropertiesMode;
 use super::super::NodeRepositoryImpl;
-use crate::{cf, cf_handle, keys};
+use crate::repositories::property_index::reader::PropertyIndexReader;
 use raisin_error::Result;
 use raisin_hlc::HLC;
+use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
 
 impl NodeRepositoryImpl {
@@ -27,44 +27,19 @@ impl NodeRepositoryImpl {
         node_type: &str,
         max_revision: Option<&HLC>,
     ) -> Result<Vec<Node>> {
-        // Use __node_type pseudo-property index for efficient lookup
-        let prefix = keys::KeyBuilder::new()
-            .push(tenant_id)
-            .push(repo_id)
-            .push(branch)
-            .push(workspace)
-            .push("prop") // Non-published properties
-            .push("__node_type")
-            .push(node_type)
-            .build_prefix();
-
-        let cf_property = cf_handle(&self.db, cf::PROPERTY_INDEX)?;
-        let prefix_clone = prefix.clone();
-        let iter = crate::prefix_scan(&self.db, cf_property, prefix);
-
-        let mut node_ids = std::collections::HashSet::new();
-
-        // Collect unique node IDs (deduplicate across revisions)
-        for item in iter {
-            let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
-
-            // Verify key actually starts with our prefix
-            if !key.starts_with(&prefix_clone) {
-                break;
-            }
-
-            // Skip tombstones
-            if is_tombstone(&value) {
-                continue;
-            }
-
-            // Extract node_id from key (last component)
-            let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
-            if let Some(node_id_bytes) = parts.last() {
-                let node_id = String::from_utf8_lossy(node_id_bytes).to_string();
-                node_ids.insert(node_id);
-            }
-        }
+        // The __node_type pseudo-property, through the one revision-bounded
+        // PROPERTY_INDEX reader: as of `max_revision`, else the branch HEAD.
+        let node_ids = PropertyIndexReader::new(
+            &self.db,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            "__node_type",
+            false,
+            max_revision,
+        )?
+        .find(&PropertyValue::String(node_type.to_string()), None)?;
 
         // Fetch actual nodes
         let mut nodes = Vec::new();
@@ -82,7 +57,10 @@ impl NodeRepositoryImpl {
                         .await?
                 }
             };
-            if let Some(node) = node_opt {
+            // The index yields candidates. A pseudo-property has no residual
+            // filter downstream, so an orphan `__node_type` entry left by an
+            // old writer would otherwise list a node whose type has changed.
+            if let Some(node) = node_opt.filter(|node| node.node_type == node_type) {
                 nodes.push(node);
             }
         }
@@ -310,8 +288,10 @@ impl NodeRepositoryImpl {
 
     /// Check if node has children
     ///
-    /// This is an optimized check that only scans the ORDERED_CHILDREN index
-    /// to see if any children exist, without fetching full node data.
+    /// An existence probe over the ORDERED_CHILDREN index that stops at the
+    /// first live child; see [`Self::probe_has_children`]. Pass the node's path
+    /// when the caller has it, so the root check needs no lookup.
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::repositories::nodes) async fn has_children_impl(
         &self,
         tenant_id: &str,
@@ -319,35 +299,17 @@ impl NodeRepositoryImpl {
         branch: &str,
         workspace: &str,
         node_id: &str,
+        node_path: Option<&str>,
         max_revision: Option<&HLC>,
     ) -> Result<bool> {
-        // Special case: ROOT node's children are indexed under "/" not the ROOT node's actual ID
-        // Check if this is the ROOT node by looking it up
-        let parent_id_for_lookup = if let Some(node) = self
-            .get_impl(tenant_id, repo_id, branch, workspace, node_id, false)
-            .await?
-        {
-            if node.path == "/" {
-                "/" // ROOT node's children are indexed under "/"
-            } else {
-                node_id
-            }
-        } else {
-            node_id
-        };
-
-        // Just check if there are any child IDs in the ordered index
-        // This is much more efficient than fetching all children
-        let child_ids = self
-            .get_ordered_child_ids(
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                parent_id_for_lookup,
-                max_revision,
-            )
-            .await?;
-        Ok(!child_ids.is_empty())
+        self.probe_has_children(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            node_id,
+            node_path,
+            max_revision,
+        )
     }
 }

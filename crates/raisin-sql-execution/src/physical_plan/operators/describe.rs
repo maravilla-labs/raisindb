@@ -80,10 +80,15 @@ impl PhysicalPlan {
             PhysicalPlan::PropertyIndexScan {
                 property_name,
                 property_value,
+                limit,
                 ..
-            } => {
-                format!("PropertyIndexScan: {}={}", property_name, property_value)
-            }
+            } => match limit {
+                Some(n) => format!(
+                    "PropertyIndexScan: {}={} limit={}",
+                    property_name, property_value, n
+                ),
+                None => format!("PropertyIndexScan: {}={}", property_name, property_value),
+            },
             PhysicalPlan::PropertyIndexCountScan { properties, .. } => {
                 let pairs = properties
                     .iter()

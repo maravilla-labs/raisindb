@@ -315,7 +315,7 @@ pub async fn delete_path_index(tx: &RocksDBTransaction, workspace: &str, path: &
     // 2. Get or allocate the single transaction HLC (all operations in tx share same revision)
     let revision = tx.get_or_allocate_transaction_revision()?;
 
-    tracing::info!(
+    tracing::debug!(
         "TXN delete_path_index: workspace={}, path={}, revision={}",
         workspace,
         path,

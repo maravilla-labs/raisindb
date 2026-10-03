@@ -173,6 +173,16 @@ pub(crate) fn management_routes(state: &AppState) -> Router<AppState> {
             .route(
                 "/api/management/repositories/{tenant_id}/{repo_id}/branches/{name}/upstream",
                 patch(crate::handlers::branches::set_upstream_branch),
+            )
+            // Index repairs: enqueue on every node of the cluster, and report
+            // which nodes have finished. Administrators only (`admin_gate`).
+            .route(
+                "/api/management/{repo}/repairs/{repair}",
+                post(crate::handlers::management::enqueue_repair),
+            )
+            .route(
+                "/api/management/{repo}/repairs/{repair}/status",
+                get(crate::handlers::management::repair_status),
             );
     }
 

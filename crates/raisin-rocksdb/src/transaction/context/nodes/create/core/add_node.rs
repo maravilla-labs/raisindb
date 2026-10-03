@@ -191,7 +191,7 @@ pub async fn add_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
     // 6. Get or allocate the single transaction HLC
     let revision = tx.get_or_allocate_transaction_revision()?;
 
-    tracing::info!(
+    tracing::debug!(
         "TXN add_node: node_id={}, path={}, revision={}",
         normalized_node.id,
         normalized_node.path,

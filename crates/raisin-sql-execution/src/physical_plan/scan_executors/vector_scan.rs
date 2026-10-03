@@ -95,7 +95,7 @@ pub async fn execute_vector_scan<S: Storage + 'static>(
     // A `Limit` above the filter puts the answer back at `k`.
     let fetch_k = k.saturating_mul(overfetch.max(1));
 
-    tracing::info!(
+    tracing::debug!(
         "   VectorScan: tenant={}, repo={}, branch={}, workspace={}, metric={}, k={}, fetch_k={}, threshold={:?}",
         tenant_id, repo_id, branch, workspace, distance_metric, k, fetch_k, max_distance
     );
@@ -129,7 +129,7 @@ pub async fn execute_vector_scan<S: Storage + 'static>(
             ))
         })?;
 
-    tracing::info!("   VectorScan: partition={}", partition);
+    tracing::debug!("   VectorScan: partition={}", partition);
 
     // Step 3: Call HNSW search with distance threshold (the index uses the metric it was created with)
     let search_results = hnsw_engine
@@ -254,7 +254,7 @@ async fn evaluate_query_vector<S: Storage + 'static>(
                 }
             };
 
-            tracing::info!(
+            tracing::debug!(
                 text = %text,
                 "Generating embedding for EMBEDDING() function in VectorScan"
             );
@@ -264,7 +264,7 @@ async fn evaluate_query_vector<S: Storage + 'static>(
                 .map_err(|e| Error::Backend(format!("Failed to generate embedding: {}", e)))?;
 
             // Note: normalization is now handled by the caller based on the distance metric
-            tracing::info!(
+            tracing::debug!(
                 text = %text,
                 dimensions = embedding.len(),
                 "Successfully generated embedding"

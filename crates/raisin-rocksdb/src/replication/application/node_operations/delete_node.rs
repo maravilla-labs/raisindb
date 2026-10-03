@@ -26,7 +26,13 @@ pub(in crate::replication::application) async fn apply_delete_node(
         revision
     );
 
-    let node_snapshot = match applicator.load_latest_node(tenant_id, repo_id, branch, node_id)? {
+    let node_snapshot = match applicator.load_latest_node(
+        tenant_id,
+        repo_id,
+        branch,
+        crate::replication::WorkspaceHint::Unknown,
+        node_id,
+    )? {
         Some(node) => node,
         None => {
             tracing::warn!(

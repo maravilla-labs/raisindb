@@ -168,84 +168,63 @@ impl NodeRepositoryImpl {
             node_revisions.len()
         );
 
-        // Fetch all matching nodes using RocksDB MultiGet for better performance
-        // This reduces round trips compared to fetching nodes one-by-one
+        // Each node's NEWEST version at or below the bound — what a point read
+        // returns — not the version at its PATH_INDEX entry's revision, which
+        // is only where the node last got its path: a node edited after that
+        // (no move) used to come back with its old properties.
         let cf_nodes = cf_handle(&self.db, cf::NODES)?;
-
-        // Build keys for batch fetch
-        let node_info_vec: Vec<(String, HLC)> = node_revisions.into_iter().collect();
-        let keys: Vec<Vec<u8>> = node_info_vec
-            .iter()
-            .map(|(node_id, revision)| {
-                keys::node_key_versioned(tenant_id, repo_id, branch, workspace, node_id, revision)
-            })
-            .collect();
-
-        tracing::debug!(
-            "REPO scan_by_path_prefix_impl: fetching {} nodes with MultiGet",
-            keys.len()
-        );
-
-        // Fetch all nodes at once with MultiGet - more efficient than individual gets
-        let values = self
-            .db
-            .multi_get_cf(keys.iter().map(|k| (&cf_nodes, k.as_slice())));
-
-        // Deserialize fetched nodes
         let mut nodes = Vec::new();
-        for (i, value_result) in values.into_iter().enumerate() {
-            if let Ok(Some(value_bytes)) = value_result {
-                // Check for tombstone
-                if is_tombstone(&value_bytes) {
-                    continue;
-                }
+        for (node_id, path_revision) in node_revisions {
+            let prefix = keys::node_key_prefix(tenant_id, repo_id, branch, workspace, &node_id);
+            let Some((blob_revision, bytes)) =
+                crate::mvcc_read::newest_at_or_before(&self.db, cf_nodes, &prefix, max_revision)?
+            else {
+                continue;
+            };
+            if is_tombstone(&bytes) {
+                continue;
+            }
 
-                // Get node_id and revision for this index
-                let (node_id, revision) = match node_info_vec.get(i) {
-                    Some((id, rev)) => (id.as_str(), rev),
-                    None => continue, // Shouldn't happen, but safety check
-                };
+            // The path as of the read: the bound, or else whichever is newer
+            // of the path entry and the blob.
+            let path_at = match max_revision {
+                Some(bound) => *bound,
+                None => blob_revision.max(path_revision),
+            };
+            let mut node = self.deserialize_node_with_path(
+                &bytes, tenant_id, repo_id, branch, workspace, &node_id, &path_at,
+            )?;
 
-                // Deserialize node and materialize path if needed
-                let mut node = self.deserialize_node_with_path(
-                    &value_bytes,
-                    tenant_id,
-                    repo_id,
-                    branch,
-                    workspace,
-                    node_id,
-                    revision,
-                )?;
+            // Populate has_children if requested — as of the READ, not as of
+            // the path entry (which hid children added since).
+            if populate_has_children {
+                let has_children = self
+                    .has_children_impl(
+                        tenant_id,
+                        repo_id,
+                        branch,
+                        workspace,
+                        &node_id,
+                        Some(&node.path),
+                        max_revision,
+                    )
+                    .await?;
+                node.has_children = Some(has_children);
+            }
 
-                // Populate has_children if requested
-                if populate_has_children {
-                    let has_children = self
-                        .has_children_impl(
-                            tenant_id,
-                            repo_id,
-                            branch,
-                            workspace,
-                            node_id,
-                            Some(revision),
-                        )
-                        .await?;
-                    node.has_children = Some(has_children);
-                }
-
-                // Double-check that path actually starts with prefix
-                // (This is a safety check - iterator should already filter correctly)
-                if node.path.starts_with(path_prefix) {
-                    nodes.push(node);
-                } else {
-                    tracing::warn!(
-                        "REPO scan_by_path_prefix_impl: node {} has path '{}' which doesn't start with prefix '{}'",
-                        node.id, node.path, path_prefix
-                    );
-                }
+            // Double-check that path actually starts with prefix
+            // (This is a safety check - iterator should already filter correctly)
+            if node.path.starts_with(path_prefix) {
+                nodes.push(node);
+            } else {
+                tracing::warn!(
+                    "REPO scan_by_path_prefix_impl: node {} has path '{}' which doesn't start with prefix '{}'",
+                    node.id, node.path, path_prefix
+                );
             }
         }
 
-        tracing::info!(
+        tracing::debug!(
             "REPO scan_by_path_prefix_impl: returning {} nodes for prefix '{}'",
             nodes.len(),
             path_prefix

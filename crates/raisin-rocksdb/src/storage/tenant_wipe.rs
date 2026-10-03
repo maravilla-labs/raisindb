@@ -124,8 +124,28 @@ impl RocksDBStorage {
         let mut cfs_wiped = 0usize;
         let mut skipped: Vec<String> = Vec::new();
 
+        // A tenant named like a kind-first record kind must not range-delete
+        // `{tenant}\0` in a mixed-layout CF: that range IS every other
+        // tenant's records of that kind (see `tenant_wipe_collision`). Its
+        // repositories are read now, before REGISTRY is wiped below.
+        let collision_repos = if super::tenant_wipe_collision::collides_with_kind(tenant_id) {
+            Some(super::tenant_wipe_collision::tenant_repos(db, tenant_id)?)
+        } else {
+            None
+        };
+
         for cf_name in TENANT_PREFIXED_CFS {
-            match wipe_cf_range(db, cf_name, &prefix, &upper) {
+            let wiped = match &collision_repos {
+                Some(repos)
+                    if crate::storage::repo_purge::mixed_layout_cfs().any(|m| m == *cf_name) =>
+                {
+                    super::tenant_wipe_collision::wipe_tenant_first_per_repo(
+                        db, cf_name, tenant_id, repos,
+                    )
+                }
+                _ => wipe_cf_range(db, cf_name, &prefix, &upper),
+            };
+            match wiped {
                 Ok(()) => cfs_wiped += 1,
                 Err(e) => {
                     tracing::warn!(
@@ -136,6 +156,25 @@ impl RocksDBStorage {
                     );
                     skipped.push((*cf_name).to_string());
                 }
+            }
+        }
+
+        // Mixed-layout CFs (INDEX_STATUS) also hold KIND-first records —
+        // `prop_index\0{tenant}\0…`, `compound_index\0…`, `spatial_index\0…` —
+        // which the `{tenant}\0` range above never reaches. Left behind they
+        // survive the wipe, and a tenant recreated under the same id inherits a
+        // `Ready` compound or spatial state for indexes it never built.
+        for cf_name in crate::storage::repo_purge::mixed_layout_cfs() {
+            if let Err(e) =
+                crate::storage::repo_purge::purge_mixed_layout_tenant(db, cf_name, tenant_id)
+            {
+                tracing::warn!(
+                    cf = %cf_name,
+                    tenant_id = %tenant_id,
+                    error = %e,
+                    "Failed to wipe kind-first index state records; continuing"
+                );
+                skipped.push(format!("{cf_name} (kind-first records)"));
             }
         }
 
@@ -335,6 +374,74 @@ mod tests {
             1,
             "tenant-b BRANCHES leaked from a tenant-a wipe"
         );
+    }
+
+    /// INDEX_STATUS holds kind-first state records (`compound_index\0{t}\0…`)
+    /// beside the tenant-first ones; the wipe takes both, and leaves another
+    /// tenant's — including one whose REPOSITORY is named like this tenant.
+    #[test]
+    fn tenant_wipe_clears_index_state() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = RocksDBStorage::new(temp_dir.path()).unwrap();
+        let db = storage.db().clone();
+
+        let kinds = ["prop_index", "compound_index", "spatial_index"];
+        let record = |kind: &str, tenant: &str, repo: &str| {
+            format!("{kind}\0{tenant}\0{repo}\0main\0ws\0x").into_bytes()
+        };
+        for kind in kinds {
+            put_in_cf(
+                &db,
+                cf::INDEX_STATUS,
+                &record(kind, "tenant-a", "repo"),
+                b"Ready",
+            );
+            put_in_cf(
+                &db,
+                cf::INDEX_STATUS,
+                &record(kind, "tenant-b", "repo"),
+                b"Ready",
+            );
+            // Another tenant's repository that shares tenant-a's NAME.
+            put_in_cf(
+                &db,
+                cf::INDEX_STATUS,
+                &record(kind, "tenant-b", "tenant-a"),
+                b"Ready",
+            );
+        }
+        let tenant_first = KeyBuilder::new()
+            .push("tenant-a")
+            .push("repo")
+            .push("main")
+            .push("repair_state")
+            .build();
+        put_in_cf(&db, cf::INDEX_STATUS, &tenant_first, b"{}");
+
+        storage.delete_tenant_data("tenant-a").unwrap();
+
+        let cf = cf_handle(&db, cf::INDEX_STATUS).unwrap();
+        for kind in kinds {
+            assert!(
+                db.get_cf(cf, record(kind, "tenant-a", "repo"))
+                    .unwrap()
+                    .is_none(),
+                "{kind} record of the wiped tenant survived"
+            );
+            assert!(
+                db.get_cf(cf, record(kind, "tenant-b", "repo"))
+                    .unwrap()
+                    .is_some(),
+                "{kind} record of another tenant was wiped"
+            );
+            assert!(
+                db.get_cf(cf, record(kind, "tenant-b", "tenant-a"))
+                    .unwrap()
+                    .is_some(),
+                "{kind} record of a repository NAMED like the tenant was wiped"
+            );
+        }
+        assert!(db.get_cf(cf, &tenant_first).unwrap().is_none());
     }
 
     #[test]

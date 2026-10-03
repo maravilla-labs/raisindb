@@ -90,7 +90,6 @@ impl NodeRepositoryImpl {
         workspace: &str,
         revision: &HLC,
     ) -> Result<()> {
-        use crate::repositories::UniqueIndexManager;
         use raisin_storage::NodeTypeRepository;
 
         // Get NodeType to check for unique properties
@@ -113,37 +112,17 @@ impl NodeRepositoryImpl {
             return Ok(());
         }
 
-        // Create UniqueIndexManager for writing
-        let unique_manager = UniqueIndexManager::new(self.db.clone());
-
-        // Add index entries for each unique property with a value
-        for prop_name in unique_properties {
-            if let Some(prop_value) = node.properties.get(&prop_name) {
-                let value_hash = hash_property_value(prop_value);
-
-                unique_manager.add_unique_index_to_batch(
-                    batch,
-                    tenant_id,
-                    repo_id,
-                    branch,
-                    workspace,
-                    &node.node_type,
-                    &prop_name,
-                    &value_hash,
-                    revision,
-                    &node.id,
-                )?;
-
-                tracing::trace!(
-                    "Added unique index for node '{}' property '{}' value '{}'",
-                    node.id,
-                    prop_name,
-                    value_hash
-                );
-            }
-        }
-
-        Ok(())
+        write_unique_entries(
+            batch,
+            &self.db,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            node,
+            &unique_properties,
+            revision,
+        )
     }
 
     /// Add tombstones for unique index entries when a node is deleted or unique property value changes
@@ -162,7 +141,6 @@ impl NodeRepositoryImpl {
         workspace: &str,
         revision: &HLC,
     ) -> Result<()> {
-        use crate::repositories::UniqueIndexManager;
         use raisin_storage::NodeTypeRepository;
 
         // Get NodeType to check for unique properties
@@ -185,37 +163,91 @@ impl NodeRepositoryImpl {
             return Ok(());
         }
 
-        // Create UniqueIndexManager for writing tombstones
-        let unique_manager = UniqueIndexManager::new(self.db.clone());
-
-        // Add tombstones for each unique property with a value
-        for prop_name in unique_properties {
-            if let Some(prop_value) = node.properties.get(&prop_name) {
-                let value_hash = hash_property_value(prop_value);
-
-                unique_manager.add_unique_tombstone_to_batch(
-                    batch,
-                    tenant_id,
-                    repo_id,
-                    branch,
-                    workspace,
-                    &node.node_type,
-                    &prop_name,
-                    &value_hash,
-                    revision,
-                )?;
-
-                tracing::trace!(
-                    "Added unique index tombstone for node '{}' property '{}' value '{}'",
-                    node.id,
-                    prop_name,
-                    value_hash
-                );
-            }
-        }
-
-        Ok(())
+        tombstone_unique_entries(
+            batch,
+            &self.db,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            node,
+            &unique_properties,
+            revision,
+        )
     }
+}
+
+/// Write `node`'s UNIQUE_INDEX entries for `unique_properties` (the names
+/// [`extract_unique_property_names`] gives for its NodeType).
+///
+/// The sync half of [`NodeRepositoryImpl::add_unique_indexes_to_batch`]: the
+/// NodeType read is the caller's, so a writer that has resolved it already —
+/// merge apply — shares the key format instead of mirroring it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_unique_entries(
+    batch: &mut WriteBatch,
+    db: &std::sync::Arc<rocksdb::DB>,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    workspace: &str,
+    node: &Node,
+    unique_properties: &[String],
+    revision: &HLC,
+) -> Result<()> {
+    let unique_manager = crate::repositories::UniqueIndexManager::new(db.clone());
+    for prop_name in unique_properties {
+        if let Some(prop_value) = node.properties.get(prop_name) {
+            let value_hash = hash_property_value(prop_value);
+            unique_manager.add_unique_index_to_batch(
+                batch,
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                &node.node_type,
+                prop_name,
+                &value_hash,
+                revision,
+                &node.id,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Tombstone `node`'s UNIQUE_INDEX entries for `unique_properties`. The sync
+/// half of [`NodeRepositoryImpl::add_unique_tombstones_to_batch`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn tombstone_unique_entries(
+    batch: &mut WriteBatch,
+    db: &std::sync::Arc<rocksdb::DB>,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    workspace: &str,
+    node: &Node,
+    unique_properties: &[String],
+    revision: &HLC,
+) -> Result<()> {
+    let unique_manager = crate::repositories::UniqueIndexManager::new(db.clone());
+    for prop_name in unique_properties {
+        if let Some(prop_value) = node.properties.get(prop_name) {
+            let value_hash = hash_property_value(prop_value);
+            unique_manager.add_unique_tombstone_to_batch(
+                batch,
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                &node.node_type,
+                prop_name,
+                &value_hash,
+                revision,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// Extract property names that have `unique: true` from a NodeType.

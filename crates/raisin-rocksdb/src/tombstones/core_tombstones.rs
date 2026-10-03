@@ -2,9 +2,10 @@
 
 use super::{TombstoneColumnFamilies, TombstoneContext, TOMBSTONE};
 use crate::keys;
+use raisin_error::Result;
 use raisin_hlc::HLC;
 use raisin_models::nodes::Node;
-use rocksdb::WriteBatch;
+use rocksdb::{WriteBatch, DB};
 
 /// Tombstone node data (NODES CF)
 pub(super) fn tombstone_node_data(
@@ -65,27 +66,66 @@ pub(super) fn tombstone_node_path(
 
 /// Tombstone ordered children entry (ORDERED_CHILDREN CF)
 ///
-/// Only tombstones if node has a parent. Empty order_key is valid.
+/// The entry lives under the parent's ID (`/` for a root child) and the label
+/// actually STORED for this child, which can differ from `node.order_key`
+/// (legacy drift, merge verbatim copies). This used to key the tombstone by
+/// `node.parent` — the parent's NAME — so it landed under a parent no entry
+/// lives under, and every deleted child stayed listed.
+///
+/// `parent_index_id` is the caller's parent id when it has one (the replicated
+/// delete carries it); otherwise it is resolved from PATH_INDEX by the node's
+/// parent path. With no resolvable parent nothing is written.
 pub(super) fn tombstone_ordered_children(
     batch: &mut WriteBatch,
+    db: &DB,
     ctx: &TombstoneContext,
     cfs: &TombstoneColumnFamilies,
     node: &Node,
     revision: &HLC,
-) {
-    if let Some(ref parent_id) = node.parent {
-        // Write tombstone even for empty order_key - empty string is a valid key component
-        // and we need to ensure the old entry is properly masked
-        let ordered_key = keys::ordered_child_key_versioned(
+    parent_index_id: Option<&str>,
+) -> Result<()> {
+    let parent_id = match parent_index_id {
+        Some(id) => Some(id.to_string()),
+        None => crate::repositories::nodes::parent_index_id(
+            db,
             ctx.tenant_id,
             ctx.repo_id,
             ctx.branch,
             ctx.workspace,
-            parent_id,
-            &node.order_key,
-            revision,
-            &node.id,
+            &node.path,
+            None,
+        )?,
+    };
+    let Some(parent_id) = parent_id else {
+        tracing::debug!(
+            node_id = %node.id,
+            path = %node.path,
+            "delete: no parent id resolvable for the ORDERED_CHILDREN tombstone"
         );
-        batch.put_cf(cfs.ordered_children, ordered_key, TOMBSTONE);
-    }
+        return Ok(());
+    };
+    // Empty order_key is a valid key component, so the fallback still masks
+    // an entry written under it.
+    let label = crate::repositories::nodes::stored_order_label(
+        db,
+        ctx.tenant_id,
+        ctx.repo_id,
+        ctx.branch,
+        ctx.workspace,
+        &parent_id,
+        &node.id,
+    )?
+    .unwrap_or_else(|| node.order_key.clone());
+    let ordered_key = keys::ordered_child_key_versioned(
+        ctx.tenant_id,
+        ctx.repo_id,
+        ctx.branch,
+        ctx.workspace,
+        &parent_id,
+        &label,
+        revision,
+        &node.id,
+    );
+    batch.put_cf(cfs.ordered_children, ordered_key, TOMBSTONE);
+    Ok(())
 }

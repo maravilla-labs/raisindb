@@ -1,7 +1,7 @@
 //! Bulk descendant fetching operations.
 //!
 //! Efficient batch retrieval of all descendants under a given path
-//! using RocksDB prefix scans and MultiGet for optimized I/O.
+//! using one PATH_INDEX prefix scan and one bounded NODES seek per node.
 
 use super::super::super::helpers::is_tombstone;
 use super::super::super::NodeRepositoryImpl;
@@ -42,6 +42,82 @@ impl NodeRepositoryImpl {
         max_depth: u32,
         max_revision: Option<&HLC>,
     ) -> Result<HashMap<String, Node>> {
+        let (search_prefix, node_info) = self.descendant_index_entries(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            parent_path,
+            max_depth,
+            max_revision,
+        )?;
+
+        // Each node's NEWEST version at or below the bound — not the version
+        // at its PATH_INDEX entry's revision, which is only where the node last
+        // got its path: a node edited after that (no move) used to come back
+        // with its old properties. Same rule, and same seek, as a point read.
+        let cf_nodes = cf_handle(&self.db, cf::NODES)?;
+        let mut result = HashMap::new();
+        for (node_id, (node_path, path_revision)) in node_info {
+            let prefix = keys::node_key_prefix(tenant_id, repo_id, branch, workspace, &node_id);
+            let Some((blob_revision, bytes)) =
+                crate::mvcc_read::newest_at_or_before(&self.db, cf_nodes, &prefix, max_revision)?
+            else {
+                continue;
+            };
+            if is_tombstone(&bytes) {
+                continue;
+            }
+
+            // The path as of the read: the bound, or else whichever is newer
+            // of the path entry and the blob.
+            let path_at = match max_revision {
+                Some(bound) => *bound,
+                None => blob_revision.max(path_revision),
+            };
+            let node = self.deserialize_node_with_path(
+                &bytes, tenant_id, repo_id, branch, workspace, &node_id, &path_at,
+            )?;
+
+            // Verify the path matches (safety check)
+            if node.path.starts_with(&search_prefix) {
+                result.insert(node_path, node);
+            } else {
+                tracing::warn!(
+                    "REPO get_descendants_bulk_impl: node {} has path '{}' which doesn't start with '{}'",
+                    node.id, node.path, search_prefix
+                );
+            }
+        }
+
+        tracing::debug!(
+            "REPO get_descendants_bulk_impl: returning {} nodes for parent_path='{}' depth={} ",
+            result.len(),
+            parent_path,
+            max_depth
+        );
+
+        Ok(result)
+    }
+
+    /// The PATH_INDEX half of [`Self::get_descendants_bulk_impl`]: every
+    /// descendant within `max_depth` as `node_id -> (path, revision)`, with no
+    /// node blob read. Returns the normalized search prefix alongside.
+    ///
+    /// Callers that only need the SHAPE of a subtree (which node has children)
+    /// use this directly; the deep readers use it to skip ORDERED_CHILDREN
+    /// scans for nodes known to be leaves.
+    #[allow(clippy::type_complexity)]
+    pub(in crate::repositories::nodes) fn descendant_index_entries(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        parent_path: &str,
+        max_depth: u32,
+        max_revision: Option<&HLC>,
+    ) -> Result<(String, HashMap<String, (String, HLC)>)> {
         tracing::debug!(
             "REPO get_descendants_bulk_impl: tenant={}, repo={}, branch={}, ws={}, parent_path='{}', max_depth={}, max_revision={:?}",
             tenant_id, repo_id, branch, workspace, parent_path, max_depth, max_revision
@@ -94,10 +170,13 @@ impl NodeRepositoryImpl {
         // Use HashMap to track the newest revision for each node_id
         let mut node_info: HashMap<String, (String, HLC)> = HashMap::new(); // node_id -> (path, revision)
 
-        // Track paths that have been tombstoned - we must skip older entries for these paths
-        // since iterator returns newest-first, a tombstone means the node was deleted
-        let mut tombstoned_paths: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        // Paths whose state at `max_revision` is already decided. Entries of
+        // one path run newest first, so the first one AT OR BELOW the bound
+        // decides it: a tombstone means the path was gone by then, a node id
+        // means it held that node. A tombstone NEWER than the bound decides
+        // nothing — it used to be recorded first and so hid, from every
+        // time-travel read, a node that was moved or deleted only later.
+        let mut decided_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         let mut scanned_count = 0;
         for item in iter {
@@ -113,8 +192,8 @@ impl NodeRepositoryImpl {
                 break;
             }
 
-            // Decode the path from the key first (needed for tombstone tracking)
             // Key structure: {tenant}\0{repo}\0{branch}\0{ws}\0path\0{path}\0{~revision}
+            // (the path itself never contains a NUL, so part 5 is the path)
             let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
             if parts.len() < 7 {
                 tracing::warn!("REPO get_descendants_bulk_impl: malformed key, skipping");
@@ -122,33 +201,14 @@ impl NodeRepositoryImpl {
             }
             let node_path = String::from_utf8_lossy(parts[5]).to_string();
 
-            // Handle tombstones: if this is a tombstone, track the path as deleted
-            // Since iterator returns newest-first, tombstone means this path is deleted
-            if is_tombstone(&value) {
-                tombstoned_paths.insert(node_path);
-                continue;
-            }
-
-            // Skip entries for paths that have been tombstoned at a newer revision
-            if tombstoned_paths.contains(&node_path) {
-                continue;
-            }
-
-            // Extract node_id from value
-            let node_id = String::from_utf8_lossy(&value).to_string();
-
             // Check depth constraint
             let node_depth = node_path.matches('/').count();
             let relative_depth = node_depth - base_depth;
             if max_depth < u32::MAX && relative_depth > max_depth as usize {
-                tracing::trace!(
-                    "REPO get_descendants_bulk_impl: skipping node_id={} path='{}' (depth {} > max {})",
-                    node_id, node_path, relative_depth, max_depth
-                );
                 continue;
             }
 
-            // Decode revision from key
+            // Decode revision from key; skip entries above the bound
             let revision = match keys::decode_revision_from_path_index_key(&key) {
                 Some(rev) => rev,
                 None => {
@@ -158,20 +218,16 @@ impl NodeRepositoryImpl {
                     continue;
                 }
             };
-
-            // Check revision constraint
-            if let Some(max_rev) = max_revision {
-                if &revision > max_rev {
-                    tracing::trace!(
-                        "REPO get_descendants_bulk_impl: skipping node_id={} at revision {} (exceeds max {})",
-                        node_id, revision, max_rev
-                    );
-                    continue;
-                }
+            if max_revision.is_some_and(|max_rev| &revision > max_rev) {
+                continue;
             }
 
-            // Track the newest revision for this node
-            // Since iterator returns newest-first, first match is the one we want
+            if !decided_paths.insert(node_path.clone()) || is_tombstone(&value) {
+                continue;
+            }
+
+            // Extract node_id from value; the first path seen for a node wins
+            let node_id = String::from_utf8_lossy(&value).to_string();
             node_info.entry(node_id).or_insert((node_path, revision));
         }
 
@@ -180,69 +236,6 @@ impl NodeRepositoryImpl {
             scanned_count, node_info.len(), max_depth
         );
 
-        // Use RocksDB MultiGet for efficient batch fetching
-        // Convert to Vec to maintain alignment between keys and paths
-        let node_info_vec: Vec<(String, String, HLC)> = node_info
-            .into_iter()
-            .map(|(node_id, (node_path, revision))| (node_id, node_path, revision))
-            .collect();
-
-        let cf_nodes = cf_handle(&self.db, cf::NODES)?;
-        let keys: Vec<Vec<u8>> = node_info_vec
-            .iter()
-            .map(|(node_id, _, revision)| {
-                keys::node_key_versioned(tenant_id, repo_id, branch, workspace, node_id, revision)
-            })
-            .collect();
-
-        tracing::debug!(
-            "REPO get_descendants_bulk_impl: fetching {} nodes with MultiGet",
-            keys.len()
-        );
-
-        // Fetch all nodes at once with MultiGet - only reading values at the last moment
-        let values = self
-            .db
-            .multi_get_cf(keys.iter().map(|k| (&cf_nodes, k.as_slice())));
-
-        // Build result map from fetched nodes
-        let mut result = HashMap::new();
-        for (i, value_result) in values.into_iter().enumerate() {
-            if let Ok(Some(value_bytes)) = value_result {
-                // Get node_id, path, and revision for this index
-                let (node_id, node_path, revision) = match node_info_vec.get(i) {
-                    Some((id, path, rev)) => (id.as_str(), path, rev),
-                    None => continue, // Shouldn't happen, but safety check
-                };
-
-                // Deserialize node and materialize path if needed
-                let node = self.deserialize_node_with_path(
-                    &value_bytes,
-                    tenant_id,
-                    repo_id,
-                    branch,
-                    workspace,
-                    node_id,
-                    revision,
-                )?;
-
-                // Verify the path matches (safety check)
-                if node.path.starts_with(&search_prefix) {
-                    result.insert(node_path.clone(), node);
-                } else {
-                    tracing::warn!(
-                        "REPO get_descendants_bulk_impl: node {} has path '{}' which doesn't start with '{}'",
-                        node.id, node.path, search_prefix
-                    );
-                }
-            }
-        }
-
-        tracing::info!(
-            "REPO get_descendants_bulk_impl: returning {} nodes for parent_path='{}' depth={} (used MultiGet for batch fetch)",
-            result.len(), parent_path, max_depth
-        );
-
-        Ok(result)
+        Ok((search_prefix, node_info))
     }
 }

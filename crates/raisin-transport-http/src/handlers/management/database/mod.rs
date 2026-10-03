@@ -11,6 +11,10 @@ mod history;
 mod path_repair;
 mod reindex;
 mod relations;
+#[cfg(feature = "storage-rocksdb")]
+mod repair_peers;
+#[cfg(feature = "storage-rocksdb")]
+mod repairs;
 mod spatial;
 mod stubs;
 pub mod types;
@@ -44,6 +48,9 @@ pub use history::{
 
 #[cfg(feature = "storage-rocksdb")]
 pub use path_repair::repair_path_index;
+
+#[cfg(feature = "storage-rocksdb")]
+pub use repairs::{enqueue_repair, repair_status};
 
 #[cfg(feature = "storage-rocksdb")]
 pub use relations::{repair_relation_integrity, verify_relation_integrity};

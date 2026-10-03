@@ -177,56 +177,46 @@ impl BranchRepositoryImpl {
         target_revision: &HLC,
         cf_nodes: &rocksdb::ColumnFamily,
     ) -> Result<Option<serde_json::Value>> {
-        let prefix = keys::KeyBuilder::new()
-            .push(tenant_id)
-            .push(repo_id)
-            .push(branch)
-            .push(workspace)
-            .push("nodes")
-            .push(node_id)
-            .build_prefix();
-
-        let iter = crate::prefix_scan(&self.db, cf_nodes, prefix.clone());
-
-        for item in iter {
-            let (key, bytes) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
-
-            if !key.starts_with(&prefix) {
-                break;
-            }
-
-            let revision = match keys::extract_revision_from_key(&key) {
-                Ok(rev) => rev,
-                Err(_) => continue,
-            };
-
-            if &revision > target_revision {
-                continue;
-            }
-
-            // Check for tombstone
-            if bytes.starts_with(b"TOMBSTONE") {
-                return Ok(None);
-            }
-
-            let node: raisin_models::nodes::Node = rmp_serde::from_slice(&bytes).map_err(|e| {
-                raisin_error::Error::storage(format!(
-                    "Failed to deserialize node {}: {}",
-                    node_id, e
-                ))
-            })?;
-
-            let json = serde_json::to_value(node.properties).map_err(|e| {
-                raisin_error::Error::storage(format!(
-                    "Failed to convert node properties to JSON: {}",
-                    e
-                ))
-            })?;
-
-            return Ok(Some(json));
+        // The newest version at or below the revision, by one seek. A
+        // tombstone is `T` (`keys::is_tombstone_value`): this reader used to
+        // test for a `TOMBSTONE` prefix no writer produces, so a deleted node
+        // reached the decoder and failed the whole conflict listing.
+        let prefix = keys::node_key_prefix(tenant_id, repo_id, branch, workspace, node_id);
+        let Some((_, bytes)) = crate::mvcc_read::newest_at_or_before(
+            &self.db,
+            cf_nodes,
+            &prefix,
+            Some(target_revision),
+        )?
+        else {
+            return Ok(None);
+        };
+        if keys::is_tombstone_value(&bytes) {
+            return Ok(None);
         }
 
-        Ok(None)
+        let node = crate::mvcc_read::deserialize_node_with_path(
+            &self.db,
+            &bytes,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            node_id,
+            target_revision,
+        )
+        .map_err(|e| {
+            raisin_error::Error::storage(format!("Failed to deserialize node {}: {}", node_id, e))
+        })?;
+
+        let json = serde_json::to_value(node.properties).map_err(|e| {
+            raisin_error::Error::storage(format!(
+                "Failed to convert node properties to JSON: {}",
+                e
+            ))
+        })?;
+
+        Ok(Some(json))
     }
 
     /// Retrieve translation overlay at or before a specific revision
@@ -269,7 +259,8 @@ impl BranchRepositoryImpl {
                 continue;
             }
 
-            if bytes.starts_with(b"TOMBSTONE") {
+            // Translation deletes write `T`; keep the legacy prefix too.
+            if crate::keys::is_tombstone_value(&bytes) || bytes.starts_with(b"TOMBSTONE") {
                 return Ok(None);
             }
 

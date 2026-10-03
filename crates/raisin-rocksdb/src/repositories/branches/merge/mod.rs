@@ -4,5 +4,8 @@
 //! conflict detection, and conflict resolution.
 
 mod apply;
+mod deletion;
 mod resolution;
+mod superseded;
 mod three_way;
+mod unique_props;

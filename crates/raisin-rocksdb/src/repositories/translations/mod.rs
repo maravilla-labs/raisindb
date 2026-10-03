@@ -25,6 +25,8 @@ mod revision;
 mod serialization;
 
 #[cfg(test)]
+mod list_tests;
+#[cfg(test)]
 mod tests;
 
 use async_trait::async_trait;

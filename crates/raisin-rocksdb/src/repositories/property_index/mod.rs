@@ -1,11 +1,12 @@
 //! Property index repository implementation
 
 mod helpers;
-mod query;
-mod scan;
+pub(crate) mod orphans;
+pub(crate) mod reader;
 mod write_ops;
 
 use raisin_error::Result;
+use raisin_hlc::HLC;
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_storage::scope::StorageScope;
 use raisin_storage::{PropertyIndexRepository, PropertyScanEntry};
@@ -21,6 +22,26 @@ pub struct PropertyIndexRepositoryImpl {
 impl PropertyIndexRepositoryImpl {
     pub fn new(db: Arc<DB>) -> Self {
         Self { db }
+    }
+
+    /// Every read goes through the one revision-bounded reader.
+    fn reader<'a>(
+        &'a self,
+        scope: StorageScope<'_>,
+        property_name: &'a str,
+        published_only: bool,
+        max_revision: Option<&HLC>,
+    ) -> Result<reader::PropertyIndexReader<'a>> {
+        reader::PropertyIndexReader::new(
+            &self.db,
+            scope.tenant_id,
+            scope.repo_id,
+            scope.branch,
+            scope.workspace,
+            property_name,
+            published_only,
+            max_revision,
+        )
     }
 }
 
@@ -94,24 +115,10 @@ impl PropertyIndexRepository for PropertyIndexRepositoryImpl {
         property_name: &str,
         property_value: &PropertyValue,
         published_only: bool,
+        max_revision: Option<&HLC>,
     ) -> Result<Vec<String>> {
-        let StorageScope {
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-        } = scope;
-        query::find_by_property(
-            &self.db,
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            property_name,
-            property_value,
-            published_only,
-        )
-        .await
+        self.reader(scope, property_name, published_only, max_revision)?
+            .find(property_value, None)
     }
 
     async fn find_by_property_with_limit(
@@ -120,26 +127,11 @@ impl PropertyIndexRepository for PropertyIndexRepositoryImpl {
         property_name: &str,
         property_value: &PropertyValue,
         published_only: bool,
+        max_revision: Option<&HLC>,
         limit: Option<usize>,
     ) -> Result<Vec<String>> {
-        let StorageScope {
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-        } = scope;
-        query::find_by_property_with_limit(
-            &self.db,
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            property_name,
-            property_value,
-            published_only,
-            limit,
-        )
-        .await
+        self.reader(scope, property_name, published_only, max_revision)?
+            .find(property_value, limit)
     }
 
     async fn count_by_property(
@@ -148,24 +140,10 @@ impl PropertyIndexRepository for PropertyIndexRepositoryImpl {
         property_name: &str,
         property_value: &PropertyValue,
         published_only: bool,
+        max_revision: Option<&HLC>,
     ) -> Result<usize> {
-        let StorageScope {
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-        } = scope;
-        query::count_by_property(
-            &self.db,
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            property_name,
-            property_value,
-            published_only,
-        )
-        .await
+        self.reader(scope, property_name, published_only, max_revision)?
+            .count(property_value)
     }
 
     async fn find_nodes_with_property(
@@ -173,23 +151,10 @@ impl PropertyIndexRepository for PropertyIndexRepositoryImpl {
         scope: StorageScope<'_>,
         property_name: &str,
         published_only: bool,
+        max_revision: Option<&HLC>,
     ) -> Result<Vec<String>> {
-        let StorageScope {
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-        } = scope;
-        query::find_nodes_with_property(
-            &self.db,
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            property_name,
-            published_only,
-        )
-        .await
+        self.reader(scope, property_name, published_only, max_revision)?
+            .nodes_with_property()
     }
 
     async fn scan_property(
@@ -197,27 +162,12 @@ impl PropertyIndexRepository for PropertyIndexRepositoryImpl {
         scope: StorageScope<'_>,
         property_name: &str,
         published_only: bool,
+        max_revision: Option<&HLC>,
         ascending: bool,
         limit: Option<usize>,
     ) -> Result<Vec<PropertyScanEntry>> {
-        let StorageScope {
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-        } = scope;
-        scan::scan_property(
-            &self.db,
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            property_name,
-            published_only,
-            ascending,
-            limit,
-        )
-        .await
+        self.reader(scope, property_name, published_only, max_revision)?
+            .scan(None, None, ascending, limit)
     }
 
     async fn scan_property_range(
@@ -227,28 +177,11 @@ impl PropertyIndexRepository for PropertyIndexRepositoryImpl {
         lower_bound: Option<(&PropertyValue, bool)>,
         upper_bound: Option<(&PropertyValue, bool)>,
         published_only: bool,
+        max_revision: Option<&HLC>,
         ascending: bool,
         limit: Option<usize>,
     ) -> Result<Vec<PropertyScanEntry>> {
-        let StorageScope {
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-        } = scope;
-        scan::scan_property_range(
-            &self.db,
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            property_name,
-            lower_bound,
-            upper_bound,
-            published_only,
-            ascending,
-            limit,
-        )
-        .await
+        self.reader(scope, property_name, published_only, max_revision)?
+            .scan(lower_bound, upper_bound, ascending, limit)
     }
 }

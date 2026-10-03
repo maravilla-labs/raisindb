@@ -598,15 +598,18 @@ async fn select_path_and_id_in_list_returns_exact_rows() {
         "name IN must find exactly a and b"
     );
 
-    // ── COUNT over IN uses the summed property-index count ───────────────
+    // ── COUNT over node_type IN is NOT pushed down ────────────────────────
+    // `node_type` is a pseudo-property: an orphan index entry has no residual
+    // filter to mask it, so the count must come from re-checked rows, never
+    // from adding up index keys.
     let count_plan = run_explain(
         &engine,
         "EXPLAIN SELECT COUNT(*) FROM items WHERE node_type IN ('test:Item','test:Other')",
     )
     .await;
     assert!(
-        count_plan.contains("PropertyIndexCountScan"),
-        "COUNT over node_type IN must use the summed index count: {}",
+        !count_plan.contains("PropertyIndexCountScan"),
+        "COUNT over a pseudo-property must not count raw index keys: {}",
         count_plan
     );
 

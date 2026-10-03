@@ -61,7 +61,7 @@ pub async fn execute_path_index_scan<S: Storage + 'static>(
     let max_revision = ctx.max_revision;
     let ctx_clone = ctx.clone();
 
-    tracing::info!(
+    tracing::debug!(
         "   PathIndexScan: path='{}', workspace='{}', branch='{}', max_revision={:?}",
         path,
         workspace,
@@ -99,7 +99,7 @@ pub async fn execute_path_index_scan<S: Storage + 'static>(
                     node
                 };
 
-                tracing::info!("   PathIndexScan found node: id={}", node.id);
+                tracing::debug!("   PathIndexScan found node: id={}", node.id);
 
                 for locale in &locales_to_use {
                     let translated_node = match resolve_node_for_locale(node.clone(), &ctx_clone, locale).await? {
@@ -162,7 +162,7 @@ pub async fn execute_node_id_scan<S: Storage + 'static>(
     let max_revision = ctx.max_revision;
     let ctx_clone = ctx.clone();
 
-    tracing::info!(
+    tracing::debug!(
         "   NodeIdScan: id='{}', workspace='{}', branch='{}', max_revision={:?}",
         node_id,
         workspace,
@@ -200,7 +200,7 @@ pub async fn execute_node_id_scan<S: Storage + 'static>(
                     node
                 };
 
-                tracing::info!("   NodeIdScan found node: path={}", node.path);
+                tracing::debug!("   NodeIdScan found node: path={}", node.path);
 
                 for locale in &locales_to_use {
                     let translated_node = match resolve_node_for_locale(node.clone(), &ctx_clone, locale).await? {

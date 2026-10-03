@@ -163,6 +163,13 @@ define_physical_plan! {
             property_value: String,
             projection: Option<Vec<String>>,
             limit: Option<usize>,
+            /// The scan re-checks `properties->>property_name = property_value`
+            /// (text semantics, on the row as emitted — translated and
+            /// field-filtered) for every row, so the planner dropped that
+            /// predicate from the residual filter. With no residual left, a
+            /// LIMIT can bound the scan exactly: the scan's own refill keeps a
+            /// dropped candidate from costing a row.
+            verifies_value: bool,
         },
         /// Property index count scan (COUNT with property filter)
         ///

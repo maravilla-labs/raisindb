@@ -120,7 +120,7 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
         None
     };
 
-    tracing::info!(
+    tracing::debug!(
         "   PrefixScan: prefix='{}', direct_children_only={}, workspace='{}', branch='{}', \
          max_revision={:?}, order_cursor={:?}, order_descending={}, claims_order={}",
         path_prefix,
@@ -223,7 +223,7 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
                 };
 
                 let fetched = nodes.len();
-                tracing::info!("   PrefixScan found {} direct children", fetched);
+                tracing::debug!("   PrefixScan found {} direct children", fetched);
 
                 if fetched == 0 {
                     break 'pages;
@@ -324,7 +324,7 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
                 )
                 .await?;
 
-            tracing::info!("   PrefixScan found {} nodes by string prefix", nodes.len());
+            tracing::debug!("   PrefixScan found {} nodes by string prefix", nodes.len());
 
             let mut emitted = 0usize;
 
@@ -433,7 +433,7 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
                         .await?;
 
                     let fetched = nodes.len();
-                    tracing::info!("   PrefixScan found {} nodes in tree order", fetched);
+                    tracing::debug!("   PrefixScan found {} nodes in tree order", fetched);
 
                     if fetched == 0 {
                         break 'subtree;

@@ -67,7 +67,13 @@ pub(in crate::replication::application) async fn apply_delete_node_snapshot(
     op: &Operation,
 ) -> Result<()> {
     // Load the node to get its full information for deletion
-    let node = match applicator.load_latest_node(tenant_id, repo_id, branch, node_id)? {
+    let node = match applicator.load_latest_node(
+        tenant_id,
+        repo_id,
+        branch,
+        crate::replication::WorkspaceHint::Unknown,
+        node_id,
+    )? {
         Some(n) => n,
         None => {
             // Node doesn't exist, nothing to delete (idempotent)

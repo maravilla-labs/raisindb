@@ -5,6 +5,9 @@
 //! because the two answer different questions with different keys, and the
 //! spatial one is already the larger of the two.
 
+mod marker;
+#[cfg(test)]
+mod marker_tests;
 mod store;
 
 pub use store::{compound_state_key, read_state, CompoundStateStore};

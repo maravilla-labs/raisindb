@@ -120,6 +120,13 @@ impl NodeRepositoryImpl {
         // 7. Add relation indexes (delegates to indexing module)
         self.add_relation_indexes(batch, node, tenant_id, repo_id, branch, workspace, revision)?;
 
+        // 7b. Spatial indexes, through the ONE spatial writer every other node
+        // writer calls. Copy, cross-branch promotion and deep create stage
+        // nodes here, and without it a copied geometry was stored, reported a
+        // healthy index, and was invisible to every ST_DWITHIN on the copy.
+        // Synchronous, policy from the local state record — no schema read.
+        self.add_spatial_indexes(batch, node, tenant_id, repo_id, branch, workspace, revision)?;
+
         // 8. Add ORDERED_CHILDREN index entry (if order_label provided)
         if let Some(label) = order_label {
             // Use parent_id_override if provided (for copy operations where node.parent is a NAME not ID)

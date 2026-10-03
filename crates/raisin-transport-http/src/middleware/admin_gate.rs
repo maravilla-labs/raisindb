@@ -77,6 +77,9 @@ pub(crate) fn policy(method: &Method, path: &str) -> Access {
         }
         ["api", "management", "registry", ..] => Access::Admin,
         ["api", "management", "system-definitions", ..] => Access::Admin,
+        // Index repairs, reads included: the status names every node of the
+        // cluster and must not fall through to the open schema reads below.
+        ["api", "management", _, "repairs", ..] => Access::Admin,
         // Schema: reads stay as they were (the SDK reads types); validating a
         // node changes nothing; every write is an operator's.
         ["api", "management", _, _, _, "validate"] => Access::Open,
@@ -312,6 +315,8 @@ mod tests {
         ("POST", "/api/admin/management/tenant/t1/cleanup"),
         ("GET", "/api/admin/management/plugins"),
         ("POST", "/api/repository/r/ai/rules"),
+        ("POST", "/api/management/r/repairs/ordered_children"),
+        ("GET", "/api/management/r/repairs/ordered_children/status"),
     ];
 
     fn m(s: &str) -> Method {

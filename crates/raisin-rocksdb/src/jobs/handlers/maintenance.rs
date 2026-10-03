@@ -67,6 +67,7 @@ impl MaintenanceJobHandler {
                 | JobType::VectorRebuild
                 | JobType::VectorOptimize
                 | JobType::VectorRegenerate
+                | JobType::IndexRepair { .. }
         )
     }
 
@@ -95,6 +96,33 @@ impl MaintenanceJobHandler {
             }
             JobType::Compaction => to_value(storage.compact(Some(tenant)).await?),
             JobType::Repair => self.repair(tenant).await?,
+            JobType::IndexRepair {
+                tenant_id,
+                repo_id,
+                branch,
+                repair,
+                dry_run,
+            } => {
+                use crate::management::async_indexing::repair::{
+                    run_repair, RepairKind, RepairOptions,
+                };
+                let kind = RepairKind::from_slug(repair)
+                    .ok_or_else(|| Error::Validation(format!("unknown index repair '{repair}'")))?;
+                to_value(
+                    run_repair(
+                        storage,
+                        tenant_id,
+                        repo_id,
+                        branch.as_deref(),
+                        kind,
+                        RepairOptions {
+                            dry_run: *dry_run,
+                            ..RepairOptions::default()
+                        },
+                    )
+                    .await?,
+                )
+            }
             // HNSW needs no optimisation pass; the job exists so the endpoint's
             // job-id contract holds. Say what happened.
             JobType::VectorOptimize => json!({

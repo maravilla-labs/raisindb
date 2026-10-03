@@ -147,6 +147,20 @@ impl JobType {
                 workspace,
                 property.as_deref().unwrap_or("*")
             ),
+            Self::IndexRepair {
+                tenant_id,
+                repo_id,
+                branch,
+                repair,
+                dry_run,
+            } => format!(
+                "index_repair:{}:{}:{}:{}:{}",
+                tenant_id,
+                repo_id,
+                branch.as_deref().unwrap_or("*"),
+                repair,
+                dry_run
+            ),
             Self::CompoundIndexBuild {
                 tenant_id,
                 repo_id,
@@ -426,6 +440,7 @@ impl JobType {
             | Self::PropertyIndexBuild { .. }
             | Self::CompoundIndexBuild { .. }
             | Self::SpatialIndexBuild { .. }
+            | Self::IndexRepair { .. }
             | Self::RetargetReferences { .. }
             | Self::IntegrityScan
             | Self::IndexRebuild
@@ -509,6 +524,7 @@ impl JobType {
             | Self::PropertyIndexBuild { .. }
             | Self::CompoundIndexBuild { .. }
             | Self::SpatialIndexBuild { .. }
+            | Self::IndexRepair { .. }
             | Self::IntegrityScan
             | Self::IndexRebuild
             | Self::IndexVerify

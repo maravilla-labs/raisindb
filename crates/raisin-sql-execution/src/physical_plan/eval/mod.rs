@@ -6,7 +6,8 @@
 //! # Module Structure
 //!
 //! - `core`: Main eval_expr function
-//! - `async_eval`: Async expression evaluation (for EMBEDDING function)
+//! - `async_eval`: Async expression evaluation (EMBEDDING, RESOLVE, INVOKE, locks)
+//! - `resolve_eval`: The SQL binding of RESOLVE()
 //! - `binary_ops`: Binary and unary operations
 //! - `helpers`: Helper functions (arithmetic, comparison, logical)
 //! - `vector_ops`: Vector operations (L2 distance, dot product)
@@ -25,10 +26,12 @@ mod helpers;
 mod json_ops;
 mod pattern;
 mod regex_ops;
+mod resolve_eval;
 mod vector_ops;
 
 // Public API - re-export the main functions
 pub use self::async_eval::{eval_expr_async, generate_embedding_cached};
+pub(crate) use self::casting::cast_literal;
 pub use self::core::eval_expr;
 
 // Re-export function context for system functions (CURRENT_USER, etc.)

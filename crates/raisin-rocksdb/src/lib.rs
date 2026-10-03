@@ -61,6 +61,7 @@ pub mod lazy_indexing;
 pub mod management;
 pub mod mcp_listener;
 pub mod monitoring;
+mod mvcc_read;
 pub mod node_dev;
 pub mod oauth_store;
 pub mod one_time_token;
@@ -75,6 +76,7 @@ mod storage;
 pub mod tantivy_transfer;
 mod tombstones;
 mod transaction;
+mod translation_read;
 pub mod vaulting;
 pub mod vmount_registry;
 
@@ -154,7 +156,8 @@ pub use oauth_store::RocksDbOAuthStore;
 pub use one_time_token::OneTimeTokenStore;
 pub use replication::OperationCapture;
 pub use repositories::{
-    OpLogRepository, OpLogStats, ProximityResult, RocksDBAuditRepo, RocksDBEmbeddingJobStore,
+    detect_property_index_orphans, OpLogRepository, OpLogStats, PropertyIndexOrphan,
+    PropertyIndexOrphanReason, ProximityResult, RocksDBAuditRepo, RocksDBEmbeddingJobStore,
     RocksDBEmbeddingStorage, RocksDBTranslationRepository, RocksDbJobStore, SpatialIndexEntry,
     SpatialIndexRepository, SystemUpdateRepositoryImpl, TenantAIConfigRepository,
     TenantEmbeddingConfigRepository, TenantEmbeddingSpecResolver, DEFAULT_AUDIT_READ_LIMIT,

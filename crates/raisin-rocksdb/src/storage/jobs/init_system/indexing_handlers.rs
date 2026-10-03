@@ -77,8 +77,12 @@ pub fn create_compound_index_handler(
     let branch_repo = Arc::new(crate::repositories::BranchRepositoryImpl::new(
         storage.db.clone(),
     ));
-    Arc::new(
-        CompoundIndexJobHandler::new(storage.db.clone(), revision_repo, branch_repo)
-            .with_lock_manager(lock_manager),
-    )
+    let mut handler = CompoundIndexJobHandler::new(storage.db.clone(), revision_repo, branch_repo)
+        .with_lock_manager(lock_manager);
+    // The build lease is per node; without a configured id the handler keeps
+    // its own random one, which is just as private.
+    if let Some(node_id) = &storage.config.cluster_node_id {
+        handler = handler.with_node_id(node_id.clone());
+    }
+    Arc::new(handler)
 }

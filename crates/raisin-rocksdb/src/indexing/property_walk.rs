@@ -71,6 +71,14 @@ pub struct WalkCursor<'a> {
     /// no element encloses. Nesting REPLACES it: inside `hero.body` where `body`
     /// is itself an Element, this is `body`'s type, not `hero`'s.
     pub enclosing_element_type: Option<&'a str>,
+    /// True anywhere below a `Composite`'s items.
+    ///
+    /// Composite descent is newer than every other container (see
+    /// [`walk_properties`]), so a consumer that tightened its rules on what the
+    /// walk reaches can tell the newly reached values apart and phase the
+    /// change in — the write-side reference resolver logs, rather than rejects,
+    /// a dangling path reference found here.
+    pub inside_composite: bool,
 }
 
 /// Walk a property tree and collect every leaf `select` accepts, paired with its
@@ -103,6 +111,7 @@ where
     fn visit<'a, T, F>(
         path: &str,
         enclosing_element_type: Option<&str>,
+        inside_composite: bool,
         value: &'a PropertyValue,
         select: F,
         out: &mut Vec<(String, &'a T)>,
@@ -115,6 +124,7 @@ where
         let cursor = WalkCursor {
             path,
             enclosing_element_type,
+            inside_composite,
         };
         if let Some(selected) = select(&cursor, value) {
             out.push((path.to_string(), selected));
@@ -126,6 +136,7 @@ where
                     visit(
                         &format!("{}.{}", path, i),
                         enclosing_element_type,
+                        inside_composite,
                         item,
                         select,
                         out,
@@ -137,6 +148,7 @@ where
                     visit(
                         &format!("{}.{}", path, key),
                         enclosing_element_type,
+                        inside_composite,
                         val,
                         select,
                         out,
@@ -150,6 +162,7 @@ where
                     visit(
                         &format!("{}.{}", path, key),
                         Some(element.element_type.as_str()),
+                        inside_composite,
                         val,
                         select,
                         out,
@@ -164,6 +177,7 @@ where
                         visit(
                             &format!("{}.{}.{}", path, i, key),
                             Some(item.element_type.as_str()),
+                            true,
                             val,
                             select,
                             out,
@@ -177,7 +191,7 @@ where
 
     let mut out = Vec::new();
     for (key, value) in properties {
-        visit(key, None, value, select, &mut out);
+        visit(key, None, false, value, select, &mut out);
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
@@ -213,6 +227,7 @@ where
     fn descend_map<F>(
         path: &str,
         enclosing_element_type: Option<&str>,
+        inside_composite: bool,
         map: &mut HashMap<String, PropertyValue>,
         visit: &mut F,
         claimed: &mut usize,
@@ -228,7 +243,14 @@ where
                 format!("{}.{}", path, key)
             };
             if let Some(value) = map.get_mut(&key) {
-                visit_mut(&child_path, enclosing_element_type, value, visit, claimed);
+                visit_mut(
+                    &child_path,
+                    enclosing_element_type,
+                    inside_composite,
+                    value,
+                    visit,
+                    claimed,
+                );
             }
         }
     }
@@ -246,6 +268,7 @@ where
             descend_map(
                 &format!("{}.{}", path, i),
                 Some(element_type.as_str()),
+                true,
                 content,
                 visit,
                 claimed,
@@ -256,6 +279,7 @@ where
     fn visit_mut<F>(
         path: &str,
         enclosing_element_type: Option<&str>,
+        inside_composite: bool,
         value: &mut PropertyValue,
         visit: &mut F,
         claimed: &mut usize,
@@ -266,6 +290,7 @@ where
             let cursor = WalkCursor {
                 path,
                 enclosing_element_type,
+                inside_composite,
             };
             if visit(&cursor, value) {
                 *claimed += 1;
@@ -278,6 +303,7 @@ where
                     visit_mut(
                         &format!("{}.{}", path, i),
                         enclosing_element_type,
+                        inside_composite,
                         item,
                         visit,
                         claimed,
@@ -285,7 +311,14 @@ where
                 }
             }
             PropertyValue::Object(obj) => {
-                descend_map(path, enclosing_element_type, obj, visit, claimed);
+                descend_map(
+                    path,
+                    enclosing_element_type,
+                    inside_composite,
+                    obj,
+                    visit,
+                    claimed,
+                );
             }
             PropertyValue::Element(element) => {
                 let Element {
@@ -293,7 +326,14 @@ where
                     content,
                     ..
                 } = element;
-                descend_map(path, Some(element_type.as_str()), content, visit, claimed);
+                descend_map(
+                    path,
+                    Some(element_type.as_str()),
+                    inside_composite,
+                    content,
+                    visit,
+                    claimed,
+                );
             }
             PropertyValue::Composite(composite) => {
                 descend_blocks(path, &mut composite.items, visit, claimed);
@@ -303,7 +343,7 @@ where
     }
 
     let mut claimed = 0;
-    descend_map("", None, properties, &mut visit, &mut claimed);
+    descend_map("", None, false, properties, &mut visit, &mut claimed);
     claimed
 }
 
@@ -471,6 +511,53 @@ mod tests {
         assert_eq!(
             strings(&props),
             vec![("hero.body.0.geo".to_string(), "deep".to_string())]
+        );
+    }
+
+    /// `inside_composite` is set below a Composite — even one nested in an
+    /// Element — and on nothing else, in both walks.
+    #[test]
+    fn cursor_reports_whether_a_composite_encloses_the_value() {
+        let mut hero_content = one("title", "t");
+        hero_content.insert(
+            "body".into(),
+            PropertyValue::Composite(Composite {
+                uuid: "c".into(),
+                items: vec![element("demo:Stop", one("geo", "deep"))],
+            }),
+        );
+        let mut props = one("plain", "p");
+        props.insert(
+            "hero".into(),
+            PropertyValue::Element(element("demo:Hero", hero_content)),
+        );
+
+        let flagged = |cursor: &WalkCursor<'_>| (cursor.path.to_string(), cursor.inside_composite);
+        let mut read: Vec<(String, bool)> = Vec::new();
+        for (path, _) in walk_properties(&props, |c, v| match v {
+            PropertyValue::String(s) if c.inside_composite => Some(s.as_str()),
+            _ => None,
+        }) {
+            read.push((path, true));
+        }
+        assert_eq!(read, vec![("hero.body.0.geo".to_string(), true)]);
+
+        let mut written: Vec<(String, bool)> = Vec::new();
+        walk_properties_mut(&mut props, |c, v| {
+            if matches!(v, PropertyValue::String(_)) {
+                written.push(flagged(c));
+                return true;
+            }
+            false
+        });
+        written.sort();
+        assert_eq!(
+            written,
+            vec![
+                ("hero.body.0.geo".to_string(), true),
+                ("hero.title".to_string(), false),
+                ("plain".to_string(), false),
+            ]
         );
     }
 

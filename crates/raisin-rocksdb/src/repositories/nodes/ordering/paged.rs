@@ -113,6 +113,47 @@ impl NodeRepositoryImpl {
             return Ok(Vec::new());
         }
 
+        let mut out = Vec::new();
+        self.scan_ordered_children(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            parent_id,
+            start,
+            descending,
+            max_revision,
+            |child_id, order_label, value| {
+                out.push(OrderedChildEntry {
+                    child_id: child_id.to_string(),
+                    order_label: order_label.to_string(),
+                    name: String::from_utf8_lossy(value).to_string(),
+                });
+                Ok(!limit.is_some_and(|limit| out.len() >= limit))
+            },
+        )?;
+        Ok(out)
+    }
+
+    /// The one `ORDERED_CHILDREN` scan, behind the listing above and the
+    /// `has_children` probe: `visit(child_id, order_label, value)` once per
+    /// live child in editorial order; it returns `Ok(false)` to stop.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::repositories::nodes) fn scan_ordered_children<F>(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        parent_id: &str,
+        start: OrderedScanStart<'_>,
+        descending: bool,
+        max_revision: Option<&HLC>,
+        mut visit: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&str, &str, &[u8]) -> Result<bool>,
+    {
         let prefix =
             keys::ordered_children_prefix(tenant_id, repo_id, branch, workspace, parent_id);
         let cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
@@ -148,7 +189,6 @@ impl NodeRepositoryImpl {
         let mut group_label: Vec<u8> = Vec::new();
         let mut group_children: Vec<Vec<u8>> = Vec::new();
         let mut seen_child_ids: HashSet<String> = HashSet::new();
-        let mut out = Vec::new();
 
         while iter.valid() {
             let (Some(key), Some(value)) = (iter.key(), iter.value()) else {
@@ -182,16 +222,9 @@ impl NodeRepositoryImpl {
                     if first_of_entry
                         && !is_tombstone(value)
                         && seen_child_ids.insert(parsed.child_id.to_string())
+                        && !visit(parsed.child_id, parsed.order_label, value)?
                     {
-                        out.push(OrderedChildEntry {
-                            child_id: parsed.child_id.to_string(),
-                            order_label: parsed.order_label.to_string(),
-                            name: String::from_utf8_lossy(value).to_string(),
-                        });
-
-                        if limit.is_some_and(|limit| out.len() >= limit) {
-                            break;
-                        }
+                        break;
                     }
                 }
             }
@@ -205,7 +238,7 @@ impl NodeRepositoryImpl {
         iter.status()
             .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
 
-        Ok(out)
+        Ok(())
     }
 
     /// Look up a single child's current order label.

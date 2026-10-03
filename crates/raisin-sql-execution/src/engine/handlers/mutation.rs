@@ -22,7 +22,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         &self,
         analyzed: &AnalyzedStatement,
     ) -> Result<RowStream, Error> {
-        tracing::info!("Executing DML statement");
+        tracing::debug!("Executing DML statement");
 
         let (workspace, branch) = extract_dml_workspace_branch(analyzed, &self.branch);
 

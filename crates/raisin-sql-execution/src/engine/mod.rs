@@ -22,6 +22,7 @@ pub mod catalog_cache;
 mod embedding_config_reader_tests;
 mod handlers;
 pub(crate) mod helpers;
+mod phase_timing;
 mod restore;
 mod spatial_admin;
 mod subquery_bind;
@@ -517,7 +518,8 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
 
     /// Execute a SQL query and return a stream of results
     pub async fn execute(&self, sql: &str) -> Result<RowStream, Error> {
-        tracing::info!("SQL Query Engine starting execution");
+        tracing::debug!("SQL Query Engine starting execution");
+        let mut timer = phase_timing::PhaseTimer::start();
         tracing::debug!("   SQL: {}", sql);
         tracing::debug!(
             "   Context: tenant={}, repo={}, default_branch={}",
@@ -532,11 +534,13 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         let analyzed = analyzer
             .analyze(sql)
             .map_err(|e| Error::Validation(format!("Analysis error: {}", e)))?;
+        timer.analyzed();
 
         // Uncorrelated subqueries (EXISTS, scalar, ANY/ALL, INSERT…SELECT) are
         // evaluated once here and folded into literals so every path below —
         // query, EXPLAIN, DML — plans against constants.
         let analyzed = self.bind_subqueries(analyzed).await?;
+        timer.bound();
 
         // Route by statement type
         match &analyzed {
@@ -667,6 +671,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         .await;
 
         let physical_plan = physical_planner.plan(&optimized)?;
+        timer.planned();
 
         // 5. Create execution context
         let (max_revision, branch_override, locales) =
@@ -705,7 +710,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
 
         // 6. Execute physical plan
         let stream = execute_plan(&physical_plan, &ctx).await?;
-        Ok(stream)
+        Ok(timer.opened(stream, sql))
     }
 
     /// Assemble the execution context from whatever this engine was configured

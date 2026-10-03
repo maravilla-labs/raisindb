@@ -222,6 +222,36 @@ impl raisin_replication::CheckpointIngestor for RocksDbCheckpointIngestor {
         // note above describes.
         raisin_core::invalidate_all_derived_caches();
 
+        // The copy may have re-imported corruption a repair already cleaned
+        // here (from an unrepaired peer). The repairs are data-detected and
+        // idempotent, so re-running them over clean data writes nothing.
+        match crate::management::async_indexing::repair::reenqueue_repairs_after_checkpoint(
+            &self.db,
+        )
+        .await
+        {
+            Ok(repos) => tracing::info!(repos, "checkpoint ingest: index repairs re-enqueued"),
+            Err(e) => {
+                tracing::warn!(error = %e, "checkpoint ingest: could not re-enqueue index repairs")
+            }
+        }
+
+        // The copy brought the PEER's compound state records, and a peer's
+        // `Ready` describes the peer's apply history, not this node's — the
+        // compound keyspace is local and was never checked against these
+        // records. Fail them closed; a local rebuild re-earns `Ready`.
+        match crate::compound_state::CompoundStateStore::new(self.db.db().clone()).mark_all_stale()
+        {
+            Ok(marked) => tracing::info!(
+                marked,
+                "checkpoint ingest: compound index state marked NotBuilt pending local rebuild"
+            ),
+            Err(e) => tracing::error!(
+                error = %e,
+                "checkpoint ingest: could not mark compound index state stale"
+            ),
+        }
+
         Ok(num_keys)
     }
 }

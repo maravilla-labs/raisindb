@@ -179,11 +179,16 @@ impl PhysicalPlanner {
 
                     // Try to evaluate the value (handles now() and other constant expressions)
                     if let Some(lit) = self.evaluate_constant_expr(value) {
+                        // Decimal MICROSECONDS, the index's unit. A value
+                        // between two microseconds can equal no stored
+                        // timestamp, so it is not answered from the index.
                         let prop_value = match lit {
-                            Literal::Timestamp(ts) => {
-                                let nanos = ts.timestamp_nanos_opt().unwrap_or(0);
-                                format!("{:020}", nanos as i128)
-                            }
+                            Literal::Timestamp(ts) => match ts.timestamp_nanos_opt().and_then(|n| {
+                                super::scan_planning::timestamp_bounds::exact_micros(n as i128)
+                            }) {
+                                Some(micros) => micros,
+                                None => continue,
+                            },
                             _ => continue,
                         };
                         return Some((prop_name.to_string(), prop_value));

@@ -706,15 +706,10 @@ impl<'a> AnalyzerContext<'a> {
                 .ok_or_else(|| AnalysisError::TableNotFound(table_ref.table.clone()))?;
 
             for col in &table.columns {
-                // Opt-in pseudo-columns (`__distance`, `__matched_path`) are
-                // selectable by name but never expanded by `*` — they are NULL on
-                // every non-spatial access path, and expanding them would add two
-                // always-NULL columns to every `SELECT *` in the system.
-                if col
-                    .generated
-                    .as_ref()
-                    .is_some_and(|g| g.hidden_from_wildcard())
-                {
+                // Opt-in columns (`__distance`, `__matched_path`, `embedding`)
+                // are selectable by name but never expanded by `*` — see
+                // `ColumnDef::hidden_from_wildcard`.
+                if col.hidden_from_wildcard() {
                     continue;
                 }
                 let typed_expr = TypedExpr::column(

@@ -11,8 +11,9 @@ use raisin_models::nodes::Node;
 impl NodeRepositoryImpl {
     /// Populate has_children field for a node
     ///
-    /// This helper uses the MVCC-aware has_children_impl to correctly determine
-    /// whether a node has children at a specific revision (or HEAD if None).
+    /// This helper uses the MVCC-aware existence probe
+    /// ([`Self::probe_has_children`]) to determine whether a node has children
+    /// at a specific revision (or HEAD if None).
     ///
     /// Returns a boxed future to break recursive async function cycles.
     pub(in super::super::super) fn populate_node_has_children<'a>(
@@ -25,17 +26,17 @@ impl NodeRepositoryImpl {
         max_revision: Option<&'a HLC>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
-            // Use existing has_children_impl which already supports max_revision filtering
-            let has_children = self
-                .has_children_impl(
-                    tenant_id,
-                    repo_id,
-                    branch,
-                    workspace,
-                    &node.id,
-                    max_revision,
-                )
-                .await?;
+            // The node is already in hand, so its path tells the probe whether
+            // it is the root — no reload.
+            let has_children = self.probe_has_children(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                &node.id,
+                Some(&node.path),
+                max_revision,
+            )?;
 
             node.has_children = Some(has_children);
             Ok(())

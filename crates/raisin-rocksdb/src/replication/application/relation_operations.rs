@@ -245,7 +245,13 @@ pub(super) fn emit_relation_events(
     );
 
     // Fetch source node metadata
-    let source_node = match applicator.load_latest_node(tenant_id, repo_id, branch, source_id) {
+    let source_node = match applicator.load_latest_node(
+        tenant_id,
+        repo_id,
+        branch,
+        crate::replication::WorkspaceHint::Explicit(source_workspace),
+        source_id,
+    ) {
         Ok(Some(node)) => node,
         Ok(None) => {
             tracing::warn!(
@@ -264,7 +270,13 @@ pub(super) fn emit_relation_events(
     };
 
     // Fetch target node metadata
-    let target_node = match applicator.load_latest_node(tenant_id, repo_id, branch, target_id) {
+    let target_node = match applicator.load_latest_node(
+        tenant_id,
+        repo_id,
+        branch,
+        crate::replication::WorkspaceHint::Explicit(target_workspace),
+        target_id,
+    ) {
         Ok(Some(node)) => node,
         Ok(None) => {
             tracing::warn!(

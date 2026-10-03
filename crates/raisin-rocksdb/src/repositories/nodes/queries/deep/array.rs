@@ -3,8 +3,15 @@
 use super::super::super::NodeRepositoryImpl;
 use raisin_error::Result;
 use raisin_hlc::HLC;
-use raisin_models::nodes::{Node, NodeWithChildren};
+use raisin_models::nodes::{ChildrenField, Node, NodeWithChildren};
 use std::collections::HashMap;
+
+use super::tree_shape::TreeShape;
+use super::DeepCtx;
+
+/// Boxed future for recursive async tree building.
+type ArrayFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<NodeWithChildren>>> + Send + 'a>>;
 
 impl NodeRepositoryImpl {
     /// Get deep children as ordered array with flexible children field
@@ -60,91 +67,95 @@ impl NodeRepositoryImpl {
             .into_values()
             .map(|node| (node.id.clone(), node))
             .collect();
+        let shape = TreeShape::new(
+            nodes_by_id
+                .values()
+                .map(|node| (node.id.as_str(), node.path.as_str())),
+        );
 
         tracing::debug!(
             "deep_children_array_impl: fetched {} nodes, building tree",
             nodes_by_id.len()
         );
 
-        self.build_array_children_from_cache(
+        let ctx = DeepCtx {
             tenant_id,
             repo_id,
             branch,
             workspace,
-            &parent_id,
-            0,
             max_depth,
             max_revision,
-            &nodes_by_id,
-        )
-        .await
+            nodes_by_id: &nodes_by_id,
+            shape: &shape,
+        };
+        self.build_array_children(&ctx, &parent_id, shape.children_of_path(parent_path), 0)
+            .await
     }
 
-    /// Helper for building NodeWithChildren array from cached nodes + ORDERED_CHILDREN CF
-    fn build_array_children_from_cache<'a>(
+    /// `NodeWithChildren` entries for the children of `parent_id` (whose
+    /// children, unordered, are `child_ids`) from the bulk-fetched nodes.
+    ///
+    /// Each child is scanned for at most once: an expanded child's own
+    /// children come from the bulk set (and are ordered by the recursion), and
+    /// only a child at `max_depth` — reported by name — reads its child list
+    /// from `ORDERED_CHILDREN`. The old build read that list for EVERY child
+    /// and then threw it away whenever it expanded the child.
+    fn build_array_children<'a>(
         &'a self,
-        tenant_id: &'a str,
-        repo_id: &'a str,
-        branch: &'a str,
-        workspace: &'a str,
+        ctx: &'a DeepCtx<'a>,
         parent_id: &'a str,
+        child_ids: &'a [String],
         current_depth: u32,
-        max_depth: u32,
-        max_revision: Option<&'a HLC>,
-        nodes_by_id: &'a HashMap<String, Node>,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<Vec<NodeWithChildren>>> + Send + 'a>,
-    > {
+    ) -> ArrayFuture<'a> {
         Box::pin(async move {
             let child_ids = self
-                .get_ordered_child_ids(
-                    tenant_id,
-                    repo_id,
-                    branch,
-                    workspace,
+                .order_child_ids(
+                    ctx.tenant_id,
+                    ctx.repo_id,
+                    ctx.branch,
+                    ctx.workspace,
                     parent_id,
-                    max_revision,
+                    child_ids,
+                    ctx.max_revision,
                 )
                 .await?;
 
             let mut result = Vec::with_capacity(child_ids.len());
 
             for child_id in child_ids {
-                if let Some(child) = nodes_by_id.get(&child_id).cloned() {
-                    let child_names_list = self
-                        .get_ordered_child_ids(
-                            tenant_id,
-                            repo_id,
-                            branch,
-                            workspace,
-                            &child_id,
-                            max_revision,
-                        )
-                        .await?;
+                if let Some(mut child) = ctx.nodes_by_id.get(&child_id).cloned() {
+                    let grandchildren = ctx.shape.children_of(&child_id);
 
-                    let node_with_children = if current_depth >= max_depth {
+                    let node_with_children = if current_depth >= ctx.max_depth {
+                        let child_names_list = self
+                            .get_ordered_child_ids(
+                                ctx.tenant_id,
+                                ctx.repo_id,
+                                ctx.branch,
+                                ctx.workspace,
+                                &child_id,
+                                ctx.max_revision,
+                            )
+                            .await?;
+                        child.has_children = Some(!child_names_list.is_empty());
                         NodeWithChildren {
                             node: child,
-                            children: raisin_models::nodes::ChildrenField::Names(child_names_list),
+                            children: ChildrenField::Names(child_names_list),
                         }
                     } else {
+                        child.has_children = Some(self.known_has_children(
+                            ctx,
+                            &child,
+                            grandchildren,
+                            current_depth,
+                        )?);
                         let expanded_children = self
-                            .build_array_children_from_cache(
-                                tenant_id,
-                                repo_id,
-                                branch,
-                                workspace,
-                                &child_id,
-                                current_depth + 1,
-                                max_depth,
-                                max_revision,
-                                nodes_by_id,
-                            )
+                            .build_array_children(ctx, &child_id, grandchildren, current_depth + 1)
                             .await?;
 
                         NodeWithChildren {
                             node: child,
-                            children: raisin_models::nodes::ChildrenField::Nodes(
+                            children: ChildrenField::Nodes(
                                 expanded_children.into_iter().map(Box::new).collect(),
                             ),
                         }

@@ -72,9 +72,6 @@ use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-/// The tombstone value every versioned family writes for "deleted".
-const TOMBSTONE: &[u8] = b"T";
-
 /// Deletes per write batch.
 const BATCH_DELETES: usize = 20_000;
 
@@ -675,7 +672,7 @@ fn add_version(
     let version = Version {
         key: key.to_vec(),
         rev,
-        tomb: value == TOMBSTONE,
+        tomb: crate::keys::is_tombstone_value(value),
         size: (key.len() + value.len()) as u64,
         value: keep_value.then(|| value.to_vec()),
     };
@@ -753,7 +750,7 @@ fn blobs_still_referenced<V>(
         it.seek_to_first();
         while it.valid() {
             if let (Some(key), Some(value)) = (it.key(), it.value()) {
-                if value != TOMBSTONE && !pruned_keys.contains(key) {
+                if !crate::keys::is_tombstone_value(value) && !pruned_keys.contains(key) {
                     blobs::mentioned_ids(key, candidates, &mut seen);
                     blobs::mentioned_ids(value, candidates, &mut seen);
                 }

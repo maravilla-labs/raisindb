@@ -60,7 +60,7 @@ pub fn read_state(
 /// hold the handle rather than re-fetching it from `Storage::compound_state()`.
 #[derive(Clone)]
 pub struct CompoundStateStore {
-    db: Arc<DB>,
+    pub(super) db: Arc<DB>,
     cache: Arc<RwLock<HashMap<Vec<u8>, Option<Arc<CompoundIndexState>>>>>,
 }
 
@@ -119,8 +119,19 @@ impl CompoundStateStore {
         Ok(loaded)
     }
 
-    /// Stage a record into an existing batch, invalidating the cache entry.
-    pub fn put_to_batch(
+    /// Stage a record into `batch` and return its key, to be invalidated once
+    /// the batch is written.
+    ///
+    /// REFUSES a record whose `stale_generation` is below the stored one. The
+    /// generation is the only thing that tells a build's `Ready` from a mark
+    /// that arrived after the build started; a write that lowers it re-opens
+    /// that window for every later build (ABA: mark to 1, a stray write back
+    /// to 0, a build begun at 0 then stamps `Ready` over the mark). Enforced
+    /// here, so no caller can forget it.
+    ///
+    /// Callers hold the transition lock (`marker.rs`) across the stage AND the
+    /// write; that is what makes this read-check-write sound.
+    pub(super) fn stage(
         &self,
         batch: &mut WriteBatch,
         tenant_id: &str,
@@ -128,19 +139,34 @@ impl CompoundStateStore {
         branch: &str,
         workspace: &str,
         state: &CompoundIndexState,
-    ) -> Result<()> {
+    ) -> Result<Vec<u8>> {
+        if let Some(stored) = read_state(
+            &self.db,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            &state.index_name,
+        )? {
+            if state.stale_generation < stored.stale_generation {
+                return Err(Error::storage(format!(
+                    "refusing to lower compound index '{}' state generation from {} to {}",
+                    state.index_name, stored.stale_generation, state.stale_generation
+                )));
+            }
+        }
         let cf = cf_handle(&self.db, cf::INDEX_STATUS)?;
         let key = compound_state_key(tenant_id, repo_id, branch, workspace, &state.index_name);
         let bytes = rmp_serde::to_vec(state).map_err(|e| {
             Error::storage(format!("Failed to serialize compound index state: {}", e))
         })?;
         batch.put_cf(cf, &key, bytes);
-        self.invalidate(&key);
-        Ok(())
+        Ok(key)
     }
 
-    /// Write one record immediately.
-    pub fn put(
+    /// Write one record now. The caller holds the transition lock; the public,
+    /// locking entry point is `put` (`marker.rs`).
+    pub(super) fn put_unlocked(
         &self,
         tenant_id: &str,
         repo_id: &str,
@@ -149,27 +175,13 @@ impl CompoundStateStore {
         state: &CompoundIndexState,
     ) -> Result<()> {
         let mut batch = WriteBatch::default();
-        self.put_to_batch(&mut batch, tenant_id, repo_id, branch, workspace, state)?;
+        let key = self.stage(&mut batch, tenant_id, repo_id, branch, workspace, state)?;
         self.db
             .write(batch)
-            .map_err(|e| Error::storage(format!("Failed to write compound index state: {}", e)))
-    }
-
-    /// Flip an existing record to `NotBuilt`. No-op when there is no record —
-    /// absent already reads as `NotBuilt`.
-    pub fn mark_not_built(
-        &self,
-        tenant_id: &str,
-        repo_id: &str,
-        branch: &str,
-        workspace: &str,
-        index_name: &str,
-    ) -> Result<()> {
-        if let Some(existing) = self.get(tenant_id, repo_id, branch, workspace, index_name)? {
-            let mut state = (*existing).clone();
-            state.phase = CompoundBuildPhase::NotBuilt;
-            self.put(tenant_id, repo_id, branch, workspace, &state)?;
-        }
+            .map_err(|e| Error::storage(format!("Failed to write compound index state: {}", e)))?;
+        // After the write, not before: a reader racing an earlier invalidation
+        // would re-cache the old record and keep it.
+        self.invalidate(&key);
         Ok(())
     }
 
@@ -200,9 +212,16 @@ impl CompoundStateStore {
         Ok(out)
     }
 
-    fn invalidate(&self, key: &[u8]) {
+    pub(super) fn invalidate(&self, key: &[u8]) {
         if let Ok(mut cache) = self.cache.write() {
             cache.remove(key);
+        }
+    }
+
+    /// Drop every cached record, after a write that bypassed `stage`.
+    pub(super) fn clear_cache(&self) {
+        if let Ok(mut cache) = self.cache.write() {
+            cache.clear();
         }
     }
 }

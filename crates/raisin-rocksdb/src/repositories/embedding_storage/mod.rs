@@ -8,6 +8,8 @@ mod storage;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod v2_lookup_tests;
 
 pub use job_store::RocksDBEmbeddingJobStore;
 pub use storage::RocksDBEmbeddingStorage;

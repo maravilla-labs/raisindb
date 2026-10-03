@@ -189,6 +189,23 @@ impl BranchRepositoryImpl {
             // `source.head` and the target at `target.head` is what makes
             // "ours" and "theirs" mean the two branch tips a user was shown in
             // the conflict, not whatever happens to sit newest in the keyspace.
+            // Every version the resolution supersedes — base, target head,
+            // source head — so the write can tombstone the union of what they
+            // indexed. See `apply.rs`.
+            let superseded = super::apply::superseded_versions(
+                &self.db,
+                tenant_id,
+                repo_id,
+                &workspace,
+                &resolution.node_id,
+                (target_branch, &target.head),
+                (source_branch, &source.head),
+                &divergence.common_ancestor,
+            )?;
+            let unique = self
+                .unique_properties(tenant_id, repo_id, target_branch, &superseded)
+                .await?;
+
             match resolution.resolution_type {
                 ResolutionType::KeepOurs => {
                     match super::apply::load_node_at(
@@ -207,7 +224,10 @@ impl BranchRepositoryImpl {
                             target_branch,
                             &workspace,
                             &node,
+                            (target_branch, &target.head),
                             &merge_revision,
+                            &superseded,
+                            &unique,
                         )?,
                         // "Keep ours" over a node the target deleted means the
                         // deletion is the thing being kept, and the source's
@@ -220,6 +240,8 @@ impl BranchRepositoryImpl {
                             &workspace,
                             &resolution.node_id,
                             &merge_revision,
+                            &superseded,
+                            &unique,
                         )?,
                     }
                 }
@@ -240,7 +262,10 @@ impl BranchRepositoryImpl {
                             target_branch,
                             &workspace,
                             &node,
+                            (source_branch, &source.head),
                             &merge_revision,
+                            &superseded,
+                            &unique,
                         )?,
                         None => super::apply::write_resolved_deletion(
                             &self.db,
@@ -250,6 +275,8 @@ impl BranchRepositoryImpl {
                             &workspace,
                             &resolution.node_id,
                             &merge_revision,
+                            &superseded,
+                            &unique,
                         )?,
                     }
                 }
@@ -268,6 +295,8 @@ impl BranchRepositoryImpl {
                             &workspace,
                             &resolution.node_id,
                             &merge_revision,
+                            &superseded,
+                            &unique,
                         )?;
                     } else {
                         // Deserialize straight into `PropertyValue`, the same
@@ -298,7 +327,7 @@ impl BranchRepositoryImpl {
                             &target.head,
                         )?;
                         let base = match base {
-                            Some(node) => Some(node),
+                            Some(node) => Some((node, (target_branch, &target.head))),
                             None => super::apply::load_node_at(
                                 &self.db,
                                 tenant_id,
@@ -307,9 +336,10 @@ impl BranchRepositoryImpl {
                                 &workspace,
                                 &resolution.node_id,
                                 &source.head,
-                            )?,
+                            )?
+                            .map(|node| (node, (source_branch, &source.head))),
                         };
-                        let mut node = base.ok_or_else(|| {
+                        let (mut node, origin) = base.ok_or_else(|| {
                             raisin_error::Error::NotFound(format!(
                                 "Node {} not found on either side of the merge",
                                 resolution.node_id
@@ -327,7 +357,10 @@ impl BranchRepositoryImpl {
                             target_branch,
                             &workspace,
                             &node,
+                            origin,
                             &merge_revision,
+                            &superseded,
+                            &unique,
                         )?;
                     }
                 }

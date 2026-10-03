@@ -9,54 +9,6 @@ use std::collections::HashSet;
 use super::{is_tombstone, OperationApplicator};
 
 impl OperationApplicator {
-    /// Load the latest version of a node from RocksDB
-    pub(in crate::replication::application) fn load_latest_node(
-        &self,
-        tenant_id: &str,
-        repo_id: &str,
-        branch: &str,
-        node_id: &str,
-    ) -> Result<Option<Node>> {
-        let cf_nodes = cf_handle(&self.db, cf::NODES)?;
-        let prefix = keys::KeyBuilder::new()
-            .push(tenant_id)
-            .push(repo_id)
-            .push(branch)
-            .build_prefix();
-
-        let mut iter = self.db.iterator_cf(
-            cf_nodes,
-            rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
-        );
-
-        while let Some(Ok((key, value))) = iter.next() {
-            if !key.starts_with(&prefix) {
-                break;
-            }
-
-            let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
-            if parts.len() < 6 {
-                continue;
-            }
-
-            if parts[5] == node_id.as_bytes() {
-                if is_tombstone(&value) {
-                    return Ok(None);
-                }
-
-                let node: Node = rmp_serde::from_slice(&value).map_err(|e| {
-                    raisin_error::Error::storage(format!(
-                        "Failed to deserialize node during delete: {}",
-                        e
-                    ))
-                })?;
-                return Ok(Some(node));
-            }
-        }
-
-        Ok(None)
-    }
-
     /// Resolve parent ID from a node's path
     pub(in crate::replication::application) fn resolve_parent_id_for_snapshot(
         &self,

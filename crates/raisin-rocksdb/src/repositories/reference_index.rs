@@ -19,44 +19,12 @@ impl ReferenceIndexRepositoryImpl {
         Self { db }
     }
 
+    /// Every reference with its path, through the ONE reference walker — the
+    /// path format the live writers and the delete tombstoner use.
     fn extract_references(
         properties: &HashMap<String, PropertyValue>,
     ) -> Vec<(String, RaisinReference)> {
-        let mut refs = Vec::new();
-
-        fn visit_value(
-            path: &str,
-            value: &PropertyValue,
-            refs: &mut Vec<(String, RaisinReference)>,
-        ) {
-            match value {
-                PropertyValue::Reference(r) => {
-                    refs.push((path.to_string(), r.clone()));
-                }
-                PropertyValue::Array(items) => {
-                    for (i, item) in items.iter().enumerate() {
-                        visit_value(&format!("{}.{}", path, i), item, refs);
-                    }
-                }
-                PropertyValue::Object(obj) => {
-                    for (key, val) in obj {
-                        let new_path = if path.is_empty() {
-                            key.clone()
-                        } else {
-                            format!("{}.{}", path, key)
-                        };
-                        visit_value(&new_path, val, refs);
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        for (key, value) in properties {
-            visit_value(key, value, &mut refs);
-        }
-
-        refs
+        crate::repositories::walk_references(properties)
     }
 }
 

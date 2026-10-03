@@ -57,6 +57,16 @@ pub fn init_storage(server_config: &MergedConfig) -> Arc<RocksDBStorage> {
             config.cluster_node_id = Some(node_id.clone());
             config.replication_enabled = true;
             tracing::info!("Replication enabled for node: {}", node_id);
+            // Peers' HTTP addresses, for admin operations that must reach
+            // every node (index repairs fan out over them).
+            config.replication_peers = server_config
+                .replication_peers
+                .iter()
+                .filter_map(|p| {
+                    let url = p.http_url.as_ref()?;
+                    Some(raisin_rocksdb::ReplicationPeerConfig::new(&p.peer_id, url))
+                })
+                .collect();
         } else {
             tracing::warn!(
                 "Replication enabled but no cluster_node_id provided - replication will be disabled"

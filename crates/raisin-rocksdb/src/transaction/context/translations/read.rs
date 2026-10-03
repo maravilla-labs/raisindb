@@ -13,11 +13,8 @@
 
 use raisin_error::Result;
 use raisin_models::translations::LocaleOverlay;
-use std::collections::HashSet;
 
-use crate::transaction::types::is_tombstone;
 use crate::transaction::RocksDBTransaction;
-use crate::{cf, cf_handle};
 
 /// Get a translation (locale overlay) for a node
 ///
@@ -76,53 +73,30 @@ pub async fn get_translation(
         )
     };
 
-    // Build prefix for this translation (all revisions)
-    let prefix = format!(
-        "{}\0{}\0{}\0{}\0translations\0{}\0{}\0",
-        tenant_id, repo_id, branch, workspace, node_id, locale
-    );
-
-    let cf_translation_data = cf_handle(&tx.db, cf::TRANSLATION_DATA)?;
-    let iter = crate::prefix_scan(&tx.db, cf_translation_data, &prefix);
-
-    // Find the first (newest) non-tombstone entry
-    for item in iter {
-        let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
-
-        // Verify key matches prefix
-        if !key.starts_with(prefix.as_bytes()) {
-            break;
-        }
-
-        // Skip tombstones
-        if is_tombstone(&value) {
-            continue;
-        }
-
-        // Deserialize LocaleOverlay
-        let overlay: LocaleOverlay = serde_json::from_slice(&value).map_err(|e| {
-            raisin_error::Error::storage(format!("JSON deserialization error: {}", e))
-        })?;
-
+    // The newest version decides; a tombstone there means deleted — never
+    // fall through to an older live version. Same reader as the repository.
+    let Some(version) = crate::translation_read::read_version(
+        &tx.db, &tenant_id, &repo_id, &branch, workspace, node_id, locale, None,
+    )?
+    else {
         tracing::debug!(
-            "TXN get_translation: found translation for node_id={}, locale={}",
+            "TXN get_translation: no translation found for node_id={}, locale={}",
             node_id,
             locale
         );
+        return Ok(None);
+    };
 
-        // Record read for conflict detection
-        tx.record_read(key.to_vec())?;
-
-        return Ok(Some(overlay));
-    }
+    // Record read for conflict detection — a tombstone is a read too.
+    tx.record_read(version.key)?;
 
     tracing::debug!(
-        "TXN get_translation: no translation found for node_id={}, locale={}",
+        "TXN get_translation: node_id={}, locale={}, present={}",
         node_id,
-        locale
+        locale,
+        version.overlay.is_some()
     );
-
-    Ok(None)
+    Ok(version.overlay)
 }
 
 /// List all available locales for a node
@@ -157,42 +131,14 @@ pub async fn list_translations_for_node(
         )
     };
 
-    // Build prefix for all translations of this node
-    let prefix = format!(
-        "{}\0{}\0{}\0{}\0translations\0{}\0",
-        tenant_id, repo_id, branch, workspace, node_id
-    );
+    // Locales whose newest version is live: same reader as the repository,
+    // so a deleted (tombstoned) locale is not listed.
+    let mut locales: Vec<String> = crate::translation_read::live_locales(
+        &tx.db, &tenant_id, &repo_id, &branch, workspace, node_id, None,
+    )?;
 
-    let cf_translation_data = cf_handle(&tx.db, cf::TRANSLATION_DATA)?;
-    let iter = crate::prefix_scan(&tx.db, cf_translation_data, &prefix);
-
-    let mut locales = HashSet::new();
-
-    // Collect unique locales
-    for item in iter {
-        let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
-
-        // Verify key matches prefix
-        if !key.starts_with(prefix.as_bytes()) {
-            break;
-        }
-
-        // Skip tombstones
-        if is_tombstone(&value) {
-            continue;
-        }
-
-        // Extract locale from key
-        // Key format: {tenant}\0{repo}\0{branch}\0{workspace}\0translations\0{node_id}\0{locale}\0{~revision}
-        let key_str = String::from_utf8_lossy(&key);
-        let parts: Vec<&str> = key_str.split('\0').collect();
-        if parts.len() >= 7 {
-            let locale = parts[6].to_string();
-            locales.insert(locale);
-        }
-    }
-
-    // Also check read cache for uncommitted translations
+    // Overlay this transaction's own uncommitted writes: a stored translation
+    // adds its locale, a deleted one (`None`) removes it.
     {
         let cache = tx
             .read_cache
@@ -200,13 +146,18 @@ pub async fn list_translations_for_node(
             .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
 
         for ((ws, nid, loc), overlay_opt) in &cache.translations {
-            if ws == workspace && nid == node_id && overlay_opt.is_some() {
-                locales.insert(loc.clone());
+            if ws != workspace || nid != node_id {
+                continue;
+            }
+            match overlay_opt {
+                Some(_) if !locales.contains(loc) => locales.push(loc.clone()),
+                Some(_) => {}
+                None => locales.retain(|l| l != loc),
             }
         }
     }
 
-    let result: Vec<String> = locales.into_iter().collect();
+    let result = locales;
 
     tracing::debug!(
         "TXN list_translations_for_node: node_id={}, found {} locales",

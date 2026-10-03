@@ -51,7 +51,7 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
         None => super::super::super::read::get_node_ignoring_head(tx, workspace, &node.id).await?,
     };
 
-    tracing::info!(
+    tracing::debug!(
         node_id = %normalized_node.id,
         path = %normalized_node.path,
         workspace = workspace,
@@ -122,7 +122,7 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
 
     // 5. Validate based on operation type
     if existing_node.is_none() {
-        tracing::info!(
+        tracing::debug!(
             node_id = %normalized_node.id,
             node_type = %normalized_node.node_type,
             "TRANSACTION: Detected NEW NODE - will track create operation"
@@ -290,7 +290,7 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
         None => tx.get_or_allocate_transaction_revision()?,
     };
 
-    tracing::info!(
+    tracing::debug!(
         "TXN put_node: node_id={}, old_path={:?}, new_path={}, path_changed={}, revision={}",
         normalized_node.id,
         old_path,

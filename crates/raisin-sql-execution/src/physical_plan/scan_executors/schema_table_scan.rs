@@ -46,7 +46,7 @@ pub(super) async fn execute_schema_table_scan<S: Storage + 'static>(
     let branch = ctx.branch.clone();
     let max_revision = ctx.max_revision.clone();
 
-    tracing::info!("   SchemaTableScan: table='{}'", kind.table_name());
+    tracing::debug!("   SchemaTableScan: table='{}'", kind.table_name());
 
     Ok(Box::pin(try_stream! {
         let scope = BranchScope::new(&tenant_id, &repo_id, &branch);

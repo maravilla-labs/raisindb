@@ -242,6 +242,70 @@ pub async fn filter_node_async(
     None
 }
 
+/// [`filter_node_async`] with a graph resolver built from `storage` at
+/// `revision`, so `RELATES … VIA` conditions are evaluated against the relation
+/// graph AS OF that revision.
+///
+/// The ONE place a reader turns "storage + revision" into a graph-aware RLS
+/// decision: the SQL scan executors and RESOLVE() both come through here, so a
+/// statement that pins a snapshot evaluates graph conditions at that snapshot
+/// instead of at whatever "now" happens to be when the row is filtered.
+///
+/// Hot path: a caller with no graph condition never builds a resolver.
+pub async fn filter_node_with_graph<S: raisin_storage::Storage>(
+    storage: &S,
+    node: Node,
+    auth: &AuthContext,
+    scope: &PermissionScope,
+    branch: raisin_storage::BranchScope<'_>,
+    revision: &raisin_hlc::HLC,
+) -> Option<Node> {
+    if !auth.uses_graph_rls() {
+        return filter_node(node, auth, scope);
+    }
+    let resolver = storage.graph_resolver(branch, revision);
+    filter_node_async(node, auth, scope, resolver.as_deref()).await
+}
+
+/// Could this caller read ANY node at `path` — or anywhere in the workspace,
+/// when `path` is `None` — before the node is loaded?
+///
+/// An UPPER BOUND, used only to skip reading something that is certain to be
+/// denied: `false` means [`filter_node`] would deny every node there, `true`
+/// decides nothing and the loaded node still goes through the full check. Its
+/// early returns mirror [`filter_node`]'s, including the one that looks
+/// backwards — unresolved permissions DENY.
+///
+/// A node's type and a grant's REL condition are deliberately ignored: both can
+/// only narrow a grant, never widen one, so ignoring them keeps this a bound.
+pub fn may_read(auth: &AuthContext, scope: &PermissionScope, path: Option<&str>) -> bool {
+    if auth.is_system {
+        return true;
+    }
+    match path {
+        Some(path) => {
+            if let Some(allowed) = visitor_zone(auth, scope, path, Operation::Read) {
+                return allowed;
+            }
+        }
+        // A visitor session may read its own home with no grant at all, and
+        // without a path that cannot be ruled out here.
+        None if auth.visitor_home.is_some() => return true,
+        None => {}
+    }
+    let Some(permissions) = auth.permissions() else {
+        return false;
+    };
+    if permissions.is_system_admin {
+        return true;
+    }
+    permissions.permissions.iter().any(|p| {
+        p.operations.contains(&Operation::Read)
+            && p.applies_to_scope(scope)
+            && path.is_none_or(|path| p.matches_path(path))
+    })
+}
+
 /// Async counterpart to [`filter_nodes`]. Evaluates each node sequentially so a
 /// single graph resolver reference can be shared across the batch.
 pub async fn filter_nodes_async(

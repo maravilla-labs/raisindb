@@ -6,6 +6,9 @@ use raisin_hlc::HLC;
 use raisin_models::nodes::{DeepNode, Node};
 use std::collections::HashMap;
 
+use super::tree_shape::TreeShape;
+use super::DeepCtx;
+
 /// Boxed future for recursive async tree building.
 type DeepNodeFuture<'a> = std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<HashMap<String, DeepNode>>> + Send + 'a>,
@@ -57,73 +60,68 @@ impl NodeRepositoryImpl {
             .into_values()
             .map(|node| (node.id.clone(), node))
             .collect();
+        let shape = TreeShape::new(
+            nodes_by_id
+                .values()
+                .map(|node| (node.id.as_str(), node.path.as_str())),
+        );
 
         tracing::debug!(
             "deep_children_nested_impl: fetched {} nodes, building tree",
             nodes_by_id.len()
         );
 
-        // Build the nested structure from cached nodes + ORDERED_CHILDREN CF for ordering
-        self.build_nested_children_from_cache(
+        let ctx = DeepCtx {
             tenant_id,
             repo_id,
             branch,
             workspace,
-            &parent_id,
-            0,
             max_depth,
             max_revision,
-            &nodes_by_id,
-        )
-        .await
+            nodes_by_id: &nodes_by_id,
+            shape: &shape,
+        };
+        self.build_nested_children(&ctx, &parent_id, shape.children_of_path(parent_path), 0)
+            .await
     }
 
-    /// Helper for building nested DeepNode children from cached nodes + ORDERED_CHILDREN CF
-    fn build_nested_children_from_cache<'a>(
+    /// Nested `DeepNode` children of `parent_id` (whose children, unordered,
+    /// are `child_ids`) from the bulk-fetched nodes. Only a parent with two or
+    /// more children scans `ORDERED_CHILDREN`; see `tree_shape`.
+    fn build_nested_children<'a>(
         &'a self,
-        tenant_id: &'a str,
-        repo_id: &'a str,
-        branch: &'a str,
-        workspace: &'a str,
+        ctx: &'a DeepCtx<'a>,
         parent_id: &'a str,
+        child_ids: &'a [String],
         current_depth: u32,
-        max_depth: u32,
-        max_revision: Option<&'a HLC>,
-        nodes_by_id: &'a HashMap<String, Node>,
     ) -> DeepNodeFuture<'a> {
         Box::pin(async move {
             let child_ids = self
-                .get_ordered_child_ids(
-                    tenant_id,
-                    repo_id,
-                    branch,
-                    workspace,
+                .order_child_ids(
+                    ctx.tenant_id,
+                    ctx.repo_id,
+                    ctx.branch,
+                    ctx.workspace,
                     parent_id,
-                    max_revision,
+                    child_ids,
+                    ctx.max_revision,
                 )
                 .await?;
 
             let mut result = HashMap::with_capacity(child_ids.len());
 
             for child_id in child_ids {
-                if let Some(child) = nodes_by_id.get(&child_id).cloned() {
+                if let Some(mut child) = ctx.nodes_by_id.get(&child_id).cloned() {
+                    let grandchildren = ctx.shape.children_of(&child_id);
+                    child.has_children =
+                        Some(self.known_has_children(ctx, &child, grandchildren, current_depth)?);
                     let child_name = child.name.clone();
 
-                    let deep_node = if current_depth >= max_depth {
+                    let deep_node = if current_depth >= ctx.max_depth {
                         DeepNode::new(child)
                     } else {
                         let nested_children = self
-                            .build_nested_children_from_cache(
-                                tenant_id,
-                                repo_id,
-                                branch,
-                                workspace,
-                                &child_id,
-                                current_depth + 1,
-                                max_depth,
-                                max_revision,
-                                nodes_by_id,
-                            )
+                            .build_nested_children(ctx, &child_id, grandchildren, current_depth + 1)
                             .await?;
 
                         DeepNode {

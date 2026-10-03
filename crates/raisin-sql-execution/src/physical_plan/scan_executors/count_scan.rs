@@ -20,6 +20,7 @@
 //! executor does. See `helpers::auth_requires_rls`.
 
 use super::helpers::auth_requires_rls;
+use super::index_recheck::node_still_matches;
 use super::{SCAN_COUNT_CEILING, SCAN_TIME_LIMIT, TIME_CHECK_INTERVAL};
 use crate::physical_plan::executor::{ExecutionContext, ExecutionError, Row, RowStream};
 use crate::physical_plan::operators::PhysicalPlan;
@@ -140,6 +141,11 @@ pub async fn execute_property_index_count_scan<S: Storage + 'static>(
 
     // Sum the per-value index counts. Multiple pairs come from IN/OR expansion
     // over the same column, whose per-value row sets are disjoint.
+    //
+    // Only USER properties reach here: the planner never pushes a COUNT on a
+    // pseudo-property down to raw index keys (see
+    // `plan_dispatch::aggregate::try_plan_property_index_count`).
+    let snapshot = ctx.statement_snapshot().await?;
     let mut count = 0usize;
     for (property_name, property_value) in &properties {
         let prop_value = PropertyValue::String(property_value.clone());
@@ -152,6 +158,7 @@ pub async fn execute_property_index_count_scan<S: Storage + 'static>(
                 property_name,
                 &prop_value,
                 false, // published_only = false (count all nodes)
+                Some(&snapshot),
             )
             .await
             .map_err(|e| ExecutionError::Backend(e.to_string()))?;
@@ -294,7 +301,8 @@ async fn count_by_property_with_rls<S: Storage + 'static>(
         .as_ref()
         .expect("auth_requires_rls implies an auth context");
     let scope = PermissionScope::new(workspace, branch);
-    let max_revision = ctx.max_revision;
+    // The index read and the node decodes see one revision.
+    let max_revision = Some(ctx.statement_snapshot().await?);
     let start = std::time::Instant::now();
 
     let mut count: i64 = 0;
@@ -309,6 +317,7 @@ async fn count_by_property_with_rls<S: Storage + 'static>(
                 property_name,
                 &prop_value,
                 false,
+                max_revision.as_ref(),
             )
             .await
             .map_err(|e| ExecutionError::Backend(e.to_string()))?;
@@ -342,6 +351,11 @@ async fn count_by_property_with_rls<S: Storage + 'static>(
                 None => continue,
             };
             if node.path == "/" {
+                continue;
+            }
+            // The rows are decoded here anyway, so an orphan entry costs
+            // nothing to rule out — for a pseudo-property it must be.
+            if !node_still_matches(&node, property_name, property_value) {
                 continue;
             }
 

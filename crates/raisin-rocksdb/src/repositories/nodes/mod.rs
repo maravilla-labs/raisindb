@@ -32,12 +32,19 @@ pub(crate) use replication_capture::WriteAttribution;
 
 // Re-export hash_property_value for use by property_index repository
 pub(crate) use helpers::hash_property_value;
+pub(crate) use ordering::{
+    child_is_under, node_path_at, parent_index_id, parse_ordered_child_key, put_ordered_child,
+    stored_order_label,
+};
 
 // Re-export the stale property-index tombstone helper for the transactional
 // write path (both write paths must keep the property index hygienic).
 pub(crate) use crud::indexing::property_indexes::add_stale_property_tombstones;
 pub(crate) use crud::indexing::reference_indexes::{
     add_reference_index_entries, add_stale_reference_tombstones, walk_references,
+};
+pub(crate) use crud::indexing::unique_indexes::{
+    extract_unique_property_names, tombstone_unique_entries, write_unique_entries,
 };
 
 use raisin_error::Result;

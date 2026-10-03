@@ -11,6 +11,7 @@
 //! strategy that uses the equality predicate index.
 
 use super::super::helpers::{extract_property_predicate_from_filter, resolve_node_for_locale};
+use super::super::index_recheck::{is_pseudo_property, node_still_matches};
 use super::super::node_to_row::node_to_row;
 use super::super::{SCAN_COUNT_CEILING, SCAN_TIME_LIMIT, TIME_CHECK_INTERVAL};
 use crate::physical_plan::eval::eval_expr;
@@ -43,11 +44,11 @@ pub(super) async fn execute_property_index_order_scan<S: Storage + 'static>(
         // Safety valve configuration
         const SCAN_MULTIPLIER: usize = 100;
 
-        tracing::info!(
+        tracing::debug!(
             "PropertyOrderScan: tenant={}, repo={}, branch={}, workspace={}",
             tenant_id, repo_id, branch, workspace
         );
-        tracing::info!(
+        tracing::debug!(
             "PropertyOrderScan: property='{}' direction={} limit_hint={} has_filter={}",
             property_name,
             if ascending { "ASC" } else { "DESC" },
@@ -80,12 +81,20 @@ pub(super) async fn execute_property_index_order_scan<S: Storage + 'static>(
             fetch_with_buffer
         };
 
+        // One revision for the index read, every node decode and RLS.
+        let scan_revision = ctx_clone.statement_snapshot().await?;
+        // A timestamp order is served by the index alone; re-check that each
+        // entry is the node's CURRENT value, or an orphan entry would place the
+        // node at a position its record contradicts.
+        let pseudo = is_pseudo_property(&property_name);
+
         let entries = storage
             .property_index()
             .scan_property(
                 StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
                 &property_name,
                 false,
+                Some(&scan_revision),
                 ascending,
                 fetch_limit,
             )
@@ -93,7 +102,7 @@ pub(super) async fn execute_property_index_order_scan<S: Storage + 'static>(
             .map_err(|e| ExecutionError::Backend(e.to_string()))?;
 
         let entries_count = entries.len();
-        tracing::info!(
+        tracing::debug!(
             "PropertyOrderScan: fetched {} index entries (fetch_limit={:?})",
             entries_count,
             fetch_limit
@@ -137,7 +146,7 @@ pub(super) async fn execute_property_index_order_scan<S: Storage + 'static>(
                 .get(
                     StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
                     &entry.node_id,
-                    ctx_clone.max_revision.as_ref(),
+                    Some(&scan_revision),
                 )
                 .await
                 .map_err(|e| ExecutionError::Backend(e.to_string()))?;
@@ -154,10 +163,13 @@ pub(super) async fn execute_property_index_order_scan<S: Storage + 'static>(
             if node.path == "/" {
                 continue;
             }
+            if pseudo && !node_still_matches(&node, &property_name, &entry.property_value) {
+                continue;
+            }
 
             let node = if let Some(ref auth) = ctx_clone.auth_context {
                 let scope = PermissionScope::new(&workspace, &branch);
-                match crate::physical_plan::scan_executors::helpers::rls_filter_node_graph(&*storage, node, auth, &scope, &tenant_id, &repo_id, &branch, ctx_clone.max_revision.as_ref()).await {
+                match crate::physical_plan::scan_executors::helpers::rls_filter_node_graph(&*storage, node, auth, &scope, &tenant_id, &repo_id, &branch, Some(&scan_revision)).await {
                     Some(n) => n,
                     None => continue,
                 }
@@ -211,7 +223,7 @@ pub(super) async fn execute_property_index_order_scan<S: Storage + 'static>(
         // FALLBACK: filter-first strategy for ultra-selective filters
         if needs_fallback && emitted < target_rows && scanned >= entries_count && entries_count > 0 {
             let remaining_needed = target_rows - emitted;
-            tracing::info!(
+            tracing::debug!(
                 "PropertyOrderScan safety valve triggered: scanned={}, emitted={}, need={}. Falling back to filter-first strategy.",
                 scanned, emitted, remaining_needed
             );
@@ -230,6 +242,7 @@ pub(super) async fn execute_property_index_order_scan<S: Storage + 'static>(
                             &prop_name,
                             &prop_value,
                             false,
+                            Some(&scan_revision),
                         )
                         .await
                         .map_err(|e| ExecutionError::Backend(e.to_string()))?;
@@ -251,6 +264,7 @@ pub(super) async fn execute_property_index_order_scan<S: Storage + 'static>(
                         &projection,
                         filter_expr,
                         &matching_node_ids,
+                        &scan_revision,
                     )
                     .await?;
 
@@ -279,6 +293,7 @@ pub(super) async fn execute_property_index_order_scan<S: Storage + 'static>(
 }
 
 /// Collect matching nodes for the filter-first fallback path.
+#[allow(clippy::too_many_arguments)]
 async fn collect_fallback_nodes<S: Storage + 'static>(
     storage: &std::sync::Arc<S>,
     ctx: &ExecutionContext<S>,
@@ -291,6 +306,7 @@ async fn collect_fallback_nodes<S: Storage + 'static>(
     projection: &Option<Vec<String>>,
     filter_expr: &raisin_sql::analyzer::TypedExpr,
     matching_node_ids: &[String],
+    scan_revision: &raisin_hlc::HLC,
 ) -> Result<Vec<(Node, Row)>, Error> {
     let mut fallback_nodes: Vec<(Node, Row)> = Vec::new();
 
@@ -300,7 +316,7 @@ async fn collect_fallback_nodes<S: Storage + 'static>(
             .get(
                 StorageScope::new(tenant_id, repo_id, branch, workspace),
                 node_id,
-                ctx.max_revision.as_ref(),
+                Some(scan_revision),
             )
             .await
             .map_err(|e| ExecutionError::Backend(e.to_string()))?;
@@ -316,6 +332,29 @@ async fn collect_fallback_nodes<S: Storage + 'static>(
         if node.path == "/" {
             continue;
         }
+
+        // The fallback emits rows too, so it is subject to RLS exactly like
+        // the index-order path above. It used to skip this check.
+        let node = if let Some(ref auth) = ctx.auth_context {
+            let scope = PermissionScope::new(workspace, branch);
+            match crate::physical_plan::scan_executors::helpers::rls_filter_node_graph(
+                &**storage,
+                node,
+                auth,
+                &scope,
+                tenant_id,
+                repo_id,
+                branch,
+                Some(scan_revision),
+            )
+            .await
+            {
+                Some(n) => n,
+                None => continue,
+            }
+        } else {
+            node
+        };
 
         let locale = locales.first().map(|s| s.as_str()).unwrap_or("en");
         let translated_node = match resolve_node_for_locale(node.clone(), ctx, locale).await? {

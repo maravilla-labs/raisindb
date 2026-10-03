@@ -46,25 +46,6 @@ pub(super) fn translation_key(
     key
 }
 
-/// Encode a translation prefix key (for iteration)
-///
-/// Format: `{tenant}\0{repo}\0{branch}\0{ws}\0translations\0{node_id}\0{locale}\0`
-pub(super) fn translation_prefix(
-    tenant_id: &str,
-    repo_id: &str,
-    branch: &str,
-    workspace: &str,
-    node_id: &str,
-    locale: &str,
-) -> Vec<u8> {
-    let mut key = base_key(tenant_id, repo_id, branch, workspace, "translations");
-    key.extend_from_slice(node_id.as_bytes());
-    key.push(b'\0');
-    key.extend_from_slice(locale.as_bytes());
-    key.push(b'\0');
-    key
-}
-
 /// Encode a block translation key
 ///
 /// Format: `{tenant}\0{repo}\0{branch}\0{ws}\0block_trans\0{node_id}\0{block_uuid}\0{locale}\0{~revision}`

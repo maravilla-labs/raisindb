@@ -59,7 +59,7 @@ pub(super) fn track_create(
             .lock()
             .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
         tracker.track_create(workspace.to_string(), revision, node.clone());
-        tracing::info!(
+        tracing::debug!(
             node_id = %node.id,
             workspace = workspace,
             revision = %revision,

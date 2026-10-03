@@ -13,13 +13,14 @@ use super::parse_ordered_child_key;
 use crate::{cf, cf_handle, keys};
 use raisin_error::Result;
 use raisin_hlc::HLC;
+use rocksdb::DB;
 use std::collections::HashSet;
 
 impl NodeRepositoryImpl {
     /// Get the current HEAD order label for a specific child
     ///
-    /// Scans only the parent's ordered index and extracts the order_label for
-    /// the specified child. No full child list loading.
+    /// Thin wrapper over [`stored_order_label`], the one reader of a child's
+    /// stored label (the delete tombstoner uses it too).
     ///
     /// Returns None if the child is not found in the ordered index.
     pub(crate) fn get_order_label_for_child(
@@ -31,44 +32,9 @@ impl NodeRepositoryImpl {
         parent_id: &str,
         child_id: &str,
     ) -> Result<Option<String>> {
-        let prefix =
-            keys::ordered_children_prefix(tenant_id, repo_id, branch, workspace, parent_id);
-        let cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
-        let iter = crate::prefix_scan(&self.db, cf_ordered, prefix.clone());
-
-        // Track seen (order_label, child_id) pairs to handle MVCC properly.
-        // With descending HLC, newer entries come first - we want the most
-        // recent non-tombstone.
-        let mut seen_labels: HashSet<(String, String)> = HashSet::new();
-
-        for item in iter {
-            let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
-
-            if !key.starts_with(&prefix) {
-                break;
-            }
-            let Some(parsed) = parse_ordered_child_key(&key, &prefix) else {
-                continue;
-            };
-
-            // Track this (order_label, child_id) pair - skip older revisions.
-            let entry_key = (parsed.order_label.to_string(), parsed.child_id.to_string());
-            if !seen_labels.insert(entry_key) {
-                continue;
-            }
-
-            // Skip tombstones (already tracked above so older revisions of the
-            // same entry cannot resurrect it).
-            if is_tombstone(&value) {
-                continue;
-            }
-
-            if parsed.child_id == child_id {
-                return Ok(Some(parsed.order_label.to_string()));
-            }
-        }
-
-        Ok(None)
+        stored_order_label(
+            &self.db, tenant_id, repo_id, branch, workspace, parent_id, child_id,
+        )
     }
 
     /// Get order labels for TWO children efficiently (for insert-between)
@@ -249,8 +215,10 @@ impl NodeRepositoryImpl {
 
     /// Find a child ID by name using the ordered children index
     ///
-    /// Efficient because child names are stored as values in the ordered index,
-    /// avoiding the need to fetch full node objects.
+    /// Child names are stored as the entry values, so no node is loaded. Each
+    /// `(label, child)` pair is decided by its NEWEST entry, through the one
+    /// ordered-children scan: an older revision of an entry — a name before a
+    /// rename, or an entry since tombstoned — is never matched.
     pub(in crate::repositories::nodes) fn find_child_id_by_name(
         &self,
         tenant_id: &str,
@@ -260,30 +228,108 @@ impl NodeRepositoryImpl {
         parent_id: &str,
         child_name: &str,
     ) -> Result<Option<String>> {
-        let prefix =
-            keys::ordered_children_prefix(tenant_id, repo_id, branch, workspace, parent_id);
-        let cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
-        let iter = crate::prefix_scan(&self.db, cf_ordered, prefix.clone());
+        let mut found = None;
+        self.scan_ordered_children(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            parent_id,
+            super::OrderedScanStart::Beginning,
+            false,
+            None,
+            |child_id, _label, name| {
+                if name == child_name.as_bytes() {
+                    found = Some(child_id.to_string());
+                    return Ok(false);
+                }
+                Ok(true)
+            },
+        )?;
+        Ok(found)
+    }
+}
 
-        for item in iter {
-            let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+/// The label `child_id` is stored under in `parent_id`'s ORDERED_CHILDREN, at
+/// HEAD: newest entry per `(label, child)` wins, tombstones hide older
+/// entries. This can differ from the node's `order_key` (legacy drift, merge
+/// verbatim copies), which is why a delete must tombstone THIS label.
+pub(crate) fn stored_order_label(
+    db: &DB,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    workspace: &str,
+    parent_id: &str,
+    child_id: &str,
+) -> Result<Option<String>> {
+    let prefix = keys::ordered_children_prefix(tenant_id, repo_id, branch, workspace, parent_id);
+    let cf_ordered = cf_handle(db, cf::ORDERED_CHILDREN)?;
+    let iter = crate::prefix_scan(db, cf_ordered, prefix.clone());
 
-            if !key.starts_with(&prefix) {
-                break;
-            }
-            if is_tombstone(&value) {
-                continue;
-            }
-            let Some(parsed) = parse_ordered_child_key(&key, &prefix) else {
-                continue;
-            };
+    // Track seen (order_label, child_id) pairs to handle MVCC properly.
+    // With descending HLC, newer entries come first - we want the most
+    // recent non-tombstone.
+    let mut seen_labels: HashSet<(String, String)> = HashSet::new();
 
-            // The child's name is stored as the entry value.
-            if value.as_ref() == child_name.as_bytes() {
-                return Ok(Some(parsed.child_id.to_string()));
-            }
+    for item in iter {
+        let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+        if !key.starts_with(&prefix) {
+            break;
+        }
+        let Some(parsed) = parse_ordered_child_key(&key, &prefix) else {
+            continue;
+        };
+
+        // Track this (order_label, child_id) pair - skip older revisions.
+        let entry_key = (parsed.order_label.to_string(), parsed.child_id.to_string());
+        if !seen_labels.insert(entry_key) {
+            continue;
         }
 
-        Ok(None)
+        // Skip tombstones (already tracked above so older revisions of the
+        // same entry cannot resurrect it).
+        if is_tombstone(&value) {
+            continue;
+        }
+
+        if parsed.child_id == child_id {
+            return Ok(Some(parsed.order_label.to_string()));
+        }
     }
+
+    Ok(None)
+}
+
+/// The ORDERED_CHILDREN parent key of the node at `node_path`, as of `at`
+/// (HEAD when `None`): `/` for a root child, else the node id PATH_INDEX
+/// gives the parent path. `Node.parent` holds the parent's NAME and must never
+/// be used as this key — that is how the delete tombstoner came to tombstone
+/// a key no entry lives under.
+pub(crate) fn parent_index_id(
+    db: &DB,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    workspace: &str,
+    node_path: &str,
+    at: Option<&HLC>,
+) -> Result<Option<String>> {
+    let parent_path = match node_path.rsplit_once('/') {
+        Some(("", _)) => "/",
+        Some((parent, _)) => parent,
+        None => return Ok(None),
+    };
+    if parent_path == "/" {
+        return Ok(Some("/".to_string()));
+    }
+    let prefix = keys::path_index_key_prefix(tenant_id, repo_id, branch, workspace, parent_path);
+    let cf_path = cf_handle(db, cf::PATH_INDEX)?;
+    Ok(
+        crate::mvcc_read::newest_at_or_before_with(db, cf_path, &prefix, at, |_, value| {
+            (!is_tombstone(value)).then(|| String::from_utf8_lossy(value).into_owned())
+        })?
+        .flatten(),
+    )
 }

@@ -41,4 +41,6 @@ mod user_operations;
 
 // Re-export the main applicator
 mod applicator;
-pub use applicator::OperationApplicator;
+pub use applicator::{
+    scoped_miss_fallbacks, unknown_workspace_scans, OperationApplicator, WorkspaceHint,
+};

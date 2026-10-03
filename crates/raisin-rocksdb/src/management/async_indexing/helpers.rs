@@ -7,7 +7,6 @@ use crate::{cf, cf_handle, keys, RocksDBStorage};
 use raisin_error::Result;
 use raisin_models::nodes::Node;
 use rocksdb::WriteBatch;
-use std::collections::HashMap;
 
 /// Scan all nodes in a workspace
 pub(crate) async fn scan_nodes(
@@ -320,46 +319,5 @@ pub(super) async fn get_current_revision(
             // No branch metadata, use initial HLC
             Ok(raisin_hlc::HLC::new(0, 0))
         }
-    }
-}
-
-/// Extract all references from node properties
-pub(super) fn extract_references(
-    properties: &HashMap<String, raisin_models::nodes::properties::PropertyValue>,
-) -> Vec<(String, raisin_models::nodes::properties::RaisinReference)> {
-    let mut references = Vec::new();
-
-    for (key, value) in properties {
-        extract_references_recursive(key, value, &mut references);
-    }
-
-    references
-}
-
-/// Recursively extract references from a property value
-fn extract_references_recursive(
-    path: &str,
-    value: &raisin_models::nodes::properties::PropertyValue,
-    results: &mut Vec<(String, raisin_models::nodes::properties::RaisinReference)>,
-) {
-    use raisin_models::nodes::properties::PropertyValue;
-
-    match value {
-        PropertyValue::Reference(r) => {
-            results.push((path.to_string(), r.clone()));
-        }
-        PropertyValue::Array(items) => {
-            for (i, item) in items.iter().enumerate() {
-                let item_path = format!("{}.{}", path, i);
-                extract_references_recursive(&item_path, item, results);
-            }
-        }
-        PropertyValue::Object(map) => {
-            for (key, val) in map {
-                let nested_path = format!("{}.{}", path, key);
-                extract_references_recursive(&nested_path, val, results);
-            }
-        }
-        _ => {}
     }
 }
