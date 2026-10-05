@@ -255,7 +255,7 @@ pub(super) fn create_function_invoke_callback(
     state: &AppState,
     tenant_id: &str,
     repo: &str,
-    _auth_context: Option<raisin_models::auth::AuthContext>,
+    auth_context: Option<raisin_models::auth::AuthContext>,
 ) -> FunctionInvokeCallback {
     let state = state.clone();
     let tenant_id = tenant_id.to_string();
@@ -263,6 +263,7 @@ pub(super) fn create_function_invoke_callback(
 
     Arc::new(
         move |path: String, input: serde_json::Value, workspace: Option<String>| {
+            let caller = auth_context.clone();
             let state = state.clone();
             let tenant_id = tenant_id.clone();
             let repo = repo.clone();
@@ -285,6 +286,17 @@ pub(super) fn create_function_invoke_callback(
                 )
                 .await?;
 
+                // Invoking needs `execute` on the function node, for the
+                // caller as this request resolved it (see
+                // `raisin_core::services::function_invoke_access`).
+                raisin_core::services::function_invoke_access::authorize_invoke_in(
+                    caller.as_ref(),
+                    &function_node,
+                    ws,
+                    "main",
+                )
+                .map_err(|refusal| raisin_error::Error::Forbidden(refusal.to_string()))?;
+
                 // Register background job
                 let execution_id = nanoid::nanoid!();
                 let job_type = JobType::FunctionExecution {
@@ -295,6 +307,14 @@ pub(super) fn create_function_invoke_callback(
 
                 let mut metadata = std::collections::HashMap::new();
                 metadata.insert("input".to_string(), input);
+                // The job runs as the caller unless the function declares
+                // "system" (the job handler decides), like the other async
+                // invoke paths. Without this it ran with no identity at all.
+                if let Some(auth) = caller.as_ref() {
+                    if let Ok(serialized) = serde_json::to_value(auth) {
+                        metadata.insert("auth_context".to_string(), serialized);
+                    }
+                }
 
                 let context = raisin_storage::jobs::JobContext {
                     tenant_id: tenant_id.clone(),
@@ -345,7 +365,7 @@ pub(super) fn create_function_invoke_sync_callback(
     state: &AppState,
     tenant_id: &str,
     repo: &str,
-    _auth_context: Option<raisin_models::auth::AuthContext>,
+    auth_context: Option<raisin_models::auth::AuthContext>,
 ) -> FunctionInvokeSyncCallback {
     let state = state.clone();
     let tenant_id = tenant_id.to_string();
@@ -353,6 +373,7 @@ pub(super) fn create_function_invoke_sync_callback(
 
     Arc::new(
         move |path: String, input: serde_json::Value, workspace: Option<String>| {
+            let caller = auth_context.clone();
             let state = state.clone();
             let tenant_id = tenant_id.clone();
             let repo = repo.clone();
@@ -370,6 +391,17 @@ pub(super) fn create_function_invoke_sync_callback(
                     &path,
                 )
                 .await?;
+
+                // Invoking needs `execute` on the function node, for the
+                // caller as this request resolved it (see
+                // `raisin_core::services::function_invoke_access`).
+                raisin_core::services::function_invoke_access::authorize_invoke_in(
+                    caller.as_ref(),
+                    &function_node,
+                    ws,
+                    "main",
+                )
+                .map_err(|refusal| raisin_error::Error::Forbidden(refusal.to_string()))?;
 
                 // Load function code via code_loader (resolves entry_file property)
                 let (code, metadata) =
@@ -421,18 +453,34 @@ pub(super) fn create_function_invoke_sync_callback(
                 )
                 .await;
 
+                // Run as the function declares: "system" elevated, "user" (the
+                // default) as the caller. This path ran every function as the
+                // system, whatever it declared.
+                let run_auth = match loaded.metadata.execution_context {
+                    raisin_functions::types::FunctionExecutionContext::System => {
+                        Some(raisin_models::auth::AuthContext::system())
+                    }
+                    raisin_functions::types::FunctionExecutionContext::User => caller.clone(),
+                };
+                let run_caller =
+                    raisin_functions::types::FunctionCaller::from_auth(caller.as_ref());
+
                 // Build execution context and API
-                let context =
+                let mut context =
                     raisin_functions::ExecutionContext::new(&tenant_id, &repo, "main", "system")
                         .with_workspace(ws)
-                        .with_input(input);
+                        .with_input(input)
+                        .with_caller(Some(run_caller.clone()));
+                if let Some(auth) = run_auth.clone() {
+                    context = context.with_auth(auth);
+                }
 
                 let api = crate::handlers::functions::build_function_api(
                     &state,
                     &tenant_id,
                     &repo,
                     &loaded.metadata,
-                    None,
+                    run_auth,
                 );
 
                 // Execute function

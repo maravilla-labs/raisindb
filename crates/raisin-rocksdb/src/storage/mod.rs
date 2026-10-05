@@ -93,6 +93,10 @@ pub struct RocksDBStorage {
     // is what lets the resolver see the job's precomputed reachability.
     pub(crate) graph_cache_layer: Arc<crate::graph::GraphCacheLayer>,
 
+    /// Whether RocksDB accepts writes, and the recovery loop that gets it to
+    /// accept them again after a stop (e.g. a full disk). See `write_health`.
+    pub(crate) write_health: Arc<crate::write_health::WriteHealth>,
+
     // Repository implementations
     pub(crate) nodes: NodeRepositoryImpl,
     pub(crate) node_types: NodeTypeRepositoryImpl,

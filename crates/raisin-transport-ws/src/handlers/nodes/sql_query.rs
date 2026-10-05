@@ -199,7 +199,7 @@ fn build_invoke_callback<S, B>(
     state: &Arc<WsState<S, B>>,
     tenant_id: &str,
     repo: &str,
-    _auth_context: Option<raisin_models::auth::AuthContext>,
+    auth_context: Option<raisin_models::auth::AuthContext>,
 ) -> raisin_sql_execution::FunctionInvokeCallback
 where
     S: raisin_storage::Storage + TransactionalStorage + 'static,
@@ -211,6 +211,7 @@ where
 
     Arc::new(
         move |path: String, input: serde_json::Value, workspace: Option<String>| {
+            let caller = auth_context.clone();
             let ws_state = ws_state.clone();
             let ws_tenant = ws_tenant.clone();
             let ws_repo = ws_repo.clone();
@@ -235,6 +236,17 @@ where
                     raisin_error::Error::Backend(format!("Failed to find function: {}", e))
                 })?;
 
+                // Invoking needs `execute` on the function node, for the
+                // caller as this request resolved it (see
+                // `raisin_core::services::function_invoke_access`).
+                raisin_core::services::function_invoke_access::authorize_invoke_in(
+                    caller.as_ref(),
+                    &function_node,
+                    ws,
+                    "main",
+                )
+                .map_err(|refusal| raisin_error::Error::Forbidden(refusal.to_string()))?;
+
                 // Register background job
                 let execution_id = nanoid::nanoid!();
                 let job_type = raisin_storage::jobs::JobType::FunctionExecution {
@@ -245,6 +257,14 @@ where
 
                 let mut metadata = std::collections::HashMap::new();
                 metadata.insert("input".to_string(), input);
+                // The job runs as the caller unless the function declares
+                // "system" (the job handler decides), like the other async
+                // invoke paths. Without this it ran with no identity at all.
+                if let Some(auth) = caller.as_ref() {
+                    if let Ok(serialized) = serde_json::to_value(auth) {
+                        metadata.insert("auth_context".to_string(), serialized);
+                    }
+                }
 
                 let context = raisin_storage::jobs::JobContext {
                     tenant_id: ws_tenant.clone(),
@@ -299,7 +319,7 @@ fn build_invoke_sync_callback<S, B>(
     state: &Arc<WsState<S, B>>,
     tenant_id: &str,
     repo: &str,
-    _auth_context: Option<raisin_models::auth::AuthContext>,
+    auth_context: Option<raisin_models::auth::AuthContext>,
 ) -> raisin_sql_execution::FunctionInvokeSyncCallback
 where
     S: raisin_storage::Storage + TransactionalStorage + 'static,
@@ -311,6 +331,7 @@ where
 
     Arc::new(
         move |path: String, input: serde_json::Value, workspace: Option<String>| {
+            let caller = auth_context.clone();
             let ws_state = ws_state.clone();
             let ws_tenant = ws_tenant.clone();
             let ws_repo = ws_repo.clone();
@@ -331,6 +352,17 @@ where
                 .map_err(|e| {
                     raisin_error::Error::Backend(format!("Failed to find function: {}", e))
                 })?;
+
+                // Invoking needs `execute` on the function node, for the
+                // caller as this request resolved it (see
+                // `raisin_core::services::function_invoke_access`).
+                raisin_core::services::function_invoke_access::authorize_invoke_in(
+                    caller.as_ref(),
+                    &function_node,
+                    ws,
+                    "main",
+                )
+                .map_err(|refusal| raisin_error::Error::Forbidden(refusal.to_string()))?;
 
                 // Load function code via canonical code_loader (resolves entry_file property)
                 let (code, metadata) =
@@ -376,11 +408,26 @@ where
                 )
                 .await;
 
+                // Run as the function declares: "system" elevated, "user" (the
+                // default) as the caller. This path ran every function as the
+                // system, whatever it declared.
+                let run_auth = match loaded.metadata.execution_context {
+                    raisin_functions::types::FunctionExecutionContext::System => {
+                        Some(raisin_models::auth::AuthContext::system())
+                    }
+                    raisin_functions::types::FunctionExecutionContext::User => caller.clone(),
+                };
+                let run_caller =
+                    raisin_functions::types::FunctionCaller::from_auth(caller.as_ref());
+
                 // Build execution context
-                let context =
+                let mut context =
                     raisin_functions::ExecutionContext::new(&ws_tenant, &ws_repo, "main", "system")
                         .with_workspace(ws)
                         .with_input(input);
+                if let Some(auth) = run_auth.clone() {
+                    context = context.with_auth(auth);
+                }
 
                 // Build API via canonical create_production_callbacks
                 let deps = Arc::new(raisin_functions::execution::ExecutionDependencies {
@@ -430,7 +477,7 @@ where
                     ws_tenant.clone(),
                     ws_repo.clone(),
                     "main".to_string(),
-                    None,
+                    run_auth,
                 );
 
                 let api = Arc::new(
@@ -438,7 +485,8 @@ where
                         raisin_functions::ExecutionContext::new(
                             &ws_tenant, &ws_repo, "main", "system",
                         )
-                        .with_workspace("functions"),
+                        .with_workspace("functions")
+                        .with_caller(Some(run_caller)),
                         loaded.metadata.network_policy.clone(),
                         callbacks,
                     )

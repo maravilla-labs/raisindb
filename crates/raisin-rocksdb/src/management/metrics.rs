@@ -24,6 +24,7 @@ use raisin_storage::{HealthCheck, HealthLevel, HealthStatus, Metrics};
 pub async fn get_health(storage: &RocksDBStorage, tenant: Option<&str>) -> Result<HealthStatus> {
     // If we have a valid RocksDBStorage reference, the DB is accessible
     let db_ok = true;
+    let writes = storage.write_health().snapshot();
 
     let config = storage.config();
     let db_status = if db_ok {
@@ -43,6 +44,15 @@ pub async fn get_health(storage: &RocksDBStorage, tenant: Option<&str>) -> Resul
             }),
         },
         HealthCheck {
+            name: "database_writes".to_string(),
+            status: if writes.writable {
+                HealthLevel::Healthy
+            } else {
+                HealthLevel::Critical
+            },
+            message: Some(describe_writes(&writes)),
+        },
+        HealthCheck {
             name: "configuration".to_string(),
             status: HealthLevel::Healthy,
             message: Some(format!(
@@ -56,7 +66,7 @@ pub async fn get_health(storage: &RocksDBStorage, tenant: Option<&str>) -> Resul
     ];
 
     // Overall status is the worst of all checks
-    let overall_status = if !db_ok {
+    let overall_status = if !db_ok || !writes.writable {
         HealthLevel::Critical
     } else {
         HealthLevel::Healthy
@@ -66,9 +76,34 @@ pub async fn get_health(storage: &RocksDBStorage, tenant: Option<&str>) -> Resul
         status: overall_status,
         tenant: tenant.map(|s| s.to_string()),
         checks,
-        needs_healing: !db_ok,
+        needs_healing: !db_ok || !writes.writable,
         last_check: chrono::Utc::now(),
     })
+}
+
+/// One line for the `database_writes` health check.
+pub fn describe_writes(writes: &crate::write_health::WriteHealthSnapshot) -> String {
+    if writes.writable {
+        return match writes.last_recovered_at {
+            Some(at) => format!(
+                "Writes accepted (recovered {} time(s), last at {at})",
+                writes.recoveries
+            ),
+            None => "Writes accepted".to_string(),
+        };
+    }
+    let mut message = format!(
+        "Writes STOPPED since {}: {}. Retrying DB::Resume() automatically",
+        writes
+            .stopped_since
+            .map(|t| t.to_rfc3339())
+            .unwrap_or_default(),
+        writes.error.as_deref().unwrap_or("unknown error")
+    );
+    if let Some(e) = &writes.last_attempt_error {
+        message.push_str(&format!("; last attempt failed: {e}"));
+    }
+    message
 }
 
 /// Get basic metrics

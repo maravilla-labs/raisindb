@@ -26,6 +26,8 @@ mod management_ops;
 mod helpers;
 mod metrics;
 
+pub use metrics::describe_writes;
+
 // Public submodules
 pub mod async_indexing;
 pub mod backup;

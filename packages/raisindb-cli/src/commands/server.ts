@@ -631,6 +631,12 @@ export async function serverStatus(): Promise<void> {
     try {
       const res = await fetchWithTimeout('http://localhost:8080/health', {}, 3000);
       console.log(`    HTTP:      ${res.ok ? green('healthy') : yellow(String(res.status))}`);
+      if (!res.ok) {
+        // 503 while the database refuses writes (e.g. a full disk); the body
+        // says why and that recovery is being retried.
+        const body = (await res.json().catch(() => null)) as { storage?: { message?: string } } | null;
+        if (body?.storage?.message) console.log(`    Storage:   ${red(body.storage.message)}`);
+      }
     } catch {
       console.log(`    HTTP:      ${red('unreachable')}`);
     }

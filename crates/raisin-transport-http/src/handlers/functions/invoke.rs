@@ -87,16 +87,33 @@ pub async fn invoke_function(
     }
 
     let t_lookup = std::time::Instant::now();
+    // Found as the system: whether the caller may RUN it is `execute`, decided
+    // below — not whether they may READ it, which is a separate grant.
     let (function_node, code_branch) = resolve_function(
         &state,
         tenant_id,
         &repo,
         &branch,
         &name,
-        auth_context.as_ref(),
+        Some(&AuthContext::system()),
     )
     .await?;
     let lookup_ms = t_lookup.elapsed().as_micros() as f64 / 1000.0;
+
+    // Invoking needs `execute` on the function node (see
+    // `raisin_core::services::function_invoke_access`).
+    if let Err(refusal) = raisin_core::services::function_invoke_access::authorize_invoke(
+        auth_context.as_ref(),
+        &function_node,
+        &code_branch,
+    ) {
+        use raisin_core::services::function_invoke_access::InvokeRefusal;
+        let status = match refusal {
+            InvokeRefusal::Unauthenticated => axum::http::StatusCode::UNAUTHORIZED,
+            InvokeRefusal::Forbidden => axum::http::StatusCode::FORBIDDEN,
+        };
+        return Err(ApiError::new(status, "FORBIDDEN", refusal.to_string()));
+    }
 
     let execution_mode = parse_execution_mode(function_node.properties.get("execution_mode"));
     if req.sync && !execution_mode.allows_sync() {

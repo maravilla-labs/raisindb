@@ -69,6 +69,19 @@ async fn rows(
     Ok(out)
 }
 
+/// `SELECT EMBEDDING_MAX_DISTANCE() AS d` as the caller of `engine` sees it.
+async fn max_distance(engine: &QueryEngine<InMemoryStorage>) -> f64 {
+    let mut stream = engine
+        .execute("SELECT EMBEDDING_MAX_DISTANCE() AS d")
+        .await
+        .unwrap();
+    let row = stream.next().await.unwrap().unwrap();
+    match row.get("d") {
+        Some(PropertyValue::Float(d)) => *d,
+        other => panic!("EMBEDDING_MAX_DISTANCE() gave {other:?}"),
+    }
+}
+
 fn value<'a>(rows: &'a [(String, String)], key: &str) -> Option<&'a str> {
     rows.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
 }
@@ -134,8 +147,12 @@ async fn functions_read_the_tenant_embedding_defaults_and_cannot_alter_them() {
     assert!(rows(&user_fn_engine, "SHOW EMBEDDING CONFIG")
         .await
         .is_err());
-    // The distance default still applies to that user's searches.
+    // The distance default still applies to that user's searches, and the
+    // user can read it: code scaling its own cuts (a site search running
+    // under a visitor's tool grant) needs the number SHOW refuses it.
     assert_eq!(user_fn_engine.tenant_default_max_distance(), Some(0.78));
+    assert!((max_distance(&user_fn_engine).await - 0.78).abs() < 1e-6);
+    assert!((max_distance(&engine).await - 0.78).abs() < 1e-6);
 
     // The admin SQL surface (store wired, system caller) can still ALTER.
     let admin_engine = function_engine().with_embedding_config_store(store.clone());
@@ -146,4 +163,18 @@ async fn functions_read_the_tenant_embedding_defaults_and_cannot_alter_them() {
     .await
     .unwrap();
     assert_eq!(function_engine().tenant_default_max_distance(), Some(0.9));
+    // ...and the function follows the change on the next statement.
+    assert!((max_distance(&function_engine()).await - 0.9).abs() < 1e-6);
+
+    // Another tenant without a configured default: the engine's own cutoff.
+    let other = QueryEngine::new(
+        Arc::new(InMemoryStorage::default()),
+        "t_unconfigured",
+        "repo",
+        "main",
+    )
+    .with_auth(AuthContext::system());
+    assert!(
+        (max_distance(&other).await - f64::from(raisin_hnsw::DEFAULT_MAX_DISTANCE)).abs() < 1e-6
+    );
 }

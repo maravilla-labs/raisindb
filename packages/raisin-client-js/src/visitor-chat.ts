@@ -112,6 +112,8 @@ export interface AnonymousConversation extends Conversation {
  * A refusal from the server. `code` is one of:
  * `ANONYMOUS_NOT_ALLOWED`, `ORIGIN_NOT_ALLOWED`, `RATE_LIMITED`, `BUSY`,
  * `TOO_LONG`, `EMPTY_MESSAGE`, `TOO_MANY_MESSAGES`, `LIMIT_REACHED`,
+ * `DAILY_LIMIT_REACHED` (the agent's daily token budget, or the per-IP daily
+ * message cap),
  * `CONVERSATION_LIMIT`, `SESSION_EXPIRED`, `SESSION_MISMATCH`,
  * `UNKNOWN_CONVERSATION`, `NO_SESSION`, `NOT_ANONYMOUS`, `UNAVAILABLE`.
  */

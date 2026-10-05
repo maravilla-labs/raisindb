@@ -87,7 +87,7 @@ initial_structure:
             description: "Built-in superuser role with full access to all resources"
             permissions:
               - path: "**"
-                operations: ["create", "read", "update", "delete", "translate", "relate", "unrelate"]
+                operations: ["create", "read", "update", "delete", "translate", "relate", "unrelate", "execute"]
         - node_type: raisin:Role
           name: anonymous
           properties:

@@ -295,7 +295,13 @@ pub(super) async fn commit_impl(tx: &RocksDBTransaction) -> Result<()> {
     })
     .await
     .map_err(|e| raisin_error::Error::storage(format!("Commit write task failed to join: {}", e)))?
-    .map_err(|e| raisin_error::Error::storage(format!("Transaction commit failed: {}", e)))?;
+    .map_err(|e| {
+        let message = e.into_string();
+        // A stopped database refuses every write until DB::Resume();
+        // start the background recovery instead of waiting for a restart.
+        tx.storage.write_health().on_write_error(&tx.db, &message);
+        raisin_error::Error::storage(format!("Transaction commit failed: {}", message))
+    })?;
     // Durable now: nothing more lands at this revision.
     tx.release_inflight_revision();
 

@@ -51,6 +51,10 @@ pub struct FunctionContext {
     /// The current authenticated user's node (pre-fetched from repository)
     /// CURRENT_USER() returns this as JSON
     pub user_node: Option<serde_json::Value>,
+    /// The tenant's configured `DEFAULT_MAX_DISTANCE`, or `None` when unset.
+    /// `EMBEDDING_MAX_DISTANCE()` returns it (else the engine default): the
+    /// cutoff KNN / HYBRID_SEARCH apply when a query names none.
+    pub default_max_distance: Option<f32>,
 }
 
 // Thread-local storage for function context

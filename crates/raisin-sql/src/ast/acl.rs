@@ -133,6 +133,8 @@ pub enum Operation {
     Relate,
     /// Remove relationships between nodes
     Unrelate,
+    /// Invoke a function (on `raisin:Function` nodes)
+    Execute,
 }
 
 impl fmt::Display for Operation {
@@ -145,6 +147,7 @@ impl fmt::Display for Operation {
             Operation::Translate => write!(f, "TRANSLATE"),
             Operation::Relate => write!(f, "RELATE"),
             Operation::Unrelate => write!(f, "UNRELATE"),
+            Operation::Execute => write!(f, "EXECUTE"),
         }
     }
 }

@@ -14,7 +14,7 @@ tiktoken-rs = ["dep:tiktoken-rs", "text-splitter/tiktoken-rs"]
 huggingface = ["dep:hf-hub", "dep:dirs"]
 pdf = ["dep:pdf-extract"]
 # PDF to markdown using pdf_oxide (pure Rust, includes OCR)
-pdf-markdown = ["dep:pdf_oxide"]
+pdf-markdown = ["dep:pdf_oxide", "dep:office_oxide"]
 # OCR for scanned PDFs/images using Tesseract
 ocr = ["dep:tesseract", "dep:tempfile", "dep:raisin-deps"]
 # Candle for local AI inference (CLIP, BLIP)
@@ -56,7 +56,12 @@ dirs = { version = "5", optional = true }
 
 # PDF processing
 pdf-extract = { version = "0.10", optional = true }
-pdf_oxide = { version = "0.2", optional = true }
+pdf_oxide = { version = "0.3.78", optional = true, features = ["rendering"] }
+# Not used directly: pins pdf_oxide's own dependency. pdf_oxide 0.3.78 asks for
+# office_oxide ^0.1.9, but office_oxide 0.1.10+ added a field to DocumentIR that
+# pdf_oxide's converter does not initialise, so any newer resolution fails to
+# compile pdf_oxide. Drop this once a pdf_oxide release builds against it.
+office_oxide = { version = "=0.1.9", default-features = false, optional = true }
 image = { version = "0.25", optional = true }
 raisin-binary = { path = "../raisin-binary" }
 

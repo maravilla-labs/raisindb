@@ -261,6 +261,7 @@ impl RocksDBStorage {
             event_bus: event_bus.clone(),
             config: config.clone(),
             graph_cache_layer: Arc::new(crate::graph::GraphCacheLayer::new()),
+            write_health: Arc::new(crate::write_health::WriteHealth::new()),
         };
         // `index.skip_unchanged` (Phase 7), gated per branch on this node's
         // property-index rebuild, kept under the id the repairs use.

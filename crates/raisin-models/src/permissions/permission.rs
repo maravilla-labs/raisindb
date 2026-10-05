@@ -37,6 +37,10 @@ pub enum Operation {
     Relate,
     /// Unrelate nodes (remove relationships)
     Unrelate,
+    /// Execute a node: invoke a `raisin:Function` from a client. Like a Unix
+    /// `x` bit, independent of `read`: a caller may run a function without
+    /// seeing its code, and seeing it does not let them run it.
+    Execute,
 }
 
 impl Operation {
@@ -50,6 +54,7 @@ impl Operation {
             Operation::Translate,
             Operation::Relate,
             Operation::Unrelate,
+            Operation::Execute,
         ]
     }
 
@@ -63,6 +68,7 @@ impl Operation {
             "translate" => Some(Operation::Translate),
             "relate" => Some(Operation::Relate),
             "unrelate" => Some(Operation::Unrelate),
+            "execute" => Some(Operation::Execute),
             _ => None,
         }
     }
@@ -78,6 +84,7 @@ impl std::fmt::Display for Operation {
             Operation::Translate => write!(f, "translate"),
             Operation::Relate => write!(f, "relate"),
             Operation::Unrelate => write!(f, "unrelate"),
+            Operation::Execute => write!(f, "execute"),
         }
     }
 }

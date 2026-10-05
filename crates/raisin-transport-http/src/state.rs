@@ -688,11 +688,40 @@ pub fn router_with_bin_and_audit(
     // NOTE: Global CorsLayer has been removed in favor of unified_cors_middleware
     // which implements hierarchical CORS resolution: Repo → Tenant → Global
     // The cors_allowed_origins are now stored in AppState for use by the middleware
+    let health_state = state.clone();
     let router = axum::Router::new()
-        .route("/health", get(|| async { "ok" }))
+        .route("/health", get(move || health(health_state.clone())))
         .merge(crate::routes::routes(state.clone()));
 
     (router, state)
+}
+
+/// `GET /health`: "ok", or 503 with the reason while the database refuses
+/// writes (a full disk). Reads keep working in that state, so without this a
+/// server that could not save anything still reported itself healthy.
+async fn health(state: AppState) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    #[cfg(feature = "storage-rocksdb")]
+    if let Some(storage) = state.rocksdb_storage() {
+        let writes = storage.write_health().snapshot();
+        if !writes.writable {
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                axum::Json(serde_json::json!({
+                    "status": "degraded",
+                    "storage": {
+                        "writes": "stopped",
+                        "message": raisin_rocksdb::management::describe_writes(&writes),
+                        "detail": writes,
+                    },
+                })),
+            )
+                .into_response();
+        }
+    }
+    #[cfg(not(feature = "storage-rocksdb"))]
+    let _ = state;
+    "ok".into_response()
 }
 
 #[cfg(test)]

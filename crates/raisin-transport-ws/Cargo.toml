@@ -58,6 +58,7 @@ raisin-sql-execution = { path = "../raisin-sql-execution", optional = true }
 raisin-flow-runtime = { path = "../raisin-flow-runtime", optional = true }
 raisin-functions = { path = "../raisin-functions", optional = true }
 raisin-agent-runtime = { path = "../raisin-agent-runtime", optional = true }
+raisin-ratelimit = { path = "../raisin-ratelimit", optional = true }
 reqwest = { workspace = true, optional = true }
 bytes = "1.10.1"
 anyhow.workspace = true
@@ -71,4 +72,4 @@ raisin-storage-memory = { path = "../raisin-storage-memory" }
 
 [features]
 default = ["storage-rocksdb"]
-storage-rocksdb = ["dep:raisin-rocksdb", "dep:raisin-indexer", "dep:raisin-hnsw", "dep:raisin-sql-execution", "dep:raisin-flow-runtime", "dep:raisin-functions", "dep:reqwest", "dep:raisin-agent-runtime"]
+storage-rocksdb = ["dep:raisin-rocksdb", "dep:raisin-indexer", "dep:raisin-hnsw", "dep:raisin-sql-execution", "dep:raisin-flow-runtime", "dep:raisin-functions", "dep:reqwest", "dep:raisin-agent-runtime", "dep:raisin-ratelimit"]

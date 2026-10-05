@@ -11,21 +11,29 @@
 //! a production tenant: 30 of ~5,100 PDFs processed in a week came back empty,
 //! every one of them a scan.
 //!
-//! # How the fallback works without a rasterizer
+//! # How the fallback works
 //!
-//! Core ships no page renderer (no pdfium, no poppler), and must not grow one
-//! for this. It does not need to: a scanned page IS an image XObject, and
-//! `pdf_oxide` can hand that image back as bytes. So the fallback is
+//! A scanned page IS an image XObject, and `pdf_oxide` can hand that image
+//! back as bytes, so most pages need no rendering. The fallback is
 //!
 //! 1. read the text layer of every page (`to_markdown`);
 //! 2. for a page the strategy says to OCR — always under `force_ocr` /
 //!    `ocr_only`, only when the text layer is (near-)empty under `auto` —
 //!    take the LARGEST image on the page and keep its bytes as the OCR
 //!    candidate (JPEG passes through untouched; raw pixel data is PNG-encoded);
-//! 3. run the configured [`OcrProvider`] over the candidates.
+//! 3. if that page has no image, or none that decodes, render the page with
+//!    pdf_oxide's pure-Rust renderer (tiny-skia) at [`OCR_RENDER_DPI`] and
+//!    use the rendering: a flyer whose text is drawn as outlines has neither
+//!    a text layer nor an image;
+//! 4. run the configured [`OcrProvider`] over the candidates.
 //!
-//! A page whose text layer is empty and that carries no image stays empty:
-//! there is nothing to read.
+//! Only pages that need OCR are ever rendered; a page with a good text layer
+//! costs nothing extra.
+//!
+//! A text layer can also be present and useless: some generators place every
+//! glyph on its own, so the layer reads as single letters separated by spaces
+//! ("P a r k t a r i f e"). Under `auto` such a *letter-soup* page is treated
+//! like an empty one and gets the OCR fallback too ([`is_letter_soup`]).
 //!
 //! # Two halves, deliberately
 //!
@@ -45,6 +53,11 @@
 //! otherwise return NOTHING and at least one page's OCR errored — then the
 //! honest status is `failed` (retryable once the dependency is installed), not
 //! `empty` (durable, never looked at again).
+//!
+//! The same holds for reading the text layer: one page pdf_oxide cannot read
+//! (an error, or a panic inside the parser) leaves that page empty instead of
+//! failing the whole brochure. Only a document where no page could be read is
+//! an error.
 
 use super::ocr::{OcrError, OcrOptions, OcrProvider};
 use super::router::{ExtractionMethod, PdfProcessedResult, PdfProcessingOptions, PdfStrategy};
@@ -71,6 +84,30 @@ pub(crate) fn readable_chars(text: &str) -> usize {
     text.chars().filter(|c| c.is_alphanumeric()).count()
 }
 
+/// Words needed before a text layer can be judged letter soup; a short label
+/// ("P 3", "A B C") says nothing either way.
+const LETTER_SOUP_MIN_WORDS: usize = 20;
+
+/// Whether a text layer is letter soup: at least half of its words are a
+/// single letter. Real prose in any language has few one-letter words ("a",
+/// "I", "y", "à"); a layer of individually placed glyphs is almost nothing
+/// else. Digits do not count, so a price table ("2 3 4") is not soup.
+pub(crate) fn is_letter_soup(text: &str) -> bool {
+    let mut words = 0usize;
+    let mut single_letters = 0usize;
+    for token in text.split_whitespace() {
+        let mut letters = token.chars().filter(|c| c.is_alphabetic());
+        if letters.next().is_none() {
+            continue;
+        }
+        words += 1;
+        if letters.next().is_none() && !token.chars().any(|c| c.is_numeric()) {
+            single_letters += 1;
+        }
+    }
+    words >= LETTER_SOUP_MIN_WORDS && single_letters * 2 >= words
+}
+
 /// Whether, under `options`, a page with this text layer should be OCR'd.
 pub(crate) fn wants_ocr(options: &PdfProcessingOptions, native_text: &str) -> bool {
     match options.strategy {
@@ -79,8 +116,26 @@ pub(crate) fn wants_ocr(options: &PdfProcessingOptions, native_text: &str) -> bo
         // `min_chars_per_page` is 0 under `Default`; a page with ANY readable
         // character then counts as native. `auto()` sets 50, which is the
         // sensible production value — a stamp or a page number on a scan is
-        // not a text layer.
-        PdfStrategy::Auto => readable_chars(native_text) < options.min_chars_per_page.max(1),
+        // not a text layer. Neither is letter soup.
+        PdfStrategy::Auto => {
+            readable_chars(native_text) < options.min_chars_per_page.max(1)
+                || is_letter_soup(native_text)
+        }
+    }
+}
+
+/// Whether an OCR reading should replace the page's text layer.
+///
+/// Normally whichever has more to say wins: under `auto` the native layer is
+/// (near-)empty by construction; under `force_ocr` a real text layer still
+/// beats a worse OCR of the same page. Letter soup has plenty of characters
+/// and says nothing, so there OCR wins unless it is soup itself or read far
+/// less (the page image was only a logo, not the page).
+fn ocr_reads_better(ocr: &str, native: &str) -> bool {
+    if is_letter_soup(native) {
+        !is_letter_soup(ocr) && readable_chars(ocr) * 2 >= readable_chars(native)
+    } else {
+        readable_chars(ocr) > readable_chars(native)
     }
 }
 
@@ -107,11 +162,24 @@ pub(crate) fn extract_pages_from_path(
     let conversion_options = ConversionOptions::default();
     let mut pages = Vec::with_capacity(page_count);
     let mut page_tree = scan::PageTree::default();
+    let mut unreadable = 0usize;
+    let mut first_error: Option<String> = None;
 
     for page_idx in 0..page_count {
         let text = if options.strategy.should_try_native() {
-            doc.to_markdown(page_idx, &conversion_options)
-                .map_err(|e| StoragePdfError::Processing(format!("Page {}: {}", page_idx, e)))?
+            match read_text_layer(&mut doc, page_idx, &conversion_options) {
+                Ok(text) => text,
+                Err(e) => {
+                    tracing::warn!(
+                        page = page_idx,
+                        error = %e,
+                        "PDF page text layer could not be read; treating the page as empty"
+                    );
+                    unreadable += 1;
+                    first_error.get_or_insert(format!("Page {}: {}", page_idx, e));
+                    String::new()
+                }
+            }
         } else {
             String::new()
         };
@@ -125,7 +193,17 @@ pub(crate) fn extract_pages_from_path(
             // A failure to find the page's image is not a failure to extract:
             // the text layer already answered, and a malformed resource
             // dictionary should not turn a readable PDF into `failed`.
-            match scan::largest_page_image(&mut doc, &mut page_tree, page_idx) {
+            let largest = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                scan::largest_page_image(&mut doc, &mut page_tree, page_idx)
+                    .map_err(|e| e.to_string())
+            }))
+            .unwrap_or_else(|panic| {
+                Err(format!(
+                    "pdf_oxide panicked while decoding: {}",
+                    panic_reason(&*panic)
+                ))
+            });
+            match largest {
                 Ok(Some(img)) => {
                     let bytes = match img.data() {
                         ImageData::Jpeg(jpeg) => Ok(jpeg.clone()),
@@ -147,12 +225,91 @@ pub(crate) fn extract_pages_from_path(
                     "PDF page images could not be read for OCR; keeping text layer"
                 ),
             }
+
+            // No image to read: the page is drawn (outlined text, a poster
+            // made of paths) or its image cannot be decoded. Render it.
+            if page.ocr_candidate.is_none() {
+                match render_page_for_ocr(&doc, page_idx) {
+                    Ok(png) => page.ocr_candidate = Some(png),
+                    Err(e) => tracing::warn!(
+                        page = page_idx,
+                        error = %e,
+                        "PDF page could not be rendered for OCR; keeping text layer"
+                    ),
+                }
+            }
         }
 
         pages.push(page);
     }
 
+    if page_count > 0 && unreadable == page_count {
+        return Err(StoragePdfError::Processing(
+            first_error.unwrap_or_else(|| "no page could be read".to_string()),
+        ));
+    }
+
     Ok(PdfPages { pages })
+}
+
+/// Resolution a page is rendered at for OCR. Tesseract reads body text best
+/// at 300 dpi; below ~200 small print starts to break up.
+#[cfg(feature = "pdf-markdown")]
+const OCR_RENDER_DPI: u32 = 300;
+
+/// Pixel budget for one rendered page. A4 at 300 dpi is 8.7 Mpx; a larger
+/// page (a poster-sized flyer) is rendered at a lower resolution to fit
+/// rather than allocating hundreds of megabytes.
+#[cfg(feature = "pdf-markdown")]
+const OCR_RENDER_MAX_PIXELS: u64 = 16_000_000;
+
+/// Render one page to PNG for OCR, the fallback for a page with no usable
+/// text layer and no decodable image. Errors and panics inside the renderer
+/// come back as an error for this page only.
+#[cfg(feature = "pdf-markdown")]
+fn render_page_for_ocr(doc: &pdf_oxide::PdfDocument, page_idx: usize) -> Result<Vec<u8>, String> {
+    use pdf_oxide::rendering::{render_page, RenderOptions};
+
+    let mut options = RenderOptions::with_dpi(OCR_RENDER_DPI);
+    options.max_output_pixels = OCR_RENDER_MAX_PIXELS;
+    // Annotations are stamps and form widgets, not page text.
+    options.render_annotations = false;
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        render_page(doc, page_idx, &options)
+    }))
+    .map_err(|panic| {
+        format!(
+            "pdf_oxide panicked while rendering: {}",
+            panic_reason(&*panic)
+        )
+    })?
+    .map(|image| image.data)
+    .map_err(|e| e.to_string())
+}
+
+#[cfg(feature = "pdf-markdown")]
+fn panic_reason(panic: &(dyn std::any::Any + Send)) -> String {
+    panic
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".to_string())
+}
+
+/// One page's text layer as markdown. A panic inside pdf_oxide (it has had
+/// sort comparators that panic on a NaN font size) becomes an error for this
+/// page instead of unwinding through the extraction job.
+#[cfg(feature = "pdf-markdown")]
+fn read_text_layer(
+    doc: &mut pdf_oxide::PdfDocument,
+    page_idx: usize,
+    options: &pdf_oxide::converters::ConversionOptions,
+) -> Result<String, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        doc.to_markdown(page_idx, options)
+    }))
+    .map_err(|panic| format!("pdf_oxide panicked: {}", panic_reason(&*panic)))?
+    .map_err(|e| e.to_string())
 }
 
 /// Finding the scan image on a page.
@@ -171,7 +328,7 @@ pub(crate) fn extract_pages_from_path(
 /// XObjects, where some scanner drivers wrap the page image.
 #[cfg(feature = "pdf-markdown")]
 mod scan {
-    use pdf_oxide::extractors::images::{extract_image_from_xobject, PdfImage};
+    use pdf_oxide::extractors::images::{extract_image_from_xobject, ImageData, PdfImage};
     use pdf_oxide::object::{Object, ObjectRef};
     use pdf_oxide::{Error, PdfDocument, Result};
     use std::collections::HashMap;
@@ -321,6 +478,125 @@ mod scan {
         w * h
     }
 
+    /// Apply a JPEG 2000 image's `/Decode` array to its samples.
+    ///
+    /// pdf_oxide applies `/Decode` on its raw-sample path but not to JPX
+    /// images, and Acrobat writes CMYK JPX images with `[1 0 1 0 1 0 1 0]`
+    /// (inverted inks). Undecoded, white paper and black text both come out
+    /// black and OCR reads nothing (Tour-de-Murg-Flyer: two full-page CMYK
+    /// JPX scans). Poppler applies the array; so does this, per ISO 32000-1
+    /// §8.9.5.2, for 8-bit samples.
+    fn apply_jpx_decode(xobj: &Object, img: PdfImage) -> PdfImage {
+        let Some(dict) = xobj.as_dict() else {
+            return img;
+        };
+        let is_jpx = match dict.get("Filter") {
+            Some(Object::Name(n)) => n == "JPXDecode",
+            Some(Object::Array(a)) => a.iter().any(|f| f.as_name() == Some("JPXDecode")),
+            _ => false,
+        };
+        let ranges: Vec<(f64, f64)> = dict
+            .get("Decode")
+            .and_then(Object::as_array)
+            .map(|a| {
+                a.chunks(2)
+                    .filter_map(|pair| match pair {
+                        [lo, hi] => Some((number(lo)?, number(hi)?)),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !is_jpx || img.bits_per_component() != 8 || ranges.iter().all(|&r| r == (0.0, 1.0)) {
+            return img;
+        }
+        let ImageData::Raw { pixels, format } = img.data() else {
+            return img;
+        };
+        let components = format.bytes_per_pixel();
+        if ranges.len() != components {
+            return img;
+        }
+        let mut pixels = pixels.clone();
+        for (i, v) in pixels.iter_mut().enumerate() {
+            let (lo, hi) = ranges[i % components];
+            let x = lo + (*v as f64 / 255.0) * (hi - lo);
+            *v = (x.clamp(0.0, 1.0) * 255.0).round() as u8;
+        }
+        PdfImage::new(
+            img.width(),
+            img.height(),
+            img.color_space().clone(),
+            8,
+            ImageData::Raw {
+                pixels,
+                format: *format,
+            },
+        )
+    }
+
+    fn number(obj: &Object) -> Option<f64> {
+        obj.as_real().or_else(|| obj.as_integer().map(|i| i as f64))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use pdf_oxide::extractors::images::{ColorSpace, PixelFormat};
+
+        fn cmyk_pixel(filter: &str, decode: Option<[f64; 8]>) -> (Object, PdfImage) {
+            let mut dict = Dict::new();
+            dict.insert("Filter".to_string(), Object::Name(filter.to_string()));
+            if let Some(d) = decode {
+                dict.insert(
+                    "Decode".to_string(),
+                    Object::Array(d.iter().map(|v| Object::Real(*v)).collect()),
+                );
+            }
+            let img = PdfImage::new(
+                1,
+                1,
+                ColorSpace::DeviceCMYK,
+                8,
+                ImageData::Raw {
+                    pixels: vec![255, 255, 255, 0],
+                    format: PixelFormat::CMYK,
+                },
+            );
+            (Object::Dictionary(dict), img)
+        }
+
+        fn pixels(img: &PdfImage) -> Vec<u8> {
+            match img.data() {
+                ImageData::Raw { pixels, .. } => pixels.clone(),
+                ImageData::Jpeg(_) => unreachable!(),
+            }
+        }
+
+        #[test]
+        fn an_inverting_decode_array_is_applied_to_a_jpx_image() {
+            let inverted = [1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0];
+            let (xobj, img) = cmyk_pixel("JPXDecode", Some(inverted));
+            // Stored (255, 255, 255, 0) under [1 0 ...] is pure black ink.
+            assert_eq!(pixels(&apply_jpx_decode(&xobj, img)), vec![0, 0, 0, 255]);
+        }
+
+        #[test]
+        fn other_images_and_the_default_decode_are_left_alone() {
+            let inverted = [1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0];
+            let (xobj, img) = cmyk_pixel("FlateDecode", Some(inverted));
+            assert_eq!(
+                pixels(&apply_jpx_decode(&xobj, img)),
+                vec![255, 255, 255, 0]
+            );
+            let (xobj, img) = cmyk_pixel("JPXDecode", None);
+            assert_eq!(
+                pixels(&apply_jpx_decode(&xobj, img)),
+                vec![255, 255, 255, 0]
+            );
+        }
+    }
+
     /// The largest image on `page_index`, decoded — or `None` when the page
     /// has no image, or none that pdf_oxide can decode (each such failure is
     /// logged, not swallowed).
@@ -341,8 +617,8 @@ mod scan {
 
         for (xobj, obj_ref) in found {
             let xobj = with_direct_color_space(doc, xobj)?;
-            match extract_image_from_xobject(Some(&*doc), &xobj, obj_ref) {
-                Ok(img) => return Ok(Some(img)),
+            match extract_image_from_xobject(Some(&*doc), &xobj, obj_ref, None) {
+                Ok(img) => return Ok(Some(apply_jpx_decode(&xobj, img))),
                 Err(e) => tracing::warn!(
                     page = page_index,
                     error = %e,
@@ -381,10 +657,7 @@ pub(crate) async fn finish_with_ocr(
         };
 
         match provider.ocr_image_detailed(&image, ocr_options).await {
-            // Keep whichever reading has more to say. Under `auto` the native
-            // layer is (near-)empty by construction; under `force_ocr` a real
-            // text layer still beats a worse OCR of the same page.
-            Ok(result) if readable_chars(&result.text) > readable_chars(&native) => {
+            Ok(result) if ocr_reads_better(&result.text, &native) => {
                 ocr_pages.push(idx);
                 if let Some(c) = result.confidence {
                     confidences.push(c);
@@ -516,6 +789,68 @@ mod tests {
         assert!(!wants_ocr(&opts, "x"));
     }
 
+    const SOUP: &str = "P a r k t a r i f e g ü l t i g a b 0 1 . 0 2 . 2 0 2 6 \
+                        F l u g h a f e n F K B B i s 3 0 M i n u t e n";
+
+    #[test]
+    fn letter_soup_is_recognised() {
+        assert!(is_letter_soup(SOUP));
+        assert!(!is_letter_soup(
+            "Parktarife gültig ab 01.02.2026. Flughafen FKB: bis 30 Minuten 2,00 €, \
+             jede weitere angefangene Stunde 3,00 €, Tagesmaximum 20,00 €, Langzeit ab \
+             drei Wochen, Premium nur mit Prebooking, Kurzzeit direkt am Terminal."
+        ));
+        assert!(!is_letter_soup("P 3 A B"), "too short to judge");
+        assert!(
+            !is_letter_soup(&"| 2 | 3 | 4 | 20 |\n".repeat(20)),
+            "a table of numbers is not soup"
+        );
+        assert!(
+            !is_letter_soup(&"I think a bird is y à la mode today, ok. ".repeat(4)),
+            "ordinary one-letter words stay a minority"
+        );
+    }
+
+    #[test]
+    fn auto_ocrs_a_letter_soup_page() {
+        let opts = PdfProcessingOptions::auto();
+        assert!(readable_chars(SOUP) >= opts.min_chars_per_page);
+        assert!(wants_ocr(&opts, SOUP));
+        let mut native_only = opts.clone();
+        native_only.strategy = PdfStrategy::NativeOnly;
+        assert!(!wants_ocr(&native_only, SOUP));
+    }
+
+    #[tokio::test]
+    async fn ocr_replaces_letter_soup_even_when_it_has_fewer_characters() {
+        let pages = PdfPages {
+            pages: vec![page(SOUP, Some(0))],
+        };
+        let provider = Scripted(vec![Ok((
+            "Parktarife gültig ab 01.02.2026 Flughafen FKB bis 30 Minuten",
+            Some(88.0),
+        ))]);
+        let out = finish_with_ocr(pages, &provider, &OcrOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(out.method_used, ExtractionMethod::Ocr);
+        assert!(out.text.starts_with("Parktarife gültig"));
+    }
+
+    #[tokio::test]
+    async fn letter_soup_stays_when_the_only_image_was_a_logo() {
+        // The page image is a logo: its OCR says far less than the page.
+        let pages = PdfPages {
+            pages: vec![page(SOUP, Some(0))],
+        };
+        let provider = Scripted(vec![Ok(("BADEN AIRPARK", None))]);
+        let out = finish_with_ocr(pages, &provider, &OcrOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(out.method_used, ExtractionMethod::Native);
+        assert_eq!(out.text, SOUP);
+    }
+
     #[tokio::test]
     async fn a_scanned_document_is_ocr_on_every_page() {
         let pages = PdfPages {
@@ -631,6 +966,58 @@ mod probe {
         );
         assert!(!out.text.trim().is_empty());
     }
+
+    /// Per-page text-layer timing over real documents (large brochures took
+    /// 25-87 s a page on pdf_oxide 0.2).
+    ///
+    /// `RAISIN_PDF_TIMING=a.pdf:b.pdf cargo test -p raisin-ai --release
+    /// --features pdf-markdown --lib pdf::pages::probe::page_timing -- --ignored
+    /// --nocapture`
+    #[test]
+    #[ignore = "needs RAISIN_PDF_TIMING"]
+    fn page_timing() {
+        use pdf_oxide::converters::ConversionOptions;
+        let Ok(paths) = std::env::var("RAISIN_PDF_TIMING") else {
+            return;
+        };
+        let options = ConversionOptions::default();
+        for path in paths.split(':') {
+            let mut doc = pdf_oxide::PdfDocument::open(path).unwrap();
+            let count = doc.page_count().unwrap();
+            let mut slowest = std::time::Duration::ZERO;
+            let started = std::time::Instant::now();
+            for page in 0..count {
+                let t = std::time::Instant::now();
+                let text = super::read_text_layer(&mut doc, page, &options);
+                slowest = slowest.max(t.elapsed());
+                if let Err(e) = text {
+                    println!("  page {page}: {e}");
+                }
+            }
+            let total = started.elapsed();
+            println!(
+                "{path}: {count} pages, {total:?} total, {:?}/page mean, {slowest:?} slowest",
+                total / count.max(1) as u32
+            );
+            // The whole synchronous pass under `auto`, including picking or
+            // rendering the OCR candidates (OCR itself is not timed).
+            let t = std::time::Instant::now();
+            let pages = super::extract_pages_from_path(
+                std::path::Path::new(path),
+                &crate::pdf::PdfProcessingOptions::auto(),
+            )
+            .unwrap();
+            let candidates = pages
+                .pages
+                .iter()
+                .filter(|p| p.ocr_candidate.is_some())
+                .count();
+            println!(
+                "  auto pass: {:?}, {candidates} page(s) with an OCR candidate",
+                t.elapsed()
+            );
+        }
+    }
 }
 
 /// Regression: a scanned page whose image carries an INDIRECT colour space —
@@ -676,6 +1063,12 @@ mod scan_tests {
                 v
             },
         ];
+        serialize_pdf(&objs)
+    }
+
+    /// Serialize numbered objects (object `n` is `objs[n - 1]`, the catalog is
+    /// object 1) into a PDF with a valid xref table.
+    fn serialize_pdf(objs: &[Vec<u8>]) -> Vec<u8> {
         let mut out = b"%PDF-1.7\n".to_vec();
         let mut offsets = Vec::new();
         for (i, body) in objs.iter().enumerate() {
@@ -700,6 +1093,31 @@ mod scan_tests {
             .as_bytes(),
         );
         out
+    }
+
+    fn content_stream(content: &str) -> Vec<u8> {
+        format!(
+            "<< /Length {} >>\nstream\n{}\nendstream",
+            content.len(),
+            content
+        )
+        .into_bytes()
+    }
+
+    /// A one-page PDF whose page has `/Contents <contents>`, with Helvetica as
+    /// /F1. `extra` are objects 5, 6, ...
+    fn one_page_pdf(contents: &str, extra: Vec<Vec<u8>>) -> Vec<u8> {
+        let mut objs: Vec<Vec<u8>> = vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            format!(
+                "<< /Type /Page /Parent 2 0 R /Resources 4 0 R /MediaBox [0 0 500 700] /Contents {contents} >>"
+            )
+            .into_bytes(),
+            b"<< /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >>".to_vec(),
+        ];
+        objs.extend(extra);
+        serialize_pdf(&objs)
     }
 
     fn tiny_jpeg() -> Vec<u8> {
@@ -749,5 +1167,141 @@ mod scan_tests {
         opts.strategy = PdfStrategy::ForceOcr;
         let pages = extract_pages_from_path(pdf.path(), &opts).unwrap();
         assert!(pages.pages[0].ocr_candidate.is_some());
+    }
+
+    /// One page whose text is drawn as filled outlines: no text layer, no
+    /// font, no image. Made with Ghostscript from Helvetica text:
+    ///
+    /// ```sh
+    /// gs -dNOPAUSE -dBATCH -dSAFER -sDEVICE=pdfwrite -dNoOutputFonts \
+    ///    -sOutputFile=outlined-text.pdf outline.ps
+    /// ```
+    ///
+    /// where `outline.ps` shows "Tour de Murg", "Radweg entlang der Murg",
+    /// "von Rastatt nach Baiersbronn" and "Rheinebene und Schwarzwald" on a
+    /// 420 x 300 pt page.
+    const OUTLINED_TEXT_PDF: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/pdf/outlined-text.pdf"
+    ));
+
+    #[test]
+    fn a_page_drawn_as_outlines_is_rendered_for_ocr() {
+        let pdf = write_temp(OUTLINED_TEXT_PDF);
+        let pages = extract_pages_from_path(pdf.path(), &PdfProcessingOptions::auto()).unwrap();
+        assert_eq!(readable_chars(&pages.pages[0].text), 0, "no text layer");
+        let png = pages.pages[0]
+            .ocr_candidate
+            .as_ref()
+            .expect("the rendered page is the OCR candidate");
+        let img = image::load_from_memory(png).expect("a decodable PNG");
+        // 420 x 300 pt at OCR_RENDER_DPI.
+        assert_eq!(img.width(), 420 * OCR_RENDER_DPI / 72);
+        assert_eq!(img.height(), 300 * OCR_RENDER_DPI / 72);
+    }
+
+    #[test]
+    fn a_page_with_a_good_text_layer_is_never_rendered() {
+        let content = "BT /F1 12 Tf 20 600 Td (A typed page with a real text layer, long enough to count as native text.) Tj ET";
+        let pdf = write_temp(&one_page_pdf("5 0 R", vec![content_stream(content)]));
+        let pages = extract_pages_from_path(pdf.path(), &PdfProcessingOptions::auto()).unwrap();
+        assert!(pages.pages[0].ocr_candidate.is_none());
+    }
+
+    /// End to end with the real Tesseract: the outlined page reads as text.
+    #[cfg(feature = "ocr")]
+    #[tokio::test]
+    async fn an_outlined_page_reads_through_tesseract() {
+        use crate::pdf::ocr::TesseractOcrProvider;
+        let provider = TesseractOcrProvider::english();
+        if !provider.is_available().await {
+            eprintln!("skipped: tesseract is not installed");
+            return;
+        }
+        let pdf = write_temp(OUTLINED_TEXT_PDF);
+        let pages = extract_pages_from_path(pdf.path(), &PdfProcessingOptions::auto()).unwrap();
+        let out = finish_with_ocr(pages, &provider, &OcrOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(out.method_used, ExtractionMethod::Ocr);
+        for word in ["Tour de Murg", "Radweg", "Rastatt", "Schwarzwald"] {
+            assert!(
+                out.text.contains(word),
+                "{word} missing from {:?}",
+                out.text
+            );
+        }
+    }
+
+    /// `/Contents [5 0 R 6 0 R]` where object 6 is `null`. pdf_oxide 0.2 failed
+    /// the page with "expected Stream, found Null", and with it the document
+    /// (seen on four brochures of one site). The null part contributes nothing;
+    /// the real stream is still read.
+    #[test]
+    fn a_null_content_stream_is_skipped_not_fatal() {
+        let pdf = write_temp(&one_page_pdf(
+            "[5 0 R 6 0 R]",
+            vec![
+                content_stream("BT /F1 12 Tf 20 600 Td (Hello content) Tj ET"),
+                b"null".to_vec(),
+            ],
+        ));
+        let pages = extract_pages_from_path(pdf.path(), &PdfProcessingOptions::auto()).unwrap();
+        assert_eq!(pages.pages.len(), 1);
+        assert!(
+            pages.pages[0].text.contains("Hello content"),
+            "got {:?}",
+            pages.pages[0].text
+        );
+    }
+
+    #[test]
+    fn a_page_whose_only_content_is_null_is_empty() {
+        let pdf = write_temp(&one_page_pdf(
+            "6 0 R",
+            vec![content_stream("BT ET"), b"null".to_vec()],
+        ));
+        let pages = extract_pages_from_path(pdf.path(), &PdfProcessingOptions::auto()).unwrap();
+        assert_eq!(readable_chars(&pages.pages[0].text), 0);
+    }
+
+    /// A span whose font size works out to NaN (an overflowing `Tf` operand
+    /// times a zero text-matrix scale). pdf_oxide 0.2 sorted font sizes with
+    /// `partial_cmp().unwrap()` and panicked on it, which aborted the whole
+    /// extraction job.
+    #[test]
+    fn a_nan_font_size_does_not_panic() {
+        let huge = format!("{}.0", "9".repeat(50));
+        let mut content = format!("BT /F1 {huge} Tf 1 0 0 0 20 650 Tm (Nan) Tj ET\n");
+        for i in 0..10 {
+            content.push_str(&format!(
+                "BT /F1 12 Tf 20 {} Td (Line {i} of ordinary text) Tj ET\n",
+                600 - i * 14
+            ));
+        }
+        let pdf = write_temp(&one_page_pdf("5 0 R", vec![content_stream(&content)]));
+        let pages = extract_pages_from_path(pdf.path(), &PdfProcessingOptions::auto()).unwrap();
+        assert!(
+            pages.pages[0].text.contains("ordinary text"),
+            "got {:?}",
+            pages.pages[0].text
+        );
+    }
+
+    /// A text layer of individually placed letters, over a page image: under
+    /// `auto` the image becomes the OCR candidate although the layer has more
+    /// than `min_chars_per_page` characters.
+    #[test]
+    fn a_letter_soup_text_layer_gets_an_ocr_candidate() {
+        let soup = "P a r k t a r i f e g u e l t i g a b F l u g h a f e n K a r l s r u h e";
+        let jpeg = tiny_jpeg();
+        let pdf = write_temp(&quartz_style_scan_pdf(&jpeg, Some(soup)));
+        let pages = extract_pages_from_path(pdf.path(), &PdfProcessingOptions::auto()).unwrap();
+        assert!(
+            is_letter_soup(&pages.pages[0].text),
+            "fixture should read as soup, got {:?}",
+            pages.pages[0].text
+        );
+        assert_eq!(pages.pages[0].ocr_candidate.as_ref(), Some(&jpeg));
     }
 }

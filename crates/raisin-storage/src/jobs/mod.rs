@@ -15,6 +15,7 @@
 //! This module provides a centralized job management system that works
 //! across all storage implementations.
 
+pub mod ai_usage;
 pub mod conversation_events;
 pub mod flow_events;
 pub mod flow_starters;

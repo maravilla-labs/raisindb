@@ -19,6 +19,14 @@
 //!
 //! Both go through one verifier, [`raisin_core::authorize_asset_read`], so the
 //! two cannot drift into a 401 that no log line explains.
+//!
+//! A request that presents NEITHER is read as its own principal — the session
+//! of an `Authorization` header, else the repository's anonymous user — under
+//! that principal's row-level security. That is the same read a plain
+//! `GET …?command=download` performs, now with range requests, inline display
+//! and mount hydration: a site whose anonymous role may read published assets
+//! (`branch_pattern: "publish"`) can link the bytes directly. A presented
+//! credential that fails never falls back to this path.
 
 use axum::{
     body::Body,
@@ -114,6 +122,9 @@ pub(crate) async fn handle_asset_command_internal(
     // The raw `Range` header, threaded down from the request. Without it a
     // `<video>` served from here has a dead scrub bar — see `http_range`.
     range_header: Option<&str>,
+    // The request's own principal (session or anonymous user), used only when
+    // neither a signature nor a grant is presented.
+    principal: Option<raisin_models::auth::AuthContext>,
 ) -> Result<Response, ApiError> {
     // Validate command
     if command != "download" && command != "display" {
@@ -147,6 +158,41 @@ pub(crate) async fn handle_asset_command_internal(
         command,
     };
     let presented_grant = grant.is_some_and(|g| !g.is_empty());
+    let presented_sig = !sig.is_empty();
+
+    // No credential at all: the request's own principal, under its row-level
+    // security. Only when NOTHING was presented — a wrong, expired or
+    // mismatched signature or grant is refused below and never lands here.
+    if !presented_sig && !presented_grant {
+        // What the ANONYMOUS principal may read is public by definition (its
+        // role says so — for a site, assets on the published branch): any
+        // cache may keep it. Everything else stays private to its reader.
+        let cache_control = if principal
+            .as_ref()
+            .is_some_and(|p| p.is_anonymous_principal())
+        {
+            PUBLIC_CACHE_CONTROL
+        } else {
+            PRIVATE_CACHE_CONTROL
+        };
+        let node =
+            read_as_request_principal(state, tenant_id, repo, branch, ws, &node_path, principal)
+                .await?;
+        return serve_asset_property(
+            state,
+            tenant_id,
+            repo,
+            branch,
+            ws,
+            node,
+            prop_name,
+            command,
+            range_header,
+            cache_control,
+        )
+        .await;
+    }
+
     let credential = raisin_core::AssetCredential::from_query(Some(sig), Some(exp), grant)
         .map_err(|e| credential_error(e, presented_grant))?;
     let authorization = raisin_core::authorize_asset_read(&signing_secret, scope, credential)
@@ -180,6 +226,44 @@ pub(crate) async fn handle_asset_command_internal(
         }
     };
 
+    serve_asset_property(
+        state,
+        tenant_id,
+        repo,
+        branch,
+        ws,
+        node,
+        prop_name,
+        command,
+        range_header,
+        PRIVATE_CACHE_CONTROL,
+    )
+    .await
+}
+
+/// A signed, granted or signed-in read: the reader's own, never a shared cache.
+const PRIVATE_CACHE_CONTROL: &str = "private, max-age=300";
+/// A read the anonymous principal may make: public content. An hour, because a
+/// published file changes only by being published again (and a new upload gets
+/// a new storage key).
+const PUBLIC_CACHE_CONTROL: &str = "public, max-age=3600";
+
+/// Serve one Resource property of an authorized node: mount hydration,
+/// external redirect, bytes with inline/attachment disposition and ranges.
+/// Shared by every credential form, so they cannot drift apart.
+#[allow(clippy::too_many_arguments)]
+async fn serve_asset_property(
+    state: &AppState,
+    tenant_id: &str,
+    repo: &str,
+    branch: &str,
+    ws: &str,
+    node: raisin_models::nodes::Node,
+    prop_name: &str,
+    command: &str,
+    range_header: Option<&str>,
+    cache_control: &'static str,
+) -> Result<Response, ApiError> {
     // A mounted file whose bytes are not held right now is NOT a missing
     // property — it is a cache miss on a file that still exists at the provider.
     //
@@ -193,7 +277,7 @@ pub(crate) async fn handle_asset_command_internal(
     // Only for the file itself: a missing `thumbnail` is a derived artifact that
     // was never made, and no fetch can conjure it.
     let node = if prop_name == "file" && !node.properties.contains_key(prop_name) {
-        hydrate_mounted_asset(&state, tenant_id, repo, branch, ws, &node)
+        hydrate_mounted_asset(state, tenant_id, repo, branch, ws, &node)
             .await
             .unwrap_or(node)
     } else {
@@ -293,7 +377,7 @@ pub(crate) async fn handle_asset_command_internal(
     let base = Response::builder()
         .header(header::CONTENT_TYPE, mime_type)
         .header(header::CONTENT_DISPOSITION, disposition)
-        .header(header::CACHE_CONTROL, "private, max-age=300")
+        .header(header::CACHE_CONTROL, cache_control)
         .header(header::ACCEPT_RANGES, "bytes");
 
     let response = match resolution {
@@ -344,6 +428,42 @@ pub(crate) async fn handle_asset_command_internal(
 /// A node the subject may not read is reported as missing, not as forbidden: the
 /// existence of a node at a path is itself something row-level security is
 /// entitled to hide.
+/// Read a node AS the request's own principal, with row-level security.
+///
+/// Fails closed: without a principal (a build whose middleware inserted none)
+/// the answer is the same 401 an unsigned request has always got — never an
+/// unfiltered read. A node the principal may not read is indistinguishable from
+/// a node that does not exist (404), so nothing leaks its existence.
+async fn read_as_request_principal(
+    state: &AppState,
+    tenant_id: &str,
+    repo: &str,
+    branch: &str,
+    ws: &str,
+    node_path: &str,
+    principal: Option<raisin_models::auth::AuthContext>,
+) -> Result<raisin_models::nodes::Node, ApiError> {
+    // A principal that may read nothing (anonymous access off → deny-all, or an
+    // anonymous role without grants) gets the answer an unsigned request has
+    // always got. It reveals nothing about the node either way.
+    let may_read_something = |p: &raisin_models::auth::AuthContext| {
+        p.is_system
+            || p.permissions()
+                .is_some_and(|r| r.is_system_admin || !r.permissions.is_empty())
+    };
+    let Some(principal) = principal.filter(may_read_something) else {
+        return Err(credential_error(
+            raisin_core::AssetAuthError::MissingCredential,
+            false,
+        ));
+    };
+    state
+        .node_service_for_context(tenant_id, repo, branch, ws, Some(principal))
+        .get_by_path(node_path)
+        .await?
+        .ok_or_else(|| ApiError::not_found("Node not found"))
+}
+
 async fn read_as_grant_subject(
     state: &AppState,
     tenant_id: &str,

@@ -105,6 +105,15 @@ fn register_system(registry: &mut FunctionRegistry) {
         is_deterministic: false,
         category: FunctionCategory::System,
     });
+
+    // The tenant's vector cutoff (DEFAULT_MAX_DISTANCE, else the engine's).
+    registry.register(FunctionSignature {
+        name: "EMBEDDING_MAX_DISTANCE".into(),
+        params: vec![],
+        return_type: DataType::Double,
+        is_deterministic: false,
+        category: FunctionCategory::System,
+    });
 }
 
 /// Geospatial functions (PostGIS-compatible).

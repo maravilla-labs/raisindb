@@ -264,6 +264,12 @@ pub async fn generate_embedding_cached<S: raisin_storage::Storage>(
     text: &str,
     ctx: &crate::physical_plan::executor::ExecutionContext<S>,
 ) -> Result<Vec<f32>, Error> {
+    // Refused before the cache too: a cache hit for a refused caller would make
+    // the answer depend on what someone else searched for.
+    if let Some(reason) = ctx.refuse_query_embedding() {
+        return Err(Error::Validation(reason));
+    }
+
     // Check cache first
     {
         let mut cache = ctx.embedding_cache.write().await;

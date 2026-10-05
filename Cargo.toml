@@ -104,3 +104,7 @@ debug = false
 # Drop this once upstream ships the fix (still present on unum-cloud/usearch main).
 [patch.crates-io]
 usearch = { path = "third_party/usearch" }
+# rocksdb 0.24.0 plus `DB::resume()` (rocksdb::DB::Resume, absent from the C
+# API), so a database stopped by a full disk can recover without a restart.
+# See third_party/rust-rocksdb/Cargo.toml.
+rocksdb = { path = "third_party/rust-rocksdb" }

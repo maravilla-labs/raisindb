@@ -608,6 +608,7 @@ Every key `ALTER EMBEDDING CONFIG` accepts:
 | `MAX_EMBEDDINGS_PER_REPO` | integer or `'unlimited'` |
 | `QUERY_PREFIX` | text prepended to every query before it is embedded; `''` clears it. See [Query and document prefixes](#query-and-document-prefixes) |
 | `DOCUMENT_PREFIX` | text prepended to every stored chunk; changing it re-embeds each node on its next job |
+| `ANONYMOUS_QUERY_EMBEDDINGS` | `'allow'` (default) or `'deny'`: whether an ANONYMOUS caller may have query text embedded (`KNN(text)`, `HYBRID_SEARCH(text)`, `EMBEDDING(text)`). Each is a provider call — money with a paid provider — and any workspace the anonymous role may read is enough to trigger it. `'deny'` refuses only the anonymous principal, before the provider is called; a literal vector, `VECTOR_OF(node)` and `FULLTEXT_SEARCH` stay available, and signed-in callers, the system and agent tools (also a visitor's tools under an anonymous tool grant) are unaffected |
 
 Read it back, and test that the job will actually succeed:
 
@@ -627,8 +628,20 @@ include_path             false
 default_max_distance     0.60 (default)
 distance_metric          Cosine
 query_prefix
+anonymous_query_embeddings  allow
 document_prefix
 max_embeddings_per_repo  unlimited
+```
+
+`SHOW EMBEDDING CONFIG` is for administrators (and the system). Code that only
+needs the cutoff, for example to scale its own distance bands to the model, reads
+it with `EMBEDDING_MAX_DISTANCE()`. Any caller may: it returns the configured
+`DEFAULT_MAX_DISTANCE`, else the engine default, i.e. the cutoff that caller's own
+`KNN` / `HYBRID_SEARCH` get when they name no `max_distance`. It works inside
+functions too, also under a visitor's tool grant:
+
+```sql
+SELECT EMBEDDING_MAX_DISTANCE() AS d;   -- 0.78 with EmbeddingGemma configured
 ```
 
 ```sql

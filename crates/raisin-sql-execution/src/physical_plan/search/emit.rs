@@ -474,6 +474,9 @@ pub async fn execute_parsed<S: Storage + 'static>(
             }
             QueryInput::Text(text) => {
                 if let Some(provider) = &embedding_provider {
+                    if let Some(reason) = ctx.refuse_query_embedding() {
+                        return Err(ExecutionError::Validation(reason));
+                    }
                     let embedded = embed_query(provider, text).await?;
                     for partition in &vector_partitions {
                         vector_legs.push((partition.clone(), embedded.clone()));

@@ -367,3 +367,47 @@ async fn an_admin_credential_cannot_reach_another_tenant() {
     .unwrap();
     assert_eq!(send(&app, req).await.0, StatusCode::FORBIDDEN);
 }
+
+/// SQL `INVOKE` / `INVOKE_SYNC` are client invokes too: they need `execute`
+/// on the function. They used to run any function, for anyone, as the system.
+#[tokio::test]
+async fn sql_invoke_needs_execute_on_the_function() {
+    let (app, creds) = app_with_credentials("sql-invoke").await;
+    // Its own repository: the SQL catalog is cached per tenant and repository
+    // process-wide, and the other tests here built REPO's without `functions`.
+    const R: &str = "gates_invoke";
+    create_repository(&app, R, "main").await;
+    crate::support::create_workspace(&app, R, "functions").await;
+    let run = |statement: &str, token: Option<&str>| {
+        let body = json!({ "sql": statement });
+        let mut req = post(&format!("/api/sql/{R}"));
+        if let Some(t) = token {
+            req = bearer(req, t);
+        }
+        let app = app.clone();
+        async move { send(&app, req.body(json_body(&body)).unwrap()).await }
+    };
+    let (status, text) = run(
+        "INSERT INTO functions (path, node_type, properties) VALUES \
+         ('/probe', 'raisin:Function', '{\"name\":\"probe\",\"title\":\"probe\",\"language\":\"javascript\",\"execution_context\":\"system\"}'::JSONB)",
+        Some(crate::support::ADMIN_TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "seed function: {text}");
+
+    for statement in [
+        "SELECT INVOKE_SYNC('/probe', '{}'::jsonb) AS r",
+        "SELECT INVOKE('/probe', '{}'::jsonb) AS r",
+    ] {
+        // Anonymous: refused before anything runs.
+        let (status, text) = run(statement, None).await;
+        assert!(
+            !status.is_success() && text.contains("Forbidden"),
+            "anonymous {statement}: {status} {text}"
+        );
+        // The operator passes the gate; the probe has no code, so INVOKE_SYNC
+        // fails later, on loading it, and INVOKE queues a job.
+        let (_, text) = run(statement, Some(&creds.admin_jwt)).await;
+        assert!(!text.contains("Forbidden"), "admin {statement}: {text}");
+    }
+}
