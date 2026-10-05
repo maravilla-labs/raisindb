@@ -53,6 +53,29 @@ pub(super) fn is_zero(lit: &Literal) -> bool {
     }
 }
 
+/// `left <op> right` for a comparison operator (`=`, `<>`, `<`, `<=`, `>`,
+/// `>=`), in SQL three-valued logic: a NULL operand makes the result NULL
+/// (unknown), never TRUE or FALSE. THE one entry point for comparison
+/// operators — the sync and async evaluators, BETWEEN and IN all go through
+/// it. `literals_equal` / `compare_literals` answer a two-valued question
+/// and must not be negated directly: `!(NULL = x)` is how `NULL <> x` used to
+/// come out TRUE and match every row with a missing value.
+pub(super) fn comparison_op(
+    left: &Literal,
+    op: BinaryOperator,
+    right: &Literal,
+) -> Result<Literal, Error> {
+    if matches!(left, Literal::Null) || matches!(right, Literal::Null) {
+        return Ok(Literal::Null);
+    }
+    let result = match op {
+        BinaryOperator::Eq => literals_equal(left, right)?,
+        BinaryOperator::NotEq => !literals_equal(left, right)?,
+        _ => compare_literals(left, right, op)?,
+    };
+    Ok(Literal::Boolean(result))
+}
+
 /// Compare two literals for equality
 #[inline]
 pub(super) fn literals_equal(left: &Literal, right: &Literal) -> Result<bool, Error> {

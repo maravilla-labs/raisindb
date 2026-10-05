@@ -45,6 +45,7 @@ mod index_read_bench_writes;
 mod is_distinct_from;
 mod join_property_tests;
 mod limit_pushdown_tests;
+mod localized_name_null_compare;
 mod localized_name_uniqueness;
 mod localized_paths;
 mod locks_sql_test;

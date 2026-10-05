@@ -4,9 +4,7 @@ use crate::physical_plan::executor::Row;
 use raisin_error::Error;
 use raisin_sql::analyzer::{BinaryOperator, Literal, TypedExpr, UnaryOperator};
 
-use super::helpers::{
-    arithmetic_op, compare_literals, is_zero, literals_equal, logical_and, logical_or,
-};
+use super::helpers::{arithmetic_op, comparison_op, is_zero, logical_and, logical_or};
 use super::vector_ops::{dot_product, extract_vector, l2_distance};
 
 /// Evaluate a binary operation
@@ -62,13 +60,12 @@ pub(super) fn eval_binary_op(
         BinaryOperator::Modulo => arithmetic_op(&left_val, &right_val, |a, b| a % b),
 
         // Comparison operators
-        BinaryOperator::Eq => Ok(Literal::Boolean(literals_equal(&left_val, &right_val)?)),
-        BinaryOperator::NotEq => Ok(Literal::Boolean(!literals_equal(&left_val, &right_val)?)),
-        BinaryOperator::Lt | BinaryOperator::LtEq | BinaryOperator::Gt | BinaryOperator::GtEq => {
-            Ok(Literal::Boolean(compare_literals(
-                &left_val, &right_val, *op,
-            )?))
-        }
+        BinaryOperator::Eq
+        | BinaryOperator::NotEq
+        | BinaryOperator::Lt
+        | BinaryOperator::LtEq
+        | BinaryOperator::Gt
+        | BinaryOperator::GtEq => comparison_op(&left_val, *op, &right_val),
 
         // Logical operators
         BinaryOperator::And => logical_and(&left_val, &right_val),

@@ -17,7 +17,7 @@ use raisin_sql::analyzer::{BinaryOperator, Expr, Literal, TypedExpr};
 use super::binary_ops::{eval_binary_op, eval_unary_op};
 use super::casting::cast_literal;
 use super::functions::{eval_function, generate_function_column_name};
-use super::helpers::{compare_literals, literals_equal};
+use super::helpers::{comparison_op, logical_and, logical_or};
 use super::pattern::{sql_ilike_match, sql_like_match};
 
 /// Evaluate a typed expression against a row
@@ -68,9 +68,10 @@ pub fn eval_expr(expr: &TypedExpr, row: &Row) -> Result<Literal, Error> {
             let value = eval_expr(expr, row)?;
             let low_val = eval_expr(low, row)?;
             let high_val = eval_expr(high, row)?;
-            let ge_low = compare_literals(&value, &low_val, BinaryOperator::GtEq)?;
-            let le_high = compare_literals(&value, &high_val, BinaryOperator::LtEq)?;
-            Ok(Literal::Boolean(ge_low && le_high))
+            // Three-valued: a NULL bound or operand makes the half unknown.
+            let ge_low = comparison_op(&value, BinaryOperator::GtEq, &low_val)?;
+            let le_high = comparison_op(&value, BinaryOperator::LtEq, &high_val)?;
+            logical_and(&ge_low, &le_high)
         }
 
         Expr::InList {
@@ -250,18 +251,26 @@ fn eval_in_list(
     negated: bool,
     row: &Row,
 ) -> Result<Literal, Error> {
+    // Three-valued (`x IN (a, b)` is `x = a OR x = b`): a match is TRUE;
+    // no match is FALSE unless some comparison was unknown (a NULL operand or
+    // a NULL item), which makes it NULL — so `NULL NOT IN (…)` and
+    // `x NOT IN (…, NULL)` never come out TRUE.
     let value = eval_expr(expr, row)?;
-    let mut found = false;
-
+    let mut result = Literal::Boolean(false);
     for item in list {
         let item_val = eval_expr(item, row)?;
-        if literals_equal(&value, &item_val)? {
-            found = true;
+        result = logical_or(
+            &result,
+            &comparison_op(&value, BinaryOperator::Eq, &item_val)?,
+        )?;
+        if result == Literal::Boolean(true) {
             break;
         }
     }
-
-    Ok(Literal::Boolean(if negated { !found } else { found }))
+    match result {
+        Literal::Boolean(found) => Ok(Literal::Boolean(found != negated)),
+        other => Ok(other),
+    }
 }
 
 /// Evaluate LIKE expression
