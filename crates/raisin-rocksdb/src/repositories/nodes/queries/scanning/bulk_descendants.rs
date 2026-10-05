@@ -76,7 +76,14 @@ impl NodeRepositoryImpl {
                 None => blob_revision.max(path_revision),
             };
             let node = self.deserialize_node_with_path(
-                &bytes, tenant_id, repo_id, branch, workspace, &node_id, &path_at,
+                &bytes,
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                &node_id,
+                &path_at,
+                &blob_revision,
             )?;
 
             // Verify the path matches (safety check)

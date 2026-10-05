@@ -1,5 +1,7 @@
 //! Export functions for backup (nodes, branches, workspaces, revisions, trees, nodetypes)
 
+use crate::management::async_indexing::node_key_parse::parse_node_key;
+use crate::repositories::nodes::helpers::is_tombstone;
 use crate::{cf, cf_handle, keys, RocksDBStorage};
 use raisin_context::Branch;
 use raisin_error::Result;
@@ -17,32 +19,66 @@ pub(super) struct TreeBackupEntry {
     pub entries: Vec<raisin_models::tree::TreeEntry>,
 }
 
-/// Export all nodes from a repository
+/// Export every node of a repository: on each branch, the version of each
+/// node visible at that branch's HEAD (a node deleted there is skipped),
+/// decoded through the ONE node decoder so its path comes from the read rule.
+///
+/// A `StorageNode` blob — what every writer stores since Phase 10b — embeds
+/// no path, and `Node.path` is `#[serde(default)]`: decoding the blob raw as
+/// a `Node` exported `"path": ""` for every such node, and a restore then
+/// wrote that empty path back. Every version of every node used to be
+/// exported, too, and the import (which writes them all at one revision)
+/// kept whichever came last — the OLDEST.
 pub(super) async fn export_all_repository_nodes(
     storage: &RocksDBStorage,
     tenant_id: &str,
     repo_id: &str,
 ) -> Result<Vec<Node>> {
-    let cf_nodes = cf_handle(storage.db(), cf::NODES)?;
-    let prefix = keys::repo_prefix(tenant_id, repo_id);
-
+    let db = storage.db();
+    let cf_nodes = cf_handle(db, cf::NODES)?;
     let mut nodes = Vec::new();
-    let iter = crate::prefix_scan(storage.db(), cf_nodes, &prefix);
 
-    for item in iter {
-        let (key, value) =
-            item.map_err(|e| raisin_error::Error::storage(format!("Iterator error: {}", e)))?;
-
-        let key_str = String::from_utf8_lossy(&key);
-        if !key_str.contains("\0nodes\0") {
-            continue;
-        }
-
-        if !value.is_empty() {
-            match rmp_serde::from_slice::<Node>(&value) {
-                Ok(node) => nodes.push(node),
+    for branch in export_branches(storage, tenant_id, repo_id).await? {
+        let prefix = keys::branch_prefix(tenant_id, repo_id, &branch.name);
+        // The node whose visible version was already decided; its older
+        // versions follow it in key order (revisions descend).
+        let mut decided: Option<(String, String)> = None;
+        for item in crate::prefix_scan(db, cf_nodes, &prefix) {
+            let (key, value) =
+                item.map_err(|e| raisin_error::Error::storage(format!("Iterator error: {}", e)))?;
+            let Some((workspace, node_id, revision)) = parse_node_key(&prefix, &key) else {
+                continue;
+            };
+            if revision > branch.head {
+                continue;
+            }
+            if decided
+                .as_ref()
+                .is_some_and(|(w, i)| w == workspace && i == node_id)
+            {
+                continue;
+            }
+            decided = Some((workspace.to_string(), node_id.to_string()));
+            if is_tombstone(&value) {
+                continue;
+            }
+            match crate::mvcc_read::deserialize_node_with_path(
+                db,
+                &value,
+                tenant_id,
+                repo_id,
+                &branch.name,
+                workspace,
+                node_id,
+                &branch.head,
+                &revision,
+            ) {
+                Ok(mut node) => {
+                    node.workspace = Some(workspace.to_string());
+                    nodes.push(node);
+                }
                 Err(e) => {
-                    tracing::warn!("Failed to deserialize node: {}", e);
+                    tracing::warn!(node_id, workspace, error = %e, "backup: failed to decode node");
                 }
             }
         }

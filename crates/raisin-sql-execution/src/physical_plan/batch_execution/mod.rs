@@ -63,6 +63,7 @@ mod tests;
 pub use accumulator::RowAccumulator;
 pub use config::BatchExecutionConfig;
 pub use project::execute_project_batch;
+pub(crate) use project::property_values_to_column_array;
 pub use scan::{
     execute_prefix_scan_batch, execute_property_index_scan_batch, execute_table_scan_batch,
 };

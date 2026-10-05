@@ -56,6 +56,7 @@ impl ApplyRevisionCaptureEnv {
             default_branch: BRANCH.to_string(),
             description: Some("Apply revision capture tests".to_string()),
             tags: HashMap::new(),
+            localized_names: Default::default(),
         };
         storage
             .repository_management()

@@ -108,20 +108,29 @@ impl MaintenanceJobHandler {
                 };
                 let kind = RepairKind::from_slug(repair)
                     .ok_or_else(|| Error::Validation(format!("unknown index repair '{repair}'")))?;
-                to_value(
-                    run_repair(
-                        storage,
-                        tenant_id,
-                        repo_id,
-                        branch.as_deref(),
-                        kind,
-                        RepairOptions {
-                            dry_run: *dry_run,
-                            ..RepairOptions::default()
-                        },
-                    )
-                    .await?,
+                let outcome = run_repair(
+                    storage,
+                    tenant_id,
+                    repo_id,
+                    branch.as_deref(),
+                    kind,
+                    RepairOptions {
+                        dry_run: *dry_run,
+                        ..RepairOptions::default()
+                    },
                 )
+                .await;
+                // A link of an automatic chain continues it, whatever its
+                // outcome (`repair::auto_targets::after_link`).
+                crate::management::async_indexing::repair::after_link(
+                    storage,
+                    kind,
+                    context,
+                    (tenant_id, repo_id, branch.as_deref()),
+                    outcome.is_ok(),
+                )
+                .await;
+                to_value(outcome?)
             }
             // HNSW needs no optimisation pass; the job exists so the endpoint's
             // job-id contract holds. Say what happened.

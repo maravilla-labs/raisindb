@@ -123,13 +123,14 @@ where
             // issuing 20 queries used to perform 20 full workspace listings.
             let engine = build_engine(&deps, &tenant, &repo, &branch, auth).await?;
 
-            // 3. Substitute parameters into SQL
-            let final_sql = substitute_params(&sql, &params)?;
-
-            tracing::debug!(final_sql = %final_sql, "Executing substituted SQL");
+            // 3. Parameters are bound by the engine: one prepared template
+            // serves every call of this SQL, whatever the values (plan
+            // Phase 13d).
 
             // 4. Execute and collect rows
-            let mut stream = engine.execute(&final_sql).await?;
+            let mut stream = engine
+                .execute_with_params(&sql, &params, &format_value)
+                .await?;
             let mut rows = Vec::new();
 
             while let Some(row_result) = stream.next().await {
@@ -182,10 +183,9 @@ where
             // 1-2. Build the engine (shared, cached catalog — see `build_engine`).
             let engine = build_engine(&deps, &tenant, &repo, &branch, auth).await?;
 
-            // 3. Substitute parameters into SQL
-            let final_sql = substitute_params(&sql, &params)?;
-
-            tracing::debug!(final_sql = %final_sql, "Executing substituted SQL");
+            // 3. Parameters are bound by the engine: one prepared template
+            // serves every call of this SQL, whatever the values (plan
+            // Phase 13d).
 
             // 4. Execute and report affected rows.
             //
@@ -196,7 +196,9 @@ where
             // that matched 0 rows would look like it affected 1).
             // Fall back to counting rows for statements that don't surface the
             // summary column.
-            let mut stream = engine.execute(&final_sql).await?;
+            let mut stream = engine
+                .execute_with_params(&sql, &params, &format_value)
+                .await?;
             let mut affected: i64 = 0;
             let mut row_count: i64 = 0;
             let mut saw_affected = false;
@@ -235,7 +237,7 @@ where
 ///
 /// This is a simple string-based substitution. For production use,
 /// consider proper prepared statement support.
-use crate::execution::callbacks::sql_params::substitute_params;
+use crate::execution::callbacks::sql_params::format_value;
 
 /// Convert a JSON value to SQL literal string
 fn json_value_to_sql(val: &Value) -> String {

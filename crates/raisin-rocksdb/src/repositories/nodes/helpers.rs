@@ -81,6 +81,15 @@ pub(crate) fn hash_property_value(value: &PropertyValue) -> String {
         PropertyValue::Resource(res) => format!("resource:{}", res.uuid),
         PropertyValue::Element(block) => format!("block:{}", block.uuid),
         PropertyValue::Composite(container) => format!("container:{}", container.uuid),
+        // An EMPTY vector is an empty array that went through a decode:
+        // `PropertyValue` is untagged, so a stored `[]` (every node's `$mixins`,
+        // any empty list property) comes back as `Vector([])`. Hashed apart,
+        // the in-memory version a writer indexes (`[]`) and the decoded one a
+        // baseline, rebuild or verify derives (`vector:0d`) disagreed: every
+        // update tombstoned a key nothing wrote, and the verify reported the
+        // entry missing on every node written since the rebuild
+        // (`verify_after_update_with_stamped_mixins_finds_no_hole`).
+        PropertyValue::Vector(v) if v.is_empty() => "[]".to_string(),
         PropertyValue::Vector(v) => {
             // For vectors, create a compact representation with dimensions
             // Don't serialize full vector to avoid huge index keys

@@ -3,7 +3,7 @@
 mod archetypes;
 mod audit;
 mod branches;
-mod compound_index;
+pub(crate) mod compound_index;
 mod element_types;
 mod embedding_storage;
 mod excerpt_fetcher;
@@ -28,7 +28,7 @@ mod tags;
 mod tenant_ai_config;
 mod tenant_auth_config;
 mod tenant_embedding_config;
-mod translations;
+pub(crate) mod translations;
 mod trees;
 mod unique_index;
 mod versioning;
@@ -79,7 +79,6 @@ pub use versioning::VersioningRepositoryImpl;
 pub use workspaces::WorkspaceRepositoryImpl;
 
 // Re-export helpers for internal use
-pub(crate) use nodes::add_stale_property_tombstones;
 pub(crate) use nodes::hash_property_value;
 pub(crate) use nodes::StorageNode;
 pub(crate) use nodes::{

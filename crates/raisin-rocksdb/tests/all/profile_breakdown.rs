@@ -33,6 +33,7 @@ async fn profile_operation_breakdown() -> Result<()> {
         default_language: "en".to_string(),
         supported_languages: vec!["en".to_string()],
         locale_fallback_chains: HashMap::new(),
+        localized_names: Default::default(),
     };
 
     // Test at different scales to see degradation

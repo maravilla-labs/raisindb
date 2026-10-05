@@ -171,6 +171,18 @@ pub(crate) fn default_nodes_table() -> TableDef {
                 nullable: true,
                 generated: Some(GeneratedExpr::SpatialMatchedPath),
             },
+            ColumnDef {
+                name: "__node_name".into(),
+                data_type: DataType::Text,
+                nullable: true,
+                generated: Some(GeneratedExpr::LocalizedNodeName),
+            },
+            ColumnDef {
+                name: "__localized_path".into(),
+                data_type: DataType::Text,
+                nullable: true,
+                generated: Some(GeneratedExpr::LocalizedPath),
+            },
         ],
         primary_key: vec!["path".into()],
         indexes: vec![
@@ -362,6 +374,19 @@ pub(crate) fn workspace_table(table_name: &str, embedding_dimensions: Option<usi
             data_type: DataType::Text,
             nullable: true,
             generated: Some(GeneratedExpr::SpatialMatchedPath),
+        },
+        // Localized URL columns (plan Phase 12): opt-in, like the spatial ones.
+        ColumnDef {
+            name: "__node_name".into(),
+            data_type: DataType::Text,
+            nullable: true,
+            generated: Some(GeneratedExpr::LocalizedNodeName),
+        },
+        ColumnDef {
+            name: "__localized_path".into(),
+            data_type: DataType::Text,
+            nullable: true,
+            generated: Some(GeneratedExpr::LocalizedPath),
         },
     ];
 

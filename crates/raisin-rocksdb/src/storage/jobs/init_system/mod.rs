@@ -121,7 +121,6 @@ impl RocksDBStorage {
         let snapshot_handler = replication_handlers::create_snapshot_handler(&self);
         let replication_gc_handler = replication_handlers::create_replication_gc_handler(&self);
         let replication_sync_handler = replication_handlers::create_replication_sync_handler(&self);
-        let oplog_compaction_handler = replication_handlers::create_oplog_compaction_handler(&self);
 
         let bulk_sql_handler = flow_handlers::create_bulk_sql_handler(sql_executor);
         let (copy_tree_handler, restore_tree_handler, revision_history_copy_handler) =
@@ -284,7 +283,6 @@ impl RocksDBStorage {
             snapshot_handler,
             replication_gc_handler,
             replication_sync_handler,
-            oplog_compaction_handler,
             property_index_handler,
             compound_index_handler,
             bulk_sql_handler,
@@ -386,6 +384,31 @@ impl RocksDBStorage {
             self.clone(),
             ai_tool_call_execution_handler.clone(),
         );
+
+        // Background build requests from code without a storage handle (a
+        // branch create, a lookup) reach this storage from here on.
+        crate::management::async_indexing::repair::register_requester(&self);
+
+        // Existing databases migrate to the one node-record format without an
+        // admin call: queue the node_path backfill on every branch where it has
+        // not completed on this node (spawned, delayed; plan Phase 10b).
+        crate::management::async_indexing::repair::schedule_node_path_backfill(self.clone());
+
+        // The localized name index is on by default (plan Phase 12, owner
+        // decision 2026-10-04): each branch's build is queued in the
+        // background, one branch at a time, never on the boot path.
+        crate::localized_name::auto::schedule_after_start(self.clone());
+
+        // `index.skip_unchanged` is on by default (plan Phase 7b): each
+        // branch's `property_index` rebuild — what unlocks skipping there — is
+        // queued in the background, one branch at a time, never on the boot
+        // path.
+        crate::management::async_indexing::repair::schedule_property_index_rebuild(self.clone());
+
+        // Block overlays of deleted nodes get the `T` their delete never
+        // wrote (plan Phase 11c): a cleanup queued in the background, one
+        // branch at a time, never on the boot path.
+        crate::management::async_indexing::repair::schedule_block_overlay_tombstones(self.clone());
 
         tracing::info!(
             realtime_workers = pools_config.realtime.dispatcher_workers,

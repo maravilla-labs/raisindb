@@ -3,6 +3,7 @@
 mod branch;
 mod config;
 mod context;
+mod localized_names;
 mod workspace;
 
 #[cfg(test)]
@@ -14,4 +15,5 @@ pub use branch::{
 };
 pub use config::{RepositoryConfig, RepositoryInfo};
 pub use context::RepositoryContext;
+pub use localized_names::LocalizedNameConfig;
 pub use workspace::{WorkspaceConfig, WorkspaceScope};

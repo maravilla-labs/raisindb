@@ -243,15 +243,14 @@ async fn lookup_by_id<S: Storage>(
         workspace,
         node_id
     );
-    let node_opt = storage
-        .nodes()
-        .get(
-            StorageScope::new(tenant_id, repo_id, branch, workspace),
-            node_id,
-            max_revision,
-        )
-        .await
-        .map_err(|e| ExecutionError::Backend(format!("IndexLookupJoin lookup error: {}", e)))?;
+    let node_opt = super::scan_executors::helpers::row_node(
+        &**storage,
+        StorageScope::new(tenant_id, repo_id, branch, workspace),
+        raisin_storage::NodeLocator::Id(node_id.to_string()),
+        max_revision,
+    )
+    .await
+    .map_err(|e| ExecutionError::Backend(format!("IndexLookupJoin lookup error: {}", e)))?;
 
     match node_opt {
         Some(node) => {
@@ -314,17 +313,14 @@ async fn lookup_by_path<S: Storage>(
     projection: &Option<Vec<String>>,
     ctx: &ExecutionContext<S>,
 ) -> Result<Option<Row>, ExecutionError> {
-    let node_opt = storage
-        .nodes()
-        .get_by_path(
-            StorageScope::new(tenant_id, repo_id, branch, workspace),
-            path,
-            max_revision,
-        )
-        .await
-        .map_err(|e| {
-            ExecutionError::Backend(format!("IndexLookupJoin path lookup error: {}", e))
-        })?;
+    let node_opt = super::scan_executors::helpers::row_node(
+        &**storage,
+        StorageScope::new(tenant_id, repo_id, branch, workspace),
+        raisin_storage::NodeLocator::Path(path.to_string()),
+        max_revision,
+    )
+    .await
+    .map_err(|e| ExecutionError::Backend(format!("IndexLookupJoin path lookup error: {}", e)))?;
 
     match node_opt {
         Some(node) => {

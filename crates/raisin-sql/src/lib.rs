@@ -49,6 +49,7 @@ pub mod logical_plan;
 pub mod optimizer;
 pub mod params;
 pub mod scalar;
+pub mod template;
 
 // Re-export commonly used items from ast
 pub use ast::{parse_sql, ParseError, RaisinDialect};
@@ -66,7 +67,7 @@ pub use logical_plan::{LogicalPlan, PlanBuilder, PlanError};
 pub use optimizer::{Optimizer, OptimizerConfig};
 
 // Re-export parameter substitution
-pub use params::{substitute_params, substitute_params_with};
+pub use params::{format_param_value, substitute_params, substitute_params_with};
 
 /// Complete query plan with analyzed statement, logical plan, and optimized plan
 #[derive(Debug, Clone)]

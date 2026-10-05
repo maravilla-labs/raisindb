@@ -147,6 +147,11 @@ pub(super) fn insert_optional_fields(
 }
 
 /// Insert computed fields (properties, depth, __workspace, locale, ordering).
+///
+/// `properties_later`: the caller owns the node and will MOVE its property map
+/// into the `properties` column once the per-property columns are copied out;
+/// a placeholder holds the column's position until then.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn insert_computed_fields(
     row: &mut Row,
     node: &Node,
@@ -155,6 +160,7 @@ pub(super) fn insert_computed_fields(
     effective_locale: &str,
     order_ctx: Option<&super::OrderContext<'_>>,
     should_include: &dyn Fn(&str) -> bool,
+    properties_later: bool,
 ) {
     use raisin_models::nodes::properties::PropertyValue;
 
@@ -162,7 +168,11 @@ pub(super) fn insert_computed_fields(
     if should_include("properties") {
         row.insert(
             format!("{}.properties", qualifier),
-            PropertyValue::Object(node.properties.clone()),
+            if properties_later {
+                PropertyValue::Null
+            } else {
+                PropertyValue::Object(node.properties.clone())
+            },
         );
     }
 
@@ -266,8 +276,15 @@ pub(super) fn insert_property_fields(
             }
         }
     } else {
-        // No projection - include all properties with qualified names
+        // No projection - include all properties with qualified names. A
+        // property literally named `properties` would overwrite the map
+        // column, and only in the borrowed entry point (the owned one writes
+        // the map afterwards) — so `SELECT *` would answer by scan kind. The
+        // column is the map, as with a projection.
         for (key, value) in &node.properties {
+            if key == "properties" {
+                continue;
+            }
             row.insert(format!("{}.{}", qualifier, key), value.clone());
         }
     }

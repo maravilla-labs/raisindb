@@ -17,17 +17,19 @@
 //! - [`OperationApplicator::load_node_before`] answers "the newest version
 //!   strictly below revision R", the baseline an out-of-order apply needs.
 //!
-//! # The workspace is not always known
+//! # Where the node lives
 //!
-//! An op's node carries its workspace — except from older peers, whose nodes
-//! may not, and the apply path then DEFAULTS it to `"default"`. A miss in a
-//! defaulted workspace cannot be told apart from "this node lives elsewhere",
-//! so it falls back to the branch scan, counted and warned
-//! ([`scoped_miss_fallbacks`]). The fallback is removed after a release in which
-//! that counter stayed at zero cluster-wide. A miss in an EXPLICIT workspace is
-//! a genuine "not stored here yet" (a create) and costs nothing more.
+//! A replicated node names its workspace: every emitter stamps it (the
+//! transaction commit, the repository capture, tree and cross-branch copy),
+//! so a miss in it is a genuine "not stored here yet" (a create) and costs
+//! nothing more. The fallback that scanned the branch when an op from an
+//! older peer named none is gone with those peers (plan "Phase 11d": no
+//! cluster runs a pre-v2 binary). Only an id-only delete
+//! (`DeleteNodeSnapshot`) still has to find the workspace by scan
+//! ([`WorkspaceHint::Unknown`], counted by [`unknown_workspace_scans`]).
 
 use super::OperationApplicator;
+use crate::mvcc_read::predecessor;
 use crate::{cf, cf_handle, keys};
 use raisin_error::Result;
 use raisin_hlc::HLC;
@@ -39,9 +41,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub enum WorkspaceHint<'a> {
     /// The op named the workspace: a miss means the node is not stored.
     Explicit(&'a str),
-    /// The op named none and `"default"`-style defaulting chose this one: a
-    /// miss falls back to the branch scan (see [`scoped_miss_fallbacks`]).
-    Defaulted(&'a str),
     /// Nothing names the workspace (a delete op carries only the id): only the
     /// branch scan can find it.
     Unknown,
@@ -50,28 +49,15 @@ pub enum WorkspaceHint<'a> {
 impl<'a> WorkspaceHint<'a> {
     /// The hint a replicated node's own `workspace` field gives.
     pub fn of(node: &'a Node) -> Self {
-        match node.workspace.as_deref() {
-            Some(ws) => Self::Explicit(ws),
-            None => Self::Defaulted(super::node_workspace(node)),
-        }
+        Self::Explicit(super::node_workspace(node))
     }
 }
 
-static SCOPED_MISS_FALLBACKS: AtomicU64 = AtomicU64::new(0);
-
 static UNKNOWN_WORKSPACE_SCANS: AtomicU64 = AtomicU64::new(0);
 
-/// How many baseline reads missed in a DEFAULTED workspace and had to scan the
-/// branch, since process start. Zero cluster-wide for a release is the signal
-/// to delete the fallback.
-pub fn scoped_miss_fallbacks() -> u64 {
-    SCOPED_MISS_FALLBACKS.load(Ordering::Relaxed)
-}
-
 /// How many baseline reads had NO workspace at all (an id-only delete) and
-/// scanned the branch, since process start. Reported beside
-/// [`scoped_miss_fallbacks`]: together they are every branch scan this path
-/// still performs.
+/// scanned the branch, since process start: every branch scan this path still
+/// performs.
 pub fn unknown_workspace_scans() -> u64 {
     UNKNOWN_WORKSPACE_SCANS.load(Ordering::Relaxed)
 }
@@ -108,6 +94,30 @@ impl OperationApplicator {
         self.load_node_at_or_before(tenant_id, repo_id, branch, workspace, node_id, Some(&bound))
     }
 
+    /// The version an apply at `revision` supersedes, with the revision it is
+    /// stored at: the one stored AT `revision` (a `versionable=false` write
+    /// overwrites its node's revision in place, so the version it replaces
+    /// sits at the very same key), else the newest strictly below. A replayed
+    /// duplicate finds itself, which diffs empty.
+    pub fn load_node_replaced_by(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: WorkspaceHint<'_>,
+        node_id: &str,
+        revision: &HLC,
+    ) -> Result<Option<(HLC, Node)>> {
+        self.load_versioned_at_or_before(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            node_id,
+            Some(revision),
+        )
+    }
+
     fn load_node_at_or_before(
         &self,
         tenant_id: &str,
@@ -117,26 +127,30 @@ impl OperationApplicator {
         node_id: &str,
         max_revision: Option<&HLC>,
     ) -> Result<Option<Node>> {
+        Ok(self
+            .load_versioned_at_or_before(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                node_id,
+                max_revision,
+            )?
+            .map(|(_, node)| node))
+    }
+
+    fn load_versioned_at_or_before(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: WorkspaceHint<'_>,
+        node_id: &str,
+        max_revision: Option<&HLC>,
+    ) -> Result<Option<(HLC, Node)>> {
         let found_in = match workspace {
             WorkspaceHint::Explicit(ws) => {
                 return self.load_scoped(tenant_id, repo_id, branch, ws, node_id, max_revision)
-            }
-            WorkspaceHint::Defaulted(ws) => {
-                if let Some(node) =
-                    self.load_scoped(tenant_id, repo_id, branch, ws, node_id, max_revision)?
-                {
-                    return Ok(Some(node));
-                }
-                let found_in = self.find_node_workspace(tenant_id, repo_id, branch, node_id)?;
-                SCOPED_MISS_FALLBACKS.fetch_add(1, Ordering::Relaxed);
-                tracing::warn!(
-                    node_id = %node_id,
-                    defaulted_workspace = %ws,
-                    found_in = ?found_in,
-                    "replication baseline: node not found in its defaulted workspace; \
-                     scanned the branch (op from a peer that did not name the workspace)"
-                );
-                found_in
             }
             WorkspaceHint::Unknown => {
                 UNKNOWN_WORKSPACE_SCANS.fetch_add(1, Ordering::Relaxed);
@@ -149,7 +163,9 @@ impl OperationApplicator {
         }
     }
 
-    /// One seek: the newest version at or before `max_revision` in `workspace`.
+    /// One seek: the newest version at or before `max_revision` in
+    /// `workspace`, with the revision it is stored at — through the one
+    /// baseline reader, `mvcc_read::node_version_at_or_before`.
     fn load_scoped(
         &self,
         tenant_id: &str,
@@ -158,29 +174,21 @@ impl OperationApplicator {
         workspace: &str,
         node_id: &str,
         max_revision: Option<&HLC>,
-    ) -> Result<Option<Node>> {
-        let cf_nodes = cf_handle(&self.db, cf::NODES)?;
-        let prefix = keys::node_key_prefix(tenant_id, repo_id, branch, workspace, node_id);
-        let Some((revision, value)) =
-            crate::mvcc_read::newest_at_or_before(&self.db, cf_nodes, &prefix, max_revision)?
-        else {
-            return Ok(None);
-        };
-        if super::is_tombstone(&value) {
-            return Ok(None);
-        }
-        let mut node = crate::mvcc_read::deserialize_node_with_path(
-            &self.db, &value, tenant_id, repo_id, branch, workspace, node_id, &revision,
-        )?;
-        // A repository-written blob carries no workspace, and callers (the
-        // id-only delete) read it back from here: the key is the authority.
-        node.workspace = Some(workspace.to_string());
-        Ok(Some(node))
+    ) -> Result<Option<(HLC, Node)>> {
+        Ok(crate::mvcc_read::node_version_at_or_before(
+            &self.db,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            node_id,
+            max_revision,
+        )?
+        .and_then(|(revision, node)| node.map(|node| (revision, node))))
     }
 
     /// The workspace holding a LIVE `node_id` on this branch, found by scanning
-    /// the branch's NODES keys. The slow path: only for ops that do not name
-    /// the workspace.
+    /// the branch's NODES keys. The slow path: only for id-only deletes.
     ///
     /// A workspace whose newest version of the id is a tombstone is skipped and
     /// the scan goes on: an id deleted in one workspace and live in another
@@ -225,28 +233,5 @@ impl OperationApplicator {
             }
         }
         Ok(None)
-    }
-}
-
-/// The greatest HLC strictly below `revision`, or `None` below the first.
-fn predecessor(revision: &HLC) -> Option<HLC> {
-    match (revision.timestamp_ms, revision.counter) {
-        (0, 0) => None,
-        (ts, 0) => Some(HLC::new(ts - 1, u64::MAX)),
-        (ts, counter) => Some(HLC::new(ts, counter - 1)),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::predecessor;
-    use raisin_hlc::HLC;
-
-    #[test]
-    fn predecessor_is_strictly_below() {
-        assert_eq!(predecessor(&HLC::new(5, 3)), Some(HLC::new(5, 2)));
-        assert_eq!(predecessor(&HLC::new(5, 0)), Some(HLC::new(4, u64::MAX)));
-        assert_eq!(predecessor(&HLC::new(0, 0)), None);
-        assert!(predecessor(&HLC::new(5, 0)).unwrap() < HLC::new(5, 0));
     }
 }

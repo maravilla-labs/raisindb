@@ -217,6 +217,46 @@ impl PhysicalPlanner {
             .collect()
     }
 
+    /// The text literal of a `column = '…'` predicate (case-insensitive
+    /// column name), e.g. `__localized_path` for `LocalizedPathLookup`.
+    pub(super) fn extract_text_column_eq(
+        &self,
+        predicates: &[CanonicalPredicate],
+        wanted: &str,
+    ) -> Option<String> {
+        predicates.iter().find_map(|pred| match pred {
+            CanonicalPredicate::ColumnEq { column, value, .. }
+                if column.eq_ignore_ascii_case(wanted) =>
+            {
+                match &value.expr {
+                    raisin_sql::analyzer::Expr::Literal(raisin_sql::analyzer::Literal::Text(s)) => {
+                        Some(s.clone())
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+    }
+
+    /// Every predicate but `column = …`.
+    pub(super) fn remove_column_eq(
+        &self,
+        predicates: &[CanonicalPredicate],
+        wanted: &str,
+    ) -> Vec<CanonicalPredicate> {
+        predicates
+            .iter()
+            .filter(|p| {
+                !matches!(
+                    p,
+                    CanonicalPredicate::ColumnEq { column, .. } if column.eq_ignore_ascii_case(wanted)
+                )
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Remove id equality predicate from list
     pub(super) fn remove_id_predicate(
         &self,

@@ -37,9 +37,11 @@
 mod child_placement;
 mod child_probe;
 mod key_parse;
+mod label_lookup;
 mod labels;
 mod operations;
 mod paged;
+mod paged_desc;
 mod put_entry;
 mod queries;
 mod rebalance;
@@ -48,10 +50,14 @@ mod tree_order;
 
 pub(crate) use child_placement::{child_is_under, node_path_at};
 pub(crate) use key_parse::parse_ordered_child_key;
+pub(crate) use label_lookup::{
+    current_order_label, last_live_order_label, live_entry_under_label, CurrentLabel,
+};
 pub(in crate::repositories::nodes) use labels::format_order_label;
+pub(crate) use labels::{mint_append_label, sorts_after};
 pub(in crate::repositories::nodes) use paged::{OrderedChildEntry, OrderedScanStart};
 pub(crate) use put_entry::put_ordered_child;
-pub(crate) use queries::{parent_index_id, stored_order_label};
+pub(crate) use queries::{parent_index_id, stored_order_label, stored_order_label_at};
 pub(in crate::repositories::nodes) use tree_order::{join_tree_order, split_tree_order};
 
 // Re-export nothing - all functions are pub(super) and accessed via NodeRepositoryImpl

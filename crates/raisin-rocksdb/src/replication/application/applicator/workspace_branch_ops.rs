@@ -60,6 +60,22 @@ impl OperationApplicator {
             }
         }
 
+        if current_head.is_none() {
+            // A branch new to this node (possibly re-created under a deleted
+            // one's name) inherits no repair state: see `create_branch`.
+            let mut batch = rocksdb::WriteBatch::default();
+            crate::management::async_indexing::repair::forget_branch_rebuild_state(
+                &self.db,
+                &mut batch,
+                tenant_id,
+                repo_id,
+                &branch.name,
+            )?;
+            self.db
+                .write(batch)
+                .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+        }
+
         let key = keys::branch_key(tenant_id, repo_id, &branch.name);
         let cf = cf_handle(&self.db, cf::BRANCHES)?;
 
@@ -144,8 +160,14 @@ impl OperationApplicator {
         let key = keys::branch_key(tenant_id, repo_id, branch_id);
         let cf = cf_handle(&self.db, cf::BRANCHES)?;
 
+        // The branch's repair state records go with it (see `delete_branch`).
+        let mut batch = rocksdb::WriteBatch::default();
+        crate::management::async_indexing::repair::forget_branch_rebuild_state(
+            &self.db, &mut batch, tenant_id, repo_id, branch_id,
+        )?;
+        batch.delete_cf(cf, key);
         self.db
-            .delete_cf(cf, key)
+            .write(batch)
             .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
 
         tracing::info!(

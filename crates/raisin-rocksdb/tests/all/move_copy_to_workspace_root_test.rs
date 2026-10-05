@@ -63,6 +63,7 @@ impl TestStorage {
                     default_branch: "main".to_string(),
                     description: Some("move/copy to workspace root".to_string()),
                     tags: HashMap::new(),
+                    localized_names: Default::default(),
                 },
             )
             .await?;

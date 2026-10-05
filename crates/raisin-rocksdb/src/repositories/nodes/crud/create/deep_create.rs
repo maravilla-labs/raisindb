@@ -169,6 +169,17 @@ impl NodeRepositoryImpl {
         // order).
         reservation_guard.reserve(tenant_id, repo_id, branch, workspace, path)?;
 
+        // The leaf's id may be the caller's: its stored versions, recorded
+        // before anything about it is read, are re-checked at commit
+        // (`StagedDeltaCheck`, plan Phase 7b) so a version of that id
+        // committed in between is ended. Intermediate folders get fresh ids.
+        let leaf_check = crate::indexing::StagedDeltaCheck::capture(
+            &self.db,
+            &crate::indexing::IndexCtx::new(tenant_id, repo_id, branch, workspace),
+            &node.id,
+            &revision,
+        )?;
+
         // Validate target node (but skip parent validation since we're creating parents)
         let validation_options = raisin_storage::CreateNodeOptions {
             validate_parent_allows_child: false,
@@ -193,7 +204,13 @@ impl NodeRepositoryImpl {
         let mut last_labels: HashMap<String, String> = HashMap::new();
 
         for (node_to_create, parent_id) in &nodes_to_create {
-            self.add_node_to_batch(
+            // The parent id is known here, and the parent may be staged in
+            // this same unwritten batch: a writer resolving it from the
+            // committed PATH_INDEX (the localized name index's) would not
+            // find it.
+            let parent_id_for_record =
+                crate::repositories::nodes::parent_id_of(Some(parent_id.as_str()));
+            self.add_node_to_batch_with_parent_id(
                 &mut batch,
                 node_to_create,
                 tenant_id,
@@ -202,7 +219,20 @@ impl NodeRepositoryImpl {
                 workspace,
                 &revision,
                 None,
+                parent_id_for_record.as_deref(),
+                crate::repositories::nodes::PropertyWrite::CREATE,
             )?;
+            // Compound entries too (plan Phase 8: every create funnel): deep
+            // create wrote none, so a deep-created node was missing from every
+            // typed folder listing the compound index served.
+            self.add_compound_delta_to_batch(
+                &mut batch,
+                &crate::indexing::IndexCtx::new(tenant_id, repo_id, branch, workspace),
+                crate::indexing::Baseline::NoPrior,
+                node_to_create,
+                &revision,
+            )
+            .await?;
 
             // Calculate fractional index order label
             let order_label = if let Some(last) = last_labels.get(parent_id) {
@@ -269,9 +299,19 @@ impl NodeRepositoryImpl {
             )?;
         }
 
+        // Every node is locked like any write of it (plan Phase 7b); the
+        // leaf's check is re-validated, the fresh folders need none.
+        let mut commit = crate::indexing::NodeCommit::new(tenant_id, repo_id, branch);
+        for (node_to_create, _) in &nodes_to_create {
+            if node_to_create.id == leaf_check.node_id() {
+                commit.check(leaf_check.clone(), Some(node_to_create.clone()));
+            } else {
+                commit.touch(&node_to_create.id);
+            }
+        }
         let updated_branch = self
             .branch_repo
-            .write_batch_with_head(batch, tenant_id, repo_id, branch, revision)
+            .write_nodes_with_head(batch, tenant_id, repo_id, branch, revision, &commit)
             .await?;
 
         // The write is durable — release every path reservation now (the

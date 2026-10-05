@@ -65,6 +65,7 @@ impl Env {
             default_branch: BRANCH.to_string(),
             description: Some("Replication attribution tests".to_string()),
             tags: HashMap::new(),
+            localized_names: Default::default(),
         };
         storage
             .repository_management()

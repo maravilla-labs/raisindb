@@ -64,15 +64,14 @@ pub use handlers::{
     FulltextJobHandler, FunctionExecutionHandler, FunctionMagicLinkEmailSender,
     HuggingFaceModelHandler, IntegrationTokenRefreshHandler, JobHandlerRegistry, McpDiscoveryDeps,
     McpToolDiscoveryHandler, NodeChangeInfo, NodeCreatorCallback, NodeDeleteCleanupHandler,
-    OpLogCompactionHandler, PackageCreateFromSelectionHandler, PackageExportHandler,
-    PackageInstallHandler, PackageInstallMode, PackageProcessHandler, PropertyIndexJobHandler,
-    RelationConsistencyHandler, ReplicationGCHandler, ReplicationSyncHandler,
-    RestoreTreeExecutorCallback, RestoreTreeHandler, ResumableUploadHandler,
-    RetargetReferencesHandler, RevisionHistoryCopyHandler, RocksDBFlowCallbacks,
-    RocksDBUserNodeCreator, ScheduledInvocationHandler, ScheduledTriggerHandler, SnapshotHandler,
-    SqlExecutorCallback, TranslationChangeInfo, TriggerBreaker, TriggerBreakerStats,
-    TriggerEvaluationHandler, TriggerSafetyConfig, UploadSessionCleanupHandler,
-    VirtualMountSyncHandler,
+    PackageCreateFromSelectionHandler, PackageExportHandler, PackageInstallHandler,
+    PackageInstallMode, PackageProcessHandler, PropertyIndexJobHandler, RelationConsistencyHandler,
+    ReplicationGCHandler, ReplicationSyncHandler, RestoreTreeExecutorCallback, RestoreTreeHandler,
+    ResumableUploadHandler, RetargetReferencesHandler, RevisionHistoryCopyHandler,
+    RocksDBFlowCallbacks, RocksDBUserNodeCreator, ScheduledInvocationHandler,
+    ScheduledTriggerHandler, SnapshotHandler, SqlExecutorCallback, TranslationChangeInfo,
+    TriggerBreaker, TriggerBreakerStats, TriggerEvaluationHandler, TriggerSafetyConfig,
+    UploadSessionCleanupHandler, VirtualMountSyncHandler,
 };
 // Additional exports for external use (transport layer callbacks)
 pub use flow_instance_lock::{FlowInstanceBusy, FlowInstanceLease, FlowInstanceLockManager};

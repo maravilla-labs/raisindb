@@ -62,6 +62,11 @@ pub(crate) fn add_reference_index_entries(
     node: &Node,
     revision: &HLC,
 ) -> Result<()> {
+    // Every reference is re-put at every version's revision — never skipped
+    // when unchanged (plan Phase 7 deviation). A reference kept from below
+    // the revision by a skip would be masked by any tombstone a write
+    // committed BELOW this version later puts (an out-of-order commit, or a
+    // replicated op older than a local version), and nothing re-asserts it.
     let is_published = node.published_at.is_some();
 
     for (property_path, reference) in walk_references(&node.properties) {
@@ -166,6 +171,7 @@ pub(crate) fn add_stale_reference_tombstones(
 impl NodeRepositoryImpl {
     /// Add reference indexes (forward and reverse) for all references in the
     /// node's property tree (nested arrays/objects/element content included).
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::repositories) fn add_reference_indexes(
         &self,
         batch: &mut WriteBatch,

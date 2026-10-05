@@ -1,11 +1,12 @@
-//! A replica's compound indexes fail closed after a replicated write.
+//! A replica's compound indexes fail closed after a replicated write it
+//! could not index.
 //!
-//! The replication apply path writes no COMPOUND_INDEX entries (Phase 8 step
-//! 3), so a replicated upsert leaves this node's compound keyspace behind its
-//! node records. Before this, the state record still said `Ready`, and the
-//! planner served the stale keyspace — a moved or edited node answered by its
-//! OLD column values. Now the apply marks the workspace's indexes `NotBuilt`
-//! (the planner scans) until a local build re-earns `Ready`.
+//! Since plan Phase 8 step 3 the apply path writes COMPOUND entries itself
+//! whenever the node type's definitions are in the local cache
+//! (`delta_writer::compound_replica_tests`). This test is the other side: the
+//! type `test:Item` was never declared here, so its definitions are COLD and
+//! the write cannot be indexed — the apply marks the workspace's indexes
+//! `NotBuilt` (the planner scans) until a local build re-earns `Ready`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -69,6 +70,7 @@ async fn setup() -> (Arc<RocksDBStorage>, TempDir) {
                 default_branch: BRANCH.to_string(),
                 description: None,
                 tags: HashMap::new(),
+                localized_names: Default::default(),
             },
         )
         .await

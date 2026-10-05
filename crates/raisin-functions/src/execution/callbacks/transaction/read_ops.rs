@@ -22,10 +22,11 @@ use raisin_storage::transactional::TransactionalStorage;
 use raisin_storage::Storage;
 use serde_json::Value;
 
-use super::helpers::{row_to_json_object, substitute_params};
+use super::helpers::row_to_json_object;
 use super::store::TransactionStore;
 use crate::api::{TxGetByPathCallback, TxGetCallback, TxListChildrenCallback};
 use crate::execution::callbacks::sql_generator;
+use crate::execution::callbacks::sql_params::format_value;
 
 /// Create the tx_get callback.
 ///
@@ -43,10 +44,11 @@ where
             })?;
 
             let stmt = sql_generator::generate_select_by_id(&workspace, &id);
-            let final_sql = substitute_params(&stmt.sql, &stmt.params)?;
 
             let engine_guard = engine.lock().await;
-            let mut stream = engine_guard.execute(&final_sql).await?;
+            let mut stream = engine_guard
+                .execute_with_params(&stmt.sql, &stmt.params, &format_value)
+                .await?;
 
             let result = if let Some(row_result) = stream.next().await {
                 let row = row_result?;
@@ -77,10 +79,11 @@ where
             })?;
 
             let stmt = sql_generator::generate_select_by_path(&workspace, &path);
-            let final_sql = substitute_params(&stmt.sql, &stmt.params)?;
 
             let engine_guard = engine.lock().await;
-            let mut stream = engine_guard.execute(&final_sql).await?;
+            let mut stream = engine_guard
+                .execute_with_params(&stmt.sql, &stmt.params, &format_value)
+                .await?;
 
             let result = if let Some(row_result) = stream.next().await {
                 let row = row_result?;
@@ -112,10 +115,11 @@ where
                 })?;
 
                 let stmt = sql_generator::generate_select_children(&workspace, &parent_path, None);
-                let final_sql = substitute_params(&stmt.sql, &stmt.params)?;
 
                 let engine_guard = engine.lock().await;
-                let mut stream = engine_guard.execute(&final_sql).await?;
+                let mut stream = engine_guard
+                    .execute_with_params(&stmt.sql, &stmt.params, &format_value)
+                    .await?;
 
                 let mut results: Vec<Value> = Vec::new();
                 while let Some(row_result) = stream.next().await {

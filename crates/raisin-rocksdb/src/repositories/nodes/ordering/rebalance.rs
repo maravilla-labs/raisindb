@@ -250,10 +250,12 @@ impl NodeRepositoryImpl {
                 )
                 .await?
             {
+                let old = node.clone();
                 node.order_key = new_full_label.clone();
                 node.updated_at = Some(chrono::Utc::now());
-                self.add_node_indexes_to_batch_with_parent_id(
+                self.rewrite_node_record_to_batch(
                     &mut batch,
+                    &old,
                     &node,
                     tenant_id,
                     repo_id,
@@ -261,7 +263,8 @@ impl NodeRepositoryImpl {
                     workspace,
                     &revision,
                     Some(parent_id.to_string()),
-                )?;
+                )
+                .await?;
                 relabelled_nodes.push((
                     node,
                     raisin_replication::operation::ReplicatedNodeChangeKind::Upsert,
@@ -276,7 +279,17 @@ impl NodeRepositoryImpl {
             keys::last_child_metadata_key(tenant_id, repo_id, branch, workspace, parent_id);
         batch.put_cf(cf_ordered, metadata_key, last_full_label.as_bytes());
 
-        self.db.write(batch).map_err(|e| {
+        // One node commit step (plan Phase 7b): each re-stamped record's index
+        // write re-derived against what is stored at that moment.
+        let mut commit = crate::indexing::NodeCommit::new(tenant_id, repo_id, branch);
+        let index_ctx = crate::indexing::IndexCtx::new(tenant_id, repo_id, branch, workspace);
+        for (node, _) in &relabelled_nodes {
+            commit.check(
+                crate::indexing::StagedDeltaCheck::always(&index_ctx, &node.id, &revision),
+                Some(node.clone()),
+            );
+        }
+        commit.write(&self.db, batch).await.map_err(|e| {
             raisin_error::Error::storage(format!("Failed to rebalance children: {}", e))
         })?;
 

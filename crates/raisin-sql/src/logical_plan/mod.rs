@@ -54,6 +54,7 @@
 pub mod builder;
 pub mod display;
 pub mod error;
+mod expr_walk;
 pub mod group_key;
 pub mod operators;
 pub mod visitor;

@@ -30,11 +30,12 @@
 //!
 //! Different operation types use different CRDTs:
 //!
-//! - **Properties**: Last-Write-Wins with vector clock + timestamp + node_id tie-breaking
-//! - **Relations/Sets**: Add-Wins Set CRDT (additions beat deletions)
-//! - **Ordered Lists**: RGA (Replicated Growable Array) with tombstones
-//! - **Moves**: Last-Write-Wins with conflict event emission
-//! - **Deletes**: Delete-Wins (prevents resurrection)
+//! - **Node writes**: one `ApplyRevision` per commit, decomposed into per-node
+//!   `UpsertNodeSnapshot` / `DeleteNodeSnapshot` registers (Last-Write-Wins
+//!   with vector clock + timestamp + node_id tie-breaking; the applicator's
+//!   tombstones make a delete win)
+//! - **Relations**: Last-Write-Wins per (source, target, relation type)
+//! - **Schema and admin entities**: Last-Write-Wins per entity
 //!
 //! ## Example Usage
 //!
@@ -53,10 +54,9 @@
 //!     "tenant1".to_string(),
 //!     "repo1".to_string(),
 //!     "main".to_string(),
-//!     OpType::SetProperty {
-//!         node_id: "abc123".to_string(),
-//!         property_name: "title".to_string(),
-//!         value: serde_json::json!("Hello World"),
+//!     OpType::CreateTag {
+//!         tag_name: "v1".to_string(),
+//!         revision: "1700000000000-0".to_string(),
 //!     },
 //!     "user@example.com".to_string(),
 //! );
@@ -67,7 +67,6 @@
 
 pub mod catch_up;
 pub mod causal_delivery;
-pub mod compaction;
 pub mod config;
 pub mod conflict_resolution;
 pub mod coordinator;
@@ -94,9 +93,6 @@ pub use catch_up::{
     IndexTransferResult, PeerStatus as CatchUpPeerStatus, VerificationResult,
 };
 pub use causal_delivery::{BufferStats as CausalBufferStats, CausalDeliveryBuffer};
-pub use compaction::{
-    CompactionConfig, CompactionResult, NodeCompactionStats, OperationLogCompactor,
-};
 pub use config::{ClusterConfig, ConnectionConfig, PeerConfig, RetryConfig, SyncConfig};
 pub use conflict_resolution::{ConflictError, ConflictGroup, ConflictResolver};
 pub use coordinator::{
@@ -111,7 +107,7 @@ pub use metrics::{
     ReplicationMetrics,
 };
 pub use metrics_reporter::{metrics_to_json, metrics_to_json_compact, MetricsReporter};
-pub use operation::{OpType, Operation, OperationTarget, ReplicatedSecret};
+pub use operation::{OpType, Operation, OperationTarget, ReplicatedOverlay, ReplicatedSecret};
 pub use operation_decomposer::decompose_operation;
 pub use operation_decomposer_metrics::OperationDecomposer;
 pub use peer_manager::{ConnectionState, PeerManager, PeerManagerError, PeerStatus};

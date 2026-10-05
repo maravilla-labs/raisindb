@@ -77,6 +77,15 @@ impl BranchRepositoryImpl {
             )));
         }
 
+        // Skip-unchanged is off on the target until the source's entries are
+        // replayed (`nodes::merge_window`).
+        let _merge_window = crate::repositories::nodes::open_merge_window(
+            &self.db,
+            tenant_id,
+            repo_id,
+            target_branch,
+        );
+
         let source = self
             .get_branch(tenant_id, repo_id, source_branch)
             .await?
@@ -114,6 +123,17 @@ impl BranchRepositoryImpl {
 
         // Collect all nodes that were changed (including resolved conflicts)
         let mut changed_nodes = Vec::new();
+
+        // Overlays with a resolution of their own: a node resolution's
+        // carried overlays must not overwrite them at M.
+        let explicit_translations: HashSet<(String, String)> = resolutions
+            .iter()
+            .filter_map(|r| {
+                r.translation_locale
+                    .as_ref()
+                    .map(|locale| (r.node_id.clone(), locale.clone()))
+            })
+            .collect();
 
         for resolution in &resolutions {
             // Validate that this node was actually in conflict
@@ -171,6 +191,27 @@ impl BranchRepositoryImpl {
                 translation_locale: resolution.translation_locale.clone(),
             });
 
+            // A TRANSLATION conflict writes the chosen overlay at M and
+            // leaves the node alone (`translations.rs`).
+            if let Some(locale_key) = resolution.translation_locale.as_deref() {
+                self.write_resolved_translation(
+                    tenant_id,
+                    repo_id,
+                    &workspace,
+                    &super::translations::MergeSides {
+                        target: (target_branch, &target.head),
+                        source: (source_branch, &source.head),
+                    },
+                    resolution,
+                    locale_key,
+                    &merge_revision,
+                    actor,
+                    message,
+                )
+                .await?;
+                continue;
+            }
+
             // WRITE THE CHOSEN SIDE. Recording the resolution in the merge
             // commit's `changed_nodes` is bookkeeping, not an outcome: the
             // node blob and every index entry still hold whatever the two
@@ -203,10 +244,12 @@ impl BranchRepositoryImpl {
                 &divergence.common_ancestor,
             )?;
             let unique = self
-                .unique_properties(tenant_id, repo_id, target_branch, &superseded)
+                .schema_definitions(tenant_id, repo_id, target_branch, &superseded)
                 .await?;
 
-            match resolution.resolution_type {
+            // Which side's node (and so its translation overlays) the
+            // resolution keeps; `None` when it deletes.
+            let kept: Option<(&str, raisin_hlc::HLC)> = match resolution.resolution_type {
                 ResolutionType::KeepOurs => {
                     match super::apply::load_node_at(
                         &self.db,
@@ -217,32 +260,42 @@ impl BranchRepositoryImpl {
                         &resolution.node_id,
                         &target.head,
                     )? {
-                        Some(node) => super::apply::write_resolved_node(
-                            &self.db,
-                            tenant_id,
-                            repo_id,
-                            target_branch,
-                            &workspace,
-                            &node,
-                            (target_branch, &target.head),
-                            &merge_revision,
-                            &superseded,
-                            &unique,
-                        )?,
+                        Some(node) => {
+                            super::apply::write_resolved_node(
+                                &self.db,
+                                tenant_id,
+                                repo_id,
+                                target_branch,
+                                &workspace,
+                                &node,
+                                (target_branch, &target.head),
+                                &merge_revision,
+                                &superseded,
+                                &unique,
+                                (source_branch, &source.head),
+                            )
+                            .await?;
+                            Some((target_branch, target.head))
+                        }
                         // "Keep ours" over a node the target deleted means the
                         // deletion is the thing being kept, and the source's
                         // copied revision must not resurrect it.
-                        None => super::apply::write_resolved_deletion(
-                            &self.db,
-                            tenant_id,
-                            repo_id,
-                            target_branch,
-                            &workspace,
-                            &resolution.node_id,
-                            &merge_revision,
-                            &superseded,
-                            &unique,
-                        )?,
+                        None => {
+                            super::apply::write_resolved_deletion(
+                                &self.db,
+                                tenant_id,
+                                repo_id,
+                                target_branch,
+                                &workspace,
+                                &resolution.node_id,
+                                &merge_revision,
+                                &superseded,
+                                &unique,
+                                (source_branch, &source.head),
+                            )
+                            .await?;
+                            None
+                        }
                     }
                 }
                 ResolutionType::KeepTheirs => {
@@ -255,29 +308,39 @@ impl BranchRepositoryImpl {
                         &resolution.node_id,
                         &source.head,
                     )? {
-                        Some(node) => super::apply::write_resolved_node(
-                            &self.db,
-                            tenant_id,
-                            repo_id,
-                            target_branch,
-                            &workspace,
-                            &node,
-                            (source_branch, &source.head),
-                            &merge_revision,
-                            &superseded,
-                            &unique,
-                        )?,
-                        None => super::apply::write_resolved_deletion(
-                            &self.db,
-                            tenant_id,
-                            repo_id,
-                            target_branch,
-                            &workspace,
-                            &resolution.node_id,
-                            &merge_revision,
-                            &superseded,
-                            &unique,
-                        )?,
+                        Some(node) => {
+                            super::apply::write_resolved_node(
+                                &self.db,
+                                tenant_id,
+                                repo_id,
+                                target_branch,
+                                &workspace,
+                                &node,
+                                (source_branch, &source.head),
+                                &merge_revision,
+                                &superseded,
+                                &unique,
+                                (source_branch, &source.head),
+                            )
+                            .await?;
+                            Some((source_branch, source.head))
+                        }
+                        None => {
+                            super::apply::write_resolved_deletion(
+                                &self.db,
+                                tenant_id,
+                                repo_id,
+                                target_branch,
+                                &workspace,
+                                &resolution.node_id,
+                                &merge_revision,
+                                &superseded,
+                                &unique,
+                                (source_branch, &source.head),
+                            )
+                            .await?;
+                            None
+                        }
                     }
                 }
                 ResolutionType::Manual => {
@@ -297,7 +360,10 @@ impl BranchRepositoryImpl {
                             &merge_revision,
                             &superseded,
                             &unique,
-                        )?;
+                            (source_branch, &source.head),
+                        )
+                        .await?;
+                        None
                     } else {
                         // Deserialize straight into `PropertyValue`, the same
                         // serde route every wire payload takes: arrays and
@@ -361,13 +427,37 @@ impl BranchRepositoryImpl {
                             &merge_revision,
                             &superseded,
                             &unique,
-                        )?;
+                            (source_branch, &source.head),
+                        )
+                        .await?;
+                        Some((origin.0, *origin.1))
                     }
                 }
-            }
+            };
+
+            // The node's translation overlays follow the side it was taken
+            // from, written at M: the copy below would otherwise replay the
+            // other side's versions (a delete's tombstones, say) over them.
+            self.write_resolved_node_translations(
+                tenant_id,
+                repo_id,
+                &workspace,
+                &resolution.node_id,
+                &super::translations::MergeSides {
+                    target: (target_branch, &target.head),
+                    source: (source_branch, &source.head),
+                },
+                kept.as_ref().map(|(branch, head)| (*branch, head)),
+                &explicit_translations,
+                &merge_revision,
+                actor,
+                message,
+            )
+            .await?;
         }
 
         // Collect all changed nodes from source branch since common ancestor
+        let mut earliest_change: Option<raisin_hlc::HLC> = None;
         let mut revision = source.head;
         while revision != divergence.common_ancestor {
             let meta = rev_repo
@@ -377,6 +467,10 @@ impl BranchRepositoryImpl {
                     raisin_error::Error::NotFound(format!("Revision {} not found", revision))
                 })?;
 
+            if !meta.changed_nodes.is_empty() {
+                earliest_change =
+                    Some(earliest_change.map_or(revision, |e: raisin_hlc::HLC| e.min(revision)));
+            }
             // Add non-conflicted nodes to changed_nodes
             for node_change in &meta.changed_nodes {
                 // Only add if not already present (check by node_id)
@@ -430,6 +524,22 @@ impl BranchRepositoryImpl {
             &source.head,
         )
         .await?;
+        self.compound_after_merge_copy(
+            tenant_id,
+            repo_id,
+            source_branch,
+            target_branch,
+            earliest_change,
+        )
+        .await?;
+        self.localized_after_merge_copy(
+            tenant_id,
+            repo_id,
+            source_branch,
+            target_branch,
+            &merge_revision,
+            &changed_nodes,
+        )?;
 
         Ok(MergeResult {
             success: true,

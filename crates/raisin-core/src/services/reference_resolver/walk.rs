@@ -1,27 +1,27 @@
-//! The ONE JSON reference walker RESOLVE uses, and the substitution pass.
+//! The ONE reference walker RESOLVE uses, and the substitution pass.
 //!
-//! Both answer "is this a reference?" through [`as_reference`], so collecting
-//! references and replacing them cannot disagree about what a reference is.
-//! RESOLVE walks the JSON it is about to emit — after translation and `fields`
-//! trimming — because a reference in a trimmed-away field must not be followed
-//! and a reference written by a translation overlay must be.
+//! Both answer "is this a reference?" through [`doc::reference`], so
+//! collecting references and replacing them cannot disagree about what a
+//! reference is. RESOLVE walks the value it is about to emit — after
+//! translation and `fields` trimming — because a reference in a trimmed-away
+//! field must not be followed and a reference written by a translation overlay
+//! must be. The values are the stored ones (`doc.rs` says why that equals the
+//! JSON the resolver used to walk).
 
 use super::budget::{self, ResolveBudget};
+use super::doc;
 use super::memo::Target;
 use raisin_error::Result;
-use serde_json::{Map, Value};
+use raisin_models::nodes::properties::PropertyValue;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-
-const REF_KEY: &str = "raisin:ref";
-const WORKSPACE_KEY: &str = "raisin:workspace";
 
 /// A reference as written. `workspace == None` means "the default workspace",
 /// which is only known where the reference is used.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct RawRef {
-    workspace: Option<String>,
-    locator: String,
+    pub(super) workspace: Option<String>,
+    pub(super) locator: String,
 }
 
 impl RawRef {
@@ -55,49 +55,23 @@ impl TargetRef {
     }
 }
 
-/// `Some((workspace, locator))` when `map` is a reference object.
-fn as_reference(map: &Map<String, Value>) -> Option<(Option<&str>, &str)> {
-    let locator = map.get(REF_KEY)?.as_str()?;
-    let workspace = map
-        .get(WORKSPACE_KEY)
-        .and_then(Value::as_str)
-        .filter(|ws| !ws.is_empty());
-    Some((workspace, locator))
-}
-
 /// The distinct references in `value`, in document order.
-pub(super) fn distinct_refs(value: &Value) -> Vec<RawRef> {
+pub(super) fn distinct_refs(value: &PropertyValue) -> Vec<RawRef> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     collect(value, &mut out, &mut seen);
     out
 }
 
-fn collect(value: &Value, out: &mut Vec<RawRef>, seen: &mut HashSet<RawRef>) {
-    match value {
-        Value::Object(map) => {
-            if let Some((workspace, locator)) = as_reference(map) {
-                let raw = RawRef {
-                    workspace: workspace.map(str::to_string),
-                    locator: locator.to_string(),
-                };
-                if seen.insert(raw.clone()) {
-                    out.push(raw);
-                }
-                // A reference is a leaf: its own members are not content.
-                return;
-            }
-            for v in map.values() {
-                collect(v, out, seen);
-            }
+fn collect(value: &PropertyValue, out: &mut Vec<RawRef>, seen: &mut HashSet<RawRef>) {
+    if let Some(raw) = RawRef::of(value) {
+        if seen.insert(raw.clone()) {
+            out.push(raw);
         }
-        Value::Array(items) => {
-            for v in items {
-                collect(v, out, seen);
-            }
-        }
-        _ => {}
+        // A reference is a leaf: its own members are not content.
+        return;
     }
+    doc::for_each_child(value, &mut |child| collect(child, out, seen));
 }
 
 /// What the inlining has produced so far: how many references it replaced
@@ -121,7 +95,8 @@ pub(super) struct Inliner<'a> {
     limits: ResolveBudget,
     /// Each target expanded once per remaining depth, cloned into every place
     /// it appears.
-    expanded: HashMap<(TargetRef, u32), (Value, Totals)>,
+    /// `None`: expanded once already (and moved into place).
+    expanded: HashMap<(TargetRef, u32), Option<(PropertyValue, Totals)>>,
 }
 
 impl<'a> Inliner<'a> {
@@ -142,7 +117,7 @@ impl<'a> Inliner<'a> {
 
     /// Replace every resolvable reference in `value`, nesting inlined nodes at
     /// most `remaining` levels deep. Returns what was inlined.
-    pub(super) fn inline(mut self, value: &mut Value, remaining: u32) -> Result<Totals> {
+    pub(super) fn inline(mut self, value: &mut PropertyValue, remaining: u32) -> Result<Totals> {
         let mut totals = Totals::default();
         self.inline_into(value, remaining, &mut totals)?;
         Ok(totals)
@@ -150,43 +125,39 @@ impl<'a> Inliner<'a> {
 
     fn inline_into(
         &mut self,
-        value: &mut Value,
+        value: &mut PropertyValue,
         remaining: u32,
         totals: &mut Totals,
     ) -> Result<()> {
-        match value {
-            Value::Object(map) => {
-                if let Some((workspace, locator)) = as_reference(map) {
-                    if remaining == 0 {
-                        return Ok(());
-                    }
-                    let key = TargetRef {
-                        workspace: workspace.unwrap_or(self.default_workspace).to_string(),
-                        locator: locator.to_string(),
-                    };
-                    let Some(Some(target)) = self.resolved.get(&key) else {
-                        return Ok(());
-                    };
-                    let target = target.clone();
-                    let (expanded, inner) = self.expand(key, &target, remaining - 1)?;
-                    totals.occurrences += inner.occurrences + 1;
-                    totals.bytes += inner.bytes + target.bytes;
-                    self.check(totals)?;
-                    *value = expanded;
-                    return Ok(());
-                }
-                for v in map.values_mut() {
-                    self.inline_into(v, remaining, totals)?;
-                }
+        if let Some((workspace, locator)) = doc::reference(value) {
+            if remaining == 0 {
+                return Ok(());
             }
-            Value::Array(items) => {
-                for v in items {
-                    self.inline_into(v, remaining, totals)?;
-                }
-            }
-            _ => {}
+            let key = TargetRef {
+                workspace: workspace
+                    .as_deref()
+                    .unwrap_or(self.default_workspace)
+                    .to_string(),
+                locator: locator.into_owned(),
+            };
+            let Some(Some(target)) = self.resolved.get(&key) else {
+                return Ok(());
+            };
+            let target = target.clone();
+            let (expanded, inner) = self.expand(key, &target, remaining - 1)?;
+            totals.occurrences += inner.occurrences + 1;
+            totals.bytes += inner.bytes + target.bytes;
+            self.check(totals)?;
+            *value = expanded;
+            return Ok(());
         }
-        Ok(())
+        let mut result = Ok(());
+        doc::for_each_child_mut(value, &mut |child| {
+            if result.is_ok() {
+                result = self.inline_into(child, remaining, totals);
+            }
+        });
+        result
     }
 
     /// `target` with its own references inlined `remaining` levels deep.
@@ -195,17 +166,40 @@ impl<'a> Inliner<'a> {
         key: TargetRef,
         target: &Arc<Target>,
         remaining: u32,
-    ) -> Result<(Value, Totals)> {
+    ) -> Result<(PropertyValue, Totals)> {
+        // A target with nothing to inline expands to itself: copy it from
+        // the target, without keeping a second copy in the cache.
+        if remaining == 0 || target.refs.is_empty() {
+            return Ok((target.value.clone(), Totals::default()));
+        }
+        // Kept for a SECOND occurrence only: the first expansion is moved into
+        // place, so a target inlined once (most of them) is never copied
+        // twice; the second one is expanded again and kept, and every later
+        // one is a copy of that.
         let cache_key = (key, remaining);
-        if let Some((value, totals)) = self.expanded.get(&cache_key) {
-            return Ok((value.clone(), *totals));
+        match self.expanded.get(&cache_key) {
+            Some(Some((value, totals))) => return Ok((value.clone(), *totals)),
+            Some(None) => {
+                let (value, totals) = self.expand_fresh(target, remaining)?;
+                self.expanded
+                    .insert(cache_key, Some((value.clone(), totals)));
+                Ok((value, totals))
+            }
+            None => {
+                self.expanded.insert(cache_key, None);
+                self.expand_fresh(target, remaining)
+            }
         }
-        let mut value = target.json.clone();
+    }
+
+    fn expand_fresh(
+        &mut self,
+        target: &Arc<Target>,
+        remaining: u32,
+    ) -> Result<(PropertyValue, Totals)> {
+        let mut value = target.value.clone();
         let mut totals = Totals::default();
-        if remaining > 0 && !target.refs.is_empty() {
-            self.inline_into(&mut value, remaining, &mut totals)?;
-        }
-        self.expanded.insert(cache_key, (value.clone(), totals));
+        self.inline_into(&mut value, remaining, &mut totals)?;
         Ok((value, totals))
     }
 

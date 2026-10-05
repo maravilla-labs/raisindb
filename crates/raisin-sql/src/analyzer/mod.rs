@@ -36,6 +36,7 @@ pub mod vector_literal;
 pub use catalog::{Catalog, ColumnDef, StaticCatalog, TableDef};
 pub use error::{AnalysisError, Result};
 pub use functions::{FunctionCategory, FunctionRegistry, FunctionSignature};
+pub(crate) use semantic::{coerce_text_to_path, literal_from_sql_value};
 pub use semantic::{
     AnalyzedCopy, AnalyzedDelete, AnalyzedDistinct, AnalyzedInsert, AnalyzedMove, AnalyzedOrder,
     AnalyzedQuery, AnalyzedRelate, AnalyzedRelateEndpoint, AnalyzedRestore, AnalyzedSetOperation,
@@ -54,7 +55,19 @@ pub use vector_literal::parse_vector_text;
 /// Semantic analyzer
 pub struct Analyzer {
     catalog: Arc<dyn Catalog>,
-    functions: FunctionRegistry,
+    functions: Arc<FunctionRegistry>,
+}
+
+/// The built-in function registry, built once per process.
+///
+/// It is immutable after construction (nothing registers into an analyzer's
+/// registry), and building it registers several hundred signatures into hash
+/// maps: measured at ~10 % of a release-build SQL point lookup when it was
+/// rebuilt for every statement (plan Phase 13b).
+fn builtin_functions() -> Arc<FunctionRegistry> {
+    static REGISTRY: std::sync::LazyLock<Arc<FunctionRegistry>> =
+        std::sync::LazyLock::new(|| Arc::new(FunctionRegistry::default()));
+    REGISTRY.clone()
 }
 
 impl Analyzer {
@@ -62,7 +75,7 @@ impl Analyzer {
     pub fn new() -> Self {
         Self {
             catalog: Arc::new(StaticCatalog::default_nodes_schema()),
-            functions: FunctionRegistry::default(),
+            functions: builtin_functions(),
         }
     }
 
@@ -79,12 +92,32 @@ impl Analyzer {
     pub fn with_catalog_arc(catalog: Arc<dyn Catalog>) -> Self {
         Self {
             catalog,
-            functions: FunctionRegistry::default(),
+            functions: builtin_functions(),
         }
     }
 
     /// Analyze a SQL string
     pub fn analyze(&self, sql: &str) -> Result<AnalyzedStatement> {
+        self.analyze_with(sql, None)
+    }
+
+    /// Analyze a statement TEMPLATE: SQL whose `$n` placeholders are left in
+    /// place and typed `param_types[n - 1]` — the type of the literal each
+    /// bound value renders to — so every type check runs exactly as on the
+    /// substituted text (plan Phase 13d; binding is `crate::template`).
+    pub fn analyze_template(
+        &self,
+        sql: &str,
+        param_types: Arc<[DataType]>,
+    ) -> Result<AnalyzedStatement> {
+        self.analyze_with(sql, Some(param_types))
+    }
+
+    fn analyze_with(
+        &self,
+        sql: &str,
+        param_types: Option<Arc<[DataType]>>,
+    ) -> Result<AnalyzedStatement> {
         // 1. Try transaction parser first (BEGIN, COMMIT)
         tracing::debug!("   Checking for transaction statements...");
         if crate::ast::transaction_parser::is_transaction_statement(sql) {
@@ -427,6 +460,9 @@ impl Analyzer {
         let mut context = semantic::AnalyzerContext::new(self.catalog.as_ref(), &self.functions);
         // Set upsert flag before analysis so analyze_insert knows it's an UPSERT
         context.set_upsert(is_upsert);
+        if let Some(types) = param_types {
+            context.set_param_types(types);
+        }
         let result = context.analyze_statement(&statements[0])?;
         tracing::debug!("   Semantic analysis complete");
         Ok(result)
@@ -442,6 +478,24 @@ impl Analyzer {
     /// COMMIT WITH MESSAGE 'Updated node';
     /// ```
     pub fn analyze_batch(&self, sql: &str) -> Result<Vec<AnalyzedStatement>> {
+        self.analyze_batch_with(sql, None)
+    }
+
+    /// [`Self::analyze_batch`] for a statement TEMPLATE (see
+    /// [`Self::analyze_template`]).
+    pub fn analyze_batch_template(
+        &self,
+        sql: &str,
+        param_types: Arc<[DataType]>,
+    ) -> Result<Vec<AnalyzedStatement>> {
+        self.analyze_batch_with(sql, Some(param_types))
+    }
+
+    fn analyze_batch_with(
+        &self,
+        sql: &str,
+        param_types: Option<Arc<[DataType]>>,
+    ) -> Result<Vec<AnalyzedStatement>> {
         tracing::debug!("Analyzing batch SQL: {} chars", sql.len());
 
         // Split SQL by semicolons, respecting string literals
@@ -471,7 +525,7 @@ impl Analyzer {
             );
 
             // Analyze each statement using the existing single-statement analyzer
-            let analyzed = self.analyze(stmt_sql)?;
+            let analyzed = self.analyze_with(stmt_sql, param_types.clone())?;
             results.push(analyzed);
         }
 

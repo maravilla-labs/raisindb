@@ -16,11 +16,12 @@
 
 mod blocks;
 mod hash_store;
-mod keys;
+pub(crate) mod key_parse;
+pub(crate) mod keys;
 mod metadata;
 mod nodes;
 mod queries;
-mod replication;
+pub(crate) mod replication;
 mod revision;
 mod serialization;
 
@@ -187,14 +188,35 @@ impl TranslationRepository for RocksDBTranslationRepository {
         .await
     }
 
+    async fn get_block_translations_for_node(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        node_id: &str,
+        locales: &[LocaleCode],
+        revision: &HLC,
+    ) -> Result<Vec<(String, LocaleCode, LocaleOverlay)>> {
+        blocks::get_block_translations_for_node(
+            &self.db, tenant_id, repo_id, branch, workspace, node_id, locales, revision,
+        )
+        .await
+    }
+
     async fn list_nodes_with_translation(
         &self,
         tenant_id: &str,
         repo_id: &str,
+        branch: &str,
+        workspace: &str,
         locale: &LocaleCode,
         revision: &HLC,
     ) -> Result<Vec<String>> {
-        queries::list_nodes_with_translation(&self.db, tenant_id, repo_id, locale, revision).await
+        queries::list_nodes_with_translation(
+            &self.db, tenant_id, repo_id, branch, workspace, locale, revision,
+        )
+        .await
     }
 
     async fn mark_blocks_orphaned(

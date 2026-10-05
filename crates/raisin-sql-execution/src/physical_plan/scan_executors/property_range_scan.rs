@@ -161,14 +161,13 @@ pub async fn execute_property_range_scan<S: Storage + 'static>(
                     continue;
                 }
 
-                let node_opt = storage
-                    .nodes()
-                    .get(
-                        StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
-                        &entry.node_id,
-                        Some(&scan_revision),
-                    )
-                    .await
+                let node_opt = super::helpers::row_node(
+                    &*storage,
+                    StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
+                    raisin_storage::NodeLocator::Id(entry.node_id.clone()),
+                    Some(&scan_revision),
+                )
+                .await
                     .map_err(|e| ExecutionError::Backend(e.to_string()))?;
 
                 if let Some(node) = node_opt {

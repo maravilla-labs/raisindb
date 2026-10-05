@@ -385,6 +385,24 @@ impl ChangeTracker {
         changes.set_move(old_parent_id, new_parent_id, position);
     }
 
+    /// Record that `node_id`'s PATH changed (an ancestor moved or was renamed)
+    /// without any change of its own, so the commit replicates a snapshot of
+    /// it at its new path. The repository move captures every moved node; the
+    /// transactional move named only the root, so a replica never learned the
+    /// descendants' new paths.
+    pub fn track_path_change(
+        &mut self,
+        node_id: String,
+        workspace: String,
+        revision: HLC,
+        new_path: String,
+    ) {
+        let changes = self.changes.entry(node_id.clone()).or_insert_with(|| {
+            NodeChanges::new_update(node_id.clone(), workspace, revision, None, None)
+        });
+        changes.path = Some(new_path);
+    }
+
     pub fn track_name_change(
         &mut self,
         node_id: String,

@@ -32,6 +32,7 @@ mod dollar_dot;
 mod identifiers;
 mod interval;
 mod literals;
+pub(crate) use literals::literal_from_sql_value;
 mod special_forms;
 mod subquery;
 

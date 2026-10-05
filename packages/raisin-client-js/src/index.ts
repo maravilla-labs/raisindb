@@ -191,6 +191,8 @@ export type {
   NodeDeletePayload,
   NodeGetPayload,
   NodeHistoryPayload,
+  NodeGetByLocalizedPathPayload,
+  LocalizedNode,
   RevisionEntry,
   AuditQueryPayload,
   AuditLogEntry,

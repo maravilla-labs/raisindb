@@ -1,229 +1,192 @@
 //! Translation carry-over (node-level and block-level) for cross-branch copy.
 
 use super::super::super::super::NodeRepositoryImpl;
-use crate::{cf, cf_handle, keys};
+use super::CopyScope;
+use crate::translation_write::OverlayTarget;
 use raisin_error::Result;
 use raisin_hlc::HLC;
-use raisin_models::nodes::Node;
-use raisin_models::translations::{LocaleOverlay, TranslationMeta};
+use raisin_models::translations::{LocaleCode, LocaleOverlay, TranslationMeta};
 use raisin_models::tree::ChangeOperation;
 use raisin_storage::NodeChangeInfo;
 use rocksdb::WriteBatch;
 use std::collections::HashMap;
 
+/// Where the staged versions of one node's carry-over go.
+struct Sink<'a> {
+    batch: &'a mut WriteBatch,
+    operation: ChangeOperation,
+    change_infos: &'a mut Vec<NodeChangeInfo>,
+    translation_ops: &'a mut Vec<raisin_replication::OpType>,
+}
+
 impl NodeRepositoryImpl {
-    /// Copy the latest node-level and block-level translations of `node_id`
-    /// from the source branch onto the target branch (same node id), writing
-    /// TRANSLATION_DATA / TRANSLATION_INDEX / meta / snapshot entries at the
-    /// shared revision — mirrors the single-branch tree-copy behavior.
+    /// Make the target branch's overlays of `node_id` (same id) what the
+    /// source branch holds, at the copy revision: every overlay live on the
+    /// source is written, and every overlay live on the TARGET but not on the
+    /// source — deleted there, or never there — is tombstoned. Without the
+    /// tombstones a translation deleted on the draft branch stayed live on the
+    /// published site forever, and no publish could remove it (the copy is
+    /// replicated, so peers took the stale overlay as authoritative too).
+    ///
+    /// Both sides are read through the one reader: the source as of its pin or
+    /// HEAD (`source_max_revision`), the target as of the copy revision.
     ///
     /// Returns **whether any overlay actually differed from what the target
     /// branch already held**, which is what the caller's no-op suppression
-    /// turns on.
+    /// turns on. Every live overlay is rewritten at the fresh revision on
+    /// every run (that is what keeps the copy self-healing), so "wrote
+    /// something" would be true for every translated node on every run and
+    /// would defeat the suppression for the whole multilingual half of a site.
+    /// The comparison is on the deserialized `LocaleOverlay` (key-order
+    /// insensitive). A locale the target lacks, or one the copy tombstones,
+    /// counts as differing.
     ///
-    /// Getting this from "did we write anything?" is wrong, and was the bug:
-    /// the copy rewrites every overlay at the fresh revision unconditionally
-    /// (that is what keeps it self-healing), so "wrote something" is true for
-    /// every translated node on every run. Reading it as "changed" made
-    /// `translations_copied` permanently true, which defeated the content
-    /// suppression for exactly the nodes a multilingual site has most of: a
-    /// steady-state publish re-embedded and re-indexed every translated node
-    /// forever.
-    ///
-    /// The comparison reads the TARGET branch's current latest overlay per
-    /// locale through the same collector used for the source — one reader, so
-    /// the two sides cannot drift in how they pick "latest" — and compares the
-    /// deserialized `LocaleOverlay` (`PartialEq`, backed by a `HashMap`, so it
-    /// is insensitive to key order; a raw byte compare would not be).
-    ///
-    /// An overlay the target does not have at all counts as differing, so a
-    /// newly translated locale always notifies.
-    #[allow(clippy::too_many_arguments)]
+    /// Also returns the node-level overlays it staged (`None`: tombstoned),
+    /// for the localized name index sync the caller runs once the node and
+    /// its overlays are both in the batch.
     pub(super) fn copy_translations_to_batch(
         &self,
         batch: &mut WriteBatch,
         node_id: &str,
-        tenant_id: &str,
-        repo_id: &str,
-        source_branch: &str,
-        target_branch: &str,
-        workspace: &str,
-        revision: &HLC,
-        now: chrono::DateTime<chrono::Utc>,
-        actor: &str,
-        message: &str,
-        is_system: bool,
+        scope: &CopyScope<'_>,
         operation: ChangeOperation,
         change_infos: &mut Vec<NodeChangeInfo>,
-    ) -> Result<bool> {
-        let cf_translation_data = cf_handle(&self.db, cf::TRANSLATION_DATA)?;
-        let cf_translation_index = cf_handle(&self.db, cf::TRANSLATION_INDEX)?;
-        let cf_block_translations = cf_handle(&self.db, cf::BLOCK_TRANSLATIONS)?;
-        let cf_revisions = cf_handle(&self.db, cf::REVISIONS)?;
-
-        let node_translations = self.collect_node_translations_for_copy(
-            tenant_id,
-            repo_id,
-            source_branch,
-            workspace,
-            node_id,
-        )?;
-
-        // What the TARGET already holds, read with the SAME collector. Only
-        // used to decide whether this copy changes anything observable; the
-        // writes below happen either way.
-        let target_node_overlays: HashMap<String, LocaleOverlay> = self
-            .collect_node_translations_for_copy(
-                tenant_id,
-                repo_id,
-                target_branch,
-                workspace,
-                node_id,
-            )?
-            .into_iter()
-            .map(|(locale, overlay, _)| (locale.as_str().to_string(), overlay))
-            .collect();
-
+        translation_ops: &mut Vec<raisin_replication::OpType>,
+    ) -> Result<(bool, crate::localized_name::sync::Overrides)> {
+        let mut staged = crate::localized_name::sync::Overrides::new();
+        let mut sink = Sink {
+            batch,
+            operation,
+            change_infos,
+            translation_ops,
+        };
+        let source = Some(scope.source_max_revision);
+        let target = Some(scope.revision);
         let mut differed = false;
 
-        for (locale, overlay, parent_translation_revision) in node_translations {
-            let overlay_bytes = serde_json::to_vec(&overlay).map_err(|e| {
-                raisin_error::Error::storage(format!(
-                    "Failed to serialize translation overlay for locale {}: {}",
-                    locale.as_str(),
-                    e
-                ))
-            })?;
-            let data_key = Self::translation_data_key(
-                tenant_id,
-                repo_id,
-                target_branch,
-                workspace,
+        let mut target_nodes: HashMap<String, (LocaleCode, LocaleOverlay)> = self
+            .collect_node_translations_for_copy(
+                scope.tenant_id,
+                scope.repo_id,
+                scope.target_branch,
+                scope.workspace,
                 node_id,
-                locale.as_str(),
-                revision,
-            );
-            batch.put_cf(&cf_translation_data, data_key, overlay_bytes.clone());
-
-            let index_key =
-                Self::translation_index_key(tenant_id, repo_id, locale.as_str(), revision, node_id);
-            batch.put_cf(&cf_translation_index, index_key, b"");
-
-            let translation_meta = TranslationMeta {
-                locale: locale.clone(),
-                revision: *revision,
-                parent_revision: parent_translation_revision,
-                timestamp: now,
-                actor: actor.to_string(),
-                message: message.to_string(),
-                is_system,
-            };
-            let meta_bytes = serde_json::to_vec(&translation_meta).map_err(|e| {
-                raisin_error::Error::storage(format!(
-                    "Failed to serialize TranslationMeta for locale {}: {}",
-                    locale.as_str(),
-                    e
-                ))
-            })?;
-            let meta_key = Self::translation_meta_key(
-                tenant_id,
-                repo_id,
-                target_branch,
-                workspace,
-                node_id,
-                locale.as_str(),
-                revision,
-            );
-            batch.put_cf(&cf_revisions, meta_key, meta_bytes);
-
-            let snapshot_key = keys::translation_snapshot_key(
-                tenant_id,
-                repo_id,
-                node_id,
-                locale.as_str(),
-                revision,
-            );
-            batch.put_cf(&cf_revisions, snapshot_key, overlay_bytes.clone());
-
-            if target_node_overlays.get(locale.as_str()) != Some(&overlay) {
-                differed = true;
-            }
-
-            change_infos.push(NodeChangeInfo {
-                node_id: node_id.to_string(),
-                workspace: workspace.to_string(),
-                operation,
-                translation_locale: Some(locale.as_str().to_string()),
-            });
-        }
-
-        let block_translations = self.collect_block_translations_for_copy(
-            tenant_id,
-            repo_id,
-            source_branch,
-            workspace,
-            node_id,
-        )?;
-
-        let target_block_overlays: HashMap<(String, String), LocaleOverlay> = self
-            .collect_block_translations_for_copy(
-                tenant_id,
-                repo_id,
-                target_branch,
-                workspace,
-                node_id,
+                target,
             )?
             .into_iter()
-            .map(|(block_uuid, locale, overlay, _)| {
-                ((block_uuid, locale.as_str().to_string()), overlay)
-            })
+            .map(|(locale, overlay, _)| (locale.as_str().to_string(), (locale, overlay)))
             .collect();
-
-        for (block_uuid, locale, overlay, _parent_revision) in block_translations {
-            let overlay_bytes = serde_json::to_vec(&overlay).map_err(|e| {
-                raisin_error::Error::storage(format!(
-                    "Failed to serialize block translation overlay {}::{}: {}",
-                    locale.as_str(),
-                    block_uuid,
-                    e
-                ))
-            })?;
-
-            let block_key = Self::block_translation_key(
-                tenant_id,
-                repo_id,
-                target_branch,
-                workspace,
+        for (locale, overlay, parent) in self.collect_node_translations_for_copy(
+            scope.tenant_id,
+            scope.repo_id,
+            scope.source_branch,
+            scope.workspace,
+            node_id,
+            source,
+        )? {
+            let held = target_nodes.remove(locale.as_str());
+            differed |= held.as_ref().map(|(_, o)| o) != Some(&overlay);
+            staged.insert(locale.as_str().to_string(), Some(overlay.clone()));
+            self.stage_carried(
+                &mut sink,
+                scope,
                 node_id,
-                &block_uuid,
-                locale.as_str(),
-                revision,
-            );
-            batch.put_cf(&cf_block_translations, block_key, overlay_bytes.clone());
-
-            let snapshot_key = keys::translation_snapshot_key(
-                tenant_id,
-                repo_id,
-                node_id,
-                &format!("{}::{}", locale.as_str(), block_uuid),
-                revision,
-            );
-            batch.put_cf(&cf_revisions, snapshot_key, overlay_bytes.clone());
-
-            if target_block_overlays.get(&(block_uuid.clone(), locale.as_str().to_string()))
-                != Some(&overlay)
-            {
-                differed = true;
-            }
-
-            change_infos.push(NodeChangeInfo {
-                node_id: node_id.to_string(),
-                workspace: workspace.to_string(),
-                operation,
-                translation_locale: Some(format!("{}::{}", locale.as_str(), block_uuid)),
-            });
+                None,
+                &locale,
+                Some(&overlay),
+                parent,
+            )?;
+        }
+        for (_, (locale, _)) in target_nodes {
+            differed = true;
+            staged.insert(locale.as_str().to_string(), None);
+            self.stage_carried(&mut sink, scope, node_id, None, &locale, None, None)?;
         }
 
-        Ok(differed)
+        let mut target_blocks: HashMap<(String, String), (LocaleCode, LocaleOverlay)> = self
+            .collect_block_translations_for_copy(
+                scope.tenant_id,
+                scope.repo_id,
+                scope.target_branch,
+                scope.workspace,
+                node_id,
+                target,
+            )?
+            .into_iter()
+            .map(|(block, locale, overlay, _)| {
+                ((block, locale.as_str().to_string()), (locale, overlay))
+            })
+            .collect();
+        for (block, locale, overlay, parent) in self.collect_block_translations_for_copy(
+            scope.tenant_id,
+            scope.repo_id,
+            scope.source_branch,
+            scope.workspace,
+            node_id,
+            source,
+        )? {
+            let held = target_blocks.remove(&(block.clone(), locale.as_str().to_string()));
+            differed |= held.as_ref().map(|(_, o)| o) != Some(&overlay);
+            self.stage_carried(
+                &mut sink,
+                scope,
+                node_id,
+                Some(&block),
+                &locale,
+                Some(&overlay),
+                parent,
+            )?;
+        }
+        for ((block, _), (locale, _)) in target_blocks {
+            differed = true;
+            self.stage_carried(&mut sink, scope, node_id, Some(&block), &locale, None, None)?;
+        }
+
+        Ok((differed, staged))
+    }
+
+    /// Stage one carried version (`None`: a tombstone) on the target branch at
+    /// the copy revision, with its replication op and change info.
+    #[allow(clippy::too_many_arguments)]
+    fn stage_carried(
+        &self,
+        sink: &mut Sink<'_>,
+        scope: &CopyScope<'_>,
+        node_id: &str,
+        block_uuid: Option<&str>,
+        locale: &LocaleCode,
+        overlay: Option<&LocaleOverlay>,
+        parent_revision: Option<HLC>,
+    ) -> Result<()> {
+        let target = OverlayTarget {
+            tenant_id: scope.tenant_id,
+            repo_id: scope.repo_id,
+            branch: scope.target_branch,
+            workspace: scope.workspace,
+            node_id,
+            block_uuid,
+            locale: locale.as_str(),
+        };
+        let meta = TranslationMeta {
+            locale: locale.clone(),
+            revision: *scope.revision,
+            parent_revision,
+            timestamp: scope.now,
+            actor: scope.meta_actor.to_string(),
+            message: scope.meta_message.to_string(),
+            is_system: scope.meta_is_system,
+        };
+        sink.translation_ops
+            .push(self.stage_copied_translation(sink.batch, &target, overlay, &meta)?);
+        sink.change_infos.push(NodeChangeInfo {
+            node_id: node_id.to_string(),
+            workspace: scope.workspace.to_string(),
+            operation: match overlay {
+                Some(_) => sink.operation,
+                None => ChangeOperation::Deleted,
+            },
+            translation_locale: Some(target.locale_key()),
+        });
+        Ok(())
     }
 }

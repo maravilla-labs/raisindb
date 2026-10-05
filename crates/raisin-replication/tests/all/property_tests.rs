@@ -20,18 +20,17 @@
 //!
 //! ## Additional CRDT-Specific Properties
 //!
-//! 5. **Last-Write-Wins (LWW)**: For property updates, the operation with
-//!    the highest vector clock wins.
+//! 5. **Last-Write-Wins (LWW)**: For node snapshots (one register per node),
+//!    the operation with the highest vector clock wins.
 //!
 //! 6. **Add-Wins**: For relations, additions win over concurrent deletions.
 //!
 //! 7. **Delete-Wins**: For nodes, deletions win over concurrent updates.
-//!
-//! 8. **RGA Convergence**: List operations converge to consistent order.
 
 use proptest::prelude::*;
+use raisin_hlc::HLC;
 use raisin_models::nodes::properties::PropertyValue;
-use raisin_models::nodes::RelationRef;
+use raisin_models::nodes::{Node, RelationRef};
 use raisin_replication::{
     causal_delivery::CausalDeliveryBuffer,
     crdt::{ConflictType, CrdtMerge, MergeResult},
@@ -45,58 +44,39 @@ use uuid::Uuid;
 // Test Helper Structures
 // ============================================================================
 
+/// One node's snapshot register: its properties, plus the vector clock,
+/// timestamp and cluster node id that decide Last-Write-Wins.
+type Snapshot = (HashMap<String, PropertyValue>, VectorClock, u64, String);
+
 /// Simplified replica state for testing CRDT properties
 #[derive(Debug, Clone, PartialEq)]
 struct ReplicaState {
-    /// Node properties (node_id -> property_name -> (value, vector_clock, timestamp, cluster_node_id))
-    /// We store vector_clock, timestamp, and cluster_node_id for LWW tie-breaking
-    properties: HashMap<String, HashMap<String, (PropertyValue, VectorClock, u64, String)>>,
+    /// Node snapshots (node_id -> the winning snapshot)
+    snapshots: HashMap<String, Snapshot>,
 
     /// Relations (source_id -> relation_type -> target_id -> vector_clock)
     relations: HashMap<String, HashMap<String, HashMap<String, VectorClock>>>,
 
     /// Deleted nodes (node_id -> vector_clock)
     deleted_nodes: HashMap<String, VectorClock>,
-
-    /// List elements (node_id -> list_property -> element_id -> (value, after_id, vector_clock))
-    lists:
-        HashMap<String, HashMap<String, HashMap<Uuid, (PropertyValue, Option<Uuid>, VectorClock)>>>,
 }
 
 impl ReplicaState {
     fn new() -> Self {
         Self {
-            properties: HashMap::new(),
+            snapshots: HashMap::new(),
             relations: HashMap::new(),
             deleted_nodes: HashMap::new(),
-            lists: HashMap::new(),
         }
     }
 
     /// Apply an operation to this replica state using CRDT merge rules
     fn apply(&mut self, op: &Operation) {
         match &op.op_type {
-            OpType::SetProperty {
-                node_id,
-                property_name,
-                value,
-            } => {
-                self.apply_set_property(
-                    node_id,
-                    property_name,
-                    value,
-                    op.timestamp_ms,
-                    &op.cluster_node_id,
-                    &op.vector_clock,
-                );
-            }
-            OpType::DeleteProperty {
-                node_id,
-                property_name,
-            } => {
-                self.apply_delete_property(
-                    node_id,
-                    property_name,
+            OpType::UpsertNodeSnapshot { node, .. } => {
+                self.apply_snapshot(
+                    &node.id,
+                    &node.properties,
                     op.timestamp_ms,
                     &op.cluster_node_id,
                     &op.vector_clock,
@@ -118,31 +98,8 @@ impl ReplicaState {
             } => {
                 self.apply_remove_relation(source_id, relation_type, target_id, &op.vector_clock);
             }
-            OpType::DeleteNode { node_id } => {
+            OpType::DeleteNodeSnapshot { node_id, .. } => {
                 self.apply_delete_node(node_id, &op.vector_clock);
-            }
-            OpType::ListInsertAfter {
-                node_id,
-                list_property,
-                after_id,
-                value,
-                element_id,
-            } => {
-                self.apply_list_insert(
-                    node_id,
-                    list_property,
-                    *element_id,
-                    value,
-                    *after_id,
-                    &op.vector_clock,
-                );
-            }
-            OpType::ListDelete {
-                node_id,
-                list_property,
-                element_id,
-            } => {
-                self.apply_list_delete(node_id, list_property, *element_id, &op.vector_clock);
             }
             _ => {
                 // For other operation types, we don't track state in this simplified model
@@ -150,98 +107,45 @@ impl ReplicaState {
         }
     }
 
-    fn apply_set_property(
+    fn apply_snapshot(
         &mut self,
         node_id: &str,
-        property_name: &str,
-        value: &PropertyValue,
+        properties: &HashMap<String, PropertyValue>,
         timestamp: u64,
         cluster_node_id: &str,
         vc: &VectorClock,
     ) {
-        let node_props = self
-            .properties
-            .entry(node_id.to_string())
-            .or_insert_with(HashMap::new);
-
         // LWW with three-level tie-breaking (matching CrdtMerge::compare_operations_lww):
         // 1. Vector clock (causal ordering)
         // 2. Timestamp (wall clock)
         // 3. Cluster node ID (deterministic)
-        if let Some((_, existing_vc, existing_timestamp, existing_cluster_node_id)) =
-            node_props.get(property_name)
-        {
-            let should_update = if vc.happens_after(existing_vc) {
-                true
-            } else if vc.happens_before(existing_vc) {
-                false
-            } else {
-                // Concurrent or equal - use timestamp tie-breaker
-                if timestamp > *existing_timestamp {
+        let should_update = match self.snapshots.get(node_id) {
+            None => true,
+            Some((_, existing_vc, existing_timestamp, existing_cluster_node_id)) => {
+                if vc.happens_after(existing_vc) {
                     true
-                } else if timestamp < *existing_timestamp {
+                } else if vc.happens_before(existing_vc) {
                     false
+                } else if timestamp != *existing_timestamp {
+                    // Concurrent or equal - use timestamp tie-breaker
+                    timestamp > *existing_timestamp
                 } else {
                     // Same timestamp - use cluster node ID as final tie-breaker
                     cluster_node_id > existing_cluster_node_id.as_str()
                 }
-            };
-
-            if should_update {
-                node_props.insert(
-                    property_name.to_string(),
-                    (
-                        value.clone(),
-                        vc.clone(),
-                        timestamp,
-                        cluster_node_id.to_string(),
-                    ),
-                );
             }
-        } else {
-            node_props.insert(
-                property_name.to_string(),
+        };
+
+        if should_update {
+            self.snapshots.insert(
+                node_id.to_string(),
                 (
-                    value.clone(),
+                    properties.clone(),
                     vc.clone(),
                     timestamp,
                     cluster_node_id.to_string(),
                 ),
             );
-        }
-    }
-
-    fn apply_delete_property(
-        &mut self,
-        node_id: &str,
-        property_name: &str,
-        timestamp: u64,
-        cluster_node_id: &str,
-        vc: &VectorClock,
-    ) {
-        if let Some(node_props) = self.properties.get_mut(node_id) {
-            if let Some((_, existing_vc, existing_timestamp, existing_cluster_node_id)) =
-                node_props.get(property_name)
-            {
-                // Same LWW logic as set_property
-                let should_delete = if vc.happens_after(existing_vc) {
-                    true
-                } else if vc.happens_before(existing_vc) {
-                    false
-                } else {
-                    if timestamp > *existing_timestamp {
-                        true
-                    } else if timestamp < *existing_timestamp {
-                        false
-                    } else {
-                        cluster_node_id > existing_cluster_node_id.as_str()
-                    }
-                };
-
-                if should_delete {
-                    node_props.remove(property_name);
-                }
-            }
         }
     }
 
@@ -294,55 +198,33 @@ impl ReplicaState {
             self.deleted_nodes.insert(node_id.to_string(), vc.clone());
         }
     }
-
-    fn apply_list_insert(
-        &mut self,
-        node_id: &str,
-        list_property: &str,
-        element_id: Uuid,
-        value: &PropertyValue,
-        after_id: Option<Uuid>,
-        vc: &VectorClock,
-    ) {
-        let node_lists = self
-            .lists
-            .entry(node_id.to_string())
-            .or_insert_with(HashMap::new);
-        let list = node_lists
-            .entry(list_property.to_string())
-            .or_insert_with(HashMap::new);
-
-        // RGA: Insert element if not already present
-        list.entry(element_id)
-            .or_insert((value.clone(), after_id, vc.clone()));
-    }
-
-    fn apply_list_delete(
-        &mut self,
-        node_id: &str,
-        list_property: &str,
-        element_id: Uuid,
-        vc: &VectorClock,
-    ) {
-        if let Some(node_lists) = self.lists.get_mut(node_id) {
-            if let Some(list) = node_lists.get_mut(list_property) {
-                if let Some((_, _, insert_vc)) = list.get(&element_id) {
-                    // RGA: Only delete if delete happened after insert
-                    if vc.happens_after(insert_vc) {
-                        list.remove(&element_id);
-                    }
-                }
-            }
-        }
-    }
 }
 
 /// Check if two replicas have equivalent state
 fn replicas_equivalent(r1: &ReplicaState, r2: &ReplicaState) -> bool {
-    r1.properties == r2.properties
+    r1.snapshots == r2.snapshots
         && r1.relations == r2.relations
         && r1.deleted_nodes == r2.deleted_nodes
-        && r1.lists == r2.lists
+}
+
+/// A node snapshot op carrying one property.
+fn snapshot_op_type(node_id: &str, property_name: &str, value: PropertyValue) -> OpType {
+    let mut properties = HashMap::new();
+    properties.insert(property_name.to_string(), value);
+    OpType::UpsertNodeSnapshot {
+        node: Node {
+            id: node_id.to_string(),
+            name: node_id.to_string(),
+            path: format!("/{node_id}"),
+            node_type: "Page".to_string(),
+            workspace: Some("content".to_string()),
+            properties,
+            ..Default::default()
+        },
+        parent_id: Some("/".to_string()),
+        revision: HLC::new(1, 0),
+        cf_order_key: format!("a0::{node_id}"),
+    }
 }
 
 // ============================================================================
@@ -384,8 +266,8 @@ fn arb_cluster_node_id() -> impl Strategy<Value = String> {
     ]
 }
 
-/// Generate a SetProperty operation from a specific cluster node
-fn arb_set_property_from_node(
+/// Generate a node snapshot operation from a specific cluster node
+fn arb_snapshot_from_node(
     cluster_node: String,
     vc_counter: u64,
 ) -> impl Strategy<Value = Operation> {
@@ -408,11 +290,7 @@ fn arb_set_property_from_node(
                 tenant_id: "tenant1".to_string(),
                 repo_id: "repo1".to_string(),
                 branch: "main".to_string(),
-                op_type: OpType::SetProperty {
-                    node_id,
-                    property_name: prop_name,
-                    value,
-                },
+                op_type: snapshot_op_type(&node_id, &prop_name, value),
                 revision: None,
                 actor: "test".to_string(),
                 message: None,
@@ -421,40 +299,6 @@ fn arb_set_property_from_node(
                 acknowledged_by: HashSet::new(),
             }
         })
-}
-
-/// Generate a DeleteProperty operation
-fn arb_delete_property_from_node(
-    cluster_node: String,
-    vc_counter: u64,
-) -> impl Strategy<Value = Operation> {
-    (arb_node_id(), arb_property_name(), any::<u64>()).prop_map(
-        move |(node_id, prop_name, timestamp)| {
-            let mut vc = VectorClock::new();
-            vc.set(&cluster_node, vc_counter);
-
-            Operation {
-                op_id: Uuid::new_v4(),
-                op_seq: vc_counter,
-                cluster_node_id: cluster_node.clone(),
-                timestamp_ms: timestamp % 1_000_000,
-                vector_clock: vc,
-                tenant_id: "tenant1".to_string(),
-                repo_id: "repo1".to_string(),
-                branch: "main".to_string(),
-                op_type: OpType::DeleteProperty {
-                    node_id,
-                    property_name: prop_name,
-                },
-                revision: None,
-                actor: "test".to_string(),
-                message: None,
-                is_system: false,
-                agent: None,
-                acknowledged_by: HashSet::new(),
-            }
-        },
-    )
 }
 
 /// Generate an AddRelation operation
@@ -537,7 +381,7 @@ fn arb_remove_relation_from_node(
     }
 }
 
-/// Generate a DeleteNode operation
+/// Generate a node delete operation
 fn arb_delete_node_from_node(
     cluster_node: String,
     vc_counter: u64,
@@ -555,7 +399,12 @@ fn arb_delete_node_from_node(
             tenant_id: "tenant1".to_string(),
             repo_id: "repo1".to_string(),
             branch: "main".to_string(),
-            op_type: OpType::DeleteNode { node_id },
+            op_type: OpType::DeleteNodeSnapshot {
+                node_id,
+                revision: HLC::new(1, 0),
+                node: None,
+                parent_id: None,
+            },
             revision: None,
             actor: "test".to_string(),
             message: None,
@@ -581,8 +430,8 @@ proptest! {
 
     #[test]
     fn prop_strong_eventual_consistency(
-        ops1 in prop::collection::vec(arb_set_property_from_node("node1".to_string(), 1), 1..10),
-        ops2 in prop::collection::vec(arb_set_property_from_node("node2".to_string(), 1), 1..10),
+        ops1 in prop::collection::vec(arb_snapshot_from_node("node1".to_string(), 1), 1..10),
+        ops2 in prop::collection::vec(arb_snapshot_from_node("node2".to_string(), 1), 1..10),
     ) {
         let mut replica_a = ReplicaState::new();
         let mut replica_b = ReplicaState::new();
@@ -610,8 +459,8 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(50))]
 
     #[test]
-    fn prop_idempotency_set_property(
-        ops in prop::collection::vec(arb_set_property_from_node("node1".to_string(), 1), 1..10)
+    fn prop_idempotency_snapshot(
+        ops in prop::collection::vec(arb_snapshot_from_node("node1".to_string(), 1), 1..10)
     ) {
         let mut replica1 = ReplicaState::new();
         let mut replica2 = ReplicaState::new();
@@ -668,8 +517,8 @@ proptest! {
 
     #[test]
     fn prop_commutativity_concurrent_ops(
-        ops1 in prop::collection::vec(arb_set_property_from_node("node1".to_string(), 1), 1..8),
-        ops2 in prop::collection::vec(arb_set_property_from_node("node2".to_string(), 1), 1..8),
+        ops1 in prop::collection::vec(arb_snapshot_from_node("node1".to_string(), 1), 1..8),
+        ops2 in prop::collection::vec(arb_snapshot_from_node("node2".to_string(), 1), 1..8),
     ) {
         let mut replica_a = ReplicaState::new();
         let mut replica_b = ReplicaState::new();
@@ -720,11 +569,7 @@ proptest! {
                 tenant_id: "tenant1".to_string(),
                 repo_id: "repo1".to_string(),
                 branch: "main".to_string(),
-                op_type: OpType::SetProperty {
-                    node_id: "test".to_string(),
-                    property_name: "value".to_string(),
-                    value: PropertyValue::Integer(i as i64),
-                },
+                op_type: snapshot_op_type("test", "value", PropertyValue::Integer(i as i64)),
                 revision: None,
                 actor: "test".to_string(),
                 message: None,
@@ -775,11 +620,11 @@ proptest! {
     }
 }
 
-// Property 5: Last-Write-Wins for Property Updates
+// Property 5: Last-Write-Wins for Node Snapshots
 // The operation with the highest vector clock wins
 
 #[test]
-fn prop_lww_property_updates() {
+fn prop_lww_node_snapshots() {
     // Create two concurrent operations with different timestamps
     let mut vc1 = VectorClock::new();
     vc1.set("node1", 1);
@@ -796,11 +641,11 @@ fn prop_lww_property_updates() {
         tenant_id: "t1".to_string(),
         repo_id: "r1".to_string(),
         branch: "main".to_string(),
-        op_type: OpType::SetProperty {
-            node_id: "test".to_string(),
-            property_name: "title".to_string(),
-            value: PropertyValue::String("Value 1".to_string()),
-        },
+        op_type: snapshot_op_type(
+            "test",
+            "title",
+            PropertyValue::String("Value 1".to_string()),
+        ),
         revision: None,
         actor: "user1".to_string(),
         message: None,
@@ -818,11 +663,11 @@ fn prop_lww_property_updates() {
         tenant_id: "t1".to_string(),
         repo_id: "r1".to_string(),
         branch: "main".to_string(),
-        op_type: OpType::SetProperty {
-            node_id: "test".to_string(),
-            property_name: "title".to_string(),
-            value: PropertyValue::String("Value 2".to_string()),
-        },
+        op_type: snapshot_op_type(
+            "test",
+            "title",
+            PropertyValue::String("Value 2".to_string()),
+        ),
         revision: None,
         actor: "user2".to_string(),
         message: None,
@@ -840,7 +685,7 @@ fn prop_lww_property_updates() {
             conflict_type,
             ..
         } => {
-            assert_eq!(conflict_type, ConflictType::ConcurrentPropertyUpdate);
+            assert_eq!(conflict_type, ConflictType::ConcurrentSchemaUpdate);
             // op2 should win (later timestamp)
             assert_eq!(winner.op_id, op2.op_id);
         }
@@ -939,7 +784,7 @@ fn prop_add_wins_relations() {
 fn prop_delete_wins_nodes() {
     let node_id = "test_node";
 
-    // Concurrent property update and node delete
+    // Concurrent node update and node delete
     let mut vc_update = VectorClock::new();
     vc_update.set("node1", 1);
 
@@ -955,11 +800,11 @@ fn prop_delete_wins_nodes() {
         tenant_id: "t1".to_string(),
         repo_id: "r1".to_string(),
         branch: "main".to_string(),
-        op_type: OpType::SetProperty {
-            node_id: node_id.to_string(),
-            property_name: "title".to_string(),
-            value: PropertyValue::String("Updated".to_string()),
-        },
+        op_type: snapshot_op_type(
+            node_id,
+            "title",
+            PropertyValue::String("Updated".to_string()),
+        ),
         revision: None,
         actor: "user".to_string(),
         message: None,
@@ -977,8 +822,11 @@ fn prop_delete_wins_nodes() {
         tenant_id: "t1".to_string(),
         repo_id: "r1".to_string(),
         branch: "main".to_string(),
-        op_type: OpType::DeleteNode {
+        op_type: OpType::DeleteNodeSnapshot {
             node_id: node_id.to_string(),
+            revision: HLC::new(1, 0),
+            node: None,
+            parent_id: None,
         },
         revision: None,
         actor: "user".to_string(),
@@ -1086,11 +934,11 @@ fn prop_crdt_merge_deterministic() {
         tenant_id: "t1".to_string(),
         repo_id: "r1".to_string(),
         branch: "main".to_string(),
-        op_type: OpType::SetProperty {
-            node_id: "test".to_string(),
-            property_name: "title".to_string(),
-            value: PropertyValue::String("Value 1".to_string()),
-        },
+        op_type: snapshot_op_type(
+            "test",
+            "title",
+            PropertyValue::String("Value 1".to_string()),
+        ),
         revision: None,
         actor: "user".to_string(),
         message: None,
@@ -1108,11 +956,11 @@ fn prop_crdt_merge_deterministic() {
         tenant_id: "t1".to_string(),
         repo_id: "r1".to_string(),
         branch: "main".to_string(),
-        op_type: OpType::SetProperty {
-            node_id: "test".to_string(),
-            property_name: "title".to_string(),
-            value: PropertyValue::String("Value 2".to_string()),
-        },
+        op_type: snapshot_op_type(
+            "test",
+            "title",
+            PropertyValue::String("Value 2".to_string()),
+        ),
         revision: None,
         actor: "user".to_string(),
         message: None,
@@ -1171,11 +1019,7 @@ proptest! {
                     tenant_id: "tenant1".to_string(),
                     repo_id: "repo1".to_string(),
                     branch: "main".to_string(),
-                    op_type: OpType::SetProperty {
-                        node_id: format!("{}_data", node),
-                        property_name: "value".to_string(),
-                        value: PropertyValue::Integer(i as i64),
-                    },
+                    op_type: snapshot_op_type(&format!("{}_data", node), "value", PropertyValue::Integer(i as i64)),
                     revision: None,
                     actor: "test".to_string(),
                     message: None,

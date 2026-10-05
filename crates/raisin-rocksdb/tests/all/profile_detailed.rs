@@ -77,6 +77,7 @@ async fn profile_node_operations() -> Result<()> {
         default_language: "en".to_string(),
         supported_languages: vec!["en".to_string()],
         locale_fallback_chains: HashMap::new(),
+        localized_names: Default::default(),
     };
     repo_mgmt
         .create_repository(TENANT, REPO, repo_config)

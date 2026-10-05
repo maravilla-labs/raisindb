@@ -86,6 +86,7 @@ impl RocksDBTransaction {
                 )
                 .await?;
 
+            // At HEAD: the delete has tombstoned the entry at its revision.
             let cf_order_key = self.resolve_cf_order_key(
                 tenant_id,
                 repo_id,
@@ -93,6 +94,7 @@ impl RocksDBTransaction {
                 workspace,
                 parent_id.as_deref(),
                 &node_snapshot.id,
+                None,
             )?;
 
             Ok(Some(ReplicatedNodeChange {
@@ -144,6 +146,9 @@ impl RocksDBTransaction {
                 )
                 .await?;
 
+            // As of the change's revision, like the snapshot itself: a later
+            // reorder committed before this capture ran must not leak its
+            // label into the version at `revision`.
             let cf_order_key = self.resolve_cf_order_key(
                 tenant_id,
                 repo_id,
@@ -151,6 +156,7 @@ impl RocksDBTransaction {
                 workspace,
                 parent_id.as_deref(),
                 &node_snapshot.id,
+                Some(revision),
             )?;
 
             tracing::debug!(
@@ -175,7 +181,9 @@ impl RocksDBTransaction {
         }
     }
 
-    /// Retrieve full CF order key from ORDERED_CHILDREN (with node_id suffix)
+    /// Retrieve full CF order key from ORDERED_CHILDREN (with node_id suffix),
+    /// as of `at` (HEAD when `None`).
+    #[allow(clippy::too_many_arguments)]
     fn resolve_cf_order_key(
         &self,
         tenant_id: &str,
@@ -184,18 +192,19 @@ impl RocksDBTransaction {
         workspace: &str,
         parent_id: Option<&str>,
         node_id: &str,
+        at: Option<&HLC>,
     ) -> Result<String> {
         if let Some(pid) = parent_id {
-            Ok(self
-                .node_repo
-                .get_order_label_for_child(tenant_id, repo_id, branch, workspace, pid, node_id)?
-                .unwrap_or_else(|| {
-                    tracing::warn!(
-                        node_id = %node_id,
-                        "⚠️ Missing CF order key during replication capture - using empty string"
-                    );
-                    String::new()
-                }))
+            Ok(crate::repositories::nodes::stored_order_label_at(
+                &self.db, tenant_id, repo_id, branch, workspace, pid, node_id, at,
+            )?
+            .unwrap_or_else(|| {
+                tracing::warn!(
+                    node_id = %node_id,
+                    "⚠️ Missing CF order key during replication capture - using empty string"
+                );
+                String::new()
+            }))
         } else {
             tracing::debug!(
                 node_id = %node_id,

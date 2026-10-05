@@ -34,7 +34,7 @@ impl OperationApplicator {
         let attribution = EventAttribution::from_op(op);
 
         for change in node_changes {
-            let workspace = change.node.workspace.as_deref().unwrap_or("default");
+            let workspace = super::node_workspace(&change.node);
             match change.kind {
                 ReplicatedNodeChangeKind::Upsert => self.apply_replicated_upsert(
                     tenant_id,
@@ -171,11 +171,14 @@ impl OperationApplicator {
             cf_key = %cf_key_to_use,
             "📥 Applying CF order key from replication"
         );
+        // `Node.order_key == ORDERED_CHILDREN label`, on the replica too: the
+        // record carries the label the entry below is written under.
+        if !cf_key_to_use.is_empty() {
+            normalized_node.order_key = cf_key_to_use.clone();
+        }
 
         let mut batch = WriteBatch::default();
-        let cf_nodes = cf_handle(&self.db, cf::NODES)?;
         let cf_path = cf_handle(&self.db, cf::PATH_INDEX)?;
-        let cf_node_path = cf_handle(&self.db, cf::NODE_PATH)?;
         let cf_property = cf_handle(&self.db, cf::PROPERTY_INDEX)?;
         let cf_reference = cf_handle(&self.db, cf::REFERENCE_INDEX)?;
         let cf_relation = cf_handle(&self.db, cf::RELATION_INDEX)?;
@@ -209,27 +212,54 @@ impl OperationApplicator {
         // newer version is already stored the diff against IT would tombstone
         // its values at an older revision (a no-op) and leave this version's
         // own predecessor's values live. The newer version is handled after
-        // the write, by `tombstone_superseded_by_newer`.
-        if let Some(old_node) = self.load_node_before(
+        // the write, by `tombstone_superseded_by_newer`. AT `revision` counts
+        // as below: an in-place (`versionable=false`) write replaces the version
+        // stored at its own revision, and diffing past it left that version's
+        // values (its old `__updated_at`, a changed title) live beside the new.
+        let replaced = self.load_node_replaced_by(
             tenant_id,
             repo_id,
             branch,
             super::WorkspaceHint::of(&normalized_node),
             &normalized_node.id,
             revision,
-        )? {
-            crate::repositories::add_stale_property_tombstones(
-                &mut batch,
-                cf_property,
+        )?;
+        if let Some((at, stored)) = &replaced {
+            if super::newer_version::stale_in_place(at, stored, revision, &normalized_node) {
+                tracing::debug!(
+                    node_id = %normalized_node.id,
+                    revision = %revision,
+                    "replicated in-place write is older than the one already stored at its \
+                     revision; skipped"
+                );
+                return Ok(());
+            }
+        }
+        // An in-place write (a version is already stored AT this revision)
+        // writes under the in-place guard, like the local in-place writers.
+        let in_place = replaced.as_ref().is_some_and(|(at, _)| at == revision);
+        // Its stale PROPERTY_INDEX values are tombstoned by the one writer
+        // below (`write_all_node_indexes`, a full put against it).
+        let replaced_node = replaced.as_ref().map(|(_, node)| node.clone());
+        // Versions ABOVE this one: the op arrived older than what is stored.
+        // A successor may be a LOCAL write made with skip-unchanged (this node
+        // is an origin too), keeping unchanged entries BELOW `revision` that
+        // the tombstones written here would mask — the property writer
+        // re-asserts every successor at its own revision (`OutOfOrder`).
+        let successors = if in_place {
+            Vec::new()
+        } else {
+            crate::mvcc_read::node_versions_above(
+                &self.db,
                 tenant_id,
                 repo_id,
                 branch,
                 workspace,
-                &old_node,
-                &normalized_node,
+                &normalized_node.id,
                 revision,
-            );
-
+            )?
+        };
+        if let Some((old_rev, old_node)) = replaced {
             crate::repositories::add_stale_reference_tombstones(
                 &mut batch,
                 cf_reference,
@@ -256,7 +286,9 @@ impl OperationApplicator {
                 &spatial_policies,
             )?;
 
-            if old_node.path != normalized_node.path {
+            if old_node.path != normalized_node.path
+                && self.path_owned_at(&index_ctx, &old_node.path, &old_node.id, revision)?
+            {
                 let old_path_key = keys::path_index_key_versioned(
                     tenant_id,
                     repo_id,
@@ -266,39 +298,80 @@ impl OperationApplicator {
                     revision,
                 );
                 batch.put_cf(cf_path, old_path_key, TOMBSTONE);
+            }
 
-                // Old ordered-children entry (old parent / old label) must go
-                // too, or the old parent still lists this node as a child.
-                if let Ok(Some(old_parent_id)) = self.resolve_parent_id_for_snapshot(
-                    tenant_id, repo_id, branch, workspace, &old_node,
+            // Old ordered-children entry (old parent / old label) must go too
+            // — on a move, or the old parent still lists this node as a child,
+            // and on a REORDER (same path, new label), or the old label stays
+            // live beside the new one: `ORDER BY __order DESC` met it first and
+            // listed the node at its old position.
+            //
+            // The old label is READ from ORDERED_CHILDREN as of `revision`,
+            // never taken from the stored blob: a node written through the
+            // transaction path before `order_key` was stamped carries "" there
+            // (so a reorder of it tombstoned nothing), and a legacy copy carries
+            // its SOURCE's label (so the tombstone landed on a label this child
+            // never had). Only a label the ORIGIN supplied can relabel: an empty
+            // `cf_order_key` means capture found no entry, and the locally
+            // allocated fallback must not tombstone the entry the node has.
+            //
+            // The old PARENT is resolved as of the old version's own revision:
+            // by path at HEAD it vanished whenever the parent had since moved
+            // or been renamed (an op this replica applied first, out of
+            // order), and the old entry was then never tombstoned.
+            let supplied = !cf_order_key.is_empty();
+            if old_node.path != normalized_node.path || supplied {
+                if let Ok(Some(old_parent_id)) = crate::repositories::nodes::parent_index_id(
+                    &self.db,
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    &old_node.path,
+                    Some(&old_rev),
                 ) {
-                    let old_ordered_key = keys::ordered_child_key_versioned(
+                    let old_label = crate::repositories::nodes::stored_order_label_at(
+                        &self.db,
                         tenant_id,
                         repo_id,
                         branch,
                         workspace,
                         &old_parent_id,
-                        &old_node.order_key,
-                        revision,
                         &old_node.id,
-                    );
-                    batch.put_cf(cf_ordered, old_ordered_key, TOMBSTONE);
+                        Some(revision),
+                    )?;
+                    if let Some(old_label) = old_label {
+                        if Some(old_parent_id.as_str()) != parent_id || old_label != cf_key_to_use {
+                            let old_ordered_key = keys::ordered_child_key_versioned(
+                                tenant_id,
+                                repo_id,
+                                branch,
+                                workspace,
+                                &old_parent_id,
+                                &old_label,
+                                revision,
+                                &old_node.id,
+                            );
+                            batch.put_cf(cf_ordered, old_ordered_key, TOMBSTONE);
+                        }
+                    }
                 }
             }
         }
 
-        let node_value = rmp_serde::to_vec_named(&normalized_node)
-            .map_err(|e| raisin_error::Error::storage(format!("Serialization error: {}", e)))?;
-
-        let node_key = keys::node_key_versioned(
+        // The record — `StorageNode` blob and NODE_PATH — through the one
+        // record writer (replicas used to store the full `Node`).
+        crate::repositories::nodes::write_node_record(
+            &self.db,
+            &mut batch,
             tenant_id,
             repo_id,
             branch,
             workspace,
-            &normalized_node.id,
+            &normalized_node,
+            crate::repositories::nodes::parent_id_of(parent_id),
             revision,
-        );
-        batch.put_cf(cf_nodes, node_key, node_value);
+        )?;
 
         let path_key = keys::path_index_key_versioned(
             tenant_id,
@@ -310,21 +383,12 @@ impl OperationApplicator {
         );
         batch.put_cf(cf_path, path_key, normalized_node.id.as_bytes());
 
-        let node_path_key = keys::node_path_key_versioned(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            &normalized_node.id,
-            revision,
-        );
-        batch.put_cf(cf_node_path, node_path_key, normalized_node.path.as_bytes());
-
         // Use index writer helpers to write all indexes — property, reference,
         // relation AND spatial. Spatial rides in this same batch, so a replica can
         // never hold the record without its index entries.
         write_all_node_indexes(
             &mut batch,
+            &self.db,
             &super::super::index_writers::ReplicationIndexCfs {
                 property: cf_property,
                 reference: cf_reference,
@@ -338,6 +402,15 @@ impl OperationApplicator {
             &normalized_node,
             revision,
             &spatial_policies,
+            if successors.is_empty() {
+                crate::indexing::Baseline::Full(replaced_node.as_ref())
+            } else {
+                crate::indexing::Baseline::OutOfOrder {
+                    prior: replaced_node.as_ref(),
+                    successors: &successors,
+                }
+            },
+            in_place,
         )?;
 
         // Create the local index-state record when this replica is seeing a
@@ -411,9 +484,30 @@ impl OperationApplicator {
             revision,
         )?;
 
-        // This path writes no compound entries: the batch carries the mark that
-        // fails the workspace's compound indexes closed (see `compound_marker`).
-        self.write_marking_compound_stale(batch, tenant_id, repo_id, branch, workspace)?;
+        // COMPOUND and UNIQUE entries from the cached definitions, or — cold —
+        // the mark that fails the workspace's compound indexes closed plus a
+        // local build request (see `compound_marker`).
+        {
+            let _in_place = in_place.then(|| {
+                crate::repositories::nodes::in_place_write_guard(tenant_id, repo_id, branch)
+            });
+            let baseline = if successors.is_empty() {
+                crate::indexing::Baseline::Full(replaced_node.as_ref())
+            } else {
+                crate::indexing::Baseline::OutOfOrder {
+                    prior: replaced_node.as_ref(),
+                    successors: &successors,
+                }
+            };
+            self.commit_with_schema_indexes(
+                batch,
+                &index_ctx,
+                baseline,
+                &normalized_node,
+                revision,
+                in_place,
+            )?;
+        }
 
         // Event kind: forced by the caller, or derived from the SOURCE node's
         // timestamps. Deriving locally (e.g. "did load_latest_node find anything")
@@ -449,64 +543,6 @@ impl OperationApplicator {
         Ok(())
     }
 
-    /// Apply a single replicated node delete
-    ///
-    /// Delegates to the shared `crate::tombstones` module (single source of
-    /// truth for deletion tombstones), so replicated deletes clean up the same
-    /// families as local deletes — including packed adjacency lists,
-    /// compound/spatial indexes, and NODE_PATH.
-    #[allow(clippy::too_many_arguments)]
-    pub(in crate::replication::application) fn apply_replicated_delete(
-        &self,
-        tenant_id: &str,
-        repo_id: &str,
-        branch: &str,
-        workspace: &str,
-        node: &Node,
-        parent_id: Option<&str>,
-        revision: &HLC,
-        attribution: EventAttribution<'_>,
-    ) -> Result<()> {
-        let mut batch = WriteBatch::default();
-
-        // The ORDERED_CHILDREN tombstone is keyed by the parent's ID, which
-        // the replicated change carries: pass it UNCONDITIONALLY. (This used to
-        // feed `node.parent` — the parent's NAME — whenever the peer's node had
-        // one, so the fix for the delete tombstoner never reached replicas.)
-        let ctx = crate::tombstones::TombstoneContext::new(tenant_id, repo_id, branch, workspace);
-        let cfs = crate::tombstones::TombstoneColumnFamilies::from_arc_db(&self.db)?;
-        crate::tombstones::add_node_tombstones_with_parent(
-            &mut batch,
-            self.db.as_ref(),
-            &ctx,
-            &cfs,
-            node,
-            revision,
-            parent_id,
-        )?;
-
-        self.db.write(batch).map_err(|e| {
-            raisin_error::Error::storage(format!("Failed to apply replicated delete: {}", e))
-        })?;
-
-        super::super::node_operations::emit_node_event(
-            &self.event_bus,
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            &node.id,
-            Some(node.node_type.clone()),
-            Some(node.path.clone()),
-            revision,
-            raisin_events::NodeEventKind::Deleted,
-            "replication",
-            attribution,
-        );
-
-        Ok(())
-    }
-
     /// Apply a node snapshot upsert (decomposed from ApplyRevision for CRDT commutativity)
     ///
     /// Uses Last-Write-Wins (LWW) semantics via the revision HLC.
@@ -521,7 +557,7 @@ impl OperationApplicator {
         cf_order_key: &str,
         op: &Operation,
     ) -> Result<()> {
-        let workspace = node.workspace.as_deref().unwrap_or("default");
+        let workspace = super::node_workspace(node);
 
         self.apply_replicated_upsert(
             tenant_id,
@@ -539,62 +575,6 @@ impl OperationApplicator {
             node_id = %node.id,
             revision = ?revision,
             "Applied UpsertNodeSnapshot with LWW semantics"
-        );
-
-        Ok(())
-    }
-
-    /// Apply a node snapshot delete (decomposed from ApplyRevision for CRDT commutativity)
-    ///
-    /// Uses Delete-Wins semantics - deletions always take precedence.
-    pub(in crate::replication::application) async fn apply_delete_node_snapshot(
-        &self,
-        tenant_id: &str,
-        repo_id: &str,
-        branch: &str,
-        node_id: &str,
-        revision: &HLC,
-        op: &Operation,
-    ) -> Result<()> {
-        // A delete op names only the id, so the workspace is found by scan.
-        let node = match self.load_latest_node(
-            tenant_id,
-            repo_id,
-            branch,
-            super::WorkspaceHint::Unknown,
-            node_id,
-        )? {
-            Some(n) => n,
-            None => {
-                tracing::debug!(
-                    node_id = %node_id,
-                    revision = ?revision,
-                    "Node not found for DeleteNodeSnapshot - treating as already deleted"
-                );
-                return Ok(());
-            }
-        };
-
-        let workspace = node.workspace.as_deref().unwrap_or("default");
-
-        // We use None for parent_id - delete logic handles this gracefully
-        let _parent_id: Option<&str> = None;
-
-        self.apply_replicated_delete(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            &node,
-            None,
-            revision,
-            EventAttribution::from_op(op),
-        )?;
-
-        tracing::debug!(
-            node_id = %node_id,
-            revision = ?revision,
-            "Applied DeleteNodeSnapshot with Delete-Wins semantics"
         );
 
         Ok(())

@@ -3,6 +3,7 @@
 //! These tests verify that the complete checkpoint transfer protocol works correctly
 //! with real TCP communication, RocksDB instances, and file transfers.
 
+use crate::replicated_node_ops::CaptureNodeSnapshot;
 use once_cell::sync::Lazy;
 use raisin_replication::{
     catch_up::CatchUpCoordinator, ClusterConfig, ConnectionConfig, PeerConfig,
@@ -170,7 +171,7 @@ async fn populate_test_data(
     for i in 0..count {
         storage
             .operation_capture()
-            .capture_create_node(
+            .capture_node_snapshot(
                 tenant_id.to_string(),
                 repo_id.to_string(),
                 "main".to_string(),
@@ -385,7 +386,7 @@ async fn test_basic_checkpoint_network_transfer() {
     eprintln!("📝 Creating new operation on source node");
     storage1
         .operation_capture()
-        .capture_create_node(
+        .capture_node_snapshot(
             tenant_id.to_string(),
             repo_id.to_string(),
             "main".to_string(),
@@ -599,7 +600,7 @@ async fn test_multinode_checkpoint_transfer() {
     eprintln!("📝 Creating new operation on node1");
     storage1
         .operation_capture()
-        .capture_create_node(
+        .capture_node_snapshot(
             tenant_id.to_string(),
             repo_id.to_string(),
             "main".to_string(),

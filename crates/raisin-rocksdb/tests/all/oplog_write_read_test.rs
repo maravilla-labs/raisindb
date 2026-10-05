@@ -29,17 +29,19 @@ fn test_oplog_write_then_read_with_properties() {
         "tenant1".to_string(),
         "repo1".to_string(),
         "main".to_string(),
-        OpType::CreateNode {
-            node_id: "article-1".to_string(),
-            name: "My First Article".to_string(),
-            node_type: "Article".to_string(),
-            archetype: None,
-            parent_id: None,
-            order_key: "a".to_string(),
-            properties: props.clone(),
-            owner_id: None,
-            workspace: None,
-            path: "/My First Article".to_string(),
+        OpType::UpsertNodeSnapshot {
+            node: raisin_models::nodes::Node {
+                id: "article-1".to_string(),
+                name: "My First Article".to_string(),
+                path: "/My First Article".to_string(),
+                node_type: "Article".to_string(),
+                workspace: Some("content".to_string()),
+                properties: props.clone(),
+                ..Default::default()
+            },
+            parent_id: Some("/".to_string()),
+            revision: raisin_hlc::HLC::new(1, 0),
+            cf_order_key: "a0::article-1".to_string(),
         },
         "test_actor".to_string(),
     );
@@ -69,18 +71,15 @@ fn test_oplog_write_then_read_with_properties() {
     assert_eq!(read_op.op_seq, 1);
     assert_eq!(read_op.cluster_node_id, "node1");
 
-    if let OpType::CreateNode {
-        properties: rt_props,
-        ..
-    } = &read_op.op_type
-    {
+    if let OpType::UpsertNodeSnapshot { node, .. } = &read_op.op_type {
+        let rt_props = &node.properties;
         assert_eq!(rt_props.len(), 1);
         assert_eq!(
             rt_props.get("content"),
             Some(&PropertyValue::String("Hello World".to_string()))
         );
     } else {
-        panic!("Expected CreateNode variant");
+        panic!("Expected UpsertNodeSnapshot variant");
     }
 
     println!("✅ All assertions passed!");

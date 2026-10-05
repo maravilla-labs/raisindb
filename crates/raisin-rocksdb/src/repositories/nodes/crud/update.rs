@@ -65,6 +65,17 @@ impl NodeRepositoryImpl {
             }
         }
 
+        // What the stored versions are BEFORE `old_node` (this write's index
+        // baseline when skipping is off) is read: the commit re-checks it
+        // under the node's commit lock (`indexing::StagedDeltaCheck`, plan
+        // Phase 7b) — flag or not, a full write also derives the entries it
+        // ENDS from the version it read.
+        let pending_check = crate::indexing::StagedDeltaCheck::before_read(
+            &self.db,
+            &crate::indexing::IndexCtx::new(tenant_id, repo_id, branch, workspace),
+            &node.id,
+        )?;
+
         // VALIDATION 3: Verify node exists and get old node for unique constraint handling
         // For updates, we need the old node to:
         // - Ensure we're not accidentally creating a new node
@@ -204,36 +215,43 @@ impl NodeRepositoryImpl {
 
         let mut batch = WriteBatch::default();
 
+        // The property-index baseline (plan Phase 7): an in-place write is a
+        // full put against the version it overwrites; otherwise the stored
+        // versions decide whether unchanged entries may be skipped.
+        let ctx = crate::indexing::IndexCtx::new(tenant_id, repo_id, branch, workspace);
+        // Re-checked under the node's commit lock at write time (two
+        // concurrent writers of one node, or a commit below a version
+        // committed meanwhile) — an in-place write too: a racing in-place
+        // rewrite at the same revision changes the marker's hash.
+        let resolve_in_place_targets = reused_revision && self.index_skip_unchanged();
+        let staged_check = if reused_revision {
+            pending_check.in_place_at(&revision, resolve_in_place_targets)
+        } else {
+            pending_check.at(&revision)
+        };
+        let baseline = if reused_revision {
+            crate::indexing::OwnedBaseline::Full(Some(old_node.clone()))
+        } else {
+            self.delta_baseline(&ctx, &node.id, &revision, Some(&old_node))?
+        };
+
         // ORDERED_CHILDREN must be maintained BEFORE the node blob is
         // serialized: it stamps `node.order_key` (preserving the existing label
         // on update, appending a new one otherwise), and the blob has to carry
         // the same label the index entry does.
         let order_step_start = std::time::Instant::now();
         self.add_ordered_children_to_batch(
-            &mut batch, &mut node, tenant_id, repo_id, branch, workspace, &revision,
+            &mut batch,
+            &mut node,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            &revision,
+            Some(&old_node),
         )
         .await?;
         let order_label_time = order_step_start.elapsed().as_micros();
-
-        // Property index: tombstone stale OLD-value entries (value changed /
-        // property removed / published tag flipped) BEFORE writing the new
-        // entries. Without this, equality scans and index COUNTs on the old
-        // value keep matching this node forever (orphaned entries even survive
-        // restarts).
-        {
-            let cf_property = crate::cf_handle(&self.db, crate::cf::PROPERTY_INDEX)?;
-            super::indexing::property_indexes::add_stale_property_tombstones(
-                &mut batch,
-                cf_property,
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                &old_node,
-                &node,
-                &revision,
-            );
-        }
 
         // Secret store: an `encrypted` property REMOVED (or set null) must
         // retire its secret, or the old value stays readable through
@@ -272,35 +290,69 @@ impl NodeRepositoryImpl {
             &revision,
         )?;
 
-        // Use shared indexing helper (DRY)
+        // Use shared indexing helper (DRY). The property index goes through
+        // the one delta writer: stale OLD values tombstoned, and only changed
+        // entries put when the baseline is a proven predecessor.
+        // An in-place write's above-R group lookup is opt-in with the flag
+        // (see `property_delta::in_place`).
+        let in_place_targets = if resolve_in_place_targets {
+            Some(crate::indexing::InPlaceTargets::resolve(
+                &self.db,
+                &ctx,
+                Some(&old_node),
+                &node,
+                &revision,
+            )?)
+        } else {
+            None
+        };
+        // Localized node name uniqueness, when the repository enforces it (plan
+        // Phase 12; `None` otherwise): checked now, and again at the commit
+        // step under the branch lock (`localized_name::unique::deferred`).
+        let name_check = crate::localized_name::unique::NameCheck::staged(
+            &self.db,
+            crate::localized_name::keys::NameScope::new(tenant_id, repo_id, branch, workspace),
+            &node,
+            None,
+            &revision,
+            crate::localized_name::sync::Overrides::new(),
+        )?;
+
         self.add_node_indexes_to_batch(
-            &mut batch, &node, tenant_id, repo_id, branch, workspace, &revision,
+            &mut batch,
+            &node,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            &revision,
+            super::indexing::PropertyWrite {
+                baseline: baseline.as_ref(),
+                in_place: if reused_revision {
+                    crate::indexing::InPlace::Reused(in_place_targets.as_ref())
+                } else {
+                    crate::indexing::InPlace::No
+                },
+            },
         )?;
 
-        // Compound indexes: tombstone the OLD value entries first, then write the
-        // new ones. Without the tombstone, a column value change (e.g. status
-        // held -> confirmed) would leave the stale old-value entry live and a scan
-        // keyed on the old value would still return this node.
-        self.add_compound_tombstones_to_batch(
-            &mut batch, &old_node, tenant_id, repo_id, branch, workspace,
-        )?;
-        self.add_compound_indexes_to_batch(
-            &mut batch, &node, tenant_id, repo_id, branch, workspace, &revision,
-        )
-        .await?;
+        // Compound indexes through the one writer, against the SAME baseline:
+        // the old tuple derived from the version replaced and tombstoned at the
+        // revision (a status held -> confirmed flip must not leave `held`
+        // matching), unchanged tuples skipped under a proven predecessor.
+        self.add_compound_delta_to_batch(&mut batch, &ctx, baseline.as_ref(), &node, &revision)
+            .await?;
 
-        // Handle unique index updates:
-        // 1. Write tombstones for unique values that have changed (old values)
-        // 2. Write new unique index entries for current values
-        // Note: We compare old vs new to only tombstone changed values, but for simplicity
-        // we write tombstones for ALL old unique values and write new entries for ALL new values.
-        // The tombstone mechanism ensures this is correct even if values haven't changed.
-        self.add_unique_tombstones_to_batch(
-            &mut batch, &old_node, tenant_id, repo_id, branch, workspace, &revision,
-        )
-        .await?;
-        self.add_unique_indexes_to_batch(
-            &mut batch, &node, tenant_id, repo_id, branch, workspace, &revision,
+        // Unique claims: tombstone the claims that changed, re-put every new
+        // one (never skipped — see `write_unique_delta`).
+        self.add_unique_delta_to_batch(
+            &mut batch,
+            Some(&old_node),
+            &node,
+            &ctx,
+            &revision,
+            reused_revision,
+            crate::repositories::nodes::UniqueHalf::Both,
         )
         .await?;
 
@@ -320,9 +372,20 @@ impl NodeRepositoryImpl {
         // the branch record lock so a concurrent writer cannot regress HEAD.
         let step_start = std::time::Instant::now();
 
+        let mut commit = crate::indexing::NodeCommit::new(tenant_id, repo_id, branch);
+        commit.check(staged_check, Some(node.clone()));
+        commit.check_name(name_check);
         let updated_branch = self
             .branch_repo
-            .write_batch_with_head(batch, tenant_id, repo_id, branch, revision)
+            .write_batch_with_head_as(
+                batch,
+                tenant_id,
+                repo_id,
+                branch,
+                revision,
+                reused_revision,
+                Some(&commit),
+            )
             .await?;
 
         let rocksdb_write_time = step_start.elapsed().as_micros();

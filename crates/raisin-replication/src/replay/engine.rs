@@ -67,8 +67,8 @@ impl ReplayEngine {
 
         // Step 3: Group by conflict register (NOT whole entity - see
         // conflict_group_key). Grouping every op on a node together would
-        // CRDT-merge a CreateNode with unrelated SetProperty/SetOwner ops and
-        // silently drop all but one mutation.
+        // CRDT-merge a node's snapshot with its relation or translation ops
+        // and silently drop all but one mutation.
         let grouped_ops = Self::group_by_conflict_key(sorted_ops);
 
         // Step 4: Apply CRDT merge rules
@@ -177,19 +177,15 @@ impl ReplayEngine {
     /// Compute the conflict-register key for an operation.
     ///
     /// Only operations that are competing writes of the SAME register may be
-    /// CRDT-merged (one winner). Grouping by whole entity is wrong: a
-    /// CreateNode plus unrelated SetProperty/SetOwner/SetArchetype ops on one
-    /// node would collapse to a single winner and silently drop mutations.
+    /// CRDT-merged (one winner). Grouping by whole entity is wrong: a node
+    /// snapshot plus unrelated relation or translation ops on that node
+    /// would collapse to a single winner and silently drop mutations.
     /// Unknown / cumulative op types get a unique key (never merged) - the
     /// safe direction is to apply, not to drop.
     fn conflict_group_key(op: &Operation) -> String {
         use crate::operation::OpType;
         let target = op.target().to_string();
         match &op.op_type {
-            OpType::SetProperty { property_name, .. }
-            | OpType::DeleteProperty { property_name, .. } => {
-                format!("{target}#prop:{property_name}")
-            }
             OpType::AddRelation {
                 relation_type,
                 target_id,
@@ -200,13 +196,8 @@ impl ReplayEngine {
                 target_id,
                 ..
             } => format!("{target}#rel:{relation_type}:{target_id}"),
-            OpType::MoveNode { .. } => format!("{target}#move"),
-            OpType::DeleteNode { .. } | OpType::DeleteNodeSnapshot { .. } => {
-                format!("{target}#delete")
-            }
-            OpType::CreateNode { .. } | OpType::UpsertNodeSnapshot { .. } => {
-                format!("{target}#snapshot")
-            }
+            OpType::DeleteNodeSnapshot { .. } => format!("{target}#delete"),
+            OpType::UpsertNodeSnapshot { .. } => format!("{target}#snapshot"),
             // Whole-entity register updates: same-target LWW is correct.
             OpType::UpdateBranch { .. }
             | OpType::UpdateUser { .. }
@@ -216,8 +207,8 @@ impl ReplayEngine {
             | OpType::UpdateArchetype { .. }
             | OpType::UpdateElementType { .. }
             | OpType::UpdateWorkspace { .. } => format!("{target}#update"),
-            // Everything else (ApplyRevision, list ops, deletes of schema
-            // entities, permissions, ...) applies individually.
+            // Everything else (ApplyRevision, translation versions, deletes
+            // of schema entities, permissions, ...) applies individually.
             _ => format!("{target}#op:{}", op.op_id),
         }
     }

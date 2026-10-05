@@ -150,10 +150,12 @@ impl NodeRepositoryImpl {
             .await?
         {
             Some(mut node) => {
+                let old = node.clone();
                 node.order_key = final_label.clone();
                 node.updated_at = Some(chrono::Utc::now());
-                self.add_node_indexes_to_batch_with_parent_id(
+                self.rewrite_node_record_to_batch(
                     &mut batch,
+                    &old,
                     &node,
                     tenant_id,
                     repo_id,
@@ -161,7 +163,8 @@ impl NodeRepositoryImpl {
                     workspace,
                     &revision,
                     Some(parent_id.to_string()),
-                )?;
+                )
+                .await?;
                 Some(node)
             }
             None => {
@@ -177,9 +180,24 @@ impl NodeRepositoryImpl {
             }
         };
 
-        // Commit batch atomically
-        self.db
-            .write(batch)
+        // Commit batch atomically, as one node commit step (plan Phase 7b):
+        // the re-stamped record's index write re-derived against what is
+        // stored at that moment.
+        let mut commit = crate::indexing::NodeCommit::new(tenant_id, repo_id, branch);
+        match &reordered_node {
+            Some(node) => commit.check(
+                crate::indexing::StagedDeltaCheck::always(
+                    &crate::indexing::IndexCtx::new(tenant_id, repo_id, branch, workspace),
+                    &node.id,
+                    &revision,
+                ),
+                Some(node.clone()),
+            ),
+            None => commit.touch(target_child_id),
+        };
+        commit
+            .write(&self.db, batch)
+            .await
             .map_err(|e| raisin_error::Error::storage(format!("Failed to reorder child: {}", e)))?;
 
         // 6. Update branch HEAD

@@ -123,17 +123,11 @@ mod tests {
             "tenant1".to_string(),
             "repo1".to_string(),
             "main".to_string(),
-            OpType::CreateNode {
+            OpType::DeleteNodeSnapshot {
                 node_id: "test123".to_string(),
-                name: "Test Article".to_string(),
-                node_type: "article".to_string(),
-                archetype: None,
+                revision: raisin_hlc::HLC::new(1, 0),
+                node: None,
                 parent_id: None,
-                order_key: "a".to_string(),
-                properties: std::collections::HashMap::new(),
-                owner_id: None,
-                workspace: None,
-                path: String::new(),
             },
             "test@example.com".to_string(),
         );

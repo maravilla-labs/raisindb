@@ -144,6 +144,11 @@ pub struct RocksDBTransaction {
     /// Same scratch-state shape as `reserved_create_paths` above: owned by the
     /// transaction, dropped with it.
     pub(super) vaulted_secrets: VaultedSecrets,
+
+    /// This transaction's revision while it is allocated and not committed
+    /// (`inflight.rs`): run-collapse keeps its watermark below it. Released
+    /// on commit, rollback, or drop.
+    pub(super) inflight_revision: Arc<Mutex<Option<super::inflight::InflightRevision>>>,
 }
 
 /// Secret name -> (version minted in this transaction, hash of its plaintext).
@@ -210,7 +215,17 @@ impl RocksDBTransaction {
             path_reservation_owner,
             reserved_create_paths: Arc::new(Mutex::new(HashSet::new())),
             vaulted_secrets: Arc::new(Mutex::new(HashMap::new())),
+            inflight_revision: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Release the in-flight claim on this transaction's revision (it has
+    /// committed, or will never commit). Idempotent.
+    pub(super) fn release_inflight_revision(&self) {
+        self.inflight_revision
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
     }
 
     /// The version this transaction already minted for `name` holding exactly
@@ -328,6 +343,12 @@ impl RocksDBTransaction {
                 .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
             metadata.transaction_revision = Some(hlc);
         }
+        // Until it commits, entries may still land at it (`inflight.rs`).
+        *self
+            .inflight_revision
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) =
+            Some(super::inflight::InflightRevision::register(&self.db, hlc));
 
         tracing::debug!("Allocated transaction HLC {:?}", hlc);
 
@@ -503,6 +524,7 @@ impl Transaction for RocksDBTransaction {
             // WriteBatch is dropped, no changes are applied.
             // Free any CREATE path reservations so other creators can proceed.
             self.release_create_path_reservations();
+            self.release_inflight_revision();
             Ok(())
         }
     }

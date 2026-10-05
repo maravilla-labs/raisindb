@@ -7,6 +7,7 @@
 //!
 //! Run with: cargo test --package raisin-rocksdb --test replication_performance_test
 
+use crate::replicated_node_ops::CaptureNodeSnapshot;
 use once_cell::sync::Lazy;
 use raisin_replication::{ClusterConfig, ConnectionConfig, PeerConfig, SyncConfig};
 use raisin_rocksdb::replication::start_replication;
@@ -231,7 +232,7 @@ async fn test_replication_latency_distribution() {
         // Create operation on node1
         storage1
             .operation_capture()
-            .capture_create_node(
+            .capture_node_snapshot(
                 "tenant1".to_string(),
                 "repo1".to_string(),
                 "main".to_string(),
@@ -343,7 +344,7 @@ async fn test_cold_start_vs_warm_latency() {
     let cold_start = Instant::now();
     storage1
         .operation_capture()
-        .capture_create_node(
+        .capture_node_snapshot(
             "tenant1".to_string(),
             "repo1".to_string(),
             "main".to_string(),
@@ -383,7 +384,7 @@ async fn test_cold_start_vs_warm_latency() {
         let start = Instant::now();
         storage1
             .operation_capture()
-            .capture_create_node(
+            .capture_node_snapshot(
                 "tenant1".to_string(),
                 "repo1".to_string(),
                 "main".to_string(),
@@ -471,7 +472,7 @@ async fn test_concurrent_bidirectional_writes() {
         for i in 1..=50 {
             storage1_task1
                 .operation_capture()
-                .capture_create_node(
+                .capture_node_snapshot(
                     "tenant1".to_string(),
                     "repo1".to_string(),
                     "main".to_string(),
@@ -516,7 +517,7 @@ async fn test_concurrent_bidirectional_writes() {
         for i in 1..=50 {
             storage2_task2
                 .operation_capture()
-                .capture_create_node(
+                .capture_node_snapshot(
                     "tenant1".to_string(),
                     "repo1".to_string(),
                     "main".to_string(),
@@ -640,7 +641,7 @@ async fn test_burst_load() {
     // Send all operations as fast as possible (no await between captures)
     let mut futures = Vec::new();
     for i in 1..=20 {
-        let future = storage1.operation_capture().capture_create_node(
+        let future = storage1.operation_capture().capture_node_snapshot(
             "tenant1".to_string(),
             "repo1".to_string(),
             "main".to_string(),

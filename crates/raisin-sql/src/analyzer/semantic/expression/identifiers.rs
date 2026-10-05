@@ -91,9 +91,9 @@ impl<'a> AnalyzerContext<'a> {
 
             // Check if this is a subquery - use its schema directly
             let table = if let Some(subquery_ref) = &table_ref.subquery {
-                subquery_ref.schema.clone()
+                std::rc::Rc::new(subquery_ref.schema.clone())
             } else {
-                self.get_table_def(&table_ref.table)?
+                self.table_def_shared(&table_ref.table)?
                     .ok_or_else(|| AnalysisError::TableNotFound(table_ref.table.clone()))?
             };
 
@@ -195,9 +195,9 @@ impl<'a> AnalyzerContext<'a> {
                 }
 
                 let table = if let Some(subquery_ref) = &table_ref.subquery {
-                    subquery_ref.schema.clone()
+                    std::rc::Rc::new(subquery_ref.schema.clone())
                 } else {
-                    self.get_table_def(&table_ref.table)?
+                    self.table_def_shared(&table_ref.table)?
                         .ok_or_else(|| AnalysisError::TableNotFound(table_ref.table.clone()))?
                 };
 

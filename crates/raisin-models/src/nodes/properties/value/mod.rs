@@ -24,6 +24,7 @@ mod domain_types;
 mod element;
 mod from_json;
 mod geojson;
+mod json_round_trip;
 mod position;
 mod property_value;
 

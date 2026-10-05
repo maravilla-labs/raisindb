@@ -93,6 +93,7 @@ impl Env {
                     default_branch: BRANCH.to_string(),
                     description: None,
                     tags: HashMap::new(),
+                    localized_names: Default::default(),
                 },
             )
             .await?;

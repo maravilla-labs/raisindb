@@ -96,8 +96,12 @@ impl RocksDBStorage {
     ///   (every index reads `NotBuilt` on first boot);
     /// - a declaration changed by package install, YAML edit or `ALTER … ADD`,
     ///   which `invalidate_changed_compound_state` has just marked stale;
-    /// - a branch fork, which inherits no state because `cf::INDEX_STATUS` is
-    ///   excluded from branch copy.
+    /// - a branch fork whose source index was not `Ready` (a fork inherits
+    ///   only `Ready` records, `compound_state::fork`).
+    ///
+    /// An index whose record is merely an OLDER FORMAT is skipped unless
+    /// `RAISIN_COMPOUND_FORMAT_REBUILD` is on (see
+    /// `compound_state::format_rebuild_enabled`).
     ///
     /// A steady-state call writes NOTHING: every index answers `Ready`, the
     /// loop queues nothing, and the sweep costs one NodeType listing. That is
@@ -158,12 +162,11 @@ impl RocksDBStorage {
         use raisin_storage::compound::CompoundStateSource;
         use raisin_storage::NodeTypeRepository;
 
-        // A compound index belongs to exactly ONE node type, and the build
-        // handler's `scan_nodes_by_type` matches that name EXACTLY (a
-        // subtype's nodes are not indexed by its base type's declaration).
-        // So a workspace that cannot hold the owning type has nothing to
-        // index, and queueing a build for it buys a full keyspace scan that
-        // provably finds zero rows.
+        // A compound index is declared by ONE node type (subtypes inherit it,
+        // and the build indexes every type that carries it). A workspace that
+        // cannot hold the declaring type is treated as having nothing to
+        // index; one holding only a subtype stays NotBuilt — fail closed, a
+        // scan — until the declaring type is allowed there.
         //
         // Skipping those is not tidiness. Measured against the studio package
         // on 2026-09-09: 276 declared compound indexes x 37 workspaces =
@@ -266,6 +269,23 @@ impl RocksDBStorage {
                 let availability =
                     state.compound_availability(tenant_id, repo_id, branch, workspace, definition);
                 if availability.is_ready() {
+                    continue;
+                }
+                if !crate::compound_state::format_rebuild_enabled()
+                    && state
+                        .get(tenant_id, repo_id, branch, workspace, &definition.name)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|record| record.is_format_upgrade())
+                {
+                    // Unusable only because the record format moved on: a
+                    // rebuild of every index on every node at once is an
+                    // admin decision (`REBUILD … compound`), not a sweep's.
+                    tracing::debug!(
+                        index = %definition.name,
+                        workspace = %workspace,
+                        "compound index has an older state format; left to an admin rebuild"
+                    );
                     continue;
                 }
                 tracing::info!(

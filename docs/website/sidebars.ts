@@ -127,6 +127,7 @@ const sidebars: SidebarsConfig = {
           items: [
             'access/sql/raisinsql',
             'access/sql/editorial-ordering',
+            'access/sql/localized-paths',
             'access/sql/indexes',
             'access/sql/branches',
             'access/sql/restore',

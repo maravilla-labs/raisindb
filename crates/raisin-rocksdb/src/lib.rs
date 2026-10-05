@@ -58,6 +58,7 @@ pub mod indexing;
 mod jobs;
 pub mod keys;
 pub mod lazy_indexing;
+pub mod localized_name;
 pub mod management;
 pub mod mcp_listener;
 pub mod monitoring;
@@ -76,7 +77,9 @@ mod storage;
 pub mod tantivy_transfer;
 mod tombstones;
 mod transaction;
+pub mod translation_history;
 mod translation_read;
+mod translation_write;
 pub mod vaulting;
 pub mod vmount_registry;
 
@@ -247,6 +250,8 @@ pub use jobs::handlers::scheduled_invocation::{
 // JobContext that the worker's handler reads, so both sides must spell the
 // rebuild-vs-reconcile discriminator identically.
 pub use jobs::handlers::fulltext::{FULLTEXT_MODE_RECONCILE, META_FULLTEXT_MODE};
+pub use mvcc_read::decode_node_blob;
+pub use repositories::nodes::crud::read::read_snapshot_seeks;
 pub use storage::{RestoreStats, RocksDBStorage};
 pub use transaction::RocksDBTransaction;
 
@@ -355,6 +360,14 @@ pub mod cf {
     //
     // A node property never holds ciphertext — it holds a `secret://` reference.
     pub const SECRETS: &str = "secrets";
+
+    // The localized name index (plan Phase 12): one localized URL segment per
+    // node, per locale, under its parent.
+    // forward: {tenant}\0{repo}\0{branch}\0{ws}\0lname\0{locale}\0{parent_id}\0{name}\0{node_id}\0{~rev}
+    // reverse: {tenant}\0{repo}\0{branch}\0{ws}\0lname_of\0{node_id}\0{locale}\0{~rev}
+    // Both end with the descending HLC (`RevisionLocator::Tail`); every text
+    // segment is null-free. See `crate::localized_name`.
+    pub const LOCALIZED_NAME_INDEX: &str = "localized_name_index";
 }
 
 /// Column families a released build created and a later one no longer uses.
@@ -426,6 +439,7 @@ pub(crate) fn all_column_families() -> Vec<&'static str> {
         cf::PENDING_BATCH_OPS,
         cf::AUDIT_LOG,
         cf::SECRETS,
+        cf::LOCALIZED_NAME_INDEX,
     ]
 }
 
@@ -542,6 +556,25 @@ pub fn open_db_with_config(config: &config::RocksDBConfig) -> Result<DB> {
         .collect();
     for name in &retired {
         cfs.push(ColumnFamilyDescriptor::new(*name, Options::default()));
+    }
+    // A column family on disk that this binary neither uses nor retired was
+    // created by a NEWER release (plan Phase 12.0: registration before any
+    // writer). RocksDB refuses to open without naming it, so it is opened
+    // generically — default options, never read, never dropped — and a later
+    // upgrade finds its data intact.
+    for name in on_disk.iter().filter(|d| {
+        d.as_str() != "default"
+            && !all_column_families().contains(&d.as_str())
+            && !RETIRED_COLUMN_FAMILIES.contains(&d.as_str())
+    }) {
+        tracing::warn!(
+            column_family = %name,
+            "Opening a column family this binary does not know (written by a newer release)"
+        );
+        cfs.push(ColumnFamilyDescriptor::new(
+            name.as_str(),
+            Options::default(),
+        ));
     }
 
     let mut db = DB::open_cf_descriptors(&db_opts, &config.path, cfs)

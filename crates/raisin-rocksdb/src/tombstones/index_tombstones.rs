@@ -1,9 +1,7 @@
-//! Index tombstone functions: property, reference, relation, compound, spatial, translation
+//! Index tombstone functions: property, reference, relation, spatial, translation
+//! (compound: `indexing::compound::delete`)
 
-use super::helpers::{
-    extract_locale_from_translation_key, extract_node_id_from_key, hash_property_value,
-    parse_relation_from_forward_key,
-};
+use super::helpers::{hash_property_value, parse_relation_from_forward_key};
 use super::{TombstoneColumnFamilies, TombstoneContext, TOMBSTONE};
 use crate::keys;
 use raisin_error::Result;
@@ -12,179 +10,45 @@ use raisin_models::nodes::Node;
 use raisin_models::nodes::{INDEXED_MIXIN_KEY, INDEXED_SUPERTYPE_KEY};
 use rocksdb::{WriteBatch, DB};
 
-/// Tombstone all property indexes (PROPERTY_INDEX CF)
+/// Tombstone all property indexes (PROPERTY_INDEX CF): every entry the
+/// node's version indexes — custom properties, pseudo-properties and IS_A /
+/// HAS_MIXIN membership — through the ONE entry derivation the writer uses
+/// (`indexing::property_delta`), so a delete can never miss an entry the
+/// write path created.
 ///
-/// Includes both custom properties and system properties:
-/// - Custom properties from node.properties
-/// - __node_type
-/// - __name
-/// - __archetype
-/// - __created_by
-/// - __updated_by
+/// A delete landing BELOW a stored version (a replicated delete older than a
+/// local update) re-asserts every such successor's entries at its own
+/// revision afterwards: a successor written with skip-unchanged keeps
+/// unchanged entries below the delete, and the delete's tombstones would
+/// otherwise mask them at HEAD.
 pub(super) fn tombstone_property_indexes(
     batch: &mut WriteBatch,
+    db: &DB,
     ctx: &TombstoneContext,
     cfs: &TombstoneColumnFamilies,
     node: &Node,
     revision: &HLC,
-    is_published: bool,
-) {
-    // Tombstone custom property indexes
-    for (prop_name, prop_value) in &node.properties {
-        let value_hash = hash_property_value(prop_value);
-        let prop_key = keys::property_index_key_versioned(
-            ctx.tenant_id,
-            ctx.repo_id,
-            ctx.branch,
-            ctx.workspace,
-            prop_name,
-            &value_hash,
-            revision,
-            &node.id,
-            is_published,
-        );
-        batch.put_cf(cfs.property_index, prop_key, TOMBSTONE);
-    }
-
-    // Tombstone __node_type index (always present)
-    let node_type_key = keys::property_index_key_versioned(
+) -> Result<()> {
+    let index_ctx =
+        crate::indexing::IndexCtx::new(ctx.tenant_id, ctx.repo_id, ctx.branch, ctx.workspace);
+    crate::indexing::tombstone_all_entries(batch, cfs.property_index, &index_ctx, node, revision);
+    let successors = crate::mvcc_read::node_versions_above(
+        db,
         ctx.tenant_id,
         ctx.repo_id,
         ctx.branch,
         ctx.workspace,
-        "__node_type",
-        &node.node_type,
-        revision,
         &node.id,
-        is_published,
+        revision,
+    )?;
+    crate::indexing::reassert_successors(
+        batch,
+        cfs.property_index,
+        &index_ctx,
+        &node.id,
+        &successors,
     );
-    batch.put_cf(cfs.property_index, node_type_key, TOMBSTONE);
-
-    // Tombstone TYPE MEMBERSHIP entries — one per supertype, one per mixin.
-    // Must mirror `index_node_properties` exactly: a member written there and
-    // not tombstoned here stays live for ever and `IS_A` keeps matching a
-    // deleted node.
-    for (pseudo_key, members) in [
-        (INDEXED_SUPERTYPE_KEY, node.effective_supertypes()),
-        (INDEXED_MIXIN_KEY, node.effective_mixins()),
-    ] {
-        for member in members {
-            let key = keys::property_index_key_versioned(
-                ctx.tenant_id,
-                ctx.repo_id,
-                ctx.branch,
-                ctx.workspace,
-                pseudo_key,
-                &member,
-                revision,
-                &node.id,
-                is_published,
-            );
-            batch.put_cf(cfs.property_index, key, TOMBSTONE);
-        }
-    }
-
-    // Tombstone __name index (if present)
-    if !node.name.is_empty() {
-        let name_key = keys::property_index_key_versioned(
-            ctx.tenant_id,
-            ctx.repo_id,
-            ctx.branch,
-            ctx.workspace,
-            "__name",
-            &node.name,
-            revision,
-            &node.id,
-            is_published,
-        );
-        batch.put_cf(cfs.property_index, name_key, TOMBSTONE);
-    }
-
-    // Tombstone __archetype index (if present)
-    if let Some(ref archetype) = node.archetype {
-        if !archetype.is_empty() {
-            let archetype_key = keys::property_index_key_versioned(
-                ctx.tenant_id,
-                ctx.repo_id,
-                ctx.branch,
-                ctx.workspace,
-                "__archetype",
-                archetype,
-                revision,
-                &node.id,
-                is_published,
-            );
-            batch.put_cf(cfs.property_index, archetype_key, TOMBSTONE);
-        }
-    }
-
-    // Tombstone __created_by index (if present)
-    if let Some(ref created_by) = node.created_by {
-        if !created_by.is_empty() {
-            let created_by_key = keys::property_index_key_versioned(
-                ctx.tenant_id,
-                ctx.repo_id,
-                ctx.branch,
-                ctx.workspace,
-                "__created_by",
-                created_by,
-                revision,
-                &node.id,
-                is_published,
-            );
-            batch.put_cf(cfs.property_index, created_by_key, TOMBSTONE);
-        }
-    }
-
-    // Tombstone __updated_by index (if present)
-    if let Some(ref updated_by) = node.updated_by {
-        if !updated_by.is_empty() {
-            let updated_by_key = keys::property_index_key_versioned(
-                ctx.tenant_id,
-                ctx.repo_id,
-                ctx.branch,
-                ctx.workspace,
-                "__updated_by",
-                updated_by,
-                revision,
-                &node.id,
-                is_published,
-            );
-            batch.put_cf(cfs.property_index, updated_by_key, TOMBSTONE);
-        }
-    }
-
-    // Tombstone __created_at / __updated_at timestamp indexes (if present) —
-    // without these, deleted nodes keep surfacing in `ORDER BY created_at`
-    // PropertyOrderScans.
-    if let Some(created_at) = node.created_at {
-        let created_at_key = keys::property_index_key_versioned_timestamp(
-            ctx.tenant_id,
-            ctx.repo_id,
-            ctx.branch,
-            ctx.workspace,
-            "__created_at",
-            created_at.timestamp_micros(),
-            revision,
-            &node.id,
-            is_published,
-        );
-        batch.put_cf(cfs.property_index, created_at_key, TOMBSTONE);
-    }
-    if let Some(updated_at) = node.updated_at {
-        let updated_at_key = keys::property_index_key_versioned_timestamp(
-            ctx.tenant_id,
-            ctx.repo_id,
-            ctx.branch,
-            ctx.workspace,
-            "__updated_at",
-            updated_at.timestamp_micros(),
-            revision,
-            &node.id,
-            is_published,
-        );
-        batch.put_cf(cfs.property_index, updated_at_key, TOMBSTONE);
-    }
+    Ok(())
 }
 
 /// Tombstone reference indexes (REFERENCE_INDEX CF)
@@ -378,85 +242,6 @@ pub(super) fn tombstone_relation_indexes(
     Ok(())
 }
 
-/// Tombstone compound indexes (COMPOUND_INDEX CF)
-///
-/// Scans workspace prefix to find all compound index entries for this node.
-/// Handles both draft and published compound indexes.
-///
-/// # This is O(every compound entry in the workspace) per node WRITE
-///
-/// Not per delete — per write. `put_node` calls this unconditionally whenever a
-/// node already exists, with no check that the node's type declares any compound
-/// index at all, and it scans the workspace prefix TWICE (draft and published)
-/// because the key carries no node id until its last component.
-///
-/// It is free today only because no NodeType in the tree declares a compound
-/// index, so both iterators seek into an empty range. The moment ONE index
-/// exists over a large type, every update in that workspace pays a scan of every
-/// entry that index holds — and on a workspace a connector syncs into, the
-/// sync's own `__etag` / `__pushed_state` stamp-back is a full node rewrite per
-/// item, so the cost lands squarely on the hot path. One index over 200k mails
-/// at ~3 live revisions makes a 500-item drain read ~6×10⁸ keys.
-///
-/// This is the same pathology [`tombstone_spatial_indexes`] documents removing
-/// 20 lines below, and it wants the same treatment: DERIVE the node's own keys
-/// instead of searching for them. The old node carries its own column values, so
-/// for each declared index the full value tuple — and therefore the key prefix
-/// `cidx[_pub]\0{name}\0{values…}` — is computable without a scan; only the
-/// entries under that one prefix can belong to this node's previous revision,
-/// because each update already tombstones its predecessor's group (induction:
-/// the A→B update tombstones group A, so at B→C only group B can be live). What
-/// blocks it is availability, not correctness: this function is synchronous and
-/// has no NodeType, while `compound_indexes` needs an async fetch. The two
-/// UPDATE call sites — `tombstone_compound_indexes_tx` and
-/// `add_compound_tombstones_to_batch` — both sit immediately before a resolve of
-/// exactly those definitions, so threading them in is contained; the DELETE path
-/// (`add_node_tombstones`) can keep the scan, deletes being rare.
-///
-/// Until then: **do not declare a compound index on a NodeType a virtual mount
-/// writes** (`raisin:Mail`, `raisin:Event`). The scan it turns on costs more
-/// than the index saves.
-pub(super) fn tombstone_compound_indexes(
-    batch: &mut WriteBatch,
-    db: &DB,
-    ctx: &TombstoneContext,
-    cfs: &TombstoneColumnFamilies,
-    node: &Node,
-) -> Result<()> {
-    // Scan compound indexes for both draft and published
-    for is_published in [false, true] {
-        let prefix = keys::compound_index_workspace_prefix(
-            ctx.tenant_id,
-            ctx.repo_id,
-            ctx.branch,
-            ctx.workspace,
-            is_published,
-        );
-
-        let iter = crate::prefix_scan(&db, cfs.compound_index, &prefix);
-        for item in iter {
-            let (key, _) = item.map_err(|e| {
-                raisin_error::Error::storage(format!("Failed to iterate compound index: {}", e))
-            })?;
-
-            // Stop when leaving workspace prefix
-            if !key.starts_with(&prefix) {
-                break;
-            }
-
-            // Check if this key is for our node (node_id is the last component)
-            if let Some(key_node_id) = extract_node_id_from_key(&key) {
-                if key_node_id == node.id {
-                    // Write tombstone for this exact key
-                    batch.put_cf(cfs.compound_index, key, TOMBSTONE);
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
 /// Tombstone spatial indexes (SPATIAL_INDEX CF)
 ///
 /// # Why this no longer scans
@@ -525,57 +310,6 @@ pub(super) fn tombstone_spatial_indexes(
             revision,
             precisions,
         )?;
-    }
-
-    Ok(())
-}
-
-/// Tombstone translation data (TRANSLATION_DATA CF)
-///
-/// Scans for all translation locales for this node and tombstones them.
-pub(super) fn tombstone_translation_data(
-    batch: &mut WriteBatch,
-    db: &DB,
-    ctx: &TombstoneContext,
-    cfs: &TombstoneColumnFamilies,
-    node: &Node,
-    revision: &HLC,
-) -> Result<()> {
-    // Build prefix for translations of this node
-    // Key format: {tenant}\0{repo}\0{branch}\0{workspace}\0translations\0{node_id}\0
-    let translation_prefix = format!(
-        "{}\0{}\0{}\0{}\0translations\0{}\0",
-        ctx.tenant_id, ctx.repo_id, ctx.branch, ctx.workspace, node.id
-    )
-    .into_bytes();
-
-    let iter = crate::prefix_scan(&db, cfs.translation_data, &translation_prefix);
-    for item in iter {
-        let (key, value) = item.map_err(|e| {
-            raisin_error::Error::storage(format!("Failed to iterate translations: {}", e))
-        })?;
-
-        // Stop when leaving node's translation prefix
-        if !key.starts_with(&translation_prefix) {
-            break;
-        }
-
-        // Skip already-tombstoned entries
-        if value.as_ref() == TOMBSTONE {
-            continue;
-        }
-
-        // Extract locale from key and write tombstone at new revision
-        if let Some(locale) = extract_locale_from_translation_key(&key, &translation_prefix) {
-            // Build tombstone key with new revision
-            let mut tombstone_key = format!(
-                "{}\0{}\0{}\0{}\0translations\0{}\0{}\0",
-                ctx.tenant_id, ctx.repo_id, ctx.branch, ctx.workspace, node.id, locale
-            )
-            .into_bytes();
-            tombstone_key.extend_from_slice(&keys::encode_descending_revision(revision));
-            batch.put_cf(cfs.translation_data, tombstone_key, TOMBSTONE);
-        }
     }
 
     Ok(())

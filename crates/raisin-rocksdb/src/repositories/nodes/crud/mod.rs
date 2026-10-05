@@ -20,5 +20,5 @@ mod create;
 mod delete;
 mod helpers;
 pub(crate) mod indexing;
-mod read;
+pub(crate) mod read;
 mod update;

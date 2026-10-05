@@ -93,6 +93,7 @@ async fn count_compound(storage: &raisin_rocksdb::RocksDBStorage, status: &str) 
             false,
             true,
             None,
+            None,
         )
         .await
         .expect("compound scan")

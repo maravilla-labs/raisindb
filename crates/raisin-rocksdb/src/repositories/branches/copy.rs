@@ -37,21 +37,24 @@ impl BranchRepositoryImpl {
         max_revision: &HLC,
     ) -> Result<()> {
         let db = Arc::clone(&self.db);
-        let (tenant_id, repo_id) = (tenant_id.to_string(), repo_id.to_string());
-        let (source_branch, target_branch) = (source_branch.to_string(), target_branch.to_string());
+        let (tenant, repo) = (tenant_id.to_string(), repo_id.to_string());
+        let (source, target) = (source_branch.to_string(), target_branch.to_string());
         let max_revision = *max_revision;
         tokio::task::spawn_blocking(move || {
-            Self::copy_branch_indexes_blocking(
-                &db,
-                &tenant_id,
-                &repo_id,
-                &source_branch,
-                &target_branch,
-                &max_revision,
-            )
+            Self::copy_branch_indexes_blocking(&db, &tenant, &repo, &source, &target, &max_revision)
         })
         .await
-        .map_err(|e| raisin_error::Error::storage(format!("branch index copy panicked: {e}")))?
+        .map_err(|e| raisin_error::Error::storage(format!("branch index copy panicked: {e}")))??;
+        // The target (a fork, or a merge from an unrebuilt source) may now owe
+        // its `property_index` rebuild: queue it in the background (plan Phase
+        // 7b; a no-op when it is still `done`).
+        crate::management::async_indexing::repair::request_property_index_rebuild(
+            &self.db,
+            tenant_id,
+            repo_id,
+            Some(target_branch),
+        );
+        Ok(())
     }
 
     fn copy_branch_indexes_blocking(
@@ -69,6 +72,16 @@ impl BranchRepositoryImpl {
         // ARCHETYPES/ELEMENT_TYPES, then the whole SPATIAL_INDEX — because a CF
         // that was never mentioned was simply never copied and nothing said so.
         for (cf_name, plan) in cfs_to_copy() {
+            // A copy inserts the source's history into the target below any
+            // entry the target already holds: run-collapse must not be
+            // mid-slice on this (target branch, CF) meanwhile (plan Phase 9).
+            let _inserting = crate::management::cf_exclusion::enter_inserter(
+                db,
+                tenant_id,
+                repo_id,
+                target_branch,
+                cf_name,
+            );
             let copied = Self::copy_cf_entries(
                 db,
                 tenant_id,
@@ -88,6 +101,31 @@ impl BranchRepositoryImpl {
                 target_branch
             );
         }
+
+        // The target now holds the SOURCE's entries for every node it
+        // replayed. Unless the source's PROPERTY_INDEX was rebuilt by this
+        // writer too, those may carry the holes the rebuild exists to fill
+        // (pre-Phase-7 replica history without membership), and a skip-
+        // unchanged write would never heal them: the target falls back to
+        // full puts until it is rebuilt.
+        crate::management::async_indexing::repair::invalidate_after_branch_copy(
+            db,
+            tenant_id,
+            repo_id,
+            source_branch,
+            target_branch,
+        )?;
+        // Likewise the repairs run-collapse requires (ORDERED_CHILDREN's): a
+        // merge from an unrepaired source brings unrepaired history into a
+        // target whose records say `done`, and collapse there would fold a
+        // stale entry into a run the repair later reshapes (plan Phase 9).
+        crate::management::history_gc::collapse::rearm_after_branch_copy(
+            db,
+            tenant_id,
+            repo_id,
+            source_branch,
+            target_branch,
+        )?;
 
         Ok(())
     }
@@ -135,8 +173,25 @@ impl BranchRepositoryImpl {
             crate::prefix_scan(&db, &cf, source_prefix)
         };
 
+        // Keys the target already holds are its own record of that revision
+        // and are never overwritten (see `copy_existing`). The schema CFs'
+        // `*_versions` lookups carry no revision in the key, so a same-key
+        // entry there is not "the same revision": they keep the old
+        // overwrite semantics.
+        let skip_existing = !matches!(plan.revision, RevisionLocator::SchemaOrVersionValue);
+        let target_prefix = keys::KeyBuilder::new()
+            .push(tenant_id)
+            .push(repo_id)
+            .push(target_branch)
+            .build_prefix();
+        let mut existing = super::copy_existing::ExistingKeys::new(db, cf, &target_prefix);
+
         let mut copied_count = 0;
         let mut skipped_unparseable = 0usize;
+        // Parents (`(workspace, parent_id)`) that received ORDERED_CHILDREN
+        // entries, whose cached LAST label the target must drop (see below).
+        let mut touched_parents: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
         let mut batch = rocksdb::WriteBatch::default();
         let mut pending = 0usize;
 
@@ -187,9 +242,20 @@ impl BranchRepositoryImpl {
                     // Create new key with target branch instead of source branch
                     // Replace the branch component (index 2) with target_branch
                     let new_key = Self::build_key_with_branch(&parts, target_branch);
+                    if skip_existing && existing.contains(&new_key) {
+                        continue;
+                    }
 
                     // Write to target branch with same value (preserving revision)
                     batch.put_cf(&cf, new_key, &*value);
+                    if cf_name == cf::ORDERED_CHILDREN {
+                        if let (Some(ws), Some(parent)) = (parts.get(3), parts.get(5)) {
+                            touched_parents.insert((
+                                String::from_utf8_lossy(ws).into_owned(),
+                                String::from_utf8_lossy(parent).into_owned(),
+                            ));
+                        }
+                    }
                     pending += 1;
                     copied_count += 1;
 
@@ -204,6 +270,34 @@ impl BranchRepositoryImpl {
 
         if pending > 0 {
             db.write(batch)
+                .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+        }
+
+        // The `LAST` label cache carries no revision, so it is never copied —
+        // and a merge brings in children the target never appended, whose
+        // labels can sort after the target's cached LAST. The next append
+        // would then be minted BEFORE them. Drop the cache for every parent
+        // that received entries the target did not already hold (keys it held
+        // are skipped above, so an unchanged parent keeps its cache); the
+        // fallback scan recomputes the true last label (the greatest
+        // fractional part) on the next append. Bounded batches, like the copy.
+        // A fork's fresh target has no cache to drop.
+        if !existing.target_had_keys {
+            touched_parents.clear();
+        }
+        for chunk in touched_parents
+            .into_iter()
+            .collect::<Vec<_>>()
+            .chunks(COPY_BATCH_ENTRIES)
+        {
+            let mut invalidate = rocksdb::WriteBatch::default();
+            for (ws, parent) in chunk {
+                invalidate.delete_cf(
+                    &cf,
+                    keys::last_child_metadata_key(tenant_id, repo_id, target_branch, ws, parent),
+                );
+            }
+            db.write(invalidate)
                 .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
         }
 

@@ -6,6 +6,7 @@
 ///! - Partition recovery (node goes down and comes back up)
 ///! - Catch-up scenario (new node joins existing cluster)
 ///! - Priority-based operation ordering
+use crate::replicated_node_ops::CaptureNodeSnapshot;
 use once_cell::sync::Lazy;
 use raisin_models::admin_user::{AdminAccessFlags, DatabaseAdminUser};
 use raisin_models::StorageTimestamp;
@@ -296,7 +297,7 @@ async fn test_three_node_cluster() {
     eprintln!("📝 Creating node on node2");
     storage2
         .operation_capture()
-        .capture_create_node(
+        .capture_node_snapshot(
             tenant_id.to_string(),
             repo_id.to_string(),
             branch.to_string(),
@@ -319,7 +320,7 @@ async fn test_three_node_cluster() {
     eprintln!("📝 Creating node on node3");
     storage3
         .operation_capture()
-        .capture_create_node(
+        .capture_node_snapshot(
             tenant_id.to_string(),
             repo_id.to_string(),
             branch.to_string(),
@@ -451,7 +452,10 @@ async fn test_partition_recovery() {
 
     // Trigger sync
     eprintln!("🔄 Triggering sync for node3 catch-up");
-    coord3.sync_with_peer("node1").await.unwrap();
+    coord3
+        .sync_with_peer_for_tenants("node1", &[(tenant_id.to_string(), repo_id.to_string())])
+        .await
+        .unwrap();
 
     // Wait for node3 to catch up
     wait_for_total_operations(&storage3, tenant_id, repo_id, 1, Duration::from_secs(10))
@@ -525,7 +529,7 @@ async fn test_admin_user_priority() {
     eprintln!("📝 Creating node on node1");
     storage1
         .operation_capture()
-        .capture_create_node(
+        .capture_node_snapshot(
             tenant_id.to_string(),
             repo_id.to_string(),
             branch.to_string(),
@@ -596,7 +600,7 @@ async fn test_lazy_index_trigger_after_catchup() {
     for i in 1..=12 {
         storage1
             .operation_capture()
-            .capture_create_node(
+            .capture_node_snapshot(
                 tenant_id.to_string(),
                 repo_id.to_string(),
                 branch.to_string(),
@@ -723,7 +727,10 @@ async fn test_lazy_index_trigger_after_catchup() {
 
     // Trigger sync for catch-up
     eprintln!("🔄 Triggering sync for node2 catch-up");
-    coord2.sync_with_peer("node1").await.unwrap();
+    coord2
+        .sync_with_peer_for_tenants("node1", &[(tenant_id.to_string(), repo_id.to_string())])
+        .await
+        .unwrap();
 
     // Wait for node2 to catch up with operations
     // The event-based trigger will automatically queue PropertyIndexBuild job

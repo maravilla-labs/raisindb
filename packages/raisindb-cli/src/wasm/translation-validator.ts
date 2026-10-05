@@ -110,6 +110,9 @@ export const NON_TRANSLATABLE_KEYS: ReadonlySet<string> = new Set([
  */
 const SECTION_IDENTIFIER_KEYS: ReadonlySet<string> = new Set(['uuid']);
 
+/** Reserved overlay key: the node's translated name (its localized URL segment). */
+const NODE_NAME_KEY = '__node_name';
+
 // ---------------------------------------------------------------------------
 // Schema helpers
 // ---------------------------------------------------------------------------
@@ -374,6 +377,9 @@ export function validateTranslationFile(
     }
   }
 
+  // 5b. The reserved translated node name, whatever the schema
+  checkNodeName(obj, filePath, errors);
+
   // 6. Schema-aware translatability check
   if (baseContent) {
     checkTranslatability(obj, filePath, baseContent, ctx, errors);
@@ -385,6 +391,31 @@ export function validateTranslationFile(
     errors,
     warnings,
   };
+}
+
+/**
+ * The reserved `__node_name` key: the node's translated name (its URL segment
+ * in this locale). The server reads a string (trimmed of `/`, last segment of
+ * a URL-shaped value) and treats `null` as "no translated name"; anything else
+ * would be stored and silently ignored, so it is an error here. Checked for
+ * every node, including built-in types the package has no schema for.
+ */
+function checkNodeName(
+  translationObj: Record<string, unknown>,
+  filePath: string,
+  errors: ValidationError[],
+): void {
+  if (!(NODE_NAME_KEY in translationObj)) return;
+  const value = translationObj[NODE_NAME_KEY];
+  if (typeof value === 'string' || value === null) return;
+  errors.push({
+    file_path: filePath,
+    field_path: NODE_NAME_KEY,
+    error_code: ErrorCodes.TRANSLATION_FIELD_NOT_TRANSLATABLE,
+    message: `'${NODE_NAME_KEY}' is the node's translated name and must be a string (one path segment)`,
+    severity: 'error',
+    fix_type: 'manual',
+  });
 }
 
 /**
@@ -423,6 +454,9 @@ function checkTranslatability(
   for (const key of Object.keys(translationObj)) {
     if (NON_TRANSLATABLE_KEYS.has(key)) continue; // already warned
     if (key === 'hidden') continue;
+    // The node's translated name is a reserved overlay field, not a schema
+    // field; its shape is checked by checkNodeName, schema or not.
+    if (key === NODE_NAME_KEY) continue;
 
     // Check if this key maps to a SectionField or CompositeField (arrays)
     const fieldDef = archetype.fields.find(f => f.name === key);

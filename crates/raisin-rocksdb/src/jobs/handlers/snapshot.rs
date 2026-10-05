@@ -158,7 +158,7 @@ impl SnapshotHandler {
         // Process translation snapshots
         for trans_change in &changed_translations {
             // Read translation from committed data
-            let translation_key = Self::translation_key(
+            let translation_key = crate::repositories::translations::keys::translation_key(
                 &context.tenant_id,
                 &context.repo_id,
                 &context.branch,
@@ -168,8 +168,15 @@ impl SnapshotHandler {
                 revision,
             );
 
-            if let Some(translation_bytes) =
-                self.db.get_cf(cf_nodes, translation_key).rocksdb_err()?
+            // TRANSLATION_DATA, not NODES: reading the node CF found nothing,
+            // so no translation snapshot was ever created. A tombstone has
+            // no snapshot.
+            let cf_translations = crate::cf_handle(&self.db, crate::cf::TRANSLATION_DATA)?;
+            if let Some(translation_bytes) = self
+                .db
+                .get_cf(cf_translations, translation_key)
+                .rocksdb_err()?
+                .filter(|bytes| !crate::keys::is_tombstone_value(bytes))
             {
                 // Translation data is already serialized - reuse it!
                 let snapshot_key = keys::translation_snapshot_key(
@@ -220,57 +227,5 @@ impl SnapshotHandler {
         }
 
         Ok(())
-    }
-
-    /// Encode a translation data key
-    ///
-    /// Format: `{tenant}\0{repo}\0{branch}\0{ws}\0translations\0{node_id}\0{locale}\0{~revision}`
-    fn translation_key(
-        tenant_id: &str,
-        repo_id: &str,
-        branch: &str,
-        workspace: &str,
-        node_id: &str,
-        locale: &str,
-        revision: &raisin_hlc::HLC,
-    ) -> Vec<u8> {
-        let mut key = format!(
-            "{}\0{}\0{}\0{}\0translations\0{}\0{}\0",
-            tenant_id, repo_id, branch, workspace, node_id, locale
-        )
-        .into_bytes();
-
-        // Append the binary revision bytes
-        key.extend_from_slice(&keys::encode_descending_revision(revision));
-        key
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_translation_key_encoding() {
-        let revision = raisin_hlc::HLC::new(100, 0);
-        let key = SnapshotHandler::translation_key(
-            "tenant1",
-            "repo1",
-            "main",
-            "workspace1",
-            "node123",
-            "fr-FR",
-            &revision,
-        );
-
-        // Verify the key contains expected components (before binary revision)
-        let key_str = String::from_utf8_lossy(&key[..key.len() - 16]);
-        assert!(key_str.contains("tenant1"));
-        assert!(key_str.contains("repo1"));
-        assert!(key_str.contains("main"));
-        assert!(key_str.contains("workspace1"));
-        assert!(key_str.contains("translations"));
-        assert!(key_str.contains("node123"));
-        assert!(key_str.contains("fr-FR"));
     }
 }

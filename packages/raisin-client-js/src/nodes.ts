@@ -11,6 +11,8 @@ import {
   NodeDeletePayload,
   NodeGetPayload,
   NodeHistoryPayload,
+  NodeGetByLocalizedPathPayload,
+  LocalizedNode,
   NodeQueryPayload,
   RelationAddPayload,
   RelationRemovePayload,
@@ -219,6 +221,28 @@ export class NodeOperations {
     };
     const result = await this.sendRequest(payload, 'node_history');
     return (result as RevisionEntry[]) ?? [];
+  }
+
+  /**
+   * Get a node by its localized URL path (plan Phase 12).
+   *
+   * @param locale - Locale code (`fr`, `fr-CA`)
+   * @param path - The node's path in that locale (`/produits/chaise`)
+   * @returns The translated node with `canonical_path`,
+   *   `canonical_localized_path`, hreflang `alternates` and a `redirect`
+   *   hint, or `null` when nothing resolves (missing, hidden in the locale
+   *   or not readable — the same answer)
+   *
+   * @example
+   * ```typescript
+   * const hit = await ws.nodes().getByLocalizedPath('fr', '/produits/chaise');
+   * if (hit?.redirect) redirect301(`/fr${hit.canonical_localized_path}`);
+   * ```
+   */
+  async getByLocalizedPath(locale: string, path: string): Promise<LocalizedNode | null> {
+    const payload: NodeGetByLocalizedPathPayload = { locale, path };
+    const result = await this.sendRequest(payload, 'node_get_by_localized_path');
+    return (result as LocalizedNode | null) ?? null;
   }
 
   /**

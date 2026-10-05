@@ -143,6 +143,9 @@ impl PhysicalPlan {
             PhysicalPlan::PathIndexScan { path, .. } => {
                 format!("PathIndexScan: path={}", path)
             }
+            PhysicalPlan::LocalizedPathLookup { path, .. } => {
+                format!("LocalizedPathLookup: path={}", path)
+            }
             PhysicalPlan::NodeIdScan { node_id, .. } => {
                 format!("NodeIdScan: id={}", node_id)
             }
@@ -503,11 +506,17 @@ impl PhysicalPlan {
                     .map(|(k, v, _ty)| format!("{}={}", k, v))
                     .collect::<Vec<_>>()
                     .join(", ");
+                // `ascending` is the INDEX direction (a Timestamp order column
+                // is stored newest-first), so print it as such.
                 format!(
                     "CompoundIndexScan: {} [{}] {} limit_hint={}",
                     index_name,
                     cols_str,
-                    if *ascending { "ASC" } else { "DESC" },
+                    if *ascending {
+                        "index-order"
+                    } else {
+                        "reverse-index-order"
+                    },
                     limit
                         .map(|l| l.to_string())
                         .unwrap_or_else(|| "none".to_string())

@@ -19,14 +19,17 @@
 //!   the one delete tombstoner, once per superseded version (with the parent
 //!   that version's own branch had), plus its UNIQUE entries;
 //! - an upsert tombstones the UNION of what base, target head and source head
-//!   indexed — properties, references, geometries, UNIQUE values, old path and
-//!   old ORDERED_CHILDREN entry — then does a full put at M: blob, PATH_INDEX,
-//!   NODE_PATH, every index through `write_all_node_indexes`, UNIQUE through
+//!   indexed — properties, references, geometries, UNIQUE values, COMPOUND
+//!   tuples, old path and old ORDERED_CHILDREN entry — then does a full put at M: the record (blob
+//!   and NODE_PATH) through the one record writer, PATH_INDEX, every index
+//!   through `write_all_node_indexes`, UNIQUE through
 //!   the local write path's sync writer, and ORDERED_CHILDREN through
 //!   `put_ordered_child`, which also advances the parent's last-child label.
 //!
-//! Not written at M: translations (Phase 11) and COMPOUND entries, which the
-//! workspace's stale marker covers until a rebuild.
+//! COMPOUND entries are written at M through the one compound writer (plan
+//! Phase 8 step 3), with definitions resolved before the write. A TRANSLATION
+//! conflict is written at M by `translations.rs` through the one translation
+//! writer (plan Phase 11).
 
 use super::superseded::{order_entry, Superseded};
 use crate::{cf, cf_handle, keys};
@@ -39,16 +42,18 @@ use std::sync::Arc;
 pub(super) use super::superseded::{load_node_at, superseded_versions};
 
 pub(super) use super::deletion::write_resolved_deletion;
-pub(super) use super::unique_props::UniqueProperties;
+pub(super) use super::unique_props::SchemaDefs;
 
 /// Write `node` into `target_branch` at `revision`, shadowing every version
 /// in `superseded`.
 ///
 /// `origin` is the branch (and revision) `node` was taken from: its parent
 /// key and stored order label are read there, because a node the source
-/// created has no entry on the target until the copy runs.
+/// created has no entry on the target until the copy runs. `source` is the
+/// merge source and its HEAD, whose entries the copy replays after this
+/// write (`merged_view`).
 #[allow(clippy::too_many_arguments)]
-pub(super) fn write_resolved_node(
+pub(super) async fn write_resolved_node(
     db: &Arc<DB>,
     tenant_id: &str,
     repo_id: &str,
@@ -58,7 +63,8 @@ pub(super) fn write_resolved_node(
     origin: (&str, &HLC),
     revision: &HLC,
     superseded: &[Superseded],
-    unique: &UniqueProperties,
+    unique: &SchemaDefs,
+    source: (&str, &HLC),
 ) -> Result<()> {
     let mut normalized = node.clone();
     normalized.has_children = None;
@@ -79,9 +85,7 @@ pub(super) fn write_resolved_node(
     }
 
     let mut batch = WriteBatch::default();
-    let cf_nodes = cf_handle(db, cf::NODES)?;
     let cf_path = cf_handle(db, cf::PATH_INDEX)?;
-    let cf_node_path = cf_handle(db, cf::NODE_PATH)?;
     let cf_property = cf_handle(db, cf::PROPERTY_INDEX)?;
     let cf_reference = cf_handle(db, cf::REFERENCE_INDEX)?;
     let cf_relation = cf_handle(db, cf::RELATION_INDEX)?;
@@ -100,6 +104,11 @@ pub(super) fn write_resolved_node(
         &index_ctx,
         &normalized,
     );
+    // Old paths and UNIQUE claims are ended at M only while the MERGED view
+    // (other resolutions at M, the source entries the copy replays below M)
+    // still gives them to this node (`merged_view`).
+    let view = super::merged_view::MergedView::new(index_ctx, revision, source);
+    let others = view.others_claims(db, superseded, unique, &normalized.id)?;
 
     // 1. Tombstone, at M, everything any superseded version indexed that the
     //    resolved node does not. Written BEFORE the puts below, so a key both
@@ -108,13 +117,10 @@ pub(super) fn write_resolved_node(
         spatial_index: cf_spatial,
     };
     for old in superseded {
-        crate::repositories::add_stale_property_tombstones(
+        crate::indexing::tombstone_superseded_entries(
             &mut batch,
             cf_property,
-            tenant_id,
-            repo_id,
-            target_branch,
-            workspace,
+            &index_ctx,
             &old.node,
             &normalized,
             revision,
@@ -151,8 +157,21 @@ pub(super) fn write_resolved_node(
             &old.node,
             unique.of(&old.node.node_type),
             revision,
+            Some(&others),
         )?;
-        if old.node.path != normalized.path && !old.node.path.is_empty() {
+        crate::indexing::compound::tombstone_superseded_compound(
+            &mut batch,
+            db,
+            &index_ctx,
+            unique.defs(),
+            &old.node,
+            &normalized,
+            revision,
+        )?;
+        if old.node.path != normalized.path
+            && !old.node.path.is_empty()
+            && view.path_names(db, &old.node.path, &normalized.id)?
+        {
             let old_path_key = keys::path_index_key_versioned(
                 tenant_id,
                 repo_id,
@@ -188,21 +207,32 @@ pub(super) fn write_resolved_node(
         }
     }
 
-    // 2. The full put at M.
-    let node_value = rmp_serde::to_vec_named(&normalized)
-        .map_err(|e| raisin_error::Error::storage(format!("Serialization error: {e}")))?;
-    batch.put_cf(
-        cf_nodes,
-        keys::node_key_versioned(
-            tenant_id,
-            repo_id,
-            target_branch,
-            workspace,
-            &normalized.id,
-            revision,
+    // 2. The full put at M. The record goes through the one record writer
+    //    (`StorageNode` + NODE_PATH); merge used to store the full `Node`.
+    crate::repositories::nodes::write_node_record(
+        db,
+        &mut batch,
+        tenant_id,
+        repo_id,
+        target_branch,
+        workspace,
+        &normalized,
+        crate::repositories::nodes::parent_id_of(
+            placement.as_ref().map(|(parent, _)| parent.as_str()),
         ),
-        node_value,
-    );
+        revision,
+    )?;
+    // The localized name index's full put at M: the source-side rows the
+    // copy replays below M (a delete's tombstones, say) must not outrank the
+    // resolution (plan Phase 12).
+    crate::localized_name::sync::sync_node_full(
+        db,
+        &mut batch,
+        crate::localized_name::keys::NameScope::new(tenant_id, repo_id, target_branch, workspace),
+        &normalized,
+        placement.as_ref().map(|(parent, _)| parent.as_str()),
+        revision,
+    )?;
     batch.put_cf(
         cf_path,
         keys::path_index_key_versioned(
@@ -214,18 +244,6 @@ pub(super) fn write_resolved_node(
             revision,
         ),
         normalized.id.as_bytes(),
-    );
-    batch.put_cf(
-        cf_node_path,
-        keys::node_path_key_versioned(
-            tenant_id,
-            repo_id,
-            target_branch,
-            workspace,
-            &normalized.id,
-            revision,
-        ),
-        normalized.path.as_bytes(),
     );
     if let Some((parent, label)) = &placement {
         crate::repositories::nodes::put_ordered_child(
@@ -254,8 +272,13 @@ pub(super) fn write_resolved_node(
         revision,
     )?;
 
+    // Merge NEVER skips (plan Phase 7 item 3): a full put of every entry at M,
+    // over the union tombstones above. Merge replays the source's entries at
+    // their ORIGINAL revisions after writing M, so an entry a KeepOurs left at
+    // its creation revision would sit under the source's later tombstone.
     crate::replication::application::index_writers::write_all_node_indexes(
         &mut batch,
+        db,
         &crate::replication::application::index_writers::ReplicationIndexCfs {
             property: cf_property,
             reference: cf_reference,
@@ -269,17 +292,36 @@ pub(super) fn write_resolved_node(
         &normalized,
         revision,
         &spatial_policies,
+        crate::indexing::Baseline::Full(None),
+        false,
     )?;
 
-    // The compound NotBuilt mark rides in the same batch, under the compound
-    // transitions lock: merge apply writes no COMPOUND entries for an upsert.
-    crate::compound_state::CompoundStateStore::new(Arc::clone(db)).write_marking_stale(
-        batch,
-        tenant_id,
-        repo_id,
-        target_branch,
-        workspace,
+    // COMPOUND: a full put at M over the union tombstones above (plan Phase 8
+    // step 3) — the workspace's compound indexes stay `Ready`.
+    crate::indexing::compound::write_compound_delta(
+        &mut batch,
+        db,
+        &index_ctx,
+        unique.defs(),
+        crate::indexing::Baseline::Full(None),
+        &normalized,
+        revision,
     )?;
+    // One node commit step (plan Phase 7b): locked, and the property and
+    // compound writes re-derived against what is stored on the target at
+    // that moment — a local write landing on the target since the merge read
+    // its versions must not leave values this full put does not end.
+    let mut commit = crate::indexing::NodeCommit::new(tenant_id, repo_id, target_branch);
+    commit
+        .check(
+            crate::indexing::StagedDeltaCheck::always(&index_ctx, &normalized.id, revision),
+            Some(normalized.clone()),
+        )
+        .hold_external(&others);
+    commit
+        .write(db, batch)
+        .await
+        .map_err(|e| raisin_error::Error::storage(format!("merge resolution write: {}", e)))?;
 
     Ok(())
 }

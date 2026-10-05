@@ -7,10 +7,14 @@ use rocksdb::DB;
 use std::sync::Arc;
 
 use crate::error_ext::ResultExt;
+use crate::translation_write::OverlayTarget;
 
-use super::{keys, replication, revision, serialization};
+use super::{keys, replication};
 
-/// Get a block-level translation
+/// Get a block-level translation as of `revision` — the same reader and
+/// rule as a node overlay (it used to take the first key: HEAD, and a
+/// tombstone failed to decode).
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn get_block_translation(
     db: &Arc<DB>,
     tenant_id: &str,
@@ -20,11 +24,11 @@ pub(super) async fn get_block_translation(
     node_id: &str,
     block_uuid: &str,
     locale: &LocaleCode,
-    _revision: &HLC,
+    revision: &HLC,
 ) -> Result<Option<LocaleOverlay>> {
-    let cf = crate::cf_handle(db, crate::cf::BLOCK_TRANSLATIONS)?;
-
-    let prefix = keys::block_translation_prefix(
+    crate::translation_history::ensure_complete_at(db, tenant_id, repo_id, branch, revision)?;
+    Ok(crate::translation_read::read_block_version(
+        db,
         tenant_id,
         repo_id,
         branch,
@@ -32,19 +36,49 @@ pub(super) async fn get_block_translation(
         node_id,
         block_uuid,
         locale.as_str(),
-    );
-
-    let mut iter = crate::prefix_scan(&db, &cf, &prefix);
-
-    if let Some(Ok((_key, value))) = iter.next() {
-        let overlay = serialization::deserialize_overlay(&value)?;
-        return Ok(Some(overlay));
-    }
-
-    Ok(None)
+        Some(revision),
+    )?
+    .and_then(|version| version.overlay))
 }
 
-/// Store a block-level translation
+/// Every live block overlay of this node in one of `locales` as of
+/// `revision` — one scan and one `NODES` walk for the node
+/// (`translation_read::live_block_versions`).
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn get_block_translations_for_node(
+    db: &Arc<DB>,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    workspace: &str,
+    node_id: &str,
+    locales: &[LocaleCode],
+    revision: &HLC,
+) -> Result<Vec<(String, LocaleCode, LocaleOverlay)>> {
+    if locales.is_empty() {
+        return Ok(Vec::new());
+    }
+    crate::translation_history::ensure_complete_at(db, tenant_id, repo_id, branch, revision)?;
+    let versions = crate::translation_read::live_block_versions(
+        db,
+        (tenant_id, repo_id, branch, workspace),
+        node_id,
+        Some(revision),
+        |locale| locales.iter().any(|wanted| wanted.as_str() == locale),
+    )?;
+    Ok(versions
+        .into_iter()
+        .filter_map(|version| {
+            LocaleCode::parse(&version.locale)
+                .ok()
+                .map(|locale| (version.block_uuid, locale, version.overlay))
+        })
+        .collect())
+}
+
+/// Store a block-level translation: version, snapshot and revision meta in
+/// ONE `WriteBatch`, then capture it for replication.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn store_block_translation(
     db: &Arc<DB>,
     operation_capture: Option<&Arc<crate::OperationCapture>>,
@@ -58,64 +92,29 @@ pub(super) async fn store_block_translation(
     overlay: &LocaleOverlay,
     meta: &TranslationMeta,
 ) -> Result<()> {
-    let cf = crate::cf_handle(db, crate::cf::BLOCK_TRANSLATIONS)?;
-
-    let overlay_bytes = serialization::serialize_overlay(overlay)?;
-
-    let key = keys::block_translation_key(
+    let target = OverlayTarget {
         tenant_id,
         repo_id,
         branch,
         workspace,
         node_id,
-        block_uuid,
-        locale.as_str(),
-        &meta.revision,
-    );
+        block_uuid: Some(block_uuid),
+        locale: locale.as_str(),
+    };
+    let batch = super::nodes::translation_batch(db, &target, overlay, meta)?;
+    db.write(batch).rocksdb_err()?;
 
-    db.put_cf(&cf, key, &overlay_bytes).rocksdb_err()?;
-
-    // Store RevisionMeta to track this block translation change
-    revision::store_block_revision_meta(
-        db,
-        tenant_id,
-        repo_id,
-        branch,
-        node_id,
-        workspace,
-        locale.as_str(),
-        block_uuid,
-        overlay,
-        meta,
-    )?;
-
-    // Store block translation snapshot for time-travel queries
-    // Block translations use "{locale}::{block_uuid}" format to track specific block changes
-    let locale_key = format!("{}::{}", locale.as_str(), block_uuid);
-    revision::store_snapshot(
-        db,
-        tenant_id,
-        repo_id,
-        node_id,
-        &locale_key,
-        &meta.revision,
-        &overlay_bytes,
-    )?;
-
-    // Capture operation for replication
-    replication::capture_block_translation(
+    replication::capture_version(
         operation_capture,
-        tenant_id,
-        repo_id,
-        branch,
-        node_id,
-        locale.as_str(),
-        block_uuid,
-        overlay,
+        &replication::TranslationVersionOp {
+            target,
+            overlay: Some(overlay),
+            revision: meta.revision,
+            history_complete_from: None,
+        },
         &meta.actor,
     )
     .await;
-
     Ok(())
 }
 
@@ -137,39 +136,19 @@ pub(super) async fn list_block_translations_for_node(
     workspace: &str,
     node_id: &str,
 ) -> Result<Vec<(String, LocaleCode)>> {
-    let cf = crate::cf_handle(db, crate::cf::BLOCK_TRANSLATIONS)?;
-    let prefix =
-        keys::block_translations_node_prefix(tenant_id, repo_id, branch, workspace, node_id);
-
-    let mut found = std::collections::HashSet::new();
-    for item in crate::prefix_scan(&db, &cf, &prefix) {
-        let (key, _value) = item.rocksdb_err()?;
-        // `prefix_iterator_cf` can run past the prefix; stop when it does.
-        let Some(suffix) = key.strip_prefix(prefix.as_slice()) else {
-            break;
-        };
-        // {block_uuid}\0{locale}\0{~revision} — split on BYTES. The trailing
-        // encoded revision is not valid UTF-8, so decoding the whole suffix first
-        // throws the entry away; only the two leading segments are text.
-        let mut parts = suffix.splitn(3, |b| *b == 0);
-        let (Some(block_uuid), Some(locale)) = (parts.next(), parts.next()) else {
-            continue;
-        };
-        let (Ok(block_uuid), Ok(locale)) =
-            (std::str::from_utf8(block_uuid), std::str::from_utf8(locale))
-        else {
-            continue;
-        };
-        // `orphaned` occupies the locale position but is a marker, not a locale.
-        if locale == "orphaned" {
-            continue;
-        }
-        if let Ok(locale) = LocaleCode::parse(locale) {
-            found.insert((block_uuid.to_string(), locale));
-        }
-    }
-
-    Ok(found.into_iter().collect())
+    // HEAD (the trait takes no revision); a block whose newest version is a
+    // tombstone is not listed.
+    let found = crate::translation_read::live_block_overlays(
+        db, tenant_id, repo_id, branch, workspace, node_id, None,
+    )?;
+    Ok(found
+        .into_iter()
+        .filter_map(|(block_uuid, locale)| {
+            LocaleCode::parse(&locale)
+                .ok()
+                .map(|locale| (block_uuid, locale))
+        })
+        .collect())
 }
 
 /// Mark blocks as orphaned
@@ -196,13 +175,9 @@ pub(super) async fn mark_blocks_orphaned(
 
     for block_uuid in block_uuids {
         // We'll store an orphan marker with a special key suffix
-        let mut key = format!(
-            "{}\0{}\0{}\0{}\0block_trans\0{}\0{}\0orphaned\0",
-            tenant_id, repo_id, branch, workspace, node_id, block_uuid
-        )
-        .into_bytes();
-
-        key.extend_from_slice(&crate::keys::encode_descending_revision(revision));
+        let key = keys::block_orphan_key(
+            tenant_id, repo_id, branch, workspace, node_id, block_uuid, revision,
+        );
 
         db.put_cf(&cf, key, &orphaned_marker).rocksdb_err()?;
     }

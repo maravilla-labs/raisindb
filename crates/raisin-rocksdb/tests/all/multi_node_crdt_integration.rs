@@ -11,6 +11,7 @@
 //! 3. Network Partition: Operations during and after partition healing converge correctly
 //! 4. Out-of-Order Delivery: Causal buffer handles operations arriving out of order
 
+use crate::replicated_node_ops::CaptureNodeSnapshot;
 use once_cell::sync::Lazy;
 use raisin_replication::{
     ClusterConfig, ConnectionConfig, PeerConfig, ReplicationCoordinator, SyncConfig, VectorClock,
@@ -337,7 +338,7 @@ async fn test_multi_node_convergence() {
     let op1 = node1
         .storage
         .operation_capture()
-        .capture_create_node(
+        .capture_node_snapshot(
             tenant_id.to_string(),
             repo_id.to_string(),
             branch.to_string(),
@@ -359,7 +360,7 @@ async fn test_multi_node_convergence() {
     let op2 = node2
         .storage
         .operation_capture()
-        .capture_create_node(
+        .capture_node_snapshot(
             tenant_id.to_string(),
             repo_id.to_string(),
             branch.to_string(),
@@ -381,7 +382,7 @@ async fn test_multi_node_convergence() {
     let op3 = node3
         .storage
         .operation_capture()
-        .capture_create_node(
+        .capture_node_snapshot(
             tenant_id.to_string(),
             repo_id.to_string(),
             branch.to_string(),
@@ -502,7 +503,7 @@ async fn test_crash_recovery_with_persistent_idempotency() {
         node1
             .storage
             .operation_capture()
-            .capture_create_node(
+            .capture_node_snapshot(
                 tenant_id.to_string(),
                 repo_id.to_string(),
                 branch.to_string(),
@@ -541,7 +542,10 @@ async fn test_crash_recovery_with_persistent_idempotency() {
 
     // Trigger sync again (will re-send same operations)
     if let Some(coordinator) = &node2.coordinator {
-        coordinator.sync_with_peer("node1").await.ok();
+        coordinator
+            .sync_with_peer_for_tenants("node1", &[(tenant_id.to_string(), repo_id.to_string())])
+            .await
+            .ok();
     }
 
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -600,15 +604,13 @@ async fn test_out_of_order_delivery_with_causal_buffer() {
     eprintln!("\n2. Creating sequence of dependent operations on node1");
 
     // Create a sequence of operations with dependencies:
-    // op1: CreateNode
-    // op2: SetProperty (depends on op1)
-    // op3: SetProperty (depends on op2)
-    // op4: AddChild (depends on op1)
+    // op1: the parent's snapshot
+    // op2..op4: its children's snapshots, each depending on the previous one
 
     let op1 = node1
         .storage
         .operation_capture()
-        .capture_create_node(
+        .capture_node_snapshot(
             tenant_id.to_string(),
             repo_id.to_string(),
             branch.to_string(),
@@ -627,56 +629,43 @@ async fn test_out_of_order_delivery_with_causal_buffer() {
         .await
         .unwrap();
 
-    let op2 = node1
-        .storage
-        .operation_capture()
-        .capture_set_archetype(
-            tenant_id.to_string(),
-            repo_id.to_string(),
-            branch.to_string(),
-            "parent-node".to_string(),
-            None,                         // old_archetype
-            Some("BlogPost".to_string()), // new_archetype
-            "user1".to_string(),
-        )
-        .await
-        .unwrap();
-
-    let op3 = node1
-        .storage
-        .operation_capture()
-        .capture_set_order_key(
-            tenant_id.to_string(),
-            repo_id.to_string(),
-            branch.to_string(),
-            "parent-node".to_string(),
-            "a0".to_string(),  // old_order_key
-            "a0b".to_string(), // new_order_key
-            "user1".to_string(),
-        )
-        .await
-        .unwrap();
-
-    let op4 = node1
-        .storage
-        .operation_capture()
-        .capture_set_owner(
-            tenant_id.to_string(),
-            repo_id.to_string(),
-            branch.to_string(),
-            "parent-node".to_string(),
-            None,                           // old_owner_id
-            Some("admin-user".to_string()), // new_owner_id
-            "user1".to_string(),
-        )
-        .await
-        .unwrap();
+    // op2..op4: children of the parent, each captured after (and so causally
+    // depending on) the one before. Distinct nodes, so the replay engine's
+    // per-node LWW merge keeps all of them (the pre-v2 per-field ops these
+    // replaced are gone, plan "Phase 11d").
+    let mut later = Vec::new();
+    for child in ["child-a", "child-b", "child-c"] {
+        later.push(
+            node1
+                .storage
+                .operation_capture()
+                .capture_node_snapshot(
+                    tenant_id.to_string(),
+                    repo_id.to_string(),
+                    branch.to_string(),
+                    child.to_string(),
+                    child.to_string(),
+                    "Document".to_string(),
+                    None,
+                    Some("parent-node".to_string()),
+                    "a0".to_string(),
+                    serde_json::json!({ "status": "draft" }),
+                    None,
+                    None,
+                    format!("/Parent Node/{child}"),
+                    "user1".to_string(),
+                )
+                .await
+                .unwrap(),
+        );
+    }
+    let (op2, op3, op4) = (&later[0], &later[1], &later[2]);
 
     eprintln!("   Created 4 dependent operations:");
-    eprintln!("   - op1 (CreateNode): {}", op1.op_id);
-    eprintln!("   - op2 (SetProperty): {}", op2.op_id);
-    eprintln!("   - op3 (SetProperty): {}", op3.op_id);
-    eprintln!("   - op4 (AddChild): {}", op4.op_id);
+    eprintln!("   - op1 (parent snapshot): {}", op1.op_id);
+    eprintln!("   - op2 (snapshot): {}", op2.op_id);
+    eprintln!("   - op3 (snapshot): {}", op3.op_id);
+    eprintln!("   - op4 (snapshot): {}", op4.op_id);
 
     assert_eq!(node1.get_total_operation_count(tenant_id, repo_id), 4);
 
@@ -692,7 +681,10 @@ async fn test_out_of_order_delivery_with_causal_buffer() {
 
     // Trigger sync
     if let Some(coordinator) = &node2.coordinator {
-        coordinator.sync_with_peer("node1").await.ok();
+        coordinator
+            .sync_with_peer_for_tenants("node1", &[(tenant_id.to_string(), repo_id.to_string())])
+            .await
+            .ok();
     }
 
     eprintln!("\n4. Waiting for node2 to receive all operations");
@@ -779,7 +771,7 @@ async fn test_network_partition_and_healing() {
     let op1 = node1
         .storage
         .operation_capture()
-        .capture_create_node(
+        .capture_node_snapshot(
             tenant_id.to_string(),
             repo_id.to_string(),
             branch.to_string(),
@@ -801,7 +793,7 @@ async fn test_network_partition_and_healing() {
     let op2 = node2
         .storage
         .operation_capture()
-        .capture_create_node(
+        .capture_node_snapshot(
             tenant_id.to_string(),
             repo_id.to_string(),
             branch.to_string(),
@@ -824,7 +816,7 @@ async fn test_network_partition_and_healing() {
     let op3 = node3
         .storage
         .operation_capture()
-        .capture_create_node(
+        .capture_node_snapshot(
             tenant_id.to_string(),
             repo_id.to_string(),
             branch.to_string(),
@@ -1014,7 +1006,7 @@ async fn test_node_offline_rejoin_replay() {
         node1
             .storage
             .operation_capture()
-            .capture_create_node(
+            .capture_node_snapshot(
                 tenant_id.to_string(),
                 repo_id.to_string(),
                 branch.to_string(),
@@ -1067,7 +1059,7 @@ async fn test_node_offline_rejoin_replay() {
         node1
             .storage
             .operation_capture()
-            .capture_create_node(
+            .capture_node_snapshot(
                 tenant_id.to_string(),
                 repo_id.to_string(),
                 branch.to_string(),
@@ -1192,7 +1184,10 @@ async fn test_node_offline_rejoin_replay() {
     // Without the fix, this would request the same operations again (infinite loop)
     // With the fix, vector clock snapshot is updated, so no operations requested
     if let Some(coordinator) = &node2.coordinator {
-        coordinator.sync_with_peer("node1").await.ok();
+        coordinator
+            .sync_with_peer_for_tenants("node1", &[(tenant_id.to_string(), repo_id.to_string())])
+            .await
+            .ok();
     }
 
     tokio::time::sleep(Duration::from_secs(2)).await;

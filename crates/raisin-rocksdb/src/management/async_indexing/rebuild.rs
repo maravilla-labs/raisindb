@@ -10,13 +10,13 @@
 use crate::{cf, cf_handle, keys, repositories::hash_property_value, RocksDBStorage};
 use raisin_error::{Error, Result};
 use raisin_hlc::HLC;
-use raisin_storage::compound::CompoundIndexState;
 use raisin_storage::{IndexType, RebuildStats};
 use rocksdb::WriteBatch;
 
+use super::compound_rebuild::rebuild_compound_indexes;
 use super::helpers::{
-    clear_compound_indexes, clear_path_indexes, clear_property_indexes, clear_reference_indexes,
-    get_current_revision, scan_nodes,
+    clear_path_indexes, clear_property_indexes, clear_reference_indexes, get_current_revision,
+    scan_nodes,
 };
 
 /// Rebuild indexes for a repository + workspace
@@ -46,6 +46,22 @@ pub async fn rebuild_indexes(
         branch,
         workspace
     );
+
+    // A rebuild clears and re-derives: hold every CF it writes against
+    // run-collapse (plan Phase 9) for its whole duration.
+    let mut _inserting = Vec::new();
+    for cf_name in rebuilt_cfs(index_type) {
+        _inserting.push(
+            crate::management::cf_exclusion::enter_inserter_async(
+                storage.db(),
+                tenant_id,
+                repo_id,
+                branch,
+                cf_name,
+            )
+            .await,
+        );
+    }
 
     match index_type {
         IndexType::Property => {
@@ -97,6 +113,25 @@ pub async fn rebuild_indexes(
     );
 
     Ok(stats)
+}
+
+/// The column families a rebuild of `index_type` clears or writes.
+fn rebuilt_cfs(index_type: IndexType) -> &'static [&'static str] {
+    match index_type {
+        IndexType::Property => &[cf::PROPERTY_INDEX, cf::UNIQUE_INDEX],
+        IndexType::Reference => &[cf::REFERENCE_INDEX],
+        IndexType::ChildOrder => &[cf::ORDERED_CHILDREN],
+        IndexType::Compound => &[cf::COMPOUND_INDEX],
+        IndexType::All => &[
+            cf::PATH_INDEX,
+            cf::PROPERTY_INDEX,
+            cf::UNIQUE_INDEX,
+            cf::REFERENCE_INDEX,
+            cf::ORDERED_CHILDREN,
+            cf::COMPOUND_INDEX,
+        ],
+        IndexType::FullText | IndexType::Vector => &[],
+    }
 }
 
 /// Rebuild path indexes for all nodes in a workspace
@@ -540,168 +575,6 @@ async fn rebuild_reference_indexes(
     Ok(())
 }
 
-/// Rebuild compound (multi-column) indexes for all nodes in a workspace.
-///
-/// Clears existing compound entries, then re-writes them from each node using the
-/// same encoder as the live write paths (`write_compound_entries_to_batch`). This
-/// both backfills data written before the index existed and repairs drift from
-/// any path that previously skipped compound maintenance. NodeType definitions
-/// are cached by node_type name to avoid a per-node async fetch.
-async fn rebuild_compound_indexes(
-    storage: &RocksDBStorage,
-    tenant_id: &str,
-    repo_id: &str,
-    branch: &str,
-    workspace: &str,
-    stats: &mut RebuildStats,
-) -> Result<()> {
-    use raisin_models::nodes::properties::schema::CompoundIndexDefinition;
-    use raisin_storage::NodeTypeRepository;
-    use std::collections::HashMap;
-
-    tracing::info!("Rebuilding compound indexes");
-
-    // 1. Get all nodes
-    let nodes = scan_nodes(storage, tenant_id, repo_id, branch, workspace).await?;
-
-    // 2. Clear existing compound indexes for this workspace (draft + published)
-    //
-    // Everything declared on this branch is about to be rebuilt, so mark it all
-    // `Building` FIRST. The clear below empties the keyspace, and until the
-    // rebuild finishes there is no complete entry set to serve — unlike spatial,
-    // where `Building` still describes a usable older generation. The planner
-    // treats `Building` as unusable and takes another access path, which is
-    // correct-but-slower rather than fast-but-wrong.
-    let state_store = crate::compound_state::CompoundStateStore::new(storage.db.clone());
-    let declared = declared_compound_indexes(storage, tenant_id, repo_id, branch).await?;
-    //
-    // `begin_rebuild` also returns the generation each build runs under: a
-    // replicated write that marks the index stale mid-rebuild advances it, and
-    // the `Ready` below then loses its compare-and-set instead of stamping over
-    // that mark. (These used to be plain puts of generation 0 — which both
-    // skipped the check and reset the counter, so an older mark could be
-    // forgotten and a later build's CAS pass against it.)
-    let mut started_under = Vec::with_capacity(declared.len());
-    for definition in &declared {
-        started_under.push(state_store.begin_rebuild(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            definition,
-            HLC::new(0, 0),
-        )?);
-    }
-
-    clear_compound_indexes(storage, tenant_id, repo_id, branch, workspace).await?;
-
-    // 3. Rebuild from nodes
-    let mut batch = WriteBatch::default();
-    let current_revision = get_current_revision(storage, tenant_id, repo_id, branch).await?;
-
-    // Cache compound-index definitions per node_type (None = no compound indexes)
-    let mut defs_cache: HashMap<String, Option<Vec<CompoundIndexDefinition>>> = HashMap::new();
-
-    for node in nodes {
-        stats.items_processed += 1;
-
-        // Resolve (and cache) this node_type's compound-index definitions
-        if !defs_cache.contains_key(&node.node_type) {
-            // Own declarations PLUS the ones inherited through `extends`.
-            // Reading the raw record here would rebuild a subtype WITHOUT the
-            // indexes its ancestors declare — the same gap the live write path
-            // had, and a rebuild is exactly where it would look repaired.
-            let mut merged: Vec<raisin_models::nodes::properties::schema::CompoundIndexDefinition> =
-                Vec::new();
-            let mut seen_type = std::collections::HashSet::new();
-            let mut cursor = Some(node.node_type.clone());
-            let mut depth = 0usize;
-            while let Some(name) = cursor {
-                if depth >= 20 || !seen_type.insert(name.clone()) {
-                    break;
-                }
-                depth += 1;
-                let nt = storage
-                    .node_types
-                    .get(
-                        raisin_storage::BranchScope::new(tenant_id, repo_id, branch),
-                        &name,
-                        None,
-                    )
-                    .await?;
-                let Some(nt) = nt else { break };
-                if let Some(ref indexes) = nt.compound_indexes {
-                    for idx in indexes {
-                        // Derived-first walk, so the first occurrence of a name
-                        // is the most-derived declaration and wins.
-                        if !merged.iter().any(|m| m.name == idx.name) {
-                            merged.push(idx.clone());
-                        }
-                    }
-                }
-                cursor = nt.extends.clone().filter(|p| !p.is_empty());
-            }
-            let defs = Some(merged).filter(|d: &Vec<_>| !d.is_empty());
-            defs_cache.insert(node.node_type.clone(), defs);
-        }
-
-        if let Some(Some(defs)) = defs_cache.get(&node.node_type) {
-            crate::repositories::NodeRepositoryImpl::write_compound_entries_to_batch(
-                storage.db(),
-                &mut batch,
-                defs,
-                &node,
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                &current_revision,
-            )?;
-        }
-
-        // Commit batch every 1000 nodes to avoid memory issues
-        if stats.items_processed % 1000 == 0 {
-            storage
-                .db()
-                .write(batch)
-                .map_err(|e| raisin_error::Error::storage(format!("Batch write failed: {}", e)))?;
-            batch = WriteBatch::default();
-        }
-    }
-
-    // Commit remaining items
-    if !batch.is_empty() {
-        storage.db().write(batch).map_err(|e| {
-            raisin_error::Error::storage(format!("Final batch write failed: {}", e))
-        })?;
-    }
-
-    // Only NOW does the state flip to `Ready`, and only for the declaration each
-    // index was actually just built from. A rebuild that dies partway leaves
-    // `Building` in place — which reads as unusable, not as ready-and-empty.
-    // That asymmetry is the whole point: the failure mode of this record must be
-    // "planner declines a good index", never "planner trusts a bad one".
-    for (definition, started) in declared.iter().zip(started_under) {
-        let mut state = CompoundIndexState::ready(definition, current_revision);
-        state.nodes_indexed = stats.items_processed as u64;
-        if !state_store.complete_build(tenant_id, repo_id, branch, workspace, state, started)? {
-            tracing::info!(
-                index_name = %definition.name,
-                "compound rebuild finished behind a newer stale mark; left NotBuilt"
-            );
-        }
-    }
-
-    Ok(())
-}
-
-/// Every compound index declared by ANY NodeType on this branch.
-///
-/// Deliberately branch-wide rather than per-node-type: an index NAME addresses a
-/// workspace-global keyspace, so "is this index built" is a question about the
-/// branch, not about one type. Matches how the planner loads declarations in
-/// `engine/helpers.rs::load_all_compound_indexes`, including its
-/// first-declaration-wins dedup by name.
 /// Effective type membership per NodeType name: `(supertypes, mixins)`.
 ///
 /// Computes the `extends` + `mixins` closure directly from the stored NodeType
@@ -773,41 +646,6 @@ async fn membership_by_node_type(
         out.insert(name.clone(), (supertypes, mixins));
     }
 
-    Ok(out)
-}
-
-async fn declared_compound_indexes(
-    storage: &RocksDBStorage,
-    tenant_id: &str,
-    repo_id: &str,
-    branch: &str,
-) -> Result<Vec<raisin_models::nodes::properties::schema::CompoundIndexDefinition>> {
-    use raisin_storage::NodeTypeRepository;
-
-    let node_types = storage
-        .node_types
-        .list(
-            raisin_storage::BranchScope::new(tenant_id, repo_id, branch),
-            None,
-        )
-        .await?;
-
-    // Every DECLARED index name in the branch. Deduplicated by name because the
-    // name IS the keyspace, so two types declaring it describe the same entries.
-    // Inheritance needs no special handling HERE — a child's entries are written
-    // by the write path, which resolves the chain — but the declaration must be
-    // seen even when only an ancestor declares it.
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for node_type in node_types {
-        if let Some(indexes) = node_type.compound_indexes {
-            for index in indexes {
-                if seen.insert(index.name.clone()) {
-                    out.push(index);
-                }
-            }
-        }
-    }
     Ok(out)
 }
 

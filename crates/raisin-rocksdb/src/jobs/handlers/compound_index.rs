@@ -6,9 +6,7 @@
 use crate::{cf, cf_handle, keys};
 use raisin_error::{Error, Result};
 use raisin_hlc::HLC;
-use raisin_models::nodes::Node;
 use raisin_storage::jobs::{JobContext, JobInfo, JobType};
-use raisin_storage::CompoundColumnValue;
 use rocksdb::{WriteBatch, DB};
 use std::sync::Arc;
 
@@ -18,18 +16,6 @@ use crate::repositories::{BranchRepositoryImpl, NodeTypeRepositoryImpl, Revision
 /// node of a type, and a lease that expires mid-build lets a second node start
 /// writing into the same keyspace.
 const BUILD_LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(1800);
-
-/// Just enough of a stored node to decide whether the build wants it.
-///
-/// Deliberately NOT `Node`: see the comment at its use in
-/// [`CompoundIndexJobHandler::scan_nodes_by_type`]. Every field a node
-/// carries but this does not is skipped by serde as `IgnoredAny`, which is
-/// what keeps the untagged `PropertyValue` deserializer — the expensive part —
-/// out of the scan for nodes of other types.
-#[derive(serde::Deserialize)]
-struct NodeTypeProbe {
-    node_type: String,
-}
 
 /// Handler for compound index building jobs
 ///
@@ -219,6 +205,12 @@ impl CompoundIndexJobHandler {
     }
 
     /// The build itself, split out so the lease above is always released.
+    ///
+    /// A mark that arrives DURING a build (a replicated write whose definitions
+    /// were cold, a merge) makes the final `Ready` lose its compare-and-set; the
+    /// build then runs again, a bounded number of times — the request that
+    /// marked it was usually what queued this very job, so waiting for another
+    /// trigger would leave the index scan-only.
     #[allow(clippy::too_many_arguments)]
     async fn build(
         &self,
@@ -230,319 +222,188 @@ impl CompoundIndexJobHandler {
         node_type_name: &str,
         index_name: &str,
     ) -> Result<()> {
-        // Load NodeType definition
-        use raisin_storage::NodeTypeRepository;
-        let node_type = self
-            .node_type_repo
-            .get(
-                raisin_storage::BranchScope::new(tenant_id, repo_id, branch),
-                node_type_name,
-                None,
-            )
-            .await?
+        const ATTEMPTS: usize = 3;
+        for attempt in 1..=ATTEMPTS {
+            if self
+                .build_once(
+                    job,
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    node_type_name,
+                    index_name,
+                )
+                .await?
+            {
+                return Ok(());
+            }
+            tracing::info!(
+                job_id = %job.id,
+                index = %index_name,
+                attempt,
+                "Compound index build finished behind a newer stale mark; building again"
+            );
+        }
+        Ok(())
+    }
+
+    /// One build pass; `Ok(true)` when it stamped `Ready`.
+    #[allow(clippy::too_many_arguments)]
+    async fn build_once(
+        &self,
+        job: &JobInfo,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        node_type_name: &str,
+        index_name: &str,
+    ) -> Result<bool> {
+        use crate::indexing::compound::build;
+        let scope = raisin_storage::BranchScope::new(tenant_id, repo_id, branch);
+        // The definitions READ FROM STORAGE (never cache-first, so a cache
+        // lagging a declaration change cannot hand the build the old columns),
+        // inheritance included: every type whose resolved declarations carry
+        // this index NAME writes into its keyspace. The same answer warms the
+        // cache the replication apply path maintains the index from.
+        let fresh = crate::indexing::compound::defs::fresh_branch(
+            &self.db,
+            &self.node_type_repo,
+            scope,
+            &[],
+        )
+        .await?;
+        let declaring = fresh
+            .get(node_type_name)
             .ok_or_else(|| Error::NotFound(format!("NodeType '{}' not found", node_type_name)))?;
-
-        // Find the compound index definition
-        let compound_indexes = node_type.compound_indexes.as_ref().ok_or_else(|| {
-            Error::NotFound(format!(
-                "NodeType '{}' has no compound indexes",
-                node_type_name
-            ))
-        })?;
-
-        let index_def = compound_indexes
+        let index_def = declaring
+            .compound
             .iter()
             .find(|idx| idx.name == index_name)
+            .cloned()
             .ok_or_else(|| {
                 Error::NotFound(format!(
                     "Compound index '{}' not found in NodeType '{}'",
                     index_name, node_type_name
                 ))
             })?;
+        let wanted: build::Wanted = fresh
+            .iter()
+            .filter_map(|(name, defs)| {
+                let def = defs.compound.iter().find(|d| d.name == index_name)?;
+                Some((name.clone(), vec![def.clone()]))
+            })
+            .collect();
+        let ctx = crate::indexing::IndexCtx::new(tenant_id, repo_id, branch, workspace);
 
-        tracing::debug!(
-            job_id = %job.id,
-            index_columns = index_def.columns.len(),
-            has_order_column = index_def.has_order_column,
-            "Loaded compound index definition"
-        );
+        // Refuse BEFORE the clear: a node the build cannot place would lose
+        // its entries to the clear and never get them back.
+        build::precheck(
+            &self.db,
+            &ctx,
+            &wanted,
+            &self.branch_head(tenant_id, repo_id, branch)?,
+        )?;
 
-        // Register the build BEFORE reading any node: a mark that arrives
-        // after this point advances the generation and makes the final
-        // `Ready` lose — see `compound_state::marker`.
+        // Register the build BEFORE clearing or reading any node: a mark that
+        // arrives after this point advances the generation and makes the
+        // final `Ready` lose — see `compound_state::marker`.
         let state_store = crate::compound_state::CompoundStateStore::new(self.db.clone());
-        let started_under = state_store.begin_build(
+        let started_under = state_store.begin_rebuild(
             tenant_id,
             repo_id,
             branch,
             workspace,
-            index_def,
+            &index_def,
             self.branch_head(tenant_id, repo_id, branch)?,
         )?;
 
-        // Scan all nodes of this type using direct DB access
-        let nodes =
-            self.scan_nodes_by_type(tenant_id, repo_id, branch, workspace, node_type_name)?;
-
-        tracing::info!(
-            job_id = %job.id,
-            total_nodes = nodes.len(),
-            "Scanned nodes to index"
-        );
-
-        let head_revision = self.branch_head(tenant_id, repo_id, branch)?;
-
-        // Build index entries in batches for performance
-        let batch_size = 1000;
-        let mut indexed_count = 0;
-        let mut skipped_count = 0;
-
-        for chunk in nodes.chunks(batch_size) {
-            let mut batch = WriteBatch::default();
-            let cf_compound = cf_handle(&self.db, cf::COMPOUND_INDEX)?;
-
-            // Branch HEAD, not `HLC::now()` — see `branch_head`.
-            let revision = head_revision;
-
-            for node in chunk {
-                // Extract column values from the node
-                let mut column_values = Vec::with_capacity(index_def.columns.len());
-
-                for column_def in &index_def.columns {
-                    match crate::repositories::NodeRepositoryImpl::extract_compound_column_value(
-                        node,
-                        &column_def.property,
-                        &column_def.column_type,
-                    ) {
-                        Some(value) => column_values.push(value),
-                        None => {
-                            // Skip this node if any required column is missing
-                            tracing::trace!(
-                                job_id = %job.id,
-                                node_id = %node.id,
-                                missing_property = %column_def.property,
-                                "Skipping node: missing column value"
-                            );
-                            skipped_count += 1;
-                            break;
-                        }
-                    }
-                }
-
-                // Only index if we got all required columns
-                if column_values.len() == index_def.columns.len() {
-                    let is_published = node.published_at.is_some();
-                    let key = keys::compound_index_key_versioned(
-                        tenant_id,
-                        repo_id,
-                        branch,
-                        workspace,
-                        index_name,
-                        &column_values,
-                        &revision,
-                        &node.id,
-                        is_published,
-                    );
-
-                    batch.put_cf(cf_compound, key, b"");
-                    indexed_count += 1;
-                }
-            }
-
-            // Write the batch
-            self.db
-                .write(batch)
-                .map_err(|e| Error::storage(e.to_string()))?;
-
-            tracing::debug!(
-                job_id = %job.id,
-                indexed = indexed_count,
-                skipped = skipped_count,
-                "Batch indexed"
-            );
+        // The clear and re-derive insert below existing entries: hold the
+        // (branch, COMPOUND) against run-collapse until the build is written.
+        let _inserting = crate::management::cf_exclusion::enter_inserter_async(
+            &self.db,
+            tenant_id,
+            repo_id,
+            branch,
+            crate::cf::COMPOUND_INDEX,
+        )
+        .await;
+        // Clear this index's keyspace (both tags), THEN read the floor and
+        // scan: a write committed before the floor read is in the scan, one
+        // after it writes its own entries over the cleared keyspace.
+        self.clear_index(tenant_id, repo_id, branch, workspace, index_name)?;
+        let floor = self.branch_head(tenant_id, repo_id, branch)?;
+        let outcome = build::write(&self.db, &ctx, &wanted, &floor)?;
+        if outcome.unplaceable > 0 {
+            state_store.mark_not_built(tenant_id, repo_id, branch, workspace, index_name)?;
+            build::refuse_unplaceable(&ctx, &outcome)?;
         }
 
-        // Stamp the state record LAST, and only on success. This is what flips
-        // the planner's fail-closed gate open for this index — so a build that
-        // errors out above leaves the previous answer in force rather than
-        // advertising an index it did not finish writing.
-        //
-        // `index_def` is stamped rather than the index NAME alone: the record
-        // carries the declaration's fingerprint, which is how a later
-        // declaration change is detected as stale instead of silently misread.
-        //
-        // Compare-and-set: a write this build may not have seen (a replicated
-        // upsert, a merge) marks the index stale while it runs, and then the
-        // record stays `NotBuilt` for the next build rather than reading Ready.
-        let mut state =
-            raisin_storage::compound::CompoundIndexState::ready(index_def, head_revision);
-        state.nodes_indexed = indexed_count as u64;
-        if !state_store.complete_build(
+        // Stamp the state record LAST, and only on success: this flips the
+        // planner's fail-closed gate open — for reads at or above the floor.
+        // Compare-and-set against marks that arrived during the build.
+        let mut state = raisin_storage::compound::CompoundIndexState::ready(&index_def, floor);
+        state.nodes_indexed = outcome.nodes as u64;
+        let stamped = state_store.complete_build(
             tenant_id,
             repo_id,
             branch,
             workspace,
             state,
             started_under,
-        )? {
+        )?;
+        if stamped {
             tracing::info!(
                 job_id = %job.id,
-                index = %index_name,
-                "Compound index build finished but a newer stale marker arrived during it; \
-                 leaving the index NotBuilt for the next build"
+                nodes = outcome.nodes,
+                entries = outcome.entries,
+                floor = %floor,
+                "Compound index build completed"
             );
-            return Ok(());
         }
-
-        tracing::info!(
-            job_id = %job.id,
-            total_nodes = nodes.len(),
-            indexed_count = indexed_count,
-            skipped_count = skipped_count,
-            "Compound index build completed"
-        );
-
-        Ok(())
+        Ok(stamped)
     }
 
-    /// Scan nodes of a specific type using direct DB access
-    ///
-    /// Scans the NODES column family and filters by node_type.
-    fn scan_nodes_by_type(
+    /// Delete every entry of one index (both tags) — the keyspace is rebuilt
+    /// from the nodes right after.
+    fn clear_index(
         &self,
         tenant_id: &str,
         repo_id: &str,
         branch: &str,
         workspace: &str,
-        node_type_name: &str,
-    ) -> Result<Vec<Node>> {
-        // Scan all nodes in this workspace and filter by type
-        let prefix = keys::KeyBuilder::new()
-            .push(tenant_id)
-            .push(repo_id)
-            .push(branch)
-            .push(workspace)
-            .push("nodes")
-            .build_prefix();
-
-        let cf_nodes = cf_handle(&self.db, cf::NODES)?;
-
-        let iter = self.db.iterator_cf(
-            cf_nodes,
-            rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
-        );
-
-        let mut nodes = Vec::new();
-        let mut seen_ids = std::collections::HashSet::new();
-
-        for item in iter {
-            let (key, value) = item.map_err(|e| Error::storage(e.to_string()))?;
-
-            if !key.starts_with(&prefix) {
-                break;
-            }
-
-            // The node id, taken from the KEY rather than from the value.
-            //
-            // Key: {tenant}\0{repo}\0{branch}\0{workspace}\0nodes\0{id}\0{~rev}.
-            // The revision is encoded DESCENDING, so the first entry seen for
-            // an id is its newest — which is what makes "first one wins"
-            // below correct, and what makes a tombstone seen first mean the
-            // node is deleted.
-            //
-            // Deliberately NOT read from the decoded value's `id`, and do not
-            // "fix" it back: reading it there means decoding EVERY revision of
-            // EVERY type just to learn which id it belongs to, which is the
-            // multiplier this scan was rebuilt to remove. The key is the
-            // addressing mechanism the whole node repository already locates
-            // nodes by, so a key/value id disagreement is corruption that
-            // would have broken reads long before it reached an index build.
-            let suffix = &key[prefix.len()..];
-            let Some(id_bytes) = suffix.split(|&b| b == 0).next() else {
-                continue;
-            };
-            let Ok(node_id) = std::str::from_utf8(id_bytes) else {
-                continue;
-            };
-
-            // A newer version of this id has already decided the matter.
-            if seen_ids.contains(node_id) {
-                continue;
-            }
-
-            // A DELETED node. Its tombstone is the marker byte `b"T"` (and
-            // some paths write an empty value), not a serialized Node — which
-            // is why this loop used to log "Failed to deserialize node:
-            // invalid type: integer `84`, expected struct Node" once per
-            // deleted revision. 84 is `T`.
-            //
-            // The old code warned and CONTINUED, which is worse than noisy: it
-            // fell through to the next entry for the same id — the last live
-            // version — and indexed it. A deleted node therefore came back in
-            // every query the compound index answered. Claiming the id here is
-            // what makes the delete stick.
-            if value.is_empty() || crate::repositories::is_node_tombstone(&value) {
-                seen_ids.insert(node_id.to_string());
-                continue;
-            }
-
-            // Read the TYPE first, out of a two-field probe, and only decode
-            // the whole Node when it is one we are indexing.
-            //
-            // This is the difference between a build costing a core and
-            // costing nothing. A node is stored with `rmp_serde::to_vec_named`
-            // (`transaction/context/nodes/create/storage.rs:54`), so it is a
-            // msgpack MAP and serde skips the fields the probe does not name
-            // with `IgnoredAny` — a length-directed walk over the bytes. What
-            // that skips is `properties`, whose `PropertyValue` is an UNTAGGED
-            // enum: decoding one value means ATTEMPTING geojson, then
-            // RaisinUrl, then RaisinReference, and failing through each before
-            // settling. Sampling the server at 760% CPU on 2026-09-09 put
-            // 62 of 67 samples inside exactly those arms, under this function.
-            //
-            // The scan walks every node in the workspace but a build wants one
-            // type, so the overwhelming majority of that work was spent fully
-            // decoding nodes that were then dropped on the `node_type` compare
-            // one line later.
-            //
-            // The probe is an OPTIMISATION, never the arbiter of what gets
-            // indexed: it only reads a map-encoded value, so if a value were
-            // ever written some other way the probe would fail where a full
-            // decode succeeds, and skipping on it would leave the index
-            // silently short of rows. So a probe failure falls back to the
-            // full decode and lets THAT have the last word.
-            seen_ids.insert(node_id.to_string());
-
-            match rmp_serde::from_slice::<NodeTypeProbe>(&value) {
-                // Exact match: a subtype's nodes are NOT indexed by its base
-                // type's declaration.
-                Ok(probe) if probe.node_type != node_type_name => continue,
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::debug!(
-                        node_id = %node_id,
-                        "Node type probe failed; falling back to a full decode: {}",
-                        e
-                    );
+        index_name: &str,
+    ) -> Result<()> {
+        let cf_compound = cf_handle(&self.db, cf::COMPOUND_INDEX)?;
+        for published in [false, true] {
+            let prefix = keys::compound_index_prefix(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                index_name,
+                &[],
+                published,
+            );
+            let mut batch = WriteBatch::default();
+            for item in crate::prefix_scan(&self.db, cf_compound, &prefix) {
+                let (key, _) = item.map_err(|e| Error::storage(e.to_string()))?;
+                if !key.starts_with(&prefix) {
+                    break;
+                }
+                batch.delete_cf(cf_compound, key);
+                if batch.len() >= 10_000 {
+                    self.db
+                        .write(std::mem::take(&mut batch))
+                        .map_err(|e| Error::storage(e.to_string()))?;
                 }
             }
-
-            let node: Node = match rmp_serde::from_slice(&value) {
-                Ok(n) => n,
-                Err(e) => {
-                    tracing::warn!(node_id = %node_id, "Failed to deserialize node: {}", e);
-                    continue;
-                }
-            };
-
-            if node.node_type != node_type_name {
-                continue;
-            }
-
-            nodes.push(node);
+            self.db
+                .write(batch)
+                .map_err(|e| Error::storage(e.to_string()))?;
         }
-
-        Ok(nodes)
+        Ok(())
     }
 }
 

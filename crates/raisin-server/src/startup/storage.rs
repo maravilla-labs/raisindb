@@ -36,6 +36,12 @@ pub fn init_storage(server_config: &MergedConfig) -> Arc<RocksDBStorage> {
         config.db_write_buffer_size = size;
     }
     apply_maintenance_settings(&mut config, &server_config.storage, server_config.dev_mode);
+    if let Some(skip) = server_config.storage.index_skip_unchanged {
+        config.index_skip_unchanged = skip;
+    }
+    if let Some(collapse) = server_config.storage.history_gc_collapse_runs {
+        config.history_gc_collapse_runs = collapse;
+    }
 
     tracing::info!(
         block_cache_mb = config.block_cache_size / (1024 * 1024),
@@ -52,6 +58,12 @@ pub fn init_storage(server_config: &MergedConfig) -> Arc<RocksDBStorage> {
     // logged two warnings per write while doing so. Capture is a replication
     // feature: off unless replication is actually configured below.
     config.replication_enabled = false;
+    // The replication coordinator starts from a node id and a replication
+    // port alone (`startup/replication.rs`), whatever `replication.enabled`
+    // says, and then applies peers' operations at their original revisions.
+    // Whatever the storage layer must refuse on a replicating node
+    // (run-collapse GC) keys off this, not off operation capture.
+    config.replication_configured = replication_configured(server_config);
     if server_config.replication_enabled {
         if let Some(ref node_id) = server_config.cluster_node_id {
             config.cluster_node_id = Some(node_id.clone());
@@ -75,6 +87,16 @@ pub fn init_storage(server_config: &MergedConfig) -> Arc<RocksDBStorage> {
     }
 
     Arc::new(RocksDBStorage::with_config(config).expect("open rocksdb"))
+}
+
+/// Whether any cluster or replication setting is present: enough for a
+/// replication coordinator (or its checkpoint ingestor) to run.
+#[cfg(feature = "storage-rocksdb")]
+fn replication_configured(server_config: &MergedConfig) -> bool {
+    server_config.cluster_node_id.is_some()
+        || server_config.replication_port.is_some()
+        || !server_config.replication_peers.is_empty()
+        || server_config.replication_enabled
 }
 
 /// A numeric override from the environment: `Some(Some(n))` for a number,

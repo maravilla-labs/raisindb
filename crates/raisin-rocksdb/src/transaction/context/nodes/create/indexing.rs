@@ -1,40 +1,27 @@
 //! Property and reference indexing for node creation
 //!
 //! This module handles indexing of node properties and references to enable
-//! efficient querying and backlink lookups.
+//! efficient querying and backlink lookups. The property and unique halves
+//! delegate to the shared delta writers (plan Phase 7).
 
 use raisin_error::Result;
 use raisin_hlc::HLC;
-use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
-use raisin_models::nodes::{INDEXED_MIXIN_KEY, INDEXED_SUPERTYPE_KEY};
 
-use crate::repositories::hash_property_value;
+use crate::repositories::nodes::PropertyWrite;
 use crate::transaction::RocksDBTransaction;
 use crate::{cf, cf_handle, keys};
 
-/// Index all properties for a node (including pseudo-properties)
+/// Index a node's properties (custom, pseudo-properties, IS_A / HAS_MIXIN
+/// membership) and its geometries.
 ///
-/// Creates property indexes for:
-/// - Custom properties from node.properties
-/// - Pseudo-properties: __node_type, __name, __archetype, __created_by, __updated_by, __created_at, __updated_at
-///
-/// These indexes enable efficient querying by property values.
-///
-/// # Arguments
-///
-/// * `tx` - The transaction instance
-/// * `tenant_id` - The tenant ID
-/// * `repo_id` - The repository ID
-/// * `branch` - The branch name
-/// * `workspace` - The workspace name
-/// * `node` - The node whose properties to index
-/// * `revision` - The HLC revision for versioning
-///
-/// # Errors
-///
-/// Returns error if lock is poisoned
-pub(super) fn index_node_properties(
+/// The PROPERTY_INDEX half is the ONE writer,
+/// `crate::indexing::write_property_index_delta`: `write` says what the entries
+/// are diffed against (a create, a full put against the replaced version, or a
+/// proven predecessor whose unchanged entries are skipped) and whether the
+/// revision is a reused in-place one. See `indexing::property_delta`.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::transaction::context::nodes) fn index_node_properties(
     tx: &RocksDBTransaction,
     tenant_id: &str,
     repo_id: &str,
@@ -42,178 +29,22 @@ pub(super) fn index_node_properties(
     workspace: &str,
     node: &Node,
     revision: &HLC,
+    write: PropertyWrite<'_>,
 ) -> Result<()> {
-    let cf_property = cf_handle(&tx.db, cf::PROPERTY_INDEX)?;
-    let is_published = node.published_at.is_some();
-
     let mut batch = tx
         .batch
         .lock()
         .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
 
-    // Index custom properties
-    for (prop_name, prop_value) in &node.properties {
-        let value_hash = hash_property_value(prop_value);
-        let prop_key = keys::property_index_key_versioned(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            prop_name,
-            &value_hash,
-            revision,
-            &node.id,
-            is_published,
-        );
-        batch.put_cf(cf_property, prop_key, node.id.as_bytes());
-    }
-
-    // Index node_type as pseudo-property
-    let node_type_key = keys::property_index_key_versioned(
-        tenant_id,
-        repo_id,
-        branch,
-        workspace,
-        "__node_type",
-        &node.node_type,
+    crate::indexing::write_property_index_delta(
+        &mut batch,
+        crate::indexing::PropertyIndexTarget::from_db(&tx.db)?,
+        &crate::indexing::IndexCtx::new(tenant_id, repo_id, branch, workspace),
+        write.baseline,
+        node,
         revision,
-        &node.id,
-        is_published,
-    );
-    batch.put_cf(cf_property, node_type_key, node.id.as_bytes());
-
-    // Index TYPE MEMBERSHIP: one entry per supertype and per mixin.
-    //
-    // `$supertypes` / `$mixins` are Arrays, and `hash_property_value` hashes an
-    // Array as a whole — so the entry written for the property itself can only
-    // answer "is the set exactly this?". Writing one entry per MEMBER under a
-    // multi-valued pseudo-property is what lets `IS_A(...)` / `HAS_MIXIN(...)`
-    // be served by an index lookup instead of scanning the workspace.
-    //
-    // Same shape as `__node_type` above, and therefore the same tombstone,
-    // MVCC and bloom-filter machinery — see `tombstone_property_indexes` and
-    // `add_stale_property_tombstones`, which must stay in step with this.
-    for (pseudo_key, members) in [
-        (INDEXED_SUPERTYPE_KEY, node.effective_supertypes()),
-        (INDEXED_MIXIN_KEY, node.effective_mixins()),
-    ] {
-        for member in members {
-            let key = keys::property_index_key_versioned(
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                pseudo_key,
-                &member,
-                revision,
-                &node.id,
-                is_published,
-            );
-            batch.put_cf(cf_property, key, node.id.as_bytes());
-        }
-    }
-
-    // Index name if not empty
-    if !node.name.is_empty() {
-        let name_key = keys::property_index_key_versioned(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            "__name",
-            &node.name,
-            revision,
-            &node.id,
-            is_published,
-        );
-        batch.put_cf(cf_property, name_key, node.id.as_bytes());
-    }
-
-    // Index archetype if present
-    if let Some(ref archetype) = node.archetype {
-        if !archetype.is_empty() {
-            let archetype_key = keys::property_index_key_versioned(
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                "__archetype",
-                archetype,
-                revision,
-                &node.id,
-                is_published,
-            );
-            batch.put_cf(cf_property, archetype_key, node.id.as_bytes());
-        }
-    }
-
-    // Index created_by if present
-    if let Some(ref created_by) = node.created_by {
-        if !created_by.is_empty() {
-            let created_by_key = keys::property_index_key_versioned(
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                "__created_by",
-                created_by,
-                revision,
-                &node.id,
-                is_published,
-            );
-            batch.put_cf(cf_property, created_by_key, node.id.as_bytes());
-        }
-    }
-
-    // Index updated_by if present
-    if let Some(ref updated_by) = node.updated_by {
-        if !updated_by.is_empty() {
-            let updated_by_key = keys::property_index_key_versioned(
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                "__updated_by",
-                updated_by,
-                revision,
-                &node.id,
-                is_published,
-            );
-            batch.put_cf(cf_property, updated_by_key, node.id.as_bytes());
-        }
-    }
-
-    // Index created_at if present (using i64 microseconds for efficient sorting)
-    if let Some(created_at) = node.created_at {
-        let created_at_key = keys::property_index_key_versioned_timestamp(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            "__created_at",
-            created_at.timestamp_micros(),
-            revision,
-            &node.id,
-            is_published,
-        );
-        batch.put_cf(cf_property, created_at_key, node.id.as_bytes());
-    }
-
-    // Index updated_at if present (using i64 microseconds for efficient sorting)
-    if let Some(updated_at) = node.updated_at {
-        let updated_at_key = keys::property_index_key_versioned_timestamp(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            "__updated_at",
-            updated_at.timestamp_micros(),
-            revision,
-            &node.id,
-            is_published,
-        );
-        batch.put_cf(cf_property, updated_at_key, node.id.as_bytes());
-    }
+        write.in_place,
+    )?;
 
     // Index geometry properties in the spatial index (within same batch for
     // atomicity). Delegates to the ONE shared spatial writer in
@@ -255,45 +86,6 @@ pub(super) fn index_node_properties(
     Ok(())
 }
 
-/// Tombstone stale property-index entries on update.
-///
-/// Every (name, value) entry of `old_node` that `new_node` no longer carries
-/// (value changed, property removed, or published tag flipped) gets a
-/// TOMBSTONE at the new revision — otherwise equality scans and index-backed
-/// COUNTs on the OLD value keep matching the node forever, and the orphaned
-/// entries survive restarts.
-pub(super) fn tombstone_stale_property_indexes(
-    tx: &RocksDBTransaction,
-    tenant_id: &str,
-    repo_id: &str,
-    branch: &str,
-    workspace: &str,
-    old_node: &Node,
-    new_node: &Node,
-    revision: &HLC,
-) -> Result<()> {
-    let cf_property = cf_handle(&tx.db, cf::PROPERTY_INDEX)?;
-
-    let mut batch = tx
-        .batch
-        .lock()
-        .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
-
-    crate::repositories::add_stale_property_tombstones(
-        &mut batch,
-        cf_property,
-        tenant_id,
-        repo_id,
-        branch,
-        workspace,
-        old_node,
-        new_node,
-        revision,
-    );
-
-    Ok(())
-}
-
 /// Tombstone old spatial index entries for a node's geometry properties.
 ///
 /// Called before re-indexing during updates to prevent stale geohash entries.
@@ -327,277 +119,94 @@ pub(super) fn tombstone_spatial_properties(
     )
 }
 
-/// Index unique properties for a node
-///
-/// Writes unique index entries for all properties marked as `unique: true` in the NodeType.
-/// These indexes enable O(1) conflict detection for unique constraint enforcement.
-///
-/// # Arguments
-///
-/// * `tx` - The transaction instance
-/// * `tenant_id` - The tenant ID
-/// * `repo_id` - The repository ID
-/// * `branch` - The branch name
-/// * `workspace` - The workspace name
-/// * `node` - The node whose unique properties to index
-/// * `revision` - The HLC revision for versioning
-///
-/// # Errors
-///
-/// Returns error if lock is poisoned or NodeType loading fails
-pub(super) async fn index_unique_properties(
+/// Stage the UNIQUE_INDEX change from `old` (the version replaced, `None` on
+/// create) to `node`: tombstone the claims that changed, put every new one
+/// (claims are never skipped — see `write_unique_delta`). The
+/// NodeTypes are read before the batch is locked (no await under the lock).
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn write_unique_properties(
     tx: &RocksDBTransaction,
     tenant_id: &str,
     repo_id: &str,
     branch: &str,
     workspace: &str,
+    old: Option<&Node>,
     node: &Node,
     revision: &HLC,
+    in_place: bool,
 ) -> Result<()> {
-    use crate::repositories::UniqueIndexManager;
-    use raisin_storage::NodeTypeRepository;
-
-    // Get NodeType to check for unique properties (async - done before locking batch)
-    let node_type = match tx
+    let old_props = match old {
+        Some(old) => {
+            tx.node_repo
+                .unique_property_names(tenant_id, repo_id, branch, &old.node_type)
+                .await?
+        }
+        None => Vec::new(),
+    };
+    let new_props = tx
         .node_repo
-        .node_type_repo
-        .get(
-            raisin_storage::BranchScope::new(tenant_id, repo_id, branch),
-            &node.node_type,
-            None,
-        )
-        .await?
-    {
-        Some(nt) => nt,
-        None => return Ok(()), // No NodeType = no unique indexes
-    };
-
-    // Get properties that have unique: true
-    let unique_properties = match node_type.properties {
-        Some(ref props) => props
-            .iter()
-            .filter_map(|p| {
-                if p.unique.unwrap_or(false) {
-                    p.name.clone()
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>(),
-        None => return Ok(()), // No properties = no unique indexes
-    };
-
-    if unique_properties.is_empty() {
+        .unique_property_names(tenant_id, repo_id, branch, &node.node_type)
+        .await?;
+    if old_props.is_empty() && new_props.is_empty() {
         return Ok(());
     }
 
-    // Now lock the batch for synchronous writes
     let mut batch = tx
         .batch
         .lock()
         .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
-
-    let unique_manager = UniqueIndexManager::new(tx.db.clone());
-
-    // Add index entries for each unique property with a value
-    for prop_name in unique_properties {
-        if let Some(prop_value) = node.properties.get(&prop_name) {
-            let value_hash = hash_property_value(prop_value);
-
-            unique_manager.add_unique_index_to_batch(
-                &mut batch,
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                &node.node_type,
-                &prop_name,
-                &value_hash,
-                revision,
-                &node.id,
-            )?;
-        }
-    }
-
-    Ok(())
-}
-
-/// Write tombstones for unique index entries
-///
-/// Writes tombstones for unique index entries when a node is deleted or unique property value changes.
-/// This releases the unique value so it can be used by other nodes.
-///
-/// # Arguments
-///
-/// * `tx` - The transaction instance
-/// * `tenant_id` - The tenant ID
-/// * `repo_id` - The repository ID
-/// * `branch` - The branch name
-/// * `workspace` - The workspace name
-/// * `node` - The node whose unique properties to tombstone (with OLD property values)
-/// * `revision` - The HLC revision for versioning
-///
-/// # Errors
-///
-/// Returns error if lock is poisoned or NodeType loading fails
-pub(super) async fn tombstone_unique_properties(
-    tx: &RocksDBTransaction,
-    tenant_id: &str,
-    repo_id: &str,
-    branch: &str,
-    workspace: &str,
-    node: &Node,
-    revision: &HLC,
-) -> Result<()> {
-    use crate::repositories::UniqueIndexManager;
-    use raisin_storage::NodeTypeRepository;
-
-    // Get NodeType to check for unique properties (async - done before locking batch)
-    let node_type = match tx
-        .node_repo
-        .node_type_repo
-        .get(
-            raisin_storage::BranchScope::new(tenant_id, repo_id, branch),
-            &node.node_type,
-            None,
-        )
-        .await?
-    {
-        Some(nt) => nt,
-        None => return Ok(()), // No NodeType = no unique indexes to tombstone
-    };
-
-    // Get properties that have unique: true
-    let unique_properties = match node_type.properties {
-        Some(ref props) => props
-            .iter()
-            .filter_map(|p| {
-                if p.unique.unwrap_or(false) {
-                    p.name.clone()
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>(),
-        None => return Ok(()),
-    };
-
-    if unique_properties.is_empty() {
-        return Ok(());
-    }
-
-    // Now lock the batch for synchronous writes
-    let mut batch = tx
-        .batch
-        .lock()
-        .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
-
-    let unique_manager = UniqueIndexManager::new(tx.db.clone());
-
-    // Add tombstones for each unique property with a value
-    for prop_name in unique_properties {
-        if let Some(prop_value) = node.properties.get(&prop_name) {
-            let value_hash = hash_property_value(prop_value);
-
-            unique_manager.add_unique_tombstone_to_batch(
-                &mut batch,
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                &node.node_type,
-                &prop_name,
-                &value_hash,
-                revision,
-            )?;
-        }
-    }
-
-    Ok(())
-}
-
-/// Index a node's compound indexes (multi-column) within the transaction batch.
-///
-/// The transaction (SQL DML) write path historically did NOT maintain compound
-/// indexes — only the repository path did — so any node written via
-/// `raisin.sql.execute`/pgwire/HTTP SQL was invisible to compound-index scans.
-/// This mirrors `index_unique_properties`: fetch the NodeType async (before the
-/// batch lock), then write entries synchronously via the shared encoder.
-pub(super) async fn index_compound_indexes(
-    tx: &RocksDBTransaction,
-    tenant_id: &str,
-    repo_id: &str,
-    branch: &str,
-    workspace: &str,
-    node: &Node,
-    revision: &HLC,
-) -> Result<()> {
-    use raisin_storage::NodeTypeRepository;
-
-    // Get NodeType to read compound-index definitions (async - before batch lock)
-    let node_type = match tx
-        .node_repo
-        .node_type_repo
-        .get(
-            raisin_storage::BranchScope::new(tenant_id, repo_id, branch),
-            &node.node_type,
-            None,
-        )
-        .await?
-    {
-        Some(nt) => nt,
-        None => return Ok(()), // No NodeType = no compound indexes
-    };
-
-    let compound_indexes = match node_type.compound_indexes {
-        Some(ref indexes) if !indexes.is_empty() => indexes,
-        _ => return Ok(()), // No compound indexes defined
-    };
-
-    // Now lock the batch for synchronous writes (no await while held)
-    let mut batch = tx
-        .batch
-        .lock()
-        .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
-
-    crate::repositories::NodeRepositoryImpl::write_compound_entries_to_batch(
-        tx.db.as_ref(),
+    crate::repositories::nodes::write_unique_delta(
         &mut batch,
-        compound_indexes,
-        node,
-        tenant_id,
-        repo_id,
-        branch,
-        workspace,
+        &tx.db,
+        &crate::indexing::IndexCtx::new(tenant_id, repo_id, branch, workspace),
+        old.map(|node| crate::repositories::nodes::UniqueSide {
+            node,
+            properties: &old_props,
+        }),
+        crate::repositories::nodes::UniqueSide {
+            node,
+            properties: &new_props,
+        },
         revision,
+        in_place,
     )
 }
 
-/// Tombstone a node's existing compound-index entries within the transaction
-/// batch (used on UPDATE before re-indexing). Without this, a column value
-/// change (e.g. status held -> confirmed) would leave the stale old-value entry
-/// live and a scan keyed on the old value would still return the node.
-pub(super) fn tombstone_compound_indexes_tx(
+/// Stage a node's COMPOUND_INDEX write within the transaction batch, through
+/// the one writer (`indexing::compound`) and against the SAME baseline as the
+/// property index: the old tuple derived from the version replaced and
+/// tombstoned at the revision, unchanged tuples skipped only under a proven
+/// predecessor (the commit re-check corrects a stale one).
+///
+/// The transaction (SQL DML) path historically wrote no compound entries at
+/// all, then wrote only the type's OWN declarations (not inherited ones) and
+/// tombstoned by a workspace-wide scan. Definitions are resolved before the
+/// batch lock (no await under it).
+#[allow(clippy::too_many_arguments)]
+pub(in crate::transaction::context::nodes) async fn write_compound_indexes(
     tx: &RocksDBTransaction,
     tenant_id: &str,
     repo_id: &str,
     branch: &str,
     workspace: &str,
-    old_node: &Node,
+    baseline: crate::indexing::Baseline<'_>,
+    node: &Node,
+    revision: &HLC,
 ) -> Result<()> {
-    use crate::tombstones::{
-        tombstone_compound_indexes_only, TombstoneColumnFamilies, TombstoneContext,
-    };
-
-    let ctx = TombstoneContext::new(tenant_id, repo_id, branch, workspace);
-    let cfs = TombstoneColumnFamilies::from_arc_db(&tx.db)?;
-
+    let ctx = crate::indexing::IndexCtx::new(tenant_id, repo_id, branch, workspace);
+    let types = crate::indexing::compound::types_of(&baseline, node);
+    let defs = tx.node_repo.index_defs(&ctx, &types).await?;
+    if !defs.any_compound() {
+        return Ok(());
+    }
     let mut batch = tx
         .batch
         .lock()
         .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
-
-    tombstone_compound_indexes_only(&mut batch, tx.db.as_ref(), &ctx, &cfs, old_node)
+    crate::indexing::compound::write_compound_delta(
+        &mut batch, &tx.db, &ctx, &defs, baseline, node, revision,
+    )?;
+    Ok(())
 }
 
 /// Index references for a node
@@ -623,6 +232,7 @@ pub(super) fn tombstone_compound_indexes_tx(
 /// Returns error if:
 /// - Lock is poisoned
 /// - Serialization fails
+#[allow(clippy::too_many_arguments)]
 pub(super) fn index_node_references(
     tx: &RocksDBTransaction,
     tenant_id: &str,
@@ -639,7 +249,7 @@ pub(super) fn index_node_references(
         .lock()
         .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
 
-    crate::repositories::add_reference_index_entries(
+    crate::repositories::nodes::add_reference_index_entries(
         &mut batch,
         cf_reference,
         tenant_id,

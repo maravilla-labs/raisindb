@@ -42,17 +42,16 @@ async fn test_direct_operation_capture() {
     let repo_id = "test_repo";
     let branch = "main";
 
-    // Directly capture a SetTranslation operation
+    // Directly capture a translation version operation
     let result = operation_capture
-        .capture_set_translation(
+        .capture_operation(
             tenant_id.to_string(),
             repo_id.to_string(),
             branch.to_string(),
-            "node1".to_string(),
-            "en".to_string(),
-            "title".to_string(),
-            serde_json::json!({"text": "Hello World"}),
+            translation_version("node1", "en", false),
             "test_user".to_string(),
+            None,
+            false,
         )
         .await;
 
@@ -67,8 +66,11 @@ async fn test_direct_operation_capture() {
     assert_eq!(op.actor, "test_user");
     assert_eq!(op.op_seq, 1);
 
-    // Verify it's a SetTranslation operation
-    assert!(matches!(op.op_type, OpType::SetTranslation { .. }));
+    // Verify it's a translation version operation
+    assert!(matches!(
+        op.op_type,
+        OpType::UpsertTranslationOverlay { .. }
+    ));
 }
 
 #[tokio::test]
@@ -278,28 +280,27 @@ async fn test_operation_persistence() {
 
     // Capture some operations
     operation_capture
-        .capture_set_translation(
+        .capture_operation(
             tenant_id.to_string(),
             repo_id.to_string(),
             branch.to_string(),
-            "node1".to_string(),
-            "en".to_string(),
-            "title".to_string(),
-            serde_json::json!("Hello"),
+            translation_version("node1", "en", false),
             "user".to_string(),
+            None,
+            false,
         )
         .await
         .unwrap();
 
     operation_capture
-        .capture_delete_translation(
+        .capture_operation(
             tenant_id.to_string(),
             repo_id.to_string(),
             branch.to_string(),
-            "node2".to_string(),
-            "fr".to_string(),
-            "description".to_string(),
+            translation_version("node2", "fr", true),
             "user".to_string(),
+            None,
+            false,
         )
         .await
         .unwrap();
@@ -311,8 +312,14 @@ async fn test_operation_persistence() {
         .unwrap();
 
     assert_eq!(ops.len(), 2);
-    assert!(matches!(ops[0].op_type, OpType::SetTranslation { .. }));
-    assert!(matches!(ops[1].op_type, OpType::DeleteTranslation { .. }));
+    assert!(matches!(
+        ops[0].op_type,
+        OpType::UpsertTranslationOverlay { .. }
+    ));
+    assert!(matches!(
+        ops[1].op_type,
+        OpType::UpsertTranslationOverlay { .. }
+    ));
 }
 
 #[tokio::test]
@@ -429,4 +436,27 @@ async fn test_all_schema_operations() {
         .unwrap();
 
     assert_eq!(ops.len(), 6);
+}
+
+/// A translation version op, through the generic capture path.
+fn translation_version(node_id: &str, locale: &str, deleted: bool) -> OpType {
+    let overlay = if deleted {
+        raisin_replication::ReplicatedOverlay::Deleted
+    } else {
+        let mut data = std::collections::HashMap::new();
+        data.insert(
+            raisin_models::translations::JsonPointer::new("/title"),
+            raisin_models::nodes::properties::PropertyValue::String("Hello World".into()),
+        );
+        raisin_replication::ReplicatedOverlay::Properties { data }
+    };
+    OpType::UpsertTranslationOverlay {
+        workspace: "ws".to_string(),
+        node_id: node_id.to_string(),
+        locale: locale.to_string(),
+        block_uuid: None,
+        overlay,
+        revision: raisin_hlc::HLC::now(),
+        history_complete_from: None,
+    }
 }

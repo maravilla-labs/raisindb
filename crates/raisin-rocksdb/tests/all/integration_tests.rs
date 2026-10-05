@@ -97,6 +97,7 @@ impl TestStorage {
             default_branch: constants::BRANCH.to_string(),
             description: Some("Test repository for integration tests".to_string()),
             tags: HashMap::new(),
+            localized_names: Default::default(),
         };
         repo_mgmt
             .create_repository(constants::TENANT, constants::REPO, repo_config)
@@ -369,6 +370,7 @@ mod node_repository {
             default_branch: constants::BRANCH.to_string(),
             description: Some("Second repository for isolation test".to_string()),
             tags: HashMap::new(),
+            localized_names: Default::default(),
         };
         repo_mgmt
             .create_repository(constants::TENANT, "repo2", repo2_config)
@@ -425,6 +427,7 @@ mod node_repository {
             default_branch: constants::BRANCH.to_string(),
             description: Some("Repository for tenant2".to_string()),
             tags: HashMap::new(),
+            localized_names: Default::default(),
         };
         repo_mgmt
             .create_repository("tenant2", "tenant2-repo", tenant2_repo_config)
@@ -571,6 +574,7 @@ mod node_repository {
             default_branch: constants::BRANCH.to_string(),
             description: Some("Second test repository".to_string()),
             tags: HashMap::new(),
+            localized_names: Default::default(),
         };
         repo_mgmt
             .create_repository(constants::TENANT, "repo2", repo2_config)
@@ -763,6 +767,7 @@ mod node_repository {
             default_branch: constants::BRANCH.to_string(),
             description: Some("Second repository for isolation test".to_string()),
             tags: HashMap::new(),
+            localized_names: Default::default(),
         };
         repo_mgmt
             .create_repository(constants::TENANT, "repo2", repo_config2)
@@ -820,6 +825,7 @@ mod node_repository {
             default_branch: constants::BRANCH.to_string(),
             description: Some("Repository for tenant2".to_string()),
             tags: HashMap::new(),
+            localized_names: Default::default(),
         };
         repo_mgmt
             .create_repository("tenant2", "repo-tenant2", repo_config_tenant2)
@@ -1819,6 +1825,7 @@ mod nodetype_repository {
             default_branch: constants::BRANCH.to_string(),
             description: Some("Second repository".to_string()),
             tags: HashMap::new(),
+            localized_names: Default::default(),
         };
         repo_mgmt
             .create_repository(constants::TENANT, "repo2", repo2_config)
@@ -1849,6 +1856,7 @@ mod nodetype_repository {
             default_branch: constants::BRANCH.to_string(),
             description: Some("Repository for tenant2".to_string()),
             tags: HashMap::new(),
+            localized_names: Default::default(),
         };
         repo_mgmt
             .create_repository("tenant2", "tenant2-repo", tenant2_repo_config)
@@ -2171,6 +2179,7 @@ mod revision_repository {
             default_branch: "main".to_string(),
             description: Some("Repo 2".to_string()),
             tags: HashMap::new(),
+            localized_names: Default::default(),
         };
         repo_mgmt
             .create_repository("tenant2", "repo2", config)
@@ -2410,6 +2419,7 @@ mod multi_tenancy {
             default_branch: "main".to_string(),
             description: Some("Repository 2".to_string()),
             tags: HashMap::new(),
+            localized_names: Default::default(),
         };
         repo_mgmt
             .create_repository("tenant2", "repo2", config)

@@ -1,8 +1,12 @@
 mod op_impl;
 mod op_type;
+mod op_type_serde;
+mod translation;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod unknown_tests;
 
 use crate::vector_clock::VectorClock;
 use raisin_hlc::HLC;
@@ -12,6 +16,7 @@ use std::collections::HashSet;
 use uuid::Uuid;
 
 pub use op_type::{OpType, ReplicatedSecret};
+pub use translation::ReplicatedOverlay;
 
 /// A replayable operation that represents a single mutation in the database.
 ///
@@ -156,6 +161,9 @@ pub enum OperationTarget {
     /// ApplyRevision must be applied, so each gets its own target and is
     /// never LWW-merged with sibling revisions of the same branch.
     Revision(String),
+    /// An operation this binary cannot decode (`OpType::Unknown`): its tag
+    /// and op id, so it is never merged with anything.
+    Unknown(String),
 }
 
 impl std::fmt::Display for OperationTarget {
@@ -181,6 +189,7 @@ impl std::fmt::Display for OperationTarget {
             Self::ApiKey(id) => write!(f, "api_key:{}", id),
             Self::Secret(id) => write!(f, "secret:{}", id),
             Self::Revision(id) => write!(f, "revision:{}", id),
+            Self::Unknown(id) => write!(f, "unknown:{}", id),
         }
     }
 }

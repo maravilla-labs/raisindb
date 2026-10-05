@@ -19,6 +19,12 @@ pub type CompoundMatchedColumn = (String, String, CompoundColumnType);
 /// Result of a successful compound index match:
 /// (index_name, matched_equality_columns, ascending, claims_order)
 ///
+/// `ascending` is the direction of the INDEX scan — `true` is index order —
+/// not the query's ORDER BY direction. They differ for a `Timestamp` order
+/// column, which the writer stores newest-first (`TimestampDesc`): there
+/// `ORDER BY created_at DESC` IS index order. Passing the query direction
+/// straight through made every `DESC` timestamp listing come back oldest-first.
+///
 /// `claims_order` is true when ALL equality columns matched and the trailing
 /// order column satisfies the query's ORDER BY — only then may the scan's
 /// iteration order be relied upon (e.g. for LIMIT pushdown under an ORDER BY).
@@ -75,6 +81,14 @@ impl PhysicalPlanner {
     /// The indexes are typically loaded from NodeType schemas.
     pub fn set_compound_indexes(&mut self, indexes: Vec<CompoundIndexDefinition>) {
         self.compound_indexes = indexes;
+    }
+
+    /// The revision the statement reads at when it pins one (`__revision =
+    /// N`); `None` (the default) for a HEAD read. A compound index is refused
+    /// for a read below its build's history floor — the build re-derived the
+    /// keyspace as of that HEAD, with no history beneath it.
+    pub fn set_read_revision(&mut self, revision: Option<raisin_hlc::HLC>) {
+        self.read_revision = revision;
     }
 
     /// Set pre-computed schema statistics for data-driven selectivity estimation.
@@ -258,7 +272,10 @@ impl PhysicalPlanner {
                     };
 
                     if order_column.property == order_col_normalized {
-                        (is_asc, true)
+                        // Index direction (see `CompoundIndexMatch`).
+                        let stored_newest_first =
+                            matches!(order_column.column_type, CompoundColumnType::Timestamp);
+                        (is_asc != stored_newest_first, true)
                     } else {
                         // Index can't serve this ORDER BY; still usable as an
                         // unordered equality filter (Sort above re-orders).

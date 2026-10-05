@@ -2,9 +2,8 @@
 //!
 //! This module provides functions for looking up and deleting nodes by their path.
 
-use super::super::helpers::is_tombstone;
+use super::super::storage_node::PropertiesMode;
 use super::super::NodeRepositoryImpl;
-use crate::{cf, cf_handle, keys};
 use raisin_error::Result;
 use raisin_hlc::HLC;
 use raisin_models::nodes::Node;
@@ -19,6 +18,34 @@ impl NodeRepositoryImpl {
         workspace: &str,
         path: &str,
         max_revision: Option<&HLC>,
+    ) -> Result<Option<Node>> {
+        // Public API - populate has_children for frontend display
+        self.get_by_path_impl_as(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            path,
+            max_revision,
+            true,
+            PropertiesMode::Load,
+        )
+        .await
+    }
+
+    /// [`Self::get_by_path_impl`] populating `has_children` only when asked
+    /// and decoding properties per `mode` (`NodeRepository::get_for_read`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn get_by_path_impl_as(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        path: &str,
+        max_revision: Option<&HLC>,
+        populate_has_children: bool,
+        mode: PropertiesMode,
     ) -> Result<Option<Node>> {
         tracing::debug!(
             "REPO get_by_path_impl: tenant={}, repo={}, branch={}, workspace={}, path={}",
@@ -35,17 +62,31 @@ impl NodeRepositoryImpl {
             return Ok(None);
         };
 
-        // Public API - populate has_children for frontend display
         match max_revision {
             Some(rev) => {
-                self.get_at_revision_impl(
-                    tenant_id, repo_id, branch, workspace, &node_id, rev, true,
+                self.get_at_revision_impl_as(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    &node_id,
+                    rev,
+                    populate_has_children,
+                    mode,
                 )
                 .await
             }
             None => {
-                self.get_impl(tenant_id, repo_id, branch, workspace, &node_id, true)
-                    .await
+                self.get_impl_as(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    &node_id,
+                    populate_has_children,
+                    mode,
+                )
+                .await
             }
         }
     }
@@ -78,16 +119,17 @@ impl NodeRepositoryImpl {
         path: &str,
         max_revision: Option<&HLC>,
     ) -> Result<Option<String>> {
-        let prefix = keys::path_index_key_prefix(tenant_id, repo_id, branch, workspace, path);
-        let cf_path = cf_handle(&self.db, cf::PATH_INDEX)?;
-
-        let entry = crate::mvcc_read::newest_at_or_before_with(
-            &self.db,
-            cf_path,
-            &prefix,
+        // THE PATH_INDEX step, shared with the batched reader.
+        let entry = crate::mvcc_read::path_index_entry_in(
+            &mut crate::mvcc_read::DbRead(&self.db),
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            path,
             max_revision,
-            |_, bytes| (!is_tombstone(bytes)).then(|| String::from_utf8_lossy(bytes).to_string()),
-        )?;
+        )?
+        .map(|(_, id)| id);
 
         match entry {
             Some(Some(node_id)) => {

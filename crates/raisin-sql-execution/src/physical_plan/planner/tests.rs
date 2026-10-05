@@ -170,7 +170,7 @@ fn test_planner_property_order_scan() {
 
 // ── IN(...) index expansion ──────────────────────────────────────────────
 
-fn scan_nodes(table: &str) -> LogicalPlan {
+pub(super) fn scan_nodes(table: &str) -> LogicalPlan {
     LogicalPlan::Scan {
         table: table.to_string(),
         alias: None,
@@ -720,7 +720,7 @@ fn planner_with_compound_index() -> PhysicalPlanner {
     planner
 }
 
-fn json_eq(table: &str, key: &str, value: &str) -> TypedExpr {
+pub(super) fn json_eq(table: &str, key: &str, value: &str) -> TypedExpr {
     eq(
         json_ref(table, key),
         TypedExpr::literal(Literal::Text(value.to_string())),
@@ -741,7 +741,7 @@ fn json_eq_cast(table: &str, key: &str, value: &str) -> TypedExpr {
     eq(cast, TypedExpr::literal(Literal::Text(value.to_string())))
 }
 
-fn and(left: TypedExpr, right: TypedExpr) -> TypedExpr {
+pub(super) fn and(left: TypedExpr, right: TypedExpr) -> TypedExpr {
     use raisin_sql::analyzer::Expr;
     TypedExpr::new(
         Expr::BinaryOp {

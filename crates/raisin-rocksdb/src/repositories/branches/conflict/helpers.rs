@@ -182,7 +182,7 @@ impl BranchRepositoryImpl {
         // test for a `TOMBSTONE` prefix no writer produces, so a deleted node
         // reached the decoder and failed the whole conflict listing.
         let prefix = keys::node_key_prefix(tenant_id, repo_id, branch, workspace, node_id);
-        let Some((_, bytes)) = crate::mvcc_read::newest_at_or_before(
+        let Some((blob_revision, bytes)) = crate::mvcc_read::newest_at_or_before(
             &self.db,
             cf_nodes,
             &prefix,
@@ -204,6 +204,7 @@ impl BranchRepositoryImpl {
             workspace,
             node_id,
             target_revision,
+            &blob_revision,
         )
         .map_err(|e| {
             raisin_error::Error::storage(format!("Failed to deserialize node {}: {}", node_id, e))
@@ -219,7 +220,10 @@ impl BranchRepositoryImpl {
         Ok(Some(json))
     }
 
-    /// Retrieve translation overlay at or before a specific revision
+    /// Retrieve translation overlay at or before a specific revision —
+    /// through the one translation reader (`{locale}::{block_uuid}` names a
+    /// block overlay, the revision-meta convention).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn get_translation_at_revision(
         &self,
         tenant_id: &str,
@@ -229,51 +233,39 @@ impl BranchRepositoryImpl {
         node_id: &str,
         locale: &str,
         target_revision: &HLC,
-        cf_translation_data: &rocksdb::ColumnFamily,
+        _cf_translation_data: &rocksdb::ColumnFamily,
     ) -> Result<Option<serde_json::Value>> {
-        let prefix = format!(
-            "{}\0{}\0{}\0{}\0translations\0{}\0{}\0",
-            tenant_id, repo_id, branch, workspace, node_id, locale
-        )
-        .into_bytes();
-
-        let iter = crate::prefix_scan(&self.db, cf_translation_data, prefix.clone());
-
-        for item in iter {
-            let (key, bytes) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
-
-            if !key.starts_with(&prefix) {
-                break;
-            }
-
-            let rev_start = prefix.len();
-            if key.len() < rev_start + 16 {
-                continue;
-            }
-            let revision = keys::decode_descending_revision(&key[rev_start..rev_start + 16])
-                .map_err(|e| {
-                    raisin_error::Error::storage(format!("Failed to decode revision: {}", e))
-                })?;
-
-            if &revision > target_revision {
-                continue;
-            }
-
-            // Translation deletes write `T`; keep the legacy prefix too.
-            if crate::keys::is_tombstone_value(&bytes) || bytes.starts_with(b"TOMBSTONE") {
-                return Ok(None);
-            }
-
-            let overlay: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
+        let version = match locale.split_once("::") {
+            Some((locale, block_uuid)) => crate::translation_read::read_block_version(
+                &self.db,
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                node_id,
+                block_uuid,
+                locale,
+                Some(target_revision),
+            )?,
+            None => crate::translation_read::read_version(
+                &self.db,
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                node_id,
+                locale,
+                Some(target_revision),
+            )?,
+        };
+        match version.and_then(|v| v.overlay) {
+            Some(overlay) => serde_json::to_value(&overlay).map(Some).map_err(|e| {
                 raisin_error::Error::storage(format!(
-                    "Failed to deserialize translation overlay for {}:{}: {}",
+                    "Failed to convert translation overlay for {}:{}: {}",
                     node_id, locale, e
                 ))
-            })?;
-
-            return Ok(Some(overlay));
+            }),
+            None => Ok(None),
         }
-
-        Ok(None)
     }
 }

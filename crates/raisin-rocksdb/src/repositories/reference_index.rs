@@ -2,6 +2,7 @@
 
 use crate::{cf, cf_handle, keys};
 use raisin_error::Result;
+use raisin_hlc::HLC;
 use raisin_models::nodes::properties::{PropertyValue, RaisinReference};
 use raisin_storage::scope::StorageScope;
 use raisin_storage::ReferenceIndexRepository;
@@ -168,74 +169,26 @@ impl ReferenceIndexRepository for ReferenceIndexRepositoryImpl {
         target_id: &str,
         published_only: bool,
     ) -> Result<Vec<(String, String)>> {
-        let StorageScope {
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-        } = scope;
-        let tag = if published_only {
-            "ref_rev_pub"
-        } else {
-            "ref_rev"
-        };
+        self.find_referencing_nodes_at(scope, target_workspace, target_id, published_only, None)
+            .await
+    }
 
-        let prefix = keys::KeyBuilder::new()
-            .push(tenant_id)
-            .push(repo_id)
-            .push(branch)
-            .push(workspace)
-            .push(tag)
-            .push(target_workspace)
-            .push(target_id)
-            .build_prefix();
-
-        let cf = cf_handle(&self.db, cf::REFERENCE_INDEX)?;
-        let prefix_clone = prefix.clone();
-        let iter = crate::prefix_scan(&self.db, cf, prefix);
-
-        // Reverse keys are `…\0{source_id}\0{property_path}\0{~revision}` with
-        // the revision encoded DESCENDING, so within one (source, property)
-        // pair the NEWEST entry sorts first. Only that newest entry decides:
-        // a live value means the reference exists, a tombstone means it was
-        // removed. Counting every key (as this scan previously did) returned
-        // every historical revision AND treated tombstones as matches — any
-        // reference ever removed kept producing REFERENCES() false positives
-        // forever.
-        const TOMBSTONE: &[u8] = b"T";
-        let mut results = Vec::new();
-        let mut seen: std::collections::HashSet<(String, String)> =
-            std::collections::HashSet::new();
-
-        for item in iter {
-            let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
-
-            // Verify key actually starts with our prefix
-            if !key.starts_with(&prefix_clone) {
-                break;
-            }
-
-            let key_str = String::from_utf8_lossy(&key);
-            let parts: Vec<&str> = key_str.split('\0').collect();
-
-            if parts.len() >= 9 {
-                let source_node_id = parts[7].to_string();
-                let property_path = parts[8].to_string();
-
-                // Only the newest revision per (source, property) counts.
-                if !seen.insert((source_node_id.clone(), property_path.clone())) {
-                    continue;
-                }
-                // Newest entry is a tombstone -> reference was removed.
-                if value.as_ref() == TOMBSTONE {
-                    continue;
-                }
-
-                results.push((source_node_id, property_path));
-            }
-        }
-
-        Ok(results)
+    async fn find_referencing_nodes_at(
+        &self,
+        scope: StorageScope<'_>,
+        target_workspace: &str,
+        target_id: &str,
+        published_only: bool,
+        max_revision: Option<&HLC>,
+    ) -> Result<Vec<(String, String)>> {
+        live_referrers(
+            &self.db,
+            scope,
+            target_workspace,
+            target_id,
+            published_only,
+            max_revision,
+        )
     }
 
     async fn get_node_references(
@@ -369,4 +322,97 @@ impl ReferenceIndexRepository for ReferenceIndexRepositoryImpl {
 
         Ok(unique)
     }
+}
+
+/// The ONE reader of the reverse reference index: every `(source, property)`
+/// whose newest entry at or below `max_revision` (newest overall when `None`)
+/// is live. `REFERENCES()` and the delete-safety check both read through it —
+/// the safety check used to scan on its own and count ANY live entry, so a
+/// reference removed long ago (its live entry beneath a newer tombstone)
+/// blocked deleting the target forever.
+pub(crate) fn live_referrers(
+    db: &DB,
+    scope: StorageScope<'_>,
+    target_workspace: &str,
+    target_id: &str,
+    published_only: bool,
+    max_revision: Option<&HLC>,
+) -> Result<Vec<(String, String)>> {
+    let StorageScope {
+        tenant_id,
+        repo_id,
+        branch,
+        workspace,
+    } = scope;
+    let tag = if published_only {
+        "ref_rev_pub"
+    } else {
+        "ref_rev"
+    };
+
+    let prefix = keys::KeyBuilder::new()
+        .push(tenant_id)
+        .push(repo_id)
+        .push(branch)
+        .push(workspace)
+        .push(tag)
+        .push(target_workspace)
+        .push(target_id)
+        .build_prefix();
+
+    let cf = cf_handle(db, cf::REFERENCE_INDEX)?;
+    let prefix_clone = prefix.clone();
+    let iter = crate::prefix_scan(db, cf, prefix);
+
+    // Reverse keys are `…\0{source_id}\0{property_path}\0{~revision}` with
+    // the revision encoded DESCENDING, so within one (source, property)
+    // pair the NEWEST entry sorts first. Only that newest entry decides:
+    // a live value means the reference exists, a tombstone means it was
+    // removed. Counting every key (as this scan previously did) returned
+    // every historical revision AND treated tombstones as matches — any
+    // reference ever removed kept producing REFERENCES() false positives
+    // forever.
+    let mut results = Vec::new();
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+
+    for item in iter {
+        let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+        // Verify key actually starts with our prefix
+        if !key.starts_with(&prefix_clone) {
+            break;
+        }
+
+        let key_str = String::from_utf8_lossy(&key);
+        let parts: Vec<&str> = key_str.split('\0').collect();
+
+        if parts.len() >= 9 {
+            let source_node_id = parts[7].to_string();
+            let property_path = parts[8].to_string();
+
+            // As of `max_revision`: entries above it do not exist yet. The
+            // revision is the key's last 16 bytes (it may contain `\0`, so
+            // it is never read from `parts`).
+            if let Some(max) = max_revision {
+                match keys::extract_revision_from_key(&key) {
+                    Ok(rev) if rev > *max => continue,
+                    Ok(_) => {}
+                    Err(_) => continue,
+                }
+            }
+
+            // Only the newest revision per (source, property) counts.
+            if !seen.insert((source_node_id.clone(), property_path.clone())) {
+                continue;
+            }
+            // Newest entry is a tombstone -> reference was removed.
+            if keys::is_tombstone_value(&value) {
+                continue;
+            }
+
+            results.push((source_node_id, property_path));
+        }
+    }
+
+    Ok(results)
 }

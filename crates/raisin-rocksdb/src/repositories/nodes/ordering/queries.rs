@@ -70,14 +70,30 @@ impl NodeRepositoryImpl {
         Ok((before_label, after_label))
     }
 
+    /// The label the next append under `parent_id` is minted after.
+    ///
+    /// A thin public view of [`Self::get_last_order_label`] for the MVCC index
+    /// oracle, which asserts that an append would land after every live child.
+    /// Production code mints through `next_append_label`.
+    #[doc(hidden)]
+    pub fn last_order_label_for_append(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        parent_id: &str,
+    ) -> Result<Option<String>> {
+        self.get_last_order_label(tenant_id, repo_id, branch, workspace, parent_id)
+    }
+
     /// Get the order label of the last child (for appending)
     ///
     /// **OPTIMIZED**: Uses cached metadata for O(1) lookup instead of O(n) scan.
-    /// Falls back to full scan if cache is missing (e.g. after migration).
-    ///
-    /// The fallback returns the label with the highest HLC (most recently
-    /// added), NOT the lexicographic maximum: sequential appends do not
-    /// necessarily maintain lex order across all labels.
+    /// Falls back to [`super::last_live_order_label`] when the cache is absent
+    /// (first insert under a parent, or a reorder/merge invalidated it): the
+    /// greatest label, in editorial order, among LIVE children, each
+    /// `(label, child)` decided by its newest entry (plan Phase 7 item 6).
     pub(crate) fn get_last_order_label(
         &self,
         tenant_id: &str,
@@ -95,41 +111,7 @@ impl NodeRepositoryImpl {
             return Ok(Some(String::from_utf8_lossy(&cached_value).to_string()));
         }
 
-        // Cache miss - fall back to full scan (O(n)). Happens on first insert to
-        // a parent or after cache invalidation.
-        let prefix =
-            keys::ordered_children_prefix(tenant_id, repo_id, branch, workspace, parent_id);
-        let iter = crate::prefix_scan(&self.db, cf_ordered, prefix.clone());
-
-        let mut last_label: Option<String> = None;
-        let mut highest_revision = HLC::new(0, 0);
-        let mut seen_labels = HashSet::new();
-
-        for item in iter {
-            let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
-
-            if !key.starts_with(&prefix) {
-                break;
-            }
-            if is_tombstone(&value) {
-                continue;
-            }
-            let Some(parsed) = parse_ordered_child_key(&key, &prefix) else {
-                continue;
-            };
-            let Some(revision) = parsed.revision() else {
-                continue;
-            };
-
-            // Due to ~HLC encoding the first occurrence per label has the
-            // highest revision, but we still need the global max across labels.
-            if seen_labels.insert(parsed.order_label.to_string()) && revision > highest_revision {
-                highest_revision = revision;
-                last_label = Some(parsed.order_label.to_string());
-            }
-        }
-
-        Ok(last_label)
+        super::last_live_order_label(&self.db, tenant_id, repo_id, branch, workspace, parent_id)
     }
 
     /// Check if the given order_label is lexicographically >= all other children's labels
@@ -181,6 +163,41 @@ impl NodeRepositoryImpl {
         }
 
         Ok(true)
+    }
+
+    /// The child ids of `parent_id` (`/` at the root) as of `max_revision`, in
+    /// editorial order — the synchronous form of [`Self::get_ordered_child_ids`],
+    /// for readers outside an async context (the localized name lookup's
+    /// row-level fallback). `snapshot` pins the listing to the caller's view
+    /// (`None`: live), so the child list and each child's record agree.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn ordered_child_ids_at(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        parent_id: &str,
+        max_revision: Option<&HLC>,
+        snapshot: Option<&rocksdb::SnapshotWithThreadMode<'_, rocksdb::DB>>,
+    ) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        self.scan_ordered_children(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            parent_id,
+            super::OrderedScanStart::Beginning,
+            false,
+            max_revision,
+            snapshot,
+            |child_id, _label, _name| {
+                out.push(child_id.to_string());
+                Ok(true)
+            },
+        )?;
+        Ok(out)
     }
 
     /// Get ordered list of child IDs at HEAD (lightweight - IDs only, no node objects)
@@ -238,6 +255,7 @@ impl NodeRepositoryImpl {
             super::OrderedScanStart::Beginning,
             false,
             None,
+            None,
             |child_id, _label, name| {
                 if name == child_name.as_bytes() {
                     found = Some(child_id.to_string());
@@ -263,6 +281,27 @@ pub(crate) fn stored_order_label(
     parent_id: &str,
     child_id: &str,
 ) -> Result<Option<String>> {
+    stored_order_label_at(
+        db, tenant_id, repo_id, branch, workspace, parent_id, child_id, None,
+    )
+}
+
+/// [`stored_order_label`] as of `at` (HEAD when `None`): entries written
+/// after `at` are invisible. The ONE reader of a child's stored label; the
+/// replica's relabel tombstone asks it at the revision it applies, because the
+/// stored blob's `order_key` is not trustworthy for that (legacy nodes carry
+/// an empty one, legacy copies their SOURCE's).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn stored_order_label_at(
+    db: &DB,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    workspace: &str,
+    parent_id: &str,
+    child_id: &str,
+    at: Option<&HLC>,
+) -> Result<Option<String>> {
     let prefix = keys::ordered_children_prefix(tenant_id, repo_id, branch, workspace, parent_id);
     let cf_ordered = cf_handle(db, cf::ORDERED_CHILDREN)?;
     let iter = crate::prefix_scan(db, cf_ordered, prefix.clone());
@@ -281,6 +320,13 @@ pub(crate) fn stored_order_label(
         let Some(parsed) = parse_ordered_child_key(&key, &prefix) else {
             continue;
         };
+        if let Some(at) = at {
+            // Not yet written as of `at` (an unreadable revision is kept:
+            // the HEAD reader never filtered on it either).
+            if parsed.revision().is_some_and(|r| r > *at) {
+                continue;
+            }
+        }
 
         // Track this (order_label, child_id) pair - skip older revisions.
         let entry_key = (parsed.order_label.to_string(), parsed.child_id.to_string());

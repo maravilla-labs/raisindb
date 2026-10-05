@@ -48,6 +48,7 @@ async fn setup() -> (Arc<RocksDBStorage>, OperationApplicator, TempDir) {
         default_branch: BRANCH.to_string(),
         description: None,
         tags: HashMap::new(),
+        localized_names: Default::default(),
     };
     storage
         .repository_management()
@@ -256,7 +257,12 @@ async fn id_only_delete_resolves_the_live_workspace() {
     assert!(path_resolves(&storage, "/doc", None).await);
 
     let scans = unknown_workspace_scans();
-    let delete = OpType::DeleteNode { node_id: doc.id };
+    let delete = OpType::DeleteNodeSnapshot {
+        node_id: doc.id,
+        revision: later(120_000),
+        node: None,
+        parent_id: None,
+    };
     applicator
         .apply_operation(&op(later(120_000), delete))
         .await

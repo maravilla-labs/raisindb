@@ -12,7 +12,7 @@ Comprehensive benchmarks covering all major components of the CRDT replication s
 
 ##### A. Operation Throughput (`operation_throughput`)
 Measures operations/second for different operation types:
-- `set_property` - SetProperty operations at batch sizes: 10, 100, 1K, 10K
+- `node_op` - one-node register operations (`DeleteNodeSnapshot`) at batch sizes: 10, 100, 1K, 10K
 - `add_child` - AddChild/AddRelation operations at batch sizes: 10, 100, 1K, 10K
 
 ##### B. Idempotency Tracker Performance (`idempotency_*`)
@@ -136,7 +136,7 @@ Total Ops        Max Buffer Size      Avg Buffer Size
 Based on the benchmarks, these are expected performance characteristics:
 
 ### Operation Throughput
-- **SetProperty**: >100K ops/sec
+- **Node operations**: >100K ops/sec
 - **AddChild**: >100K ops/sec
 - **Batch operations**: Linear scaling up to 10K ops
 
@@ -208,7 +208,7 @@ Small overhead per node change but enables:
 1. Implement periodic GC for idempotency tracker
 2. Reduce max buffer size for causal delivery
 3. Use persistent storage for long-term tracking
-4. Monitor operation log compaction
+4. Monitor operation log growth
 
 ### If End-to-End Latency is High
 1. Profile each component individually

@@ -51,6 +51,7 @@ impl TestStorage {
                     default_branch: "main".to_string(),
                     description: Some("order_key persistence test".to_string()),
                     tags: HashMap::new(),
+                    localized_names: Default::default(),
                 },
             )
             .await?;

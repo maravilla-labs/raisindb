@@ -10,6 +10,7 @@
 //! collected and flushed as batch jobs when thresholds are reached.
 
 mod asset_processing;
+mod compound_defs;
 mod delete_and_schema_handlers;
 mod event_dispatch;
 pub(crate) mod index_helpers;

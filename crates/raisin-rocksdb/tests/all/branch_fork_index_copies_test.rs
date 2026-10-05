@@ -285,6 +285,7 @@ impl Env {
                 false,
                 true,
                 None,
+                None,
             )
             .await
             .expect("compound index scan must not error")

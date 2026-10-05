@@ -95,42 +95,6 @@ impl NodeRepositoryImpl {
         }
     }
 
-    /// The newest stored version of a node at or before a target revision,
-    /// with its blob.
-    ///
-    /// Used for time-travel reads. One seek to `{prefix}{~target}` lands on the
-    /// answer directly (see [`crate::mvcc_read`]); it used to walk every newer
-    /// revision first and then point-read the blob it had just passed.
-    ///
-    /// # Returns
-    /// - `Some((revision, blob))` if the node had a version at or before
-    ///   `target_revision` (the blob may be a tombstone)
-    /// - `None` if it had none
-    pub(in super::super) fn get_versioned_at_or_before(
-        &self,
-        tenant_id: &str,
-        repo_id: &str,
-        branch: &str,
-        workspace: &str,
-        node_id: &str,
-        target_revision: &HLC,
-    ) -> Result<Option<(HLC, Vec<u8>)>> {
-        let prefix = keys::node_key_prefix(tenant_id, repo_id, branch, workspace, node_id);
-        let cf = cf_handle(&self.db, cf::NODES)?;
-        let found =
-            crate::mvcc_read::newest_at_or_before(&self.db, cf, &prefix, Some(target_revision))?;
-
-        tracing::trace!(
-            target: "rocksb::nodes::revision_lookup",
-            node_id,
-            target = %target_revision,
-            found = ?found.as_ref().map(|(revision, _)| *revision),
-            "get_versioned_at_or_before"
-        );
-
-        Ok(found)
-    }
-
     /// Get all outgoing relations from a node (where THIS node points TO other nodes)
     ///
     /// Queries the RELATION_INDEX CF forward index to find all relations
@@ -265,51 +229,5 @@ impl NodeRepositoryImpl {
         }
 
         Ok(relations)
-    }
-
-    /// List all translation locales for a node
-    ///
-    /// Scans the TRANSLATION_DATA CF to find all locales that have translations
-    /// for the given node.
-    ///
-    /// # Returns
-    /// Vector of locale codes (e.g., ["en", "de", "fr"])
-    pub(in super::super) fn list_translation_locales(
-        &self,
-        tenant_id: &str,
-        repo_id: &str,
-        branch: &str,
-        workspace: &str,
-        node_id: &str,
-    ) -> Result<Vec<String>> {
-        let prefix = format!(
-            "{}\0{}\0{}\0{}\0translations\0{}\0",
-            tenant_id, repo_id, branch, workspace, node_id
-        );
-
-        let cf = cf_handle(&self.db, cf::TRANSLATION_DATA)?;
-        let iter = crate::prefix_scan(&self.db, cf, prefix.as_bytes());
-
-        let mut locales = HashSet::new();
-
-        for item in iter {
-            let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
-
-            // Skip tombstones
-            if &*value == TOMBSTONE {
-                continue;
-            }
-
-            // Parse locale from key
-            // Key format: {tenant}\0{repo}\0{branch}\0{workspace}\0translations\0{node_id}\0{locale}\0{~revision}
-            let key_str = String::from_utf8_lossy(&key);
-            let parts: Vec<&str> = key_str.split('\0').collect();
-            if parts.len() >= 7 {
-                let locale = parts[6].to_string();
-                locales.insert(locale);
-            }
-        }
-
-        Ok(locales.into_iter().collect())
     }
 }

@@ -44,7 +44,8 @@ fn deserialize_node_with_path(
     branch: &str,
     workspace: &str,
     node_id: &str,
-    target_revision: &HLC,
+    read_at: &HLC,
+    blob_revision: &HLC,
 ) -> Result<Node> {
     crate::mvcc_read::deserialize_node_with_path(
         db,
@@ -54,7 +55,8 @@ fn deserialize_node_with_path(
         branch,
         workspace,
         node_id,
-        target_revision,
+        read_at,
+        blob_revision,
     )
 }
 
@@ -119,8 +121,10 @@ async fn get_node_bounded(
     node_id: &str,
     bound_to_head: bool,
 ) -> Result<Option<Node>> {
-    // Check read cache first for read-your-writes semantics
-    {
+    // Check read cache first for read-your-writes semantics. A node this
+    // transaction WROTE is served as is; one it only MOVED (committed state,
+    // new path) replaces the committed read below but still passes RLS.
+    let moved = {
         let cache = tx
             .read_cache
             .lock()
@@ -129,7 +133,8 @@ async fn get_node_bounded(
         if let Some(cached) = cache.nodes.get(&cache_key) {
             return Ok(cached.clone());
         }
-    }
+        cache.moved_nodes.get(&cache_key).cloned()
+    };
 
     // 1. Get metadata
     let (tenant_id, repo_id, branch) = {
@@ -154,31 +159,21 @@ async fn get_node_bounded(
         .ok_or_else(|| raisin_error::Error::NotFound(format!("Branch {} not found", branch)))?
         .head;
 
-    // 3. The newest version at or before HEAD: one seek to `{prefix}{~HEAD}`
-    // (see `crate::mvcc_read`), bounded to this node's prefix so a lookup for a
-    // NONEXISTENT id can never read the next node in the keyspace (observed
-    // once: put_node with a fresh id taking the UPDATE branch against an
-    // unrelated node). `bound_to_head == false` is the deliberate
-    // identity-resolution path (see `get_node_ignoring_head`), which must see
-    // stranded revisions, so it takes the newest version unbounded.
-    let cf_nodes = cf_handle(&tx.db, cf::NODES)?;
-    let prefix = keys::node_key_prefix(&tenant_id, &repo_id, &branch, workspace, node_id);
-    let max_revision = bound_to_head.then_some(&head_revision);
-    let Some((revision, value)) =
-        crate::mvcc_read::newest_at_or_before(&tx.db, cf_nodes, &prefix, max_revision)?
-    else {
-        return Ok(None);
+    let node = match moved {
+        Some(node) => node,
+        None => match read_committed(
+            tx,
+            &tenant_id,
+            &repo_id,
+            &branch,
+            workspace,
+            node_id,
+            bound_to_head.then_some(&head_revision),
+        )? {
+            Some(node) => node,
+            None => return Ok(None),
+        },
     };
-
-    // A tombstone means the node is deleted.
-    if is_tombstone(&value) {
-        return Ok(None);
-    }
-
-    // Deserialize with StorageNode/Node compatibility
-    let node = deserialize_node_with_path(
-        &tx.db, &value, &tenant_id, &repo_id, &branch, workspace, node_id, &revision,
-    )?;
 
     // RLS check - SECURITY: deny-by-default if no auth context.
     // Clone the auth context out of the metadata guard so the guard is
@@ -238,6 +233,58 @@ async fn get_node_bounded(
     }
 
     Ok(Some(node))
+}
+
+/// The committed record of `node_id`: the newest version at or before
+/// `max_revision` (`None`: newest), with its path as of that read.
+fn read_committed(
+    tx: &RocksDBTransaction,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    workspace: &str,
+    node_id: &str,
+    max_revision: Option<&HLC>,
+) -> Result<Option<Node>> {
+    // The newest version at or before HEAD: one seek to `{prefix}{~HEAD}`
+    // (see `crate::mvcc_read`), bounded to this node's prefix so a lookup for a
+    // NONEXISTENT id can never read the next node in the keyspace (observed
+    // once: put_node with a fresh id taking the UPDATE branch against an
+    // unrelated node). `max_revision == None` is the deliberate
+    // identity-resolution path (see `get_node_ignoring_head`), which must see
+    // stranded revisions, so it takes the newest version unbounded.
+    let cf_nodes = cf_handle(&tx.db, cf::NODES)?;
+    let prefix = keys::node_key_prefix(tenant_id, repo_id, branch, workspace, node_id);
+    let Some((blob_revision, value)) =
+        crate::mvcc_read::newest_at_or_before(&tx.db, cf_nodes, &prefix, max_revision)?
+    else {
+        return Ok(None);
+    };
+
+    // A tombstone means the node is deleted.
+    if is_tombstone(&value) {
+        return Ok(None);
+    }
+
+    // Deserialize with StorageNode/Node compatibility. The path is the one
+    // AS OF THE READ (HEAD, or the newest when unbounded), not as of the blob:
+    // a later ancestor move writes NODE_PATH above the blob's revision, and
+    // reading it at the blob's revision handed `move_node_tree` the pre-move
+    // path — so it could not find the old parent and left the old
+    // ORDERED_CHILDREN entry live (the node listed under both parents).
+    let path_at = max_revision.copied().unwrap_or(crate::mvcc_read::NEWEST);
+    deserialize_node_with_path(
+        &tx.db,
+        &value,
+        tenant_id,
+        repo_id,
+        branch,
+        workspace,
+        node_id,
+        &path_at,
+        &blob_revision,
+    )
+    .map(Some)
 }
 
 /// Get a node by path with read-your-writes semantics

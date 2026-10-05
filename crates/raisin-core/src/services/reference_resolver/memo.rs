@@ -16,10 +16,11 @@
 //! caller. That is why a memo must never outlive the statement.
 
 use super::budget::{self, ResolveBudget};
-use super::node_to_json_value_with_fields;
 use super::walk::{self, RawRef, TargetRef, Totals};
+use super::{doc, json_len};
 use raisin_error::Result;
 use raisin_hlc::HLC;
+use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -52,29 +53,66 @@ impl MemoKey {
 /// A fetched, translated, permitted and trimmed target, ready to inline.
 #[derive(Debug)]
 pub(super) struct Target {
-    /// Exactly what is inlined (before its own references are).
-    pub(super) json: serde_json::Value,
-    /// Its outgoing references, collected once from `json`.
+    /// Exactly what is inlined (before its own references are): the node as
+    /// the object `node_to_json_value_with_fields` renders, built from the
+    /// stored values themselves (`doc.rs`).
+    pub(super) value: PropertyValue,
+    /// Its outgoing references, collected once from `value`.
     pub(super) refs: Vec<RawRef>,
-    /// Approximate serialized size, charged per inlined occurrence.
+    /// Serialized size, charged per inlined occurrence.
     pub(super) bytes: usize,
     id: String,
     path: String,
 }
 
 impl Target {
-    pub(super) fn from_node(node: &Node, fields: Option<&[String]>) -> Self {
-        let json = node_to_json_value_with_fields(node, fields);
-        let refs = walk::distinct_refs(&json);
-        let bytes = serde_json::to_vec(&json).map_or(0, |b| b.len());
+    pub(super) fn from_node(node: Node, fields: Option<&[String]>) -> Self {
+        let id = node.id.clone();
+        let path = node.path.clone();
+        let mut value = node_value(node, fields);
+        doc::make_walkable(&mut value);
+        let refs = walk::distinct_refs(&value);
+        let bytes = json_len::json_len(&value);
         Self {
-            json,
+            value,
             refs,
             bytes,
-            id: node.id.clone(),
-            path: node.path.clone(),
+            id,
+            path,
         }
     }
+}
+
+/// `node_to_json_value_with_fields`, as the value it renders: `id`, `name`,
+/// `path`, `node_type`, then the properties (all, or only `fields`), a
+/// property of the same name replacing an identity member. The node's own
+/// property map becomes the object (no copy, no re-hash): the identity
+/// members go in only where no property already has their name — which is
+/// exactly "a property replaces it".
+fn node_value(node: Node, fields: Option<&[String]>) -> PropertyValue {
+    let Node {
+        id,
+        name,
+        path,
+        node_type,
+        mut properties,
+        ..
+    } = node;
+    if let Some(fields) = fields {
+        properties.retain(|key, _| fields.iter().any(|f| f == key));
+    }
+    properties.reserve(4);
+    for (key, value) in [
+        ("id", id),
+        ("name", name),
+        ("path", path),
+        ("node_type", node_type),
+    ] {
+        properties
+            .entry(key.to_string())
+            .or_insert(PropertyValue::String(value));
+    }
+    PropertyValue::Object(properties)
 }
 
 /// Counters for one statement's resolutions.

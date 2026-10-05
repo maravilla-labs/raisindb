@@ -262,6 +262,12 @@ impl RocksDBStorage {
             config: config.clone(),
             graph_cache_layer: Arc::new(crate::graph::GraphCacheLayer::new()),
         };
+        // `index.skip_unchanged` (Phase 7), gated per branch on this node's
+        // property-index rebuild, kept under the id the repairs use.
+        storage.nodes.configure_index_writes(
+            config.index_skip_unchanged,
+            config.cluster_node_id.as_deref(),
+        );
 
         Ok(storage)
     }

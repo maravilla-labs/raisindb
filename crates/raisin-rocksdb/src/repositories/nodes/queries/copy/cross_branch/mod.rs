@@ -10,15 +10,19 @@
 //! - new/changed nodes go through `add_node_to_batch_with_parent_id`
 //!   (node blob + PATH / NODE_PATH / PROPERTY / REFERENCE / RELATION /
 //!   ORDERED_CHILDREN entries at the copy revision),
-//! - pre-existing target nodes get old-value compound/unique tombstones
-//!   first (the `update_impl` stale-index pattern), plus stale PATH and
-//!   ORDERED_CHILDREN tombstones when the node moved on the source,
-//! - pruned nodes get the full `delete_impl` tombstone set.
+//! - pre-existing target nodes get old-value compound tombstones first (the
+//!   `update_impl` stale-index pattern),
+//! - pruned and displaced target nodes get the shared delete tombstone set
+//!   (`prune::retire_target_node`), and moved nodes their stale PATH and
+//!   ORDERED_CHILDREN tombstones and ended UNIQUE claims — ALL staged before
+//!   ANY copied node is put (the prune, then the retire pass of `prepare.rs`;
+//!   PATH_INDEX and UNIQUE keys carry no node id, see there).
 
 mod capture;
 mod collect;
 mod events;
 mod helpers;
+mod prepare;
 mod prune;
 mod relations;
 mod roots;
@@ -56,6 +60,8 @@ struct CopyScope<'a> {
     meta_actor: &'a str,
     meta_message: &'a str,
     meta_is_system: bool,
+    /// Ids of every node in the promoted source set.
+    src_ids: &'a HashSet<String>,
 }
 
 /// Mutable results accumulated while staging entries.
@@ -70,6 +76,8 @@ struct CopyAccumulators {
     secrets: Vec<crate::secret_store::StoredSecret>,
     /// Edge deltas the promotion produced on the target, for replication.
     relation_ops: Vec<raisin_replication::OpType>,
+    /// Translation versions the promotion wrote on the target, for replication.
+    translation_ops: Vec<raisin_replication::OpType>,
     /// Ids of target nodes the copy rewrote with byte-identical content.
     ///
     /// The row is still written (new revision, refreshed indexes — the copy
@@ -78,6 +86,12 @@ struct CopyAccumulators {
     /// every unchanged node on every run. Mirrors `track_update`'s no-op guard
     /// on the transaction path; see `events.rs`.
     content_unchanged: HashSet<String>,
+    /// Ids of target nodes this promotion has already deleted (pruned or
+    /// displaced), so a node is never retired twice.
+    retired: HashSet<String>,
+    /// Target nodes displaced from their path by a different id, for the
+    /// `Delete` changes of the replicated `ApplyRevision`.
+    displaced: Vec<prune::PrunedNode>,
 }
 
 /// One source node staged for copying, with its resolved parent ids.
@@ -238,6 +252,7 @@ impl NodeRepositoryImpl {
             meta_actor: &meta_actor,
             meta_message: &meta_message,
             meta_is_system,
+            src_ids: &src_ids,
         };
         let mut acc = CopyAccumulators {
             changes,
@@ -246,20 +261,64 @@ impl NodeRepositoryImpl {
             max_label_per_parent,
             secrets: Vec::new(),
             relation_ops: Vec::new(),
+            translation_ops: Vec::new(),
             content_unchanged: HashSet::new(),
+            retired: HashSet::new(),
+            displaced: Vec::new(),
         };
+
+        // delete_missing: prune target-only nodes FIRST. PATH_INDEX and UNIQUE
+        // keys carry no node id, so a pruned node and a copied node claiming
+        // its path or value at this revision write one key — and the later
+        // put wins (see `prune::retire_target_node`).
+        let pruned = if delete_missing {
+            self.prune_missing_targets(
+                &mut batch,
+                tenant_id,
+                repo_id,
+                target_branch,
+                workspace,
+                &revision,
+                &root_ctxs,
+                &src_ids,
+                &mut acc.changes,
+                &mut acc.change_infos,
+            )
+            .await?
+        } else {
+            Vec::new()
+        };
+        let deleted = pruned.len();
+        acc.retired.extend(pruned.iter().map(|p| p.node.id.clone()));
+
+        // Two passes over the entries (plan Phase 13a, `prepare.rs`): first
+        // everything any entry ENDS — a displaced occupant, its own previous
+        // path and slot, the UNIQUE claims it gives up — then every put. A
+        // node moving into a path (or taking a value) another entry vacates
+        // in this same promotion then keeps it, whichever of the two the
+        // source tree lists first.
+        let mut prepared = Vec::with_capacity(entries.len());
         for entry in &entries {
-            self.stage_cross_branch_entry(&mut batch, entry, &scope, &mut acc)
+            prepared.push(
+                self.prepare_cross_branch_entry(&mut batch, entry, &scope, &mut acc)
+                    .await?,
+            );
+        }
+        for (entry, prepared) in entries.iter().zip(prepared) {
+            self.stage_cross_branch_entry(&mut batch, entry, prepared, &scope, &mut acc)
                 .await?;
         }
         let CopyAccumulators {
-            mut changes,
-            mut change_infos,
+            changes,
+            change_infos,
             nodes_for_replication,
             max_label_per_parent,
             secrets,
             relation_ops,
+            translation_ops,
             content_unchanged,
+            displaced,
+            ..
         } = acc;
 
         let copied = entries.len();
@@ -293,26 +352,6 @@ impl NodeRepositoryImpl {
             }
         }
 
-        // ========== STEP 5: delete_missing — prune target-only nodes ==========
-        let deleted_ids = if delete_missing {
-            self.prune_missing_targets(
-                &mut batch,
-                tenant_id,
-                repo_id,
-                target_branch,
-                workspace,
-                &revision,
-                &root_ctxs,
-                &src_ids,
-                &mut changes,
-                &mut change_infos,
-            )
-            .await?
-        } else {
-            HashSet::new()
-        };
-        let deleted = deleted_ids.len();
-
         // ========== STEP 6: revision index + branch HEAD in the same batch ==========
         for change in &changes {
             self.revision_repo.index_node_change_to_batch(
@@ -324,9 +363,34 @@ impl NodeRepositoryImpl {
             )?;
         }
 
+        // One node commit step on the target (plan Phase 7b): every written
+        // or pruned node locked, its index write re-derived against what is
+        // stored on the target at that moment (staged from reads taken across
+        // the whole promotion — `always`).
+        let mut commit = crate::indexing::NodeCommit::new(tenant_id, repo_id, target_branch);
+        let index_ctx =
+            crate::indexing::IndexCtx::new(tenant_id, repo_id, target_branch, workspace);
+        for (node, _, _) in &nodes_for_replication {
+            commit.check(
+                crate::indexing::StagedDeltaCheck::always(&index_ctx, &node.id, &revision),
+                Some(node.clone()),
+            );
+        }
+        for change in &changes {
+            if change.operation == ChangeOperation::Deleted {
+                commit.check(
+                    crate::indexing::StagedDeltaCheck::always(
+                        &index_ctx,
+                        &change.node_id,
+                        &revision,
+                    ),
+                    None,
+                );
+            }
+        }
         let updated_branch = self
             .branch_repo
-            .write_batch_with_head(batch, tenant_id, repo_id, target_branch, revision)
+            .write_nodes_with_head(batch, tenant_id, repo_id, target_branch, revision, &commit)
             .await?;
 
         tracing::info!(
@@ -364,13 +428,15 @@ impl NodeRepositoryImpl {
             &meta_actor,
             &revision,
             &nodes_for_replication,
-            &deleted_ids,
+            pruned.iter().chain(&displaced),
         )
         .await;
 
         // Edge deltas AFTER the node snapshots, same lane: a peer applies the
         // AddRelation once both endpoints' snapshots have landed.
-        for op_type in relation_ops {
+        // Translation versions after the node snapshots, same lane: a peer
+        // applies an overlay once its node has landed.
+        for op_type in translation_ops.into_iter().chain(relation_ops) {
             let _ = self
                 .operation_capture
                 .capture_operation_with_revision(

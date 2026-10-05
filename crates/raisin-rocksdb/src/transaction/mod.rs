@@ -152,11 +152,14 @@ pub(crate) mod change_types;
 mod commit;
 mod context;
 mod core;
+mod inflight;
 mod metadata;
+mod pending_names;
 mod replication;
 mod types;
 
 // Re-export the main transaction type
 pub use core::RocksDBTransaction;
+pub(crate) use inflight::oldest_inflight_revision;
 
 // Internal exports for use within the transaction module

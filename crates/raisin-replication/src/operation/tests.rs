@@ -1,41 +1,50 @@
 use super::*;
 use crate::vector_clock::VectorClock;
+use raisin_hlc::HLC;
 use raisin_models::nodes::properties::PropertyValue;
+use raisin_models::nodes::Node;
 use std::collections::HashMap;
+
+fn snapshot(node_id: &str) -> OpType {
+    let mut properties = HashMap::new();
+    properties.insert(
+        "title".to_string(),
+        PropertyValue::String("Test".to_string()),
+    );
+    OpType::UpsertNodeSnapshot {
+        node: Node {
+            id: node_id.to_string(),
+            name: "test-article".to_string(),
+            path: "/test-article".to_string(),
+            node_type: "article".to_string(),
+            workspace: Some("content".to_string()),
+            properties,
+            ..Default::default()
+        },
+        parent_id: Some("/".to_string()),
+        revision: HLC::new(1_000, 0),
+        cf_order_key: "a0::test".to_string(),
+    }
+}
+
+fn op(seq: u64, op_type: OpType) -> Operation {
+    let mut vc = VectorClock::new();
+    vc.increment("node1");
+    Operation::new(
+        seq,
+        "node1".to_string(),
+        vc,
+        "t1".to_string(),
+        "r1".to_string(),
+        "main".to_string(),
+        op_type,
+        "user@example.com".to_string(),
+    )
+}
 
 #[test]
 fn test_operation_creation() {
-    let mut vc = VectorClock::new();
-    vc.increment("node1");
-
-    let op = Operation::new(
-        1,
-        "node1".to_string(),
-        vc,
-        "tenant1".to_string(),
-        "repo1".to_string(),
-        "main".to_string(),
-        OpType::CreateNode {
-            node_id: "test123".to_string(),
-            name: "test-article".to_string(),
-            node_type: "article".to_string(),
-            archetype: None,
-            parent_id: None,
-            order_key: "a".to_string(),
-            properties: {
-                let mut props = HashMap::new();
-                props.insert(
-                    "title".to_string(),
-                    PropertyValue::String("Test".to_string()),
-                );
-                props
-            },
-            owner_id: None,
-            path: "/test-article".to_string(),
-            workspace: None,
-        },
-        "user@example.com".to_string(),
-    );
+    let op = op(1, snapshot("test123"));
 
     assert_eq!(op.op_seq, 1);
     assert_eq!(op.cluster_node_id, "node1");
@@ -44,22 +53,14 @@ fn test_operation_creation() {
 
 #[test]
 fn test_operation_target() {
-    let mut vc = VectorClock::new();
-    vc.increment("node1");
-
-    let op = Operation::new(
+    let op = op(
         1,
-        "node1".to_string(),
-        vc.clone(),
-        "t1".to_string(),
-        "r1".to_string(),
-        "main".to_string(),
-        OpType::SetProperty {
+        OpType::DeleteNodeSnapshot {
             node_id: "node123".to_string(),
-            property_name: "title".to_string(),
-            value: PropertyValue::String("New Title".to_string()),
+            revision: HLC::new(1_000, 0),
+            node: None,
+            parent_id: None,
         },
-        "user".to_string(),
     );
 
     assert_eq!(op.target(), OperationTarget::Node("node123".to_string()));
@@ -67,75 +68,23 @@ fn test_operation_target() {
 
 #[test]
 fn test_is_delete() {
-    let mut vc = VectorClock::new();
-    vc.increment("node1");
-
-    let delete_op = Operation::new(
+    let delete_op = op(
         1,
-        "node1".to_string(),
-        vc.clone(),
-        "t1".to_string(),
-        "r1".to_string(),
-        "main".to_string(),
-        OpType::DeleteNode {
+        OpType::DeleteNodeSnapshot {
             node_id: "node123".to_string(),
+            revision: HLC::new(1_000, 0),
+            node: None,
+            parent_id: None,
         },
-        "user".to_string(),
     );
-
     assert!(delete_op.is_delete());
 
-    let create_op = Operation::new(
-        2,
-        "node1".to_string(),
-        vc,
-        "t1".to_string(),
-        "r1".to_string(),
-        "main".to_string(),
-        OpType::CreateNode {
-            node_id: "node456".to_string(),
-            name: "test-node".to_string(),
-            node_type: "article".to_string(),
-            archetype: None,
-            parent_id: None,
-            order_key: "a".to_string(),
-            properties: HashMap::new(),
-            owner_id: None,
-            workspace: None,
-            path: "/test-node".to_string(),
-        },
-        "user".to_string(),
-    );
-
-    assert!(!create_op.is_delete());
+    assert!(!op(2, snapshot("node456")).is_delete());
 }
 
 #[test]
 fn test_acknowledgment() {
-    let mut vc = VectorClock::new();
-    vc.increment("node1");
-
-    let mut op = Operation::new(
-        1,
-        "node1".to_string(),
-        vc,
-        "t1".to_string(),
-        "r1".to_string(),
-        "main".to_string(),
-        OpType::CreateNode {
-            node_id: "test".to_string(),
-            name: "test-article".to_string(),
-            node_type: "article".to_string(),
-            archetype: None,
-            parent_id: None,
-            order_key: "a".to_string(),
-            properties: HashMap::new(),
-            owner_id: None,
-            workspace: None,
-            path: "/test-article".to_string(),
-        },
-        "user".to_string(),
-    );
+    let mut op = op(1, snapshot("test"));
 
     assert!(!op.acknowledged_by_all(&["peer1".to_string(), "peer2".to_string()]));
 
@@ -148,48 +97,16 @@ fn test_acknowledgment() {
 
 #[test]
 fn test_optype_msgpack_debug() {
-    use raisin_models::nodes::properties::PropertyValue;
+    let op_type = snapshot("test-1");
 
-    // Test CreateNode with properties
-    let mut props = HashMap::new();
-    props.insert(
-        "title".to_string(),
-        PropertyValue::String("Test".to_string()),
-    );
-
-    let op_type = OpType::CreateNode {
-        node_id: "test-1".to_string(),
-        name: "Test Node".to_string(),
-        node_type: "Article".to_string(),
-        archetype: None,
-        parent_id: None,
-        order_key: "a".to_string(),
-        properties: props.clone(),
-        owner_id: None,
-        workspace: None,
-        path: "/Test Node".to_string(),
-    };
-
-    // Serialize to MessagePack
-    let bytes = rmp_serde::to_vec(&op_type).unwrap();
-    eprintln!(
-        "
-OpType::CreateNode MessagePack bytes (len={}):",
-        bytes.len()
-    );
-    eprintln!("First 50 bytes: {:?}", &bytes[..bytes.len().min(50)]);
-
-    // Try to deserialize
+    // Serialize to MessagePack (named, as the oplog and the wire encode it)
+    let bytes = rmp_serde::to_vec_named(&op_type).unwrap();
     let roundtrip: OpType = rmp_serde::from_slice(&bytes).unwrap();
 
-    if let OpType::CreateNode {
-        properties: rt_props,
-        ..
-    } = roundtrip
-    {
-        assert_eq!(rt_props.len(), 1);
+    if let OpType::UpsertNodeSnapshot { node, .. } = roundtrip {
+        assert_eq!(node.properties.len(), 1);
     } else {
-        panic!("Expected CreateNode variant");
+        panic!("Expected UpsertNodeSnapshot variant");
     }
 }
 
@@ -376,8 +293,11 @@ mod agent_field_is_additive {
             "t".to_string(),
             "r".to_string(),
             "main".to_string(),
-            OpType::DeleteNode {
+            OpType::DeleteNodeSnapshot {
                 node_id: "n1".to_string(),
+                revision: raisin_hlc::HLC::new(1_000, 0),
+                node: None,
+                parent_id: None,
             },
             "alice".to_string(),
         );

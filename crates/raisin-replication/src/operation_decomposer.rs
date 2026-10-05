@@ -99,6 +99,8 @@ fn decompose_apply_revision(
             ReplicatedNodeChangeKind::Delete => OpType::DeleteNodeSnapshot {
                 node_id: node_change.node.id.clone(),
                 revision: branch_head,
+                node: Some(node_change.node.clone()),
+                parent_id: node_change.parent_id.clone(),
             },
         };
 
@@ -198,10 +200,9 @@ mod tests {
             tenant_id: "t1".to_string(),
             repo_id: "r1".to_string(),
             branch: "main".to_string(),
-            op_type: OpType::SetProperty {
-                node_id: "test".to_string(),
-                property_name: "title".to_string(),
-                value: raisin_models::nodes::properties::PropertyValue::String("Test".to_string()),
+            op_type: OpType::CreateTag {
+                tag_name: "v1".to_string(),
+                revision: "1000-0".to_string(),
             },
             revision: None,
             actor: "user".to_string(),
@@ -238,7 +239,7 @@ mod tests {
             },
             ReplicatedNodeChange {
                 node: make_test_node("node_c"),
-                parent_id: None,
+                parent_id: Some("node_a".to_string()),
                 kind: ReplicatedNodeChangeKind::Delete,
                 cf_order_key: String::new(),
             },
@@ -310,9 +311,18 @@ mod tests {
 
         // Check third decomposed op (Delete node_c)
         match &decomposed[2].op_type {
-            OpType::DeleteNodeSnapshot { node_id, revision } => {
+            OpType::DeleteNodeSnapshot {
+                node_id,
+                revision,
+                node,
+                parent_id,
+            } => {
                 assert_eq!(node_id, "node_c");
                 assert_eq!(*revision, branch_head);
+                // The change's context survives decomposition: the pre-delete
+                // node (its workspace, path) and its ORDERED_CHILDREN parent.
+                assert_eq!(node.as_ref().map(|n| n.id.as_str()), Some("node_c"));
+                assert_eq!(parent_id.as_deref(), Some("node_a"));
             }
             _ => panic!("Expected DeleteNodeSnapshot"),
         }

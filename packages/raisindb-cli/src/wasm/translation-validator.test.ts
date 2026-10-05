@@ -122,6 +122,53 @@ describe('translation validator: schema resolution', () => {
     expect(notTranslatable(files)).toEqual(['stray']);
   });
 
+  it('accepts the reserved translated node name on a fully local schema', () => {
+    const files = {
+      'archetypes/page.yaml': [
+        'name: pkg:Page',
+        'fields:',
+        '  - { $type: TextField, name: title, translatable: true }',
+      ].join('\n'),
+      [BASE]: 'node_type: studio:Page\narchetype: pkg:Page\nproperties:\n  title: Hi\n',
+      [DE]: 'title: Hallo\n__node_name: seite\n',
+    };
+    expect(notTranslatable(files)).toEqual([]);
+  });
+
+  it('accepts a null translated node name (no name of its own in this locale)', () => {
+    const files = {
+      'archetypes/page.yaml': [
+        'name: pkg:Page',
+        'fields:',
+        '  - { $type: TextField, name: title, translatable: true }',
+      ].join('\n'),
+      [BASE]: 'node_type: studio:Page\narchetype: pkg:Page\nproperties:\n  title: Hi\n',
+      [DE]: 'title: Hallo\n__node_name: null\n',
+    };
+    expect(notTranslatable(files)).toEqual([]);
+  });
+
+  it('rejects a translated node name that is not a string', () => {
+    const files = {
+      'archetypes/page.yaml': [
+        'name: pkg:Page',
+        'fields:',
+        '  - { $type: TextField, name: title, translatable: true }',
+      ].join('\n'),
+      [BASE]: 'node_type: studio:Page\narchetype: pkg:Page\nproperties:\n  title: Hi\n',
+      [DE]: '__node_name: [a, b]\n',
+    };
+    expect(notTranslatable(files)).toEqual(['__node_name']);
+  });
+
+  it('rejects a non-string translated node name on a type the package has no schema for', () => {
+    const files = {
+      [BASE]: 'node_type: raisin:Folder\nproperties:\n  title: Hi\n',
+      [DE]: '__node_name: 42\n',
+    };
+    expect(notTranslatable(files)).toEqual(['__node_name']);
+  });
+
   it('applies the same rules to element types in a SectionField', () => {
     const files = {
       'archetypes/page.yaml': [

@@ -135,6 +135,22 @@ pub(crate) struct StorageNode<P = HashMap<String, PropertyValue>> {
     /// Relations to other nodes
     #[serde(default)]
     pub relations: Vec<RelationRef>,
+
+    /// The path a LEGACY full-`Node` blob embeds; never written.
+    ///
+    /// Before Phase 10 the transaction write path (`put_node`/`add_node`,
+    /// `move_node_tree`) stored the whole `Node`, path included, and wrote no
+    /// `NODE_PATH` entry. Such a blob decodes as a `StorageNode` (the extra
+    /// map keys are ignored), so without this field its path was silently
+    /// dropped and an OLDER `NODE_PATH` entry won. Readers take the newer, by
+    /// revision, of this path and `NODE_PATH` — see
+    /// [`crate::mvcc_read::materialize_path`]. `None` for every blob written
+    /// as a `StorageNode`; an empty string counts as `None`.
+    ///
+    /// Last in the struct so that a positional (array) encoding of the other
+    /// fields is unaffected: it is the trailing, defaulted element.
+    #[serde(rename = "path", default, skip_serializing)]
+    pub embedded_path: Option<String>,
 }
 
 /// Whether a read decodes the node's properties.
@@ -159,6 +175,13 @@ impl PropertiesMode {
 
 fn default_version() -> i32 {
     1
+}
+
+impl<P> StorageNode<P> {
+    /// The path the blob embeds, when it is a legacy full-`Node` blob.
+    pub fn embedded_path(&self) -> Option<&str> {
+        self.embedded_path.as_deref().filter(|p| !p.is_empty())
+    }
 }
 
 /// A stored node read without its properties; see [`StorageNode`].
@@ -190,6 +213,7 @@ impl StorageNodeHead {
             workspace: self.workspace,
             owner_id: self.owner_id,
             relations: self.relations,
+            embedded_path: None,
         }
         .into_node(path)
     }
@@ -224,6 +248,7 @@ impl StorageNode {
             workspace: node.workspace.clone(),
             owner_id: node.owner_id.clone(),
             relations: node.relations.clone(),
+            embedded_path: None,
         }
     }
 

@@ -1,144 +1,35 @@
 //! Per-node staging for cross-branch copy (STEP 3 of
-//! `copy_nodes_across_branches_impl`): index writes, stale-value tombstones,
-//! translation carry-over, and change bookkeeping for one copied entry.
+//! `copy_nodes_across_branches_impl`), the PUT pass: index writes,
+//! stale-value tombstones keyed by node id, translation carry-over, and change
+//! bookkeeping for one copied entry. Everything the entry ENDS on a key
+//! without a node id was staged by the retire pass (`prepare.rs`) for every
+//! entry first.
 
 use super::super::super::super::NodeRepositoryImpl;
+use super::prepare::PreparedEntry;
 use super::{CopyAccumulators, CopyEntry, CopyScope};
 use raisin_error::Result;
-use raisin_models::nodes::Node;
 use raisin_models::tree::ChangeOperation;
 use raisin_storage::{CrossBranchNodeChange, NodeChangeInfo};
 use rocksdb::WriteBatch;
 
 impl NodeRepositoryImpl {
-    /// Stage one copied node into the shared WriteBatch.
+    /// Stage one copied node into the shared WriteBatch (after the retire
+    /// pass of EVERY entry).
     pub(super) async fn stage_cross_branch_entry(
         &self,
         batch: &mut WriteBatch,
         entry: &CopyEntry,
+        prepared: PreparedEntry,
         scope: &CopyScope<'_>,
         acc: &mut CopyAccumulators,
     ) -> Result<()> {
-        let src_node = &entry.node;
-
-        // Same id on the target branch -> Added vs Modified.
-        let old_dst = self
-            .get_impl(
-                scope.tenant_id,
-                scope.repo_id,
-                scope.target_branch,
-                scope.workspace,
-                &src_node.id,
-                false,
-            )
-            .await?;
-        let operation = if old_dst.is_some() {
-            ChangeOperation::Modified
-        } else {
-            ChangeOperation::Added
-        };
-
-        // A DIFFERENT node already sitting on the destination path must be
-        // retired, not shadowed. `old_dst` above answers "same id, is this an
-        // update?"; it cannot see "same path, different id", which is what a
-        // source-side re-create produces (`deploy --install` mints fresh ids).
-        // Left alone the incoming node overwrites the path mapping and the
-        // previous occupant becomes a scan-only orphan — see
-        // `displace_path_occupant` for what that does to a live site.
-        //
-        // Ordering is load-bearing: this runs BEFORE the node is staged,
-        // because the tombstone and the new mapping share one PATH_INDEX key.
-        let displaced = self
-            .get_by_path_impl(
-                scope.tenant_id,
-                scope.repo_id,
-                scope.target_branch,
-                scope.workspace,
-                &src_node.path,
-                None,
-            )
-            .await?
-            .filter(|occ| occ.id != src_node.id);
-        if let Some(occ) = &displaced {
-            self.displace_path_occupant(
-                batch,
-                occ,
-                scope.tenant_id,
-                scope.repo_id,
-                scope.target_branch,
-                scope.workspace,
-                scope.revision,
-            )
-            .await?;
-        }
-
-        let mut node = src_node.clone();
-        node.parent = Node::extract_parent_name_from_path(&node.path);
-        node.has_children = None; // computed field, never stored
-        node.children = vec![];
-        if operation == ChangeOperation::Modified {
-            // Keep creation metadata, stamp the modification.
-            node.updated_at = Some(scope.now);
-        }
-
-        // Child order: replay the source fractional label onto the target.
-        // (Label collisions with independent target children are possible —
-        // same caveat as branch merge; reads dedup and the ordering is
-        // healed lazily on the next reorder.)
-        let order_label = match self.get_order_label_for_child(
-            scope.tenant_id,
-            scope.repo_id,
-            scope.source_branch,
-            scope.workspace,
-            &entry.src_parent_id,
-            &node.id,
-        )? {
-            Some(label) => label,
-            None => {
-                // No source ordering entry (unusual) — append at the end
-                // of the target parent instead.
-                match self.get_last_order_label(
-                    scope.tenant_id,
-                    scope.repo_id,
-                    scope.target_branch,
-                    scope.workspace,
-                    &entry.dst_parent_id,
-                )? {
-                    Some(last) => crate::fractional_index::inc(&last)
-                        .unwrap_or_else(|_| crate::fractional_index::first()),
-                    None => crate::fractional_index::first(),
-                }
-            }
-        };
-
-        // Reject a `properties` change onto an immutable destination node.
-        // Unlike `update_impl`, this promotion path hand-rolls its own
-        // upsert rather than calling it, so it needs its own independent
-        // check — see `crate::immutability`. Fails OPEN if the destination
-        // type can't be resolved.
-        if let Some(old) = &old_dst {
-            use raisin_storage::NodeTypeRepository as _;
-            if let Some(old_type) = self
-                .node_type_repo
-                .get(
-                    raisin_storage::BranchScope::new(
-                        scope.tenant_id,
-                        scope.repo_id,
-                        scope.target_branch,
-                    ),
-                    &old.node_type,
-                    None,
-                )
-                .await?
-            {
-                crate::immutability::reject_if_immutable(
-                    &old_type,
-                    &old.id,
-                    &old.properties,
-                    &node.properties,
-                )?;
-            }
-        }
+        let PreparedEntry {
+            node,
+            old_dst,
+            operation,
+            order_label,
+        } = prepared;
 
         // Stale OLD-value entries of the destination's previous version:
         // property values and references the source no longer has, and its
@@ -148,19 +39,22 @@ impl NodeRepositoryImpl {
         // `REFERENCES(...)` long after the source dropped them. Same diff as
         // `update_impl`, from the same helpers; written before the new
         // entries, which share keys with any unchanged value.
+        //
+        // The PROPERTY_INDEX half is the one writer's: it is diffed against
+        // `old_dst` (an upsert, not a create — plan Phase 7 item 3), and is a
+        // FULL put. The promotion's commit step re-derives it against what is
+        // stored on the target then (`indexing::NodeCommit`, plan Phase 7b,
+        // `always`), so a write landing between this read and the commit
+        // cannot leave the index disagreeing with the records. Promotion is
+        // not the hot path.
+        let ctx = crate::indexing::IndexCtx::new(
+            scope.tenant_id,
+            scope.repo_id,
+            scope.target_branch,
+            scope.workspace,
+        );
+        let baseline = self.full_baseline(&ctx, &node.id, scope.revision, old_dst.as_ref())?;
         if let Some(old) = &old_dst {
-            let cf_property = crate::cf_handle(&self.db, crate::cf::PROPERTY_INDEX)?;
-            crate::repositories::add_stale_property_tombstones(
-                batch,
-                cf_property,
-                scope.tenant_id,
-                scope.repo_id,
-                scope.target_branch,
-                scope.workspace,
-                old,
-                &node,
-                scope.revision,
-            );
             self.add_stale_reference_tombstones_to_batch(
                 batch,
                 old,
@@ -195,6 +89,10 @@ impl NodeRepositoryImpl {
             scope.revision,
             Some(&order_label),
             Some(&entry.dst_parent_id),
+            crate::repositories::nodes::PropertyWrite {
+                baseline: baseline.as_ref(),
+                in_place: crate::indexing::InPlace::No,
+            },
         )?;
 
         // A `secret://` reference is branch-agnostic but `cf::SECRETS` is
@@ -203,68 +101,23 @@ impl NodeRepositoryImpl {
         // silently, because reads never resolve a reference. See `secrets.rs`.
         self.stage_secret_copies(batch, &node, scope, &mut acc.secrets)?;
 
-        // Compound/unique indexes: tombstone the OLD target values first,
-        // then write the new entries — without the tombstones a changed
-        // column value would leave the stale old-value entry live (the
-        // exact bug class fixed in update_impl).
-        if let Some(old) = &old_dst {
-            self.add_compound_tombstones_to_batch(
-                batch,
-                old,
-                scope.tenant_id,
-                scope.repo_id,
-                scope.target_branch,
-                scope.workspace,
-            )?;
-            self.add_unique_tombstones_to_batch(
-                batch,
-                old,
-                scope.tenant_id,
-                scope.repo_id,
-                scope.target_branch,
-                scope.workspace,
-                scope.revision,
-            )
+        // Compound indexes: tombstone the OLD target values first, then write
+        // the new entries — without the tombstones a changed column value
+        // would leave the stale old-value entry live (the exact bug class
+        // fixed in update_impl). UNIQUE: the claims the node gave up were
+        // ended in the retire pass; here every claim it holds is put.
+        self.add_compound_delta_to_batch(batch, &ctx, baseline.as_ref(), &node, scope.revision)
             .await?;
-        }
-        self.add_compound_indexes_to_batch(
+        self.add_unique_delta_to_batch(
             batch,
+            old_dst.as_ref(),
             &node,
-            scope.tenant_id,
-            scope.repo_id,
-            scope.target_branch,
-            scope.workspace,
+            &ctx,
             scope.revision,
+            false,
+            crate::repositories::nodes::UniqueHalf::Puts,
         )
         .await?;
-        self.add_unique_indexes_to_batch(
-            batch,
-            &node,
-            scope.tenant_id,
-            scope.repo_id,
-            scope.target_branch,
-            scope.workspace,
-            scope.revision,
-        )
-        .await?;
-
-        // If the node moved/renamed on the source since the last copy,
-        // its old target path and old ordered-children slot are stale.
-        if let Some(old) = &old_dst {
-            self.tombstone_stale_placement(
-                batch,
-                old,
-                &node,
-                &entry.dst_parent_id,
-                &order_label,
-                scope.tenant_id,
-                scope.repo_id,
-                scope.target_branch,
-                scope.workspace,
-                scope.revision,
-            )
-            .await?;
-        }
 
         // Carry translations (node-level and block-level) to the target
         // branch under the SAME node id.
@@ -275,21 +128,31 @@ impl NodeRepositoryImpl {
         // from the `change_infos` length delta (what this used to do) made
         // every translated node look changed forever and silently exempted the
         // whole multilingual half of a site from the suppression below.
-        let translations_differed = self.copy_translations_to_batch(
+        let (translations_differed, staged_overlays) = self.copy_translations_to_batch(
             batch,
             &node.id,
-            scope.tenant_id,
-            scope.repo_id,
-            scope.source_branch,
-            scope.target_branch,
-            scope.workspace,
-            scope.revision,
-            scope.now,
-            &scope.meta_actor,
-            &scope.meta_message,
-            scope.meta_is_system,
+            scope,
             operation,
             &mut acc.change_infos,
+            &mut acc.translation_ops,
+        )?;
+
+        // The node and its carried overlays are in this one batch, unreadable
+        // until written: sync the localized name index against both (plan
+        // Phase 12; the record writer's sync saw the target's old overlays).
+        crate::localized_name::sync::sync_node_final(
+            &self.db,
+            batch,
+            crate::localized_name::keys::NameScope::new(
+                scope.tenant_id,
+                scope.repo_id,
+                scope.target_branch,
+                scope.workspace,
+            ),
+            &node,
+            Some(&entry.dst_parent_id),
+            scope.revision,
+            &staged_overlays,
         )?;
 
         // Carry the node's outgoing edges — branch-scoped, in their own
@@ -328,24 +191,6 @@ impl NodeRepositoryImpl {
             .or_insert_with(|| order_label.clone());
         if order_label > *slot {
             *slot = order_label.clone();
-        }
-
-        // Report the displacement as its own Deleted change. A subscriber that
-        // only saw the Added would keep a cache entry for a node that no longer
-        // exists, at a path now owned by someone else.
-        if let Some(occ) = displaced {
-            acc.changes.push(CrossBranchNodeChange {
-                node_id: occ.id.clone(),
-                path: occ.path.clone(),
-                node_type: occ.node_type.clone(),
-                operation: ChangeOperation::Deleted,
-            });
-            acc.change_infos.push(NodeChangeInfo {
-                node_id: occ.id,
-                workspace: scope.workspace.to_string(),
-                operation: ChangeOperation::Deleted,
-                translation_locale: None,
-            });
         }
 
         acc.changes.push(CrossBranchNodeChange {

@@ -16,8 +16,26 @@ pub(crate) async fn scan_nodes(
     branch: &str,
     workspace: &str,
 ) -> Result<Vec<Node>> {
+    Ok(
+        scan_node_versions(storage, tenant_id, repo_id, branch, workspace)
+            .await?
+            .into_iter()
+            .map(|(node, _)| node)
+            .collect(),
+    )
+}
+
+/// [`scan_nodes`] with each node's stored revision (the revision of the
+/// version it is), for a rebuild that writes entries AT that revision.
+pub(crate) async fn scan_node_versions(
+    storage: &RocksDBStorage,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    workspace: &str,
+) -> Result<Vec<(Node, raisin_hlc::HLC)>> {
     let (nodes, skipped) =
-        scan_nodes_counting_skips(storage, tenant_id, repo_id, branch, workspace).await?;
+        scan_versions_counting_skips(storage, tenant_id, repo_id, branch, workspace).await?;
     if skipped > 0 {
         // REFUSE, rather than hand back a partial set to a caller that is
         // about to CLEAR the keyspace it is rebuilding. Every rebuild here is
@@ -52,6 +70,21 @@ pub(crate) async fn scan_nodes_counting_skips(
     branch: &str,
     workspace: &str,
 ) -> Result<(Vec<Node>, usize)> {
+    let (versions, skipped) =
+        scan_versions_counting_skips(storage, tenant_id, repo_id, branch, workspace).await?;
+    Ok((
+        versions.into_iter().map(|(node, _)| node).collect(),
+        skipped,
+    ))
+}
+
+async fn scan_versions_counting_skips(
+    storage: &RocksDBStorage,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    workspace: &str,
+) -> Result<(Vec<(Node, raisin_hlc::HLC)>, usize)> {
     let cf_nodes = cf_handle(storage.db(), cf::NODES)?;
     let prefix = keys::workspace_prefix(tenant_id, repo_id, branch, workspace);
 
@@ -87,49 +120,46 @@ pub(crate) async fn scan_nodes_counting_skips(
             continue;
         }
 
-        match rmp_serde::from_slice::<Node>(&value) {
-            Ok(mut node) => {
-                // MATERIALIZE THE PATH. A node blob deliberately carries none —
-                // `StorageNode` omits it so a subtree move is O(1) in blob
-                // writes — and it is looked up from NODE_PATH on the normal read
-                // path. This function reads the blob DIRECTLY, so without this
-                // every node arrives with `path: ""`.
-                //
-                // That is not cosmetic. The compound-index rebuild derives
-                // `__parent_path` from `Node::parent_path()`, which reads the
-                // path; with an empty one it resolves to `None`, the column
-                // cannot be filled, and every node is skipped. The rebuild
-                // CLEARS the keyspace first and marks the index `Ready` at the
-                // end, so the result was an EMPTY index the planner trusts —
-                // silently returning no rows for a folder listing, with the
-                // matched predicates already stripped from the residual filter
-                // so nothing downstream could catch the loss.
-                if node.path.is_empty() {
-                    match storage.nodes.materialize_path(
-                        tenant_id,
-                        repo_id,
-                        branch,
-                        workspace,
-                        &node.id,
-                        &current_revision,
-                    ) {
-                        Ok(path) => node.path = path,
-                        Err(e) => {
-                            // Skip rather than index a node whose place in the
-                            // tree is unknown: a hierarchy column built from a
-                            // guess is worse than one missing an entry, because
-                            // the planner cannot tell the difference.
-                            tracing::warn!(
-                                node_id = %node.id,
-                                error = %e,
-                                "Skipping node during index rebuild: no path in NODE_PATH"
-                            );
-                            skipped += 1;
-                            continue;
-                        }
-                    }
-                }
-                nodes.push(node)
+        // MATERIALIZE THE PATH, through the one decoder and the one read rule
+        // (Phase 10: the newer of NODE_PATH and a legacy full blob's embedded
+        // path). A StorageNode blob carries no path, so a raw `Node` decode
+        // gave `path: ""`; a legacy full blob carried one but a later ancestor
+        // move superseded it in NODE_PATH, which a raw decode never saw.
+        //
+        // That is not cosmetic. The compound-index rebuild derives
+        // `__parent_path` from `Node::parent_path()`, which reads the path;
+        // with an empty one it resolves to `None`, the column cannot be
+        // filled, and every node is skipped. The rebuild CLEARS the keyspace
+        // first and marks the index `Ready` at the end, so the result was an
+        // EMPTY index the planner trusts — silently returning no rows for a
+        // folder listing, with the matched predicates already stripped from
+        // the residual filter so nothing downstream could catch the loss.
+        let Ok(blob_revision) = keys::extract_revision_from_key(&key) else {
+            tracing::warn!(node_id = %node_id, "Skipping node key with an unparseable revision");
+            continue;
+        };
+        match crate::mvcc_read::deserialize_node_with_path(
+            storage.db(),
+            &value,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            node_id,
+            &current_revision,
+            &blob_revision,
+        ) {
+            Ok(node) if !node.path.is_empty() => nodes.push((node, blob_revision)),
+            Ok(node) => {
+                // Skip rather than index a node whose place in the tree is
+                // unknown: a hierarchy column built from a guess is worse than
+                // one missing an entry, because the planner cannot tell the
+                // difference.
+                tracing::warn!(
+                    node_id = %node.id,
+                    "Skipping node during index rebuild: no path in NODE_PATH"
+                );
+                skipped += 1;
             }
             Err(e) => {
                 tracing::warn!("Failed to deserialize node: {}", e);

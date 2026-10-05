@@ -13,17 +13,23 @@ use super::memo::ReadScope;
 use super::walk::{self, Resolved, TargetRef};
 use super::ReferenceResolver;
 use raisin_error::Result;
+use raisin_models::nodes::properties::PropertyValue;
 use raisin_storage::Storage;
 use std::collections::HashSet;
 use std::sync::Arc;
 
 impl<S: Storage> ReferenceResolver<S> {
-    /// Every target the inlining of `value` to `depth` levels can reach,
+    /// Every target the inlining of `values` to `depth` levels can reach,
     /// decided. Targets beyond the last level are never read.
+    ///
+    /// Several documents share ONE walk (a chunk of rows): level 1 is the union
+    /// of their references, so each level is one batched read for all of them.
+    /// The union reaches exactly the targets the documents reach one by one —
+    /// a BFS from many sources visits the union of each source's ball.
     pub(super) async fn gather(
         &self,
         workspace: &str,
-        value: &serde_json::Value,
+        values: &[PropertyValue],
         depth: u32,
         read: &Arc<ReadScope>,
         fields: Option<&[String]>,
@@ -31,10 +37,12 @@ impl<S: Storage> ReferenceResolver<S> {
         let mut resolved = Resolved::new();
         let mut queued: HashSet<TargetRef> = HashSet::new();
         let mut frontier: Vec<TargetRef> = Vec::new();
-        for raw in walk::distinct_refs(value) {
-            let target = raw.target(workspace);
-            if queued.insert(target.clone()) {
-                frontier.push(target);
+        for value in values {
+            for raw in walk::distinct_refs(value) {
+                let target = raw.target(workspace);
+                if queued.insert(target.clone()) {
+                    frontier.push(target);
+                }
             }
         }
 

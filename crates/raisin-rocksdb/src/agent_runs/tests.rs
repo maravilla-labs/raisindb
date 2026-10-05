@@ -67,6 +67,7 @@ async fn provisioned(dir: &tempfile::TempDir) -> Arc<RocksDBStorage> {
             default_branch: "main".into(),
             description: None,
             tags: HashMap::new(),
+            localized_names: Default::default(),
         };
         storage
             .repository_management()

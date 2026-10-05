@@ -121,6 +121,23 @@ impl NodeRepositoryImpl {
             &new_name,
         )
         .await?;
+        // Localized node name uniqueness at the destination, when the
+        // repository enforces it (plan Phase 12; `None` otherwise): checked
+        // now, and again at the commit step under the branch lock
+        // (`localized_name::unique::deferred`).
+        let name_check = {
+            let mut moved = root_node.clone();
+            moved.path = new_path.to_string();
+            moved.name = new_name.to_string();
+            crate::localized_name::unique::NameCheck::staged(
+                &self.db,
+                crate::localized_name::keys::NameScope::new(tenant_id, repo_id, branch, workspace),
+                &moved,
+                Some(target_parent_node.as_ref().map_or("/", |p| p.id.as_str())),
+                &crate::mvcc_read::NEWEST,
+                crate::localized_name::sync::Overrides::new(),
+            )?
+        };
 
         tracing::info!(
             "move_node_tree: source_path={}, target_path={}",
@@ -208,7 +225,7 @@ impl NodeRepositoryImpl {
             .as_ref()
             .map_or_else(|| "/".to_string(), |p| p.id.clone());
 
-        let order_label = match self.get_order_label_for_child(
+        let (order_label, appended) = match self.get_order_label_for_child(
             tenant_id,
             repo_id,
             branch,
@@ -217,15 +234,18 @@ impl NodeRepositoryImpl {
             id,
         )? {
             // Already ordered under the target parent (re-move / rename in place).
-            Some(existing) => existing,
-            None => self.next_append_label(
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                &new_parent_id,
-                &revision,
-            )?,
+            Some(existing) => (existing, false),
+            None => (
+                self.next_append_label(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    &new_parent_id,
+                    &revision,
+                )?,
+                true,
+            ),
         };
         let ordered_key = keys::ordered_child_key_versioned(
             tenant_id,
@@ -239,10 +259,19 @@ impl NodeRepositoryImpl {
         );
         batch.put_cf(cf_ordered, ordered_key, new_name.as_bytes());
 
-        // Update cached last-child metadata
-        let metadata_key =
-            keys::last_child_metadata_key(tenant_id, repo_id, branch, workspace, &new_parent_id);
-        batch.put_cf(cf_ordered, metadata_key, order_label.as_bytes());
+        // Update cached last-child metadata — only for an append. A rename in
+        // place keeps its label, which is usually NOT the last one; caching it
+        // as LAST made the next append land in the middle of the siblings.
+        if appended {
+            let metadata_key = keys::last_child_metadata_key(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                &new_parent_id,
+            );
+            batch.put_cf(cf_ordered, metadata_key, order_label.as_bytes());
+        }
 
         // Process all nodes (root + descendants): update PATH_INDEX and NODE_PATH
         let mut moved_node_ids = Vec::new();
@@ -253,6 +282,8 @@ impl NodeRepositoryImpl {
         // `moved_descendant_path`) and their stale ordering entries are healed
         // below, so the inconsistency does not follow the tree around forever.
         let mut orphaned: Vec<(String, String, usize)> = Vec::new();
+        // (listed, moved) for each node re-keyed without a record rewrite.
+        let mut rekeyed: Vec<(Node, Node)> = Vec::new();
 
         for (node, depth) in &descendants {
             // Calculate new path for this node
@@ -319,22 +350,28 @@ impl NodeRepositoryImpl {
             // spatial (see indexing/mod.rs) and once for the SQL DML path (see
             // transaction/.../indexing.rs). `move_tree_compound_reindex_test`
             // pins it.
-            self.add_compound_tombstones_to_batch(
-                &mut batch, node, tenant_id, repo_id, branch, workspace,
-            )?;
-
+            // A node the record loop below REWRITES (the root, or one whose
+            // name/parent the move changes) gets its compound entries there,
+            // from the rewritten record — its fresh `updated_at` included.
+            // Writing them here too would leave this pre-stamp tuple live.
+            let rewritten_below = *depth == 0
+                || node.name != node_new_path.rsplit('/').next().unwrap_or(&node_new_path)
+                || node.parent != Node::extract_parent_name_from_path(&node_new_path);
             let mut moved_node = node.clone();
             moved_node.path = node_new_path.clone();
-            self.add_compound_indexes_to_batch(
-                &mut batch,
-                &moved_node,
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                &revision,
-            )
-            .await?;
+            if !rewritten_below {
+                self.add_compound_delta_to_batch(
+                    &mut batch,
+                    &crate::indexing::IndexCtx::new(tenant_id, repo_id, branch, workspace),
+                    crate::indexing::Baseline::Full(Some(node)),
+                    &moved_node,
+                    &revision,
+                )
+                .await?;
+                // Derived from the LISTED version: checked at commit against
+                // the stored one (an update may commit in between).
+                rekeyed.push((node.clone(), moved_node));
+            }
         }
 
         // HEAL the inconsistency that produced `orphaned`.
@@ -388,6 +425,13 @@ impl NodeRepositoryImpl {
         // Rewriting them would turn an O(index) move into an O(subtree) blob
         // rewrite for no benefit.
         let mut rewritten_nodes: Vec<Node> = Vec::new();
+        // A descendant keeps its parent, whose new path is staged in this
+        // same unwritten batch: hand the record writer the id rather than
+        // leave it to resolve the path from the committed PATH_INDEX.
+        let ids_by_old_path: std::collections::HashMap<&str, &str> = descendants
+            .iter()
+            .map(|(n, _)| (n.path.as_str(), n.id.as_str()))
+            .collect();
         for (node, depth) in &descendants {
             let node_new_path = if *depth == 0 {
                 new_path.to_string()
@@ -426,10 +470,14 @@ impl NodeRepositoryImpl {
             let parent_id_for_index = if is_root {
                 Some(new_parent_id.clone())
             } else {
-                None
+                node.path
+                    .rsplit_once('/')
+                    .and_then(|(parent, _)| ids_by_old_path.get(parent))
+                    .map(|id| id.to_string())
             };
-            self.add_node_indexes_to_batch_with_parent_id(
+            self.rewrite_node_record_to_batch(
                 &mut batch,
+                node,
                 &rewritten,
                 tenant_id,
                 repo_id,
@@ -437,7 +485,8 @@ impl NodeRepositoryImpl {
                 workspace,
                 &revision,
                 parent_id_for_index,
-            )?;
+            )
+            .await?;
             rewritten_nodes.push(rewritten);
         }
 
@@ -446,10 +495,36 @@ impl NodeRepositoryImpl {
             .find(|node| node.path == new_path)
             .cloned();
 
-        // Atomic commit
-        self.db
-            .write(batch)
-            .map_err(|e| raisin_error::Error::storage(format!("Atomic tree move failed: {}", e)))?;
+        // Atomic commit, as one node commit step (plan Phase 7b): every moved
+        // node locked; each rewritten record's index write re-derived against
+        // what is stored at that moment (the subtree was read by a scan, so
+        // there is no per-node "before the read" to record — `always`).
+        let mut commit = crate::indexing::NodeCommit::new(tenant_id, repo_id, branch);
+        let index_ctx = crate::indexing::IndexCtx::new(tenant_id, repo_id, branch, workspace);
+        for rewritten in &rewritten_nodes {
+            commit.check(
+                crate::indexing::StagedDeltaCheck::always(&index_ctx, &rewritten.id, &revision),
+                Some(rewritten.clone()),
+            );
+        }
+        // A descendant re-keyed without a record rewrite: its compound
+        // re-key is checked against the version stored at commit.
+        for (listed, moved) in &rekeyed {
+            commit.check(
+                crate::indexing::StagedDeltaCheck::rekey(&index_ctx, listed, &revision),
+                Some(moved.clone()),
+            );
+        }
+        for node_id in &moved_node_ids {
+            commit.touch(node_id);
+        }
+        commit.check_name(name_check);
+        commit.write(&self.db, batch).await.map_err(|e| match e {
+            // A localized name refused under the branch lock stays a
+            // conflict.
+            raisin_error::Error::Conflict(_) => e,
+            e => raisin_error::Error::storage(format!("Atomic tree move failed: {}", e)),
+        })?;
 
         tracing::info!(
             "move_node_tree: wrote {} index updates + {} blob rewrites atomically",

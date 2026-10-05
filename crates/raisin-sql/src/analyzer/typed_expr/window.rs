@@ -7,7 +7,7 @@ use super::expressions::TypedExpr;
 use crate::analyzer::types::DataType;
 
 /// Window function types
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum WindowFunction {
     // Ranking functions
     RowNumber,

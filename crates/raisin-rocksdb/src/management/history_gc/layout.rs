@@ -174,6 +174,16 @@ pub(super) const GC_TARGETS: &[GcTarget] = &[
         layouts: &[t(4, "uniq", Tail)],
         drop_orphan_tombstones: false,
     },
+    // fwd: …\0lname\0{locale}\0{parent_id}\0{name}\0{node_id}\0{~rev}
+    // rev: …\0lname_of\0{node_id}\0{locale}\0{~rev}
+    // One group per node (forward) and per (node, locale) (reverse), so
+    // retention never lets one node's tombstone outlive another's claim.
+    GcTarget {
+        cf: cf::LOCALIZED_NAME_INDEX,
+        branch_scoped: true,
+        layouts: &[t(4, "lname", Tail), t(4, "lname_of", Tail)],
+        drop_orphan_tombstones: false,
+    },
     // v2:     …\0{embedder_hash}\0{kind}\0{source_id}\0{chunk_idx}\0{~rev}
     // legacy: …\0{node_id}\0{~rev}
     GcTarget {

@@ -79,6 +79,11 @@ pub(crate) fn repository_routes(state: &AppState) -> Router<AppState> {
             "/api/repository/{repo}/{branch}/head/{ws}/$ref/{id}",
             get(crate::handlers::repo::repo_get_by_id),
         )
+        // Localized URL lookup (plan Phase 12).
+        .route(
+            "/api/repository/{repo}/{branch}/head/{ws}/by-localized-path/{locale}/{*path}",
+            get(crate::handlers::repo::repo_get_by_localized_path),
+        )
         .route(
             "/api/repository/{repo}/{branch}/head/{ws}/{*node_path}",
             get(crate::handlers::repo::repo_get)

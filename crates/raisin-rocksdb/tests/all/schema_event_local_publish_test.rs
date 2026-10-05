@@ -87,6 +87,7 @@ async fn seed_repo(storage: &Arc<RocksDBStorage>) -> Result<()> {
         default_branch: BRANCH.to_string(),
         description: Some("Schema event publish test".to_string()),
         tags: HashMap::new(),
+        localized_names: Default::default(),
     };
     storage
         .repository_management()

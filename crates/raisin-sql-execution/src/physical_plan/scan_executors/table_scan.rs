@@ -152,10 +152,13 @@ pub async fn execute_table_scan<S: Storage + 'static>(
             }
 
             // Materialize node on-demand (LAST POSSIBLE MOMENT)
-            let node = match storage
-                .nodes()
-                .get(StorageScope::new(&tenant_id, &repo_id, &branch, &workspace), &node_id, max_revision.as_ref())
-                .await?
+            let node = match super::helpers::row_node(
+                &*storage,
+                StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
+                raisin_storage::NodeLocator::Id(node_id.clone()),
+                max_revision.as_ref(),
+            )
+            .await?
             {
                 Some(n) => n,
                 None => {

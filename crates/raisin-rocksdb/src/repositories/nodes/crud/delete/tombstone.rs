@@ -25,6 +25,14 @@ impl NodeRepositoryImpl {
         self.check_delete_safety(tenant_id, repo_id, branch, workspace, id)
             .await?;
 
+        // The stored versions BEFORE the version this delete ends is read:
+        // re-checked under the node's commit lock (plan Phase 7b).
+        let pending_check = crate::indexing::StagedDeltaCheck::before_read(
+            &self.db,
+            &crate::indexing::IndexCtx::new(tenant_id, repo_id, branch, workspace),
+            id,
+        )?;
+
         // Get current node to check if it exists and get its properties (internal operation)
         let node = match self
             .get_impl(tenant_id, repo_id, branch, workspace, id, false)
@@ -71,9 +79,11 @@ impl NodeRepositoryImpl {
             .index_node_change_to_batch(&mut batch, tenant_id, repo_id, &revision, id)?;
 
         // Add branch HEAD update to the batch and write it atomically
+        let mut commit = crate::indexing::NodeCommit::new(tenant_id, repo_id, branch);
+        commit.check(pending_check.at(&revision), None);
         let updated_branch = self
             .branch_repo
-            .write_batch_with_head(batch, tenant_id, repo_id, branch, revision)
+            .write_nodes_with_head(batch, tenant_id, repo_id, branch, revision, &commit)
             .await?;
 
         // Capture replication events (after atomic write)
@@ -408,35 +418,6 @@ impl NodeRepositoryImpl {
         )?;
         for (key, value) in puts {
             batch.put_cf(cf_relation, key, value);
-        }
-
-        Ok(())
-    }
-
-    /// Add tombstone entries for translations.
-    pub(in crate::repositories::nodes) fn add_translation_tombstones_to_batch(
-        &self,
-        batch: &mut WriteBatch,
-        tenant_id: &str,
-        repo_id: &str,
-        branch: &str,
-        workspace: &str,
-        id: &str,
-        revision: &raisin_hlc::HLC,
-    ) -> Result<()> {
-        let cf_translation_data = cf_handle(&self.db, cf::TRANSLATION_DATA)?;
-        let translation_locales =
-            self.list_translation_locales(tenant_id, repo_id, branch, workspace, id)?;
-
-        for locale in translation_locales {
-            let mut translation_key = format!(
-                "{}\0{}\0{}\0{}\0translations\0{}\0{}\0",
-                tenant_id, repo_id, branch, workspace, id, locale
-            )
-            .into_bytes();
-            translation_key.extend_from_slice(&keys::encode_descending_revision(revision));
-
-            batch.put_cf(cf_translation_data, translation_key, TOMBSTONE);
         }
 
         Ok(())

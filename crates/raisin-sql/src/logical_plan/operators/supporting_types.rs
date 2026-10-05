@@ -3,7 +3,7 @@
 use crate::analyzer::{typed_expr::BinaryOperator, ColumnDef, DataType, Expr, TypedExpr};
 
 /// Specification for DISTINCT behavior
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum DistinctSpec {
     /// DISTINCT: deduplicate based on all output columns
     All,
@@ -13,7 +13,7 @@ pub enum DistinctSpec {
 }
 
 /// Window expression definition
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WindowExpr {
     pub function: crate::analyzer::WindowFunction,
     pub partition_by: Vec<TypedExpr>,
@@ -25,7 +25,7 @@ pub struct WindowExpr {
 
 /// Filter predicate in Conjunctive Normal Form (CNF)
 /// Represents multiple predicates that are AND-ed together
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FilterPredicate {
     /// Individual AND-ed predicates (conjuncts)
     pub conjuncts: Vec<TypedExpr>,
@@ -88,14 +88,14 @@ impl FilterPredicate {
 }
 
 /// Projection expression with alias
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProjectionExpr {
     pub expr: TypedExpr,
     pub alias: String,
 }
 
 /// Sort expression with direction and nulls ordering
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SortExpr {
     pub expr: TypedExpr,
     pub ascending: bool,
@@ -104,7 +104,7 @@ pub struct SortExpr {
 }
 
 /// Aggregate expression
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AggregateExpr {
     pub func: AggregateFunction,
     pub args: Vec<TypedExpr>,
@@ -130,14 +130,14 @@ pub enum AggregateFunction {
 }
 
 /// Table schema for scan operations
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TableSchema {
     pub table_name: String,
     pub columns: Vec<ColumnDef>,
 }
 
 /// Schema column (simplified version for schema output)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SchemaColumn {
     pub name: String,
     pub data_type: DataType,

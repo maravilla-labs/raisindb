@@ -1,7 +1,8 @@
-//! The last two reference traversals that only saw TOP-LEVEL references: the
-//! legacy replicated `CreateNode` writer and the cross-branch prune tombstoner.
-//! Both now go through the one walker, so a reference inside an array is
-//! indexed on a replica and retired when a promotion prunes its node.
+//! Two reference traversals that once saw only TOP-LEVEL references: the
+//! replicated create (then the pre-v2 `CreateNode` writer, removed in plan
+//! "Phase 11d"; now the node snapshot upsert) and the cross-branch prune
+//! tombstoner. Both go through the one walker, so a reference inside an array
+//! is indexed on a replica and retired when a promotion prunes its node.
 
 use raisin_context::RepositoryConfig;
 use raisin_hlc::HLC;
@@ -42,6 +43,7 @@ async fn setup() -> (Arc<RocksDBStorage>, TempDir) {
         default_branch: "main".to_string(),
         description: None,
         tags: HashMap::new(),
+        localized_names: Default::default(),
     };
     storage
         .repository_management()
@@ -105,7 +107,7 @@ async fn referrers(storage: &RocksDBStorage, branch: &str, target: &Node) -> Vec
 }
 
 #[tokio::test]
-async fn legacy_create_indexes_nested_references() {
+async fn replicated_create_indexes_nested_references() {
     let (storage, _dir) = setup().await;
     let target = node("target", "/target");
     create(&storage, &target).await;
@@ -117,17 +119,19 @@ async fn legacy_create_indexes_nested_references() {
 
     let source_id = uuid::Uuid::new_v4().to_string();
     let revision = HLC::new(chrono::Utc::now().timestamp_millis() as u64 + 60_000, 0);
-    let op_type = OpType::CreateNode {
-        node_id: source_id.clone(),
-        name: "source".to_string(),
-        node_type: "raisin:Folder".to_string(),
-        archetype: None,
-        parent_id: None,
-        order_key: "a0".to_string(),
-        properties: nested_reference(&target),
-        owner_id: None,
-        workspace: Some(WS.to_string()),
-        path: "/source".to_string(),
+    let op_type = OpType::UpsertNodeSnapshot {
+        node: Node {
+            id: source_id.clone(),
+            name: "source".to_string(),
+            path: "/source".to_string(),
+            node_type: "raisin:Folder".to_string(),
+            properties: nested_reference(&target),
+            workspace: Some(WS.to_string()),
+            ..Default::default()
+        },
+        parent_id: Some("/".to_string()),
+        revision,
+        cf_order_key: format!("a0::{source_id}"),
     };
     let op = Operation {
         op_id: uuid::Uuid::new_v4(),

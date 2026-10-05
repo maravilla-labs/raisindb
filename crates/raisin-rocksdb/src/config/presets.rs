@@ -45,20 +45,18 @@ impl RocksDBConfig {
             cluster_node_id: None,      // Will be auto-generated
             replication_enabled: false, // Disabled by default in development
             replication_peers: Vec::new(),
+            replication_configured: false,
             async_operation_queue: false, // Disabled for development (simpler debugging)
             operation_queue_capacity: 1_000,
             operation_queue_batch_size: 50,
             operation_queue_batch_timeout_ms: 100,
-            oplog_compaction_enabled: false, // Disabled by default in development
-            oplog_compaction_interval_secs: 21600, // 6 hours
-            oplog_compaction_min_age_secs: 3600, // 1 hour
-            oplog_merge_property_updates: true,
-            oplog_compaction_batch_size: 100_000,
             trigger_safety: crate::jobs::TriggerSafetyConfig::default(),
             max_active_jobs_per_tenant: Some(5000),
             spatial_compaction: crate::spatial::SpatialCompactionConfig::default()
                 .with_env_overrides(),
             spatial_max_entries_per_cell: crate::DEFAULT_SPATIAL_MAX_ENTRIES_PER_CELL,
+            index_skip_unchanged: true,
+            history_gc_collapse_runs: false,
         }
     }
 
@@ -102,20 +100,18 @@ impl RocksDBConfig {
             cluster_node_id: None, // Should be configured explicitly in production
             replication_enabled: true, // Enabled by default in production
             replication_peers: Vec::new(),
+            replication_configured: false,
             async_operation_queue: true, // Enabled for production high-throughput
             operation_queue_capacity: 10_000,
             operation_queue_batch_size: 100,
             operation_queue_batch_timeout_ms: 100,
-            oplog_compaction_enabled: true, // Enabled for production
-            oplog_compaction_interval_secs: 21600, // 6 hours
-            oplog_compaction_min_age_secs: 3600, // 1 hour
-            oplog_merge_property_updates: true,
-            oplog_compaction_batch_size: 100_000,
             trigger_safety: crate::jobs::TriggerSafetyConfig::default(),
             max_active_jobs_per_tenant: Some(5000),
             spatial_compaction: crate::spatial::SpatialCompactionConfig::default()
                 .with_env_overrides(),
             spatial_max_entries_per_cell: crate::DEFAULT_SPATIAL_MAX_ENTRIES_PER_CELL,
+            index_skip_unchanged: true,
+            history_gc_collapse_runs: false,
         }
     }
 
@@ -153,20 +149,18 @@ impl RocksDBConfig {
             cluster_node_id: None,     // Should be configured explicitly
             replication_enabled: true, // Enabled for high-performance clusters
             replication_peers: Vec::new(),
+            replication_configured: false,
             async_operation_queue: true, // Critical for high-throughput scenarios
             operation_queue_capacity: 50_000,
             operation_queue_batch_size: 500,
             operation_queue_batch_timeout_ms: 50,
-            oplog_compaction_enabled: true, // Enabled for high-performance
-            oplog_compaction_interval_secs: 10800, // 3 hours (more frequent for high-volume)
-            oplog_compaction_min_age_secs: 1800, // 30 minutes (shorter for high-volume)
-            oplog_merge_property_updates: true,
-            oplog_compaction_batch_size: 500_000, // Larger batch for high-performance
             trigger_safety: crate::jobs::TriggerSafetyConfig::default(),
             max_active_jobs_per_tenant: Some(5000),
             spatial_compaction: crate::spatial::SpatialCompactionConfig::default()
                 .with_env_overrides(),
             spatial_max_entries_per_cell: crate::DEFAULT_SPATIAL_MAX_ENTRIES_PER_CELL,
+            index_skip_unchanged: true,
+            history_gc_collapse_runs: false,
         }
     }
 }

@@ -38,6 +38,25 @@ impl NodeRepositoryImpl {
         node: &Node,
         options: &CreateNodeOptions,
     ) -> Result<()> {
+        self.validate_for_create_checked(tenant_id, repo_id, branch, workspace, node, options, true)
+            .await
+    }
+
+    /// [`Self::validate_for_create`] for a transaction that resolved
+    /// `node.path` itself: `check_committed_path = false` skips step 2 when the
+    /// transaction already VACATED that path (moved or deleted its committed
+    /// occupant), which committed state cannot see. Every other check runs.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn validate_for_create_checked(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        node: &Node,
+        options: &CreateNodeOptions,
+        check_committed_path: bool,
+    ) -> Result<()> {
         // 1. Check node doesn't already exist (always required for create)
         if self
             .get_impl(tenant_id, repo_id, branch, workspace, &node.id, false)
@@ -52,10 +71,11 @@ impl NodeRepositoryImpl {
 
         // 2. Check path uniqueness (always required for create)
         let node_path = &node.path;
-        if self
-            .get_by_path_impl(tenant_id, repo_id, branch, workspace, node_path, None)
-            .await?
-            .is_some()
+        if check_committed_path
+            && self
+                .get_by_path_impl(tenant_id, repo_id, branch, workspace, node_path, None)
+                .await?
+                .is_some()
         {
             return Err(Error::Conflict(format!(
                 "Node with path '{}' already exists",

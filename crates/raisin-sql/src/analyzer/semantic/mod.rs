@@ -34,6 +34,8 @@ mod query;
 mod types;
 
 // Re-export public types
+pub(crate) use expression::literal_from_sql_value;
+pub(crate) use operators::coerce_text_to_path;
 pub use types::*;
 
 use super::{
@@ -63,6 +65,17 @@ pub(super) struct AnalyzerContext<'a> {
     /// identifier resolution only after no table supplies the name, so an
     /// alias can never shadow a real column.
     select_aliases: HashMap<String, TypedExpr>,
+    /// The type of each `$n` placeholder when a statement TEMPLATE is
+    /// analyzed (`Analyzer::analyze_template`, plan Phase 13d): `$n` is typed
+    /// exactly like the literal its bound value renders to, so every type
+    /// check runs as it would on the substituted text. `None` for ordinary
+    /// SQL, where a placeholder stays `Unknown`.
+    param_types: Option<std::sync::Arc<[DataType]>>,
+    /// Catalog tables this scope already looked up. A workspace table is
+    /// BUILT per lookup (~30 columns), and resolving one statement looked the
+    /// same table up once per column reference (plan Phase 13d). CTEs are
+    /// never memoized (they are registered while the statement is analyzed).
+    table_memo: std::cell::RefCell<HashMap<String, std::rc::Rc<TableDef>>>,
 }
 
 impl<'a> AnalyzerContext<'a> {
@@ -74,7 +87,34 @@ impl<'a> AnalyzerContext<'a> {
             cte_catalog: HashMap::new(),
             is_upsert: false,
             select_aliases: HashMap::new(),
+            param_types: None,
+            table_memo: Default::default(),
         }
+    }
+
+    /// Analyze `$n` placeholders as typed parameters (see `param_types`).
+    pub fn set_param_types(&mut self, types: std::sync::Arc<[DataType]>) {
+        self.param_types = Some(types);
+    }
+
+    /// The type a `$n` placeholder is analyzed with: its bound literal's
+    /// type in a template, `Unknown` otherwise. A placeholder a template
+    /// has no value for is an error (the substituted text fails the same
+    /// way: "Parameter $n not provided").
+    pub(super) fn placeholder_type(&self, placeholder: &str) -> Result<DataType> {
+        let Some(types) = &self.param_types else {
+            return Ok(DataType::Unknown);
+        };
+        placeholder
+            .strip_prefix('$')
+            .and_then(|n| n.parse::<usize>().ok())
+            .filter(|n| *n >= 1)
+            .and_then(|n| types.get(n - 1).cloned())
+            .ok_or_else(|| {
+                AnalysisError::UnsupportedExpression(format!(
+                    "parameter {placeholder} has no value"
+                ))
+            })
     }
 
     /// A fresh context for a nested query scope (subquery, set-operation
@@ -89,12 +129,36 @@ impl<'a> AnalyzerContext<'a> {
             cte_catalog: self.cte_catalog.clone(),
             is_upsert: false,
             select_aliases: HashMap::new(),
+            param_types: self.param_types.clone(),
+            table_memo: Default::default(),
         }
     }
 
     /// Set the upsert flag for the next INSERT analysis
     pub fn set_upsert(&mut self, is_upsert: bool) {
         self.is_upsert = is_upsert;
+    }
+
+    /// [`Self::get_table_def`], shared: a catalog table is looked up once per
+    /// scope (see `table_memo`).
+    pub(super) fn table_def_shared(
+        &self,
+        table_name: &str,
+    ) -> Result<Option<std::rc::Rc<TableDef>>> {
+        if self.cte_catalog.contains_key(table_name) {
+            return Ok(self.get_table_def(table_name)?.map(std::rc::Rc::new));
+        }
+        if let Some(found) = self.table_memo.borrow().get(table_name) {
+            return Ok(Some(found.clone()));
+        }
+        let Some(def) = self.get_table_def(table_name)? else {
+            return Ok(None);
+        };
+        let def = std::rc::Rc::new(def);
+        self.table_memo
+            .borrow_mut()
+            .insert(table_name.to_string(), def.clone());
+        Ok(Some(def))
     }
 
     /// Get table definition, checking CTEs, regular tables, workspace tables,

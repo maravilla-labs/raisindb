@@ -2,7 +2,6 @@
 mod tests {
     use crate::causal_delivery::{BufferStats, CausalDeliveryBuffer};
     use crate::{OpType, Operation, VectorClock};
-    use raisin_models::nodes::properties::PropertyValue;
     use uuid::Uuid;
 
     fn make_test_op(cluster_node_id: &str, op_seq: u64, vc: VectorClock) -> Operation {
@@ -15,10 +14,11 @@ mod tests {
             tenant_id: "tenant1".to_string(),
             repo_id: "repo1".to_string(),
             branch: "main".to_string(),
-            op_type: OpType::SetProperty {
+            op_type: OpType::DeleteNodeSnapshot {
                 node_id: "test".to_string(),
-                property_name: "value".to_string(),
-                value: PropertyValue::Integer(op_seq as i64),
+                revision: raisin_hlc::HLC::new(op_seq, 0),
+                node: None,
+                parent_id: None,
             },
             revision: None,
             actor: "test".to_string(),

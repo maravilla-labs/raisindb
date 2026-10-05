@@ -10,20 +10,8 @@ use async_stream::try_stream;
 use futures::stream::StreamExt;
 use raisin_error::Error;
 use raisin_sql::analyzer::{Expr, Literal};
+use raisin_sql::logical_plan::ProjectionExpr;
 use raisin_storage::Storage;
-use std::collections::HashMap;
-
-/// Generate a cache key for an expression
-///
-/// This creates a stable key for caching expression results within a row.
-/// Currently focuses on column references and JSON extractions.
-fn expr_cache_key(expr: &Expr) -> Option<String> {
-    match expr {
-        // Cache column references: "table.column"
-        Expr::Column { table, column } => Some(format!("{}.{}", table, column)),
-        _ => None, // Don't cache other expression types for now
-    }
-}
 
 /// Execute a Project operator
 ///
@@ -58,80 +46,143 @@ pub async fn execute_project<
     tracing::debug!(num_exprs = exprs.len(), "project_row started");
 
     // Execute input plan first
-    let mut input_stream = execute_plan(input, ctx).await?;
+    let input_stream = execute_plan(input, ctx).await?;
 
     // Clone ctx for the stream closure
     let ctx_clone = ctx.clone();
 
+    // A top-level RESOLVE is evaluated a chunk of rows at a time, so one
+    // frontier walk (one batched read per level) serves the whole chunk.
+    let resolve_at = super::project_resolve::chunked_resolve_exprs(&exprs);
+    if ctx.batched_fetch && !resolve_at.is_empty() {
+        return Ok(super::project_resolve::project_chunked(
+            input_stream,
+            exprs,
+            resolve_at,
+            ctx_clone,
+        ));
+    }
+
+    // `SELECT *` / `SELECT a, b, c`: every expression a plain column. Each
+    // row's values can then be MOVED into the output instead of cloned, when
+    // no two expressions name the same input column.
+    let all_columns = exprs
+        .iter()
+        .all(|e| matches!(e.expr.expr, Expr::Column { .. }));
+
+    let mut input_stream = input_stream;
     Ok(Box::pin(try_stream! {
         // Process each row from input
         while let Some(row_result) = input_stream.next().await {
             let input_row = row_result?;
-            let mut output_row = Row::new();
-            let row_start = std::time::Instant::now();
-
-            // Per-row expression cache to avoid redundant evaluations
-            // This is particularly effective for repeated column references
-            // like multiple JSON extractions from the same column
-            let mut expr_cache: HashMap<String, Literal> = HashMap::new();
-
-            // Evaluate each projection expression
-            // Use async evaluator to handle EMBEDDING() and other async functions
-            for proj_expr in &exprs {
-                let expr_start = std::time::Instant::now();
-                // Check if this expression can be cached and if it's already computed
-                let value = if let Some(cache_key) = expr_cache_key(&proj_expr.expr.expr) {
-                    if let Some(cached_value) = expr_cache.get(&cache_key) {
-                        // Cache hit - reuse previously computed value
-                        cached_value.clone()
-                    } else {
-                        // Cache miss - evaluate and store
-                        let computed = eval_expr_async(&proj_expr.expr, &input_row, &ctx_clone).await?;
-                        expr_cache.insert(cache_key, computed.clone());
-                        computed
-                    }
-                } else {
-                    // Expression not cacheable - evaluate normally
-                    eval_expr_async(&proj_expr.expr, &input_row, &ctx_clone).await?
-                };
-
-                tracing::trace!(
-                    alias = %proj_expr.alias,
-                    elapsed_us = expr_start.elapsed().as_micros(),
-                    cached = expr_cache.contains_key(&expr_cache_key(&proj_expr.expr.expr).unwrap_or_default()),
-                    "Expression evaluated"
-                );
-
-                // Convert literal to PropertyValue
-                let prop_value = match to_property_value(&value) {
-                    Ok(pv) => pv,
-                    Err(_) if matches!(value, raisin_sql::analyzer::Literal::Null) => {
-                        // NULL values can be skipped or represented as absence
+            let input_row = if all_columns {
+                match move_columns(&exprs, input_row)? {
+                    Ok(row) => {
+                        yield row;
                         continue;
                     }
-                    Err(e) => {
-                        Err(Error::Validation(format!(
-                            "Failed to convert expression result: {}",
-                            e
-                        )))?;
-                        unreachable!();
-                    }
-                };
-
-                output_row.insert(proj_expr.alias.clone(), prop_value);
-            }
-
-            tracing::trace!(
-                num_exprs = exprs.len(),
-                elapsed_us = row_start.elapsed().as_micros(),
-                "Row projection completed"
-            );
-
-            // Cache is automatically dropped at end of row iteration
-
-            yield output_row;
+                    Err(unmoved) => unmoved,
+                }
+            } else {
+                input_row
+            };
+            yield project_row(&exprs, &input_row, &ctx_clone, &mut []).await?;
         }
     }))
+}
+
+/// Project a row whose expressions are all plain columns by MOVING each
+/// named value out of `input` — exactly the values [`project_row`] would
+/// clone (same lookup, same conversion). `Ok(Err(input))` hands the row back
+/// untouched when two expressions name the same column (a move would leave
+/// the second one empty).
+fn move_columns(exprs: &[ProjectionExpr], mut input: Row) -> Result<Result<Row, Row>, Error> {
+    let mut slots: Vec<Option<usize>> = Vec::with_capacity(exprs.len());
+    for proj_expr in exprs {
+        let Expr::Column { table, column } = &proj_expr.expr.expr else {
+            return Ok(Err(input));
+        };
+        let slot = super::eval::core::column_index(table, column, &input);
+        if slot.is_some() && slots.contains(&slot) {
+            return Ok(Err(input));
+        }
+        slots.push(slot);
+    }
+    let mut output = Row::with_capacity(exprs.len());
+    for (proj_expr, slot) in exprs.iter().zip(slots) {
+        let value = match slot {
+            Some(i) => {
+                let stored = std::mem::replace(
+                    &mut input.columns[i],
+                    raisin_models::nodes::properties::PropertyValue::Null,
+                );
+                super::project_value::projected_column_value_owned(stored).map_err(|e| {
+                    Error::Validation(format!("Failed to convert column value: {}", e))
+                })?
+            }
+            None => raisin_models::nodes::properties::PropertyValue::Null,
+        };
+        output.insert(proj_expr.alias.clone(), value);
+    }
+    Ok(Ok(output))
+}
+
+/// Project one row. `precomputed[i]`, when present, is the already evaluated
+/// value of `exprs[i]` (a chunk-evaluated RESOLVE); it is taken, not cloned.
+pub(crate) async fn project_row<S: Storage>(
+    exprs: &[ProjectionExpr],
+    input_row: &Row,
+    ctx: &ExecutionContext<S>,
+    precomputed: &mut [Option<raisin_models::nodes::properties::PropertyValue>],
+) -> Result<Row, ExecutionError> {
+    let mut output_row = Row::with_capacity(exprs.len());
+
+    // Evaluate each projection expression
+    // Use async evaluator to handle EMBEDDING() and other async functions
+    for (i, proj_expr) in exprs.iter().enumerate() {
+        // A value computed for the whole chunk (a top-level RESOLVE), already
+        // the row's value.
+        if let Some(value) = precomputed.get_mut(i).and_then(Option::take) {
+            output_row.insert(proj_expr.alias.clone(), value);
+            continue;
+        }
+        let value = if let Expr::Column { table, column } = &proj_expr.expr.expr {
+            // A plain column passes its stored value through: the same value
+            // `eval_column` + `to_property_value` produce, without converting
+            // a property map to JSON and back (see `project_value`).
+            let prop_value = match super::eval::core::column_value(table, column, input_row) {
+                Some(stored) => {
+                    super::project_value::projected_column_value(stored).map_err(|e| {
+                        Error::Validation(format!("Failed to convert column value: {}", e))
+                    })?
+                }
+                None => raisin_models::nodes::properties::PropertyValue::Null,
+            };
+            output_row.insert(proj_expr.alias.clone(), prop_value);
+            continue;
+        } else {
+            eval_expr_async(&proj_expr.expr, input_row, ctx).await?
+        };
+
+        // Convert literal to PropertyValue
+        let prop_value = match to_property_value(&value) {
+            Ok(pv) => pv,
+            Err(_) if matches!(value, Literal::Null) => {
+                // NULL values can be skipped or represented as absence
+                continue;
+            }
+            Err(e) => {
+                return Err(Error::Validation(format!(
+                    "Failed to convert expression result: {}",
+                    e
+                )));
+            }
+        };
+
+        output_row.insert(proj_expr.alias.clone(), prop_value);
+    }
+
+    Ok(output_row)
 }
 
 #[cfg(test)]
@@ -168,7 +219,7 @@ mod tests {
 
         let project = PhysicalPlan::Project {
             input: Box::new(scan),
-            exprs: vec![proj_expr],
+            exprs: vec![proj_expr].into(),
         };
 
         assert_eq!(project.inputs().len(), 1);
@@ -198,7 +249,8 @@ mod tests {
             exprs: vec![ProjectionExpr {
                 expr: TypedExpr::literal(Literal::Int(1)),
                 alias: "one".to_string(),
-            }],
+            }]
+            .into(),
         };
 
         let desc = project.describe();

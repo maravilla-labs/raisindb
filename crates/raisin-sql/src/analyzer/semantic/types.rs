@@ -13,7 +13,7 @@ use crate::logical_plan::operators::AggregateExpr;
 /// Order by specification for a single expression
 ///
 /// Captures the full ordering semantics including direction and nulls handling.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct OrderBySpec {
     /// The expression to order by
     pub expr: TypedExpr,
@@ -201,7 +201,7 @@ pub struct AnalyzedTranslate {
 }
 
 /// A translation value that has been analyzed and validated
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AnalyzedTranslationValue {
     String(String),
     Integer(i64),
@@ -211,7 +211,7 @@ pub enum AnalyzedTranslationValue {
 }
 
 /// Filter for TRANSLATE statement WHERE clause
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AnalyzedTranslateFilter {
     /// Filter by path: WHERE path = '/post'
     Path(String),
@@ -269,7 +269,7 @@ pub struct AnalyzedUnrelate {
 }
 
 /// Endpoint for RELATE/UNRELATE statements
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AnalyzedRelateEndpoint {
     /// Node reference (path or id)
     pub node_ref: crate::ast::relate::RelateNodeReference,
@@ -278,7 +278,7 @@ pub struct AnalyzedRelateEndpoint {
 }
 
 /// Target table for DML operations
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum DmlTableTarget {
     /// Schema table (NodeTypes, Archetypes, ElementTypes)
     SchemaTable(SchemaTableKind),
@@ -380,7 +380,7 @@ pub enum ExplainFormat {
 }
 
 /// DISTINCT specification for SELECT queries
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AnalyzedDistinct {
     /// Simple DISTINCT: eliminate duplicate rows based on all projected columns
     All,
@@ -388,7 +388,7 @@ pub enum AnalyzedDistinct {
     On(Vec<TypedExpr>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AnalyzedQuery {
     /// CTE (Common Table Expression) definitions
     /// Each CTE is a (name, query) pair that can be referenced in the main query
@@ -446,7 +446,7 @@ impl SetOperationKind {
 }
 
 /// `left <op> [ALL] right`
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AnalyzedSetOperation {
     pub kind: SetOperationKind,
     /// `ALL` keeps duplicates; without it the result is de-duplicated.
@@ -468,7 +468,7 @@ pub struct CteDefinition {
 }
 
 /// Join information
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct JoinInfo {
     pub join_type: JoinType,
     pub right_table: TableRef,
@@ -485,7 +485,7 @@ pub enum JoinType {
     Cross,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TableRef {
     pub table: String,
     pub alias: Option<String>,
@@ -532,7 +532,7 @@ impl TableRef {
 /// `FunctionArg::Named { arg, .. }` and pushed only the expression, so
 /// `HYBRID_SEARCH('q', workspaces => 'library')` parsed cleanly and then ran as
 /// *limit 10, every workspace* — the name was accepted and silently discarded.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TableFunctionArg {
     /// Argument name from the `name => value` form; `None` when positional.
     pub name: Option<String>,
@@ -556,7 +556,7 @@ impl TableFunctionArg {
 }
 
 /// Metadata for table-valued function references
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TableFunctionRef {
     pub name: String,
     pub args: Vec<TableFunctionArg>,
@@ -567,7 +567,7 @@ pub struct TableFunctionRef {
 ///
 /// Represents `LATERAL func(args) AS alias` syntax where a scalar function
 /// is applied per-row and the result is added as a new column.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LateralFunctionRef {
     /// The analyzed function call expression
     pub function_expr: TypedExpr,
@@ -578,7 +578,7 @@ pub struct LateralFunctionRef {
 }
 
 /// Metadata for subquery (derived table) references in FROM clause
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SubqueryRef {
     /// The analyzed subquery
     pub query: Box<AnalyzedQuery>,

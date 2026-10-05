@@ -165,6 +165,26 @@ impl PhysicalPlanner {
             }
         }
 
+        // Priority 1b: localized URL (`__localized_path = '/produits/chaise'`,
+        // plan Phase 12) — the localized name index, depth x 1-2 seeks.
+        if let Some(path_value) = self.extract_text_column_eq(&canonical, "__localized_path") {
+            let remaining = self.remove_column_eq(&canonical, "__localized_path");
+            let scan = PhysicalPlan::LocalizedPathLookup {
+                tenant_id: self.default_tenant_id.to_string(),
+                repo_id: self.default_repo_id.to_string(),
+                branch: branch.to_string(),
+                workspace: workspace.to_string(),
+                table: table.to_string(),
+                alias: alias.clone(),
+                path: path_value,
+                projection: projection.clone(),
+            };
+            return Ok(Self::wrap_with_residual(
+                scan,
+                self.combine_canonical_predicates(&remaining),
+            ));
+        }
+
         // Priority 2: Node ID equality (id = 'uuid')
         if let Some(id_value) = self.extract_id_predicate(&canonical) {
             let remaining = self.remove_id_predicate(&canonical);
@@ -714,6 +734,20 @@ impl PhysicalPlanner {
             .iter()
             .map(|(prop, _, _)| prop.clone())
             .collect();
+        // A date-like literal on a String column matches the index through
+        // the writer's canonical date text (`CompoundColumnValue::text`), but a
+        // row-level comparison sees the property's own text: keep the
+        // predicate as a residual, so the index-served answer is the scan's.
+        let date_like: std::collections::HashSet<&str> = equality_columns
+            .iter()
+            .filter(|(_, value, column_type)| {
+                matches!(
+                    column_type,
+                    raisin_models::nodes::properties::schema::CompoundColumnType::String
+                ) && chrono::DateTime::parse_from_rfc3339(value).is_ok()
+            })
+            .map(|(prop, _, _)| prop.as_str())
+            .collect();
 
         // The parent path this scan is pinned to, if `__parent_path` was one of
         // the matched columns. Only the ChildOf that produced it may be dropped;
@@ -735,7 +769,9 @@ impl PhysicalPlanner {
                     };
                     !used_props.contains(prop)
                 }
-                CanonicalPredicate::JsonPropertyEq { key, .. } => !used_props.contains(key),
+                CanonicalPredicate::JsonPropertyEq { key, .. } => {
+                    !used_props.contains(key) || date_like.contains(key.as_str())
+                }
                 // A ChildOf consumed as the `__parent_path` column is guaranteed
                 // exactly by the index: the key stores the raw parent path, so
                 // there is no hashing and no collision to re-verify. Keeping it

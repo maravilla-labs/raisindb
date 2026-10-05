@@ -13,6 +13,12 @@ use raisin_storage::{NodeRepository, Storage, StorageScope};
 impl UnifiedJobEventHandler {
     /// Handle node creation/update events
     pub(crate) async fn handle_node_change(&self, node_event: &NodeEvent) -> Result<()> {
+        // A replicated write that found its index definitions cold asked for
+        // a local compound build (`indexing::compound::cold`); it emits this
+        // very event right after, so serving the request here keeps the
+        // window to one write. Normally nothing is pending.
+        self.drain_cold_compound_requests().await;
+
         // Check if this is a trigger-related node change that requires cache invalidation
         // This must happen BEFORE the quick-reject check
         let node_type_str = node_event.node_type.as_deref().unwrap_or("");

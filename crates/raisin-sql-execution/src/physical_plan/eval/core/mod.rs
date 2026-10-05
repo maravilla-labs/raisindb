@@ -187,27 +187,42 @@ fn eval_column(table: &str, column: &str, row: &Row) -> Result<Literal, Error> {
 /// THE lookup `eval_column` does, exposed so an operator that needs one part of
 /// a column — `properties ->> 'title'` — can take that part instead of
 /// converting the whole column first.
-pub(super) fn column_value<'a>(
+pub(crate) fn column_value<'a>(
     table: &str,
     column: &str,
     row: &'a Row,
 ) -> Option<&'a raisin_models::nodes::properties::PropertyValue> {
+    column_index(table, column, row).map(|i| &row.columns[i])
+}
+
+/// The position in `row` of the column a reference names — THE lookup behind
+/// [`column_value`], without allocating the qualified name.
+pub(crate) fn column_index(table: &str, column: &str, row: &Row) -> Option<usize> {
     // Strategy 1: Try qualified name (for pre-projection rows with known table)
     if !table.is_empty() {
-        let qualified_name = format!("{}.{}", table, column);
-        if let Some(value) = row.get(&qualified_name) {
-            return Some(value);
+        let mut buf = [0u8; 256];
+        let len = table.len() + 1 + column.len();
+        let found = if len <= buf.len() {
+            buf[..table.len()].copy_from_slice(table.as_bytes());
+            buf[table.len()] = b'.';
+            buf[table.len() + 1..len].copy_from_slice(column.as_bytes());
+            // Both halves are UTF-8, so their concatenation is.
+            std::str::from_utf8(&buf[..len])
+                .ok()
+                .and_then(|qualified| row.columns.get_index_of(qualified))
+        } else {
+            row.columns
+                .get_index_of(format!("{table}.{column}").as_str())
+        };
+        if found.is_some() {
+            return found;
         }
     }
 
-    // Strategy 2: Try unqualified column name (for post-projection rows)
-    if let Some(value) = row.get(column) {
-        return Some(value);
-    }
-
-    // Strategies 3 and 4 (a column ending with ".{column}", whatever the
-    // table name) are the same lookup.
-    row.get_by_unqualified(column)
+    // Strategy 2: unqualified name (post-projection rows); strategies 3 and
+    // 4 (a column ending with ".{column}", whatever the table name) are the
+    // same lookup.
+    row.index_of_unqualified(column)
 }
 
 /// Evaluate a function expression, checking for pre-computed values first

@@ -3,14 +3,17 @@
 use raisin_error::Result;
 use raisin_hlc::HLC;
 use raisin_models::translations::{LocaleCode, LocaleOverlay, TranslationMeta};
-use rocksdb::DB;
+use rocksdb::{WriteBatch, DB};
 use std::sync::Arc;
 
-use crate::error_ext::ResultExt;
+use crate::translation_write::{self, OverlayTarget};
 
-use super::{keys, replication, revision, serialization};
+use super::{replication, revision};
 
-/// Get a node-level translation
+/// Get a node-level translation as of `revision` (plan Phase 11 item 1: it
+/// used to read HEAD whatever it was asked for, so time travel with a locale
+/// showed today's translation).
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn get_translation(
     db: &Arc<DB>,
     tenant_id: &str,
@@ -19,10 +22,9 @@ pub(super) async fn get_translation(
     workspace: &str,
     node_id: &str,
     locale: &LocaleCode,
-    _revision: &HLC,
+    revision: &HLC,
 ) -> Result<Option<LocaleOverlay>> {
-    // HEAD read: the newest version decides, and a tombstone there means the
-    // translation is deleted. One reader shared with the transaction path.
+    crate::translation_history::ensure_complete_at(db, tenant_id, repo_id, branch, revision)?;
     crate::translation_read::read_overlay(
         db,
         tenant_id,
@@ -31,11 +33,14 @@ pub(super) async fn get_translation(
         workspace,
         node_id,
         locale.as_str(),
-        None,
+        Some(revision),
     )
 }
 
-/// Store a node-level translation
+/// Store a node-level translation: the version, its index entry, its meta,
+/// its snapshot and the revision meta in ONE `WriteBatch` (they were five
+/// separate puts), then capture it for replication.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn store_translation(
     db: &Arc<DB>,
     operation_capture: Option<&Arc<crate::OperationCapture>>,
@@ -48,90 +53,75 @@ pub(super) async fn store_translation(
     overlay: &LocaleOverlay,
     meta: &TranslationMeta,
 ) -> Result<()> {
-    let cf_data = crate::cf_handle(db, crate::cf::TRANSLATION_DATA)?;
-    let cf_index = crate::cf_handle(db, crate::cf::TRANSLATION_INDEX)?;
-    let cf_meta = crate::cf_handle(db, crate::cf::REVISIONS)?;
-
-    // Serialize overlay and metadata
-    let overlay_bytes = serialization::serialize_overlay(overlay)?;
-    let meta_bytes = serialization::serialize_translation_meta(meta)?;
-
-    // Build keys
-    let data_key = keys::translation_key(
+    let target = OverlayTarget {
         tenant_id,
         repo_id,
         branch,
         workspace,
         node_id,
-        locale.as_str(),
-        &meta.revision,
-    );
+        block_uuid: None,
+        locale: locale.as_str(),
+    };
+    // Localized node name uniqueness, when the repository enforces it (plan
+    // Phase 12): an overlay's `/__node_name` must not collide with a
+    // sibling's. Checked now, and again at the commit step UNDER THE BRANCH
+    // LOCK (`localized_name::unique::deferred`): every HTTP `/translations`,
+    // `raisin:cmd/translate`, WS and `TranslationService` write funnels
+    // through here, and a check outside the lock let two of them — or one and
+    // a transaction commit — store the same name on two siblings.
+    let names = crate::localized_name::keys::NameScope::new(tenant_id, repo_id, branch, workspace);
+    let name_check = match crate::localized_name::sync::node_at(db, names, node_id, None)? {
+        Some((_, Some(node))) => crate::localized_name::unique::NameCheck::staged(
+            db,
+            names,
+            &node,
+            None,
+            &meta.revision,
+            crate::localized_name::sync::Overrides::from([(
+                locale.as_str().to_string(),
+                Some(overlay.clone()),
+            )]),
+        )?,
+        _ => None,
+    };
+    let batch = translation_batch(db, &target, overlay, meta)?;
+    // The node is locked like any write of it; the branch lock is taken
+    // only when a name check is carried.
+    let mut commit = crate::indexing::NodeCommit::new(tenant_id, repo_id, branch);
+    commit.touch(node_id).check_name(name_check);
+    commit.write(db, batch).await?;
 
-    let index_key =
-        keys::translation_index_key(tenant_id, repo_id, locale.as_str(), &meta.revision, node_id);
-
-    let meta_key = keys::translation_meta_key(
-        tenant_id,
-        repo_id,
-        branch,
-        workspace,
-        node_id,
-        locale.as_str(),
-        &meta.revision,
-    );
-
-    // Write to all three CFs
-    db.put_cf(&cf_data, data_key, &overlay_bytes)
-        .rocksdb_err()?;
-    db.put_cf(&cf_index, index_key, b"").rocksdb_err()?; // Index entry (empty value)
-    db.put_cf(&cf_meta, meta_key, meta_bytes).rocksdb_err()?;
-
-    // Store RevisionMeta so translation changes appear in revision history
-    revision::store_node_revision_meta(
-        db,
-        tenant_id,
-        repo_id,
-        branch,
-        node_id,
-        workspace,
-        locale.as_str(),
-        overlay,
-        meta,
-    )?;
-
-    // Store translation snapshot for time-travel queries and rollback
-    revision::store_snapshot(
-        db,
-        tenant_id,
-        repo_id,
-        node_id,
-        locale.as_str(),
-        &meta.revision,
-        &overlay_bytes,
-    )?;
-
-    // Capture operation for replication
-    replication::capture_node_translation(
+    replication::capture_version(
         operation_capture,
-        tenant_id,
-        repo_id,
-        branch,
-        node_id,
-        locale.as_str(),
-        overlay,
+        &replication::TranslationVersionOp {
+            target,
+            overlay: Some(overlay),
+            revision: meta.revision,
+            history_complete_from: None,
+        },
         &meta.actor,
     )
     .await;
-
     Ok(())
 }
 
-/// List all translations for a node
-///
-/// One entry per locale whose NEWEST version is live — the same rule
-/// [`get_translation`] applies to a single locale, and the same reader the
-/// transaction path uses (`crate::translation_read`). Like `get_translation`,
-/// this reads HEAD; the revision is unused.
+/// Everything one repository translation write stores, as one batch.
+pub(super) fn translation_batch(
+    db: &DB,
+    target: &OverlayTarget<'_>,
+    overlay: &LocaleOverlay,
+    meta: &TranslationMeta,
+) -> Result<WriteBatch> {
+    let mut batch = WriteBatch::default();
+    translation_write::stage_version(db, &mut batch, target, Some(overlay), &meta.revision)?;
+    translation_write::stage_history(db, &mut batch, target, Some(overlay), meta)?;
+    revision::stage_revision_meta(db, &mut batch, target, overlay, meta)?;
+    Ok(batch)
+}
+
+/// List the locales of a node as of `revision`: one entry per locale whose
+/// newest version at or before it is live — the rule [`get_translation`]
+/// applies to a single locale, through the same reader.
 pub(super) async fn list_translations_for_node(
     db: &Arc<DB>,
     tenant_id: &str,
@@ -139,10 +129,17 @@ pub(super) async fn list_translations_for_node(
     branch: &str,
     workspace: &str,
     node_id: &str,
-    _revision: &HLC,
+    revision: &HLC,
 ) -> Result<Vec<LocaleCode>> {
+    crate::translation_history::ensure_complete_at(db, tenant_id, repo_id, branch, revision)?;
     let locales = crate::translation_read::live_locales(
-        db, tenant_id, repo_id, branch, workspace, node_id, None,
+        db,
+        tenant_id,
+        repo_id,
+        branch,
+        workspace,
+        node_id,
+        Some(revision),
     )?;
 
     Ok(locales

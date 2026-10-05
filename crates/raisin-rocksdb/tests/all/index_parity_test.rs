@@ -149,6 +149,7 @@ async fn fresh_storage() -> Result<(TempDir, Arc<RocksDBStorage>)> {
                 default_branch: BRANCH.to_string(),
                 description: None,
                 tags: HashMap::new(),
+                localized_names: Default::default(),
             },
         )
         .await?;

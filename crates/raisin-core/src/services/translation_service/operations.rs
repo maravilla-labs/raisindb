@@ -481,19 +481,23 @@ impl<S: Storage> TranslationService<S> {
             .await
     }
 
-    /// List all nodes that have translations in a specific locale.
+    /// List all nodes of a branch and workspace that have translations in a
+    /// specific locale.
     ///
     /// Useful for finding translated content or generating translation reports.
+    #[allow(clippy::too_many_arguments)]
     pub async fn list_translated_nodes(
         &self,
         tenant_id: &str,
         repo_id: &str,
+        branch: &str,
+        workspace: &str,
         locale: &LocaleCode,
         revision: &raisin_hlc::HLC,
     ) -> Result<Vec<String>> {
         self.storage
             .translations()
-            .list_nodes_with_translation(tenant_id, repo_id, locale, revision)
+            .list_nodes_with_translation(tenant_id, repo_id, branch, workspace, locale, revision)
             .await
     }
 }

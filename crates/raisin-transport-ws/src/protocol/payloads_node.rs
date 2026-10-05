@@ -54,6 +54,17 @@ pub struct NodeGetPayload {
     pub node_id: String,
 }
 
+/// Get a node by its localized URL path (`node_get_by_localized_path`).
+///
+/// `path` is the node's segments in `locale` (`/produits/chaise`); the answer
+/// is the translated node with `canonical_path`, `canonical_localized_path`,
+/// `alternates` and `redirect`, or `null`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeGetByLocalizedPathPayload {
+    pub locale: String,
+    pub path: String,
+}
+
 /// Request a node's revision history (git-style "file history"), newest first.
 ///
 /// Identify the node by either `node_id` or `path` (at least one required).

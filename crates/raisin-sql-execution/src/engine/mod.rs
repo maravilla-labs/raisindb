@@ -23,17 +23,26 @@ mod embedding_config_reader_tests;
 mod handlers;
 pub(crate) mod helpers;
 mod phase_timing;
+mod physical_cache;
+mod prepared;
+mod prepared_params;
+mod query_exec;
 mod restore;
 mod spatial_admin;
+#[cfg(test)]
+mod statement_context_tests;
 mod subquery_bind;
 
 pub use batch::batch_requires_async;
 pub use catalog_cache::{
     invalidate_all_workspace_catalogs, invalidate_workspace_catalog, workspace_catalog,
 };
+pub use helpers::invalidate_compound_index_cache;
+pub use prepared::{invalidate_plan_cache, plan_cache_contains, plan_cache_stats};
+pub use prepared_params::{template_cache_stats, ParamOutcome};
+pub use query_exec::physical_plan_cache_hits;
 
 use crate::physical_plan::executor::{execute_plan, ExecutionContext, RowStream};
-use crate::physical_plan::planner::PhysicalPlanner;
 use crate::physical_plan::IndexCatalog;
 use raisin_context::RepositoryConfig;
 use raisin_core::SharedSchemaStatsCache;
@@ -51,6 +60,10 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+/// How a parameter value is rendered as a SQL literal for `$n` substitution
+/// (see [`QueryEngine::execute_with_params`]).
+pub type ParamFormat = dyn Fn(&serde_json::Value) -> String + Send + Sync;
 
 /// Callback type for registering async bulk SQL jobs
 ///
@@ -171,6 +184,8 @@ pub struct QueryEngine<S: Storage> {
     pub(crate) master_key: Option<[u8; 32]>,
     /// Shared schema stats cache for data-driven selectivity estimation
     pub(crate) schema_stats_cache: Option<SharedSchemaStatsCache>,
+    /// `sql.batched_fetch` for every statement this engine runs.
+    pub(crate) batched_fetch: bool,
 }
 
 /// The default nodes schema, built once for the process.
@@ -220,7 +235,36 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             ai_config_store: None,
             master_key: None,
             schema_stats_cache: None,
+            batched_fetch: crate::physical_plan::executor::context::batched_fetch_default(),
         }
+    }
+
+    /// `sql.batched_fetch`: `false` makes index scans and RESOLVE read one node
+    /// at a time instead of in batches (the rollback switch). The default comes
+    /// from `RAISIN_SQL_BATCHED_FETCH` (on unless set to `0`/`false`/`off`).
+    pub fn with_batched_fetch(mut self, batched: bool) -> Self {
+        self.batched_fetch = batched;
+        self
+    }
+
+    /// A fresh statement context carrying this engine's per-statement
+    /// switches. EVERY SQL `ExecutionContext` is built here, so a new
+    /// construction site cannot forget one (the scalar `SELECT RESOLVE(...)`
+    /// path once kept the env default after `with_batched_fetch(false)`).
+    pub(crate) fn new_statement_context(
+        &self,
+        branch: String,
+        workspace: String,
+    ) -> ExecutionContext<S> {
+        let mut ctx = ExecutionContext::new(
+            self.storage.clone(),
+            self.tenant_id.clone(),
+            self.repo_id.clone(),
+            branch,
+            workspace,
+        );
+        ctx.batched_fetch = self.batched_fetch;
+        ctx
     }
 
     /// Set the default language for queries without explicit locale specification
@@ -390,7 +434,8 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
     // Schema Stats Loading
     // =========================================================================
 
-    /// Load schema statistics from the cache (if configured) and apply them to the physical planner.
+    /// Schema statistics for the physical planner, from the cache (if
+    /// configured).
     ///
     /// `selection` is the query's WHERE clause. The stats are used ONLY to refine
     /// selectivity for `node_type =` / `archetype =` equality (see
@@ -399,63 +444,60 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
     /// deserializes every NodeType and Archetype on the branch just to count
     /// them, which was ~33% of production CPU when run per query (2026-08).
     ///
-    /// The gate lives HERE, not at the three call sites, deliberately. Each site
+    /// The gate lives HERE, not at the call sites, deliberately. Each site
     /// would otherwise need its own copy of the predicate walk, and this codebase
     /// has a documented recurring bug class of mirrored paths silently drifting —
     /// a caller that forgot the gate would quietly reintroduce the whole cost.
     /// `None` means "no WHERE clause", which cannot contain the predicate, so it
     /// skips too.
-    pub(crate) async fn apply_schema_stats(
+    pub(crate) async fn schema_stats_for(
         &self,
-        physical_planner: &mut PhysicalPlanner,
         branch: &str,
         selection: Option<&raisin_sql::analyzer::TypedExpr>,
-    ) {
+    ) -> Option<crate::SchemaStats> {
         let uses_stats = selection.is_some_and(helpers::selection_uses_schema_stats);
         if !uses_stats {
-            return;
+            return None;
         }
-        if let Some(ref stats_cache) = self.schema_stats_cache {
-            let scope_key = format!("{}:{}:{}", self.tenant_id, self.repo_id, branch);
-            let storage_ref = self.storage.clone();
-            let t = self.tenant_id.clone();
-            let r = self.repo_id.clone();
-            let b = branch.to_string();
-            if let Ok(cache_stats) = stats_cache
-                .get_or_compute(&scope_key, || {
-                    let storage_ref = storage_ref.clone();
-                    let t = t.clone();
-                    let r = r.clone();
-                    let b = b.clone();
-                    async move {
-                        let scope = raisin_storage::BranchScope::new(&t, &r, &b);
-                        let nt_count = storage_ref
-                            .node_types()
-                            .list(scope, None)
-                            .await
-                            .map(|v| v.len())
-                            .unwrap_or(0);
-                        let scope = raisin_storage::BranchScope::new(&t, &r, &b);
-                        let at_count = storage_ref
-                            .archetypes()
-                            .list(scope, None)
-                            .await
-                            .map(|v| v.len())
-                            .unwrap_or(0);
-                        Ok(raisin_core::SchemaStats {
-                            node_type_count: nt_count,
-                            archetype_count: at_count,
-                        })
-                    }
-                })
-                .await
-            {
-                physical_planner.set_schema_statistics(crate::SchemaStats {
-                    node_type_count: cache_stats.node_type_count,
-                    archetype_count: cache_stats.archetype_count,
-                });
-            }
-        }
+        let stats_cache = self.schema_stats_cache.as_ref()?;
+        let scope_key = format!("{}:{}:{}", self.tenant_id, self.repo_id, branch);
+        let storage_ref = self.storage.clone();
+        let t = self.tenant_id.clone();
+        let r = self.repo_id.clone();
+        let b = branch.to_string();
+        let cache_stats = stats_cache
+            .get_or_compute(&scope_key, || {
+                let storage_ref = storage_ref.clone();
+                let t = t.clone();
+                let r = r.clone();
+                let b = b.clone();
+                async move {
+                    let scope = raisin_storage::BranchScope::new(&t, &r, &b);
+                    let nt_count = storage_ref
+                        .node_types()
+                        .list(scope, None)
+                        .await
+                        .map(|v| v.len())
+                        .unwrap_or(0);
+                    let scope = raisin_storage::BranchScope::new(&t, &r, &b);
+                    let at_count = storage_ref
+                        .archetypes()
+                        .list(scope, None)
+                        .await
+                        .map(|v| v.len())
+                        .unwrap_or(0);
+                    Ok(raisin_core::SchemaStats {
+                        node_type_count: nt_count,
+                        archetype_count: at_count,
+                    })
+                }
+            })
+            .await
+            .ok()?;
+        Some(crate::SchemaStats {
+            node_type_count: cache_stats.node_type_count,
+            archetype_count: cache_stats.archetype_count,
+        })
     }
 
     // =========================================================================
@@ -518,197 +560,100 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
 
     /// Execute a SQL query and return a stream of results
     pub async fn execute(&self, sql: &str) -> Result<RowStream, Error> {
-        tracing::debug!("SQL Query Engine starting execution");
         let mut timer = phase_timing::PhaseTimer::start();
-        tracing::debug!("   SQL: {}", sql);
-        tracing::debug!(
-            "   Context: tenant={}, repo={}, default_branch={}",
-            self.tenant_id,
-            self.repo_id,
-            self.branch
-        );
-
-        // 1. Parse and Semantic analysis
-        tracing::debug!("Phase 1: Parsing and analyzing SQL");
-        let analyzer = Analyzer::with_catalog_arc(self.catalog.clone());
-        let analyzed = analyzer
-            .analyze(sql)
-            .map_err(|e| Error::Validation(format!("Analysis error: {}", e)))?;
+        // 1. Parse and semantic analysis — and, for a query, its optimized
+        // logical plan — from the prepared-statement cache when the same text
+        // was seen against the same catalog (`prepared.rs`).
+        let prepared = prepared::prepare_statement(&self.catalog, sql)?;
         timer.analyzed();
+        self.execute_prepared(sql, prepared, timer).await
+    }
 
+    /// Execute `sql` with `$1`, `$2`, … bound to `params`, each rendered as
+    /// a SQL literal by `format` (`raisin_sql::format_param_value` is what
+    /// HTTP, WS and pgwire use; the functions runtime has its own).
+    ///
+    /// One prepared TEMPLATE serves every execution of the same text, whatever
+    /// the values (`prepared_params.rs`, plan Phase 13d); a statement whose
+    /// plan depends on a value is planned from the substituted text, exactly
+    /// as substituting first and calling [`Self::execute`] would.
+    pub async fn execute_with_params(
+        &self,
+        sql: &str,
+        params: &[serde_json::Value],
+        format: &ParamFormat,
+    ) -> Result<RowStream, Error> {
+        self.execute_with_params_traced(sql, params, format)
+            .await
+            .map(|(stream, _)| stream)
+    }
+
+    /// [`Self::execute_with_params`], also saying how the statement was
+    /// prepared — for tests and diagnostics.
+    #[doc(hidden)]
+    pub async fn execute_with_params_traced(
+        &self,
+        sql: &str,
+        params: &[serde_json::Value],
+        format: &ParamFormat,
+    ) -> Result<(RowStream, ParamOutcome), Error> {
+        let mut timer = phase_timing::PhaseTimer::start();
+        let bound =
+            prepared_params::prepare_with_params(&self.catalog, false, sql, params, format)?;
+        timer.analyzed();
+        let outcome = bound.outcome;
+        let prepared = bound
+            .statements
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::Validation("No statement to execute".to_string()))?;
+        let stream = self.execute_prepared(&bound.sql, prepared, timer).await?;
+        Ok((stream, outcome))
+    }
+
+    /// The body of [`Self::execute`] after preparation.
+    async fn execute_prepared(
+        &self,
+        sql: &str,
+        prepared: std::sync::Arc<prepared::Prepared>,
+        mut timer: phase_timing::PhaseTimer,
+    ) -> Result<RowStream, Error> {
+        tracing::debug!("SQL Query Engine executing: {}", sql);
         // Uncorrelated subqueries (EXISTS, scalar, ANY/ALL, INSERT…SELECT) are
         // evaluated once here and folded into literals so every path below —
-        // query, EXPLAIN, DML — plans against constants.
-        let analyzed = self.bind_subqueries(analyzed).await?;
+        // query, EXPLAIN, DML — plans against constants. A cached statement
+        // never has any.
+        let bound;
+        let (analyzed, cached) = if subquery_bind::statement_needs_binding(&prepared.analyzed) {
+            bound = self.bind_subqueries(prepared.analyzed.clone()).await?;
+            (&bound, None)
+        } else {
+            (&prepared.analyzed, Some(prepared.as_ref()))
+        };
         timer.bound();
 
         // Route by statement type
-        match &analyzed {
-            AnalyzedStatement::Explain(ref explain_stmt) => {
-                return self.execute_explain(explain_stmt).await;
-            }
-            AnalyzedStatement::Insert(_)
-            | AnalyzedStatement::Update(_)
-            | AnalyzedStatement::Delete(_)
-            | AnalyzedStatement::Order(_)
-            | AnalyzedStatement::Move(_)
-            | AnalyzedStatement::Copy(_)
-            | AnalyzedStatement::Translate(_)
-            | AnalyzedStatement::Relate(_)
-            | AnalyzedStatement::Unrelate(_) => {
-                return self.execute_dml(&analyzed).await;
-            }
-            AnalyzedStatement::Ddl(ref ddl_stmt) => {
-                return self.execute_ddl(ddl_stmt).await;
-            }
-            AnalyzedStatement::Transaction(ref txn_stmt) => {
-                return self.execute_transaction(txn_stmt).await;
-            }
-            AnalyzedStatement::Show(ref show_stmt) => {
-                return self.execute_show(show_stmt).await;
-            }
-            AnalyzedStatement::Branch(ref branch_stmt) => {
-                return self.execute_branch_statement(branch_stmt).await;
-            }
-            AnalyzedStatement::Restore(ref restore_stmt) => {
-                return self.execute_restore(restore_stmt).await;
-            }
-            AnalyzedStatement::Acl(ref acl_stmt) => {
-                return self.execute_acl(acl_stmt).await;
-            }
-            AnalyzedStatement::AIConfig(ref stmt) => {
-                return self.execute_ai_config(stmt).await;
-            }
-            AnalyzedStatement::SpatialAdmin(ref stmt) => {
-                return self.execute_spatial_admin(stmt).await;
-            }
-            AnalyzedStatement::Query(_) => {
-                // Continue with query execution below
-            }
-        }
-
-        // 2. Build logical plan
-        let plan_builder = PlanBuilder::new(self.catalog.as_ref());
-        let logical_plan = plan_builder
-            .build(&analyzed)
-            .map_err(|e| Error::Validation(format!("Plan error: {}", e)))?;
-
-        // 3. Optimize logical plan
-        let optimizer = Optimizer::default();
-        let optimized = optimizer.optimize(logical_plan);
-
-        // 4. Generate physical plan
-        let workspace = if let AnalyzedStatement::Query(ref q) = analyzed {
-            q.from
-                .first()
-                .and_then(|t| t.workspace.clone())
-                .unwrap_or_else(|| "default".to_string())
-        } else {
-            "default".to_string()
+        let AnalyzedStatement::Query(ref query) = analyzed else {
+            return self.execute_analyzed_statement(analyzed).await;
         };
-
-        // Attach the spatial index's build state. Without it the catalog answers
-        // `NotBuilt` for every property and every ST_DWITHIN degrades to a
-        // row-level filter on a full scan — correct, but never fast. With it, the
-        // planner can tell "indexed" from "never indexed" and only then drop the
-        // predicate.
-        let index_catalog: Arc<dyn IndexCatalog> = Arc::new(
-            crate::physical_plan::catalog::RocksDBIndexCatalog::new()
-                .with_optional_spatial_state(self.storage.spatial_state())
-                // Compound build state. Without it every compound index
-                // reads as `NotBuilt` and the planner declines it — correct,
-                // never fast. With it, a declared-but-unbuilt index is
-                // distinguishable from a usable one.
-                .with_optional_compound_state(self.storage.compound_state()),
-        );
-
-        let mut physical_planner = PhysicalPlanner::with_catalog(
-            self.tenant_id.clone(),
-            self.repo_id.clone(),
-            self.branch.clone(),
-            workspace.clone(),
-            index_catalog,
-        );
-
-        // Compound indexes for this branch: the named NodeType's when the
-        // WHERE clause pins one, otherwise every index on the branch.
-        let compound = match helpers::extract_node_type_from_analyzed(&analyzed) {
-            Some(node_type_name) => {
-                helpers::load_compound_indexes(
-                    &*self.storage,
-                    &self.tenant_id,
-                    &self.repo_id,
-                    &self.branch,
-                    &node_type_name,
-                )
-                .await
-            }
-            // No `node_type =` in the WHERE clause. A hierarchy query is
-            // usually written without one, so fall back to every compound
-            // index on the branch rather than planning as if none existed.
-            None => {
-                helpers::load_all_compound_indexes(
-                    &*self.storage,
-                    &self.tenant_id,
-                    &self.repo_id,
-                    &self.branch,
-                )
-                .await
-            }
-        };
-        if let Some(indexes) = compound {
-            physical_planner.set_compound_indexes(indexes);
-        }
-
-        // Load schema statistics for data-driven selectivity estimation.
-        // Gated inside `apply_schema_stats` on the WHERE clause actually
-        // containing a node_type/archetype equality — see that method.
-        self.apply_schema_stats(
-            &mut physical_planner,
-            &self.branch,
-            helpers::analyzed_selection(&analyzed),
-        )
-        .await;
-
-        let physical_plan = physical_planner.plan(&optimized)?;
-        timer.planned();
-
-        // 5. Create execution context
-        let (max_revision, branch_override, locales) =
-            if let AnalyzedStatement::Query(ref q) = analyzed {
-                (q.max_revision, q.branch_override.clone(), q.locales.clone())
-            } else {
-                (None, None, Vec::new())
-            };
-
-        let branch = branch_override.unwrap_or_else(|| self.branch.clone());
-
-        let max_revision = if max_revision.is_none() {
-            let branch_opt = self
-                .storage
-                .branches()
-                .get_branch(&self.tenant_id, &self.repo_id, &branch)
-                .await?;
-
-            Some(
-                branch_opt
-                    .map(|b| b.head)
-                    .unwrap_or_else(|| raisin_hlc::HLC::new(0, 0)),
-            )
-        } else {
-            max_revision
-        };
-
-        // Save branch for user lookup
-        let branch_for_lookup = branch.clone();
-
-        let ctx = self.build_execution_context(branch, workspace, max_revision, locales);
 
         // Set function context for system functions (RAISIN_CURRENT_USER).
         // Resolves the user node only when the SQL can actually call it.
+        let branch_for_lookup = query
+            .branch_override
+            .clone()
+            .unwrap_or_else(|| self.branch.clone());
         self.install_function_context(sql, &branch_for_lookup).await;
 
-        // 6. Execute physical plan
+        if let Some(scalar) = self.execute_scalar_if_no_from(analyzed).await {
+            return scalar;
+        }
+        // 2-4. Logical plan (cached or built), physical plan (cached or
+        // planned), context.
+        let (physical_plan, ctx) = self.plan_query(analyzed, cached).await?;
+        timer.planned();
+
+        // 5. Execute physical plan
         let stream = execute_plan(&physical_plan, &ctx).await?;
         Ok(timer.opened(stream, sql))
     }
@@ -728,18 +673,14 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         max_revision: Option<raisin_hlc::HLC>,
         locales: Vec<String>,
     ) -> ExecutionContext<S> {
-        let mut ctx = ExecutionContext::new(
-            self.storage.clone(),
-            self.tenant_id.clone(),
-            self.repo_id.clone(),
-            branch,
-            workspace,
-        );
+        let mut ctx = self.new_statement_context(branch, workspace);
 
         ctx.default_language = Arc::from(self.default_language.as_str());
         ctx.default_max_distance = self.tenant_default_max_distance();
         ctx = ctx.with_max_revision(max_revision);
         ctx.locales = Arc::from(locales);
+        // The statement's storage view (Phase 4) opens at its first batched
+        // read, not here: most statements never read in batches.
 
         if let Some(ref engine) = self.indexing_engine {
             ctx = ctx.with_indexing_engine(engine.clone());

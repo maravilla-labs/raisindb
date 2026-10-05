@@ -50,7 +50,7 @@ impl OperationApplicator {
             ..
         } = *ctx;
         let Some((newer_rev, newer)) =
-            self.load_node_after(tenant_id, repo_id, branch, workspace, &node.id, revision)?
+            self.load_node_after(tenant_id, repo_id, branch, workspace, node, revision)?
         else {
             return Ok(());
         };
@@ -76,17 +76,9 @@ impl OperationApplicator {
             }
         };
 
-        crate::repositories::add_stale_property_tombstones(
-            batch,
-            cf_handle(&self.db, cf::PROPERTY_INDEX)?,
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            node,
-            superseding,
-            &newer_rev,
-        );
+        // PROPERTY_INDEX is not handled here: the writer already ended this
+        // version's values at the newer revision and re-asserted every newer
+        // version's entries (`Baseline::OutOfOrder`, `write_successors`).
         crate::repositories::add_stale_reference_tombstones(
             batch,
             cf_handle(&self.db, cf::REFERENCE_INDEX)?,
@@ -118,35 +110,65 @@ impl OperationApplicator {
         }
 
         if let Some(placement) = placement {
-            let same_place = match &newer {
-                Some(n) => {
-                    n.order_key == placement.label
-                        && self
-                            .resolve_parent_id_for_snapshot(
-                                tenant_id, repo_id, branch, workspace, n,
-                            )
-                            .ok()
-                            .flatten()
-                            .as_deref()
-                            == Some(placement.parent_id)
-                }
-                None => false,
-            };
-            if !same_place {
-                let key = keys::ordered_child_key_versioned(
+            // Still in this place at `newer_rev` exactly when the pair's
+            // newest entry AT OR BELOW `newer_rev` is live — read the entry,
+            // not the newer version's blob and path. Resolving the newer
+            // version's PARENT by path at HEAD was wrong out of order: when an
+            // ancestor's rename or move had not arrived yet, the new parent
+            // path did not resolve, the placement looked changed, and the
+            // node's only live entry was tombstoned at the newer revision —
+            // gone from its parent's listing for good. (The blob's `order_key`
+            // is no authority either: legacy blobs carry "".) Bounded by
+            // revision, not the EXACT key at `newer_rev`: a newer version that
+            // did not re-put an unchanged entry keeps it at an older revision,
+            // and reading only the exact key tombstoned its only placement.
+            let cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
+            let key = keys::ordered_child_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                placement.parent_id,
+                placement.label,
+                &newer_rev,
+                &node.id,
+            );
+            let same_place = newer.is_some()
+                && crate::repositories::nodes::live_entry_under_label(
+                    &self.db,
                     tenant_id,
                     repo_id,
                     branch,
                     workspace,
                     placement.parent_id,
                     placement.label,
-                    &newer_rev,
                     &node.id,
-                );
-                batch.put_cf(cf_handle(&self.db, cf::ORDERED_CHILDREN)?, key, TOMBSTONE);
+                    Some(&newer_rev),
+                )?
+                .is_some();
+            if !same_place {
+                batch.put_cf(cf_ordered, key, TOMBSTONE);
             }
         }
         Ok(())
+    }
+
+    /// Whether `path`'s newest PATH_INDEX entry at or before `at` maps to
+    /// `node_id` — i.e. whether a tombstone at `at` would end THIS node's
+    /// entry. Out of order, a node's old path may already belong to another
+    /// node by `at` (it moved away in a version this replica has not seen
+    /// yet, and someone else took the path); tombstoning it then deleted that
+    /// other node's path.
+    pub(super) fn path_owned_at(
+        &self,
+        ctx: &IndexCtx<'_>,
+        path: &str,
+        node_id: &str,
+        at: &HLC,
+    ) -> Result<bool> {
+        // The one ownership check every old-path tombstone makes (origin
+        // promotion and merge included): `indexing::key_owner`.
+        crate::indexing::key_owner::path_owned_at(&self.db, ctx, path, node_id, at)
     }
 
     /// Whether `node`'s path entry written at `revision` would still be the
@@ -180,13 +202,24 @@ impl OperationApplicator {
 }
 
 impl OperationApplicator {
-    /// The OLDEST stored version of `node_id` strictly above `revision` in
-    /// `workspace`: `Some((rev, Some(node)))`, `Some((rev, None))` when that
-    /// version is a tombstone, or `None` when `revision` is the newest.
+    /// The OLDEST stored version of `incoming`'s node strictly above
+    /// `revision` in `workspace`: `Some((rev, Some(node)))`, `Some((rev,
+    /// None))` when that version is a tombstone, or `None` when `revision` is
+    /// the newest.
     ///
     /// An op applied out of order (older than what is already stored) must
     /// have its values superseded at exactly this revision — see
     /// [`Self::tombstone_superseded_by_newer`].
+    ///
+    /// The newer version's PATH is its path as of its revision INCLUDING the
+    /// `NODE_PATH` entry this apply is staging at `revision` (still in the
+    /// batch, invisible to a committed read): a record that asserts no path —
+    /// one a pre-v2 property-only op stored before those ops were removed
+    /// (plan "Phase 11d"; data, so still read) — takes its
+    /// path from the newest entry at or below it, and when that entry is not
+    /// above `revision` it is this one. Read from committed state alone it was
+    /// the pre-move path, so an out-of-order ancestor move tombstoned its own
+    /// new PATH_INDEX entry at the newer revision.
     #[allow(clippy::too_many_arguments)]
     fn load_node_after(
         &self,
@@ -194,9 +227,10 @@ impl OperationApplicator {
         repo_id: &str,
         branch: &str,
         workspace: &str,
-        node_id: &str,
+        incoming: &Node,
         revision: &HLC,
     ) -> Result<Option<(HLC, Option<Node>)>> {
+        let node_id = incoming.id.as_str();
         let cf_nodes = cf_handle(&self.db, cf::NODES)?;
         let prefix = keys::node_key_prefix(tenant_id, repo_id, branch, workspace, node_id);
         // Newest first: walk down until reaching `revision`; the last version
@@ -222,9 +256,39 @@ impl OperationApplicator {
             return Ok(Some((found, None)));
         }
         let mut node = crate::mvcc_read::deserialize_node_with_path(
-            &self.db, &value, tenant_id, repo_id, branch, workspace, node_id, &found,
+            &self.db, &value, tenant_id, repo_id, branch, workspace, node_id, &found, &found,
         )?;
+        if crate::mvcc_read::embedded_path_of(&value).is_none() {
+            let entry_prefix =
+                keys::node_path_key_prefix(tenant_id, repo_id, branch, workspace, node_id);
+            let indexed = crate::mvcc_read::newest_at_or_before(
+                &self.db,
+                cf_handle(&self.db, cf::NODE_PATH)?,
+                &entry_prefix,
+                Some(&found),
+            )?;
+            if indexed.is_none_or(|(at, _)| &at <= revision) {
+                node.path = incoming.path.clone();
+            }
+        }
         node.workspace = Some(workspace.to_string());
         Ok(Some((found, Some(node))))
     }
+}
+
+/// Whether an upsert at `revision` is an in-place (`versionable=false`) write
+/// OLDER than the version already stored at that very revision.
+///
+/// Two in-place writes of one node land on one key, so the revision carries no
+/// order between them and the last one APPLIED would win. Delivered out of
+/// order — a node's create applied after its in-place refresh, say — the
+/// older content silently overwrote the newer, for good. Between versions at
+/// one revision, `updated_at` (stamped by every write) decides; equal stamps
+/// (a replayed duplicate) apply, which is idempotent.
+pub(super) fn stale_in_place(at: &HLC, stored: &Node, revision: &HLC, incoming: &Node) -> bool {
+    at == revision
+        && match (stored.updated_at, incoming.updated_at) {
+            (Some(stored_at), Some(incoming_at)) => stored_at > incoming_at,
+            _ => false,
+        }
 }

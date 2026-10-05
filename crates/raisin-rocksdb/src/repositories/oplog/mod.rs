@@ -20,7 +20,6 @@
 //! ├── query.rs         - Query operations: get from seq/node, missing ops, stats
 //! ├── deletion.rs      - Deletion operations
 //! ├── gc.rs            - Garbage collection
-//! ├── compaction.rs    - Operation log compaction
 //! ├── vector_clock.rs  - Vector clock snapshot management
 //! ├── helpers.rs       - Shared utilities (serialization, iteration, etc.)
 //! └── tests.rs         - Test code
@@ -52,7 +51,6 @@
 //! let gc_result = repo.garbage_collect("tenant1", "repo1", &gc_config)?;
 //! ```
 
-mod compaction;
 mod crud;
 mod deletion;
 mod gc;

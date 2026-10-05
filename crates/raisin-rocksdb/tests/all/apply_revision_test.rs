@@ -282,8 +282,11 @@ async fn apply_delete_node_removes_translations() {
         tenant_id: tenant_id.to_string(),
         repo_id: repo_id.to_string(),
         branch: branch_name.to_string(),
-        op_type: OpType::DeleteNode {
+        op_type: OpType::DeleteNodeSnapshot {
             node_id: node.id.clone(),
+            revision: delete_revision,
+            node: None,
+            parent_id: None,
         },
         revision: Some(delete_revision.clone()),
         actor: "system".to_string(),

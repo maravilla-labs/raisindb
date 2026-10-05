@@ -112,10 +112,16 @@ impl BranchRepositoryImpl {
                 .get_cf(cf_nodes, &node_key)
                 .map_err(|e| raisin_error::Error::storage(e.to_string()))?
             {
+                // Through the one decoder: a StorageNode blob embeds no path
+                // (it lives in NODE_PATH), and a legacy full blob's embedded
+                // path answers to the Phase 10 read rule.
                 Some(bytes) if !bytes.starts_with(b"TOMBSTONE") => {
-                    rmp_serde::from_slice::<raisin_models::nodes::Node>(&bytes)
-                        .ok()
-                        .map(|n| n.path)
+                    crate::mvcc_read::deserialize_node_with_path(
+                        &self.db, &bytes, tenant_id, repo_id, branch, &workspace, &node_id,
+                        &revision, &revision,
+                    )
+                    .ok()
+                    .map(|n| n.path)
                 }
                 _ => None,
             };

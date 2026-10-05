@@ -5,6 +5,7 @@
 //! - get_at_revision_impl: Get node at specific revision (time-travel)
 //! - list_all_impl: List all nodes in workspace
 //! - count_all_impl: Count all nodes in workspace
+//! - get_many_for_read_impl: many nodes at one revision through one snapshot
 //!
 //! # StorageNode Optimization
 //!
@@ -12,6 +13,11 @@
 //! The path is materialized from the NODE_PATH index during reads.
 //! This enables O(1) move operations (only root node blob + path indexes need updating).
 
+mod batch_get;
 mod get_operations;
 mod list_operations;
 mod path_materialization;
+mod read_snapshot;
+
+pub use read_snapshot::read_snapshot_seeks;
+pub(crate) use read_snapshot::RocksReadSnapshot;

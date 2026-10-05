@@ -35,12 +35,52 @@ pub(crate) fn put_ordered_child(
 
     let metadata_key =
         keys::last_child_metadata_key(tenant_id, repo_id, branch, workspace, parent_id);
-    let advance = match db.get_cf(cf_ordered, &metadata_key) {
-        Ok(Some(existing)) => label > String::from_utf8_lossy(&existing).as_ref(),
-        _ => true,
-    };
-    if advance {
+    if advances_last(
+        db.get_cf(cf_ordered, &metadata_key)
+            .ok()
+            .flatten()
+            .as_deref(),
+        label,
+    ) {
         batch.put_cf(cf_ordered, metadata_key, label.as_bytes());
     }
     Ok(())
+}
+
+/// Whether writing an entry under `label` advances a parent's cached LAST.
+///
+/// Only a PRESENT cache is advanced, and only past what it holds in editorial
+/// order. An ABSENT cache stays absent: absence is a deliberate state (a merge
+/// or a reorder-to-front invalidated it) that makes the next append run the
+/// fallback scan for the true last label. Writing the label we were handed
+/// there — typically an EXISTING child's middle label, re-put by a replicated
+/// update or a merge resolution — made the next append mint inc(middle), a
+/// fractional part that duplicates the next sibling's.
+fn advances_last(cached: Option<&[u8]>, label: &str) -> bool {
+    match cached {
+        Some(existing) => super::sorts_after(label, &String::from_utf8_lossy(existing)),
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::advances_last;
+
+    #[test]
+    fn replicated_middle_label_does_not_repopulate_an_invalidated_last_cache() {
+        assert!(!advances_last(None, "a0::0000000000000001"));
+    }
+
+    #[test]
+    fn last_cache_advances_only_past_what_it_holds() {
+        assert!(advances_last(
+            Some(b"a0::0000000000000009"),
+            "a0V::0000000000000001"
+        ));
+        assert!(!advances_last(
+            Some(b"a1::0000000000000001"),
+            "a0V::0000000000000009"
+        ));
+    }
 }

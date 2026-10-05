@@ -103,6 +103,17 @@ impl UnifiedJobEventHandler {
             "Schema change event received"
         );
 
+        // The branch's cached index definitions (compound + unique, the
+        // replication apply path's only source), dropped and re-resolved here,
+        // off the apply path. The write paths already dropped them
+        // synchronously; this re-warm is what keeps the apply path WARM.
+        self.refresh_compound_definitions(
+            &schema_event.tenant_id,
+            &schema_event.repository_id,
+            &schema_event.branch,
+        )
+        .await;
+
         // A NodeType that declares (or changes) a compound index needs that
         // index BUILT before the planner will use it: the fail-closed
         // availability gate answers `NotBuilt` until a build has recorded its
@@ -220,7 +231,7 @@ impl UnifiedJobEventHandler {
         }
     }
 
-    async fn sweep_compound_index_builds_for_workspace(
+    pub(super) async fn sweep_compound_index_builds_for_workspace(
         &self,
         tenant_id: &str,
         repo_id: &str,

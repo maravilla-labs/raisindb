@@ -194,7 +194,7 @@ impl PhysicalPlanner {
 
         plan = PhysicalPlan::Project {
             input: Box::new(plan),
-            exprs: components.project_exprs,
+            exprs: components.project_exprs.into(),
         };
 
         plan = PhysicalPlan::Limit {

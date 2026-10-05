@@ -8,8 +8,9 @@
 //! O(1) lookups for exact path matches and direct node ID access.
 //! These are the fastest possible access methods for known identifiers.
 
+use super::batch_fetch::per_locale;
 use super::helpers::{get_locales_to_use, resolve_node_for_locale};
-use super::node_to_row::node_to_row;
+use super::node_to_row::node_to_row_owned;
 use crate::physical_plan::executor::{ExecutionContext, ExecutionError, RowStream};
 use crate::physical_plan::operators::PhysicalPlan;
 use async_stream::try_stream;
@@ -75,14 +76,13 @@ pub async fn execute_path_index_scan<S: Storage + 'static>(
 
         tracing::debug!("   Looking up node by exact path '{}'...", path);
 
-        let node_opt = storage
-            .nodes()
-            .get_by_path(
-                StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
-                &path,
-                max_revision.as_ref(),
-            )
-            .await?;
+        let node_opt = super::helpers::row_node(
+            &*storage,
+            StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
+            raisin_storage::NodeLocator::Path(path.clone()),
+            max_revision.as_ref(),
+        )
+        .await?;
 
         if let Some(node) = node_opt {
             if node.path != "/" {
@@ -101,13 +101,15 @@ pub async fn execute_path_index_scan<S: Storage + 'static>(
 
                 tracing::debug!("   PathIndexScan found node: id={}", node.id);
 
-                for locale in &locales_to_use {
-                    let translated_node = match resolve_node_for_locale(node.clone(), &ctx_clone, locale).await? {
+                // One locale (the common case) clones nothing: the node is
+                // moved through translation into the row.
+                for (locale, node) in per_locale(node, &locales_to_use) {
+                    let translated_node = match resolve_node_for_locale(node, &ctx_clone, locale).await? {
                         Some(n) => n,
                         None => continue,
                     };
 
-                    let row = node_to_row(&translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale, None,).await?;
+                    let row = node_to_row_owned(translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale, None,).await?;
                     yield row;
                 }
             } else {
@@ -176,14 +178,13 @@ pub async fn execute_node_id_scan<S: Storage + 'static>(
 
         tracing::debug!("   Looking up node by ID '{}'...", node_id);
 
-        let node_opt = storage
-            .nodes()
-            .get(
-                StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
-                &node_id,
-                max_revision.as_ref(),
-            )
-            .await?;
+        let node_opt = super::helpers::row_node(
+            &*storage,
+            StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
+            raisin_storage::NodeLocator::Id(node_id.clone()),
+            max_revision.as_ref(),
+        )
+        .await?;
 
         if let Some(node) = node_opt {
             if node.path != "/" {
@@ -202,13 +203,15 @@ pub async fn execute_node_id_scan<S: Storage + 'static>(
 
                 tracing::debug!("   NodeIdScan found node: path={}", node.path);
 
-                for locale in &locales_to_use {
-                    let translated_node = match resolve_node_for_locale(node.clone(), &ctx_clone, locale).await? {
+                // One locale (the common case) clones nothing: the node is
+                // moved through translation into the row.
+                for (locale, node) in per_locale(node, &locales_to_use) {
+                    let translated_node = match resolve_node_for_locale(node, &ctx_clone, locale).await? {
                         Some(n) => n,
                         None => continue,
                     };
 
-                    let row = node_to_row(&translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale, None,).await?;
+                    let row = node_to_row_owned(translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale, None,).await?;
                     yield row;
                 }
             } else {

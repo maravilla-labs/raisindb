@@ -10,6 +10,64 @@ use raisin_storage::Storage;
 use std::sync::Arc;
 use tempfile::TempDir;
 
+/// Capture a node create the way every write replicates it: one
+/// `ApplyRevision` carrying the node snapshot (the pre-v2 `create_node` op
+/// and its builder are gone, plan "Phase 11d").
+async fn capture_node_create(
+    storage: &crate::RocksDBStorage,
+    id: &str,
+    name: &str,
+    node_type: &str,
+    workspace: &str,
+    path: &str,
+    properties: serde_json::Value,
+) -> raisin_replication::Operation {
+    use raisin_replication::operation::{ReplicatedNodeChange, ReplicatedNodeChangeKind};
+    let revision = raisin_hlc::HLC::new(1, 0);
+    let properties = properties
+        .as_object()
+        .expect("properties are an object")
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.clone(),
+                raisin_models::nodes::properties::PropertyValue::from_json(v),
+            )
+        })
+        .collect();
+    let node = raisin_models::nodes::Node {
+        id: id.to_string(),
+        name: name.to_string(),
+        path: path.to_string(),
+        node_type: node_type.to_string(),
+        workspace: Some(workspace.to_string()),
+        properties,
+        ..Default::default()
+    };
+    storage
+        .operation_capture()
+        .capture_operation_with_revision(
+            "tenant1".to_string(),
+            "repo1".to_string(),
+            "main".to_string(),
+            raisin_replication::OpType::ApplyRevision {
+                branch_head: revision,
+                node_changes: vec![ReplicatedNodeChange {
+                    node,
+                    parent_id: Some("/".to_string()),
+                    kind: ReplicatedNodeChangeKind::Upsert,
+                    cf_order_key: format!("a0::{id}"),
+                }],
+            },
+            "test-actor".to_string(),
+            None,
+            false,
+            Some(revision),
+        )
+        .await
+        .unwrap()
+}
+
 fn setup_test_storage() -> (TempDir, Arc<crate::RocksDBStorage>) {
     let temp_dir = TempDir::new().unwrap();
     let storage = crate::RocksDBStorage::new(temp_dir.path()).unwrap();
@@ -151,26 +209,16 @@ async fn test_handle_node_change_enqueues_embedding_job_when_enabled() {
         .unwrap();
 
     // Create the node first so it exists when the event handler checks it
-    let op = storage
-        .operation_capture()
-        .capture_create_node(
-            "tenant1".to_string(),
-            "repo1".to_string(),
-            "main".to_string(),
-            "node1".to_string(),
-            "Test Node".to_string(),
-            "Document".to_string(),
-            None,
-            None,
-            "order1".to_string(),
-            serde_json::json!({"title": "Test content"}),
-            None,
-            None,                     // Use default workspace
-            "/Test Node".to_string(), // Path for root node
-            "test-actor".to_string(),
-        )
-        .await
-        .unwrap();
+    let op = capture_node_create(
+        &storage,
+        "node1",
+        "Test Node",
+        "Document",
+        "default",
+        "/Test Node",
+        serde_json::json!({"title": "Test content"}),
+    )
+    .await;
 
     // Ensure operation has a revision (required for application)
     let revision = op
@@ -291,26 +339,16 @@ async fn seed_node(storage: &Arc<crate::RocksDBStorage>) {
         .await
         .unwrap();
 
-    let op = storage
-        .operation_capture()
-        .capture_create_node(
-            "tenant1".to_string(),
-            "repo1".to_string(),
-            "main".to_string(),
-            "node1".to_string(),
-            "Test Node".to_string(),
-            "Document".to_string(),
-            None,
-            None,
-            "order1".to_string(),
-            serde_json::json!({"title": "Test content"}),
-            None,
-            None,
-            "/Test Node".to_string(),
-            "test-actor".to_string(),
-        )
-        .await
-        .unwrap();
+    let op = capture_node_create(
+        &storage,
+        "node1",
+        "Test Node",
+        "Document",
+        "default",
+        "/Test Node",
+        serde_json::json!({"title": "Test content"}),
+    )
+    .await;
 
     let revision = op
         .revision
@@ -574,26 +612,16 @@ async fn seed_activity_node(storage: &Arc<crate::RocksDBStorage>) {
         .await
         .unwrap();
 
-    let op = storage
-        .operation_capture()
-        .capture_create_node(
-            "tenant1".to_string(),
-            "repo1".to_string(),
-            "main".to_string(),
-            "job-activity".to_string(),
-            "activity".to_string(),
-            "raisin:JobActivity".to_string(),
-            None,
-            None,
-            "order1".to_string(),
-            serde_json::json!({"degraded": false, "active": 0}),
-            None,
-            Some("job_activity".to_string()),
-            "/activity".to_string(),
-            "job-activity".to_string(),
-        )
-        .await
-        .unwrap();
+    let op = capture_node_create(
+        &storage,
+        "job-activity",
+        "activity",
+        "raisin:JobActivity",
+        "job_activity",
+        "/activity",
+        serde_json::json!({"degraded": false, "active": 0}),
+    )
+    .await;
 
     let revision = op
         .revision

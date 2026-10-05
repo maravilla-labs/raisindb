@@ -312,6 +312,14 @@ impl Storage for RocksDBStorage {
         )))
     }
 
+    /// The localized name index (plan Phase 12), over a clone of the node
+    /// repository (cheap: `Arc`s).
+    fn localized_names(&self) -> Option<Arc<dyn raisin_storage::localized::LocalizedNameSource>> {
+        Some(Arc::new(
+            crate::localized_name::source::RocksLocalizedNames::new(self.nodes.clone()),
+        ))
+    }
+
     /// The RocksDB backend can administer its spatial index: read the local state
     /// records, census the keys physically present, and queue a local rebuild.
     ///

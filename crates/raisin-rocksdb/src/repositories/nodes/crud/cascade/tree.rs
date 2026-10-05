@@ -37,15 +37,11 @@ impl NodeRepositoryImpl {
     /// # Returns
     /// * `Ok(true)` if node and descendants were deleted
     /// * `Ok(false)` if node didn't exist
-    /// * `Err` if deletion failed (note: may leave partial deletions on error)
+    /// * `Err` if deletion failed (nothing was written)
     ///
-    /// # Atomicity Note
-    /// Each individual node deletion is atomic (via WriteBatch), but the entire
-    /// tree deletion is NOT atomic. If an error occurs midway, some descendants
-    /// may already be deleted. This is acceptable because:
-    /// 1. Partial deletions don't violate referential integrity (children deleted first)
-    /// 2. Retry will complete the operation (idempotent)
-    /// 3. Time-travel can recover nodes from before the operation
+    /// # Atomicity
+    /// Tombstones, unique claims, the revision index and the HEAD advance are
+    /// ONE batch, written as one node commit step (plan Phase 7b).
     pub(in super::super::super) async fn delete_with_cascade(
         &self,
         tenant_id: &str,
@@ -73,33 +69,23 @@ impl NodeRepositoryImpl {
         // STEP 1: Allocate SINGLE revision for entire tree deletion
         let revision = self.revision_repo.allocate_revision();
 
-        // STEP 2: Delete root AND all descendants in ONE WriteBatch (optimal!)
-        // This batch includes tombstones for nodes, path indexes, property indexes, etc.
-        let deleted_descendants = self.delete_tree_with_single_batch(
-            tenant_id, repo_id, branch, workspace, &node, &revision,
-        )?;
+        // STEP 2: Tombstones for the root AND all descendants, their unique
+        // claims and the revision index, in ONE WriteBatch — written once,
+        // with the HEAD advance, as one commit step (plan Phase 7b): every
+        // deleted node locked, and its tombstones re-derived against what is
+        // stored at that moment (the descendants were read by a scan, so
+        // there is no per-node "before the read" to record — `always`).
+        let (mut batch, deleted_descendants) =
+            self.stage_tree_delete(tenant_id, repo_id, branch, workspace, &node, &revision)?;
 
-        // STEP 2.5: Write unique index tombstones for root node and all descendants
-        // This is separate from the main batch because add_unique_tombstones_to_batch is async
-        // (requires NodeType lookup to find unique properties)
-        let mut unique_batch = WriteBatch::default();
-
-        // Root node unique tombstones
+        // Unique claims (async — needs the NodeType's unique properties).
         self.add_unique_tombstones_to_batch(
-            &mut unique_batch,
-            &node,
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            &revision,
+            &mut batch, &node, tenant_id, repo_id, branch, workspace, &revision,
         )
         .await?;
-
-        // Descendant unique tombstones
         for deleted_node in &deleted_descendants {
             self.add_unique_tombstones_to_batch(
-                &mut unique_batch,
+                &mut batch,
                 deleted_node,
                 tenant_id,
                 repo_id,
@@ -110,40 +96,30 @@ impl NodeRepositoryImpl {
             .await?;
         }
 
-        // Write unique tombstones
-        if !unique_batch.is_empty() {
-            self.db.write(unique_batch).map_err(|e| {
-                raisin_error::Error::storage(format!("Unique tombstone write failed: {}", e))
-            })?;
-        }
-
-        // STEP 3: Index all node changes AND update branch HEAD in a SECOND atomic batch
-        // This ensures revision tracking is atomic even if separate from tombstones
-        let mut revision_batch = rocksdb::WriteBatch::default();
-
-        // Index all descendant node deletions
+        // STEP 3: Index every node change with the same revision.
         for deleted_node in &deleted_descendants {
             self.revision_repo.index_node_change_to_batch(
-                &mut revision_batch,
+                &mut batch,
                 tenant_id,
                 repo_id,
                 &revision,
                 &deleted_node.id,
             )?;
         }
-        // Index the root node deletion
-        self.revision_repo.index_node_change_to_batch(
-            &mut revision_batch,
-            tenant_id,
-            repo_id,
-            &revision,
-            node_id,
-        )?;
+        self.revision_repo
+            .index_node_change_to_batch(&mut batch, tenant_id, repo_id, &revision, node_id)?;
 
-        // Add branch HEAD update to the batch and write it atomically
+        let ctx = crate::indexing::IndexCtx::new(tenant_id, repo_id, branch, workspace);
+        let mut commit = crate::indexing::NodeCommit::new(tenant_id, repo_id, branch);
+        for deleted in std::iter::once(&node).chain(deleted_descendants.iter()) {
+            commit.check(
+                crate::indexing::StagedDeltaCheck::always(&ctx, &deleted.id, &revision),
+                None,
+            );
+        }
         let updated_branch = self
             .branch_repo
-            .write_batch_with_head(revision_batch, tenant_id, repo_id, branch, revision)
+            .write_nodes_with_head(batch, tenant_id, repo_id, branch, revision, &commit)
             .await?;
 
         // STEP 3.5: Capture replication events (after atomic write)
@@ -208,110 +184,13 @@ impl NodeRepositoryImpl {
         Ok(true)
     }
 
-    /// Delete all descendants of a node using iterative prefix scan with single revision
-    ///
-    /// This is a helper for cascade delete that uses RocksDB prefix iteration
-    /// instead of recursion. It scans all descendants and deletes them using a
-    /// SINGLE WriteBatch for optimal performance (one atomic commit for entire tree).
-    ///
-    /// # Arguments
-    /// * `tenant_id`, `repo_id`, `branch`, `workspace` - Context for the operation
-    /// * `parent_id` - The ID of the parent whose children should be deleted
-    /// * `revision` - The single revision to use for all deletions
+    /// Stage the tombstones of `root_node` AND all its descendants into ONE
+    /// WriteBatch, at one revision. Nothing is written: the caller commits it
+    /// through the node commit step (plan Phase 7b).
     ///
     /// # Returns
-    /// * `Ok(Vec<Node>)` - All deleted nodes
-    /// * `Err` if deletion failed
-    ///
-    /// # Performance
-    /// - O(N) where N = total descendants
-    /// - ONE WriteBatch for entire tree (atomic)
-    /// - ONE db.write() call for all tombstones
-    pub(in super::super::super) fn delete_descendants_with_revision(
-        &self,
-        tenant_id: &str,
-        repo_id: &str,
-        branch: &str,
-        workspace: &str,
-        parent_id: &str,
-        revision: &HLC,
-    ) -> Result<Vec<Node>> {
-        // Use prefix scan to collect all descendants (NO RECURSION!)
-        let descendants = self.scan_descendants_ordered_impl(
-            tenant_id, repo_id, branch, workspace, parent_id, None,
-        )?;
-
-        // CRITICAL: Single WriteBatch for ALL descendants (one atomic commit!)
-        let mut batch = WriteBatch::default();
-        let mut deleted_nodes = Vec::new();
-
-        // Get column family handles once
-        let cf_nodes = cf_handle(&self.db, cf::NODES)?;
-        let cf_path = cf_handle(&self.db, cf::PATH_INDEX)?;
-        let cf_property = cf_handle(&self.db, cf::PROPERTY_INDEX)?;
-        let cf_relation = cf_handle(&self.db, cf::RELATION_INDEX)?;
-        let cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
-        let cf_node_path = cf_handle(&self.db, cf::NODE_PATH)?;
-        let cf_compound = cf_handle(&self.db, cf::COMPOUND_INDEX)?;
-        let cf_spatial = cf_handle(&self.db, cf::SPATIAL_INDEX)?;
-
-        // Process all descendants (excluding root itself)
-        // ALL tombstones added to SAME batch!
-        for (node, _depth) in descendants.into_iter() {
-            // Skip the root node itself (we only delete descendants)
-            if node.id == parent_id {
-                continue;
-            }
-
-            // Add all tombstones to the batch using shared logic
-            self.add_node_tombstones_to_batch(
-                &mut batch,
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                &node,
-                revision,
-                cf_nodes,
-                cf_path,
-                cf_property,
-                cf_relation,
-                cf_ordered,
-                cf_node_path,
-                cf_compound,
-                cf_spatial,
-            )?;
-
-            deleted_nodes.push(node);
-        }
-
-        // Atomic commit of all deletions with SAME revision
-        self.db
-            .write(batch)
-            .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
-
-        Ok(deleted_nodes)
-    }
-
-    /// Delete root node AND all descendants in SINGLE WriteBatch (optimal!)
-    ///
-    /// This combines the root node deletion and all descendant deletions into
-    /// ONE atomic WriteBatch commit for maximum performance.
-    ///
-    /// # Arguments
-    /// * `tenant_id`, `repo_id`, `branch`, `workspace` - Context for the operation
-    /// * `root_node` - The root node to delete (already fetched)
-    /// * `revision` - The single revision to use for all deletions
-    ///
-    /// # Returns
-    /// * `Ok(Vec<Node>)` - All deleted descendants (NOT including root)
-    /// * `Err` if deletion failed
-    ///
-    /// # Performance
-    /// - O(N) where N = total descendants + root
-    /// - ONE WriteBatch for entire tree (fully atomic)
-    /// - ONE db.write() call for all tombstones
-    pub(in super::super::super) fn delete_tree_with_single_batch(
+    /// The batch and every deleted descendant (NOT including the root).
+    pub(in super::super::super) fn stage_tree_delete(
         &self,
         tenant_id: &str,
         repo_id: &str,
@@ -319,7 +198,7 @@ impl NodeRepositoryImpl {
         workspace: &str,
         root_node: &Node,
         revision: &HLC,
-    ) -> Result<Vec<Node>> {
+    ) -> Result<(WriteBatch, Vec<Node>)> {
         // STEP 1: Scan all descendants (not including root)
         let descendants = self.scan_descendants_ordered_impl(
             tenant_id,
@@ -391,11 +270,6 @@ impl NodeRepositoryImpl {
             deleted_nodes.push(node);
         }
 
-        // STEP 5: ONE atomic commit for entire tree!
-        self.db
-            .write(batch)
-            .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
-
-        Ok(deleted_nodes)
+        Ok((batch, deleted_nodes))
     }
 }

@@ -11,6 +11,7 @@
 mod cf_registry;
 mod conflict;
 mod copy;
+mod copy_existing;
 mod crud;
 mod diff;
 mod divergence;

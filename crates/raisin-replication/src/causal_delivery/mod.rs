@@ -14,13 +14,13 @@
 //!
 //! ```ignore
 //! // Node 1 creates operations:
-//! Op A: CreateNode { node_id: "foo" }     VC: {node1: 1}
-//! Op B: SetProperty { node_id: "foo" }    VC: {node1: 2}
+//! Op A: UpsertNodeSnapshot { node: "foo" }       VC: {node1: 1}
+//! Op B: AddRelation { source_id: "foo", .. }      VC: {node1: 2}
 //!
 //! // Node 2 receives B before A (network delay)
 //! // Without causal delivery:
 //! //   - Apply B: FAILS (node "foo" doesn't exist)
-//! //   - Apply A: Creates node, but property was never set
+//! //   - Apply A: Creates node, but the relation was never added
 //! //   - RESULT: State divergence!
 //! //
 //! // With causal delivery:

@@ -3,7 +3,7 @@
 use super::ComparisonOp;
 use crate::analyzer::{BinaryOperator, DataType, Expr, Literal, TypedExpr};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CanonicalPredicate {
     PrefixRange {
         table: String,

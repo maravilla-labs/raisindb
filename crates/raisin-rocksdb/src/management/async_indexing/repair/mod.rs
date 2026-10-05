@@ -15,111 +15,88 @@
 //!   twice the affected CF on the data volume. A dry run reports what it would
 //!   write and writes nothing.
 //! - **Admin-triggered, never at boot.** Each node repairs its own data; the
-//!   per-node state record lets an operator see which nodes have not.
+//!   per-node state record lets an operator see which nodes have not. The one
+//!   exception is the `node_path` backfill, which queues itself (ordinary
+//!   background jobs, after boot, one branch at a time) on every branch where
+//!   it has not completed — see `auto_node_path.rs` (plan Phase 10b) — and
+//!   the chains built on it: `localized_names`, `property_index` and
+//!   `block_overlay_tombstones` (`auto_block_overlays.rs`, plan Phase 11c).
 //!
 //! [`run_repair`] is the entry point the job handler and the admin endpoint
 //! call.
+//!
+//! Run-collapse GC (plan Phase 9) runs through here too, as the
+//! `collapse_runs` kind: the same bounded writer, cursor, throttle, state
+//! record and fan-out, but it DELETES (`management::history_gc::collapse`).
+//! Every repair that inserts entries holds the `(branch, CF)` exclusion
+//! against it while it runs (`management::cf_exclusion`).
 
+mod auto_block_overlays;
+mod auto_node_path;
+mod auto_property_index;
+mod auto_targets;
+mod block_overlay_tombstones;
+mod branches;
 mod cursor;
 mod enqueue;
+mod headroom;
+mod kind;
+mod node_path_backfill;
+mod node_path_stage;
+mod options;
 mod ordered_children;
 mod ordered_pass;
 mod parent_entries;
 mod path_tombstone;
+mod property_index;
+mod property_state;
+mod requests;
+mod translation_resync;
+mod translation_resync_scan;
 
-pub use cursor::{check_headroom, load_state, state_key, BatchReport, RepairState};
+pub use auto_block_overlays::{
+    auto_enabled as block_overlay_auto_enabled, pending_branches as pending_block_overlay_branches,
+    schedule_after_start as schedule_block_overlay_tombstones, BLOCK_OVERLAY_AUTO_ENV,
+};
+pub use auto_node_path::{
+    auto_backfill_enabled, continue_chain, continue_node_path_backfill_chain,
+    enqueue_pending_node_path_backfills, pending_node_path_branches, schedule_chain,
+    schedule_node_path_backfill, start_chain, AUTO_BACKFILL_DELAY, AUTO_CHAIN_META,
+    NODE_PATH_AUTO_BACKFILL_ENV,
+};
+pub use auto_property_index::{
+    auto_rebuild_enabled as property_index_auto_rebuild_enabled, pending_property_index_branches,
+    request_rebuild as request_property_index_rebuild,
+    schedule_after_start as schedule_property_index_rebuild, PROPERTY_INDEX_AUTO_REBUILD_ENV,
+};
+pub use auto_targets::{after_link, enqueue_branch, record_link_outcome};
+pub use block_overlay_tombstones::BlockOverlayCounts;
+pub(crate) use cursor::BoundedWriter;
+pub use cursor::{load_state, state_key, BatchReport, CommitHook, RepairState};
+pub(crate) use enqueue::list_repositories;
 pub use enqueue::{
     enqueue_index_repair, reenqueue_repairs_after_checkpoint, reenqueue_repairs_after_ingest,
 };
+pub use enqueue::{mark_repairs_pending, mark_repairs_pending_on};
+pub use headroom::{check_headroom, check_headroom_assuming};
+pub use kind::RepairKind;
+pub use node_path_backfill::NodePathCounts;
+pub use options::{RepairOptions, RepairReport};
+pub(crate) use ordered_children::iterate_from;
 pub use ordered_children::OrderedChildrenCounts;
+pub use property_index::PropertyIndexCounts;
+pub use property_state::{
+    forget_branch_rebuild_state, invalidate_after_branch_copy, invalidate_property_index_rebuild,
+    invalidate_rebuilds_for_ingest, property_index_rebuilt,
+};
+pub use requests::register_requester;
+pub(crate) use requests::{debounced, registered_storage_for, registered_storages};
+pub use translation_resync::TranslationResyncCounts;
 
-use crate::{cf, cf_handle, keys};
+use crate::{cf, keys};
+pub(crate) use branches::{branch_head, list_branches};
 use raisin_error::Result;
-use raisin_hlc::HLC;
 use rocksdb::DB;
-use serde::{Deserialize, Serialize};
-
-/// Which repair to run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RepairKind {
-    /// Tombstone ORDERED_CHILDREN entries deletes left live (plan item 2.1).
-    OrderedChildren,
-    /// Rewrite merge's legacy `\0` PATH_INDEX tombstones as `T` (item 2.2).
-    PathTombstone,
-}
-
-impl RepairKind {
-    /// Stable name, used in the state record key and the job type.
-    pub fn slug(&self) -> &'static str {
-        match self {
-            Self::OrderedChildren => "ordered_children",
-            Self::PathTombstone => "path_tombstone",
-        }
-    }
-
-    pub fn from_slug(slug: &str) -> Option<Self> {
-        match slug {
-            "ordered_children" => Some(Self::OrderedChildren),
-            "path_tombstone" => Some(Self::PathTombstone),
-            _ => None,
-        }
-    }
-
-    /// The CF the repair writes, which the disk precheck sizes.
-    fn column_family(&self) -> &'static str {
-        match self {
-            Self::OrderedChildren => cf::ORDERED_CHILDREN,
-            Self::PathTombstone => cf::PATH_INDEX,
-        }
-    }
-}
-
-/// How to run a repair.
-#[derive(Debug, Clone)]
-pub struct RepairOptions {
-    /// Report what would be written; write nothing.
-    pub dry_run: bool,
-    /// Commit when a batch reaches this many bytes.
-    pub batch_bytes: usize,
-    /// Refuse to start without 2x the CF size free on the data volume.
-    pub check_headroom: bool,
-    /// Stop as if crashed after this many committed batches (tests).
-    pub stop_after_batches: Option<usize>,
-    /// Average write rate cap between batches, in bytes per second; 0 means
-    /// unlimited. Keeps a repair from saturating the disk a live node serves
-    /// from.
-    pub max_bytes_per_sec: u64,
-}
-
-impl Default for RepairOptions {
-    fn default() -> Self {
-        Self {
-            dry_run: false,
-            batch_bytes: 8 * 1024 * 1024,
-            check_headroom: true,
-            stop_after_batches: None,
-            max_bytes_per_sec: 32 * 1024 * 1024,
-        }
-    }
-}
-
-/// What one repair did on one branch.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RepairReport {
-    pub branch: String,
-    pub repair: String,
-    pub dry_run: bool,
-    /// The run picked up from a persisted cursor.
-    pub resumed: bool,
-    /// The run reached the end (false: stopped early, resumable).
-    pub completed: bool,
-    /// Writes queued/committed, batches and bytes.
-    pub writes: BatchReport,
-    /// PATH_INDEX entries scanned (path repair).
-    pub scanned: u64,
-    /// ORDERED_CHILDREN repair counts.
-    pub ordered: OrderedChildrenCounts,
-}
 
 /// Run `kind` over one branch, or every branch of the repository when
 /// `branch` is `None` — forks included, since each holds its own copies.
@@ -129,17 +106,33 @@ pub async fn run_repair(
     repo_id: &str,
     branch: Option<&str>,
     kind: RepairKind,
-    options: RepairOptions,
+    mut options: RepairOptions,
 ) -> Result<Vec<RepairReport>> {
+    if kind == RepairKind::CollapseRuns {
+        if !storage.config().history_gc_collapse_runs && !collapse_enabled_by_env() {
+            return Err(raisin_error::Error::Validation(format!(
+                "collapse_runs is disabled: set `history_gc_collapse_runs` in the storage \
+                 configuration or {COLLAPSE_RUNS_ENV}=1 (plan Phase 9; default off)"
+            )));
+        }
+        // Any replication setting, not just operation capture: the
+        // coordinator applies peers' ops from a node id and port alone.
+        options.cluster_mode |= storage.config().replicates();
+    }
+    if kind == RepairKind::ResyncTranslations {
+        // Async: it captures replication ops as it goes.
+        return translation_resync::resync_translations(
+            storage, tenant_id, repo_id, branch, &options,
+        )
+        .await;
+    }
     let db = storage.db().clone();
-    let node_id = storage
-        .config()
-        .cluster_node_id
-        .clone()
-        .unwrap_or_else(|| "local".to_string());
+    let node_id = repair_node_id(storage);
     let (tenant_id, repo_id) = (tenant_id.to_string(), repo_id.to_string());
     let branch = branch.map(str::to_string);
-    tokio::task::spawn_blocking(move || {
+    let dry_run = options.dry_run;
+    let (t, r) = (tenant_id.clone(), repo_id.clone());
+    let reports = tokio::task::spawn_blocking(move || {
         run_repair_blocking(
             &db,
             &tenant_id,
@@ -151,7 +144,34 @@ pub async fn run_repair(
         )
     })
     .await
-    .map_err(|e| raisin_error::Error::storage(format!("repair task failed: {e}")))?
+    .map_err(|e| raisin_error::Error::storage(format!("repair task failed: {e}")))??;
+    if kind == RepairKind::PropertyIndexVerify && !dry_run {
+        property_state::queue_rebuilds_for_misses(storage, &t, &r, &reports).await?;
+    }
+    Ok(reports)
+}
+
+/// The env var that enables `collapse_runs` (`1`/`true`/`on`/`yes`), besides
+/// `RocksDBConfig::history_gc_collapse_runs`. Default off.
+pub const COLLAPSE_RUNS_ENV: &str = "RAISIN_HISTORY_GC_COLLAPSE_RUNS";
+
+fn collapse_enabled_by_env() -> bool {
+    std::env::var(COLLAPSE_RUNS_ENV).is_ok_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "on" | "yes"
+        )
+    })
+}
+
+/// The cluster node id a repair's state record is kept under (`local` on a
+/// single node).
+pub fn repair_node_id(storage: &crate::RocksDBStorage) -> String {
+    storage
+        .config()
+        .cluster_node_id
+        .clone()
+        .unwrap_or_else(|| "local".to_string())
 }
 
 /// The synchronous body of [`run_repair`].
@@ -164,8 +184,10 @@ pub fn run_repair_blocking(
     node_id: &str,
     options: &RepairOptions,
 ) -> Result<Vec<RepairReport>> {
-    if options.check_headroom && !options.dry_run {
-        check_headroom(db, kind.column_family())?;
+    if kind == RepairKind::CollapseRuns {
+        crate::management::history_gc::collapse::precheck_headroom(db, options)?;
+    } else if options.check_headroom && !options.dry_run && kind.writes() {
+        check_headroom_assuming(db, kind.column_family(), options.free_bytes_override)?;
     }
     let branches = match branch {
         Some(branch) => vec![branch.to_string()],
@@ -197,6 +219,17 @@ fn repair_branch(
     } else {
         RepairState::default()
     };
+    // An inserting repair holds its `(branch, CF)` against run-collapse for
+    // the whole branch (it writes below existing entries).
+    let _inserting = (kind.inserts() && !options.dry_run).then(|| {
+        crate::management::cf_exclusion::enter_inserter(
+            db,
+            tenant_id,
+            repo_id,
+            branch,
+            kind.column_family(),
+        )
+    });
     let mut writer = cursor::BoundedWriter::new(
         db,
         key,
@@ -205,7 +238,15 @@ fn repair_branch(
         options.dry_run,
         options.stop_after_batches,
         options.max_bytes_per_sec,
+        options.before_commit.clone(),
     );
+    // A fresh `property_index` rebuild records the invalidation epoch it
+    // starts under; a resumed one keeps the epoch of the run it continues.
+    if kind == RepairKind::PropertyIndex && !resumed {
+        writer.set_epoch(property_state::rebuild_epoch(
+            db, tenant_id, repo_id, branch, node_id,
+        )?);
+    }
     let mut report = RepairReport {
         branch: branch.to_string(),
         repair: kind.slug().to_string(),
@@ -233,10 +274,83 @@ fn repair_branch(
             &mut writer,
             &mut report.scanned,
         )?,
+        RepairKind::NodePath => node_path_backfill::node_path_pass(
+            db,
+            &node_path_backfill::Scope {
+                tenant_id,
+                repo_id,
+                branch,
+            },
+            &mut writer,
+            &mut report.node_path,
+        )?,
+        RepairKind::PropertyIndex | RepairKind::PropertyIndexVerify => {
+            property_index::property_index_pass(
+                db,
+                &property_index::Scope {
+                    tenant_id,
+                    repo_id,
+                    branch,
+                },
+                &mut writer,
+                &mut report.property_index,
+                (kind == RepairKind::PropertyIndexVerify).then_some(options.sample_every),
+            )?
+        }
+        RepairKind::ResyncTranslations => {
+            return Err(raisin_error::Error::Validation(
+                "resync_translations runs through run_repair (it is async)".to_string(),
+            ))
+        }
+        RepairKind::LocalizedNames => crate::localized_name::rebuild::rebuild_branch(
+            db,
+            (tenant_id, repo_id, branch),
+            &mut writer,
+            resumed,
+            &mut report.localized_names,
+        )?,
+        RepairKind::BlockOverlayTombstones => block_overlay_tombstones::block_overlay_pass(
+            db,
+            &block_overlay_tombstones::Scope {
+                tenant_id,
+                repo_id,
+                branch,
+                head: branch_head(db, tenant_id, repo_id, branch)?,
+            },
+            &mut writer,
+            &mut report.block_overlays,
+        )?,
+        RepairKind::CollapseRuns => {
+            crate::management::history_gc::collapse::collapse_branch_at_head(
+                db,
+                tenant_id,
+                repo_id,
+                branch,
+                node_id,
+                branch_head(db, tenant_id, repo_id, branch)?,
+                &mut writer,
+                &mut report.collapse,
+                options,
+            )?
+        }
     };
 
-    if completed {
+    if completed && kind == RepairKind::PropertyIndex && !options.dry_run {
+        // `done` only while no invalidation happened since the run started.
+        if !property_state::commit_rebuild(db, &mut writer, tenant_id, repo_id, branch, node_id)? {
+            report.writes = writer.report.clone();
+            return Ok(report);
+        }
+    } else if completed {
         writer.commit("done")?;
+        if kind == RepairKind::PropertyIndexVerify
+            && report.property_index.missing > 0
+            && !options.dry_run
+        {
+            // Fail closed at once: the delta writer does full puts on this
+            // branch until the rebuild `run_repair` queues has completed.
+            invalidate_property_index_rebuild(db, tenant_id, repo_id, branch, node_id)?;
+        }
     }
     report.completed = completed;
     report.writes = writer.report.clone();
@@ -252,38 +366,4 @@ fn repair_branch(
         "index repair finished a branch"
     );
     Ok(report)
-}
-
-/// Every branch of a repository, from the BRANCHES records.
-fn list_branches(db: &DB, tenant_id: &str, repo_id: &str) -> Result<Vec<String>> {
-    let prefix = keys::KeyBuilder::new()
-        .push(tenant_id)
-        .push(repo_id)
-        .push("branches")
-        .build_prefix();
-    let cf = cf_handle(db, cf::BRANCHES)?;
-    let mut branches = Vec::new();
-    for item in crate::prefix_scan(db, cf, &prefix) {
-        let (key, _) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
-        if let Ok(name) = std::str::from_utf8(&key[prefix.len()..]) {
-            if !name.is_empty() && !name.contains('\0') {
-                branches.push(name.to_string());
-            }
-        }
-    }
-    Ok(branches)
-}
-
-/// The branch HEAD, or `None` when the record is missing.
-fn branch_head(db: &DB, tenant_id: &str, repo_id: &str, branch: &str) -> Result<Option<HLC>> {
-    let cf = cf_handle(db, cf::BRANCHES)?;
-    let bytes = db
-        .get_cf(cf, keys::branch_key(tenant_id, repo_id, branch))
-        .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
-    match bytes {
-        Some(bytes) => rmp_serde::from_slice::<raisin_context::Branch>(&bytes)
-            .map(|b| Some(b.head))
-            .map_err(|e| raisin_error::Error::storage(format!("Branch decode error: {e}"))),
-        None => Ok(None),
-    }
 }

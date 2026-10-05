@@ -29,11 +29,19 @@ impl TreeShape {
         let mut children: HashMap<String, Vec<String>> = HashMap::new();
         let mut paths = HashMap::new();
         for (id, path) in nodes {
+            paths.insert(id.to_string(), path.to_string());
+            // The workspace ROOT sits at `/`, inside every `/` prefix scan,
+            // and `parent_of("/")` is `/` itself: registering it would make
+            // the root its own child. It is nobody's child. (An empty
+            // workspace's deep listing returned the root, nested `depth`
+            // times, because one candidate skips the ORDERED_CHILDREN filter.)
+            if normalize(path) == "/" {
+                continue;
+            }
             children
                 .entry(parent_of(path).to_string())
                 .or_default()
                 .push(id.to_string());
-            paths.insert(id.to_string(), path.to_string());
         }
         Self { children, paths }
     }
@@ -133,5 +141,16 @@ mod tests {
         assert_eq!(shape.children_of("b"), ["d".to_string()]);
         assert!(shape.children_of("d").is_empty());
         assert!(shape.children_of("unknown").is_empty());
+    }
+
+    #[test]
+    fn the_root_is_never_its_own_child() {
+        let empty = TreeShape::new([("root", "/")]);
+        assert!(empty.children_of_path("/").is_empty());
+        assert!(empty.children_of("root").is_empty());
+
+        let shape = TreeShape::new([("root", "/"), ("a", "/a")]);
+        assert_eq!(shape.children_of_path("/"), ["a".to_string()]);
+        assert_eq!(shape.children_of("root"), ["a".to_string()]);
     }
 }

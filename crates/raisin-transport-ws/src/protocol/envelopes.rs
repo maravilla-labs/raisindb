@@ -276,6 +276,8 @@ pub enum RequestType {
     NodeUpdate,
     NodeDelete,
     NodeGet,
+    /// A node by its localized URL (plan Phase 12).
+    NodeGetByLocalizedPath,
     NodeHistory,
     NodeQuery,
     NodeQueryByPath,

@@ -46,6 +46,7 @@ impl CompoundIndexRepository for InMemoryCompoundIndexRepo {
         published_only: bool,
         ascending: bool,
         limit: Option<usize>,
+        max_revision: Option<&HLC>,
     ) -> impl std::future::Future<Output = Result<Vec<CompoundIndexScanEntry>>> + Send {
         let _ = (
             scope,
@@ -54,6 +55,7 @@ impl CompoundIndexRepository for InMemoryCompoundIndexRepo {
             published_only,
             ascending,
             limit,
+            max_revision,
         );
         async move { Ok(Vec::new()) }
     }

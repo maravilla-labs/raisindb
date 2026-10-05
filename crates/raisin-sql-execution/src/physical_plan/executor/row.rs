@@ -53,6 +53,13 @@ impl Row {
         }
     }
 
+    /// Create an empty row with room for `n` columns.
+    pub fn with_capacity(n: usize) -> Self {
+        Self {
+            columns: IndexMap::with_capacity(n),
+        }
+    }
+
     /// Create a row from an IndexMap preserving insertion order
     pub fn from_map(columns: IndexMap<String, PropertyValue>) -> Self {
         Self { columns }
@@ -87,20 +94,22 @@ impl Row {
     /// This is useful for functions like DESCENDANT_OF that need to access
     /// columns without knowing the table qualifier.
     pub fn get_by_unqualified(&self, name: &str) -> Option<&PropertyValue> {
+        self.index_of_unqualified(name).map(|i| &self.columns[i])
+    }
+
+    /// The position of the column [`get_by_unqualified`](Self::get_by_unqualified)
+    /// answers with — the ONE lookup, without allocating.
+    pub fn index_of_unqualified(&self, name: &str) -> Option<usize> {
         // Try exact match first
-        if let Some(value) = self.columns.get(name) {
-            return Some(value);
+        if let Some(i) = self.columns.get_index_of(name) {
+            return Some(i);
         }
-
-        // Try finding qualified name ending with .{name}
-        let suffix = format!(".{}", name);
-        for (key, value) in &self.columns {
-            if key.ends_with(&suffix) {
-                return Some(value);
-            }
-        }
-
-        None
+        // Then the first qualified name ending with `.{name}`.
+        self.columns.keys().position(|key| {
+            key.len() > name.len()
+                && key.ends_with(name)
+                && key.as_bytes()[key.len() - name.len() - 1] == b'.'
+        })
     }
 }
 

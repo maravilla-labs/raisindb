@@ -353,16 +353,19 @@ impl<'a> AnalyzerContext<'a> {
         // If we have Text literal and need Path
         if let Expr::Literal(Literal::Text(s)) = &expr.expr {
             if matches!(target, DataType::Path) {
-                // Validate path syntax
-                if !s.starts_with('/') {
-                    return Err(AnalysisError::InvalidPath(format!(
-                        "Path must start with '/': {}",
-                        s
-                    )));
-                }
-                // Return coerced expression
                 return Ok(TypedExpr::new(
-                    Expr::Literal(Literal::Path(s.clone())),
+                    Expr::Literal(coerce_text_to_path(s)?),
+                    DataType::Path,
+                ));
+            }
+        }
+        // A template parameter that will be bound to a Text literal takes the
+        // same coercion — at binding, through `coerce_text_to_path` (plan
+        // Phase 13d). Typing it Path here is what tells the binder so.
+        if let Expr::Literal(Literal::Parameter(p)) = &expr.expr {
+            if matches!(target, DataType::Path) && matches!(expr.data_type, DataType::Text) {
+                return Ok(TypedExpr::new(
+                    Expr::Literal(Literal::Parameter(p.clone())),
                     DataType::Path,
                 ));
             }
@@ -378,4 +381,16 @@ impl<'a> AnalyzerContext<'a> {
 
         Ok(expr)
     }
+}
+
+/// A Text literal where a Path is expected: validated and re-spelled. The
+/// one rule for literals in the SQL text and for bound template parameters.
+pub(crate) fn coerce_text_to_path(s: &str) -> Result<Literal> {
+    if !s.starts_with('/') {
+        return Err(AnalysisError::InvalidPath(format!(
+            "Path must start with '/': {}",
+            s
+        )));
+    }
+    Ok(Literal::Path(s.to_string()))
 }

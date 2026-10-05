@@ -4,14 +4,18 @@
 //! between create and update operations, following DRY principles.
 
 mod compound_indexes;
-pub(crate) mod property_indexes;
+pub(crate) mod in_place_guard;
+pub(crate) mod node_record;
+mod property_write;
 pub(crate) mod reference_indexes;
 mod relation_indexes;
+pub(crate) mod unique_delta;
+pub(crate) mod unique_guard;
 pub(crate) mod unique_indexes;
 
-use super::super::storage_node::StorageNode;
 use super::super::NodeRepositoryImpl;
 use crate::{cf, cf_handle, keys};
+pub(crate) use property_write::PropertyWrite;
 use raisin_error::Result;
 use raisin_hlc::HLC;
 use raisin_models::nodes::Node;
@@ -35,6 +39,7 @@ impl NodeRepositoryImpl {
     /// The node blob is stored as `StorageNode` which excludes the `path` field.
     /// This enables O(1) move operations since only the root node blob needs updating,
     /// while descendant blobs remain unchanged (only path indexes are updated).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn add_node_indexes_to_batch(
         &self,
         batch: &mut WriteBatch,
@@ -44,10 +49,62 @@ impl NodeRepositoryImpl {
         branch: &str,
         workspace: &str,
         revision: &HLC,
+        write: PropertyWrite<'_>,
     ) -> Result<()> {
         self.add_node_indexes_to_batch_with_parent_id(
-            batch, node, tenant_id, repo_id, branch, workspace, revision, None,
+            batch, node, tenant_id, repo_id, branch, workspace, revision, None, write,
         )
+    }
+
+    /// Rewrite an EXISTING node's record at `revision`: index `new` through
+    /// [`Self::add_node_indexes_to_batch_with_parent_id`] with a FULL
+    /// property-index put against `old` (every value `old` carried that `new`
+    /// no longer does is tombstoned).
+    ///
+    /// The writers that re-stamp a node record outside `update_impl` — reorder,
+    /// rebalance and tree move all set a fresh `updated_at`, and a move can
+    /// change `name` — used to write only the NEW entries, leaving the old
+    /// `__updated_at` / `__name` entry live beside them. The timestamp reader
+    /// dedupes per node, so it met the stale entry first, rejected it on the
+    /// residual re-check, and then skipped the live one: `ORDER BY updated_at`
+    /// silently dropped every reordered node.
+    ///
+    /// The COMPOUND entries follow too (plan Phase 8): a re-stamp changes
+    /// `updated_at`, and a compound column over `__updated_at` kept the old
+    /// position live beside nothing at the new one.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn rewrite_node_record_to_batch(
+        &self,
+        batch: &mut WriteBatch,
+        old: &Node,
+        new: &Node,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        revision: &HLC,
+        parent_id: Option<String>,
+    ) -> Result<()> {
+        // A re-stamp is a full put against the record it replaces.
+        self.add_node_indexes_to_batch_with_parent_id(
+            batch,
+            new,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            revision,
+            parent_id,
+            PropertyWrite::full(Some(old)),
+        )?;
+        self.add_compound_delta_to_batch(
+            batch,
+            &crate::indexing::IndexCtx::new(tenant_id, repo_id, branch, workspace),
+            crate::indexing::Baseline::Full(Some(old)),
+            new,
+            revision,
+        )
+        .await
     }
 
     /// Add all index entries for a node with an optional parent_id
@@ -64,48 +121,28 @@ impl NodeRepositoryImpl {
         workspace: &str,
         revision: &HLC,
         parent_id: Option<String>,
+        write: PropertyWrite<'_>,
     ) -> Result<()> {
-        // Get column family handles
-        let cf_nodes = cf_handle(&self.db, cf::NODES)?;
-        let cf_path = cf_handle(&self.db, cf::PATH_INDEX)?;
-        let cf_node_path = cf_handle(&self.db, cf::NODE_PATH)?;
-
-        // Convert Node to StorageNode (excludes path from blob)
-        let storage_node = StorageNode::from_node(node, parent_id);
-
-        // Serialize StorageNode with named fields (NOT Node - path is excluded)
-        // Using to_vec_named ensures nested types like RaisinReference serialize with
-        // field names (e.g., "raisin:ref", "raisin:workspace"), avoiding ambiguity
-        // with plain string arrays during deserialization.
-        let node_value = rmp_serde::to_vec_named(&storage_node)
-            .map_err(|e| raisin_error::Error::storage(format!("Serialization error: {}", e)))?;
-
-        // 1. Store node blob with versioned key
-        let node_key =
-            keys::node_key_versioned(tenant_id, repo_id, branch, workspace, &node.id, revision);
-        batch.put_cf(cf_nodes, node_key, node_value);
+        // 1 + 3. The node record — StorageNode blob (no path) and its
+        // NODE_PATH entry — through the ONE record writer.
+        node_record::write_node_record(
+            &self.db, batch, tenant_id, repo_id, branch, workspace, node, parent_id, revision,
+        )?;
 
         // 2. Index by path with versioned key (path -> node_id)
+        let cf_path = cf_handle(&self.db, cf::PATH_INDEX)?;
         let path_key = keys::path_index_key_versioned(
             tenant_id, repo_id, branch, workspace, &node.path, revision,
         );
         batch.put_cf(cf_path, path_key, node.id.as_bytes());
 
-        // 3. Index node_path with versioned key (node_id -> path) for O(1) path materialization
-        let node_path_key = keys::node_path_key_versioned(
-            tenant_id, repo_id, branch, workspace, &node.id, revision,
-        );
-        batch.put_cf(cf_node_path, node_path_key, node.path.as_bytes());
-
-        // 4. Add property indexes
-        self.add_property_indexes(batch, node, tenant_id, repo_id, branch, workspace, revision)?;
-
-        // 5. Add system property indexes
-        self.add_system_property_indexes(
-            batch, node, tenant_id, repo_id, branch, workspace, revision,
+        // 4 + 5. Property and pseudo-property entries, IS_A / HAS_MIXIN
+        // membership included, through the ONE writer (`property_delta`).
+        self.write_property_entries(
+            batch, node, tenant_id, repo_id, branch, workspace, revision, write,
         )?;
 
-        // 6. Add reference indexes
+        // 6. Add reference indexes (every reference, never skipped)
         self.add_reference_indexes(batch, node, tenant_id, repo_id, branch, workspace, revision)?;
 
         // 7. Add relation indexes

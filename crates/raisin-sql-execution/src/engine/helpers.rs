@@ -183,6 +183,15 @@ fn compound_index_cache(
     })
 }
 
+/// Drop every cached compound-index definition list — what the 30 s TTL does
+/// on its own; for tests that change a NodeType and plan again at once.
+#[doc(hidden)]
+pub fn invalidate_compound_index_cache() {
+    if let Some(cache) = COMPOUND_INDEX_CACHE.get() {
+        cache.invalidate_all();
+    }
+}
+
 pub(crate) async fn load_all_compound_indexes<S: Storage>(
     storage: &S,
     tenant_id: &str,

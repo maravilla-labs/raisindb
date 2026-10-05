@@ -298,6 +298,22 @@ pub struct StorageConfig {
     /// Env: `RAISIN_MAINTENANCE_INTERVAL_MINUTES`.
     #[serde(default)]
     pub maintenance_interval_minutes: Option<u64>,
+    /// `index.skip_unchanged` (plan Phases 7 and 7b): an update writes only
+    /// the PROPERTY_INDEX (and compound) entries that changed. Default: ON.
+    /// It takes effect on a branch only after this node has run the
+    /// `property_index` repair there, which queues itself per branch in the
+    /// background while this is on (`RAISIN_PROPERTY_INDEX_AUTO_REBUILD=0`
+    /// stops that; the admin endpoint still works). Turning it off is always a
+    /// safe rollback. Env: `RAISIN_INDEX_SKIP_UNCHANGED=0`/`1` overrides this
+    /// either way.
+    #[serde(default)]
+    pub index_skip_unchanged: Option<bool>,
+    /// Run-collapse GC (plan Phase 9): allow the admin-triggered
+    /// `collapse_runs` repair (`POST /api/management/{repo}/repairs/collapse_runs`).
+    /// Default: off. It refuses on a replicating node (no causal-stability
+    /// watermark yet). Env: `RAISIN_HISTORY_GC_COLLAPSE_RUNS=1` also turns it on.
+    #[serde(default)]
+    pub history_gc_collapse_runs: Option<bool>,
 }
 
 /// Trigger circuit breaker configuration (TOML `[trigger_safety]` section).

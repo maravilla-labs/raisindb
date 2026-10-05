@@ -190,6 +190,17 @@ pub(crate) const BRANCH_CF_REGISTRY: &[(&str, BranchScope)] = &[
     // v2:     …\0{embedder_hash}\0{kind}\0{source_id}\0{chunk_idx}\0{~rev}
     // legacy: …\0{node_id}\0{~rev}
     (cf::EMBEDDINGS, copied("embeddings", RevisionLocator::Tail)),
+    // fwd: …\0lname\0{locale}\0{parent_id}\0{name}\0{node_id}\0{~rev}
+    // rev: …\0lname_of\0{node_id}\0{locale}\0{~rev}
+    // Derived, but forked like every other derived index: the fork's nodes
+    // and translations are copied, so their entries are exactly as valid
+    // there. The fork's BUILD STATE is not (INDEX_STATUS is not copied), so a
+    // fork serves lookups by the row-level fallback until its own rebuild
+    // (`localized_name::state`) — the plan's `fork_is_not_ready_until_rebuilt`.
+    (
+        cf::LOCALIZED_NAME_INDEX,
+        copied("localized_name_index", RevisionLocator::Tail),
+    ),
     // ---- branch-scoped, deliberately NOT copied ----------------------------
     (
         cf::ORDER_INDEX,
@@ -442,6 +453,7 @@ mod tests {
             cf::SPATIAL_INDEX,
             cf::COMPOUND_INDEX,
             cf::UNIQUE_INDEX,
+            cf::LOCALIZED_NAME_INDEX,
             cf::NODES,
             cf::PATH_INDEX,
             // A fork that drops secrets still LOOKS healthy: reads return the

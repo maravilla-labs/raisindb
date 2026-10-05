@@ -67,6 +67,14 @@ pub async fn add_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
     // 3a. Check CREATE permission
     rls::check_create_permission(tx, &normalized_node, workspace).await?;
 
+    // 3b'. The id's stored versions, recorded before anything is read: the
+    // commit re-checks them under the node's lock (`StagedDeltaCheck`), so a
+    // version of this id committed in between is ended, not left live.
+    let pending_check = tx.pending_delta_check(
+        &crate::indexing::IndexCtx::new(&tenant_id, &repo_id, &branch, workspace),
+        &normalized_node.id,
+    )?;
+
     // 3c. Reserve the path against concurrent creators BEFORE the existence
     // check below. The existence check alone is a TOCTOU race: two concurrent
     // transactions can both see "no node at path" and both commit, yielding two
@@ -190,6 +198,9 @@ pub async fn add_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
 
     // 6. Get or allocate the single transaction HLC
     let revision = tx.get_or_allocate_transaction_revision()?;
+    if let Some(pending) = pending_check {
+        tx.record_delta_check(workspace, pending.at(&revision))?;
+    }
 
     tracing::debug!(
         "TXN add_node: node_id={}, path={}, revision={}",
@@ -241,6 +252,36 @@ pub async fn add_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
         .capture_secret_versions(&tenant_id, &repo_id, &branch, &vault_actor, &minted_secrets)
         .await;
 
+    // 11 (runs first). The ORDERED_CHILDREN label IS the node's `order_key`,
+    // so it is minted before the record is cached or written — stamping it
+    // afterwards stored every transaction-created node with an empty
+    // order_key (`Node.order_key == ORDERED_CHILDREN label` invariant).
+    // Add ORDERED_CHILDREN index entry (FAST PATH)
+    let parent_id = ordering::lookup_parent_id(
+        tx,
+        &tenant_id,
+        &repo_id,
+        &branch,
+        workspace,
+        &normalized_node,
+    )
+    .await?;
+
+    if let Some(parent_id_val) = parent_id.as_ref() {
+        let order_label = ordering::add_ordered_child_fast(
+            tx,
+            &tenant_id,
+            &repo_id,
+            &branch,
+            workspace,
+            &parent_id_val,
+            &normalized_node,
+            &revision,
+        )?;
+
+        normalized_node.order_key = order_label;
+    }
+
     // 6. Update read cache for read-your-writes semantics
     cache::update_read_cache(tx, workspace, &normalized_node, None)?;
 
@@ -252,6 +293,7 @@ pub async fn add_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
         &branch,
         workspace,
         &normalized_node,
+        parent_id.as_deref(),
         &revision,
     )?;
     tx.record_write(node_key)?;
@@ -278,6 +320,7 @@ pub async fn add_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
         workspace,
         &normalized_node,
         &revision,
+        crate::repositories::nodes::PropertyWrite::CREATE,
     )?;
 
     // 10. Index references
@@ -292,55 +335,32 @@ pub async fn add_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
     )?;
 
     // 10a. Index unique properties
-    indexing::index_unique_properties(
+    indexing::write_unique_properties(
         tx,
         &tenant_id,
         &repo_id,
         &branch,
         workspace,
+        None,
         &normalized_node,
         &revision,
+        false,
     )
     .await?;
 
     // 10b. Index compound indexes (multi-column). Mirrors the repository path so
     // SQL-created nodes are visible to compound-index scans.
-    indexing::index_compound_indexes(
+    indexing::write_compound_indexes(
         tx,
         &tenant_id,
         &repo_id,
         &branch,
         workspace,
+        crate::indexing::Baseline::NoPrior,
         &normalized_node,
         &revision,
     )
     .await?;
-
-    // 11. Add ORDERED_CHILDREN index entry (FAST PATH)
-    let parent_id = ordering::lookup_parent_id(
-        tx,
-        &tenant_id,
-        &repo_id,
-        &branch,
-        workspace,
-        &normalized_node,
-    )
-    .await?;
-
-    if let Some(parent_id_val) = parent_id {
-        let order_label = ordering::add_ordered_child_fast(
-            tx,
-            &tenant_id,
-            &repo_id,
-            &branch,
-            workspace,
-            &parent_id_val,
-            &normalized_node,
-            &revision,
-        )?;
-
-        normalized_node.order_key = order_label;
-    }
 
     // 12. Track creation
     tracking::track_create(tx, workspace, &normalized_node, revision)?;

@@ -37,6 +37,33 @@ impl NodeRepositoryImpl {
         id: &str,
         max_revision: Option<&HLC>,
     ) -> Result<Option<Node>> {
+        self.dispatch_get_as(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            id,
+            max_revision,
+            true,
+            crate::repositories::nodes::storage_node::PropertiesMode::Load,
+        )
+        .await
+    }
+
+    /// [`Self::dispatch_get`] populating `has_children` only when asked and
+    /// decoding properties per `mode` (`NodeRepository::get_for_read`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn dispatch_get_as(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        id: &str,
+        max_revision: Option<&HLC>,
+        populate_has_children: bool,
+        mode: crate::repositories::nodes::storage_node::PropertiesMode,
+    ) -> Result<Option<Node>> {
         let target_revision = if let Some(rev) = max_revision {
             *rev
         } else if let Some(head) = self
@@ -48,14 +75,15 @@ impl NodeRepositoryImpl {
             return Ok(None);
         };
 
-        self.get_at_revision_impl(
+        self.get_at_revision_impl_as(
             tenant_id,
             repo_id,
             branch,
             workspace,
             id,
             &target_revision,
-            true,
+            populate_has_children,
+            mode,
         )
         .await
     }

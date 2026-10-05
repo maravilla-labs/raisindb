@@ -170,15 +170,16 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         // Step 4: Get the node at the historical revision
         let historical_service = build_service(workspace.clone()).at_revision(revision_hlc);
 
-        let historical_node = historical_service
-            .get_by_path(&node_path)
-            .await?
-            .ok_or_else(|| {
-                Error::NotFound(format!(
-                    "Node at path '{}' not found at revision {}",
-                    node_path, revision_hlc
-                ))
-            })?;
+        // By ID: the node is already identified, and its path at that
+        // revision may differ from today's (it, or an ancestor, was moved or
+        // renamed since). A by-path lookup answered "not found" for exactly
+        // the revisions a restore is most often aimed at.
+        let historical_node = historical_service.get(&node_id).await?.ok_or_else(|| {
+            Error::NotFound(format!(
+                "Node '{}' ({}) not found at revision {}",
+                node_path, node_id, revision_hlc
+            ))
+        })?;
 
         // Step 5: Handle recursive restore (RESTORE TREE NODE)
         if restore_stmt.recursive {
@@ -242,9 +243,16 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
 
             merged_node
         } else {
+            // Content from the past, PLACEMENT from the present: the node
+            // stays where it is now. Its name, parent and sibling label are
+            // as current as its path — the historical ones describe a place
+            // it may since have been moved or renamed out of.
             let mut restored = historical_node.clone();
             restored.path = current_node.path.clone();
             restored.id = current_node.id.clone();
+            restored.name = current_node.name.clone();
+            restored.parent = current_node.parent.clone();
+            restored.order_key = current_node.order_key.clone();
             restored
         };
 

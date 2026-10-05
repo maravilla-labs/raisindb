@@ -1,7 +1,7 @@
 //! Writing a resolved conflict's DELETION into the target branch.
 
 use super::superseded::{order_entry, Superseded};
-use super::unique_props::UniqueProperties;
+use super::unique_props::SchemaDefs;
 use crate::{cf, cf_handle, keys};
 use raisin_error::Result;
 use raisin_hlc::HLC;
@@ -16,7 +16,7 @@ use std::sync::Arc;
 /// version came from, since a source-side entry reaches the target only when
 /// the copy runs — after this.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn write_resolved_deletion(
+pub(super) async fn write_resolved_deletion(
     db: &Arc<DB>,
     tenant_id: &str,
     repo_id: &str,
@@ -25,7 +25,8 @@ pub(super) fn write_resolved_deletion(
     node_id: &str,
     revision: &HLC,
     superseded: &[Superseded],
-    unique: &UniqueProperties,
+    unique: &SchemaDefs,
+    source: (&str, &HLC),
 ) -> Result<()> {
     let mut batch = WriteBatch::default();
     let cf_nodes = cf_handle(db, cf::NODES)?;
@@ -33,6 +34,11 @@ pub(super) fn write_resolved_deletion(
     let ctx =
         crate::tombstones::TombstoneContext::new(tenant_id, repo_id, target_branch, workspace);
     let cfs = crate::tombstones::TombstoneColumnFamilies::from_db(db)?;
+    let index_ctx = crate::indexing::IndexCtx::new(tenant_id, repo_id, target_branch, workspace);
+    // UNIQUE claims the merged view gives to other nodes are not ended
+    // (`merged_view`).
+    let others = super::merged_view::MergedView::new(index_ctx, revision, source)
+        .others_claims(db, superseded, unique, node_id)?;
 
     for old in superseded {
         // The ORDERED_CHILDREN parent as the version's OWN branch had it.
@@ -64,6 +70,7 @@ pub(super) fn write_resolved_deletion(
             &old.node,
             unique.of(&old.node.node_type),
             revision,
+            Some(&others),
         )?;
         if let Some((parent, label)) = order_entry(
             db,
@@ -101,9 +108,29 @@ pub(super) fn write_resolved_deletion(
         ),
         keys::TOMBSTONE_VALUE,
     );
+    if superseded.is_empty() {
+        // The delete funnel above materializes block-overlay `T`s (plan Phase
+        // 11c); with no live version on either side it did not run.
+        crate::translation_write::materialize_block_deletion(
+            db,
+            &mut batch,
+            (tenant_id, repo_id, target_branch, workspace),
+            node_id,
+            revision,
+        )?;
+    }
 
-    db.write(batch)
-        .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+    // One node commit step (plan Phase 7b): locked, and the delete's
+    // property and compound tombstones re-derived against what is stored on
+    // the target at that moment.
+    let mut commit = crate::indexing::NodeCommit::new(tenant_id, repo_id, target_branch);
+    commit
+        .check(
+            crate::indexing::StagedDeltaCheck::always(&index_ctx, node_id, revision),
+            None,
+        )
+        .hold_external(&others);
+    commit.write(db, batch).await?;
     // No compound stale mark: the delete tombstoner above already retires
     // every version's COMPOUND_INDEX entries, so the index stays exact.
 

@@ -3,7 +3,6 @@ use raisin_hlc::HLC;
 use raisin_models::admin_user::DatabaseAdminUser;
 use raisin_models::api_key::ApiKey;
 use raisin_models::auth::{Identity, OAuthClient, RefreshToken, Session};
-use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::types::archetype::Archetype;
 use raisin_models::nodes::types::node_type::NodeType;
 use raisin_models::nodes::Node;
@@ -12,103 +11,61 @@ use raisin_models::registry::{DeploymentRegistration, TenantRegistration};
 use raisin_models::workspace::Workspace;
 use raisin_storage::RevisionMeta;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use uuid::Uuid;
 
-use super::ReplicatedNodeChange;
+use super::{ReplicatedNodeChange, ReplicatedOverlay};
 
 // NOTE: This enum intentionally exceeds 300 lines - it is a single enum definition
 // with many variants that cannot be further decomposed in Rust.
 
 /// The type of operation being performed
+///
+/// # Mixed versions: an op this binary does not know
+///
+/// `Serialize`/`Deserialize` are derived with `remote = "Self"` (inherent
+/// functions) and wrapped by hand in `op_type_serde.rs`, so a variant this
+/// binary has never heard of decodes as [`OpType::Unknown`] — carrying its
+/// tag and payload verbatim — instead of failing the whole message. Without
+/// it, one op from a newer peer made the batch undecodable and the applier
+/// retried it forever (plan Phase 11, `unknown_optype_is_skipped_not_stalled`).
+/// A new op must therefore carry data (a struct or newtype variant): a UNIT
+/// variant unknown to an older peer still fails to decode there.
+///
+/// # Node writes replicate as snapshots only
+///
+/// Every node write replicates as [`OpType::ApplyRevision`] (decomposed into
+/// [`OpType::UpsertNodeSnapshot`] / [`OpType::DeleteNodeSnapshot`] before it
+/// is sent). The pre-v2 granular node ops — `create_node`, `delete_node`,
+/// `set_property`, `delete_property`, `rename_node`, `set_archetype`,
+/// `set_order_key`, `set_owner`, `publish_node`, `unpublish_node`,
+/// `move_node`, `list_insert_after`, `list_delete` — are gone (no cluster ran
+/// on them; plan "Phase 11d"). Because the tag is the variant NAME, one still
+/// sitting in a saved oplog decodes as [`OpType::Unknown`] and is skipped; no
+/// placeholder variant is needed, and none of those names may be reused for a
+/// differently shaped op.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
+#[serde(remote = "Self", rename_all = "snake_case")]
 pub enum OpType {
-    /// Create a new node (storage node in the database)
-    CreateNode {
-        node_id: String, // Storage node ID
-        name: String,
-        node_type: String,
-        archetype: Option<String>,
-        parent_id: Option<String>,
-        order_key: String,
-        #[serde(default)]
-        properties: HashMap<String, PropertyValue>,
-        owner_id: Option<String>,
-        workspace: Option<String>,
-        #[serde(default)]
-        path: String, // Full path to the node (e.g., "/content/page")
-    },
-
-    /// Delete an existing node (storage node)
-    DeleteNode {
-        node_id: String, // Storage node ID
-    },
-
-    /// Set a single property on a node (granular for CRDT)
-    SetProperty {
-        node_id: String, // Storage node ID
-        property_name: String,
-        value: PropertyValue,
-    },
-
-    /// Delete a single property from a node
-    DeleteProperty {
-        node_id: String, // Storage node ID
-        property_name: String,
-    },
-
-    /// Rename a node
-    RenameNode {
-        node_id: String,
-        old_name: String,
-        new_name: String,
-    },
-
-    /// Change node archetype
-    SetArchetype {
-        node_id: String,
-        old_archetype: Option<String>,
-        new_archetype: Option<String>,
-    },
-
-    /// Update node order key (for sibling ordering)
-    SetOrderKey {
-        node_id: String,
-        old_order_key: String,
-        new_order_key: String,
-    },
-
-    /// Transfer node ownership
-    SetOwner {
-        node_id: String,
-        old_owner_id: Option<String>,
-        new_owner_id: Option<String>,
-    },
-
-    /// Publish a node
-    PublishNode {
-        node_id: String,
-        published_by: String,
-        published_at: u64, // timestamp_ms
-    },
-
-    /// Unpublish a node
-    UnpublishNode { node_id: String },
-
-    /// Set translation for a property
-    SetTranslation {
+    /// One version of one translation overlay (node or block), at its
+    /// original revision — Hidden as Hidden, a deletion as `Deleted` (plan
+    /// Phase 11). The only translation op. The pre-Phase-11
+    /// `set_translation` / `delete_translation` ops (no workspace, no
+    /// revision, Hidden folded into delete) are gone: no binary ever applied
+    /// them and no cluster ran on them, so one still sitting in a saved oplog
+    /// decodes as [`OpType::Unknown`] and is skipped.
+    UpsertTranslationOverlay {
+        workspace: String,
         node_id: String,
         locale: String,
-        property_name: String,
-        value: PropertyValue,
-    },
-
-    /// Delete translation for a property
-    DeleteTranslation {
-        node_id: String,
-        locale: String,
-        property_name: String,
+        /// `Some` for a block overlay (`BLOCK_TRANSLATIONS`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block_uuid: Option<String>,
+        overlay: ReplicatedOverlay,
+        revision: HLC,
+        /// Set by the resync job: below this revision the sender's translation
+        /// history of the op's branch is not complete (its history GC deleted
+        /// versions there). See `translation_history_complete_from`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        history_complete_from: Option<HLC>,
     },
 
     /// Add a relation between nodes (Last-Write-Wins CRDT)
@@ -136,14 +93,6 @@ pub enum OpType {
         target_workspace: String,
     },
 
-    /// Move a node to a new parent (Last-Write-Wins)
-    MoveNode {
-        node_id: String, // Storage node ID
-        old_parent_id: Option<String>,
-        new_parent_id: Option<String>,
-        /// Fractional index for ordering among siblings
-        position: Option<String>,
-    },
     /// Apply a fully materialized revision captured at commit time
     ApplyRevision {
         /// Target branch head after applying the revision
@@ -163,25 +112,22 @@ pub enum OpType {
 
     /// Delete a node snapshot (decomposed from ApplyRevision for CRDT commutativity)
     /// This operation is Delete-Wins and commutative with other node operations
-    DeleteNodeSnapshot { node_id: String, revision: HLC },
-
-    /// Insert an element into an ordered list (RGA CRDT)
-    ListInsertAfter {
-        node_id: String, // Storage node ID
-        list_property: String,
-        /// Element to insert after (None = insert at beginning)
-        after_id: Option<Uuid>,
-        value: PropertyValue,
-        /// Unique immutable ID for this list element
-        element_id: Uuid,
-    },
-
-    /// Delete an element from an ordered list (RGA CRDT)
-    ListDelete {
-        node_id: String, // Storage node ID
-        list_property: String,
-        /// The element_id from ListInsertAfter
-        element_id: Uuid,
+    DeleteNodeSnapshot {
+        node_id: String,
+        revision: HLC,
+        /// The pre-delete node, stamped with its workspace — the `Delete`
+        /// change's node, carried through decomposition so a peer tombstones
+        /// from it exactly as it does for the `ApplyRevision` it came from,
+        /// instead of finding the node by a whole-branch scan and its parent
+        /// by path at HEAD (gone once an earlier op in the same revision
+        /// tombstoned the parent's path). `None` on an op from an older binary:
+        /// the peer then falls back to the scan.
+        #[serde(default)]
+        node: Option<Node>,
+        /// The ORDERED_CHILDREN parent id (`/` for a root child) the change
+        /// carried, when it had one.
+        #[serde(default)]
+        parent_id: Option<String>,
     },
 
     /// Update a NodeType schema
@@ -414,6 +360,21 @@ pub enum OpType {
         session_id: String,
         new_generation: u32,
     },
+
+    /// An operation from a NEWER peer that this binary cannot decode: its
+    /// variant tag and payload, kept verbatim (re-serialized byte-for-byte in
+    /// structure, so persisting or forwarding it loses nothing). Never
+    /// constructed locally; appliers skip it with a warning.
+    ///
+    /// Skipping is NOT deferral: the op is marked applied and the vector
+    /// clock moves past it (or the next sync would ask for it forever), and
+    /// nothing re-dispatches it after this node upgrades to a binary that
+    /// knows the tag. Whatever it carried is missing here until some repair
+    /// re-emits it. So a release that adds an op whose loss would matter must
+    /// not let any node emit it until every node of the cluster decodes it
+    /// (a deploy-order rule, or an emission gate for that op).
+    #[serde(skip)]
+    Unknown { tag: String, payload: rmpv::Value },
 }
 
 /// One version of one secret on the wire: **ciphertext only**.

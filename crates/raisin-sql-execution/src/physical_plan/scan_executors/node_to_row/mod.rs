@@ -15,18 +15,22 @@
 
 mod embedding;
 mod fields;
+mod localized;
 
 use crate::physical_plan::executor::{ExecutionContext, Row};
 use raisin_error::Error;
 use raisin_models::nodes::Node;
 use raisin_storage::Storage;
+use std::borrow::Cow;
 
-/// Editorial-ordering context a scan can supply for the row it is emitting.
+/// Values a scan already holds for the row it is emitting.
 ///
 /// Scans driven by the `ORDERED_CHILDREN` index already hold the node's order
 /// label (it is part of the scanned key), and tree traversals additionally know
 /// the chain of ancestor labels. Passing them through avoids a re-lookup and is
-/// the only way `__tree_order` can be known at all.
+/// the only way `__tree_order` can be known at all. `LocalizedPathLookup`
+/// likewise knows the row's canonical localized path: it emits the node only
+/// when that path IS the requested one.
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct OrderContext<'a> {
     /// The node's own editorial order label among its siblings.
@@ -38,6 +42,11 @@ pub(crate) struct OrderContext<'a> {
     /// `None` leaves `__tree_order` NULL, which is correct for any scan that is
     /// not a tree traversal.
     pub tree_order: Option<&'a str>,
+    /// The node's canonical localized path in the row's locale, when the
+    /// scan resolved it. `None` computes it (only when `__localized_path` is
+    /// projected) — walking every ancestor (plan Phase 13b measured that
+    /// recomputation at ~40 % of a localized path lookup).
+    pub localized_path: Option<&'a str>,
 }
 
 impl<'a> OrderContext<'a> {
@@ -45,7 +54,7 @@ impl<'a> OrderContext<'a> {
     pub(crate) fn label(order_label: &'a str) -> Self {
         Self {
             order_label: Some(order_label),
-            tree_order: None,
+            ..Self::default()
         }
     }
 }
@@ -69,6 +78,52 @@ impl<'a> OrderContext<'a> {
 ///   `qualifier.__order`, `qualifier.__tree_order`
 pub(crate) async fn node_to_row<S: Storage>(
     node: &Node,
+    qualifier: &str,
+    workspace: &str,
+    projection: &Option<Vec<String>>,
+    ctx: &ExecutionContext<S>,
+    effective_locale: &str,
+    order_ctx: Option<&OrderContext<'_>>,
+) -> Result<Row, Error> {
+    convert(
+        Cow::Borrowed(node),
+        qualifier,
+        workspace,
+        projection,
+        ctx,
+        effective_locale,
+        order_ctx,
+    )
+    .await
+}
+
+/// [`node_to_row`] for a node the caller is done with: its property map is
+/// MOVED into the `properties` column instead of cloned (the batched index
+/// scans hand over every node they read).
+pub(crate) async fn node_to_row_owned<S: Storage>(
+    node: Node,
+    qualifier: &str,
+    workspace: &str,
+    projection: &Option<Vec<String>>,
+    ctx: &ExecutionContext<S>,
+    effective_locale: &str,
+    order_ctx: Option<&OrderContext<'_>>,
+) -> Result<Row, Error> {
+    convert(
+        Cow::Owned(node),
+        qualifier,
+        workspace,
+        projection,
+        ctx,
+        effective_locale,
+        order_ctx,
+    )
+    .await
+}
+
+/// The ONE conversion behind both entry points.
+async fn convert<S: Storage>(
+    node: Cow<'_, Node>,
     qualifier: &str,
     workspace: &str,
     projection: &Option<Vec<String>>,
@@ -117,17 +172,20 @@ pub(crate) async fn node_to_row<S: Storage>(
             .is_none_or(|p| p.contains(&col.to_string()))
     };
 
+    let owned = matches!(node, Cow::Owned(_));
+
     // Map standard node fields with qualified names
-    fields::insert_standard_fields(&mut row, node, qualifier, &should_include);
-    fields::insert_optional_fields(&mut row, node, qualifier, &should_include);
+    fields::insert_standard_fields(&mut row, &node, qualifier, &should_include);
+    fields::insert_optional_fields(&mut row, &node, qualifier, &should_include);
     fields::insert_computed_fields(
         &mut row,
-        node,
+        &node,
         qualifier,
         workspace,
         effective_locale,
         order_ctx,
         &should_include,
+        owned,
     );
 
     // Virtual column: embedding (fetched from RocksDB embedding storage) —
@@ -137,11 +195,34 @@ pub(crate) async fn node_to_row<S: Storage>(
         .as_ref()
         .is_some_and(|p| p.iter().any(|c| c == "embedding"))
     {
-        embedding::insert_embedding_field(&mut row, node, qualifier, workspace, ctx).await?;
+        embedding::insert_embedding_field(&mut row, &node, qualifier, workspace, ctx).await?;
     }
 
+    // Virtual columns: __node_name / __localized_path — only when NAMED.
+    localized::insert_localized_fields(
+        &mut row,
+        &node,
+        qualifier,
+        workspace,
+        ctx,
+        effective_locale,
+        projection,
+        order_ctx.and_then(|c| c.localized_path),
+    )
+    .await?;
+
     // Include properties with qualified names
-    fields::insert_property_fields(&mut row, node, qualifier, projection);
+    fields::insert_property_fields(&mut row, &node, qualifier, projection);
+
+    // The placeholder `insert_computed_fields` left keeps its position.
+    if let Cow::Owned(node) = node {
+        if should_include("properties") {
+            row.insert(
+                format!("{}.properties", qualifier),
+                PropertyValue::Object(node.properties),
+            );
+        }
+    }
 
     Ok(row)
 }

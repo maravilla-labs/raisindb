@@ -92,6 +92,28 @@ pub trait ReferenceIndexRepository: Send + Sync {
         published_only: bool,
     ) -> impl std::future::Future<Output = Result<Vec<(String, String)>>> + Send;
 
+    /// [`Self::find_referencing_nodes`] AS OF `max_revision`: per
+    /// `(source, property)` the newest entry at or below it decides. `None`
+    /// reads the newest entry, exactly like `find_referencing_nodes`.
+    ///
+    /// A `REFERENCES()` read at `__revision = N` must see the referrers of
+    /// revision N — including one whose reference was removed, or which was
+    /// deleted, after N. A HEAD-only read dropped those.
+    ///
+    /// The default answers as of HEAD, for backends without revision-bounded
+    /// index reads (the deprecated in-memory backend).
+    fn find_referencing_nodes_at(
+        &self,
+        scope: StorageScope<'_>,
+        target_workspace: &str,
+        target_id: &str,
+        published_only: bool,
+        max_revision: Option<&HLC>,
+    ) -> impl std::future::Future<Output = Result<Vec<(String, String)>>> + Send {
+        let _ = max_revision;
+        self.find_referencing_nodes(scope, target_workspace, target_id, published_only)
+    }
+
     /// Get all references from a specific node
     ///
     /// Uses forward index for O(1) or O(log n) lookup.

@@ -30,7 +30,6 @@
 
 use raisin_error::Result;
 
-use crate::repositories::hash_property_value;
 use crate::tombstones::{
     add_node_tombstones, TombstoneColumnFamilies, TombstoneContext, TOMBSTONE,
 };
@@ -90,7 +89,15 @@ pub async fn delete_node(tx: &RocksDBTransaction, workspace: &str, node_id: &str
         )
     };
 
-    // 2. Get current node to know what indexes to clean up
+    // 2. Get current node to know what indexes to clean up — after recording
+    // the node's stored versions (plan Phase 7b): the commit re-checks them
+    // under the node's commit lock and re-derives the delete's property and
+    // compound tombstones when they changed. Only for the node's first write
+    // in this transaction (an earlier write's check already covers it).
+    let pending_check = tx.pending_delta_check(
+        &crate::indexing::IndexCtx::new(&tenant_id, &repo_id, &branch, workspace),
+        node_id,
+    )?;
     let node = super::read::get_node(tx, workspace, node_id)
         .await?
         .ok_or_else(|| raisin_error::Error::NotFound(format!("Node {} not found", node_id)))?;
@@ -172,41 +179,30 @@ pub async fn delete_node(tx: &RocksDBTransaction, workspace: &str, node_id: &str
         cache
             .paths
             .insert((workspace.to_string(), node.path.clone()), None);
+        if let Some(pending) = pending_check {
+            cache
+                .delta_checks
+                .entry((workspace.to_string(), node_id.to_string()))
+                .or_insert_with(|| pending.at(&revision));
+        }
     }
 
     // 4. Get unique property info BEFORE locking batch (async operation)
-    // This avoids holding MutexGuard across await points
-    use crate::repositories::UniqueIndexManager;
+    // This avoids holding MutexGuard across await points. One walk of the
+    // NodeType (`extract_unique_property_names`), shared with every writer.
     use raisin_storage::NodeTypeRepository;
 
-    let unique_properties = {
-        let node_type = tx
-            .node_repo
-            .node_type_repo
-            .get(
-                raisin_storage::BranchScope::new(&tenant_id, &repo_id, &branch),
-                &node.node_type,
-                None,
-            )
-            .await?;
-
-        match node_type {
-            Some(nt) => match nt.properties {
-                Some(ref props) => props
-                    .iter()
-                    .filter_map(|p| {
-                        if p.unique.unwrap_or(false) {
-                            p.name.clone()
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>(),
-                None => Vec::new(),
-            },
-            None => Vec::new(),
-        }
-    };
+    let unique_properties = tx
+        .node_repo
+        .node_type_repo
+        .get(
+            raisin_storage::BranchScope::new(&tenant_id, &repo_id, &branch),
+            &node.node_type,
+            None,
+        )
+        .await?
+        .map(|nt| crate::repositories::nodes::extract_unique_property_names(&nt))
+        .unwrap_or_default();
 
     // 5. Lock batch and write all tombstones (synchronous operations only)
     let mut batch = tx
@@ -215,26 +211,21 @@ pub async fn delete_node(tx: &RocksDBTransaction, workspace: &str, node_id: &str
         .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
 
     // 5a. Tombstone unique index entries (release unique values for reuse)
+    // through the one delete tombstoner, so this path ends a claim exactly
+    // when the repository and the replicated delete do (plan Phase 13a).
     if !unique_properties.is_empty() {
-        let unique_manager = UniqueIndexManager::new(tx.db.clone());
-
-        for prop_name in unique_properties {
-            if let Some(prop_value) = node.properties.get(&prop_name) {
-                let value_hash = hash_property_value(prop_value);
-
-                unique_manager.add_unique_tombstone_to_batch(
-                    &mut batch,
-                    &tenant_id,
-                    &repo_id,
-                    &branch,
-                    workspace,
-                    &node.node_type,
-                    &prop_name,
-                    &value_hash,
-                    &revision,
-                )?;
-            }
-        }
+        crate::repositories::nodes::tombstone_unique_entries(
+            &mut batch,
+            &tx.db,
+            &tenant_id,
+            &repo_id,
+            &branch,
+            workspace,
+            &node,
+            &unique_properties,
+            &revision,
+            None,
+        )?;
     }
 
     // Use shared tombstone function - SINGLE SOURCE OF TRUTH for all deletion tombstones
@@ -242,6 +233,13 @@ pub async fn delete_node(tx: &RocksDBTransaction, workspace: &str, node_id: &str
     let cfs = TombstoneColumnFamilies::from_arc_db(&tx.db)?;
 
     add_node_tombstones(&mut batch, &tx.db, &ctx, &cfs, &node, &revision)?;
+    crate::transaction::context::translations::write::tombstone_own_writes(
+        tx,
+        &mut batch,
+        (&tenant_id, &repo_id, &branch, workspace),
+        node_id,
+        &revision,
+    )?;
 
     // Track changed node for revision snapshot creation during commit (always Deleted for delete_impl)
     // IMPORTANT: Store path and node_type BEFORE deletion so WebSocket subscriptions can match

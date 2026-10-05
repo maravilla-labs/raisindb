@@ -207,6 +207,19 @@ pub async fn sweep_compound_index_builds_at_boot(storage: &RocksDBStorage) -> Re
                 }
             };
             for branch in branches {
+                // Warm the index definitions the replication apply path reads
+                // (it may not read a NodeType): a replica that has just booted
+                // then maintains compound and unique entries inline from its
+                // first replicated write (plan Phase 8 step 3).
+                if let Err(e) = crate::indexing::compound::defs::warm_branch(
+                    storage.db(),
+                    &storage.node_types,
+                    raisin_storage::BranchScope::new(&tenant_id, &repo_id, &branch.name),
+                )
+                .await
+                {
+                    tracing::warn!(tenant = %tenant_id, repo = %repo_id, branch = %branch.name, error = %e, "boot compound-index sweep: failed to warm index definitions");
+                }
                 let workspaces = match storage
                     .workspaces()
                     .list(RepoScope::new(&tenant_id, &repo_id))

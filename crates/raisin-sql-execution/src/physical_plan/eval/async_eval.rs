@@ -18,6 +18,7 @@ use super::helpers::{
     arithmetic_op, compare_literals, is_zero, literals_equal, logical_and, logical_or,
 };
 use super::resolve_eval::eval_resolve;
+use super::resolve_path_eval::eval_resolve_path;
 use super::vector_ops::{dot_product, extract_vector, l2_distance};
 
 /// Evaluate a typed expression against a row asynchronously
@@ -77,6 +78,7 @@ fn is_async_function(name: &str) -> bool {
     [
         "EMBEDDING",
         "RESOLVE",
+        "RESOLVE_PATH",
         "INVOKE",
         "INVOKE_SYNC",
         "RAISIN_TRY_ACQUIRE",
@@ -372,6 +374,7 @@ async fn eval_function_async<S: raisin_storage::Storage>(
         }
 
         "RESOLVE" => eval_resolve(args, row, ctx).await,
+        "RESOLVE_PATH" => eval_resolve_path(args, row, ctx).await,
         "INVOKE" => eval_invoke(args, row, ctx).await,
         "INVOKE_SYNC" => eval_invoke_sync(args, row, ctx).await,
 

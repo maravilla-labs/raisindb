@@ -54,6 +54,9 @@ const TENANT_PREFIXED_CFS: &[&str] = &[
     cf::COMPOUND_INDEX,
     cf::UNIQUE_INDEX,
     cf::SPATIAL_INDEX,
+    // Localized name index (plan Phase 12). Not covered by any exhaustiveness
+    // test except `tenant_wipe_lists_cf` below — the classic omission.
+    cf::LOCALIZED_NAME_INDEX,
     // Workspace / versioning
     cf::WORKSPACES,
     cf::BRANCHES,

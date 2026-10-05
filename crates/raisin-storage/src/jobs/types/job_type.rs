@@ -82,10 +82,6 @@ pub enum JobType {
         repo_id: String,
         peer_id: Option<String>,
     },
-    OpLogCompaction {
-        tenant_id: String,
-        repo_id: String,
-    },
     PropertyIndexBuild {
         tenant_id: String,
         repo_id: String,

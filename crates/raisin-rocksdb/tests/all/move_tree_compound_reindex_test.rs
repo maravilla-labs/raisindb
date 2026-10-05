@@ -149,6 +149,7 @@ async fn ids_under(storage: &Arc<RocksDBStorage>, parent_path: &str) -> Vec<Stri
             false,
             true,
             None,
+            None,
         )
         .await
         .expect("scan compound index")

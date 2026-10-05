@@ -33,8 +33,11 @@
 //!    never a silently truncated document.
 
 mod budget;
+mod doc;
 mod fetch;
 mod frontier;
+mod json_api;
+mod json_len;
 mod memo;
 mod walk;
 
@@ -42,6 +45,7 @@ mod walk;
 mod tests;
 
 pub use budget::ResolveBudget;
+pub use json_api::{document_from_json, node_to_json_value, node_to_json_value_with_fields};
 pub use memo::{ResolveMemo, ResolveStats};
 
 use crate::services::translation_resolver::TranslationResolver;
@@ -52,7 +56,7 @@ use raisin_hlc::HLC;
 use raisin_models::auth::AuthContext;
 use raisin_models::nodes::Node;
 use raisin_models::translations::LocaleCode;
-use raisin_storage::Storage;
+use raisin_storage::{ReadSnapshot, Storage};
 use std::sync::Arc;
 
 /// Maximum depth for recursive reference resolution to prevent runaway queries.
@@ -96,6 +100,10 @@ pub struct ReferenceResolver<S: Storage> {
     locale: Option<ResolutionLocale>,
     translations: Option<Arc<TranslationResolver<S::Translations>>>,
     memo: Arc<ResolveMemo>,
+    /// Read each frontier level in one batched call (`sql.batched_fetch`).
+    batched_fetch: bool,
+    /// The statement's storage view, shared by every batched read.
+    read_snapshot: Option<ReadSnapshot>,
 }
 
 impl<S: Storage> ReferenceResolver<S> {
@@ -118,7 +126,24 @@ impl<S: Storage> ReferenceResolver<S> {
             locale: None,
             translations: None,
             memo: Arc::new(ResolveMemo::default()),
+            batched_fetch: true,
+            read_snapshot: None,
         }
+    }
+
+    /// `false` reads targets one at a time (the `sql.batched_fetch = false`
+    /// rollback); the default reads each frontier level in one batched call.
+    pub fn with_batched_fetch(mut self, batched: bool) -> Self {
+        self.batched_fetch = batched;
+        self
+    }
+
+    /// Read targets through the statement's storage snapshot, so every level
+    /// (and every row of the statement) sees one view of the database. Must
+    /// be a view taken at or after `snapshot`'s revision.
+    pub fn with_read_snapshot(mut self, snapshot: Option<ReadSnapshot>) -> Self {
+        self.read_snapshot = snapshot;
+        self
     }
 
     /// The identity every target is checked against. There is no opt-out: a
@@ -151,32 +176,28 @@ impl<S: Storage> ReferenceResolver<S> {
         self
     }
 
-    /// Resolve every reference inside a JSON value.
+    /// Resolve the references in several documents — the rows of one chunk of
+    /// a statement — reading and producing stored VALUES, not JSON (plan
+    /// Phase 13d). ONE frontier walk serves them all, so a level's targets
+    /// across every document are read in one batch; each document is then
+    /// inlined on its own.
     ///
-    /// - a reference is any object carrying a string `raisin:ref` (an id, or a
-    ///   path when it starts with `/`); its `raisin:workspace` defaults to
-    ///   `workspace` when absent or empty — also for references found inside
-    ///   inlined targets;
-    /// - `max_depth` (capped at [`MAX_RESOLUTION_DEPTH`]) bounds how deep
-    ///   inlined nodes nest, which is also what makes a cycle terminate;
-    /// - a reference that cannot be resolved — missing, hidden in the locale,
-    ///   or not readable by the caller — is kept as it was written;
-    /// - `fields`, when given, trims every inlined node to `id`, `name`,
-    ///   `path`, `node_type` plus the listed properties, and only references
-    ///   inside what is kept are followed.
-    ///
-    /// The value may itself be a single reference, which resolves to the node.
-    pub async fn resolve_json(
+    /// Each result is the value whose JSON rendering is the document the
+    /// JSON resolver produced for the document's rendering (`doc.rs`); a
+    /// caller that wants what that JSON reads back as applies
+    /// `PropertyValue::into_json_round_trip`.
+    pub async fn resolve_values_many(
         &self,
         workspace: &str,
-        value: &serde_json::Value,
+        mut values: Vec<raisin_models::nodes::properties::PropertyValue>,
         max_depth: u32,
         fields: Option<&[String]>,
-    ) -> Result<serde_json::Value> {
+    ) -> Result<Vec<raisin_models::nodes::properties::PropertyValue>> {
         let depth = max_depth.min(MAX_RESOLUTION_DEPTH);
         if depth == 0 {
-            return Ok(value.clone());
+            return Ok(values);
         }
+        values.iter_mut().for_each(doc::make_walkable);
 
         let read = Arc::new(ReadScope {
             snapshot: self.snapshot,
@@ -185,21 +206,23 @@ impl<S: Storage> ReferenceResolver<S> {
                 .map(|l| l.locale.as_str().to_string()),
             fields: fields.map(<[String]>::to_vec),
         });
-        let resolved = self.gather(workspace, value, depth, &read, fields).await?;
+        let resolved = self
+            .gather(workspace, &values, depth, &read, fields)
+            .await?;
 
-        let mut out = value.clone();
-        if resolved.values().all(Option::is_none) {
-            return Ok(out);
+        if resolved.values().any(Option::is_some) {
+            for value in &mut values {
+                let totals = walk::Inliner::new(
+                    workspace,
+                    &resolved,
+                    self.memo.allowance(),
+                    self.memo.budget(),
+                )
+                .inline(value, depth)?;
+                self.memo.charge(totals)?;
+            }
         }
-        let totals = walk::Inliner::new(
-            workspace,
-            &resolved,
-            self.memo.allowance(),
-            self.memo.budget(),
-        )
-        .inline(&mut out, depth)?;
-        self.memo.charge(totals)?;
-        Ok(out)
+        Ok(values)
     }
 
     /// The locale to translate targets into, or `None` when that is the base
@@ -209,60 +232,4 @@ impl<S: Storage> ReferenceResolver<S> {
             .as_ref()
             .filter(|l| l.locale.as_str() != l.default_language)
     }
-}
-
-/// Convert a Node to a `serde_json::Value` for RESOLVE() SQL function output
-///
-/// Returns an object with: id, name, path, node_type, plus all properties flattened.
-pub fn node_to_json_value(node: &Node) -> serde_json::Value {
-    let mut map = serde_json::Map::new();
-    map.insert("id".to_string(), serde_json::Value::String(node.id.clone()));
-    map.insert(
-        "name".to_string(),
-        serde_json::Value::String(node.name.clone()),
-    );
-    map.insert(
-        "path".to_string(),
-        serde_json::Value::String(node.path.clone()),
-    );
-    map.insert(
-        "node_type".to_string(),
-        serde_json::Value::String(node.node_type.clone()),
-    );
-
-    // Flatten properties into the object
-    if let Ok(serde_json::Value::Object(props_map)) = serde_json::to_value(&node.properties) {
-        for (k, v) in props_map {
-            map.insert(k, v);
-        }
-    }
-
-    serde_json::Value::Object(map)
-}
-
-/// [`node_to_json_value`], optionally keeping only `fields` of the properties.
-///
-/// The identity members (`id`, `name`, `path`, `node_type`) are always kept:
-/// they are what a renderer links and keys by, and a trimmed node without them
-/// could not be told apart from its neighbours.
-pub fn node_to_json_value_with_fields(node: &Node, fields: Option<&[String]>) -> serde_json::Value {
-    let Some(fields) = fields else {
-        return node_to_json_value(node);
-    };
-    let mut map = serde_json::Map::with_capacity(4 + fields.len());
-    map.insert("id".into(), serde_json::Value::String(node.id.clone()));
-    map.insert("name".into(), serde_json::Value::String(node.name.clone()));
-    map.insert("path".into(), serde_json::Value::String(node.path.clone()));
-    map.insert(
-        "node_type".into(),
-        serde_json::Value::String(node.node_type.clone()),
-    );
-    for field in fields {
-        if let Some(value) = node.properties.get(field) {
-            if let Ok(json) = serde_json::to_value(value) {
-                map.insert(field.clone(), json);
-            }
-        }
-    }
-    serde_json::Value::Object(map)
 }

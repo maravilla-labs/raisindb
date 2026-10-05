@@ -63,17 +63,6 @@ pub(crate) fn parse_replication_variants(s: &str) -> Result<Option<JobType>, Str
             }
         }
     }
-    if let Some(rest) = s.strip_prefix("OpLogCompaction(") {
-        if let Some(c) = rest.strip_suffix(')') {
-            let p: Vec<&str> = c.split('/').collect();
-            if p.len() == 2 {
-                return Ok(Some(JobType::OpLogCompaction {
-                    tenant_id: p[0].to_string(),
-                    repo_id: p[1].to_string(),
-                }));
-            }
-        }
-    }
     Ok(None)
 }
 

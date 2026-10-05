@@ -47,6 +47,7 @@ async fn setup() -> Result<(Arc<RocksDBStorage>, TempDir)> {
                 default_branch: "main".to_string(),
                 description: Some("child listing keyset test".to_string()),
                 tags: HashMap::new(),
+                localized_names: Default::default(),
             },
         )
         .await?;

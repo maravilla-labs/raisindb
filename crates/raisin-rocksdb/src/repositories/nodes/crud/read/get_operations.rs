@@ -3,6 +3,7 @@
 use super::super::super::helpers::is_tombstone;
 use super::super::super::storage_node::PropertiesMode;
 use super::super::super::NodeRepositoryImpl;
+use crate::mvcc_read::{node_version_in, DbRead, NodeScope};
 use raisin_error::Result;
 use raisin_hlc::HLC;
 use raisin_models::nodes::Node;
@@ -83,6 +84,7 @@ impl NodeRepositoryImpl {
             workspace,
             id,
             &path_revision,
+            &blob_revision,
             mode,
         )?;
         tracing::trace!(
@@ -137,46 +139,35 @@ impl NodeRepositoryImpl {
         populate_has_children: bool,
         mode: PropertiesMode,
     ) -> Result<Option<Node>> {
-        // The seek that finds the version also yields its blob: no second
-        // point read of the same key.
-        let (revision, bytes) = match self.get_versioned_at_or_before(
+        // THE seek-and-decode step, shared with the batched reader: one seek
+        // finds the version and yields its blob.
+        let scope = NodeScope {
             tenant_id,
             repo_id,
             branch,
             workspace,
-            id,
-            target_revision,
-        )? {
-            Some(found) => found,
-            None => {
-                tracing::trace!(
-                    "REPO get_at_revision_impl: node_id={} - no revision found at or before {}",
-                    id,
-                    target_revision
-                );
-                return Ok(None);
-            }
+            node_id: id,
         };
-
-        if is_tombstone(&bytes) {
-            tracing::trace!(
-                "REPO get_at_revision_impl: node_id={} at revision={} is tombstone",
-                id,
-                revision
-            );
-            return Ok(None);
-        }
-
-        let mut node = self.deserialize_node_with_path_as(
-            &bytes,
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            id,
-            target_revision,
-            mode,
-        )?;
+        let (revision, mut node) =
+            match node_version_in(&mut DbRead(&self.db), scope, target_revision, mode)? {
+                Some((revision, Some(node))) => (revision, node),
+                Some((revision, None)) => {
+                    tracing::trace!(
+                        "REPO get_at_revision_impl: node_id={} at revision={} is tombstone",
+                        id,
+                        revision
+                    );
+                    return Ok(None);
+                }
+                None => {
+                    tracing::trace!(
+                        "REPO get_at_revision_impl: node_id={} - no revision found at or before {}",
+                        id,
+                        target_revision
+                    );
+                    return Ok(None);
+                }
+            };
         tracing::trace!(
             "REPO get_at_revision_impl: node_id={}, found_revision={} (target={}), path={}",
             id,

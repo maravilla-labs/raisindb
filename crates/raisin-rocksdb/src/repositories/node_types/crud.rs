@@ -242,6 +242,13 @@ impl NodeTypeRepository for NodeTypeRepositoryImpl {
             }
         }
 
+        // The cached index definitions of this branch (compound declarations
+        // and unique names, inheritance included — so EVERY cached type, not
+        // just this one), refreshed AFTER the write and before returning: the
+        // event below is dispatched asynchronously, and a write in between
+        // must not index under the old declaration.
+        self.refresh_index_definitions(scope, &enriched.name).await;
+
         // Local schema event. `create`, `update`, `put`, `publish` and
         // `unpublish` all funnel through here, so this one site covers them.
         publish_local_schema_event(
@@ -327,6 +334,7 @@ impl NodeTypeRepository for NodeTypeRepositoryImpl {
             }
         }
 
+        self.refresh_index_definitions(scope, name).await;
         publish_local_schema_event(
             self.event_bus.as_ref(),
             scope,

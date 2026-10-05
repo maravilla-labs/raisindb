@@ -23,6 +23,28 @@ use raisin_storage::{scope::BranchScope, Storage};
 
 use crate::physical_plan::executor::ExecutionContext;
 
+/// A node as a SQL row reads it: by id (`NodeLocator::Id`) or path, at
+/// `max_revision`, WITHOUT the `has_children` probe — no SQL column shows
+/// it, and a point lookup paid ~1 µs for it (plan Phase 13d). The ONE way a
+/// scan executor reads a single node.
+pub(crate) async fn row_node<S: Storage>(
+    storage: &S,
+    scope: raisin_storage::StorageScope<'_>,
+    locator: raisin_storage::NodeLocator,
+    max_revision: Option<&HLC>,
+) -> raisin_error::Result<Option<Node>> {
+    use raisin_storage::NodeRepository;
+    storage
+        .nodes()
+        .get_for_read(
+            scope,
+            &locator,
+            max_revision,
+            &raisin_storage::ReadOpts::default(),
+        )
+        .await
+}
+
 /// Apply RLS to a single node, building a cache-backed graph resolver from
 /// `storage` so `RELATES … VIA` conditions are evaluated against the relation
 /// graph. This is the async counterpart to `rls_filter::filter_node` used

@@ -1,175 +1,48 @@
-//! Compound index operations (multi-column indexes)
+//! Compound index operations (multi-column indexes): the repository's entry
+//! points to the one writer (`indexing::compound`), plus the one column
+//! extractor.
 
 use super::super::super::NodeRepositoryImpl;
-use crate::{cf, cf_handle, keys};
+use crate::indexing::compound::{write_compound_delta, DefsSet};
+use crate::indexing::{Baseline, IndexCtx};
 use raisin_error::Result;
 use raisin_hlc::HLC;
-use raisin_models::nodes::properties::schema::CompoundIndexDefinition;
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
-use rocksdb::{WriteBatch, DB};
+use rocksdb::WriteBatch;
 
 impl NodeRepositoryImpl {
-    /// Add compound indexes for a node based on its NodeType's compound_indexes configuration
-    ///
-    /// This reads the NodeType definition to find any compound indexes defined for this node type,
-    /// then extracts the required column values from the node and indexes them.
-    pub(crate) async fn add_compound_indexes_to_batch(
-        &self,
-        batch: &mut WriteBatch,
-        node: &Node,
-        tenant_id: &str,
-        repo_id: &str,
-        branch: &str,
-        workspace: &str,
-        revision: &HLC,
-    ) -> Result<()> {
-        use raisin_storage::NodeTypeRepository;
-
-        // Get NodeType to check for compound indexes
-        let node_type = match self
-            .node_type_repo
-            .get(
-                raisin_storage::BranchScope::new(tenant_id, repo_id, branch),
-                &node.node_type,
-                None,
-            )
-            .await?
-        {
-            Some(nt) => nt,
-            None => return Ok(()), // No NodeType = no compound indexes
-        };
-
-        // Compound indexes INCLUDING the ones inherited through `extends`.
-        //
-        // This used to read `node_type.compound_indexes` off the raw stored
-        // record, which never contains an ancestor's declarations — so a subtype
-        // wrote NO entries for an index declared on its parent, and every query
-        // on that subtype silently fell back to a scan while the parent's own
-        // queries were fast. Inheritance merges `compound_indexes` along the
-        // chain, and the write path has to honour that or the index is a lie for
-        // half the family.
-        //
-        // Resolved locally rather than through raisin-core's resolver because
-        // the dependency points the other way; the chain is shallow and the
-        // NodeType reads are cached.
-        let inherited = self
-            .resolve_inherited_compound_indexes(&node_type, tenant_id, repo_id, branch)
-            .await?;
-        let compound_indexes = match inherited {
-            ref indexes if !indexes.is_empty() => indexes,
-            _ => return Ok(()), // No compound indexes defined
-        };
-
-        Self::write_compound_entries_to_batch(
+    /// The schema-driven index definitions of `types` on the branch
+    /// (compound declarations with inheritance, unique property names),
+    /// resolved through the shared cache — async, so call it BEFORE any batch
+    /// lock is taken.
+    pub(crate) async fn index_defs(&self, ctx: &IndexCtx<'_>, types: &[&str]) -> Result<DefsSet> {
+        DefsSet::resolve(
             &self.db,
-            batch,
-            compound_indexes,
-            node,
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            revision,
+            self.node_type_repo.as_ref(),
+            raisin_storage::BranchScope::new(ctx.tenant_id, ctx.repo_id, ctx.branch),
+            types,
         )
+        .await
     }
 
-    /// Write compound-index entries for a node into a WriteBatch (synchronous).
-    ///
-    /// This is the SINGLE source of compound-index write encoding, shared by the
-    /// repository create/update paths, the transaction (SQL DML) path, and the
-    /// compound-index rebuild. Callers must resolve the NodeType's
-    /// `compound_indexes` first (an async NodeType fetch) and pass it in, keeping
-    /// this body lock-friendly and `await`-free so it can run while a WriteBatch
-    /// mutex guard is held.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn write_compound_entries_to_batch(
-        db: &DB,
-        batch: &mut WriteBatch,
-        compound_indexes: &[CompoundIndexDefinition],
-        node: &Node,
-        tenant_id: &str,
-        repo_id: &str,
-        branch: &str,
-        workspace: &str,
-        revision: &HLC,
-    ) -> Result<()> {
-        let cf_compound = cf_handle(db, cf::COMPOUND_INDEX)?;
-        let is_published = node.published_at.is_some();
-
-        // Process each compound index
-        for index_def in compound_indexes {
-            // Extract column values from the node
-            let mut column_values = Vec::with_capacity(index_def.columns.len());
-
-            for column_def in &index_def.columns {
-                match Self::extract_compound_column_value(
-                    node,
-                    &column_def.property,
-                    &column_def.column_type,
-                ) {
-                    Some(value) => column_values.push(value),
-                    None => {
-                        // Skip this index if any required column is missing
-                        tracing::debug!(
-                            "Skipping compound index '{}' for node '{}': missing property '{}'",
-                            index_def.name,
-                            node.id,
-                            column_def.property
-                        );
-                        break;
-                    }
-                }
-            }
-
-            // Only index if we got all required columns
-            if column_values.len() == index_def.columns.len() {
-                let key = keys::compound_index_key_versioned(
-                    tenant_id,
-                    repo_id,
-                    branch,
-                    workspace,
-                    &index_def.name,
-                    &column_values,
-                    revision,
-                    &node.id,
-                    is_published,
-                );
-
-                batch.put_cf(cf_compound, key, b"");
-
-                tracing::trace!(
-                    "Indexed node '{}' in compound index '{}' with {} columns",
-                    node.id,
-                    index_def.name,
-                    column_values.len()
-                );
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Tombstone a node's existing compound-index entries (for UPDATE).
-    ///
-    /// On an update the column values may have changed; the old-value entries
-    /// must be tombstoned before the new ones are written so a scan keyed on the
-    /// OLD value no longer returns the node. Reuses the shared tombstone logic.
-    pub(crate) fn add_compound_tombstones_to_batch(
+    /// Stage `new`'s COMPOUND_INDEX write against `baseline` (the property
+    /// index's baseline for the same write — see `indexing::compound::writer`).
+    pub(crate) async fn add_compound_delta_to_batch(
         &self,
         batch: &mut WriteBatch,
-        node: &Node,
-        tenant_id: &str,
-        repo_id: &str,
-        branch: &str,
-        workspace: &str,
+        ctx: &IndexCtx<'_>,
+        baseline: Baseline<'_>,
+        new: &Node,
+        revision: &HLC,
     ) -> Result<()> {
-        use crate::tombstones::{
-            tombstone_compound_indexes_only, TombstoneColumnFamilies, TombstoneContext,
-        };
-        let ctx = TombstoneContext::new(tenant_id, repo_id, branch, workspace);
-        let cfs = TombstoneColumnFamilies::from_arc_db(&self.db)?;
-        tombstone_compound_indexes_only(batch, self.db.as_ref(), &ctx, &cfs, node)
+        let types = crate::indexing::compound::types_of(&baseline, new);
+        let defs = self.index_defs(ctx, &types).await?;
+        if !defs.any_compound() {
+            return Ok(());
+        }
+        write_compound_delta(batch, &self.db, ctx, &defs, baseline, new, revision)?;
+        Ok(())
     }
 
     /// Extract a compound column value from a node based on the property name
@@ -252,8 +125,13 @@ impl NodeRepositoryImpl {
 
                 // Convert PropertyValue to CompoundColumnValue based on column_type
                 match (column_type, prop_value) {
+                    // One text encoding for both spellings a stored string
+                    // can come back as (`CompoundColumnValue::text`).
                     (CompoundColumnType::String, PropertyValue::String(s)) => {
-                        Some(CompoundColumnValue::String(s.clone()))
+                        Some(CompoundColumnValue::text(s))
+                    }
+                    (CompoundColumnType::String, PropertyValue::Date(d)) => {
+                        Some(CompoundColumnValue::date_text(**d))
                     }
                     (CompoundColumnType::Integer, PropertyValue::Integer(i)) => {
                         Some(CompoundColumnValue::Integer(*i))
@@ -274,63 +152,5 @@ impl NodeRepositoryImpl {
                 }
             }
         }
-    }
-
-    /// A NodeType's compound indexes, merged along its `extends` chain.
-    ///
-    /// Most-derived wins on a name collision, matching the core resolver: parent
-    /// first, then own. A missing or cyclic parent simply ends the walk — an
-    /// index write must not fail because one NodeType is malformed.
-    pub(crate) async fn resolve_inherited_compound_indexes(
-        &self,
-        node_type: &raisin_models::nodes::types::node_type::NodeType,
-        tenant_id: &str,
-        repo_id: &str,
-        branch: &str,
-    ) -> Result<Vec<CompoundIndexDefinition>> {
-        use raisin_storage::NodeTypeRepository;
-
-        const MAX_DEPTH: usize = 20;
-
-        // Walk up to the root, collecting each level's declarations.
-        let mut chain: Vec<Vec<CompoundIndexDefinition>> = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        let mut current = Some(node_type.clone());
-        let mut depth = 0usize;
-
-        while let Some(nt) = current {
-            if depth >= MAX_DEPTH || !seen.insert(nt.name.clone()) {
-                break;
-            }
-            depth += 1;
-            chain.push(nt.compound_indexes.clone().unwrap_or_default());
-
-            current = match nt.extends.as_deref() {
-                Some(parent) if !parent.is_empty() => self
-                    .node_type_repo
-                    .get(
-                        raisin_storage::BranchScope::new(tenant_id, repo_id, branch),
-                        parent,
-                        None,
-                    )
-                    .await
-                    .ok()
-                    .flatten(),
-                _ => None,
-            };
-        }
-
-        // Parent first so a derived declaration of the same NAME replaces it.
-        let mut merged: Vec<CompoundIndexDefinition> = Vec::new();
-        for level in chain.into_iter().rev() {
-            for idx in level {
-                if let Some(existing) = merged.iter_mut().find(|e| e.name == idx.name) {
-                    *existing = idx;
-                } else {
-                    merged.push(idx);
-                }
-            }
-        }
-        Ok(merged)
     }
 }

@@ -157,7 +157,7 @@ impl PhysicalPlanner {
         Ok(Some(match projection_exprs {
             Some(exprs) => PhysicalPlan::Project {
                 input: Box::new(scan),
-                exprs,
+                exprs: exprs.into(),
             },
             None => scan,
         }))

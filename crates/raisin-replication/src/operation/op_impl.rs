@@ -53,21 +53,9 @@ impl Operation {
     /// Get the target of this operation (what it modifies)
     pub fn target(&self) -> OperationTarget {
         match &self.op_type {
-            OpType::CreateNode { node_id, .. }
-            | OpType::DeleteNode { node_id }
-            | OpType::SetProperty { node_id, .. }
-            | OpType::DeleteProperty { node_id, .. }
-            | OpType::RenameNode { node_id, .. }
-            | OpType::SetArchetype { node_id, .. }
-            | OpType::SetOrderKey { node_id, .. }
-            | OpType::SetOwner { node_id, .. }
-            | OpType::PublishNode { node_id, .. }
-            | OpType::UnpublishNode { node_id }
-            | OpType::SetTranslation { node_id, .. }
-            | OpType::DeleteTranslation { node_id, .. }
-            | OpType::MoveNode { node_id, .. }
-            | OpType::ListInsertAfter { node_id, .. }
-            | OpType::ListDelete { node_id, .. } => OperationTarget::Node(node_id.clone()),
+            OpType::UpsertTranslationOverlay { node_id, .. } => {
+                OperationTarget::Node(node_id.clone())
+            }
             OpType::UpsertNodeSnapshot { node, .. } => OperationTarget::Node(node.id.clone()),
             OpType::DeleteNodeSnapshot { node_id, .. } => OperationTarget::Node(node_id.clone()),
             OpType::AddRelation { source_id, .. } | OpType::RemoveRelation { source_id, .. } => {
@@ -152,6 +140,9 @@ impl Operation {
             OpType::RevokeAllIdentitySessions { identity_id } => {
                 OperationTarget::Identity(identity_id.clone())
             }
+            OpType::Unknown { tag, .. } => {
+                OperationTarget::Unknown(format!("{}:{}", tag, self.op_id))
+            }
         }
     }
 
@@ -159,11 +150,8 @@ impl Operation {
     pub fn is_delete(&self) -> bool {
         matches!(
             self.op_type,
-            OpType::DeleteNode { .. }
-                | OpType::DeleteProperty { .. }
-                | OpType::DeleteTranslation { .. }
+            OpType::DeleteNodeSnapshot { .. }
                 | OpType::RemoveRelation { .. }
-                | OpType::ListDelete { .. }
                 | OpType::DeleteNodeType { .. }
                 | OpType::DeleteArchetype { .. }
                 | OpType::DeleteElementType { .. }
@@ -173,7 +161,6 @@ impl Operation {
                 | OpType::DeleteUser { .. }
                 | OpType::DeleteTenant { .. }
                 | OpType::DeleteDeployment { .. }
-                | OpType::UnpublishNode { .. }
                 | OpType::RevokePermission { .. }
                 | OpType::DeleteIdentity { .. }
                 | OpType::RevokeSession { .. }

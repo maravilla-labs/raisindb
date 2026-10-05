@@ -235,8 +235,34 @@ where
             engine = engine.with_lock_manager(mgr.clone());
         }
 
-        // Execute the query using execute_batch for proper support
-        let row_stream = engine.execute_batch(&sql).await.map_err(|e| {
+        // Execute the query using execute_batch for proper support. A
+        // statement with parameters goes in as the prepared text plus its
+        // values, so every Execute of one prepared statement shares one plan
+        // (plan Phase 13d); `sql` above is only read by session commands and
+        // schema inference.
+        let params = if portal.parameter_len() == 0 {
+            Vec::new()
+        } else {
+            self.portal_params(portal).map_err(|e| {
+                PgWireError::UserError(Box::new(ErrorInfo::new(
+                    "ERROR".to_owned(),
+                    "42P02".to_owned(), // Undefined parameter
+                    e.to_string(),
+                )))
+            })?
+        };
+        let executed = if params.is_empty() {
+            engine.execute_batch(&sql).await
+        } else {
+            engine
+                .execute_batch_with_params(
+                    &portal.statement.statement.sql,
+                    &params,
+                    &raisin_sql_execution::format_param_value,
+                )
+                .await
+        };
+        let row_stream = executed.map_err(|e| {
             error!("Query execution failed: {}", e);
             PgWireError::UserError(Box::new(ErrorInfo::new(
                 "ERROR".to_owned(),

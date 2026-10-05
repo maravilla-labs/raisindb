@@ -84,6 +84,7 @@ async fn setup_storage(default_language: &str) -> Result<(Arc<RocksDBStorage>, T
         default_branch: BRANCH.to_string(),
         description: Some("Fulltext rebuild language test".to_string()),
         tags: HashMap::new(),
+        localized_names: Default::default(),
     };
     storage
         .repository_management()

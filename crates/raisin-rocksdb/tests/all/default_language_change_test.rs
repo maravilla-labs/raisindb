@@ -101,6 +101,7 @@ async fn setup_storage(cluster_node_id: Option<&str>) -> Result<(Arc<RocksDBStor
         default_branch: BRANCH.to_string(),
         description: Some("Default language change test".to_string()),
         tags: HashMap::new(),
+        localized_names: Default::default(),
     };
     storage
         .repository_management()

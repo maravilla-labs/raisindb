@@ -10,7 +10,7 @@ use raisin_core::services::reference_resolver::ResolveMemo;
 use raisin_core::services::translation_resolver::TranslationResolver;
 use raisin_error::Error;
 use raisin_hlc::HLC;
-use raisin_storage::{BranchRepository, Storage};
+use raisin_storage::{BranchRepository, NodeRepository, ReadSnapshot, Storage};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -25,6 +25,9 @@ pub struct StatementState<S: Storage> {
     translation_resolver: OnceLock<Arc<TranslationResolver<S::Translations>>>,
     /// `embedding` was named but no embedding store exists: said once.
     embedding_unavailable_warned: AtomicBool,
+    /// The storage view every batched read of the statement goes through,
+    /// opened on first use and released with the statement.
+    read_snapshot: OnceLock<Option<ReadSnapshot>>,
 }
 
 impl<S: Storage> Default for StatementState<S> {
@@ -34,6 +37,7 @@ impl<S: Storage> Default for StatementState<S> {
             snapshot: tokio::sync::OnceCell::new(),
             translation_resolver: OnceLock::new(),
             embedding_unavailable_warned: AtomicBool::new(false),
+            read_snapshot: OnceLock::new(),
         }
     }
 }
@@ -59,6 +63,30 @@ impl<S: Storage> ExecutionContext<S> {
             })
             .await
             .copied()
+    }
+
+    /// The storage view this statement's batched reads go through — ONE per
+    /// statement, not one per chunk or level. The revision bound does not
+    /// protect against an in-place `versionable=false` overwrite at or below
+    /// it, so without one view a statement read in chunks could see a node
+    /// before such a write in one chunk and after it in the next. `None` when
+    /// the backend has no snapshots (each batch then takes its own).
+    ///
+    /// Opened on FIRST USE — the first batched read — never eagerly: a
+    /// statement that never reads in batches (a table scan, a point lookup,
+    /// EXPLAIN) holds no snapshot, takes no DB mutex for one, and pins no
+    /// superseded versions while its stream is open. Every caller reads
+    /// [`Self::statement_snapshot`] first, so the view is taken AFTER the
+    /// statement's revision was fixed: it holds everything at or below that
+    /// revision and the revision bound filters anything newer. (Taken before,
+    /// a commit landing in between would advance HEAD past data the view
+    /// cannot see.) A commit at or below the revision that lands AFTER the pin
+    /// is not hidden by it: the batched reader lets a newer live record win.
+    pub fn statement_read_snapshot(&self) -> Option<ReadSnapshot> {
+        self.statement
+            .read_snapshot
+            .get_or_init(|| self.storage.nodes().open_read_snapshot())
+            .clone()
     }
 
     /// RESOLVE's memo for this statement.

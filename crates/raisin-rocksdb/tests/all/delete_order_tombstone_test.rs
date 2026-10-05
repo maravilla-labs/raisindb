@@ -40,7 +40,18 @@ fn scope() -> StorageScope<'static> {
 
 /// Children of `parent_id` whose newest entry at or below `at` is live.
 fn live_children(storage: &RocksDBStorage, parent_id: &str, at: Option<HLC>) -> HashSet<String> {
-    let prefix = keys::ordered_children_prefix(TENANT, REPO, BRANCH, WORKSPACE, parent_id);
+    live_children_in(storage, (TENANT, REPO, BRANCH, WORKSPACE), parent_id, at)
+}
+
+/// [`live_children`] in any `(tenant, repo, branch, workspace)`, read RAW from
+/// ORDERED_CHILDREN so no liveness check elsewhere can mask a missing tombstone.
+pub(crate) fn live_children_in(
+    storage: &RocksDBStorage,
+    (tenant, repo, branch, workspace): (&str, &str, &str, &str),
+    parent_id: &str,
+    at: Option<HLC>,
+) -> HashSet<String> {
+    let prefix = keys::ordered_children_prefix(tenant, repo, branch, workspace, parent_id);
     let db = storage.db();
     let cf = db.cf_handle(cf::ORDERED_CHILDREN).unwrap();
     let mut decided = HashSet::new();
@@ -89,6 +100,7 @@ async fn setup() -> Result<(RocksDBStorage, TempDir)> {
                 default_branch: BRANCH.to_string(),
                 description: None,
                 tags: HashMap::new(),
+                localized_names: Default::default(),
             },
         )
         .await?;

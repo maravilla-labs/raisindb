@@ -97,6 +97,9 @@ where
         RequestType::NodeDelete => handle_node_delete(state, connection_state, request).await,
         RequestType::NodeGet => handle_node_get(state, connection_state, request).await,
         RequestType::NodeHistory => handle_node_history(state, connection_state, request).await,
+        RequestType::NodeGetByLocalizedPath => {
+            handle_node_get_by_localized_path(state, connection_state, request).await
+        }
         RequestType::AuditQuery => handle_audit_query(state, connection_state, request).await,
         RequestType::NodeQuery => handle_node_query(state, connection_state, request).await,
         RequestType::NodeQueryByPath => {

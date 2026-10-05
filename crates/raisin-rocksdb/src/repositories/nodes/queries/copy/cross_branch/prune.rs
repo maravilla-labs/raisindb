@@ -1,9 +1,8 @@
-//! Full delete-tombstone set for target-branch nodes pruned by delete_missing.
+//! Retiring target-branch nodes during a promotion — the `delete_missing`
+//! prune and the same-path displacement (`stage.rs`) — through ONE body.
 
-use super::super::super::super::helpers::{hash_property_value, TOMBSTONE};
 use super::super::super::super::NodeRepositoryImpl;
 use super::parent_path_of;
-use crate::{cf, cf_handle, keys};
 use raisin_error::Result;
 use raisin_hlc::HLC;
 use raisin_models::nodes::Node;
@@ -13,12 +12,29 @@ use rocksdb::WriteBatch;
 use std::collections::HashSet;
 
 impl NodeRepositoryImpl {
-    /// Add the full tombstone set for one pruned target-branch node —
-    /// mirrors `delete_impl` (node blob, path, property/system-property,
-    /// unique, reference, relation, translation, ordered-children entries),
-    /// but writes into the shared cross-branch batch instead of committing.
+    /// Delete one target-branch node (`node` is its pre-delete state) into
+    /// the shared cross-branch batch at `revision`.
+    ///
+    /// The shared delete tombstoner, not a hand-rolled CF list: it is the one
+    /// body the repository, cascade, transaction, merge and replicated delete
+    /// paths use, and a replica applies this very delete through it (the
+    /// promotion replicates it as a `Delete` change). A copy here that missed
+    /// NODE_PATH / COMPOUND / SPATIAL / SECRETS / the vmount registry left those
+    /// live on the origin only — a pruned geometry kept matching `ST_DWITHIN`
+    /// forever while every replica had dropped it. UNIQUE claims need a
+    /// NodeType read, so they are retired explicitly beside it.
+    ///
+    /// The placement is resolved FIRST, from committed (pre-promotion) state:
+    /// it is what the replicated `Delete` change carries, and the tombstoner
+    /// is handed the same parent id.
+    ///
+    /// CALL THIS BEFORE staging any copied node. PATH_INDEX and UNIQUE keys
+    /// carry no node id, so a replacement claiming the same path or value at
+    /// this revision writes the same key; a WriteBatch applies in order, so
+    /// delete-then-put leaves the new owner live, while put-then-delete erased
+    /// the path (and claim) it had just taken.
     #[allow(clippy::too_many_arguments)]
-    pub(super) async fn add_cross_branch_prune_to_batch(
+    pub(super) async fn retire_target_node(
         &self,
         batch: &mut WriteBatch,
         node: &Node,
@@ -27,131 +43,8 @@ impl NodeRepositoryImpl {
         target_branch: &str,
         workspace: &str,
         revision: &HLC,
-    ) -> Result<()> {
-        let cf_nodes = cf_handle(&self.db, cf::NODES)?;
-        let cf_path = cf_handle(&self.db, cf::PATH_INDEX)?;
-        let cf_property = cf_handle(&self.db, cf::PROPERTY_INDEX)?;
-        let cf_reference = cf_handle(&self.db, cf::REFERENCE_INDEX)?;
-        let cf_relation = cf_handle(&self.db, cf::RELATION_INDEX)?;
-        let cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
-
-        // Node blob tombstone
-        let node_key = keys::node_key_versioned(
-            tenant_id,
-            repo_id,
-            target_branch,
-            workspace,
-            &node.id,
-            revision,
-        );
-        batch.put_cf(cf_nodes, node_key, TOMBSTONE);
-
-        // Path index tombstone
-        let path_key = keys::path_index_key_versioned(
-            tenant_id,
-            repo_id,
-            target_branch,
-            workspace,
-            &node.path,
-            revision,
-        );
-        batch.put_cf(cf_path, path_key, TOMBSTONE);
-
-        // Property index tombstones (user properties + __node_type)
-        let is_published = node.published_at.is_some();
-        for (prop_name, prop_value) in &node.properties {
-            let value_hash = hash_property_value(prop_value);
-            let prop_key = keys::property_index_key_versioned(
-                tenant_id,
-                repo_id,
-                target_branch,
-                workspace,
-                prop_name,
-                &value_hash,
-                revision,
-                &node.id,
-                is_published,
-            );
-            batch.put_cf(cf_property, prop_key, TOMBSTONE);
-        }
-        let node_type_key = keys::property_index_key_versioned(
-            tenant_id,
-            repo_id,
-            target_branch,
-            workspace,
-            "__node_type",
-            &node.node_type,
-            revision,
-            &node.id,
-            is_published,
-        );
-        batch.put_cf(cf_property, node_type_key, TOMBSTONE);
-
-        // System field indexes (__name, __archetype, __created_*, __updated_*)
-        self.add_field_tombstones_to_batch(
-            batch,
-            cf_property,
-            node,
-            tenant_id,
-            repo_id,
-            target_branch,
-            workspace,
-            &node.id,
-            revision,
-            is_published,
-        );
-
-        // Unique index tombstones (release unique values)
-        self.add_unique_tombstones_to_batch(
-            batch,
-            node,
-            tenant_id,
-            repo_id,
-            target_branch,
-            workspace,
-            revision,
-        )
-        .await?;
-
-        // Reference index tombstones (forward + reverse)
-        self.add_reference_tombstones_to_batch(
-            batch,
-            cf_reference,
-            node,
-            tenant_id,
-            repo_id,
-            target_branch,
-            workspace,
-            &node.id,
-            revision,
-            is_published,
-        );
-
-        // Relation index tombstones (outgoing + incoming)
-        self.add_relation_tombstones_to_batch(
-            batch,
-            cf_relation,
-            tenant_id,
-            repo_id,
-            target_branch,
-            workspace,
-            &node.id,
-            revision,
-        )?;
-
-        // Translation tombstones
-        self.add_translation_tombstones_to_batch(
-            batch,
-            tenant_id,
-            repo_id,
-            target_branch,
-            workspace,
-            &node.id,
-            revision,
-        )?;
-
-        // Ordered-children tombstone (resolve the parent id by path — the
-        // node's `parent` field holds the parent NAME, not its id)
+    ) -> Result<PrunedPlacement> {
+        let mut placement = PrunedPlacement::default();
         let parent_path = parent_path_of(&node.path);
         if let Some(parent_id) = self
             .resolve_parent_id_opt(tenant_id, repo_id, target_branch, workspace, &parent_path)
@@ -165,28 +58,48 @@ impl NodeRepositoryImpl {
                 &parent_id,
                 &node.id,
             )? {
-                let ordered_key = keys::ordered_child_key_versioned(
-                    tenant_id,
-                    repo_id,
-                    target_branch,
-                    workspace,
-                    &parent_id,
-                    &label,
-                    revision,
-                    &node.id,
-                );
-                batch.put_cf(cf_ordered, ordered_key, TOMBSTONE);
+                placement.label = label;
             }
+            placement.parent_id = Some(parent_id);
         }
 
-        Ok(())
-    }
-}
+        let ctx =
+            crate::tombstones::TombstoneContext::new(tenant_id, repo_id, target_branch, workspace);
+        let cfs = crate::tombstones::TombstoneColumnFamilies::from_db(&self.db)?;
+        crate::tombstones::add_node_tombstones_with_parent(
+            batch,
+            &self.db,
+            &ctx,
+            &cfs,
+            node,
+            revision,
+            placement.parent_id.as_deref(),
+        )?;
+        self.add_unique_tombstones_to_batch(
+            batch,
+            node,
+            tenant_id,
+            repo_id,
+            target_branch,
+            workspace,
+            revision,
+        )
+        .await?;
 
-impl NodeRepositoryImpl {
-    /// STEP 4 of `copy_nodes_across_branches_impl`: tombstone every
-    /// target-branch node under the copied roots that no longer exists in the
-    /// copied source set. Returns the pruned node ids.
+        Ok(placement)
+    }
+
+    /// `delete_missing`: tombstone every target-branch node under the copied
+    /// roots that no longer exists in the copied source set. Runs BEFORE any
+    /// node is staged (see [`Self::retire_target_node`]). Returns the pruned
+    /// nodes (pre-delete state) with their placement, for the `Delete` changes
+    /// of the copy's replicated `ApplyRevision`.
+    ///
+    /// A root is looked up on the target by its id AND by its path: a root the
+    /// source re-created under a fresh id (`deploy --install`) leaves the
+    /// previous generation at that path, and its subtree is pruned too —
+    /// otherwise whatever the source no longer has stayed live beneath a parent
+    /// id nothing resolves to any more.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn prune_missing_targets(
         &self,
@@ -200,11 +113,13 @@ impl NodeRepositoryImpl {
         src_ids: &HashSet<String>,
         changes: &mut Vec<CrossBranchNodeChange>,
         change_infos: &mut Vec<NodeChangeInfo>,
-    ) -> Result<HashSet<String>> {
+    ) -> Result<Vec<PrunedNode>> {
         let mut deleted_ids: HashSet<String> = HashSet::new();
+        let mut pruned: Vec<PrunedNode> = Vec::new();
         for rc in root_ctxs {
-            // The pre-copy target tree under the same root id (the batch
-            // is not committed yet, so this sees the previous state).
+            // The pre-copy target trees (nothing is staged yet, and the batch
+            // is not committed, so these reads see the previous state).
+            let mut subtree_roots: Vec<String> = Vec::new();
             if self
                 .get_impl(
                     tenant_id,
@@ -215,47 +130,86 @@ impl NodeRepositoryImpl {
                     false,
                 )
                 .await?
-                .is_none()
+                .is_some()
             {
-                continue;
+                subtree_roots.push(rc.node.id.clone());
             }
-            let dst_set = self.scan_descendants_ordered_impl(
-                tenant_id,
-                repo_id,
-                target_branch,
-                workspace,
-                &rc.node.id,
-                None,
-            )?;
-            for (dst_node, _) in dst_set {
-                if src_ids.contains(&dst_node.id) || !deleted_ids.insert(dst_node.id.clone()) {
-                    continue;
-                }
-                self.add_cross_branch_prune_to_batch(
-                    batch,
-                    &dst_node,
+            if let Some(occupant) = self
+                .get_by_path_impl(
                     tenant_id,
                     repo_id,
                     target_branch,
                     workspace,
-                    revision,
+                    &rc.node.path,
+                    None,
                 )
-                .await?;
-                changes.push(CrossBranchNodeChange {
-                    node_id: dst_node.id.clone(),
-                    path: dst_node.path.clone(),
-                    node_type: dst_node.node_type.clone(),
-                    operation: ChangeOperation::Deleted,
-                });
-                change_infos.push(NodeChangeInfo {
-                    node_id: dst_node.id.clone(),
-                    workspace: workspace.to_string(),
-                    operation: ChangeOperation::Deleted,
-                    translation_locale: None,
-                });
+                .await?
+            {
+                if occupant.id != rc.node.id {
+                    subtree_roots.push(occupant.id);
+                }
+            }
+            for root_id in subtree_roots {
+                let dst_set = self.scan_descendants_ordered_impl(
+                    tenant_id,
+                    repo_id,
+                    target_branch,
+                    workspace,
+                    &root_id,
+                    None,
+                )?;
+                for (dst_node, _) in dst_set {
+                    if src_ids.contains(&dst_node.id) || !deleted_ids.insert(dst_node.id.clone()) {
+                        continue;
+                    }
+                    let placement = self
+                        .retire_target_node(
+                            batch,
+                            &dst_node,
+                            tenant_id,
+                            repo_id,
+                            target_branch,
+                            workspace,
+                            revision,
+                        )
+                        .await?;
+                    changes.push(CrossBranchNodeChange {
+                        node_id: dst_node.id.clone(),
+                        path: dst_node.path.clone(),
+                        node_type: dst_node.node_type.clone(),
+                        operation: ChangeOperation::Deleted,
+                    });
+                    change_infos.push(NodeChangeInfo {
+                        node_id: dst_node.id.clone(),
+                        workspace: workspace.to_string(),
+                        operation: ChangeOperation::Deleted,
+                        translation_locale: None,
+                    });
+                    pruned.push(PrunedNode {
+                        node: dst_node,
+                        placement,
+                    });
+                }
             }
         }
 
-        Ok(deleted_ids)
+        Ok(pruned)
     }
+}
+
+/// Where a retired node sat among its siblings on the target.
+#[derive(Debug, Default)]
+pub(super) struct PrunedPlacement {
+    /// The ORDERED_CHILDREN parent key (`/` for a root child), when resolved.
+    pub(super) parent_id: Option<String>,
+    /// Its ORDERED_CHILDREN label, or empty when it had none.
+    pub(super) label: String,
+}
+
+/// A target node the promotion deleted — pruned by `delete_missing` or
+/// displaced from its path by a node with a different id — as it was before.
+#[derive(Debug)]
+pub(super) struct PrunedNode {
+    pub(super) node: Node,
+    pub(super) placement: PrunedPlacement,
 }

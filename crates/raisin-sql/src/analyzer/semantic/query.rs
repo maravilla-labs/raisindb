@@ -702,7 +702,7 @@ impl<'a> AnalyzerContext<'a> {
         } else {
             // For regular tables, look up in catalog
             let table = self
-                .get_table_def(&table_ref.table)?
+                .table_def_shared(&table_ref.table)?
                 .ok_or_else(|| AnalysisError::TableNotFound(table_ref.table.clone()))?;
 
             for col in &table.columns {

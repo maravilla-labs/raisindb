@@ -53,6 +53,7 @@ impl TestStorage {
                     default_branch: "main".to_string(),
                     description: Some("subtree document order test".to_string()),
                     tags: HashMap::new(),
+                    localized_names: Default::default(),
                 },
             )
             .await?;

@@ -23,17 +23,11 @@ async fn test_operation_capture() {
             "tenant1".to_string(),
             "repo1".to_string(),
             "main".to_string(),
-            OpType::CreateNode {
+            OpType::DeleteNodeSnapshot {
                 node_id: "test_node".to_string(),
-                name: "test-document".to_string(),
-                node_type: "Document".to_string(),
-                archetype: None,
-                parent_id: Some("/".to_string()),
-                order_key: "a".to_string(),
-                properties: serde_json::from_value(serde_json::json!({"title": "Test"})).unwrap(),
-                owner_id: None,
-                workspace: None,
-                path: String::new(),
+                revision: raisin_hlc::HLC::new(1, 0),
+                node: None,
+                parent_id: None,
             },
             "test_user".to_string(),
             Some("Create test node".to_string()),
@@ -76,10 +70,11 @@ async fn test_vector_clock_increment() {
             "tenant1".to_string(),
             "repo1".to_string(),
             "main".to_string(),
-            OpType::SetProperty {
+            OpType::DeleteNodeSnapshot {
                 node_id: "node1".to_string(),
-                property_name: "title".to_string(),
-                value: raisin_models::nodes::properties::PropertyValue::String("Test".to_string()),
+                revision: raisin_hlc::HLC::new(1, 0),
+                node: None,
+                parent_id: None,
             },
             "test".to_string(),
             None,
@@ -111,13 +106,11 @@ async fn test_restore_from_oplog() {
                     "tenant1".to_string(),
                     "repo1".to_string(),
                     "main".to_string(),
-                    OpType::SetProperty {
+                    OpType::DeleteNodeSnapshot {
                         node_id: format!("node{}", i),
-                        property_name: "title".to_string(),
-                        value: raisin_models::nodes::properties::PropertyValue::String(format!(
-                            "Value {}",
-                            i
-                        )),
+                        revision: raisin_hlc::HLC::new(1, 0),
+                        node: None,
+                        parent_id: None,
                     },
                     "test".to_string(),
                     None,
@@ -156,12 +149,11 @@ async fn test_restore_from_oplog() {
                 "tenant1".to_string(),
                 "repo1".to_string(),
                 "main".to_string(),
-                OpType::SetProperty {
+                OpType::DeleteNodeSnapshot {
                     node_id: "node6".to_string(),
-                    property_name: "title".to_string(),
-                    value: raisin_models::nodes::properties::PropertyValue::String(
-                        "Value 6".to_string(),
-                    ),
+                    revision: raisin_hlc::HLC::new(1, 0),
+                    node: None,
+                    parent_id: None,
                 },
                 "test".to_string(),
                 None,
@@ -193,10 +185,11 @@ async fn test_disabled_capture() {
             "tenant1".to_string(),
             "repo1".to_string(),
             "main".to_string(),
-            OpType::SetProperty {
+            OpType::DeleteNodeSnapshot {
                 node_id: "node1".to_string(),
-                property_name: "title".to_string(),
-                value: raisin_models::nodes::properties::PropertyValue::String("Test".to_string()),
+                revision: raisin_hlc::HLC::new(1, 0),
+                node: None,
+                parent_id: None,
             },
             "test".to_string(),
             None,

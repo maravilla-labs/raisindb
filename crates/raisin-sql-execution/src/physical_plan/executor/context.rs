@@ -117,6 +117,26 @@ pub struct ExecutionContext<S: Storage> {
     /// Per-statement state every clone of this context shares (RESOLVE's memo,
     /// the read snapshot, the translation resolver). See [`StatementState`].
     pub(crate) statement: Arc<StatementState<S>>,
+    /// `sql.batched_fetch`: index scans and RESOLVE read nodes in batches
+    /// through `NodeRepository::get_many_for_read` (default). `false` falls
+    /// back to one `get` per row — the rollback switch for one release.
+    /// Defaults from `RAISIN_SQL_BATCHED_FETCH`; see [`batched_fetch_default`].
+    pub batched_fetch: bool,
+}
+
+/// The process default for `sql.batched_fetch`: ON unless the environment
+/// variable `RAISIN_SQL_BATCHED_FETCH` is `0`, `false`, `off` or `no`. Read
+/// once.
+pub fn batched_fetch_default() -> bool {
+    static DEFAULT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DEFAULT.get_or_init(|| {
+        std::env::var("RAISIN_SQL_BATCHED_FETCH")
+            .map(|v| {
+                let v = v.trim().to_ascii_lowercase();
+                !matches!(v.as_str(), "0" | "false" | "off" | "no")
+            })
+            .unwrap_or(true)
+    })
 }
 
 impl<S: Storage> ExecutionContext<S> {
@@ -155,6 +175,7 @@ impl<S: Storage> ExecutionContext<S> {
             function_invoke_sync: None,
             lock_manager: None,
             statement: Arc::new(StatementState::default()),
+            batched_fetch: batched_fetch_default(),
         }
     }
 
@@ -379,6 +400,7 @@ impl<S: Storage> Clone for ExecutionContext<S> {
             function_invoke_sync: self.function_invoke_sync.clone(),
             lock_manager: self.lock_manager.clone(),
             statement: self.statement.clone(), // Same statement, same state
+            batched_fetch: self.batched_fetch,
         }
     }
 }

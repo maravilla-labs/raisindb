@@ -56,15 +56,20 @@ impl<R: TranslationRepository> TranslationResolver<R> {
         //
         // `Hidden` is order-independent: hidden anywhere in the chain hides the node.
         //
-        // ONE scan tells us whether this node has block overlays at all. Almost no
-        // node does, and the answer is reused for every locale in the chain — where
-        // the old shape walked the node's whole property tree and issued a point
-        // read per block uuid it found, per locale, only to learn "none" every time.
+        // ONE read gives every block overlay of this node in the whole chain, AS
+        // OF `revision`. Almost no node has any, and the answer is reused for
+        // every locale in the chain — where the old shape walked the node's whole
+        // property tree and issued a point read per block uuid it found, per
+        // locale. It used to be a HEAD listing followed by a point read per
+        // block: a time-travel read lost every block a later delete of the node
+        // ended, and each point read repeated the node's delete check.
+        let chain = parse_chain(&fallback_chain)?;
         let block_overlays = self
             .repository
-            .list_block_translations_for_node(tenant_id, repo_id, branch, workspace, &node.id)
-            .await
-            .unwrap_or_default();
+            .get_block_translations_for_node(
+                tenant_id, repo_id, branch, workspace, &node.id, &chain, revision,
+            )
+            .await?;
 
         for fallback_locale in fallback_chain.into_iter().rev() {
             let locale_code = LocaleCode::parse(&fallback_locale)?;
@@ -99,17 +104,7 @@ impl<R: TranslationRepository> TranslationResolver<R> {
             // itself has one. They used to hang off the node-overlay branch above,
             // so a block translated in a locale where the node had no overlay of
             // its own was stored, listed, and never resolved.
-            self.apply_block_overlays_for_locale(
-                &mut node,
-                &block_overlays,
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                &locale_code,
-                revision,
-            )
-            .await?;
+            self.apply_block_overlays_for_locale(&mut node, &block_overlays, &locale_code)?;
         }
 
         Ok(Some(node))
@@ -155,34 +150,26 @@ impl<R: TranslationRepository> TranslationResolver<R> {
 
     /// Apply the block overlays that belong to ONE locale of the fallback chain.
     ///
-    /// `block_overlays` is the node's `(block_uuid, locale)` inventory, read once by
-    /// the caller. Nothing is fetched — and the node's property tree is not walked —
-    /// unless this locale actually has a block overlay, which is what makes the
-    /// common case (no block overlays anywhere) free rather than N reads per locale.
-    #[allow(clippy::too_many_arguments)]
-    async fn apply_block_overlays_for_locale(
+    /// `block_overlays` is every block overlay of the node in the chain, read
+    /// once by the caller at the read revision. The node's property tree is not
+    /// walked unless this locale actually has a block overlay, which is what
+    /// makes the common case (no block overlays anywhere) free.
+    fn apply_block_overlays_for_locale(
         &self,
         node: &mut Node,
-        block_overlays: &[(String, LocaleCode)],
-        tenant_id: &str,
-        repo_id: &str,
-        branch: &str,
-        workspace: &str,
+        block_overlays: &[(String, LocaleCode, LocaleOverlay)],
         locale: &LocaleCode,
-        revision: &raisin_hlc::HLC,
     ) -> Result<()> {
-        for (block_uuid, overlay_locale) in block_overlays {
+        for (block_uuid, overlay_locale, overlay) in block_overlays {
             if overlay_locale != locale {
                 continue;
             }
-            let block_overlay = self
-                .repository
-                .get_block_translation(
-                    tenant_id, repo_id, branch, workspace, &node.id, block_uuid, locale, revision,
-                )
-                .await?;
-            if let Some(LocaleOverlay::Properties { data }) = block_overlay {
-                self.apply_block_translation_by_uuid(&mut node.properties, block_uuid, data)?;
+            if let LocaleOverlay::Properties { data } = overlay {
+                self.apply_block_translation_by_uuid(
+                    &mut node.properties,
+                    block_uuid,
+                    data.clone(),
+                )?;
             }
         }
 
@@ -276,35 +263,23 @@ impl<R: TranslationRepository> TranslationResolver<R> {
         // Block overlays, once per surviving node. Kept OUT of the locale loop
         // above: the inventory scan is per node, not per locale, and a node's
         // block overlays are applied in the same least-specific-first order.
-        let chain: Vec<LocaleCode> = self
-            .config
-            .get_fallback_chain(locale.as_str())
+        let chain: Vec<LocaleCode> = parse_chain(&self.config.get_fallback_chain(locale.as_str()))?
             .into_iter()
             .rev()
-            .map(|l| LocaleCode::parse(&l))
-            .collect::<Result<Vec<_>>>()?;
+            .collect();
 
         for node in nodes_by_id.values_mut() {
             let block_overlays = self
                 .repository
-                .list_block_translations_for_node(tenant_id, repo_id, branch, workspace, &node.id)
-                .await
-                .unwrap_or_default();
+                .get_block_translations_for_node(
+                    tenant_id, repo_id, branch, workspace, &node.id, &chain, revision,
+                )
+                .await?;
             if block_overlays.is_empty() {
                 continue;
             }
             for locale_code in &chain {
-                self.apply_block_overlays_for_locale(
-                    node,
-                    &block_overlays,
-                    tenant_id,
-                    repo_id,
-                    branch,
-                    workspace,
-                    locale_code,
-                    revision,
-                )
-                .await?;
+                self.apply_block_overlays_for_locale(node, &block_overlays, locale_code)?;
             }
         }
 
@@ -315,6 +290,11 @@ impl<R: TranslationRepository> TranslationResolver<R> {
 
         Ok(result)
     }
+}
+
+/// The fallback chain as locale codes, in the chain's order.
+fn parse_chain(chain: &[String]) -> Result<Vec<LocaleCode>> {
+    chain.iter().map(|l| LocaleCode::parse(l)).collect()
 }
 
 /// Recursively merge a value into a property map following the given path segments.

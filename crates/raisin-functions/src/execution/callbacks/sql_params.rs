@@ -37,8 +37,9 @@ pub(crate) fn substitute_params(sql: &str, params: &[Value]) -> Result<String, E
     raisin_sql_execution::substitute_params_with(sql, params, &format_value)
 }
 
-/// Render one parameter as a SQL literal.
-fn format_value(value: &Value) -> String {
+/// Render one parameter as a SQL literal — the formatter the engine binds
+/// `raisin.sql.*` parameters with (`QueryEngine::execute_with_params`).
+pub(crate) fn format_value(value: &Value) -> String {
     match value {
         Value::String(s) => quote(s),
         Value::Number(n) => n.to_string(),

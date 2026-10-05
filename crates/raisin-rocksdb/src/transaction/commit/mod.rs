@@ -10,8 +10,10 @@
 
 mod events;
 mod extract;
+mod localized_names;
 mod replication;
 mod revision;
+mod staged_index;
 
 use super::RocksDBTransaction;
 use raisin_error::Result;
@@ -119,6 +121,51 @@ pub(super) async fn commit_impl(tx: &RocksDBTransaction) -> Result<()> {
         changed_translations.len()
     );
 
+    // Who wrote the translation versions, for their history records here and
+    // for the ops captured after the write (a replica stores the same).
+    let translation_actor = tx.attributed_actor(
+        actor
+            .as_deref()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "system".to_string()),
+    );
+    let translation_message = message
+        .as_deref()
+        .map(|s| s.as_str())
+        .unwrap_or("auto-commit");
+    let translation_commit =
+        branch.as_deref().map(
+            |branch_name| super::replication::translations::TranslationCommit {
+                tenant_id: tenant_id.as_str(),
+                repo_id: repo_id.as_str(),
+                branch: branch_name.as_str(),
+                actor: &translation_actor,
+                message: translation_message,
+                is_system,
+            },
+        );
+    if let Some(commit) = &translation_commit {
+        tx.stage_translation_history(&mut batch_to_write, commit)?;
+    }
+
+    // PHASE 2.5: The node commit step (plan Phase 7b). Every node this
+    // transaction wrote, moved or deleted is locked — BEFORE the branch record
+    // lock, the one lock order — and held until the batch is written, so no
+    // other writer of those nodes lands in between. Under it, each staged
+    // property-index write is re-validated against what is stored NOW (two
+    // writers of one node, or a commit below a version committed meanwhile).
+    let node_guard = match branch.as_deref() {
+        Some(branch_name) => Some(
+            tx.lock_written_nodes(&tenant_id, &repo_id, branch_name)
+                .await?,
+        ),
+        None => None,
+    };
+    tx.revalidate_staged_index_writes(&mut batch_to_write)?;
+    if let Some(guard) = &node_guard {
+        guard.before_write().await;
+    }
+
     // PHASE 3-4: Create RevisionMeta and update branch HEAD in the batch
     let mut created_revision_meta: Option<raisin_storage::RevisionMeta> = None;
     let mut branch_updates = Vec::new();
@@ -181,6 +228,17 @@ pub(super) async fn commit_impl(tx: &RocksDBTransaction) -> Result<()> {
             )
             .await?;
 
+        // Under the branch lock too: the localized name index against this
+        // transaction's final view (its nodes and overlays share one
+        // unreadable batch) and every commit before it, and uniqueness.
+        tx.stage_localized_names(
+            &mut batch_to_write,
+            (tenant_id.as_str(), repo_id.as_str(), branch_name.as_str()),
+            &changed_nodes,
+            &changed_translations,
+            new_revision,
+        )?;
+
         debug!("Adding branch update to branch_updates vec");
         branch_updates.push((tenant_id.clone(), repo_id.clone(), updated_branch));
     } else {
@@ -205,15 +263,41 @@ pub(super) async fn commit_impl(tx: &RocksDBTransaction) -> Result<()> {
     // wedge the whole pool — the deadlock that froze the job queue. Offloading to the
     // elastic blocking pool keeps the async worker threads free to make progress;
     // the commit is still awaited here, so ordering and consistency are unchanged.
+    //
+    // A transaction that rewrote a node in place (`versionable=false`) writes
+    // under the in-place guard, so the `node_path` backfill cannot land a
+    // stale entry on the same revision between its re-check and its write.
+    // Taken INSIDE the blocking task: it is a std lock, never held across an
+    // `.await`.
     let db = tx.db.clone();
-    tokio::task::spawn_blocking(move || db.write(batch_to_write))
-        .await
-        .map_err(|e| {
-            raisin_error::Error::storage(format!("Commit write task failed to join: {}", e))
-        })?
-        .map_err(|e| raisin_error::Error::storage(format!("Transaction commit failed: {}", e)))?;
-
-    drop(branch_lock);
+    let in_place_scope = match (commit_meta.in_place_record_write, branch.as_ref()) {
+        (true, Some(branch_name)) => {
+            Some((tenant_id.clone(), repo_id.clone(), branch_name.clone()))
+        }
+        _ => None,
+    };
+    //
+    // The node and branch record guards move INTO the blocking task and drop
+    // only after the write returns: dropping this commit future mid-write (a
+    // client disconnect, a timeout wrapper) must not release them while the
+    // batch is still in flight (`indexing::node_lock`).
+    tokio::task::spawn_blocking(move || {
+        let _in_place = in_place_scope.as_ref().map(|(t, r, b)| {
+            crate::repositories::nodes::in_place_write_guard(t.as_str(), r.as_str(), b.as_str())
+        });
+        if let Some(guard) = &node_guard {
+            guard.in_write();
+        }
+        let written = db.write(batch_to_write);
+        drop(branch_lock);
+        drop(node_guard);
+        written
+    })
+    .await
+    .map_err(|e| raisin_error::Error::storage(format!("Commit write task failed to join: {}", e)))?
+    .map_err(|e| raisin_error::Error::storage(format!("Transaction commit failed: {}", e)))?;
+    // Durable now: nothing more lands at this revision.
+    tx.release_inflight_revision();
 
     tracing::debug!("Atomic commit successful");
 
@@ -237,8 +321,13 @@ pub(super) async fn commit_impl(tx: &RocksDBTransaction) -> Result<()> {
     )
     .await;
 
-    // PHASE 5.4: Capture operations for replication using ChangeTracker
-    if let (Some(branch_name), Some(new_revision)) = (branch.as_deref(), max_revision.as_ref()) {
+    // PHASE 5.4: Capture operations for replication using ChangeTracker.
+    //
+    // Not gated on a transaction revision: a transaction of only
+    // `versionable=false` updates allocates none (each write reuses its node's
+    // revision), and gating here left those updates unreplicated forever.
+    // `capture_tracked_changes` resolves the revision itself.
+    if let Some(branch_name) = branch.as_deref() {
         let actor_str = actor
             .as_deref()
             .map(|s| s.to_string())
@@ -252,12 +341,18 @@ pub(super) async fn commit_impl(tx: &RocksDBTransaction) -> Result<()> {
             (*tenant_id).clone(),
             (*repo_id).clone(),
             branch_name.to_string(),
-            Some(*new_revision),
-            actor_str,
+            max_revision,
+            actor_str.clone(),
             message_str,
             is_system,
         )
         .await?;
+
+        // Translation versions, after the nodes they belong to (same causal
+        // lane, so a replica never applies an overlay before its node).
+        if let Some(commit) = &translation_commit {
+            tx.capture_translation_changes(commit).await?;
+        }
     }
 
     // PHASE 5.5: Enqueue async snapshot creation job.

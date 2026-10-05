@@ -5,6 +5,7 @@
 //! fractional index ordering, and translations (node-level and block-level).
 
 use super::super::super::NodeRepositoryImpl;
+use crate::translation_write::OverlayTarget;
 use crate::{cf, cf_handle, keys};
 use raisin_error::Result;
 use raisin_models::nodes::Node;
@@ -120,6 +121,36 @@ impl NodeRepositoryImpl {
             .await?;
         }
 
+        // Localized node name uniqueness of the copied root at its
+        // destination, carrying the source's overlays (plan Phase 12; a no-op
+        // unless the repository enforces it).
+        // Checked now, and again at the commit step under the branch lock
+        // (`localized_name::unique::deferred`).
+        let name_check = {
+            let names =
+                crate::localized_name::keys::NameScope::new(tenant_id, repo_id, branch, workspace);
+            let mut copy = source.clone();
+            copy.id = String::new();
+            copy.path = new_path.clone();
+            copy.name = name.to_string();
+            crate::localized_name::unique::NameCheck::staged(
+                &self.db,
+                names,
+                &copy,
+                Some(target_parent_node.as_ref().map_or("/", |p| p.id.as_str())),
+                &crate::mvcc_read::NEWEST,
+                crate::localized_name::unique::source_overrides(&self.db, names, &source.id)?,
+            )?
+        };
+
+        // Overlays are read as of the branch HEAD (the one reader's bound),
+        // never a version written above it.
+        let source_head = self
+            .branch_repo
+            .get_branch(tenant_id, repo_id, branch)
+            .await?
+            .map(|b| b.head);
+
         // STEP 1: Allocate SINGLE revision for entire tree copy operation
         let revision = self.revision_repo.allocate_revision();
 
@@ -182,10 +213,8 @@ impl NodeRepositoryImpl {
         let mut translation_change_infos: Vec<raisin_storage::NodeChangeInfo> = Vec::new();
         let now = chrono::Utc::now();
 
-        let cf_translation_data = cf_handle(&self.db, cf::TRANSLATION_DATA)?;
-        let cf_translation_index = cf_handle(&self.db, cf::TRANSLATION_INDEX)?;
-        let cf_block_translations = cf_handle(&self.db, cf::BLOCK_TRANSLATIONS)?;
-        let cf_revisions = cf_handle(&self.db, cf::REVISIONS)?;
+        // Translation versions the copy writes, captured after the nodes.
+        let mut translation_ops: Vec<raisin_replication::OpType> = Vec::new();
 
         let (translation_actor, translation_message, translation_is_system) =
             if let Some(meta) = operation_meta.as_ref() {
@@ -286,32 +315,28 @@ impl NodeRepositoryImpl {
                 None
             };
 
-            // Get fractional index label (preserve source order)
+            // The order label. A DESCENDANT keeps its source label: its parent is
+            // a fresh copy, so labels cannot collide and editorial order is
+            // preserved. The copied ROOT is appended to the target parent like
+            // any create, through the one append minter. It used to reuse the
+            // source's label (landing at the source's position, possibly on a
+            // label a target sibling already holds) or, under the workspace
+            // root, pass a FULL label to `inc` — which fails on the `::HLC`
+            // suffix and fell back to a duplicate `first()`.
+            //
+            // The label is the node's `order_key` (`Node.order_key ==
+            // ORDERED_CHILDREN label`): the clone still carried the SOURCE's.
             let mut order_label_owned: Option<String> = None;
             if let Some(ref parent_id) = new_parent_id {
-                if let Some(existing) = order_label_mapping.get(&source_node.id) {
-                    order_label_owned = Some(existing.clone());
-                } else {
-                    let next_label = match self
-                        .get_last_order_label(tenant_id, repo_id, branch, workspace, parent_id)?
-                    {
-                        Some(last) => match crate::fractional_index::inc(&last) {
-                            Ok(label) => label,
-                            Err(e) => {
-                                tracing::warn!(
-                                    parent_id = %parent_id,
-                                    last_label = %last,
-                                    error = %e,
-                                    "Corrupt order label detected in copy, falling back to first()"
-                                );
-                                crate::fractional_index::first()
-                            }
-                        },
-                        None => crate::fractional_index::first(),
-                    };
-                    order_label_mapping.insert(source_node.id.clone(), next_label.clone());
-                    order_label_owned = Some(next_label);
-                }
+                let label = match order_label_mapping.get(&source_node.id) {
+                    Some(existing) if depth > 0 => existing.clone(),
+                    _ => self.next_append_label(
+                        tenant_id, repo_id, branch, workspace, parent_id, &revision,
+                    )?,
+                };
+                order_label_mapping.insert(source_node.id.clone(), label.clone());
+                new_node.order_key = label.clone();
+                order_label_owned = Some(label);
             }
 
             // Add node to batch with SAME revision and parent ID override
@@ -325,7 +350,22 @@ impl NodeRepositoryImpl {
                 &revision,
                 order_label_owned.as_deref(),
                 new_parent_id.as_deref(),
+                // A copy mints a fresh id: no prior version on the branch.
+                crate::repositories::nodes::PropertyWrite::CREATE,
             )?;
+
+            // Compound indexes are the one family the batch indexer cannot
+            // write (they need an async NodeType load), so every write path
+            // adds them itself — the copy never did, and a copied node was
+            // invisible to every typed folder listing.
+            self.add_compound_delta_to_batch(
+                &mut batch,
+                &crate::indexing::IndexCtx::new(tenant_id, repo_id, branch, workspace),
+                crate::indexing::Baseline::NoPrior,
+                &new_node,
+                &revision,
+            )
+            .await?;
 
             // Copy latest node-level translations (if any)
             let node_translations = self.collect_node_translations_for_copy(
@@ -334,36 +374,21 @@ impl NodeRepositoryImpl {
                 branch,
                 workspace,
                 &source_node.id,
+                source_head.as_ref(),
             )?;
 
+            let mut staged_overlays = crate::localized_name::sync::Overrides::new();
             for (locale, overlay, parent_translation_revision) in node_translations {
-                let overlay_bytes = serde_json::to_vec(&overlay).map_err(|e| {
-                    raisin_error::Error::storage(format!(
-                        "Failed to serialize translation overlay for locale {}: {}",
-                        locale.as_str(),
-                        e
-                    ))
-                })?;
-                let data_key = Self::translation_data_key(
+                staged_overlays.insert(locale.as_str().to_string(), Some(overlay.clone()));
+                let target = OverlayTarget {
                     tenant_id,
                     repo_id,
                     branch,
                     workspace,
-                    &new_id,
-                    locale.as_str(),
-                    &revision,
-                );
-                batch.put_cf(&cf_translation_data, data_key, overlay_bytes.clone());
-
-                let index_key = Self::translation_index_key(
-                    tenant_id,
-                    repo_id,
-                    locale.as_str(),
-                    &revision,
-                    &new_id,
-                );
-                batch.put_cf(&cf_translation_index, index_key, b"");
-
+                    node_id: &new_id,
+                    block_uuid: None,
+                    locale: locale.as_str(),
+                };
                 let translation_meta = TranslationMeta {
                     locale: locale.clone(),
                     revision,
@@ -373,32 +398,12 @@ impl NodeRepositoryImpl {
                     message: translation_message.clone(),
                     is_system: translation_is_system,
                 };
-                let meta_bytes = serde_json::to_vec(&translation_meta).map_err(|e| {
-                    raisin_error::Error::storage(format!(
-                        "Failed to serialize TranslationMeta for locale {}: {}",
-                        locale.as_str(),
-                        e
-                    ))
-                })?;
-                let meta_key = Self::translation_meta_key(
-                    tenant_id,
-                    repo_id,
-                    branch,
-                    workspace,
-                    &new_id,
-                    locale.as_str(),
-                    &revision,
-                );
-                batch.put_cf(&cf_revisions, meta_key, meta_bytes);
-
-                let snapshot_key = keys::translation_snapshot_key(
-                    tenant_id,
-                    repo_id,
-                    &new_id,
-                    locale.as_str(),
-                    &revision,
-                );
-                batch.put_cf(&cf_revisions, snapshot_key, overlay_bytes.clone());
+                translation_ops.push(self.stage_copied_translation(
+                    &mut batch,
+                    &target,
+                    Some(&overlay),
+                    &translation_meta,
+                )?);
 
                 translation_change_infos.push(raisin_storage::NodeChangeInfo {
                     node_id: new_id.clone(),
@@ -408,6 +413,22 @@ impl NodeRepositoryImpl {
                 });
             }
 
+            // The copy and its overlays share this unreadable batch: sync the
+            // localized name index against both (plan Phase 12).
+            if !staged_overlays.is_empty() {
+                crate::localized_name::sync::sync_node_final(
+                    &self.db,
+                    &mut batch,
+                    crate::localized_name::keys::NameScope::new(
+                        tenant_id, repo_id, branch, workspace,
+                    ),
+                    &new_node,
+                    new_parent_id.as_deref(),
+                    &revision,
+                    &staged_overlays,
+                )?;
+            }
+
             // Copy block-level translations (if any)
             let block_translations = self.collect_block_translations_for_copy(
                 tenant_id,
@@ -415,38 +436,34 @@ impl NodeRepositoryImpl {
                 branch,
                 workspace,
                 &source_node.id,
+                source_head.as_ref(),
             )?;
 
-            for (block_uuid, locale, overlay, _parent_revision) in block_translations {
-                let overlay_bytes = serde_json::to_vec(&overlay).map_err(|e| {
-                    raisin_error::Error::storage(format!(
-                        "Failed to serialize block translation overlay {}::{}: {}",
-                        locale.as_str(),
-                        block_uuid,
-                        e
-                    ))
-                })?;
-
-                let block_key = Self::block_translation_key(
+            for (block_uuid, locale, overlay, parent_revision) in block_translations {
+                let target = OverlayTarget {
                     tenant_id,
                     repo_id,
                     branch,
                     workspace,
-                    &new_id,
-                    &block_uuid,
-                    locale.as_str(),
-                    &revision,
-                );
-                batch.put_cf(&cf_block_translations, block_key, overlay_bytes.clone());
-
-                let snapshot_key = keys::translation_snapshot_key(
-                    tenant_id,
-                    repo_id,
-                    &new_id,
-                    &format!("{}::{}", locale.as_str(), block_uuid),
-                    &revision,
-                );
-                batch.put_cf(&cf_revisions, snapshot_key, overlay_bytes.clone());
+                    node_id: &new_id,
+                    block_uuid: Some(&block_uuid),
+                    locale: locale.as_str(),
+                };
+                let translation_meta = TranslationMeta {
+                    locale: locale.clone(),
+                    revision,
+                    parent_revision,
+                    timestamp: now,
+                    actor: translation_actor.clone(),
+                    message: translation_message.clone(),
+                    is_system: translation_is_system,
+                };
+                translation_ops.push(self.stage_copied_translation(
+                    &mut batch,
+                    &target,
+                    Some(&overlay),
+                    &translation_meta,
+                )?);
 
                 translation_change_infos.push(raisin_storage::NodeChangeInfo {
                     node_id: new_id.clone(),
@@ -469,10 +486,20 @@ impl NodeRepositoryImpl {
             nodes_for_replication.push((new_node, new_parent_id, order_label_owned));
         }
 
-        // STEP 6: Atomic commit - all nodes created in single WriteBatch
-        self.db
-            .write(batch)
-            .map_err(|e| raisin_error::Error::storage(format!("Atomic copy_tree failed: {}", e)))?;
+        // STEP 6: Atomic commit - all nodes created in single WriteBatch, as one
+        // node commit step (plan Phase 7b): creates re-validate nothing, but
+        // every copied node is locked like any write of it.
+        let mut commit = crate::indexing::NodeCommit::new(tenant_id, repo_id, branch);
+        for node_id in &copied_node_ids {
+            commit.touch(node_id);
+        }
+        commit.check_name(name_check);
+        commit.write(&self.db, batch).await.map_err(|e| match e {
+            // A localized name refused under the branch lock stays a
+            // conflict.
+            raisin_error::Error::Conflict(_) => e,
+            e => raisin_error::Error::storage(format!("Atomic copy_tree failed: {}", e)),
+        })?;
 
         // Destination tree is durable — release the root reservation.
         drop(reservation_guard);
@@ -501,6 +528,27 @@ impl NodeRepositoryImpl {
             revision,
         )
         .await;
+
+        // STEP 7.6: The copied translation versions, after the nodes (same lane).
+        let translation_actor_for_capture = operation_meta
+            .as_ref()
+            .map(|m| m.actor.clone())
+            .unwrap_or_else(|| "system".to_string());
+        for op_type in translation_ops {
+            let _ = self
+                .operation_capture
+                .capture_operation_with_revision(
+                    tenant_id.to_string(),
+                    repo_id.to_string(),
+                    branch.to_string(),
+                    op_type,
+                    translation_actor_for_capture.clone(),
+                    None,
+                    false,
+                    Some(revision),
+                )
+                .await;
+        }
 
         // STEP 8: Store operation metadata with ALL copied node IDs
         if let Some(mut op_meta) = operation_meta {

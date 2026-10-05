@@ -42,8 +42,27 @@ pub(super) async fn validate_create(
         operation_meta: None,
     };
 
+    // Both callers resolved `node.path` through the transaction's own view
+    // first. The repository's check reads COMMITTED state, so after this
+    // transaction moved or deleted the committed occupant away (the cache
+    // records the path as vacated) it still sees that node there and rejects
+    // a create the transaction is entitled to. Any other path keeps the
+    // committed check, which is unbounded by HEAD on purpose.
+    let vacated = {
+        let cache = tx
+            .read_cache
+            .lock()
+            .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
+        matches!(
+            cache.paths.get(&(workspace.to_string(), node.path.clone())),
+            Some(None)
+        )
+    };
+
     tx.node_repo
-        .validate_for_create(tenant_id, repo_id, branch, workspace, node, &options)
+        .validate_for_create_checked(
+            tenant_id, repo_id, branch, workspace, node, &options, !vacated,
+        )
         .await
 }
 

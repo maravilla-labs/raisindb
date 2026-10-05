@@ -73,16 +73,18 @@ pub mod schema_auth;
 
 // Re-export commonly used items from raisin-sql
 pub use raisin_sql::{
-    parse_sql, substitute_params, substitute_params_with, AnalyzedQuery, AnalyzedStatement,
-    Analyzer, Catalog, DataType, LogicalPlan, Optimizer, OptimizerConfig, ParseError, PlanBuilder,
-    PlanError, QueryPlan, RaisinDialect, StaticCatalog,
+    format_param_value, parse_sql, substitute_params, substitute_params_with, AnalyzedQuery,
+    AnalyzedStatement, Analyzer, Catalog, DataType, LogicalPlan, Optimizer, OptimizerConfig,
+    ParseError, PlanBuilder, PlanError, QueryPlan, RaisinDialect, StaticCatalog,
 };
 
 // Re-export query engine and batch utilities
 pub use engine::{
-    batch_requires_async, invalidate_all_workspace_catalogs, invalidate_workspace_catalog,
-    workspace_catalog, FunctionInvokeCallback, FunctionInvokeSyncCallback, JobRegistrarCallback,
-    QueryEngine, RestoreTreeRegistrarCallback,
+    batch_requires_async, invalidate_all_workspace_catalogs, invalidate_compound_index_cache,
+    invalidate_plan_cache, invalidate_workspace_catalog, physical_plan_cache_hits,
+    plan_cache_contains, plan_cache_stats, template_cache_stats, workspace_catalog,
+    FunctionInvokeCallback, FunctionInvokeSyncCallback, JobRegistrarCallback, ParamFormat,
+    ParamOutcome, QueryEngine, RestoreTreeRegistrarCallback,
 };
 
 // Re-export physical plan types

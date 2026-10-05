@@ -286,8 +286,8 @@ where
     use futures::StreamExt;
     use raisin_models::auth::AuthContext;
     use raisin_models::nodes::properties::PropertyValue;
-    use raisin_sql_execution::{QueryEngine, StaticCatalog};
-    use raisin_storage::{RepoScope, RepositoryManagementRepository, WorkspaceRepository};
+    use raisin_sql_execution::QueryEngine;
+    use raisin_storage::RepositoryManagementRepository;
 
     Arc::new(
         move |sql: String,
@@ -301,22 +301,19 @@ where
             let hnsw_engine = hnsw_engine.clone();
 
             Box::pin(async move {
-                // Register every workspace so `FROM <workspace>` resolves.
-                let workspaces = storage
-                    .workspaces()
-                    .list(RepoScope::new(&tenant_id, &repo_id))
-                    .await?;
-                let mut catalog = StaticCatalog::default_nodes_schema();
-                for ws in &workspaces {
-                    catalog.register_workspace(ws.name.clone());
-                }
+                // The shared per-repo catalog: the prepared-statement cache
+                // keys on catalog identity, so a catalog built per job would
+                // make every bulk statement a guaranteed cache miss.
+                let catalog =
+                    raisin_sql_execution::workspace_catalog(storage.as_ref(), &tenant_id, &repo_id)
+                        .await?;
 
                 // Run under the submitter's identity (captured at enqueue time)
                 // so RLS matches a synchronous request. Fall back to anonymous —
                 // never system — when the identity is absent.
                 let auth = auth.unwrap_or_else(AuthContext::anonymous);
                 let mut engine = QueryEngine::new(storage.clone(), &tenant_id, &repo_id, &branch)
-                    .with_catalog(Arc::new(catalog))
+                    .with_catalog(catalog)
                     .with_auth(auth)
                     .with_default_actor(actor);
                 // Same reason as `callbacks::sql::build_engine`: without the

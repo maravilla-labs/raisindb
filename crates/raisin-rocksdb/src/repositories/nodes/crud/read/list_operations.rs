@@ -121,8 +121,10 @@ impl NodeRepositoryImpl {
             if let std::collections::hash_map::Entry::Vacant(entry) =
                 nodes_map.entry(node_id.clone())
             {
+                // Path as of the read, not the blob's revision.
+                let path_at = max_revision.copied().unwrap_or(crate::mvcc_read::NEWEST);
                 let node = self.deserialize_node_with_path(
-                    &value, tenant_id, repo_id, branch, workspace, &node_id, &revision,
+                    &value, tenant_id, repo_id, branch, workspace, &node_id, &path_at, &revision,
                 )?;
                 tracing::debug!(
                     "  ADDED: node_id={}, path={}, revision={}",

@@ -111,6 +111,7 @@ impl PhysicalPlan {
                 | PhysicalPlan::PropertyRangeScan { .. }
                 | PhysicalPlan::CompoundIndexScan { .. }
                 | PhysicalPlan::PathIndexScan { .. }
+                | PhysicalPlan::LocalizedPathLookup { .. }
                 | PhysicalPlan::NodeIdScan { .. }
                 | PhysicalPlan::FullTextScan { .. }
                 | PhysicalPlan::CTEScan { .. }
@@ -195,6 +196,13 @@ impl PhysicalPlan {
                 ..
             } => Some((tenant_id, repo_id, branch, workspace)),
             PhysicalPlan::NodeIdScan {
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                ..
+            } => Some((tenant_id, repo_id, branch, workspace)),
+            PhysicalPlan::LocalizedPathLookup {
                 tenant_id,
                 repo_id,
                 branch,

@@ -114,9 +114,14 @@ pub(crate) fn child_is_under(
 }
 
 /// A node's path as of `max_revision`, without decoding properties when it
-/// can be helped: `NODE_PATH` first, else the path embedded in a full `Node`
-/// blob (the transaction write path stores those and writes no `NODE_PATH`).
-/// `None` when deleted by then or the path is unknown.
+/// can be helped. `None` when deleted by then or the path is unknown.
+///
+/// The Phase 10 read rule, through its one blob-less implementation
+/// ([`crate::mvcc_read::current_path`]): the newer, by revision, of
+/// `NODE_PATH`'s newest entry and the path a legacy full-`Node` blob embeds,
+/// a disagreeing tie decided by `PATH_INDEX`. ("`NODE_PATH` first" alone
+/// returned the pre-rename path of a node renamed through the pre-Phase-10
+/// transaction writer.)
 pub(crate) fn node_path_at(
     db: &DB,
     tenant_id: &str,
@@ -126,35 +131,14 @@ pub(crate) fn node_path_at(
     node_id: &str,
     max_revision: Option<&HLC>,
 ) -> Result<Option<String>> {
-    let prefix = keys::node_path_key_prefix(tenant_id, repo_id, branch, workspace, node_id);
-    let cf_node_path = cf_handle(db, cf::NODE_PATH)?;
-    let indexed = crate::mvcc_read::newest_at_or_before_with(
-        db,
-        cf_node_path,
-        &prefix,
-        max_revision,
-        |_, v| (!is_tombstone(v)).then(|| String::from_utf8_lossy(v).into_owned()),
-    )?;
-    match indexed {
-        Some(Some(path)) => return Ok(Some(path)),
-        Some(None) => return Ok(None),
-        None => {}
-    }
-
-    let prefix = keys::node_key_prefix(tenant_id, repo_id, branch, workspace, node_id);
-    let cf_nodes = cf_handle(db, cf::NODES)?;
-    Ok(
-        crate::mvcc_read::newest_at_or_before_with(db, cf_nodes, &prefix, max_revision, |_, v| {
-            if is_tombstone(v) {
-                return None;
-            }
-            rmp_serde::from_slice::<Node>(v)
-                .ok()
-                .map(|node| node.path)
-                .filter(|path| !path.is_empty())
-        })?
-        .flatten(),
-    )
+    let scope = crate::mvcc_read::NodeScope {
+        tenant_id,
+        repo_id,
+        branch,
+        workspace,
+        node_id,
+    };
+    Ok(crate::mvcc_read::current_path(db, scope, max_revision)?.and_then(|c| c.path))
 }
 
 /// `/a/b` -> `/a`; `/a` -> `/`.

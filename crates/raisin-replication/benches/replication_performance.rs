@@ -11,7 +11,6 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use raisin_hlc::HLC;
-use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
 use raisin_models::nodes::RelationRef;
 use raisin_replication::{
@@ -28,8 +27,8 @@ use uuid::Uuid;
 // Helper Functions for Creating Test Data
 // ============================================================================
 
-/// Create a test operation with SetProperty
-fn make_set_property_op(
+/// Create a test node-delete operation (a one-node register op)
+fn make_node_op(
     cluster_node_id: &str,
     op_seq: u64,
     vc: VectorClock,
@@ -45,10 +44,11 @@ fn make_set_property_op(
         tenant_id: "tenant1".to_string(),
         repo_id: "repo1".to_string(),
         branch: "main".to_string(),
-        op_type: OpType::SetProperty {
+        op_type: OpType::DeleteNodeSnapshot {
             node_id: node_id.to_string(),
-            property_name: "value".to_string(),
-            value: PropertyValue::Integer(op_seq as i64),
+            revision: raisin_hlc::HLC::new(op_seq, 0),
+            node: None,
+            parent_id: None,
         },
         revision: None,
         actor: "benchmark".to_string(),
@@ -165,7 +165,7 @@ fn create_sequential_ops(node_id: &str, count: usize) -> Vec<Operation> {
 
     for i in 0..count {
         vc.increment(node_id);
-        ops.push(make_set_property_op(
+        ops.push(make_node_op(
             node_id,
             i as u64 + 1,
             vc.clone(),
@@ -185,10 +185,10 @@ fn bench_operation_throughput(c: &mut Criterion) {
     let mut group = c.benchmark_group("operation_throughput");
 
     for batch_size in [10, 100, 1000, 10000] {
-        // SetProperty operations
+        // Node operations
         group.throughput(Throughput::Elements(batch_size as u64));
         group.bench_with_input(
-            BenchmarkId::new("set_property", batch_size),
+            BenchmarkId::new("node_op", batch_size),
             &batch_size,
             |b, &size| {
                 let ops = create_sequential_ops("node1", size);
@@ -657,7 +657,7 @@ fn bench_multi_node_concurrent_ops(c: &mut Criterion) {
 
                         for i in 0..100 {
                             vc.increment(&node_name);
-                            all_ops.push(make_set_property_op(
+                            all_ops.push(make_node_op(
                                 &node_name,
                                 i + 1,
                                 vc.clone(),

@@ -45,21 +45,3 @@ pub(super) fn parse_relation_from_forward_key(
     // TODO: Parse target_workspace from value if stored there
     Some((relation_type, String::new(), target_id))
 }
-
-/// Extract locale from a translation key
-///
-/// Key format after node prefix: {locale}\0{~revision}
-pub(super) fn extract_locale_from_translation_key(key: &[u8], prefix: &[u8]) -> Option<String> {
-    if key.len() <= prefix.len() {
-        return None;
-    }
-
-    let suffix = &key[prefix.len()..];
-    let parts: Vec<&[u8]> = suffix.split(|&b| b == 0).collect();
-
-    if parts.is_empty() {
-        return None;
-    }
-
-    String::from_utf8(parts[0].to_vec()).ok()
-}

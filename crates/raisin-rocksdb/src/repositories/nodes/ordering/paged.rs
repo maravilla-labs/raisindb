@@ -17,11 +17,12 @@
 
 use super::super::helpers::is_tombstone;
 use super::super::NodeRepositoryImpl;
+use super::paged_desc::{flush_descending_group, DescEntry};
 use super::parse_ordered_child_key;
 use crate::{cf, cf_handle, keys};
 use raisin_error::Result;
 use raisin_hlc::HLC;
-use rocksdb::ReadOptions;
+use rocksdb::{ReadOptions, SnapshotWithThreadMode, DB};
 use std::collections::HashSet;
 
 /// Where a forward/reverse ordered-children scan begins.
@@ -123,6 +124,7 @@ impl NodeRepositoryImpl {
             start,
             descending,
             max_revision,
+            None,
             |child_id, order_label, value| {
                 out.push(OrderedChildEntry {
                     child_id: child_id.to_string(),
@@ -138,6 +140,9 @@ impl NodeRepositoryImpl {
     /// The one `ORDERED_CHILDREN` scan, behind the listing above and the
     /// `has_children` probe: `visit(child_id, order_label, value)` once per
     /// live child in editorial order; it returns `Ok(false)` to stop.
+    /// `snapshot` pins it to a caller's view (`None`: the live database), so
+    /// a walk that reads everything else from a snapshot lists children from
+    /// the same one.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::repositories::nodes) fn scan_ordered_children<F>(
         &self,
@@ -149,6 +154,7 @@ impl NodeRepositoryImpl {
         start: OrderedScanStart<'_>,
         descending: bool,
         max_revision: Option<&HLC>,
+        snapshot: Option<&SnapshotWithThreadMode<'_, DB>>,
         mut visit: F,
     ) -> Result<()>
     where
@@ -163,6 +169,9 @@ impl NodeRepositoryImpl {
         let mut opts = ReadOptions::default();
         opts.set_iterate_lower_bound(prefix.clone());
         opts.set_iterate_upper_bound(prefix_upper_bound(&prefix));
+        if let Some(snapshot) = snapshot {
+            opts.set_snapshot(snapshot);
+        }
 
         // A raw iterator: the entries are only looked at, and the boxed
         // iterator copied every key and value it yielded. On a real content
@@ -189,6 +198,13 @@ impl NodeRepositoryImpl {
         let mut group_label: Vec<u8> = Vec::new();
         let mut group_children: Vec<Vec<u8>> = Vec::new();
         let mut seen_child_ids: HashSet<String> = HashSet::new();
+        // Walking BACKWARDS, a label group's revisions arrive OLDEST first, so
+        // "first entry seen" would pick the oldest revision — a stale live
+        // entry beneath a newer tombstone (every reorder leaves one) came back
+        // to life in `ORDER BY __order DESC`. Descending scans therefore
+        // buffer one label group and resolve newest-per-child when it closes.
+        let mut pending: Vec<DescEntry> = Vec::new();
+        let mut stopped = false;
 
         while iter.valid() {
             let (Some(key), Some(value)) = (iter.key(), iter.value()) else {
@@ -205,7 +221,22 @@ impl NodeRepositoryImpl {
                         _ => true,
                     };
 
-                if visible {
+                if visible && descending {
+                    if parsed.order_label.as_bytes() != group_label.as_slice() {
+                        if !flush_descending_group(&mut pending, &mut seen_child_ids, &mut visit)? {
+                            stopped = true;
+                            break;
+                        }
+                        group_label.clear();
+                        group_label.extend_from_slice(parsed.order_label.as_bytes());
+                    }
+                    pending.push(DescEntry {
+                        revision: parsed.revision_bytes.to_vec(),
+                        child_id: parsed.child_id.to_string(),
+                        label: parsed.order_label.to_string(),
+                        value: value.to_vec(),
+                    });
+                } else if visible {
                     if parsed.order_label.as_bytes() != group_label.as_slice() {
                         group_label.clear();
                         group_label.extend_from_slice(parsed.order_label.as_bytes());
@@ -234,6 +265,9 @@ impl NodeRepositoryImpl {
             } else {
                 iter.next();
             }
+        }
+        if descending && !stopped {
+            flush_descending_group(&mut pending, &mut seen_child_ids, &mut visit)?;
         }
         iter.status()
             .map_err(|e| raisin_error::Error::storage(e.to_string()))?;

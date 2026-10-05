@@ -21,6 +21,21 @@ use super::rewriter::CsePlanRewriter;
 /// An optimized plan with common subexpressions extracted into intermediate
 /// projections, or the original plan if no optimization opportunities were found.
 pub fn apply_cse(plan: LogicalPlan, config: &CseConfig) -> LogicalPlan {
+    // A projection of plain columns and literals (`SELECT *`, `SELECT id`)
+    // has no candidate: a leaf is never extracted, and a leaf's only
+    // subexpression is itself. Hashing and interning its ~30 columns was a
+    // tenth of planning a never-seen `SELECT *` (plan Phase 13d).
+    if let LogicalPlan::Project { exprs, .. } = &plan {
+        if exprs.iter().all(|e| {
+            matches!(
+                e.expr.expr,
+                crate::analyzer::Expr::Literal(_) | crate::analyzer::Expr::Column { .. }
+            )
+        }) {
+            return plan;
+        }
+    }
+
     // Step 1: Create CSE context with arena
     let mut ctx = CseContext::new(config.clone());
 

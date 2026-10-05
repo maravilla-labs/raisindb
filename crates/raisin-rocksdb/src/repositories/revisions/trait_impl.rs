@@ -188,9 +188,19 @@ impl RevisionRepository for RevisionRepositoryImpl {
                     .map_err(|e| raisin_error::Error::storage(e.to_string()))?
             {
                 if !value_bytes.starts_with(b"TOMBSTONE") {
-                    if let Ok(node) =
-                        rmp_serde::from_slice::<raisin_models::nodes::Node>(&value_bytes)
-                    {
+                    // Through the one decoder, so the path is materialized
+                    // for a StorageNode blob (Phase 10 read rule).
+                    if let Ok(node) = crate::mvcc_read::deserialize_node_with_path(
+                        &self.db,
+                        &value_bytes,
+                        tenant_id,
+                        repo_id,
+                        &meta.branch,
+                        &change_info.workspace,
+                        &change_info.node_id,
+                        revision,
+                        revision,
+                    ) {
                         (Some(node.path), Some(node.node_type))
                     } else {
                         (None, None)

@@ -22,10 +22,9 @@ use raisin_binary::BinaryStorage;
 use raisin_error::Error;
 use raisin_models::auth::AuthContext;
 use raisin_models::nodes::properties::PropertyValue;
-use raisin_sql_execution::{QueryEngine, StaticCatalog};
-use raisin_storage::scope::RepoScope;
+use raisin_sql_execution::QueryEngine;
 use raisin_storage::transactional::TransactionalStorage;
-use raisin_storage::{Storage, WorkspaceRepository};
+use raisin_storage::Storage;
 use serde_json::Value;
 
 use super::super::types::ExecutionDependencies;
@@ -80,17 +79,16 @@ where
     /// indexing engines. Each call creates a fresh engine, which means each
     /// operation will use auto-commit mode.
     pub async fn create_engine(&self) -> Result<QueryEngine<S>, Error> {
-        // Build workspace catalog from storage
-        let workspaces = self
-            .deps
-            .storage
-            .workspaces()
-            .list(RepoScope::new(&self.tenant_id, &self.repo_id))
-            .await?;
-        let mut catalog = StaticCatalog::default_nodes_schema();
-        for ws in &workspaces {
-            catalog.register_workspace(ws.name.clone());
-        }
+        // The shared per-repo catalog, as `callbacks::sql::build_engine` uses.
+        // The prepared-statement cache keys on the catalog's identity, so a
+        // catalog built here per engine made every statement of a function
+        // transaction a guaranteed cache miss (and a dead cache entry).
+        let catalog = raisin_sql_execution::workspace_catalog(
+            self.deps.storage.as_ref(),
+            &self.tenant_id,
+            &self.repo_id,
+        )
+        .await?;
 
         // Create QueryEngine with catalog and optional engines
         let mut engine = QueryEngine::new(
@@ -99,7 +97,7 @@ where
             &self.repo_id,
             &self.branch,
         )
-        .with_catalog(Arc::new(catalog));
+        .with_catalog(catalog);
 
         if let Some(idx) = &self.deps.indexing_engine {
             engine = engine.with_indexing_engine(idx.clone());
@@ -127,11 +125,13 @@ where
     /// The engine will automatically commit the transaction after execution.
     pub async fn execute_query(&self, stmt: &SqlStatement) -> Result<Vec<Value>, Error> {
         let engine = self.create_engine().await?;
-        let final_sql = substitute_params(&stmt.sql, &stmt.params)?;
+        tracing::debug!(sql = %stmt.sql, "Executing SQL query via QueryContext");
 
-        tracing::debug!(sql = %final_sql, "Executing SQL query via QueryContext");
-
-        let mut stream = engine.execute(&final_sql).await?;
+        // Parameters are bound by the engine (one template per SQL text,
+        // plan Phase 13d).
+        let mut stream = engine
+            .execute_with_params(&stmt.sql, &stmt.params, &format_value)
+            .await?;
         let mut rows = Vec::new();
 
         while let Some(row_result) = stream.next().await {
@@ -157,15 +157,15 @@ where
     /// Suitable for INSERT, UPDATE, DELETE operations.
     pub async fn execute_statement(&self, stmt: &SqlStatement) -> Result<i64, Error> {
         let engine = self.create_engine().await?;
-        let final_sql = substitute_params(&stmt.sql, &stmt.params)?;
-
-        tracing::debug!(sql = %final_sql, "Executing SQL statement via QueryContext");
+        tracing::debug!(sql = %stmt.sql, "Executing SQL statement via QueryContext");
 
         // DML emits a single summary row carrying the real `affected_rows` count;
         // read that value rather than counting emitted rows (which is always 1 for
         // DML and would break compare-and-swap callers). Fall back to a row count
         // for statements that don't surface the summary column.
-        let mut stream = engine.execute(&final_sql).await?;
+        let mut stream = engine
+            .execute_with_params(&stmt.sql, &stmt.params, &format_value)
+            .await?;
         let mut affected: i64 = 0;
         let mut row_count: i64 = 0;
         let mut saw_affected = false;
@@ -208,7 +208,11 @@ where
     }
 }
 
-use crate::execution::callbacks::sql_params::substitute_params;
+use crate::execution::callbacks::sql_params::format_value;
+
+#[cfg(test)]
+#[path = "query_context_tests.rs"]
+mod tests;
 
 /// Convert PropertyValue to JSON Value
 fn property_value_to_json(pv: PropertyValue) -> Value {

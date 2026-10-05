@@ -142,6 +142,7 @@ async fn regenerate_queues_eligible_nodes_without_an_embedding() -> Result<()> {
                 default_branch: BRANCH.to_string(),
                 description: None,
                 tags: HashMap::new(),
+                localized_names: Default::default(),
             },
         )
         .await?;

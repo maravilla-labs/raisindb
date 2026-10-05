@@ -12,9 +12,9 @@ pub enum OperationPriority {
     Critical = 1,
     /// High: Workspaces, branches, tags, node types (Priority 2)
     High = 2,
-    /// Medium: Node CRUD operations (Priority 3)
+    /// Medium: Whole revisions and revision metadata (Priority 3)
     Medium = 3,
-    /// Low: Property updates, relations (Priority 4)
+    /// Low: Node snapshots, relations, translations (Priority 4)
     Low = 4,
 }
 
@@ -64,28 +64,16 @@ impl OperationPriority {
             | OpType::UpdateElementType { .. }
             | OpType::DeleteElementType { .. } => OperationPriority::High,
 
-            // Medium: Node creation and deletion, revision metadata
-            OpType::CreateNode { .. }
-            | OpType::DeleteNode { .. }
-            | OpType::MoveNode { .. }
-            | OpType::ApplyRevision { .. }
-            | OpType::SetArchetype { .. }
-            | OpType::RenameNode { .. }
-            | OpType::SetOwner { .. }
-            | OpType::PublishNode { .. }
-            | OpType::UnpublishNode { .. }
-            | OpType::CreateRevisionMeta { .. } => OperationPriority::Medium,
+            // Medium: whole revisions, revision metadata
+            OpType::ApplyRevision { .. } | OpType::CreateRevisionMeta { .. } => {
+                OperationPriority::Medium
+            }
 
-            // Low: Property and relation updates
-            OpType::SetProperty { .. }
-            | OpType::DeleteProperty { .. }
-            | OpType::AddRelation { .. }
+            // Low: node snapshots, relations, translations
+            OpType::AddRelation { .. }
             | OpType::RemoveRelation { .. }
-            | OpType::SetOrderKey { .. }
-            | OpType::ListInsertAfter { .. }
-            | OpType::ListDelete { .. }
-            | OpType::SetTranslation { .. }
-            | OpType::DeleteTranslation { .. }
+            | OpType::UpsertTranslationOverlay { .. }
+            | OpType::Unknown { .. }
             | OpType::UpsertNodeSnapshot { .. }
             | OpType::DeleteNodeSnapshot { .. } => OperationPriority::Low,
         }
@@ -117,7 +105,7 @@ mod tests {
     use super::*;
     use crate::VectorClock;
     use raisin_models::nodes::RelationRef;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashSet;
     use uuid::Uuid;
 
     fn create_test_op(op_type: OpType, op_seq: u64) -> Operation {
@@ -180,26 +168,19 @@ mod tests {
         );
 
         let node_op = create_test_op(
-            OpType::CreateNode {
-                node_id: "node1".to_string(),
-                name: "Node".to_string(),
-                node_type: "Page".to_string(),
-                archetype: None,
-                parent_id: None,
-                order_key: "a0".to_string(),
-                properties: Default::default(),
-                owner_id: None,
-                workspace: None,
-                path: "/Node".to_string(),
+            OpType::ApplyRevision {
+                branch_head: raisin_hlc::HLC::new(1, 0),
+                node_changes: vec![],
             },
             102,
         );
 
         let property_op = create_test_op(
-            OpType::SetProperty {
+            OpType::DeleteNodeSnapshot {
                 node_id: "node1".to_string(),
-                property_name: "title".to_string(),
-                value: raisin_models::nodes::properties::PropertyValue::String("Test".to_string()),
+                revision: raisin_hlc::HLC::new(1, 0),
+                node: None,
+                parent_id: None,
             },
             103,
         );
@@ -232,29 +213,31 @@ mod tests {
 
         sort_operations_by_priority(&mut ops);
 
-        // Should be sorted: admin -> workspace -> node -> property
+        // Should be sorted: admin -> workspace -> revision -> node snapshot
         assert!(matches!(ops[0].op_type, OpType::UpdateUser { .. }));
         assert!(matches!(ops[1].op_type, OpType::UpdateWorkspace { .. }));
-        assert!(matches!(ops[2].op_type, OpType::CreateNode { .. }));
-        assert!(matches!(ops[3].op_type, OpType::SetProperty { .. }));
+        assert!(matches!(ops[2].op_type, OpType::ApplyRevision { .. }));
+        assert!(matches!(ops[3].op_type, OpType::DeleteNodeSnapshot { .. }));
     }
 
     #[test]
     fn test_same_priority_maintains_order() {
         let op1 = create_test_op(
-            OpType::SetProperty {
-                node_id: "node1".to_string(),
-                property_name: "a".to_string(),
-                value: raisin_models::nodes::properties::PropertyValue::String("A".to_string()),
+            OpType::DeleteNodeSnapshot {
+                node_id: "node-a".to_string(),
+                revision: raisin_hlc::HLC::new(1, 0),
+                node: None,
+                parent_id: None,
             },
             100,
         );
 
         let op2 = create_test_op(
-            OpType::SetProperty {
-                node_id: "node1".to_string(),
-                property_name: "b".to_string(),
-                value: raisin_models::nodes::properties::PropertyValue::String("B".to_string()),
+            OpType::DeleteNodeSnapshot {
+                node_id: "node-b".to_string(),
+                revision: raisin_hlc::HLC::new(1, 0),
+                node: None,
+                parent_id: None,
             },
             101,
         );

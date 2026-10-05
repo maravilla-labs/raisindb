@@ -5,7 +5,7 @@
 use super::*;
 use raisin_context::RepositoryConfig;
 use raisin_models::translations::{LocaleCode, LocaleOverlay, TranslationMeta};
-use raisin_storage::TranslationRepository;
+use raisin_storage::{BranchRepository, TranslationRepository};
 
 fn localized_engine(storage: &Arc<Store>) -> QueryEngine<Store> {
     let config = RepositoryConfig {
@@ -41,6 +41,13 @@ async fn hide(storage: &Arc<Store>, workspace: &str, node_id: &str, locale: &str
         )
         .await
         .expect("hide");
+    // What `TranslationService::hide_node` does after the store: the version
+    // is committed state once HEAD reaches it (reads are revision-bounded).
+    storage
+        .branches()
+        .update_head(TENANT, REPO, BRANCH, meta.revision)
+        .await
+        .expect("head");
 }
 
 #[tokio::test]

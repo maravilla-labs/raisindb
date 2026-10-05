@@ -1,4 +1,4 @@
-//! Reconstruct PATH_INDEX from NODE_PATH.
+//! Reconstruct PATH_INDEX from each node's current path, by the read rule.
 //!
 //! # Why this exists separately from `rebuild_indexes`
 //!
@@ -21,18 +21,26 @@
 //! This function exists to recover from exactly that, and is shaped so it
 //! cannot repeat it:
 //!
-//! * **It reads NODE_PATH, which is the source of truth**, not a derived index.
-//!   Nothing in the rebuild path clears NODE_PATH, which is why the damage
+//! * **It decides each node's path by THE read rule**
+//!   (`crate::mvcc_read::current_path`): the newer of `NODE_PATH` and the path
+//!   a legacy full-`Node` blob embeds. Taking `NODE_PATH` alone — what this
+//!   did before Phase 10 — disagreed with every reader while legacy blobs
+//!   exist: a node renamed through the pre-Phase-10 `put_node` got its OLD
+//!   path written back (a phantom at `/p1`, nothing at `/p2`), a node the
+//!   transaction path created had no entry and was skipped, and one deleted
+//!   and recreated through it read as deleted. It walks `NODES`, so every
+//!   node with a record is considered whatever `NODE_PATH` holds. Nothing in
+//!   the rebuild path clears `NODES` or `NODE_PATH`, which is why the damage
 //!   above was recoverable at all.
-//! * **It writes at each entry's OWN revision**, so it needs no branch head and
-//!   cannot be defeated by a missing or stale branch record.
+//! * **It writes at the winning record's OWN revision**, so it needs no branch
+//!   head and cannot be defeated by a missing or stale branch record.
 //! * **It never deletes.** An index repair that begins by deleting is the shape
 //!   that caused the incident. Being write-only also makes it safely
 //!   re-runnable: a second pass writes the same keys with the same values.
 //!
 //! # What it restores, and what it does not
 //!
-//! Only the NEWEST non-tombstone NODE_PATH entry per node — the CURRENT tree.
+//! Only each live node's CURRENT path — the current tree.
 //! Deliberately not the history, and the reason is correctness rather than
 //! cost. `get_node_id_by_path_as_of` skips a tombstone and keeps looking at
 //! OLDER entries, so replaying a node's whole path history would make a moved
@@ -42,10 +50,18 @@
 //! So a path lookup AT AN OLD REVISION may still miss after this runs. Those
 //! entries were destroyed by the clear; nothing can reconstruct them without
 //! reintroducing the resurrection above.
+//!
+//! One residue: a disagreeing same-revision tie between `NODE_PATH` and a
+//! legacy blob is settled by `PATH_INDEX` itself, which the clear destroyed,
+//! so such a node is restored at its `NODE_PATH` path (the pre-Phase-10
+//! answer).
 
+use super::node_key_parse::{parse_node_key, workspace_nodes_prefix};
+use crate::mvcc_read::{current_path, NodeScope};
+use crate::repositories::nodes::helpers::is_tombstone;
 use crate::{cf, cf_handle, keys, RocksDBStorage};
 use raisin_error::Result;
-use rocksdb::WriteBatch;
+use rocksdb::{ReadOptions, WriteBatch};
 use serde::{Deserialize, Serialize};
 
 /// What one workspace's repair did. Every node scanned lands in exactly one of
@@ -53,24 +69,24 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PathIndexRepairStats {
     pub workspace: String,
-    /// NODE_PATH entries walked, every revision of every node.
+    /// `NODES` versions walked, every revision of every node.
     pub entries_read: usize,
     /// Distinct node ids seen.
     pub nodes_seen: usize,
     /// Forward PATH_INDEX entries written (or, in a dry run, that would be).
     pub entries_written: usize,
-    /// Nodes whose newest entry is a tombstone: deleted, correctly absent from
-    /// the forward index.
+    /// Nodes whose newest record is a tombstone (or whose current path is):
+    /// deleted, correctly absent from the forward index.
     pub skipped_deleted: usize,
-    /// Older revisions of a node already decided by a newer entry.
+    /// Older revisions of a node already decided by its newest record.
     pub skipped_superseded: usize,
-    /// Entries whose key or value could not be read. NOT ZERO IS A PROBLEM:
-    /// each one is a node that will stay unreachable by path.
+    /// Nodes whose key or path could not be read. NOT ZERO IS A PROBLEM: each
+    /// one is a node that will stay unreachable by path.
     pub skipped_unreadable: usize,
     pub dry_run: bool,
 }
 
-/// Rebuild `workspace`'s PATH_INDEX from its NODE_PATH entries.
+/// Rebuild `workspace`'s PATH_INDEX from each node's current path.
 ///
 /// With `dry_run`, reports what it would write and writes nothing.
 pub async fn repair_path_index(
@@ -86,104 +102,105 @@ pub async fn repair_path_index(
         dry_run,
         ..Default::default()
     };
+    let db = storage.db();
+    let cf_nodes = cf_handle(db, cf::NODES)?;
+    let cf_path = cf_handle(db, cf::PATH_INDEX)?;
 
-    let cf_node_path = cf_handle(storage.db(), cf::NODE_PATH)?;
-    let cf_path = cf_handle(storage.db(), cf::PATH_INDEX)?;
+    let branch_prefix = keys::branch_prefix(tenant_id, repo_id, branch);
+    let prefix = workspace_nodes_prefix(tenant_id, repo_id, branch, workspace);
+    let mut opts = ReadOptions::default();
+    opts.set_total_order_seek(true);
+    opts.fill_cache(false);
+    if let Some(upper) = crate::prefix_successor(&prefix) {
+        opts.set_iterate_upper_bound(upper);
+    }
+    let mut iter = db.raw_iterator_cf_opt(cf_nodes, opts);
+    iter.seek(&prefix);
 
-    let prefix = keys::KeyBuilder::new()
-        .push(tenant_id)
-        .push(repo_id)
-        .push(branch)
-        .push(workspace)
-        .push("node_path")
-        .build_prefix();
-
-    let iter = crate::prefix_scan(storage.db(), cf_node_path, prefix.clone());
-
-    // Entries for one node id are contiguous and the revision is encoded
-    // DESCENDING, so the first entry seen for an id is its newest and decides
-    // the id outright — the same "first one wins" the node scans use.
+    // A node's versions are contiguous and the revision is encoded
+    // DESCENDING, so the first version seen for an id is its newest.
     let mut current_node: Option<String> = None;
     let mut batch = WriteBatch::default();
     let mut pending = 0usize;
 
-    for item in iter {
-        let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
-
-        if !key.starts_with(&prefix) {
+    while iter.valid() {
+        let (Some(key), Some(value)) = (iter.key(), iter.value()) else {
             break;
-        }
+        };
         stats.entries_read += 1;
-
-        let suffix = &key[prefix.len()..];
-        let Some(id_bytes) = suffix.split(|&b| b == 0).next() else {
+        let Some((ws, node_id, _)) = parse_node_key(&branch_prefix, key) else {
             stats.skipped_unreadable += 1;
+            iter.next();
             continue;
         };
-        let Ok(node_id) = std::str::from_utf8(id_bytes) else {
-            stats.skipped_unreadable += 1;
-            continue;
-        };
-
-        if current_node.as_deref() == Some(node_id) {
-            stats.skipped_superseded += 1;
+        if ws != workspace || current_node.as_deref() == Some(node_id) {
+            stats.skipped_superseded += usize::from(ws == workspace);
+            iter.next();
             continue;
         }
         current_node = Some(node_id.to_string());
         stats.nodes_seen += 1;
 
-        // Newest entry is a tombstone: the node is deleted and belongs in no
-        // forward entry. Writing its older paths back is precisely how a
-        // deleted node becomes answerable again.
-        if value.is_empty() || crate::repositories::is_node_tombstone(&value) {
+        // Newest record is a tombstone: deleted, and in no forward entry.
+        // Writing an older path back is how a deleted node becomes
+        // answerable again.
+        if is_tombstone(value) {
             stats.skipped_deleted += 1;
+            iter.next();
             continue;
         }
 
-        let Ok(path) = std::str::from_utf8(&value) else {
-            tracing::warn!(node_id = %node_id, "path repair: NODE_PATH value is not UTF-8");
-            stats.skipped_unreadable += 1;
-            continue;
+        let scope = NodeScope {
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            node_id,
         };
-
-        // The entry's OWN revision, never a branch head — that dependency is
-        // what broke the rebuild this repairs.
-        let revision = match keys::extract_revision_from_key(&key) {
-            Ok(rev) => rev,
-            Err(e) => {
+        match current_path(db, scope, None)? {
+            Some(current) => match current.path {
+                Some(path) => {
+                    stats.entries_written += 1;
+                    if !dry_run {
+                        // The winning record's OWN revision, never a branch
+                        // head — that dependency is what broke the rebuild
+                        // this repairs.
+                        let forward = keys::path_index_key_versioned(
+                            tenant_id,
+                            repo_id,
+                            branch,
+                            workspace,
+                            &path,
+                            &current.revision,
+                        );
+                        batch.put_cf(cf_path, forward, node_id.as_bytes());
+                        pending += 1;
+                    }
+                }
+                None => stats.skipped_deleted += 1,
+            },
+            None => {
                 tracing::warn!(
                     node_id = %node_id,
-                    error = %e,
-                    "path repair: could not read the revision from a NODE_PATH key"
+                    "path repair: a live record with no path in NODE_PATH or the blob"
                 );
                 stats.skipped_unreadable += 1;
-                continue;
             }
-        };
-
-        stats.entries_written += 1;
-        if dry_run {
-            continue;
         }
-
-        let forward =
-            keys::path_index_key_versioned(tenant_id, repo_id, branch, workspace, path, &revision);
-        batch.put_cf(cf_path, forward, node_id.as_bytes());
-        pending += 1;
 
         if pending >= 1000 {
-            storage
-                .db()
-                .write(std::mem::take(&mut batch))
-                .map_err(|e| {
-                    raisin_error::Error::storage(format!("path repair batch write failed: {}", e))
-                })?;
+            db.write(std::mem::take(&mut batch)).map_err(|e| {
+                raisin_error::Error::storage(format!("path repair batch write failed: {}", e))
+            })?;
             pending = 0;
         }
+        iter.next();
     }
+    iter.status()
+        .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
 
     if pending > 0 {
-        storage.db().write(batch).map_err(|e| {
+        db.write(batch).map_err(|e| {
             raisin_error::Error::storage(format!("path repair final batch write failed: {}", e))
         })?;
     }

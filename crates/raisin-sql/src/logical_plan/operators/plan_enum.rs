@@ -10,7 +10,7 @@ use super::supporting_types::{
 };
 
 /// Logical plan node representing a relational operator
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum LogicalPlan {
     /// Scan a table
     Scan {

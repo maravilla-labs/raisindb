@@ -148,12 +148,11 @@ mod tests {
             tenant_id: "tenant1".to_string(),
             repo_id: "repo1".to_string(),
             branch: "main".to_string(),
-            op_type: OpType::SetProperty {
+            op_type: OpType::DeleteNodeSnapshot {
                 node_id: "test_node".to_string(),
-                property_name: "title".to_string(),
-                value: raisin_models::nodes::properties::PropertyValue::String(
-                    "Old Value".to_string(),
-                ),
+                revision: raisin_hlc::HLC::new(1, 0),
+                node: None,
+                parent_id: None,
             },
             revision: None,
             actor: "test".to_string(),

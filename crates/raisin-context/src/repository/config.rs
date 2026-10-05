@@ -60,6 +60,11 @@ pub struct RepositoryConfig {
     /// - Circular references are not allowed
     #[serde(default)]
     pub locale_fallback_chains: std::collections::HashMap<String, Vec<String>>,
+
+    /// Settings of the localized name index (plan Phase 12): translated node
+    /// names (`/__node_name` overlays) as localized URL segments.
+    #[serde(default)]
+    pub localized_names: super::LocalizedNameConfig,
 }
 
 fn default_language() -> String {
@@ -202,6 +207,7 @@ impl Default for RepositoryConfig {
             default_language: default_language(),
             supported_languages: default_supported_languages(),
             locale_fallback_chains: std::collections::HashMap::new(),
+            localized_names: super::LocalizedNameConfig::default(),
         }
     }
 }

@@ -86,6 +86,7 @@ impl NodeRepositoryImpl {
             OrderedScanStart::Beginning,
             false,
             max_revision,
+            None,
             |child_id, _order_label, name| {
                 if self.child_is_live(
                     tenant_id,

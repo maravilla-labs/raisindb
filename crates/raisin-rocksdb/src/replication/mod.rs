@@ -10,9 +10,7 @@ pub mod operation_capture;
 pub mod operation_queue;
 pub mod persistent_idempotency;
 
-pub use application::{
-    scoped_miss_fallbacks, unknown_workspace_scans, OperationApplicator, WorkspaceHint,
-};
+pub use application::{unknown_workspace_scans, OperationApplicator, WorkspaceHint};
 pub use change_tracker::{
     ChangeTracker, NodeChanges, NodeMetadataChanges, NodeMove, PropertyChange, RelationChange,
 };

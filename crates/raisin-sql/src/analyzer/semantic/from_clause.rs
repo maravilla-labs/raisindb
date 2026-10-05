@@ -258,15 +258,19 @@ impl<'a> AnalyzerContext<'a> {
         // The static catalog still carries a legacy `nodes` table definition
         // for catalog-less analysis (unit tests, completion). On a catalog that
         // knows real workspaces it must not shadow them: `FROM nodes` is only
-        // valid when a workspace is actually called `nodes`.
+        // valid when a workspace is actually called `nodes`. The built-in
+        // `default` workspace every catalog starts with does not count: a
+        // catalog that knows nothing else (the catalog-less analysis above)
+        // keeps the legacy table, while a real repository always registers
+        // its own (system) workspaces and so still gets the guard.
         let has_registered_workspaces = self
             .catalog
             .list_tables()
             .iter()
-            .any(|t| self.catalog.is_workspace(t));
+            .any(|t| *t != "default" && self.catalog.is_workspace(t));
         if table_name.eq_ignore_ascii_case("nodes")
             && has_registered_workspaces
-            && self.catalog.get_workspace_table(table_name).is_none()
+            && !self.catalog.has_workspace_table(table_name)
         {
             return Err(AnalysisError::TableNotFound(table_name.to_string()));
         }
@@ -284,7 +288,7 @@ impl<'a> AnalyzerContext<'a> {
         }
 
         // Check if it's a workspace table (dynamic workspace support)
-        if self.catalog.get_workspace_table(table_name).is_some() {
+        if self.catalog.has_workspace_table(table_name) {
             let workspace_name = self
                 .catalog
                 .resolve_workspace_name(table_name)

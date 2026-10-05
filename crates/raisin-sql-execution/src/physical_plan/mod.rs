@@ -69,6 +69,8 @@ pub mod pg_catalog_executor;
 pub mod pgq;
 pub mod planner;
 pub mod project;
+pub(crate) mod project_resolve;
+pub(crate) mod project_value;
 pub mod scan_executors;
 pub mod search;
 pub mod semi_join;

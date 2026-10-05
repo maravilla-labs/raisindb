@@ -77,6 +77,9 @@ pub fn execute_plan<
             PhysicalPlan::NodeIdScan { .. } => {
                 crate::physical_plan::scan_executors::execute_node_id_scan(plan, ctx).await
             }
+            PhysicalPlan::LocalizedPathLookup { .. } => {
+                crate::physical_plan::scan_executors::execute_localized_path_lookup(plan, ctx).await
+            }
             PhysicalPlan::FullTextScan { .. } => {
                 crate::physical_plan::fulltext::execute_fulltext_scan(plan, ctx).await
             }
@@ -400,7 +403,7 @@ pub fn execute_plan_batch<
             // Batch-aware projection operator
             PhysicalPlan::Project { input, exprs } => {
                 let input_stream = execute_plan_batch(input.as_ref(), ctx, batch_config).await?;
-                execute_project_batch(input_stream, exprs.clone(), ctx.clone()).await
+                execute_project_batch(input_stream, exprs.to_vec(), ctx.clone()).await
             }
 
             // For all other operators, fall back to row execution and convert to batches

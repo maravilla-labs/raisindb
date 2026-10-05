@@ -1,11 +1,10 @@
 //! Replication and maintenance job handler construction
 //!
-//! Creates handlers for snapshots, replication GC, replication sync,
-//! and oplog compaction.
+//! Creates handlers for snapshots, replication GC and replication sync.
 
 use std::sync::Arc;
 
-use crate::jobs::{OpLogCompactionHandler, ReplicationGCHandler};
+use crate::jobs::ReplicationGCHandler;
 use crate::storage::RocksDBStorage;
 
 /// Create the snapshot handler
@@ -31,19 +30,5 @@ pub fn create_replication_sync_handler(
     Arc::new(crate::jobs::ReplicationSyncHandler::new(
         storage.db.clone(),
         cluster_node_id,
-    ))
-}
-
-/// Create the oplog compaction handler
-pub fn create_oplog_compaction_handler(storage: &RocksDBStorage) -> Arc<OpLogCompactionHandler> {
-    let compaction_config = raisin_replication::CompactionConfig {
-        min_age_secs: storage.config.oplog_compaction_min_age_secs,
-        merge_property_updates: storage.config.oplog_merge_property_updates,
-        batch_size: storage.config.oplog_compaction_batch_size,
-    };
-
-    Arc::new(OpLogCompactionHandler::with_config(
-        storage.db.clone(),
-        compaction_config,
     ))
 }

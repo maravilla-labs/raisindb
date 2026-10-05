@@ -20,8 +20,8 @@ impl ReplicationCoordinator {
     ///
     /// # Arguments
     /// * `peer_id` - ID of the peer to sync with
-    /// * `tenant_repo_pairs` - Optional list of (tenant_id, repo_id) pairs to sync.
-    ///   If None, syncs a default pair (useful for single-tenant deployments).
+    /// * `tenant_repo_pairs` - The (tenant_id, repo_id) pairs to sync; empty
+    ///   syncs nothing.
     pub async fn sync_with_peer_for_tenants(
         &self,
         peer_id: &str,
@@ -45,22 +45,6 @@ impl ReplicationCoordinator {
         }
 
         Ok(())
-    }
-
-    /// Sync with a specific peer (pull missing operations) - simplified version
-    ///
-    /// This syncs a default tenant/repo pair for backward compatibility.
-    /// For multi-tenant setups, use `sync_with_peer_for_tenants()` instead.
-    pub async fn sync_with_peer(&self, peer_id: &str) -> Result<(), CoordinatorError> {
-        info!(peer_id = %peer_id, "Starting sync with peer (default tenant/repo)");
-
-        // Default to tenant1/repo1 for backward compatibility
-        // TODO: Callers should use sync_with_peer_for_tenants() to specify exact pairs
-        let tenant_id = "tenant1";
-        let repo_id = "repo1";
-
-        self.sync_tenant_repo_with_peer(peer_id, tenant_id, repo_id)
-            .await
     }
 
     /// Sync a specific tenant/repo with a peer

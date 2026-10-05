@@ -6,8 +6,10 @@ use raisin_models::nodes::properties::PropertyValue;
 
 #[test]
 fn test_deletion_column_families_count() {
-    // Ensure we're tracking all 11 column families
-    assert_eq!(DELETION_COLUMN_FAMILIES.len(), 11);
+    // Ensure we're tracking all 12 column families (TRANSLATION_DATA is not
+    // one: a node delete ends its node overlays by a read rule; block
+    // overlays get a materialized `T` as well, plan Phase 11c).
+    assert_eq!(DELETION_COLUMN_FAMILIES.len(), 12);
 }
 
 #[test]

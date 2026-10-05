@@ -1,122 +1,49 @@
-//! Translation key builders and collection helpers
+//! Translation helpers for COPY: collecting a node's overlays through the one
+//! translation reader (`crate::translation_read`), and staging the copied
+//! versions through the one writer (`crate::translation_write`).
 //!
-//! This module provides functions for:
-//! - Building translation keys for data, index, and metadata
-//! - Collecting translations for copy operations
-//! - Block translation handling
+//! The collectors used to scan `TRANSLATION_DATA` / `BLOCK_TRANSLATIONS` by
+//! hand — a second reader — taking the newest key with no revision bound, and
+//! the block scan decoded the orphan marker (`…\0{block}\0orphaned\0{~rev}`,
+//! not an overlay) as a `LocaleOverlay`, so one `mark_blocks_orphaned` call
+//! made every later publish or tree copy of that node fail.
 
 use super::super::NodeRepositoryImpl;
-use crate::{cf, cf_handle, keys};
+use crate::repositories::translations::replication;
+use crate::translation_write::OverlayTarget;
 use raisin_error::Result;
 use raisin_hlc::HLC;
-use raisin_models::translations::{LocaleCode, LocaleOverlay};
-use std::collections::HashSet;
+use raisin_models::translations::{LocaleCode, LocaleOverlay, TranslationMeta};
 
 /// A single block translation entry: (block_uuid, locale, overlay, parent_revision).
 type BlockTranslationEntry = (String, LocaleCode, LocaleOverlay, Option<HLC>);
 
 impl NodeRepositoryImpl {
-    pub(in crate::repositories::nodes) fn translation_data_prefix(
-        tenant_id: &str,
-        repo_id: &str,
-        branch: &str,
-        workspace: &str,
-        node_id: &str,
-    ) -> Vec<u8> {
-        format!(
-            "{}\0{}\0{}\0{}\0translations\0{}\0",
-            tenant_id, repo_id, branch, workspace, node_id
-        )
-        .into_bytes()
+    /// Stage one copied version — data, index entry, meta and snapshot; `None`
+    /// is a deletion — through the one translation writer, and return the op
+    /// that replicates it (a copy wrote these and never captured them, so a
+    /// replica's copy or publish arrived untranslated).
+    pub(in crate::repositories::nodes) fn stage_copied_translation(
+        &self,
+        batch: &mut rocksdb::WriteBatch,
+        target: &OverlayTarget<'_>,
+        overlay: Option<&LocaleOverlay>,
+        meta: &TranslationMeta,
+    ) -> Result<raisin_replication::OpType> {
+        crate::translation_write::stage_version(&self.db, batch, target, overlay, &meta.revision)?;
+        crate::translation_write::stage_history(&self.db, batch, target, overlay, meta)?;
+        Ok(replication::translation_op(
+            &replication::TranslationVersionOp {
+                target: *target,
+                overlay,
+                revision: meta.revision,
+                history_complete_from: None,
+            },
+        ))
     }
 
-    pub(in crate::repositories::nodes) fn translation_data_key(
-        tenant_id: &str,
-        repo_id: &str,
-        branch: &str,
-        workspace: &str,
-        node_id: &str,
-        locale: &str,
-        revision: &HLC,
-    ) -> Vec<u8> {
-        let mut key = format!(
-            "{}\0{}\0{}\0{}\0translations\0{}\0{}\0",
-            tenant_id, repo_id, branch, workspace, node_id, locale
-        )
-        .into_bytes();
-        key.extend_from_slice(&keys::encode_descending_revision(revision));
-        key
-    }
-
-    pub(in crate::repositories::nodes) fn translation_index_key(
-        tenant_id: &str,
-        repo_id: &str,
-        locale: &str,
-        revision: &HLC,
-        node_id: &str,
-    ) -> Vec<u8> {
-        let mut key = format!(
-            "{}\0{}\0translation_index\0{}\0",
-            tenant_id, repo_id, locale
-        )
-        .into_bytes();
-        key.extend_from_slice(&keys::encode_descending_revision(revision));
-        key.push(b'\0');
-        key.extend_from_slice(node_id.as_bytes());
-        key
-    }
-
-    pub(in crate::repositories::nodes) fn translation_meta_key(
-        tenant_id: &str,
-        repo_id: &str,
-        branch: &str,
-        workspace: &str,
-        node_id: &str,
-        locale: &str,
-        revision: &HLC,
-    ) -> Vec<u8> {
-        let mut key = format!(
-            "{}\0{}\0{}\0{}\0trans_meta\0{}\0{}\0",
-            tenant_id, repo_id, branch, workspace, node_id, locale
-        )
-        .into_bytes();
-        key.extend_from_slice(&keys::encode_descending_revision(revision));
-        key
-    }
-
-    pub(in crate::repositories::nodes) fn block_translation_prefix(
-        tenant_id: &str,
-        repo_id: &str,
-        branch: &str,
-        workspace: &str,
-        node_id: &str,
-    ) -> Vec<u8> {
-        format!(
-            "{}\0{}\0{}\0{}\0block_trans\0{}\0",
-            tenant_id, repo_id, branch, workspace, node_id
-        )
-        .into_bytes()
-    }
-
-    pub(in crate::repositories::nodes) fn block_translation_key(
-        tenant_id: &str,
-        repo_id: &str,
-        branch: &str,
-        workspace: &str,
-        node_id: &str,
-        block_uuid: &str,
-        locale: &str,
-        revision: &HLC,
-    ) -> Vec<u8> {
-        let mut key = format!(
-            "{}\0{}\0{}\0{}\0block_trans\0{}\0{}\0{}\0",
-            tenant_id, repo_id, branch, workspace, node_id, block_uuid, locale
-        )
-        .into_bytes();
-        key.extend_from_slice(&keys::encode_descending_revision(revision));
-        key
-    }
-
+    /// Every live node-level overlay of `node_id` as of `max_revision` (the
+    /// newest at all when `None`): `(locale, overlay, revision it was read at)`.
     pub(in crate::repositories::nodes) fn collect_node_translations_for_copy(
         &self,
         tenant_id: &str,
@@ -124,81 +51,46 @@ impl NodeRepositoryImpl {
         branch: &str,
         workspace: &str,
         node_id: &str,
+        max_revision: Option<&HLC>,
     ) -> Result<Vec<(LocaleCode, LocaleOverlay, Option<HLC>)>> {
-        let cf_translation_data = cf_handle(&self.db, cf::TRANSLATION_DATA)?;
-        let prefix = Self::translation_data_prefix(tenant_id, repo_id, branch, workspace, node_id);
-        let prefix_clone = prefix.clone();
-        let iter = crate::prefix_scan(&self.db, cf_translation_data, prefix);
-
-        let mut seen_locales = HashSet::new();
-        let mut translations = Vec::new();
-
-        for item in iter {
-            let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
-
-            if !key.starts_with(&prefix_clone) {
-                break;
-            }
-
-            let suffix = &key[prefix_clone.len()..];
-            if suffix.is_empty() {
+        let mut out = Vec::new();
+        for locale in crate::translation_read::live_locales(
+            &self.db,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            node_id,
+            max_revision,
+        )? {
+            let Some(version) = crate::translation_read::read_version(
+                &self.db,
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                node_id,
+                &locale,
+                max_revision,
+            )?
+            else {
                 continue;
-            }
-
-            let locale_end = match suffix.iter().position(|&b| b == 0) {
-                Some(idx) => idx,
-                None => continue,
             };
-            let locale_bytes = &suffix[..locale_end];
-            let locale_str = std::str::from_utf8(locale_bytes).map_err(|e| {
-                raisin_error::Error::storage(format!(
-                    "Invalid locale encoding for node {}: {}",
-                    node_id, e
-                ))
-            })?;
-
-            if !seen_locales.insert(locale_str.to_string()) {
+            let Some(overlay) = version.overlay else {
                 continue;
-            }
-
-            // The revision is the LAST 16 BYTES of the key, and must be taken
-            // from the end rather than by walking forward from the locale.
-            //
-            // An HLC is 16 bytes (8 timestamp + 8 counter) and its descending
-            // encoding is a bitwise NOT, which readily produces interior NULL
-            // bytes — so neither null-splitting nor a fixed 8-byte slice can
-            // locate or carry it. Taking `remaining[..8]` fed `decode_descending`
-            // half an HLC, which fails unconditionally: `copy_nodes_across_branches`
-            // could never copy a node that had ANY translation overlay, and the
-            // whole promotion aborted with "Failed to decode translation revision".
-            // `extract_revision_from_key` is the helper that encodes this rule.
-            let parent_revision = keys::extract_revision_from_key(&key).map_err(|_| {
-                raisin_error::Error::storage(format!(
-                    "Failed to decode translation revision for {} on node {}",
-                    locale_str, node_id
-                ))
-            })?;
-
-            let overlay: LocaleOverlay = serde_json::from_slice(&value).map_err(|e| {
-                raisin_error::Error::storage(format!(
-                    "Failed to deserialize translation overlay for {}: {}",
-                    locale_str, e
-                ))
-            })?;
-
-            let locale = LocaleCode::parse(locale_str).map_err(|e| {
-                raisin_error::Error::storage(format!(
-                    "Invalid locale code {} on node {}: {}",
-                    locale_str, node_id, e
-                ))
-            })?;
-
-            translations.push((locale, overlay, Some(parent_revision)));
+            };
+            out.push((
+                parse_locale(&locale, node_id)?,
+                overlay,
+                crate::keys::extract_revision_from_key(&version.key).ok(),
+            ));
         }
-
-        Ok(translations)
+        Ok(out)
     }
 
+    /// Every live block overlay of `node_id` as of `max_revision`:
+    /// `(block_uuid, locale, overlay, revision it was read at)`. Orphan
+    /// markers are not overlays and are never returned.
     pub(in crate::repositories::nodes) fn collect_block_translations_for_copy(
         &self,
         tenant_id: &str,
@@ -206,90 +98,33 @@ impl NodeRepositoryImpl {
         branch: &str,
         workspace: &str,
         node_id: &str,
+        max_revision: Option<&HLC>,
     ) -> Result<Vec<BlockTranslationEntry>> {
-        let cf_block_trans = cf_handle(&self.db, cf::BLOCK_TRANSLATIONS)?;
-        let prefix = Self::block_translation_prefix(tenant_id, repo_id, branch, workspace, node_id);
-        let prefix_clone = prefix.clone();
-        let iter = crate::prefix_scan(&self.db, cf_block_trans, prefix);
-
-        let mut seen = HashSet::new();
-        let mut translations = Vec::new();
-
-        for item in iter {
-            let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
-
-            if !key.starts_with(&prefix_clone) {
-                break;
-            }
-
-            let suffix = &key[prefix_clone.len()..];
-            if suffix.is_empty() {
-                continue;
-            }
-
-            let block_end = match suffix.iter().position(|&b| b == 0) {
-                Some(idx) => idx,
-                None => continue,
-            };
-            let block_uuid = std::str::from_utf8(&suffix[..block_end]).map_err(|e| {
-                raisin_error::Error::storage(format!(
-                    "Invalid block UUID encoding for node {}: {}",
-                    node_id, e
-                ))
-            })?;
-
-            let remaining = &suffix[block_end + 1..];
-            if remaining.is_empty() {
-                continue;
-            }
-
-            let locale_end = match remaining.iter().position(|&b| b == 0) {
-                Some(idx) => idx,
-                None => continue,
-            };
-            let locale_bytes = &remaining[..locale_end];
-            let locale_str = std::str::from_utf8(locale_bytes).map_err(|e| {
-                raisin_error::Error::storage(format!(
-                    "Invalid locale encoding for block translation on node {}: {}",
-                    node_id, e
-                ))
-            })?;
-
-            let key_tuple = (block_uuid.to_string(), locale_str.to_string());
-            if !seen.insert(key_tuple.clone()) {
-                continue;
-            }
-
-            // Last 16 bytes, for the same reason as the node-level overlay above.
-            let parent_revision = keys::extract_revision_from_key(&key).map_err(|_| {
-                raisin_error::Error::storage(format!(
-                    "Failed to decode block translation revision for {}::{} on node {}",
-                    locale_str, block_uuid, node_id
-                ))
-            })?;
-
-            let overlay: LocaleOverlay = serde_json::from_slice(&value).map_err(|e| {
-                raisin_error::Error::storage(format!(
-                    "Failed to deserialize block translation overlay {}::{} on node {}: {}",
-                    locale_str, block_uuid, node_id, e
-                ))
-            })?;
-
-            let locale = LocaleCode::parse(locale_str).map_err(|e| {
-                raisin_error::Error::storage(format!(
-                    "Invalid locale code {} for block translation on node {}: {}",
-                    locale_str, node_id, e
-                ))
-            })?;
-
-            translations.push((
-                block_uuid.to_string(),
-                locale,
-                overlay,
-                Some(parent_revision),
+        // One scan and one `NODES` walk for the whole node, not one per block.
+        let mut out = Vec::new();
+        for version in crate::translation_read::live_block_versions(
+            &self.db,
+            (tenant_id, repo_id, branch, workspace),
+            node_id,
+            max_revision,
+            |_| true,
+        )? {
+            out.push((
+                version.block_uuid,
+                parse_locale(&version.locale, node_id)?,
+                version.overlay,
+                Some(version.revision),
             ));
         }
-
-        Ok(translations)
+        Ok(out)
     }
+}
+
+fn parse_locale(locale: &str, node_id: &str) -> Result<LocaleCode> {
+    LocaleCode::parse(locale).map_err(|e| {
+        raisin_error::Error::storage(format!(
+            "Invalid locale code {} on node {}: {}",
+            locale, node_id, e
+        ))
+    })
 }

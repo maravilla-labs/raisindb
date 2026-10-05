@@ -5,8 +5,7 @@
 //! WHOLE branch's NODES column family, decoded as a full `Node` — so a
 //! repository-written `StorageNode` blob came back with `path == ""` and a
 //! replicated rename never tombstoned the old path. These pin the one-seek
-//! read, the path materialization, and the counted fallback for ops that do
-//! not name their workspace.
+//! read, the path materialization, and that only an id-only read scans.
 
 use super::perf_counters::count;
 use raisin_context::RepositoryConfig;
@@ -16,7 +15,7 @@ use raisin_replication::{
     operation::{ReplicatedNodeChange, ReplicatedNodeChangeKind},
     OpType, Operation, VectorClock,
 };
-use raisin_rocksdb::replication::{scoped_miss_fallbacks, OperationApplicator, WorkspaceHint};
+use raisin_rocksdb::replication::{OperationApplicator, WorkspaceHint};
 use raisin_rocksdb::RocksDBStorage;
 use raisin_storage::{
     BranchRepository, CreateNodeOptions, NodeRepository, RegistryRepository, RepoScope,
@@ -51,6 +50,7 @@ async fn setup() -> (Arc<RocksDBStorage>, OperationApplicator, TempDir) {
                 default_branch: BRANCH.to_string(),
                 description: None,
                 tags: HashMap::new(),
+                localized_names: Default::default(),
             },
         )
         .await
@@ -244,28 +244,14 @@ async fn replicated_upsert_finds_previous_version_without_branch_scan() {
     );
 }
 
+/// A workspace the op names is the authority: a node living elsewhere is a
+/// plain miss there — no branch scan (the defaulted-workspace fallback for
+/// pre-v2 peers is gone, plan "Phase 11d"); only an id-only read scans.
 #[tokio::test]
-async fn replicated_upsert_without_workspace_falls_back_and_counts() {
+async fn an_explicit_workspace_miss_does_not_scan() {
     let (storage, applicator, _dir) = setup().await;
     let node = create(&storage, "elsewhere").await;
 
-    // An op that names no workspace is applied as `"default"`: the node is not
-    // there, so the read scans the branch, finds it in `content`, and counts.
-    let before = scoped_miss_fallbacks();
-    let found = applicator
-        .load_latest_node(
-            TENANT,
-            REPO,
-            BRANCH,
-            WorkspaceHint::Defaulted("default"),
-            &node.id,
-        )
-        .expect("load")
-        .expect("found by the fallback scan");
-    assert_eq!(found.path, "/elsewhere");
-    assert!(scoped_miss_fallbacks() > before);
-
-    // An EXPLICIT workspace that does not hold the node is a plain miss.
     let explicit = applicator
         .load_latest_node(
             TENANT,
@@ -275,5 +261,11 @@ async fn replicated_upsert_without_workspace_falls_back_and_counts() {
             &node.id,
         )
         .expect("load");
-    assert!(explicit.is_none());
+    assert!(explicit.is_none(), "a named miss is a miss, never a scan");
+
+    let found = applicator
+        .load_latest_node(TENANT, REPO, BRANCH, WorkspaceHint::Unknown, &node.id)
+        .expect("load")
+        .expect("an id-only read finds it by scan");
+    assert_eq!(found.path, "/elsewhere");
 }

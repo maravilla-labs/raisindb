@@ -112,7 +112,12 @@ impl OperationApplicator {
         self.scan_last_order_label_for_parent(tenant_id, repo_id, branch, workspace, parent_id)
     }
 
-    /// Scan ORDERED_CHILDREN to find the last order label for a parent
+    /// The parent's last LIVE label, through the one fallback scan the
+    /// repository uses too (`ordering::last_live_order_label`). This used to
+    /// be its own scan that took the label with the highest REVISION — the
+    /// most recently written, not the last in editorial order — counted
+    /// tombstoned labels, and split keys on `\0` (the descending HLC holds
+    /// null bytes).
     pub(in crate::replication::application) fn scan_last_order_label_for_parent(
         &self,
         tenant_id: &str,
@@ -121,50 +126,9 @@ impl OperationApplicator {
         workspace: &str,
         parent_id: &str,
     ) -> Result<Option<String>> {
-        let cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
-        let prefix =
-            keys::ordered_children_prefix(tenant_id, repo_id, branch, workspace, parent_id);
-        let prefix_clone = prefix.clone();
-        let iter = crate::prefix_scan(&self.db, cf_ordered, prefix);
-
-        let mut last_label: Option<String> = None;
-        let mut highest_revision = HLC::new(0, 0);
-        let mut seen_labels = HashSet::new();
-
-        for item in iter {
-            let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
-
-            if !key.starts_with(&prefix_clone) {
-                break;
-            }
-
-            if is_tombstone(&value) {
-                continue;
-            }
-
-            let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
-            if parts.len() >= 9 {
-                if let Some(order_label) = Self::parse_order_label(parts[6]) {
-                    let revision_bytes = parts[7];
-                    if revision_bytes.len() == 16 {
-                        let revision =
-                            keys::decode_descending_revision(revision_bytes).map_err(|e| {
-                                raisin_error::Error::storage(format!(
-                                    "Invalid HLC revision encoding: {}",
-                                    e
-                                ))
-                            })?;
-
-                        if seen_labels.insert(order_label.clone()) && revision > highest_revision {
-                            highest_revision = revision;
-                            last_label = Some(order_label);
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(last_label)
+        crate::repositories::nodes::last_live_order_label(
+            &self.db, tenant_id, repo_id, branch, workspace, parent_id,
+        )
     }
 
     /// Parse and validate an order label from raw bytes
@@ -277,45 +241,5 @@ impl OperationApplicator {
         }
 
         Ok(relations)
-    }
-
-    /// List all translation locales for a node
-    pub(in crate::replication::application) fn list_translation_locales(
-        &self,
-        tenant_id: &str,
-        repo_id: &str,
-        branch: &str,
-        workspace: &str,
-        node_id: &str,
-    ) -> Result<Vec<String>> {
-        let cf_translation = cf_handle(&self.db, cf::TRANSLATION_DATA)?;
-        let prefix = format!(
-            "{}\0{}\0{}\0{}\0translations\0{}\0",
-            tenant_id, repo_id, branch, workspace, node_id
-        )
-        .into_bytes();
-        let prefix_clone = prefix.clone();
-        let iter = crate::prefix_scan(&self.db, cf_translation, &prefix);
-        let mut locales = HashSet::new();
-
-        for item in iter {
-            let (key, value) =
-                item.map_err(|e| raisin_error::Error::storage(format!("Iterator error: {}", e)))?;
-
-            if !key.starts_with(&prefix_clone) {
-                break;
-            }
-
-            if is_tombstone(&value) {
-                continue;
-            }
-
-            let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
-            if parts.len() >= 7 {
-                locales.insert(String::from_utf8_lossy(parts[6]).into_owned());
-            }
-        }
-
-        Ok(locales.into_iter().collect())
     }
 }

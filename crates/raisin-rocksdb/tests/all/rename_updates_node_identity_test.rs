@@ -54,6 +54,7 @@ impl TestStorage {
                     default_branch: "main".to_string(),
                     description: Some("rename identity test".to_string()),
                     tags: HashMap::new(),
+                    localized_names: Default::default(),
                 },
             )
             .await?;

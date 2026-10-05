@@ -29,23 +29,25 @@ fn test_debug_serialization_issue() {
         "tenant1".to_string(),
         "repo1".to_string(),
         "main".to_string(),
-        OpType::CreateNode {
-            node_id: "article-1".to_string(),
-            name: "My First Article".to_string(),
-            node_type: "Article".to_string(),
-            archetype: None,
-            parent_id: None,
-            order_key: "a".to_string(),
-            properties: props.clone(),
-            owner_id: None,
-            workspace: None,
-            path: "/My First Article".to_string(),
+        OpType::UpsertNodeSnapshot {
+            node: raisin_models::nodes::Node {
+                id: "article-1".to_string(),
+                name: "My First Article".to_string(),
+                path: "/My First Article".to_string(),
+                node_type: "Article".to_string(),
+                workspace: Some("content".to_string()),
+                properties: props.clone(),
+                ..Default::default()
+            },
+            parent_id: Some("/".to_string()),
+            revision: raisin_hlc::HLC::new(1, 0),
+            cf_order_key: "a0::article-1".to_string(),
         },
         "test_actor".to_string(),
     );
 
-    // Serialize directly to see what bytes we get
-    let direct_bytes = rmp_serde::to_vec(&op).unwrap();
+    // Serialize directly (name-keyed, as the oplog stores it)
+    let direct_bytes = rmp_serde::to_vec_named(&op).unwrap();
     println!("✅ Direct serialization: {} bytes", direct_bytes.len());
     println!(
         "First 200 bytes: {:?}",

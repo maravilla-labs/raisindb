@@ -186,10 +186,9 @@ mod tests {
     fn test_decomposer_tracks_passthrough() {
         let decomposer = OperationDecomposer::new();
 
-        let op = make_test_op(OpType::SetProperty {
-            node_id: "test".to_string(),
-            property_name: "title".to_string(),
-            value: raisin_models::nodes::properties::PropertyValue::String("Test".to_string()),
+        let op = make_test_op(OpType::CreateTag {
+            tag_name: "v1".to_string(),
+            revision: "1000-0".to_string(),
         });
 
         let result = decomposer.decompose(op);

@@ -59,7 +59,7 @@ pub fn apply_projection_pruning(plan: LogicalPlan) -> LogicalPlan {
 /// Internal implementation that tracks required columns from parent operators
 fn apply_projection_pruning_impl(
     plan: LogicalPlan,
-    parent_requirements: Option<&HashSet<String>>,
+    parent_requirements: Option<HashSet<String>>,
 ) -> LogicalPlan {
     match plan {
         LogicalPlan::Scan {
@@ -75,7 +75,7 @@ fn apply_projection_pruning_impl(
         } => {
             // Compute what columns are needed by parent operators
             let required = if let Some(reqs) = parent_requirements {
-                reqs.clone()
+                reqs
             } else {
                 // If no parent requirements, this is the root - include all columns
                 schema
@@ -131,13 +131,13 @@ fn apply_projection_pruning_impl(
             }
 
             // Merge with parent requirements
-            let mut child_requirements = parent_requirements.cloned().unwrap_or_default();
+            let mut child_requirements = parent_requirements.unwrap_or_default();
             child_requirements.extend(filter_cols);
 
             LogicalPlan::Filter {
                 input: Box::new(apply_projection_pruning_impl(
                     *input,
-                    Some(&child_requirements),
+                    Some(child_requirements),
                 )),
                 predicate,
             }
@@ -150,13 +150,12 @@ fn apply_projection_pruning_impl(
                 proj_cols.extend(extract_column_refs(&proj.expr));
             }
 
-            // Collect columns that are already in the projection expressions
-            let mut existing_cols = HashSet::new();
-            for proj in &exprs {
-                existing_cols.extend(extract_column_refs(&proj.expr));
-            }
+            // `proj_cols` is, until the parent requirements are added below,
+            // exactly the read set of the expressions (computed once — the
+            // second walk was a measurable share of planning a wide
+            // `SELECT *`; the copy of it, too, plan Phase 13d).
 
-            // Names this projection already EMITS. Distinct from `existing_cols`,
+            // Names this projection already EMITS. Distinct from the read set,
             // which is what it READS — and the distinction is load-bearing.
             //
             // A parent requirement is satisfied either way, but only the read set
@@ -180,38 +179,46 @@ fn apply_projection_pruning_impl(
             let existing_aliases: HashSet<&str> =
                 exprs.iter().map(|proj| proj.alias.as_str()).collect();
 
-            // Build new projection expressions including parent requirements
-            let mut new_exprs = exprs.clone();
+            // Pass-through columns for parent requirements, collected first so
+            // `exprs` can be moved (not cloned) into the result.
+            let mut pass_through: Vec<String> = Vec::new();
 
             // IMPORTANT: Also include parent requirements!
             // This handles cases like: SELECT id ... ORDER BY created_at
             // where ORDER BY references columns not in SELECT list.
             if let Some(parent_reqs) = parent_requirements {
-                proj_cols.extend(parent_reqs.iter().cloned());
-
-                // Add pass-through column references for parent requirements not in SELECT
-                for col in parent_reqs {
-                    if !existing_cols.contains(col) && !existing_aliases.contains(col.as_str()) {
-                        // Add a simple column reference to pass through this column
-                        use crate::analyzer::{DataType, Expr, TypedExpr};
-                        use crate::logical_plan::ProjectionExpr;
-                        let col_expr = TypedExpr::new(
-                            Expr::Column {
-                                table: "".to_string(), // Unqualified - will be resolved
-                                column: col.clone(),
-                            },
-                            DataType::Unknown, // Type will be inferred
-                        );
-                        new_exprs.push(ProjectionExpr {
-                            expr: col_expr,
-                            alias: col.clone(),
-                        });
+                // Pass-through column references for parent requirements not
+                // in SELECT — judged against the read set BEFORE it grows.
+                for col in &parent_reqs {
+                    if !proj_cols.contains(col) && !existing_aliases.contains(col.as_str()) {
+                        pass_through.push(col.clone());
                     }
                 }
+                proj_cols.extend(parent_reqs);
+            }
+            drop(existing_aliases);
+
+            // Build new projection expressions including parent requirements
+            let mut new_exprs = exprs;
+            for col in pass_through {
+                // Add a simple column reference to pass through this column
+                use crate::analyzer::{DataType, Expr, TypedExpr};
+                use crate::logical_plan::ProjectionExpr;
+                let col_expr = TypedExpr::new(
+                    Expr::Column {
+                        table: "".to_string(), // Unqualified - will be resolved
+                        column: col.clone(),
+                    },
+                    DataType::Unknown, // Type will be inferred
+                );
+                new_exprs.push(ProjectionExpr {
+                    expr: col_expr,
+                    alias: col,
+                });
             }
 
             LogicalPlan::Project {
-                input: Box::new(apply_projection_pruning_impl(*input, Some(&proj_cols))),
+                input: Box::new(apply_projection_pruning_impl(*input, Some(proj_cols))),
                 exprs: new_exprs,
             }
         }
@@ -224,13 +231,13 @@ fn apply_projection_pruning_impl(
             }
 
             // Merge with parent requirements
-            let mut child_requirements = parent_requirements.cloned().unwrap_or_default();
+            let mut child_requirements = parent_requirements.unwrap_or_default();
             child_requirements.extend(sort_cols);
 
             LogicalPlan::Sort {
                 input: Box::new(apply_projection_pruning_impl(
                     *input,
-                    Some(&child_requirements),
+                    Some(child_requirements),
                 )),
                 sort_exprs,
             }
@@ -254,7 +261,7 @@ fn apply_projection_pruning_impl(
             distinct_spec,
         } => {
             // Collect columns needed for DISTINCT ON expressions (if present)
-            let mut distinct_cols = parent_requirements.cloned().unwrap_or_default();
+            let mut distinct_cols = parent_requirements.unwrap_or_default();
 
             if let crate::logical_plan::operators::DistinctSpec::On(ref exprs) = distinct_spec {
                 for expr in exprs {
@@ -263,7 +270,7 @@ fn apply_projection_pruning_impl(
             }
 
             LogicalPlan::Distinct {
-                input: Box::new(apply_projection_pruning_impl(*input, Some(&distinct_cols))),
+                input: Box::new(apply_projection_pruning_impl(*input, Some(distinct_cols))),
                 distinct_spec,
             }
         }
@@ -285,7 +292,7 @@ fn apply_projection_pruning_impl(
                 // Also collect columns from FILTER clause
                 if let Some(ref filter_expr) = agg.filter {
                     let filter_cols = extract_column_refs(filter_expr);
-                    tracing::error!(
+                    tracing::debug!(
                         "🔍 [apply_projection_pruning_impl] FILTER clause columns: {:?}",
                         filter_cols
                     );
@@ -298,7 +305,7 @@ fn apply_projection_pruning_impl(
             );
 
             LogicalPlan::Aggregate {
-                input: Box::new(apply_projection_pruning_impl(*input, Some(&agg_cols))),
+                input: Box::new(apply_projection_pruning_impl(*input, Some(agg_cols))),
                 group_by,
                 aggregates,
             }
@@ -313,7 +320,7 @@ fn apply_projection_pruning_impl(
             // For joins, we need columns from:
             // 1. Join condition
             // 2. Parent requirements (if any)
-            let mut required = parent_requirements.cloned().unwrap_or_default();
+            let mut required = parent_requirements.unwrap_or_default();
 
             if let Some(ref cond) = condition {
                 required.extend(extract_column_refs(cond));
@@ -348,8 +355,8 @@ fn apply_projection_pruning_impl(
             }
 
             LogicalPlan::Join {
-                left: Box::new(apply_projection_pruning_impl(*left, Some(&left_required))),
-                right: Box::new(apply_projection_pruning_impl(*right, Some(&right_required))),
+                left: Box::new(apply_projection_pruning_impl(*left, Some(left_required))),
+                right: Box::new(apply_projection_pruning_impl(*right, Some(right_required))),
                 join_type,
                 condition,
             }
@@ -365,7 +372,7 @@ fn apply_projection_pruning_impl(
             // For semi-joins, we need columns from:
             // 1. Left key and right key expressions
             // 2. Parent requirements (only from left, since SemiJoin returns left schema only)
-            let mut left_required = parent_requirements.cloned().unwrap_or_default();
+            let mut left_required = parent_requirements.unwrap_or_default();
 
             // Add columns from left key
             left_required.extend(extract_column_refs(&left_key));
@@ -375,8 +382,8 @@ fn apply_projection_pruning_impl(
             right_required.extend(extract_column_refs(&right_key));
 
             LogicalPlan::SemiJoin {
-                left: Box::new(apply_projection_pruning_impl(*left, Some(&left_required))),
-                right: Box::new(apply_projection_pruning_impl(*right, Some(&right_required))),
+                left: Box::new(apply_projection_pruning_impl(*left, Some(left_required))),
+                right: Box::new(apply_projection_pruning_impl(*right, Some(right_required))),
                 left_key,
                 right_key,
                 anti,
@@ -462,13 +469,13 @@ fn apply_projection_pruning_impl(
             }
 
             // Merge with parent requirements
-            let mut child_requirements = parent_requirements.cloned().unwrap_or_default();
+            let mut child_requirements = parent_requirements.unwrap_or_default();
             child_requirements.extend(window_cols);
 
             LogicalPlan::Window {
                 input: Box::new(apply_projection_pruning_impl(
                     *input,
-                    Some(&child_requirements),
+                    Some(child_requirements),
                 )),
                 window_exprs,
             }
@@ -484,13 +491,13 @@ fn apply_projection_pruning_impl(
             lateral_cols.extend(extract_column_refs(&function_expr));
 
             // Merge with parent requirements
-            let mut child_requirements = parent_requirements.cloned().unwrap_or_default();
+            let mut child_requirements = parent_requirements.unwrap_or_default();
             child_requirements.extend(lateral_cols);
 
             LogicalPlan::LateralMap {
                 input: Box::new(apply_projection_pruning_impl(
                     *input,
-                    Some(&child_requirements),
+                    Some(child_requirements),
                 )),
                 function_expr,
                 column_name,

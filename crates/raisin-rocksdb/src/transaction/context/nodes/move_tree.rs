@@ -55,6 +55,8 @@ pub async fn move_node_tree(
         &tenant_id, &repo_id, &branch, workspace, node_id,
         None, // Use committed state for reading
     )?;
+    // ...as THIS transaction left each of them (see `move_view`).
+    let descendants = super::move_view::transaction_view(tx, workspace, descendants)?;
 
     tracing::info!(
         "TXN move_node_tree: moving {} nodes from '{}' to '{}'",
@@ -156,8 +158,14 @@ pub async fn move_node_tree(
         None
     };
 
-    // 5b. Compute new order label BEFORE locking batch
-    let new_order_label = {
+    // 6. Get or allocate transaction revision — before the label, which
+    // carries it as its `::HLC` suffix like every other minted label.
+    let revision = tx.get_or_allocate_transaction_revision()?;
+
+    // 5b. Compute new order label BEFORE locking batch. `appended` says whether
+    // it was minted at the end of the new parent (only then is it the parent's
+    // new LAST label).
+    let (new_order_label, appended) = {
         // Check if child already exists in new parent (shouldn't, but handle gracefully)
         let existing = node_repo.get_order_label_for_child(
             &tenant_id,
@@ -168,217 +176,289 @@ pub async fn move_node_tree(
             node_id,
         )?;
         if let Some(label) = existing {
-            label
+            (label, false)
         } else {
-            // Get last order label and increment
-            let last = node_repo.get_last_order_label(
+            // Append through the transaction's minter: this transaction's own
+            // appends under the new parent first, the database after. Reading
+            // the database alone minted the SAME label as a create into that
+            // parent earlier (or later) in this transaction.
+            let label = super::create::next_append_label_tx(
+                tx,
                 &tenant_id,
                 &repo_id,
                 &branch,
                 workspace,
                 &target_parent_id,
+                &revision,
             )?;
-            if let Some(ref l) = last {
-                crate::fractional_index::inc(l).unwrap_or_else(|_| crate::fractional_index::first())
-            } else {
-                crate::fractional_index::first()
-            }
+            super::create::record_appended_label_tx(tx, workspace, &target_parent_id, &label)?;
+            (label, true)
         }
     };
 
-    // 6. Get or allocate transaction revision
-    let revision = tx.get_or_allocate_transaction_revision()?;
+    // `(old path, node as moved)` per moved node, for the read cache (step 9)
+    // and change tracking.
+    let mut moved: Vec<(String, Node)> = Vec::new();
 
-    // 7. Lock batch and write all path updates
-    let mut batch = tx
-        .batch
-        .lock()
-        .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
+    // `(old, new)` records rewritten below, re-indexed once the batch lock is
+    // released (the index writers take it themselves).
+    let mut rewrites: Vec<(Node, Node)> = Vec::new();
+    // `(old, moved)` for EVERY moved node: `__parent_path` is a compound-index
+    // column, re-keyed below exactly as the repository move does.
+    let mut rekeys: Vec<(Node, Node)> = Vec::new();
+    // The listed version of each node re-keyed WITHOUT a record rewrite.
+    let mut rekey_only: Vec<Node> = Vec::new();
 
-    let cf_nodes = cf_handle(&tx.db, cf::NODES)?;
-    let cf_path = cf_handle(&tx.db, cf::PATH_INDEX)?;
-    let cf_node_path = cf_handle(&tx.db, cf::NODE_PATH)?;
-    let cf_ordered = cf_handle(&tx.db, cf::ORDERED_CHILDREN)?;
+    // 7. Lock batch and write all path updates. Scoped: the guard is not
+    // `Send`, and the index maintenance below awaits.
+    {
+        let mut batch = tx
+            .batch
+            .lock()
+            .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
 
-    // 7a. Tombstone old ORDERED_CHILDREN entry (remove from old parent)
-    if let (Some(ref old_parent), Some(ref old_label)) = (&old_parent_id, &old_order_label) {
-        let old_ordered_key = keys::ordered_child_key_versioned(
-            &tenant_id, &repo_id, &branch, workspace, old_parent, old_label, &revision, node_id,
-        );
-        batch.put_cf(cf_ordered, old_ordered_key, TOMBSTONE);
+        let cf_path = cf_handle(&tx.db, cf::PATH_INDEX)?;
+        let cf_node_path = cf_handle(&tx.db, cf::NODE_PATH)?;
+        let cf_ordered = cf_handle(&tx.db, cf::ORDERED_CHILDREN)?;
 
-        // Invalidate old parent's cached metadata
-        let old_metadata_key =
-            keys::last_child_metadata_key(&tenant_id, &repo_id, &branch, workspace, old_parent);
-        batch.delete_cf(cf_ordered, old_metadata_key);
-    }
+        // 7a. Tombstone old ORDERED_CHILDREN entry (remove from old parent)
+        if let (Some(ref old_parent), Some(ref old_label)) = (&old_parent_id, &old_order_label) {
+            let old_ordered_key = keys::ordered_child_key_versioned(
+                &tenant_id, &repo_id, &branch, workspace, old_parent, old_label, &revision, node_id,
+            );
+            batch.put_cf(cf_ordered, old_ordered_key, TOMBSTONE);
 
-    // 7b. Add new ORDERED_CHILDREN entry (add to new parent)
-    let new_name = new_path
-        .rsplit_once('/')
-        .map(|(_, n)| n)
-        .unwrap_or(new_path);
-    let new_ordered_key = keys::ordered_child_key_versioned(
-        &tenant_id,
-        &repo_id,
-        &branch,
-        workspace,
-        &target_parent_id,
-        &new_order_label,
-        &revision,
-        node_id,
-    );
-    batch.put_cf(cf_ordered, new_ordered_key, new_name.as_bytes());
+            // Invalidate old parent's cached metadata
+            let old_metadata_key =
+                keys::last_child_metadata_key(&tenant_id, &repo_id, &branch, workspace, old_parent);
+            batch.delete_cf(cf_ordered, old_metadata_key);
+        }
 
-    // Update new parent's cached last-child metadata
-    let new_metadata_key =
-        keys::last_child_metadata_key(&tenant_id, &repo_id, &branch, workspace, &target_parent_id);
-    batch.put_cf(cf_ordered, new_metadata_key, new_order_label.as_bytes());
-
-    // Track moved node IDs for change tracking
-    let mut moved_node_ids = Vec::new();
-
-    // (old_path, new_path, node_id) per moved node, so the read cache can be
-    // updated in step 9 — both halves of the move, not just the vacated path.
-    let mut moved_paths: Vec<(String, String, String)> = Vec::new();
-
-    // 8. For each node (root + descendants): update paths
-    for (node, depth) in &descendants {
-        // Calculate new path for this node
-        let node_new_path = if *depth == 0 {
-            // Root node gets the new_path exactly
-            new_path.to_string()
-        } else {
-            // Descendant nodes: replace old root prefix with new root prefix.
-            // A node the child-order index claims is here but whose path says
-            // otherwise is LEFT WHERE IT IS — see `moved_descendant_path` for
-            // what the old `unwrap_or(&node.path)` did to it instead.
-            match crate::repositories::nodes::helpers::moved_descendant_path(
-                &node.path,
-                &old_root_path,
-                new_path,
-            ) {
-                Some(path) => path,
-                None => {
-                    tracing::warn!(
-                        node_id = %node.id,
-                        node_path = %node.path,
-                        old_root_path = %old_root_path,
-                        "TXN move_node_tree: node is listed under the moved subtree but its path \
-                         is outside it — leaving it in place"
-                    );
-                    continue;
-                }
-            }
-        };
-
-        // Counted as moved only once we know it IS moving.
-        moved_node_ids.push(node.id.clone());
-
-        tracing::debug!(
-            "TXN move_node_tree: updating node path: {} → {}",
-            node.path,
-            node_new_path
-        );
-
-        // Tombstone old PATH_INDEX
-        let old_path_key = keys::path_index_key_versioned(
-            &tenant_id, &repo_id, &branch, workspace, &node.path, &revision,
-        );
-        batch.put_cf(cf_path, old_path_key, TOMBSTONE);
-
-        // Write new PATH_INDEX
-        let new_path_key = keys::path_index_key_versioned(
+        // 7b. Add new ORDERED_CHILDREN entry (add to new parent)
+        let new_name = new_path
+            .rsplit_once('/')
+            .map(|(_, n)| n)
+            .unwrap_or(new_path);
+        let new_ordered_key = keys::ordered_child_key_versioned(
             &tenant_id,
             &repo_id,
             &branch,
             workspace,
-            &node_new_path,
+            &target_parent_id,
+            &new_order_label,
             &revision,
+            node_id,
         );
-        batch.put_cf(cf_path, new_path_key, node.id.as_bytes());
+        batch.put_cf(cf_ordered, new_ordered_key, new_name.as_bytes());
 
-        // Write new NODE_PATH
-        let node_path_key = keys::node_path_key_versioned(
-            &tenant_id, &repo_id, &branch, workspace, &node.id, &revision,
-        );
-        batch.put_cf(cf_node_path, node_path_key, node_new_path.as_bytes());
-
-        moved_paths.push((node.path.clone(), node_new_path.clone(), node.id.clone()));
-
-        // A move is mostly index-only, because `Node` stores its parent's NAME
-        // rather than a path. Two kinds of node still go stale and need their
-        // blob rewritten:
-        //
-        //   * the moved ROOT — new `name` (on rename), new `parent`, new
-        //     `order_key`;
-        //   * its DIRECT CHILDREN, but only on a RENAME, since they hold the
-        //     root's old name in `parent`.
-        //
-        // Without this a transactional rename left `node.name` reporting the old
-        // name forever, even though every path had been updated around it.
-        let updated_name = node_new_path
-            .rsplit('/')
-            .next()
-            .unwrap_or(&node_new_path)
-            .to_string();
-        let updated_parent = Node::extract_parent_name_from_path(&node_new_path);
-        let is_root = *depth == 0;
-
-        if is_root || node.name != updated_name || node.parent != updated_parent {
-            let mut rewritten = node.clone();
-            rewritten.path = node_new_path.clone();
-            rewritten.name = updated_name;
-            rewritten.parent = updated_parent;
-            rewritten.updated_at = Some(chrono::Utc::now());
-            if is_root {
-                rewritten.order_key = new_order_label.clone();
-            }
-
-            let node_key = keys::node_key_versioned(
+        // Update new parent's cached last-child metadata — only when the node was
+        // appended. A rename keeps its label, which is usually NOT the last one;
+        // caching it as LAST made the next append land in the middle.
+        if appended {
+            let new_metadata_key = keys::last_child_metadata_key(
                 &tenant_id,
                 &repo_id,
                 &branch,
                 workspace,
-                &rewritten.id,
+                &target_parent_id,
+            );
+            batch.put_cf(cf_ordered, new_metadata_key, new_order_label.as_bytes());
+        }
+
+        // 8. For each node (root + descendants): update paths
+        for subject in &descendants {
+            let (node, depth) = (&subject.node, &subject.depth);
+            // Calculate new path for this node
+            let node_new_path = if *depth == 0 {
+                // Root node gets the new_path exactly
+                new_path.to_string()
+            } else {
+                // Descendant nodes: replace old root prefix with new root prefix.
+                // A node the child-order index claims is here but whose path says
+                // otherwise is LEFT WHERE IT IS — see `moved_descendant_path` for
+                // what the old `unwrap_or(&node.path)` did to it instead.
+                match crate::repositories::nodes::helpers::moved_descendant_path(
+                    &node.path,
+                    &old_root_path,
+                    new_path,
+                ) {
+                    Some(path) => path,
+                    None => {
+                        tracing::warn!(
+                            node_id = %node.id,
+                            node_path = %node.path,
+                            old_root_path = %old_root_path,
+                            "TXN move_node_tree: node is listed under the moved subtree but its path \
+                             is outside it — leaving it in place"
+                        );
+                        continue;
+                    }
+                }
+            };
+
+            tracing::debug!(
+                "TXN move_node_tree: updating node path: {} → {}",
+                node.path,
+                node_new_path
+            );
+
+            // Tombstone old PATH_INDEX
+            let old_path_key = keys::path_index_key_versioned(
+                &tenant_id, &repo_id, &branch, workspace, &node.path, &revision,
+            );
+            batch.put_cf(cf_path, old_path_key, TOMBSTONE);
+
+            // Write new PATH_INDEX
+            let new_path_key = keys::path_index_key_versioned(
+                &tenant_id,
+                &repo_id,
+                &branch,
+                workspace,
+                &node_new_path,
                 &revision,
             );
-            let node_value = rmp_serde::to_vec_named(&rewritten)
-                .map_err(|e| raisin_error::Error::storage(format!("Serialization error: {}", e)))?;
-            batch.put_cf(cf_nodes, node_key, node_value);
+            batch.put_cf(cf_path, new_path_key, node.id.as_bytes());
+
+            // Write new NODE_PATH
+            let node_path_key = keys::node_path_key_versioned(
+                &tenant_id, &repo_id, &branch, workspace, &node.id, &revision,
+            );
+            batch.put_cf(cf_node_path, node_path_key, node_new_path.as_bytes());
+
+            let mut as_moved = node.clone();
+            as_moved.path = node_new_path.clone();
+
+            // A move is mostly index-only, because `Node` stores its parent's NAME
+            // rather than a path. Three kinds of node still need their record
+            // rewritten:
+            //
+            //   * the moved ROOT — new `name` (on rename), new `parent`, new
+            //     `order_key`;
+            //   * its DIRECT CHILDREN, but only on a RENAME, since they hold the
+            //     root's old name in `parent`;
+            //   * any node this transaction already WROTE (or moved): its record
+            //     at this revision names the pre-move path, and a record must
+            //     name one path. Rewritten from the staged node, so the write's
+            //     own changes survive.
+            //
+            // Without the first two a transactional rename left `node.name`
+            // reporting the old name forever, even though every path had been
+            // updated around it.
+            let updated_name = node_new_path
+                .rsplit('/')
+                .next()
+                .unwrap_or(&node_new_path)
+                .to_string();
+            let updated_parent = Node::extract_parent_name_from_path(&node_new_path);
+            let is_root = *depth == 0;
+            let renamed = node.name != updated_name || node.parent != updated_parent;
+
+            if is_root || renamed || subject.touched {
+                as_moved.name = updated_name;
+                as_moved.parent = updated_parent;
+                if is_root || renamed {
+                    as_moved.updated_at = Some(chrono::Utc::now());
+                }
+                if is_root {
+                    as_moved.order_key = new_order_label.clone();
+                }
+                let parent_id = if is_root {
+                    Some(target_parent_id.clone()).filter(|p| p != "/")
+                } else {
+                    subject.parent_id.clone()
+                };
+
+                // Through the one record writer (the NODE_PATH entry it
+                // writes is the one written just above).
+                crate::repositories::nodes::crud::indexing::node_record::write_node_record(
+                    &tx.db, &mut batch, &tenant_id, &repo_id, &branch, workspace, &as_moved,
+                    parent_id, &revision,
+                )?;
+                if is_root || renamed {
+                    rewrites.push((node.clone(), as_moved.clone()));
+                }
+            } else {
+                // Re-keyed from the LISTED version without a record rewrite:
+                // checked at commit against the stored one.
+                rekey_only.push(node.clone());
+            }
+            rekeys.push((node.clone(), as_moved.clone()));
+            moved.push((node.path.clone(), as_moved));
         }
     }
 
-    // 9. Update read cache for read-your-writes semantics
+    // 8b. A rewritten record carries a fresh `updated_at` (and on a rename a
+    // new `name`): its property index must follow, exactly as `put_node`
+    // maintains it — tombstone what the old record indexed, index the new
+    // one. Without this, `ORDER BY updated_at` dropped every moved node (the
+    // reader meets the stale entry first and rejects it on the re-check) and
+    // `name = ...` kept answering with the old name.
+    // 8c. Re-key compound-index entries. The transaction move never did, so
+    // a node moved through it kept matching `CHILD_OF(old parent)` in a typed
+    // folder listing and never matched the new one (the repository move has
+    // done this since `move_tree_compound_reindex_test`). Derived from the old
+    // record, so no workspace scan per moved node.
+    for (old, moved) in &rekeys {
+        super::create::indexing::write_compound_indexes(
+            tx,
+            &tenant_id,
+            &repo_id,
+            &branch,
+            workspace,
+            crate::indexing::Baseline::Full(Some(old)),
+            moved,
+            &revision,
+        )
+        .await?;
+    }
+    for (old, new) in &rewrites {
+        // A re-stamp: full put against the record it replaces.
+        super::create::indexing::index_node_properties(
+            tx,
+            &tenant_id,
+            &repo_id,
+            &branch,
+            workspace,
+            new,
+            &revision,
+            crate::repositories::nodes::PropertyWrite::full(Some(old)),
+        )?;
+    }
+
+    // 8d. Each re-stamped record's property and compound writes were derived
+    // from the committed subtree this move listed; the commit re-derives them
+    // under the node's commit lock against what is stored then (plan Phase
+    // 7b — `always`: a listing has no per-node "before the read" to record).
     {
+        let ctx = crate::indexing::IndexCtx::new(&tenant_id, &repo_id, &branch, workspace);
         let mut cache = tx
             .read_cache
             .lock()
             .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
-
-        // Vacate the old paths first, THEN claim the new ones. Doing it in one
-        // pass would let a node moved onto a sibling's vacated path be erased
-        // again by that sibling's removal.
-        for (old_path, _, _) in &moved_paths {
+        for (_, new) in &rewrites {
             cache
-                .paths
-                .insert((workspace.to_string(), old_path.clone()), None);
+                .delta_checks
+                .entry((workspace.to_string(), new.id.clone()))
+                .or_insert_with(|| {
+                    crate::indexing::StagedDeltaCheck::always(&ctx, &new.id, &revision)
+                });
         }
-
-        // Register the new paths. Without this the moved node was unreachable
-        // by path for the REST OF THE TRANSACTION — the batch had already
-        // written the new PATH_INDEX entry, but an in-transaction read still
-        // resolved through the cache and saw nothing. A caller that moved a
-        // node and then upserted it at its new path therefore took the CREATE
-        // branch and minted a duplicate, which for a node type with a
-        // `unique: true` property failed the whole write.
-        for (_, new_path, node_id) in &moved_paths {
-            cache.paths.insert(
-                (workspace.to_string(), new_path.clone()),
-                Some(node_id.clone()),
-            );
+        // A descendant re-keyed but not rewritten: its compound re-key was
+        // derived from the version this move listed (an update may commit
+        // before this transaction does).
+        for listed in &rekey_only {
+            cache
+                .delta_checks
+                .entry((workspace.to_string(), listed.id.clone()))
+                .or_insert_with(|| {
+                    crate::indexing::StagedDeltaCheck::rekey(&ctx, listed, &revision)
+                });
         }
     }
+
+    // 9. Update read cache for read-your-writes semantics: every moved node,
+    // with its new path, where a later `get_node` in this transaction finds it.
+    super::move_view::record_moves(tx, workspace, &moved)?;
 
     // 10. Track changes for event emission during commit
     {
@@ -387,7 +467,7 @@ pub async fn move_node_tree(
             .lock()
             .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
 
-        for (node, _) in &descendants {
+        for (old_path, node) in &moved {
             // A move changes the path, never a property: an untouched node
             // reports an empty changed-property list; one already written
             // earlier in this transaction keeps what that write knew.
@@ -402,7 +482,7 @@ pub async fn move_node_tree(
                     workspace: workspace.to_string(),
                     revision,
                     operation: ChangeOperation::Modified,
-                    path: Some(node.path.clone()), // Store path before move for event matching
+                    path: Some(old_path.clone()), // Store path before move for event matching
                     node_type: Some(node.node_type.clone()),
                     changed_properties,
                 },
@@ -423,13 +503,25 @@ pub async fn move_node_tree(
             revision,
             old_parent_id,
             Some(target_parent_id.clone()),
-            None, // Order label not computed in transaction
+            Some(new_order_label.clone()),
         );
+        // Every descendant's path changed too: replicate each, as the
+        // repository move does, or a peer keeps them at their old paths.
+        for (_, node) in &moved {
+            if node.id != source_node.id {
+                tracker.track_path_change(
+                    node.id.clone(),
+                    workspace.to_string(),
+                    revision,
+                    node.path.clone(),
+                );
+            }
+        }
     }
 
     tracing::info!(
         "TXN move_node_tree: wrote {} path updates to transaction batch (single revision)",
-        moved_node_ids.len() * 3 // PATH_INDEX tombstone + new PATH_INDEX + NODE_PATH
+        moved.len() * 3 // PATH_INDEX tombstone + new PATH_INDEX + NODE_PATH
     );
 
     Ok(())

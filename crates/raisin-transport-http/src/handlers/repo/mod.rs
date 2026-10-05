@@ -15,6 +15,7 @@ mod get;
 mod get_listing;
 mod helpers;
 mod http_range;
+mod localized;
 mod post;
 mod post_external;
 mod post_multipart;
@@ -28,6 +29,7 @@ mod write;
 // Re-export all public handler functions at the module level
 // so existing imports like `crate::handlers::repo::repo_get` continue to work.
 pub use get::{repo_get, repo_get_by_id, repo_get_root};
+pub use localized::repo_get_by_localized_path;
 pub use post::{repo_post, repo_post_root};
 pub use revision::{repo_get_at_revision, repo_get_by_id_at_revision, repo_get_root_at_revision};
 pub use write::{repo_delete, repo_put};

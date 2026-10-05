@@ -37,47 +37,18 @@ where
     /// Bind parameters to SQL by replacing placeholders with values.
     ///
     /// This uses the same parameter substitution logic as the HTTP transport
-    /// (raisin_sql::substitute_params) to ensure consistent behavior.
-    ///
-    /// # Arguments
-    ///
-    /// * `portal` - The portal containing the statement and bound parameters
-    ///
-    /// # Returns
-    ///
-    /// The SQL string with parameters substituted, or an error
+    /// (raisin_sql::substitute_params) to ensure consistent behavior. A query
+    /// is NOT executed from this text: `do_query` hands the statement's SQL
+    /// and [`Self::portal_params`] to the engine, which plans a prepared
+    /// statement once for all its executions (plan Phase 13d). The text is
+    /// what session commands (`SET app.user = $1`) and schema inference read.
     pub(crate) fn bind_parameters(&self, portal: &Portal<RaisinStatement>) -> Result<String> {
         let sql = &portal.statement.statement.sql;
-        let param_count = portal.parameter_len();
-
-        debug!("Binding {} parameters to SQL: {}", param_count, sql);
-
-        if param_count == 0 {
+        if portal.parameter_len() == 0 {
             // No parameters to bind
             return Ok(sql.clone());
         }
-
-        // Convert pgwire parameters to JSON values for substitute_params
-        let mut json_params: Vec<JsonValue> = Vec::with_capacity(param_count);
-
-        for i in 0..param_count {
-            // Get the parameter type from the statement
-            let param_type = portal
-                .statement
-                .parameter_types
-                .get(i)
-                .cloned()
-                .unwrap_or(Type::TEXT);
-
-            let json_value = self.extract_parameter_as_json(portal, i, &param_type)?;
-            debug!(
-                "Parameter ${}: {:?} (type: {:?})",
-                i + 1,
-                json_value,
-                param_type
-            );
-            json_params.push(json_value);
-        }
+        let json_params = self.portal_params(portal)?;
 
         // Use the same substitution logic as HTTP transport
         let result = substitute_params(sql, &json_params).map_err(|e| {
@@ -88,130 +59,168 @@ where
         Ok(result)
     }
 
-    /// Extract a parameter from the portal and convert it to a JSON value.
-    ///
-    /// This handles the parameter extraction based on the PostgreSQL type.
-    fn extract_parameter_as_json(
-        &self,
-        portal: &Portal<RaisinStatement>,
-        index: usize,
-        param_type: &Type,
-    ) -> Result<JsonValue> {
-        match *param_type {
-            Type::BOOL => {
-                let value = portal.parameter::<bool>(index, param_type).map_err(|e| {
-                    PgWireTransportError::internal(format!(
-                        "Failed to extract BOOL parameter {}: {}",
-                        index, e
-                    ))
-                })?;
-                Ok(value.map(JsonValue::Bool).unwrap_or(JsonValue::Null))
-            }
-            Type::INT2 => {
-                let value = portal.parameter::<i16>(index, param_type).map_err(|e| {
-                    PgWireTransportError::internal(format!(
-                        "Failed to extract INT2 parameter {}: {}",
-                        index, e
-                    ))
-                })?;
-                Ok(value
-                    .map(|v| JsonValue::Number(v.into()))
-                    .unwrap_or(JsonValue::Null))
-            }
-            Type::INT4 => {
-                let value = portal.parameter::<i32>(index, param_type).map_err(|e| {
-                    PgWireTransportError::internal(format!(
-                        "Failed to extract INT4 parameter {}: {}",
-                        index, e
-                    ))
-                })?;
-                Ok(value
-                    .map(|v| JsonValue::Number(v.into()))
-                    .unwrap_or(JsonValue::Null))
-            }
-            Type::INT8 => {
-                let value = portal.parameter::<i64>(index, param_type).map_err(|e| {
-                    PgWireTransportError::internal(format!(
-                        "Failed to extract INT8 parameter {}: {}",
-                        index, e
-                    ))
-                })?;
-                Ok(value
-                    .map(|v| JsonValue::Number(v.into()))
-                    .unwrap_or(JsonValue::Null))
-            }
-            Type::FLOAT4 => {
-                let value = portal.parameter::<f32>(index, param_type).map_err(|e| {
-                    PgWireTransportError::internal(format!(
-                        "Failed to extract FLOAT4 parameter {}: {}",
-                        index, e
-                    ))
-                })?;
-                Ok(value
-                    .and_then(|v| serde_json::Number::from_f64(v as f64))
-                    .map(JsonValue::Number)
-                    .unwrap_or(JsonValue::Null))
-            }
-            Type::FLOAT8 => {
-                let value = portal.parameter::<f64>(index, param_type).map_err(|e| {
-                    PgWireTransportError::internal(format!(
-                        "Failed to extract FLOAT8 parameter {}: {}",
-                        index, e
-                    ))
-                })?;
-                Ok(value
-                    .and_then(serde_json::Number::from_f64)
-                    .map(JsonValue::Number)
-                    .unwrap_or(JsonValue::Null))
-            }
-            Type::TEXT | Type::VARCHAR => {
-                let value = portal.parameter::<String>(index, param_type).map_err(|e| {
-                    PgWireTransportError::internal(format!(
-                        "Failed to extract TEXT/VARCHAR parameter {}: {}",
-                        index, e
-                    ))
-                })?;
-                // For TEXT parameters, try to detect if value is actually a number
-                // This handles cases where JDBC drivers send LIMIT/OFFSET as text
-                if let Some(ref s) = value {
-                    // Try integer first
-                    if let Ok(n) = s.parse::<i64>() {
-                        debug!("TEXT parameter {} looks like integer: {}", index, n);
-                        return Ok(JsonValue::Number(n.into()));
-                    }
-                    // Try float
-                    if let Ok(n) = s.parse::<f64>() {
-                        if let Some(num) = serde_json::Number::from_f64(n) {
-                            debug!("TEXT parameter {} looks like float: {}", index, n);
-                            return Ok(JsonValue::Number(num));
-                        }
+    /// The portal's parameters as JSON values, in `$n` order.
+    pub(crate) fn portal_params(&self, portal: &Portal<RaisinStatement>) -> Result<Vec<JsonValue>> {
+        portal_params(portal)
+    }
+}
+
+/// A portal's parameters as JSON values, in `$n` order — what the engine binds
+/// into the prepared statement's template (`execute_batch_with_params`).
+pub(crate) fn portal_params(portal: &Portal<RaisinStatement>) -> Result<Vec<JsonValue>> {
+    let param_count = portal.parameter_len();
+    debug!(
+        "Binding {} parameters to SQL: {}",
+        param_count, portal.statement.statement.sql
+    );
+    let mut json_params: Vec<JsonValue> = Vec::with_capacity(param_count);
+    for i in 0..param_count {
+        // Get the parameter type from the statement
+        let param_type = portal
+            .statement
+            .parameter_types
+            .get(i)
+            .cloned()
+            .unwrap_or(Type::TEXT);
+
+        let json_value = extract_parameter_as_json(portal, i, &param_type)?;
+        debug!(
+            "Parameter ${}: {:?} (type: {:?})",
+            i + 1,
+            json_value,
+            param_type
+        );
+        json_params.push(json_value);
+    }
+    Ok(json_params)
+}
+
+/// Extract a parameter from the portal and convert it to a JSON value.
+///
+/// This handles the parameter extraction based on the PostgreSQL type.
+fn extract_parameter_as_json(
+    portal: &Portal<RaisinStatement>,
+    index: usize,
+    param_type: &Type,
+) -> Result<JsonValue> {
+    match *param_type {
+        Type::BOOL => {
+            let value = portal.parameter::<bool>(index, param_type).map_err(|e| {
+                PgWireTransportError::internal(format!(
+                    "Failed to extract BOOL parameter {}: {}",
+                    index, e
+                ))
+            })?;
+            Ok(value.map(JsonValue::Bool).unwrap_or(JsonValue::Null))
+        }
+        Type::INT2 => {
+            let value = portal.parameter::<i16>(index, param_type).map_err(|e| {
+                PgWireTransportError::internal(format!(
+                    "Failed to extract INT2 parameter {}: {}",
+                    index, e
+                ))
+            })?;
+            Ok(value
+                .map(|v| JsonValue::Number(v.into()))
+                .unwrap_or(JsonValue::Null))
+        }
+        Type::INT4 => {
+            let value = portal.parameter::<i32>(index, param_type).map_err(|e| {
+                PgWireTransportError::internal(format!(
+                    "Failed to extract INT4 parameter {}: {}",
+                    index, e
+                ))
+            })?;
+            Ok(value
+                .map(|v| JsonValue::Number(v.into()))
+                .unwrap_or(JsonValue::Null))
+        }
+        Type::INT8 => {
+            let value = portal.parameter::<i64>(index, param_type).map_err(|e| {
+                PgWireTransportError::internal(format!(
+                    "Failed to extract INT8 parameter {}: {}",
+                    index, e
+                ))
+            })?;
+            Ok(value
+                .map(|v| JsonValue::Number(v.into()))
+                .unwrap_or(JsonValue::Null))
+        }
+        Type::FLOAT4 => {
+            let value = portal.parameter::<f32>(index, param_type).map_err(|e| {
+                PgWireTransportError::internal(format!(
+                    "Failed to extract FLOAT4 parameter {}: {}",
+                    index, e
+                ))
+            })?;
+            Ok(value
+                .and_then(|v| serde_json::Number::from_f64(v as f64))
+                .map(JsonValue::Number)
+                .unwrap_or(JsonValue::Null))
+        }
+        Type::FLOAT8 => {
+            let value = portal.parameter::<f64>(index, param_type).map_err(|e| {
+                PgWireTransportError::internal(format!(
+                    "Failed to extract FLOAT8 parameter {}: {}",
+                    index, e
+                ))
+            })?;
+            Ok(value
+                .and_then(serde_json::Number::from_f64)
+                .map(JsonValue::Number)
+                .unwrap_or(JsonValue::Null))
+        }
+        Type::TEXT | Type::VARCHAR => {
+            let value = portal.parameter::<String>(index, param_type).map_err(|e| {
+                PgWireTransportError::internal(format!(
+                    "Failed to extract TEXT/VARCHAR parameter {}: {}",
+                    index, e
+                ))
+            })?;
+            // For TEXT parameters, try to detect if value is actually a number
+            // This handles cases where JDBC drivers send LIMIT/OFFSET as text
+            if let Some(ref s) = value {
+                // Try integer first
+                if let Ok(n) = s.parse::<i64>() {
+                    debug!("TEXT parameter {} looks like integer: {}", index, n);
+                    return Ok(JsonValue::Number(n.into()));
+                }
+                // Try float
+                if let Ok(n) = s.parse::<f64>() {
+                    if let Some(num) = serde_json::Number::from_f64(n) {
+                        debug!("TEXT parameter {} looks like float: {}", index, n);
+                        return Ok(JsonValue::Number(num));
                     }
                 }
-                Ok(value.map(JsonValue::String).unwrap_or(JsonValue::Null))
             }
-            Type::UUID => {
-                let value = portal.parameter::<String>(index, param_type).map_err(|e| {
-                    PgWireTransportError::internal(format!(
-                        "Failed to extract UUID parameter {}: {}",
-                        index, e
-                    ))
-                })?;
-                Ok(value.map(JsonValue::String).unwrap_or(JsonValue::Null))
-            }
-            _ => {
-                // For unsupported types, try to get as string
-                warn!(
-                    "Unsupported parameter type {:?} at index {}, treating as TEXT",
-                    param_type, index
-                );
-                let value = portal.parameter::<String>(index, param_type).map_err(|e| {
-                    PgWireTransportError::internal(format!(
-                        "Failed to extract parameter {} as TEXT: {}",
-                        index, e
-                    ))
-                })?;
-                Ok(value.map(JsonValue::String).unwrap_or(JsonValue::Null))
-            }
+            Ok(value.map(JsonValue::String).unwrap_or(JsonValue::Null))
+        }
+        Type::UUID => {
+            let value = portal.parameter::<String>(index, param_type).map_err(|e| {
+                PgWireTransportError::internal(format!(
+                    "Failed to extract UUID parameter {}: {}",
+                    index, e
+                ))
+            })?;
+            Ok(value.map(JsonValue::String).unwrap_or(JsonValue::Null))
+        }
+        _ => {
+            // For unsupported types, try to get as string
+            warn!(
+                "Unsupported parameter type {:?} at index {}, treating as TEXT",
+                param_type, index
+            );
+            let value = portal.parameter::<String>(index, param_type).map_err(|e| {
+                PgWireTransportError::internal(format!(
+                    "Failed to extract parameter {} as TEXT: {}",
+                    index, e
+                ))
+            })?;
+            Ok(value.map(JsonValue::String).unwrap_or(JsonValue::Null))
         }
     }
 }
+
+#[cfg(test)]
+#[path = "params_tests.rs"]
+mod tests;

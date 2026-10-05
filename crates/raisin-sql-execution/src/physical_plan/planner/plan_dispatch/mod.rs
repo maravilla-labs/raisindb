@@ -148,7 +148,7 @@ impl PhysicalPlanner {
                 let input_plan = self.plan_with_context(input, context)?;
                 Ok(PhysicalPlan::Project {
                     input: Box::new(input_plan),
-                    exprs: exprs.clone(),
+                    exprs: exprs.as_slice().into(),
                 })
             }
 

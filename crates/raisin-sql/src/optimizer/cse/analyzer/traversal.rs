@@ -19,10 +19,12 @@ pub(super) fn expressions_equal(a: &TypedExpr, b: &TypedExpr) -> bool {
         return false;
     }
 
-    // Check expression structure matches
-    // For simplicity, we use debug format comparison
-    // In production, you might want a more efficient deep equality check
-    format!("{:?}", a.expr) == format!("{:?}", b.expr)
+    // Structural equality (`PartialEq`, derived since plan Phase 13b). It
+    // used to compare the `Debug` renderings, which formatted both
+    // expressions on every hash match — every repeated column reference of a
+    // wide `SELECT *`. The one difference: a NaN literal is never equal to
+    // another, so it is never shared — CSE only loses an opportunity there.
+    a.expr == b.expr
 }
 
 /// Iteratively collect all subexpressions and their frequencies

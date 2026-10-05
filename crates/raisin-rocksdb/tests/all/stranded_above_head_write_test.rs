@@ -112,6 +112,7 @@ async fn setup(temp_dir: &TempDir) -> Result<Arc<RocksDBStorage>> {
         default_branch: BRANCH.to_string(),
         description: Some("Stranded-node test".to_string()),
         tags: HashMap::new(),
+        localized_names: Default::default(),
     };
     storage
         .repository_management()

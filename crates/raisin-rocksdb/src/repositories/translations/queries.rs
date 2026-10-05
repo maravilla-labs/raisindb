@@ -11,40 +11,73 @@ use crate::error_ext::ResultExt;
 
 use super::keys;
 
-/// List all nodes that have a translation in the given locale
+/// Every node of `(branch, workspace)` with a live translation in `locale` as
+/// of `revision`.
+///
+/// `TRANSLATION_INDEX` is REPO-WIDE — `{tenant}\0{repo}\0translation_index\0
+/// {locale}\0{~revision:16}\0{node_id}`, no branch, no workspace — so it can
+/// only say which nodes MAY qualify. Letting its newest entry decide (as this
+/// did) made a delete on one branch hide the node from every other branch's
+/// listing, and a translation written only on a branch list the node on
+/// `main`. So the index yields CANDIDATES — every node with an entry at or
+/// before the bound, live or `T`: each version write stages its index entry at
+/// the same revision, so no qualifying node lacks one — and the one reader
+/// (`translation_read::read_overlay`) decides each on the caller's branch and
+/// workspace. The revision is 16 BINARY bytes that can contain `\0` and are
+/// usually not valid UTF-8, so the node id is taken by POSITION.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn list_nodes_with_translation(
     db: &Arc<DB>,
     tenant_id: &str,
     repo_id: &str,
+    branch: &str,
+    workspace: &str,
     locale: &LocaleCode,
-    _revision: &HLC,
+    revision: &HLC,
 ) -> Result<Vec<String>> {
+    crate::translation_history::ensure_complete_at(db, tenant_id, repo_id, branch, revision)?;
     let cf = crate::cf_handle(db, crate::cf::TRANSLATION_INDEX)?;
-
     let prefix = keys::translation_index_prefix(tenant_id, repo_id, locale.as_str());
 
-    let mut node_ids = HashSet::new();
-    let iter = crate::prefix_scan(&db, &cf, &prefix);
-
-    for item in iter {
-        let (key, _value) = item.rocksdb_err()?;
-
-        // Key format: {prefix}{~revision:16}\0{node_id}. The revision is 16
-        // BINARY bytes that can contain `\0` and are usually not valid UTF-8,
-        // so take the node id by POSITION: decoding or splitting the whole
-        // suffix silently dropped the node.
+    let mut candidates = HashSet::new();
+    let mut node_ids = Vec::new();
+    for item in crate::prefix_scan(&db, &cf, &prefix) {
+        let (key, _) = item.rocksdb_err()?;
         let Some(suffix) = key.strip_prefix(prefix.as_slice()) else {
             break;
         };
         if suffix.len() <= 17 || suffix[16] != 0 {
             continue;
         }
-        if let Ok(node_id) = std::str::from_utf8(&suffix[17..]) {
-            node_ids.insert(node_id.to_string());
+        let Ok(entry_revision) = crate::keys::decode_descending_revision(&suffix[..16]) else {
+            continue;
+        };
+        if &entry_revision > revision {
+            continue;
+        }
+        let Ok(node_id) = std::str::from_utf8(&suffix[17..]) else {
+            continue;
+        };
+        if !candidates.insert(node_id.to_string()) {
+            continue;
+        }
+        if crate::translation_read::read_overlay(
+            db,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            node_id,
+            locale.as_str(),
+            Some(revision),
+        )?
+        .is_some()
+        {
+            node_ids.push(node_id.to_string());
         }
     }
 
-    Ok(node_ids.into_iter().collect())
+    Ok(node_ids)
 }
 
 /// Batch fetch translations for multiple nodes
@@ -58,6 +91,7 @@ pub(super) async fn get_translations_batch(
     locale: &LocaleCode,
     revision: &HLC,
 ) -> Result<HashMap<String, LocaleOverlay>> {
+    crate::translation_history::ensure_complete_at(db, tenant_id, repo_id, branch, revision)?;
     let mut result = HashMap::new();
 
     // Per node: the newest version at or before `revision`; a tombstone there

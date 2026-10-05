@@ -64,6 +64,8 @@ pub struct CommitMetadata {
     pub message: Option<Arc<String>>,
     pub is_system: bool,
     pub bookkeeping: bool,
+    /// See `TransactionMetadata::in_place_record_write`.
+    pub in_place_record_write: bool,
 }
 
 /// Whether a property key is engine-internal (`__…`, `$mixins`, …) and so

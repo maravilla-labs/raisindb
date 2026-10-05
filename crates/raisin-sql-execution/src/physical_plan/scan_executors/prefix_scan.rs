@@ -486,8 +486,8 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
                         };
 
                         let order_ctx = OrderContext {
-                            order_label: None,
                             tree_order: Some(&tree_order),
+                            ..OrderContext::default()
                         };
 
                         for locale in &locales_to_use {

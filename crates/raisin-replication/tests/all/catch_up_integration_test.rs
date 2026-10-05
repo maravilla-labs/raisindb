@@ -7,7 +7,6 @@
 //! - Log verification
 //! - Conflict resolution
 
-use raisin_models::nodes::properties::PropertyValue;
 use raisin_replication::{CatchUpCoordinator, ConflictResolver, OpType, Operation, VectorClock};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -27,10 +26,11 @@ fn create_test_operation(node_id: &str, op_seq: u64, timestamp_ms: u64) -> Opera
         tenant_id: "tenant1".to_string(),
         repo_id: "repo1".to_string(),
         branch: "main".to_string(),
-        op_type: OpType::SetProperty {
+        op_type: OpType::DeleteNodeSnapshot {
             node_id: "test_node".to_string(),
-            property_name: "test_prop".to_string(),
-            value: PropertyValue::String("test_value".to_string()),
+            revision: raisin_hlc::HLC::new(timestamp_ms, 0),
+            node: None,
+            parent_id: None,
         },
         revision: None,
         actor: "test".to_string(),

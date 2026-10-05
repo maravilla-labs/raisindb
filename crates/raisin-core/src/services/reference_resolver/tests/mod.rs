@@ -211,3 +211,5 @@ async fn test_resolve_json_reference_by_path() {
 }
 
 mod scope;
+
+mod equivalence;

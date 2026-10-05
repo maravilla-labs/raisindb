@@ -10,7 +10,7 @@ use crate::analyzer::functions::FunctionSignature;
 use crate::analyzer::types::DataType;
 
 /// Typed expression (output of semantic analysis)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TypedExpr {
     pub expr: Expr,
     pub data_type: DataType,
@@ -40,7 +40,7 @@ impl TypedExpr {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     // Literals
     Literal(Literal),

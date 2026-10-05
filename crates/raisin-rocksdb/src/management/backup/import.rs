@@ -11,7 +11,18 @@ use raisin_models::{
 use raisin_storage::RevisionMeta;
 use std::path::Path;
 
-/// Import nodes from JSON Lines file
+/// Import nodes from a JSON Lines file.
+///
+/// Each node goes through the batch funnel copy and deep create use
+/// (`add_node_to_batch_with_parent_id`): the record (blob + NODE_PATH) through
+/// the one record writer, plus PATH_INDEX and the property / reference /
+/// relation / spatial entries — this used to write the record alone, so a
+/// restored node had no PATH_INDEX entry and `get_by_path` found nothing.
+///
+/// A node with an empty path is refused, and the whole file with it, before
+/// anything is written: asserting `""` in NODE_PATH makes the node
+/// unreachable by path with no error anywhere. (A backup taken by a release
+/// whose export decoded path-less blobs raw holds exactly such rows.)
 pub(super) async fn import_nodes_from_jsonl(
     storage: &RocksDBStorage,
     tenant_id: &str,
@@ -23,42 +34,74 @@ pub(super) async fn import_nodes_from_jsonl(
     let file_handle = std::fs::File::open(file)
         .map_err(|e| raisin_error::Error::storage(format!("Failed to open nodes file: {}", e)))?;
 
-    let reader = std::io::BufReader::new(file_handle);
-    let cf_nodes = cf_handle(storage.db(), cf::NODES)?;
-    let mut batch = rocksdb::WriteBatch::default();
-    let mut count = 0;
-
-    for line in reader.lines() {
+    let mut nodes = Vec::new();
+    for line in std::io::BufReader::new(file_handle).lines() {
         let line =
             line.map_err(|e| raisin_error::Error::storage(format!("Failed to read line: {}", e)))?;
-
         let node: Node = serde_json::from_str(&line)
             .map_err(|e| raisin_error::Error::storage(format!("Failed to parse node: {}", e)))?;
+        nodes.push(node);
+    }
+    let pathless: Vec<&str> = nodes
+        .iter()
+        .filter(|n| n.path.is_empty())
+        .map(|n| n.id.as_str())
+        .collect();
+    if !pathless.is_empty() {
+        return Err(raisin_error::Error::Validation(format!(
+            "restore refused: {} node(s) in the backup have no path (first: {}); the backup \
+             was taken by a release that exported path-less records without their path",
+            pathless.len(),
+            pathless
+                .iter()
+                .take(5)
+                .copied()
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
 
-        // We need to extract branch and workspace from the node's context
-        // For now, we'll use default values - in a real implementation,
-        // this information should be in the backup metadata
-        let branch = "main"; // Default branch
-        let workspace = "default"; // Default workspace
-        let revision = raisin_hlc::HLC::new(0, 0); // Default revision
-
-        let key =
-            keys::node_key_versioned(tenant_id, repo_id, branch, workspace, &node.id, &revision);
-
-        let value = rmp_serde::to_vec_named(&node).map_err(|e| {
-            raisin_error::Error::storage(format!("Failed to serialize node: {}", e))
-        })?;
-
-        batch.put_cf(cf_nodes, key, value);
+    // The backup does not record the branch; the workspace is on the node.
+    let branch = "main";
+    let revision = raisin_hlc::HLC::new(0, 0);
+    let mut batch = rocksdb::WriteBatch::default();
+    let mut count = 0;
+    // Parents and children share unwritten batches: give each record its
+    // parent id from the backup itself rather than leaving writers to
+    // resolve it from the committed PATH_INDEX.
+    let ids_by_path: std::collections::HashMap<(&str, &str), &str> = nodes
+        .iter()
+        .map(|n| {
+            (
+                (n.workspace.as_deref().unwrap_or("default"), n.path.as_str()),
+                n.id.as_str(),
+            )
+        })
+        .collect();
+    for node in &nodes {
+        let workspace = node.workspace.as_deref().unwrap_or("default");
+        let parent_path = crate::localized_name::sync::parent_path_of(&node.path);
+        let parent_id = ids_by_path.get(&(workspace, parent_path.as_str())).copied();
+        storage.nodes_impl().add_node_to_batch_with_parent_id(
+            &mut batch,
+            node,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            &revision,
+            None,
+            parent_id,
+            crate::repositories::nodes::PropertyWrite::CREATE,
+        )?;
         count += 1;
 
         // Commit batch every 1000 nodes
         if count % 1000 == 0 {
             storage
                 .db()
-                .write(batch)
+                .write(std::mem::take(&mut batch))
                 .map_err(|e| raisin_error::Error::storage(format!("Batch write failed: {}", e)))?;
-            batch = rocksdb::WriteBatch::default();
             tracing::debug!("Imported {} nodes", count);
         }
     }

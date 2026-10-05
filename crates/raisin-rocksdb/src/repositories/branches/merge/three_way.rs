@@ -5,6 +5,7 @@
 
 use raisin_context::{MergeResult, MergeStrategy};
 use raisin_error::Result;
+use raisin_hlc::HLC;
 use raisin_storage::{BranchRepository, RevisionMeta, RevisionRepository};
 use std::collections::{HashSet, VecDeque};
 
@@ -128,6 +129,15 @@ impl BranchRepositoryImpl {
             )));
         }
 
+        // Skip-unchanged is off on the target until the source's entries are
+        // replayed (`nodes::merge_window`).
+        let _merge_window = crate::repositories::nodes::open_merge_window(
+            &self.db,
+            tenant_id,
+            repo_id,
+            target_branch,
+        );
+
         let source = self
             .get_branch(tenant_id, repo_id, source_branch)
             .await?
@@ -204,6 +214,7 @@ impl BranchRepositoryImpl {
         // Collect all changed nodes from source branch since common ancestor
         // Use BFS to follow BOTH parent AND merge_parent (handles merge commits correctly)
         let mut changed_nodes = Vec::new();
+        let mut earliest_change: Option<HLC> = None;
         let mut visited = HashSet::new();
         let mut queue = VecDeque::new();
         queue.push_back(source.head);
@@ -222,6 +233,9 @@ impl BranchRepositoryImpl {
                 continue;
             };
 
+            if !meta.changed_nodes.is_empty() {
+                earliest_change = Some(earliest_change.map_or(revision, |e: HLC| e.min(revision)));
+            }
             changed_nodes.extend(meta.changed_nodes.clone());
 
             // Follow BOTH parent and merge_parent to traverse all ancestors
@@ -282,6 +296,22 @@ impl BranchRepositoryImpl {
             &source.head,
         )
         .await?;
+        self.compound_after_merge_copy(
+            tenant_id,
+            repo_id,
+            source_branch,
+            target_branch,
+            earliest_change,
+        )
+        .await?;
+        self.localized_after_merge_copy(
+            tenant_id,
+            repo_id,
+            source_branch,
+            target_branch,
+            &merge_revision,
+            &changed_nodes,
+        )?;
 
         Ok(MergeResult {
             success: true,

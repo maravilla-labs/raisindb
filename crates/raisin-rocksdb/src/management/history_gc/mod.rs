@@ -55,11 +55,15 @@
 //! is, and a run reclaims little by design.
 
 mod blobs;
+pub mod collapse;
 mod layout;
+mod node_delete_translations;
+mod pins;
 pub mod retention;
 mod sweep;
 #[cfg(test)]
 mod tests;
+mod translation_floor;
 
 pub use retention::{HistoryRetention, ALL_BRANCHES};
 
@@ -348,6 +352,9 @@ fn nth_newest_revisions(
 struct Plans {
     /// `{tenant}\0{repo}\0{branch}` -> plan
     branch: HashMap<Vec<u8>, ScopePlan>,
+    /// `{tenant}\0{repo}\0{branch}` -> the branch HEAD when the plan was made
+    /// (caps the translation history floor, `translation_floor.rs`).
+    heads: HashMap<Vec<u8>, HLC>,
     /// `{tenant}\0{repo}` -> plan (only when EVERY branch of the repo has one)
     repo: HashMap<Vec<u8>, ScopePlan>,
     report: Vec<BranchGcPlan>,
@@ -373,6 +380,13 @@ fn build_plans(db: &DB, opts: &GcOptions) -> Result<Plans> {
             pins.entry((t.clone(), r.clone())).or_default().push(from);
         }
     }
+    // Merge commits and their second parents: after a second merge the
+    // divergence base is the earlier merge (or the source head it merged),
+    // and the three-way merge reads both branches AT that revision.
+    for (t, r) in pins::repositories(&branches) {
+        let merges = pins::merge_revisions(db, &t, &r)?;
+        pins.entry((t, r)).or_default().extend(merges);
+    }
 
     let now = now_ms();
     let safety = hlc_at_ms(now.saturating_sub(opts.min_age.as_millis() as u64));
@@ -392,6 +406,10 @@ fn build_plans(db: &DB, opts: &GcOptions) -> Result<Plans> {
 
     let mut plans = Plans {
         branch: HashMap::new(),
+        heads: branches
+            .iter()
+            .map(|(t, r, b)| (format!("{t}\0{r}\0{}", b.name).into_bytes(), b.head))
+            .collect(),
         repo: HashMap::new(),
         report: Vec::new(),
     };
@@ -510,6 +528,9 @@ struct Pass<'a> {
     blob_candidates: &'a mut HashMap<String, String>,
     /// Keys pruned in a dry run, so the blob reference pass can skip them.
     pruned_keys: &'a mut HashSet<Vec<u8>>,
+    /// Branch scopes (`{tenant}\0{repo}\0{branch}`) where a translation
+    /// version was deleted (`translation_floor.rs`).
+    translation_scopes: &'a mut HashSet<Vec<u8>>,
 }
 
 impl Pass<'_> {
@@ -534,6 +555,11 @@ impl Pass<'_> {
         let Some(plan) = self.plans.get(&chunk.prefix[..chunk.scope_end]) else {
             return Ok(());
         };
+        let translation_cf = matches!(
+            self.target.cf,
+            cf::TRANSLATION_DATA | cf::BLOCK_TRANSLATIONS
+        );
+        let node_chunk = node_delete_translations::NodeChunk::parse(self.target.cf, &chunk.prefix);
         for (_, mut versions) in chunk.groups {
             if versions.len() < 2 && !(self.target.drop_orphan_tombstones && versions[0].tomb) {
                 continue;
@@ -541,7 +567,10 @@ impl Pass<'_> {
             versions.sort_by(|a, b| b.rev.cmp(&a.rev));
             let revs: Vec<HLC> = versions.iter().map(|v| v.rev).collect();
             let tomb: Vec<bool> = versions.iter().map(|v| v.tomb).collect();
-            let keep = select_survivors(&revs, &tomb, plan, self.target.drop_orphan_tombstones);
+            let mut keep = select_survivors(&revs, &tomb, plan, self.target.drop_orphan_tombstones);
+            if node_chunk.is_some() {
+                node_delete_translations::keep_generation_starts(&tomb, &mut keep);
+            }
             for (i, (v, kept)) in versions.into_iter().zip(keep).enumerate() {
                 if kept {
                     if i > 0 {
@@ -552,6 +581,14 @@ impl Pass<'_> {
                 }
                 self.stats.versions_deleted += 1;
                 self.stats.bytes_deleted += v.size;
+                if translation_cf
+                    && !self
+                        .translation_scopes
+                        .contains(&chunk.prefix[..chunk.scope_end])
+                {
+                    self.translation_scopes
+                        .insert(chunk.prefix[..chunk.scope_end].to_vec());
+                }
                 if let Some(value) = &v.value {
                     if !v.tomb {
                         blobs::exact_keys_in_msgpack(value, self.blob_candidates);
@@ -562,6 +599,18 @@ impl Pass<'_> {
                         self.pruned_keys.insert(v.key);
                     }
                 } else {
+                    if let (true, Some(node)) = (v.tomb, &node_chunk) {
+                        // Same batch as the tombstone's delete (flushed only
+                        // after it): the read rule's evidence never vanishes
+                        // before its replacement lands.
+                        let next_record = i.checked_sub(1).map(|newer| revs[newer]);
+                        self.pending += node.materialize(
+                            self.db,
+                            &mut self.batch,
+                            &v.rev,
+                            next_record.as_ref(),
+                        )?;
+                    }
                     self.batch.delete_cf(self.cf, &v.key);
                     self.pending += 1;
                     if self.pending >= BATCH_DELETES {
@@ -582,6 +631,7 @@ fn prune_cf(
     opts: &GcOptions,
     blob_candidates: &mut HashMap<String, String>,
     pruned_keys: &mut HashSet<Vec<u8>>,
+    translation_scopes: &mut HashSet<Vec<u8>>,
 ) -> Result<CfGcStats> {
     let cf = cf_handle(db, target.cf)?;
     let plan_map = if target.branch_scoped {
@@ -602,6 +652,7 @@ fn prune_cf(
         stats: CfGcStats::default(),
         blob_candidates,
         pruned_keys,
+        translation_scopes,
     };
     if plan_map.is_empty() {
         return Ok(pass.stats);
@@ -847,6 +898,12 @@ pub(crate) fn run_history_gc_on_db(
         ));
     }
     let started = Instant::now();
+    // Retention keeps the NEWEST version at or below its cutoff and deletes
+    // the older ones; run-collapse keeps the OLDEST of a run and deletes the
+    // newer twin. Interleaved, both commit and the group is empty: hold the
+    // database against collapse slices for the whole run (a dry run deletes
+    // nothing and needs no hold).
+    let _pruning = (!opts.dry_run).then(|| crate::management::cf_exclusion::enter_pruner(db));
     let mut report = GcReport {
         dry_run: opts.dry_run,
         ..Default::default()
@@ -858,6 +915,7 @@ pub(crate) fn run_history_gc_on_db(
 
     let mut blob_candidates: HashMap<String, String> = HashMap::new();
     let mut pruned_keys: HashSet<Vec<u8>> = HashSet::new();
+    let mut translation_scopes: HashSet<Vec<u8>> = HashSet::new();
     let mut touched: Vec<&'static str> = Vec::new();
 
     for target in GC_TARGETS {
@@ -869,6 +927,7 @@ pub(crate) fn run_history_gc_on_db(
             opts,
             &mut blob_candidates,
             &mut pruned_keys,
+            &mut translation_scopes,
         )?;
         stats.live_sst_bytes_before = before;
         if stats.versions_deleted > 0 {
@@ -887,6 +946,10 @@ pub(crate) fn run_history_gc_on_db(
         report.versions_retained += stats.versions_retained;
         report.bytes_retained += stats.bytes_retained;
         report.column_families.insert(target.cf.to_string(), stats);
+    }
+
+    if !opts.dry_run {
+        translation_floor::record(db, &plans, &translation_scopes)?;
     }
 
     if opts.purge_oplog {

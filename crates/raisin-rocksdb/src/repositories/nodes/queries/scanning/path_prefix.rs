@@ -192,7 +192,14 @@ impl NodeRepositoryImpl {
                 None => blob_revision.max(path_revision),
             };
             let mut node = self.deserialize_node_with_path(
-                &bytes, tenant_id, repo_id, branch, workspace, &node_id, &path_at,
+                &bytes,
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                &node_id,
+                &path_at,
+                &blob_revision,
             )?;
 
             // Populate has_children if requested — as of the READ, not as of

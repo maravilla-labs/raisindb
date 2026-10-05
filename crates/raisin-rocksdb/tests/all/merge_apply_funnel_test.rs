@@ -33,16 +33,16 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tempfile::TempDir;
 
-const TENANT: &str = "merge-tenant";
-const REPO: &str = "merge-repo";
-const WS: &str = "content";
+pub(crate) const TENANT: &str = "merge-tenant";
+pub(crate) const REPO: &str = "merge-repo";
+pub(crate) const WS: &str = "content";
 
-struct Env {
-    storage: Arc<RocksDBStorage>,
+pub(crate) struct Env {
+    pub(crate) storage: Arc<RocksDBStorage>,
     _temp_dir: TempDir,
 }
 
-fn node(id: &str, path: &str, props: &[(&str, &str)]) -> Node {
+pub(crate) fn node(id: &str, path: &str, props: &[(&str, &str)]) -> Node {
     let name = path.rsplit('/').next().unwrap().to_string();
     let parent = match path.rsplitn(2, '/').nth(1) {
         Some(p) if !p.is_empty() => p.rsplit('/').next().map(str::to_string),
@@ -63,7 +63,7 @@ fn node(id: &str, path: &str, props: &[(&str, &str)]) -> Node {
 }
 
 impl Env {
-    async fn new() -> Result<Self> {
+    pub(crate) async fn new() -> Result<Self> {
         let temp_dir =
             tempfile::tempdir().map_err(|e| raisin_error::Error::Backend(e.to_string()))?;
         let storage = Arc::new(RocksDBStorage::new(temp_dir.path())?);
@@ -83,6 +83,7 @@ impl Env {
                     default_branch: "main".to_string(),
                     description: None,
                     tags: HashMap::new(),
+                    localized_names: Default::default(),
                 },
             )
             .await?;
@@ -101,11 +102,11 @@ impl Env {
         })
     }
 
-    fn scope<'a>(&self, branch: &'a str) -> StorageScope<'a> {
+    pub(crate) fn scope<'a>(&self, branch: &'a str) -> StorageScope<'a> {
         StorageScope::new(TENANT, REPO, branch, WS)
     }
 
-    async fn tx(&self, branch: &str) -> Result<Box<dyn TransactionalContext>> {
+    pub(crate) async fn tx(&self, branch: &str) -> Result<Box<dyn TransactionalContext>> {
         let ctx = self.storage.begin_context().await?;
         ctx.set_tenant_repo(TENANT, REPO)?;
         ctx.set_branch(branch)?;
@@ -116,25 +117,25 @@ impl Env {
         Ok(ctx)
     }
 
-    async fn add(&self, branch: &str, n: Node) -> Result<()> {
+    pub(crate) async fn add(&self, branch: &str, n: Node) -> Result<()> {
         let ctx = self.tx(branch).await?;
         ctx.add_node(WS, &n).await?;
         ctx.commit().await
     }
 
-    async fn put(&self, branch: &str, n: Node) -> Result<()> {
+    pub(crate) async fn put(&self, branch: &str, n: Node) -> Result<()> {
         let ctx = self.tx(branch).await?;
         ctx.put_node(WS, &n).await?;
         ctx.commit().await
     }
 
-    async fn delete(&self, branch: &str, id: &str) -> Result<()> {
+    pub(crate) async fn delete(&self, branch: &str, id: &str) -> Result<()> {
         let ctx = self.tx(branch).await?;
         ctx.delete_node(WS, id).await?;
         ctx.commit().await
     }
 
-    async fn fork(&self) -> Result<()> {
+    pub(crate) async fn fork(&self) -> Result<()> {
         self.storage
             .branches()
             .create_branch(
@@ -151,7 +152,7 @@ impl Env {
         Ok(())
     }
 
-    async fn conflict_and_resolve(&self, id: &str, kind: ResolutionType) -> Result<()> {
+    pub(crate) async fn conflict_and_resolve(&self, id: &str, kind: ResolutionType) -> Result<()> {
         let attempt = self
             .storage
             .branches_impl()
@@ -191,7 +192,7 @@ impl Env {
         Ok(())
     }
 
-    async fn id_at(&self, path: &str) -> Option<String> {
+    pub(crate) async fn id_at(&self, path: &str) -> Option<String> {
         self.storage
             .nodes()
             .get_node_id_by_path(self.scope("main"), path, None)

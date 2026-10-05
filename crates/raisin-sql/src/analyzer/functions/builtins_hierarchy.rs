@@ -106,6 +106,17 @@ pub(super) fn register(registry: &mut FunctionRegistry) {
         category: FunctionCategory::Hierarchy, // TODO: Add Graph category
     });
 
+    // RESOLVE_PATH(workspace, locale, path) -> id: a node by its localized
+    // URL path (plan Phase 12). NULL when nothing resolves, the node is
+    // hidden in the locale, or the caller cannot read it.
+    registry.register(FunctionSignature {
+        name: "RESOLVE_PATH".into(),
+        params: vec![DataType::Text, DataType::Text, DataType::Text],
+        return_type: DataType::Nullable(Box::new(DataType::Text)),
+        is_deterministic: false,
+        category: FunctionCategory::Hierarchy,
+    });
+
     // RESOLVE(jsonb) - Resolve all references in a JSONB value (depth=1)
     registry.register(FunctionSignature {
         name: "RESOLVE".into(),

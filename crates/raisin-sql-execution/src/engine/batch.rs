@@ -10,7 +10,7 @@ use futures::stream;
 use indexmap::IndexMap;
 use raisin_error::Error;
 use raisin_models::nodes::properties::PropertyValue;
-use raisin_sql::analyzer::{AnalyzedStatement, Analyzer};
+use raisin_sql::analyzer::AnalyzedStatement;
 use raisin_storage::Storage;
 
 impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static> QueryEngine<S> {
@@ -22,12 +22,34 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
     pub async fn execute_batch(&self, sql: &str) -> Result<RowStream, Error> {
         tracing::debug!("SQL Query Engine starting batch execution");
 
-        // 1. Analyze all statements
-        let analyzer = Analyzer::with_catalog_arc(self.catalog.clone());
-        let statements = analyzer
-            .analyze_batch(sql)
-            .map_err(|e| Error::Validation(format!("Batch analysis error: {}", e)))?;
+        // 1. Analyze all statements (a one-statement batch from the
+        // prepared-statement cache when it can; see `prepared.rs`).
+        let statements = super::prepared::prepare_batch(&self.catalog, sql)?;
+        self.execute_batch_prepared(sql, statements).await
+    }
 
+    /// [`Self::execute_batch`] with `$1`, `$2`, … bound to `params`, rendered
+    /// by `format` — see [`Self::execute_with_params`]. The HTTP, WS and
+    /// pgwire SQL endpoints call this, so a parameterized statement is
+    /// planned once for all its values.
+    pub async fn execute_batch_with_params(
+        &self,
+        sql: &str,
+        params: &[serde_json::Value],
+        format: &super::ParamFormat,
+    ) -> Result<RowStream, Error> {
+        let bound =
+            super::prepared_params::prepare_with_params(&self.catalog, true, sql, params, format)?;
+        self.execute_batch_prepared(&bound.sql, bound.statements)
+            .await
+    }
+
+    /// Steps 2-3 of [`Self::execute_batch`]: async routing, then execution.
+    async fn execute_batch_prepared(
+        &self,
+        sql: &str,
+        statements: Vec<std::sync::Arc<super::prepared::Prepared>>,
+    ) -> Result<RowStream, Error> {
         if statements.is_empty() {
             return Err(Error::Validation(
                 "No valid statements to execute".to_string(),
@@ -36,7 +58,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
 
         // 2. Check if async routing is needed
         if let Some(ref registrar) = self.job_registrar {
-            if batch_requires_async(&statements) {
+            if requires_async(statements.iter().map(|p| &p.analyzed)) {
                 tracing::debug!("Batch requires async execution (complex WHERE clause detected)");
 
                 let job_id = registrar(sql.to_string(), self.default_actor.clone()).await?;
@@ -68,12 +90,18 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
 
     /// Execute a batch synchronously (force sync, no async routing)
     pub async fn execute_batch_sync(&self, sql: &str) -> Result<RowStream, Error> {
+        self.execute_batch_sync_traced(sql)
+            .await
+            .map(|(stream, _)| stream)
+    }
+
+    /// [`execute_batch_sync`](Self::execute_batch_sync), also saying whether
+    /// the batch was answered from the prepared-statement cache — for tests.
+    #[doc(hidden)]
+    pub async fn execute_batch_sync_traced(&self, sql: &str) -> Result<(RowStream, bool), Error> {
         tracing::debug!("SQL Query Engine starting batch execution (forced sync)");
 
-        let analyzer = Analyzer::with_catalog_arc(self.catalog.clone());
-        let statements = analyzer
-            .analyze_batch(sql)
-            .map_err(|e| Error::Validation(format!("Batch analysis error: {}", e)))?;
+        let (statements, cached) = super::prepared::prepare_batch_traced(&self.catalog, sql)?;
 
         if statements.is_empty() {
             return Err(Error::Validation(
@@ -81,20 +109,21 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             ));
         }
 
-        self.execute_batch_sync_internal(sql, &statements).await
+        let stream = self.execute_batch_sync_internal(sql, &statements).await?;
+        Ok((stream, cached))
     }
 
     /// Internal sync execution path for analyzed statements
     async fn execute_batch_sync_internal(
         &self,
         sql: &str,
-        statements: &[AnalyzedStatement],
+        statements: &[std::sync::Arc<super::prepared::Prepared>],
     ) -> Result<RowStream, Error> {
         // Determine branch for user node lookup (check for branch_override in any Query statement)
         let branch_for_lookup = statements
             .iter()
             .find_map(|stmt| {
-                if let AnalyzedStatement::Query(q) = stmt {
+                if let AnalyzedStatement::Query(q) = &stmt.analyzed {
                     q.branch_override.clone()
                 } else {
                     None
@@ -108,7 +137,8 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
 
         let mut last_result: Option<RowStream> = None;
 
-        for (idx, analyzed) in statements.iter().enumerate() {
+        for (idx, prepared) in statements.iter().enumerate() {
+            let analyzed = &prepared.analyzed;
             tracing::debug!(
                 "   Executing statement {}/{}: {:?}",
                 idx + 1,
@@ -116,8 +146,17 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
                 statement_type_name(analyzed)
             );
 
-            let bound = self.bind_subqueries(analyzed.clone()).await?;
-            let result = self.execute_analyzed_statement(&bound).await?;
+            let result = if super::subquery_bind::statement_needs_binding(analyzed) {
+                let bound = self.bind_subqueries(analyzed.clone()).await?;
+                self.execute_analyzed_statement(&bound).await?
+            } else if let AnalyzedStatement::Query(_) = analyzed {
+                // The prepared logical (and physical) plan, when the
+                // statement came from the cache; planned here otherwise.
+                self.execute_query(analyzed, Some(prepared.as_ref()))
+                    .await?
+            } else {
+                self.execute_analyzed_statement(analyzed).await?
+            };
             last_result = Some(result);
         }
 
@@ -156,7 +195,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             AnalyzedStatement::Acl(ref acl_stmt) => self.execute_acl(acl_stmt).await,
             AnalyzedStatement::AIConfig(ref stmt) => self.execute_ai_config(stmt).await,
             AnalyzedStatement::SpatialAdmin(ref stmt) => self.execute_spatial_admin(stmt).await,
-            AnalyzedStatement::Query(_) => self.execute_query(analyzed).await,
+            AnalyzedStatement::Query(_) => self.execute_query(analyzed, None).await,
         }
     }
 }
@@ -165,6 +204,10 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
 ///
 /// Returns `true` if any UPDATE or DELETE has a complex WHERE clause.
 pub fn batch_requires_async(statements: &[AnalyzedStatement]) -> bool {
+    requires_async(statements)
+}
+
+fn requires_async<'a>(statements: impl IntoIterator<Item = &'a AnalyzedStatement>) -> bool {
     for stmt in statements {
         match stmt {
             // A SCHEMA-TABLE write names ONE definition (`WHERE name = '…'`),

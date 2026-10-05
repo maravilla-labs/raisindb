@@ -225,6 +225,7 @@ pub(super) fn tombstone_old_ordering(
 /// # Errors
 ///
 /// Returns error if lock is poisoned or fractional index calculation fails
+#[allow(clippy::too_many_arguments)]
 pub(super) fn add_ordered_child(
     tx: &RocksDBTransaction,
     tenant_id: &str,
@@ -234,6 +235,7 @@ pub(super) fn add_ordered_child(
     parent_id: &str,
     node: &Node,
     revision: &HLC,
+    prior: Option<&Node>,
 ) -> Result<(String, bool)> {
     let mut batch = tx
         .batch
@@ -242,42 +244,29 @@ pub(super) fn add_ordered_child(
 
     let cf_ordered = cf_handle(&tx.db, cf::ORDERED_CHILDREN)?;
 
-    // Check if node already has an order label (for updates)
-    let existing_label = tx
-        .node_repo
-        .get_order_label_for_child(tenant_id, repo_id, branch, workspace, parent_id, &node.id)?;
+    // Check if node already has an order label (for updates): the prior
+    // record's `order_key`, verified by one `(parent, label)` seek, before the
+    // sibling scan (plan Phase 7 item 7).
+    let existing_label = tx.node_repo.current_order_label(
+        tenant_id,
+        repo_id,
+        branch,
+        workspace,
+        parent_id,
+        &node.id,
+        prior.map(|p| p.order_key.as_str()),
+    )?;
 
     let (order_label, is_new_node) = if let Some(existing) = existing_label {
-        (existing, false) // Preserve existing order - this is an update
+        // Preserve existing order - this is an update. The entry is re-put at
+        // this revision even when unchanged (see
+        // `NodeRepositoryImpl::add_ordered_children_to_batch`).
+        (existing.label, false)
     } else {
-        // Calculate new label by appending - this is a new node
-        // Check transaction cache first (for siblings created in the same batch)
-        let cached_label = {
-            let cache = tx
-                .read_cache
-                .lock()
-                .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
-            cache
-                .last_order_labels
-                .get(&(workspace.to_string(), parent_id.to_string()))
-                .cloned()
-        };
-
-        let last_label = cached_label.or(tx
-            .node_repo
-            .get_last_order_label(tenant_id, repo_id, branch, workspace, parent_id)?);
-
-        // Extract fractional part from last label (strip ::HLC suffix)
-        let fractional_label = if let Some(ref last) = last_label {
-            let last_fractional = crate::fractional_index::extract_fractional(last);
-            crate::fractional_index::inc(last_fractional)?
-        } else {
-            crate::fractional_index::first()
-        };
-
-        // Append HLC timestamp for causal ordering and conflict resolution
-        // HLC provides total ordering across cluster with wall-clock semantics
-        let label = crate::fractional_index::format_label(&fractional_label, revision);
+        // A new node: append, minting after this transaction's own appends.
+        let label = super::append_label::next_append_label_tx(
+            tx, tenant_id, repo_id, branch, workspace, parent_id, revision,
+        )?;
         (label, true)
     };
 
@@ -301,15 +290,7 @@ pub(super) fn add_ordered_child(
         let metadata_key =
             keys::last_child_metadata_key(tenant_id, repo_id, branch, workspace, parent_id);
         batch.put_cf(cf_ordered, metadata_key, order_label.as_bytes());
-
-        let mut cache = tx
-            .read_cache
-            .lock()
-            .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
-        cache.last_order_labels.insert(
-            (workspace.to_string(), parent_id.to_string()),
-            order_label.clone(),
-        );
+        super::append_label::record_appended_label_tx(tx, workspace, parent_id, &order_label)?;
     }
 
     Ok((order_label, is_new_node))
@@ -355,34 +336,11 @@ pub(super) fn add_ordered_child_fast(
 
     let cf_ordered = cf_handle(&tx.db, cf::ORDERED_CHILDREN)?;
 
-    // FAST PATH: Just append to end (no existence check)
-    // Check transaction cache first (for siblings created in the same batch)
-    let cached_label = {
-        let cache = tx
-            .read_cache
-            .lock()
-            .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
-        cache
-            .last_order_labels
-            .get(&(workspace.to_string(), parent_id.to_string()))
-            .cloned()
-    };
-
-    let last_label = cached_label.or(tx
-        .node_repo
-        .get_last_order_label(tenant_id, repo_id, branch, workspace, parent_id)?);
-
-    // Extract fractional part from last label (strip ::HLC suffix)
-    let fractional_label = if let Some(ref last) = last_label {
-        let last_fractional = crate::fractional_index::extract_fractional(last);
-        crate::fractional_index::inc(last_fractional)?
-    } else {
-        crate::fractional_index::first()
-    };
-
-    // Append HLC timestamp for causal ordering and conflict resolution
-    // HLC provides total ordering across cluster with wall-clock semantics
-    let order_label = crate::fractional_index::format_label(&fractional_label, revision);
+    // FAST PATH: Just append to end (no existence check), minting after this
+    // transaction's own appends.
+    let order_label = super::append_label::next_append_label_tx(
+        tx, tenant_id, repo_id, branch, workspace, parent_id, revision,
+    )?;
 
     let ordered_key = keys::ordered_child_key_versioned(
         tenant_id,
@@ -406,16 +364,7 @@ pub(super) fn add_ordered_child_fast(
     batch.put_cf(cf_ordered, metadata_key, order_label.as_bytes());
 
     // Update transaction cache so next sibling in the same batch gets a unique label
-    {
-        let mut cache = tx
-            .read_cache
-            .lock()
-            .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
-        cache.last_order_labels.insert(
-            (workspace.to_string(), parent_id.to_string()),
-            order_label.clone(),
-        );
-    }
+    super::append_label::record_appended_label_tx(tx, workspace, parent_id, &order_label)?;
 
     Ok(order_label)
 }

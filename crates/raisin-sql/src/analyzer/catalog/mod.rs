@@ -57,6 +57,12 @@ pub trait Catalog: Send + Sync {
         None
     }
 
+    /// Whether [`Self::get_workspace_table`] answers for `name` — without
+    /// building the table (plan Phase 13d).
+    fn has_workspace_table(&self, name: &str) -> bool {
+        self.get_workspace_table(name).is_some()
+    }
+
     /// Resolve a table name to its workspace name
     ///
     /// Returns the original workspace name for a given table name.

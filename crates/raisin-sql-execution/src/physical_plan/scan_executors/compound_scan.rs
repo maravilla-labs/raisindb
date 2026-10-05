@@ -10,8 +10,9 @@
 //! `WHERE node_type = 'Article' AND category = 'news' ORDER BY created_at DESC LIMIT 10`
 //! to execute in O(LIMIT) time by using a prefix scan.
 
+use super::batch_fetch::{chunk_len, fetch_nodes, per_locale};
 use super::helpers::{get_locales_to_use, resolve_node_for_locale};
-use super::node_to_row::node_to_row;
+use super::node_to_row::{node_to_row, node_to_row_owned};
 use super::{SCAN_COUNT_CEILING, SCAN_TIME_LIMIT, TIME_CHECK_INTERVAL};
 use crate::physical_plan::eval::eval_expr;
 use crate::physical_plan::executor::{ExecutionContext, ExecutionError, RowStream};
@@ -22,7 +23,7 @@ use raisin_error::Error;
 use raisin_models::nodes::properties::schema::CompoundColumnType;
 use raisin_models::permissions::PermissionScope;
 use raisin_storage::{
-    CompoundColumnValue, CompoundIndexRepository, NodeRepository, Storage, StorageScope,
+    BranchScope, CompoundColumnValue, CompoundIndexRepository, Storage, StorageScope,
 };
 use std::time::Instant;
 
@@ -46,7 +47,8 @@ fn encode_equality_value(
     column_type: &CompoundColumnType,
 ) -> CompoundColumnValue {
     match column_type {
-        CompoundColumnType::String => CompoundColumnValue::String(value.to_string()),
+        // The writers' text encoding: a date-like string is its canonical date.
+        CompoundColumnType::String => CompoundColumnValue::text(value),
         CompoundColumnType::Integer => match value.parse::<i64>() {
             Ok(i) => CompoundColumnValue::Integer(i),
             Err(_) => {
@@ -181,6 +183,11 @@ pub async fn execute_compound_index_scan<S: Storage + 'static>(
             index_name, compound_values.len()
         );
 
+        // The statement's revision: the index is read AS OF it (each
+        // `(tuple, node)` decided by its newest entry at or below), and every
+        // chunk's node read below uses the same one.
+        let scan_revision = ctx_clone.statement_snapshot().await?;
+
         // Request 10x limit to account for post-index filtering
         let scan_limit = limit.map(|l| l.saturating_mul(10).max(100));
         let scan_results = storage
@@ -193,6 +200,7 @@ pub async fn execute_compound_index_scan<S: Storage + 'static>(
                 // `true` would restrict to published-only, which no SQL surface
                 // currently asks for.
                 &index_name, &compound_values, false, ascending, scan_limit,
+                Some(&scan_revision),
             )
             .await?;
 
@@ -205,30 +213,44 @@ pub async fn execute_compound_index_scan<S: Storage + 'static>(
         let mut safety_scanned = 0usize;
         let start_time = Instant::now();
 
-        for scan_entry in scan_results {
+        let ids: Vec<String> = scan_results.into_iter().map(|entry| entry.node_id).collect();
+        let mut cursor = 0;
+        let mut previous = 0;
+
+        while cursor < ids.len() {
             if let Some(lim) = limit {
                 if emitted >= lim { break; }
             }
+            let chunk = &ids[cursor..(cursor + chunk_len(limit, emitted, previous)).min(ids.len())];
+            cursor += chunk.len();
+            previous = chunk.len();
 
-            safety_scanned += 1;
-
-            if safety_scanned > SCAN_COUNT_CEILING {
-                tracing::warn!("CompoundIndexScan count limit reached: {} nodes checked", safety_scanned);
-                Err(super::scan_count_budget_exceeded(safety_scanned, start_time.elapsed()))?;
+            for _ in chunk {
+                safety_scanned += 1;
+                if safety_scanned > SCAN_COUNT_CEILING {
+                    tracing::warn!("CompoundIndexScan count limit reached: {} nodes checked", safety_scanned);
+                    Err(super::scan_count_budget_exceeded(safety_scanned, start_time.elapsed()))?;
+                }
+                if safety_scanned % TIME_CHECK_INTERVAL == 0 && start_time.elapsed() > SCAN_TIME_LIMIT {
+                    tracing::warn!("CompoundIndexScan time limit reached: {:?} elapsed, {} nodes checked",
+                                   start_time.elapsed(), safety_scanned);
+                    Err(super::scan_time_budget_exceeded(safety_scanned, start_time.elapsed()))?;
+                }
             }
 
-            if safety_scanned % TIME_CHECK_INTERVAL == 0 && start_time.elapsed() > SCAN_TIME_LIMIT {
-                tracing::warn!("CompoundIndexScan time limit reached: {:?} elapsed, {} nodes checked",
-                               start_time.elapsed(), safety_scanned);
-                Err(super::scan_time_budget_exceeded(safety_scanned, start_time.elapsed()))?;
-            }
+            let nodes = fetch_nodes(
+                &ctx_clone,
+                BranchScope::new(&tenant_id, &repo_id, &branch),
+                &workspace,
+                chunk,
+                &scan_revision,
+            )
+            .await?;
 
-            let node_opt = storage
-                .nodes()
-                .get(StorageScope::new(&tenant_id, &repo_id, &branch, &workspace), &scan_entry.node_id, ctx_clone.max_revision.as_ref())
-                .await?;
-
-            if let Some(node) = node_opt {
+            for node in nodes.into_iter().flatten() {
+                if let Some(lim) = limit {
+                    if emitted >= lim { break; }
+                }
                 if node.path == "/" { continue; }
 
                 let node = if let Some(ref auth) = ctx_clone.auth_context {
@@ -241,8 +263,8 @@ pub async fn execute_compound_index_scan<S: Storage + 'static>(
                     node
                 };
 
-                for locale in &locales_to_use {
-                    let translated_node = match resolve_node_for_locale(node.clone(), &ctx_clone, locale).await? {
+                for (locale, node) in per_locale(node, &locales_to_use) {
+                    let translated_node = match resolve_node_for_locale(node, &ctx_clone, locale).await? {
                         Some(n) => n,
                         None => continue,
                     };
@@ -263,7 +285,7 @@ pub async fn execute_compound_index_scan<S: Storage + 'static>(
                         }
                     }
 
-                    let row = node_to_row(&translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale, None,).await?;
+                    let row = node_to_row_owned(translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale, None,).await?;
 
                     yield row;
                     emitted += 1;
@@ -271,10 +293,6 @@ pub async fn execute_compound_index_scan<S: Storage + 'static>(
                     if let Some(lim) = limit {
                         if emitted >= lim { break; }
                     }
-                }
-
-                if let Some(lim) = limit {
-                    if emitted >= lim { break; }
                 }
             }
         }

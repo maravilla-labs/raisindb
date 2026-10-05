@@ -304,10 +304,18 @@ pub(super) fn extract_locale_predicate(filter: &TypedExpr) -> (Vec<String>, Opti
 }
 
 /// Extract locale value from a typed expression
-/// Returns Some(locale_code) for string literals
+/// Returns Some(locale_code) for string literals, also behind a cast — a
+/// bound parameter arrives as `'fr'` or, typed, `'fr'::TEXT` (`locale = $1`
+/// with `$1` substituted by `raisin_sql::substitute_params`; plan Phase 12).
 fn extract_locale_value(expr: &TypedExpr) -> Option<String> {
     match &expr.expr {
         Expr::Literal(Literal::Text(s)) => Some(s.clone()),
+        // A template's `locale = $n`, whose value will be a Text literal: the
+        // locale is the parameter, filled in at binding (plan Phase 13d).
+        Expr::Literal(Literal::Parameter(p)) if matches!(expr.data_type, DataType::Text) => {
+            Some(crate::template::locale_marker(p))
+        }
+        Expr::Cast { expr: inner, .. } => extract_locale_value(inner),
         _ => None,
     }
 }

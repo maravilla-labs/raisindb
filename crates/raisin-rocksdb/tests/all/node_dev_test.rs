@@ -99,6 +99,7 @@ async fn setup(dir: &TempDir) -> Result<Arc<RocksDBStorage>> {
         default_branch: "main".to_string(),
         description: None,
         tags: HashMap::new(),
+        localized_names: Default::default(),
     };
     storage
         .repository_management()

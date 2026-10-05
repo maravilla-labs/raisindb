@@ -15,9 +15,27 @@
 //! - **A2** — the same lookup with `LIMIT 1`, at the same edit counts.
 //! - **B** — the same lookup at an early `__revision` (right after the node
 //!   was created, before any of its edits), measured on the same data as A.
-//! - **C** — `RESOLVE(properties, 2)` over a header/footer/settings "chrome"
-//!   node (25 references, 3 targets shared), as one statement and as 50 rows
-//!   that all reference the chrome.
+//! - **C** — `index_read_bench_resolve`: `RESOLVE(properties, 2)` over a
+//!   header/footer/settings "chrome" node (25 references, 3 targets shared),
+//!   as one statement and as 50 rows that all reference the chrome; **C3**,
+//!   a 50-row listing whose rows share no target (100 distinct).
+//!
+//! - **H (writes)** — `index_read_bench_writes`: one property updated on a
+//!   node with 30, `index.skip_unchanged` off and on (plan Phase 7).
+//!   Every scenario here runs with the delta writer in effect (the default
+//!   since plan Phase 7b; the branch is rebuilt at bootstrap);
+//!   `RAISIN_INDEX_SKIP_UNCHANGED=0` runs them with full puts.
+//!
+//! - **E/F (paths)** — `index_read_bench_paths`: `get_by_path`, `WHERE path =`,
+//!   `CHILD_OF` and `DESCENDANT_OF` on the legacy record format vs the one
+//!   format (plan Phase 10b).
+//!
+//! - **P / R / L (plan Phase 13b, release build, p50/p95)** —
+//!   `index_read_bench_point`: point lookups by path, id and indexed property,
+//!   SQL vs the storage API (hot and fresh SQL text); and
+//!   `index_read_bench_point_resolve`: RESOLVE over 50 references at depth 1
+//!   and 2 vs the batched-read floor, and a localized path lookup at depth 3
+//!   and 6 (replacing scenario I's `url_fr` property, which no longer exists).
 //!
 //! Set `RAISIN_SQL_PHASE_TIMING=1` to also get per-statement phase lines.
 
@@ -33,14 +51,14 @@ use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const TENANT: &str = "bench";
-const REPO: &str = "bench";
-const BRANCH: &str = "main";
-const WS: &str = "site";
+pub(super) const TENANT: &str = "bench";
+pub(super) const REPO: &str = "bench";
+pub(super) const BRANCH: &str = "main";
+pub(super) const WS: &str = "site";
 /// Timed repetitions per measurement; the median is reported.
-const REPS: usize = 50;
+pub(super) const REPS: usize = 50;
 
-type Store = raisin_rocksdb::RocksDBStorage;
+pub(super) type Store = raisin_rocksdb::RocksDBStorage;
 
 fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name)
@@ -49,7 +67,7 @@ fn env_usize(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-async fn bootstrap() -> (QueryEngine<Store>, Arc<Store>, tempfile::TempDir) {
+pub(super) async fn bootstrap() -> (QueryEngine<Store>, Arc<Store>, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("temp dir");
     let storage = Arc::new(Store::new(dir.path()).expect("storage"));
     let _ = storage
@@ -78,11 +96,46 @@ async fn bootstrap() -> (QueryEngine<Store>, Arc<Store>, tempfile::TempDir) {
     let engine = QueryEngine::new(storage.clone(), TENANT, REPO, BRANCH)
         .with_catalog(Arc::new(catalog))
         .with_auth(AuthContext::system());
+    // With `index.skip_unchanged` on (the default since Phase 7b) every
+    // scenario runs with the Phase 7 delta writer in effect.
+    unlock_skip_unchanged(&storage).await;
     (engine, storage, dir)
 }
 
+/// When `index.skip_unchanged` is on, rebuild the branch's property index so
+/// the delta writer skips there (plan Phase 7); a no-op otherwise.
+pub(super) async fn unlock_skip_unchanged(storage: &Store) {
+    use raisin_rocksdb::management::async_indexing::repair::{
+        run_repair, RepairKind, RepairOptions,
+    };
+    if !storage.nodes_impl().index_skip_unchanged() {
+        return;
+    }
+    let options = RepairOptions {
+        check_headroom: false,
+        max_bytes_per_sec: 0,
+        ..RepairOptions::default()
+    };
+    run_repair(
+        storage,
+        TENANT,
+        REPO,
+        Some(BRANCH),
+        RepairKind::PropertyIndex,
+        options,
+    )
+    .await
+    .expect("property_index rebuild");
+}
+
+/// The median of `samples`.
+pub(super) fn median_of(mut samples: Vec<Duration>) -> Duration {
+    samples.sort();
+    samples[samples.len() / 2]
+}
+
 /// Run a statement to completion; returns the row count.
-async fn run(engine: &QueryEngine<Store>, sql: &str) -> usize {
+pub(super) async fn run(engine: &QueryEngine<Store>, sql: &str) -> usize {
     let mut stream = engine
         .execute(sql)
         .await
@@ -95,12 +148,12 @@ async fn run(engine: &QueryEngine<Store>, sql: &str) -> usize {
     n
 }
 
-fn jsonb(value: &Value) -> String {
+pub(super) fn jsonb(value: &Value) -> String {
     format!("'{}'::jsonb", value.to_string().replace('\'', "''"))
 }
 
 /// Insert `(id, path, properties)` rows, a few hundred per statement.
-async fn insert_many(engine: &QueryEngine<Store>, rows: &[(String, String, Value)]) {
+pub(super) async fn insert_many(engine: &QueryEngine<Store>, rows: &[(String, String, Value)]) {
     for chunk in rows.chunks(250) {
         let values: Vec<String> = chunk
             .iter()
@@ -118,7 +171,7 @@ async fn insert_many(engine: &QueryEngine<Store>, rows: &[(String, String, Value
 }
 
 /// Median wall time of `REPS` runs of `sql`, after one warm-up run.
-async fn median(engine: &QueryEngine<Store>, sql: &str, expect_rows: usize) -> Duration {
+pub(super) async fn median(engine: &QueryEngine<Store>, sql: &str, expect_rows: usize) -> Duration {
     assert_eq!(run(engine, sql).await, expect_rows, "{sql}");
     let mut samples = Vec::with_capacity(REPS);
     for _ in 0..REPS {
@@ -131,7 +184,7 @@ async fn median(engine: &QueryEngine<Store>, sql: &str, expect_rows: usize) -> D
 }
 
 /// Append one result line to `target/bench/index_read.jsonl`.
-fn record(scenario: &str, params: Value, took: Duration) {
+pub(super) fn record(scenario: &str, params: Value, took: Duration) {
     let line = json!({
         "bench": "index_read",
         "scenario": scenario,
@@ -208,7 +261,11 @@ async fn index_read_bench_a_lookup_by_unchanged_property() {
             .await;
         }
 
-        let params = json!({ "edits": edits, "distractors": distractors });
+        let params = json!({
+            "edits": edits,
+            "distractors": distractors,
+            "skip_unchanged": storage.nodes_impl().index_skip_unchanged(),
+        });
         let sql = format!("SELECT id FROM '{WS}' WHERE properties->>'slug'::String = 'the-target'");
         let took = median(&engine, &sql, 1).await;
         record("A_lookup_unchanged_property", params.clone(), took);
@@ -227,75 +284,4 @@ async fn index_read_bench_a_lookup_by_unchanged_property() {
             took,
         );
     }
-}
-
-fn reference(id: &str) -> Value {
-    json!({ "raisin:ref": id, "raisin:workspace": WS })
-}
-
-/// Scenario C: RESOLVE over a site "chrome" node.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "read-path baseline; run with --ignored --nocapture"]
-async fn index_read_bench_c_resolve_chrome() {
-    let (engine, _storage, _dir) = bootstrap().await;
-
-    // 20 distinct link targets + 3 shared ones (logo, legal, brand).
-    let mut rows: Vec<(String, String, Value)> = (0..20)
-        .map(|i| {
-            (
-                format!("a{i}"),
-                format!("/a{i}"),
-                json!({ "title": format!("Link {i}"), "url": format!("/l/{i}"), "alt": "x" }),
-            )
-        })
-        .collect();
-    for shared in ["logo", "legal", "brand"] {
-        rows.push((
-            shared.to_string(),
-            format!("/{shared}"),
-            json!({ "title": shared, "file": format!("/{shared}.svg") }),
-        ));
-    }
-    insert_many(&engine, &rows).await;
-
-    // 25 references, 23 distinct targets; logo appears three times.
-    let links = |from: usize, to: usize| -> Vec<Value> {
-        (from..to).map(|i| reference(&format!("a{i}"))).collect()
-    };
-    let chrome = json!({
-        "header": { "logo": reference("logo"), "nav": links(0, 8) },
-        "footer": { "logo": reference("logo"), "legal": reference("legal"), "links": links(8, 16) },
-        "settings": { "brand": reference("brand"), "favicon": reference("logo"), "social": links(16, 20) },
-    });
-    insert_many(&engine, &[("chrome".into(), "/chrome".into(), chrome)]).await;
-
-    let one = format!("SELECT RESOLVE(properties, 2) AS r FROM '{WS}' WHERE path = '/chrome'");
-    let took = median(&engine, &one, 1).await;
-    record(
-        "C_resolve_chrome_one_row",
-        json!({ "refs": 25, "distinct": 23 }),
-        took,
-    );
-
-    // 50 pages that each reference the chrome: the targets are shared by
-    // every row of the statement.
-    insert_many(&engine, &[("pages".into(), "/pages".into(), json!({}))]).await;
-    let pages: Vec<(String, String, Value)> = (0..50)
-        .map(|i| {
-            (
-                format!("p{i}"),
-                format!("/pages/p{i}"),
-                json!({ "title": format!("Page {i}"), "chrome": reference("chrome") }),
-            )
-        })
-        .collect();
-    insert_many(&engine, &pages).await;
-
-    let fifty = format!("SELECT RESOLVE(properties, 3) AS r FROM '{WS}' WHERE CHILD_OF('/pages')");
-    let took = median(&engine, &fifty, 50).await;
-    record(
-        "C_resolve_chrome_50_rows",
-        json!({ "rows": 50, "depth": 3 }),
-        took,
-    );
 }

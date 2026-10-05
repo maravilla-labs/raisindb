@@ -33,6 +33,7 @@
 pub mod compound;
 pub mod fulltext;
 pub mod jobs;
+pub mod localized;
 pub mod management;
 pub mod node_operations;
 mod repository;
@@ -128,10 +129,11 @@ pub use scope::{
 
 // Re-export all storage traits from the traits module
 pub use traits::{
-    apply_child_order_from_branch, ArchetypeRepository, CompoundColumnValue,
-    CompoundIndexRepository, CompoundIndexScanEntry, CrossBranchCopySummary, CrossBranchNodeChange,
-    ElementTypeRepository, NodeRepository, NodeTypeRepository, OrderedChild,
-    ProcessingRulesRepository, PropertyIndexRepository, PropertyScanEntry,
-    ReferenceIndexRepository, RegistryRepository, RelationRepository, Storage, Transaction,
-    TreeRepository, VersioningRepository, WorkspaceRepository,
+    apply_child_order_from_branch, get_many_by_loop, ArchetypeRepository, BatchReadItem,
+    CompoundColumnValue, CompoundIndexRepository, CompoundIndexScanEntry, CrossBranchCopySummary,
+    CrossBranchNodeChange, ElementTypeRepository, NodeLocator, NodeRepository, NodeTypeRepository,
+    OrderedChild, ProcessingRulesRepository, PropertiesRead, PropertyIndexRepository,
+    PropertyScanEntry, ReadOpts, ReadSnapshot, ReferenceIndexRepository, RegistryRepository,
+    RelationRepository, Storage, Transaction, TreeRepository, VersioningRepository,
+    WorkspaceRepository,
 };

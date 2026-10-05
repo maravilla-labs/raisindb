@@ -25,10 +25,12 @@
 //! - `compound_scan` - Multi-column compound index scans
 //! - `reference_scan` - Reverse reference index scans
 
+pub(crate) mod batch_fetch;
 mod compound_scan;
 mod count_scan;
 pub(crate) mod helpers;
 pub(crate) mod index_recheck;
+mod localized_lookup;
 mod neighbors_scan;
 mod node_to_row;
 mod point_lookup;
@@ -48,8 +50,9 @@ use std::time::Duration;
 // Re-export all public scan executor functions
 pub use compound_scan::execute_compound_index_scan;
 pub use count_scan::{execute_count_scan, execute_property_index_count_scan};
+pub use localized_lookup::execute_localized_path_lookup;
 pub use neighbors_scan::execute_neighbors_scan;
-pub(crate) use node_to_row::{node_to_row, OrderContext};
+pub(crate) use node_to_row::{node_to_row, node_to_row_owned, OrderContext};
 pub use point_lookup::{execute_node_id_scan, execute_path_index_scan};
 pub use prefix_scan::execute_prefix_scan;
 pub use property_index_scan::execute_property_index_scan;

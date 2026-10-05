@@ -50,6 +50,8 @@ mod folder_dup_tests;
 mod handler;
 mod install_content;
 mod install_schema;
+#[cfg(test)]
+mod localized_name_install_tests;
 mod manifest;
 mod migrations;
 mod nested;

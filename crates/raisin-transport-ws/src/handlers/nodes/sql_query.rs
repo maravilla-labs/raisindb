@@ -111,22 +111,35 @@ where
             .with_function_invoke(invoke_cb)
             .with_function_invoke_sync(invoke_sync_cb);
 
-        // Substitute parameters if provided (for SQL injection protection)
-        let final_sql = if let Some(ref params) = payload.params {
-            raisin_sql_execution::substitute_params(&payload.query, params).map_err(|e| {
+        // Parameters are bound by the engine, which plans a parameterized
+        // statement once for all its values (plan Phase 13d). Placeholders the
+        // parameters cannot fill are refused here, as the substitution did.
+        if let Some(ref params) = payload.params {
+            raisin_sql_execution::substitute_params_with(&payload.query, params, &|_| {
+                String::new()
+            })
+            .map_err(|e| {
                 WsError::InvalidRequest(format!("Parameter substitution failed: {}", e))
-            })?
-        } else {
-            payload.query.clone()
-        };
+            })?;
+        }
 
         // Execute query (supports single or multiple statements for transactions)
         // QueryEngine returns RowStream in all cases - for async bulk ops (if job registrar
         // were configured), it would return a single row with job_id, status, message columns
-        let mut stream = engine
-            .execute_batch(&final_sql)
-            .await
-            .map_err(|e| WsError::OperationError(format!("SQL query failed: {}", e)))?;
+        let stream = match payload.params {
+            Some(ref params) => {
+                engine
+                    .execute_batch_with_params(
+                        &payload.query,
+                        params,
+                        &raisin_sql_execution::format_param_value,
+                    )
+                    .await
+            }
+            None => engine.execute_batch(&payload.query).await,
+        };
+        let mut stream =
+            stream.map_err(|e| WsError::OperationError(format!("SQL query failed: {}", e)))?;
 
         // Check if USE BRANCH was executed and update session branch
         if let Some(new_branch) = engine.take_pending_session_branch().await {

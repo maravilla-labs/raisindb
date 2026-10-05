@@ -212,6 +212,34 @@ impl CompoundStateStore {
         Ok(out)
     }
 
+    /// Every recorded index on a branch, with its workspace.
+    pub fn list_for_branch(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+    ) -> Result<Vec<(String, CompoundIndexState)>> {
+        let cf = cf_handle(&self.db, cf::INDEX_STATUS)?;
+        let prefix = format!("compound_index\0{tenant_id}\0{repo_id}\0{branch}\0").into_bytes();
+        let mut out = Vec::new();
+        for item in crate::prefix_scan(&self.db, cf, &prefix) {
+            let (key, value) =
+                item.map_err(|e| Error::storage(format!("Failed to list compound state: {}", e)))?;
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            let rest = String::from_utf8_lossy(&key[prefix.len()..]).into_owned();
+            let (Some((workspace, _)), Ok(state)) = (
+                rest.split_once('\0'),
+                rmp_serde::from_slice::<CompoundIndexState>(&value),
+            ) else {
+                continue;
+            };
+            out.push((workspace.to_string(), state));
+        }
+        Ok(out)
+    }
+
     pub(super) fn invalidate(&self, key: &[u8]) {
         if let Ok(mut cache) = self.cache.write() {
             cache.remove(key);

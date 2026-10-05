@@ -65,7 +65,7 @@ pub async fn execute_sql_query(
     tracing::info!("   Repository: {}", repo);
     tracing::debug!("   SQL: {}", req.sql);
 
-    let final_sql = substitute_params(&req.sql, &req.params)?;
+    validate_params(&req.sql, &req.params)?;
 
     let storage = state.storage();
     let repo_mgmt = storage.repository_management();
@@ -79,7 +79,7 @@ pub async fn execute_sql_query(
 
     let engine = build_engine(&state, tenant_id, &repo, &branch, &repository, auth_context).await?;
 
-    collect_and_respond(engine, &final_sql).await
+    collect_and_respond(engine, &req.sql, req.params.as_deref()).await
 }
 
 /// Execute a SQL query against the repository with explicit branch in path
@@ -112,7 +112,7 @@ pub async fn execute_sql_query_with_branch(
     tracing::info!("   Branch: {}", branch);
     tracing::debug!("   SQL: {}", req.sql);
 
-    let final_sql = substitute_params(&req.sql, &req.params)?;
+    validate_params(&req.sql, &req.params)?;
 
     let storage = state.storage();
     let repo_mgmt = storage.repository_management();
@@ -123,20 +123,22 @@ pub async fn execute_sql_query_with_branch(
 
     let engine = build_engine(&state, tenant_id, &repo, &branch, &repository, auth_context).await?;
 
-    collect_and_respond(engine, &final_sql).await
+    collect_and_respond(engine, &req.sql, req.params.as_deref()).await
 }
 
-/// Substitute query parameters if provided.
-fn substitute_params(
-    sql: &str,
-    params: &Option<Vec<serde_json::Value>>,
-) -> Result<String, ApiError> {
+/// Refuse placeholders the parameters cannot fill, with the error (and status)
+/// the substitution reports. The values themselves are bound by the engine
+/// (`execute_batch_with_params`), which plans a parameterized statement once
+/// for all its values (plan Phase 13d).
+fn validate_params(sql: &str, params: &Option<Vec<serde_json::Value>>) -> Result<(), ApiError> {
     if let Some(ref params) = params {
-        raisin_sql_execution::substitute_params(sql, params).map_err(|e| {
-            ApiError::validation_failed(format!("Parameter substitution failed: {}", e))
-        })
+        raisin_sql_execution::substitute_params_with(sql, params, &|_| String::new())
+            .map(drop)
+            .map_err(|e| {
+                ApiError::validation_failed(format!("Parameter substitution failed: {}", e))
+            })
     } else {
-        Ok(sql.to_string())
+        Ok(())
     }
 }
 
@@ -219,12 +221,19 @@ async fn build_engine(
 /// Execute the query and collect results into a response.
 async fn collect_and_respond(
     engine: QueryEngine<crate::state::Store>,
-    final_sql: &str,
+    sql: &str,
+    params: Option<&[serde_json::Value]>,
 ) -> Result<Json<SqlQueryResponse>, ApiError> {
     let start = std::time::Instant::now();
-    let mut stream = engine
-        .execute_batch(final_sql)
-        .await
+    let stream = match params {
+        Some(params) => {
+            engine
+                .execute_batch_with_params(sql, params, &raisin_sql_execution::format_param_value)
+                .await
+        }
+        None => engine.execute_batch(sql).await,
+    };
+    let mut stream = stream
         .map_err(|e| ApiError::validation_failed(format!("Failed to execute SQL query: {}", e)))?;
 
     let mut rows = Vec::new();

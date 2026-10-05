@@ -17,6 +17,15 @@ impl NodeRepositoryImpl {
     /// appended. Either way the resulting label is stamped onto
     /// `node.order_key`, so the node record and the index agree — which means
     /// this must be called BEFORE the node blob is serialized into the batch.
+    ///
+    /// `prior` is the version being updated: its `order_key` is tried first,
+    /// verified by one `(parent, label)` seek, before the sibling scan (plan
+    /// Phase 7 item 7). The entry is re-put at every version's revision even
+    /// when parent, label and name are unchanged: an entry kept from below
+    /// the revision would be masked by the relabel/move tombstone of any
+    /// write later committed below this version (out of order, or a
+    /// replicated op older than this local one), and nothing re-asserts it.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn add_ordered_children_to_batch(
         &self,
         batch: &mut WriteBatch,
@@ -26,6 +35,7 @@ impl NodeRepositoryImpl {
         branch: &str,
         workspace: &str,
         revision: &HLC,
+        prior: Option<&Node>,
     ) -> Result<()> {
         let order_start = std::time::Instant::now();
 
@@ -70,16 +80,23 @@ impl NodeRepositoryImpl {
             let mut get_last_time = 0u128;
 
             let (order_label, is_new_child) = if is_update {
-                // Node exists - check for existing order label (may scan, but only for updates)
+                // Node exists - its stored label, verified by one seek when
+                // the prior record carries it, else the sibling scan.
                 let t = std::time::Instant::now();
-                let existing_label = self.get_order_label_for_child(
-                    tenant_id, repo_id, branch, workspace, parent_id, &node.id,
+                let existing_label = self.current_order_label(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    parent_id,
+                    &node.id,
+                    prior.map(|p| p.order_key.as_str()),
                 )?;
                 get_existing_time = t.elapsed().as_micros();
 
                 if let Some(existing) = existing_label {
-                    // Preserve existing order label
-                    (existing, false)
+                    // Preserve existing order label.
+                    (existing.label, false)
                 } else {
                     // Update without previous order (rare edge case)
                     let t = std::time::Instant::now();

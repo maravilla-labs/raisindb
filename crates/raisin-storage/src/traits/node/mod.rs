@@ -20,6 +20,11 @@ use crate::node_operations::{
 };
 use crate::scope::{BranchScope, StorageScope};
 
+pub mod batch_read;
+pub use batch_read::{
+    get_many_by_loop, BatchReadItem, NodeLocator, PropertiesRead, ReadOpts, ReadSnapshot,
+};
+
 /// A single node touched by a cross-branch node-set copy.
 ///
 /// Carries enough context (id, path, type, operation) for callers to emit
@@ -120,6 +125,53 @@ pub trait NodeRepository: Send + Sync {
         id: &str,
         max_revision: Option<&HLC>,
     ) -> impl std::future::Future<Output = Result<Option<models::nodes::Node>>> + Send;
+
+    /// One node, by id (answered like `get`) or path (like `get_by_path`),
+    /// populating only what `opts` asks for: `has_children` only when
+    /// `opts.has_children`, the properties per `opts.properties`. Everything
+    /// else is exactly the answer `get`/`get_by_path` gives at `max_revision`.
+    ///
+    /// For a reader that never shows `has_children` — a SQL row, an inlined
+    /// RESOLVE target — so it does not pay the child probe (plan Phase 13d).
+    /// The default reads with `get`/`get_by_path` and drops what was not
+    /// asked for; a backend overrides it to skip that work.
+    fn get_for_read(
+        &self,
+        scope: StorageScope<'_>,
+        locator: &NodeLocator,
+        max_revision: Option<&HLC>,
+        opts: &ReadOpts,
+    ) -> impl std::future::Future<Output = Result<Option<models::nodes::Node>>> + Send {
+        async move { batch_read::get_one_by_loop(self, scope, locator, max_revision, opts).await }
+    }
+
+    /// Read many nodes at one revision in one call — RESOLVE's frontier level,
+    /// an index scan's chunk of candidate ids. See [`batch_read`].
+    ///
+    /// Item `i` of the result answers `items[i]` exactly as `get` (an id) or
+    /// `get_by_path` (a path) would at `at`, apart from `has_children` (only
+    /// populated when `opts.has_children`). `snapshot`, when it came from this
+    /// backend's [`Self::open_read_snapshot`], pins every read of the call to
+    /// that view; otherwise the backend may take its own for the call.
+    ///
+    /// The default loops `get`/`get_by_path`.
+    fn get_many_for_read(
+        &self,
+        scope: BranchScope<'_>,
+        items: &[BatchReadItem],
+        at: &HLC,
+        snapshot: Option<&ReadSnapshot>,
+        opts: ReadOpts,
+    ) -> impl std::future::Future<Output = Result<Vec<Option<models::nodes::Node>>>> + Send {
+        let _ = snapshot;
+        async move { batch_read::get_many_by_loop(self, scope, items, at, &opts).await }
+    }
+
+    /// Open a consistent view for a statement's batched reads, held until the
+    /// last clone is dropped. `None` (the default) when the backend has none.
+    fn open_read_snapshot(&self) -> Option<ReadSnapshot> {
+        None
+    }
 
     /// Get a node with its direct children populated.
     ///

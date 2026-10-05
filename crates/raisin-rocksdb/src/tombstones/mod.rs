@@ -20,8 +20,19 @@
 //! 7. **ORDERED_CHILDREN** - Child ordering entries
 //! 8. **COMPOUND_INDEX** - Multi-column compound indexes
 //! 9. **SPATIAL_INDEX** - Geohash-based spatial indexes
-//! 10. **TRANSLATION_DATA** - Locale overlay data
-//! 11. **SECRETS** - Vaulted `encrypted` field values
+//! 10. **SECRETS** - Vaulted `encrypted` field values
+//! 11. **LOCALIZED_NAME_INDEX** - Localized URL segments (plan Phase 12)
+//! 12. **BLOCK_TRANSLATIONS** - `T` at the delete for every block overlay
+//!     live there (plan Phase 11c; hygiene, see below)
+//!
+//! A node delete ends its overlays — node AND block — by a READ rule
+//! (`translation_read::ended_by_node_delete`); that is what makes them absent
+//! in any arrival order. Not TRANSLATION_DATA: deriving node-overlay
+//! tombstones at write time raced with translation writes, and their
+//! `TRANSLATION_INDEX` / localized-name side effects are the read rule's
+//! business. Block overlays have neither, and their `T` is materialized here
+//! so retention GC can reclaim what the delete ended
+//! (`translation_write::block_deletion`).
 
 mod core_tombstones;
 pub mod helpers;
@@ -52,8 +63,9 @@ pub const DELETION_COLUMN_FAMILIES: &[&str] = &[
     cf::ORDERED_CHILDREN,
     cf::COMPOUND_INDEX,
     cf::SPATIAL_INDEX,
-    cf::TRANSLATION_DATA,
     cf::SECRETS,
+    cf::LOCALIZED_NAME_INDEX,
+    cf::BLOCK_TRANSLATIONS,
 ];
 
 /// Context for tombstone operations
@@ -87,7 +99,6 @@ pub struct TombstoneColumnFamilies<'a> {
     pub ordered_children: &'a ColumnFamily,
     pub compound_index: &'a ColumnFamily,
     pub spatial_index: &'a ColumnFamily,
-    pub translation_data: &'a ColumnFamily,
     pub secrets: &'a ColumnFamily,
 }
 
@@ -105,7 +116,6 @@ impl<'a> TombstoneColumnFamilies<'a> {
             ordered_children: cf_handle(db, cf::ORDERED_CHILDREN)?,
             compound_index: cf_handle(db, cf::COMPOUND_INDEX)?,
             spatial_index: cf_handle(db, cf::SPATIAL_INDEX)?,
-            translation_data: cf_handle(db, cf::TRANSLATION_DATA)?,
             secrets: cf_handle(db, cf::SECRETS)?,
         })
     }
@@ -114,25 +124,6 @@ impl<'a> TombstoneColumnFamilies<'a> {
     pub fn from_arc_db(db: &'a Arc<DB>) -> Result<Self> {
         Self::from_db(db.as_ref())
     }
-}
-
-/// Tombstone ONLY the compound-index entries for a node.
-///
-/// Used on UPDATE when a node's compound-index column values may have changed:
-/// the old-value entries must be tombstoned before the new-value entries are
-/// written, otherwise a scan keyed on the OLD value still returns the node
-/// (e.g. a status `held` -> `confirmed` flip would leave a stale `held` entry).
-/// This is a focused public wrapper around the internal compound tombstone used
-/// by `add_node_tombstones`, so both the repository and transaction update paths
-/// can reuse it without tombstoning every other index family.
-pub fn tombstone_compound_indexes_only(
-    batch: &mut WriteBatch,
-    db: &DB,
-    ctx: &TombstoneContext,
-    cfs: &TombstoneColumnFamilies,
-    node: &Node,
-) -> Result<()> {
-    index_tombstones::tombstone_compound_indexes(batch, db, ctx, cfs, node)
 }
 
 /// Add ALL required tombstones for a node deletion to a WriteBatch
@@ -179,14 +170,14 @@ pub fn add_node_tombstones_with_parent(
     // 1. NODES - Tombstone node data
     core_tombstones::tombstone_node_data(batch, ctx, cfs, node, revision);
 
-    // 2. PATH_INDEX - Tombstone path index
-    core_tombstones::tombstone_path_index(batch, ctx, cfs, node, revision);
+    // 2. PATH_INDEX - Tombstone path index (never over another node's entry)
+    core_tombstones::tombstone_path_index(batch, db, ctx, cfs, node, revision)?;
 
     // 3. NODE_PATH - Tombstone node-to-path reverse index
     core_tombstones::tombstone_node_path(batch, ctx, cfs, node, revision);
 
     // 4. PROPERTY_INDEX - Tombstone all property indexes (custom + system)
-    index_tombstones::tombstone_property_indexes(batch, ctx, cfs, node, revision, is_published);
+    index_tombstones::tombstone_property_indexes(batch, db, ctx, cfs, node, revision)?;
 
     // 5. REFERENCE_INDEX - Tombstone forward and reverse references
     index_tombstones::tombstone_reference_indexes(batch, ctx, cfs, node, revision, is_published);
@@ -206,24 +197,29 @@ pub fn add_node_tombstones_with_parent(
         parent_index_id,
     )?;
 
-    // 8. COMPOUND_INDEX - Tombstone compound index entries (prefix scan)
-    index_tombstones::tombstone_compound_indexes(batch, db, ctx, cfs, node)?;
+    // 8. COMPOUND_INDEX - derived from the node and its cached definitions
+    //    (a workspace scan only when they are cold); tombstones at the delete
+    //    revision, never written over the live key (plan Phase 8).
+    crate::indexing::compound::tombstone_compound_for_delete(
+        batch,
+        db,
+        &crate::indexing::IndexCtx::new(ctx.tenant_id, ctx.repo_id, ctx.branch, ctx.workspace),
+        node,
+        revision,
+    )?;
 
     // 9. SPATIAL_INDEX - Tombstone spatial index entries (derived from the node's
     //    own geometry; no scan)
     index_tombstones::tombstone_spatial_indexes(batch, db, ctx, cfs, node, revision)?;
 
-    // 10. TRANSLATION_DATA - Tombstone translation data (prefix scan)
-    index_tombstones::tombstone_translation_data(batch, db, ctx, cfs, node, revision)?;
-
-    // 11. SECRETS - Retire every vaulted `encrypted` field value the node owns.
+    // 10. SECRETS - Retire every vaulted `encrypted` field value the node owns.
     //     Found by an EXACT key prefix (`node/{node_id}/`), not by walking the
     //     node's properties: a field cleared on an earlier revision left a
     //     secret the current properties no longer mention, and that one must be
     //     retired too. Prior versions survive — see `secret_tombstones`.
     secret_tombstones::tombstone_secrets(batch, db, ctx, cfs, node, revision)?;
 
-    // 12. REGISTRY - Drop the virtual-mount registry entry (no-op for every
+    // 11. REGISTRY - Drop the virtual-mount registry entry (no-op for every
     //     other node type).
     //
     //     A real delete rather than a tombstone: the registry is a live derived
@@ -238,6 +234,44 @@ pub fn add_node_tombstones_with_parent(
         ctx.repo_id,
         ctx.branch,
         node,
+    )?;
+
+    // 12. LOCALIZED_NAME_INDEX - the node's live claims and reverse rows as of
+    //     the delete (plan Phase 12). Hygiene: a lookup also checks the node
+    //     is live, so a delete that arrives without this is never served.
+    crate::localized_name::sync::stage_node_deleted(
+        db,
+        batch,
+        crate::localized_name::keys::NameScope::new(
+            ctx.tenant_id,
+            ctx.repo_id,
+            ctx.branch,
+            ctx.workspace,
+        ),
+        &node.id,
+        revision,
+    )?;
+
+    // 13. BLOCK_TRANSLATIONS - `T` at the delete for every block overlay
+    //     whose newest stored version at or before it is live (plan Phase
+    //     11c). Hygiene: the read rule already ends them, so a version this
+    //     read misses (committed below the delete meanwhile) is still absent,
+    //     and the one writer or the `block_overlay_tombstones` repair stores
+    //     its `T` later.
+    //
+    //     A `T` at the delete's revision is only right while the node STAYS
+    //     deleted there: a live `NODES` record written later at the same
+    //     revision would overwrite the tombstone and leave this `T` ending the
+    //     overlays of a node that was never deleted. No path writes one — a
+    //     transaction cannot recreate an id it deleted (`validate_create`
+    //     checks the id against committed state; test
+    //     `a_transaction_cannot_recreate_a_node_it_deleted`).
+    crate::translation_write::materialize_block_deletion(
+        db,
+        batch,
+        (ctx.tenant_id, ctx.repo_id, ctx.branch, ctx.workspace),
+        &node.id,
+        revision,
     )?;
 
     Ok(())

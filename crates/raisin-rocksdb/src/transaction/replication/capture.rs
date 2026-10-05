@@ -3,7 +3,7 @@
 use super::super::RocksDBTransaction;
 use raisin_error::Result;
 use raisin_hlc::HLC;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 impl RocksDBTransaction {
     /// Capture an operation, using async queue if available or synchronous capture otherwise
@@ -14,6 +14,19 @@ impl RocksDBTransaction {
     ///
     /// IMPORTANT: UpdateBranch and CreateRevisionMeta operations are ALWAYS captured synchronously
     /// because they must be pushed immediately to make replicated data visible on peers.
+    /// The actor a captured op carries (see `capture_operation_internal`):
+    /// the auth context's principal, else `fallback`. Records this node
+    /// stores for the same write (translation metas) use it too, so the
+    /// replica's copy from the op is identical.
+    pub(in super::super) fn attributed_actor(&self, fallback: String) -> String {
+        use raisin_storage::transactional::TransactionalContext;
+        self.get_auth_context()
+            .ok()
+            .flatten()
+            .map(|a| a.actor_id())
+            .unwrap_or(fallback)
+    }
+
     pub(in super::super) async fn capture_operation_internal(
         &self,
         tenant_id: String,
@@ -43,13 +56,11 @@ impl RocksDBTransaction {
         // `"sql-update"`) still know the real principal, and the local audit row
         // already records *that*. Falling back to the caller's value keeps every
         // path that has no auth context (system jobs, seeds) unchanged.
-        let (actor, agent) = {
+        let actor = self.attributed_actor(actor);
+        let agent = {
             use raisin_storage::transactional::TransactionalContext;
             let auth = self.get_auth_context().ok().flatten();
-            (
-                auth.as_ref().map(|a| a.actor_id()).unwrap_or(actor),
-                auth.as_ref().and_then(|a| a.agent.clone()),
-            )
+            auth.as_ref().and_then(|a| a.agent.clone())
         };
 
         if resolved_revision.is_none() {
@@ -163,19 +174,41 @@ impl RocksDBTransaction {
             return Ok(());
         }
 
-        // Capture ApplyRevision operation
-        if let Some(branch_revision) = max_revision {
+        // Capture ApplyRevision operations: ONE PER DISTINCT REVISION the
+        // changes were written at. A replica applies every change of an
+        // ApplyRevision at the op's single revision, and not every change in a
+        // transaction sits at the transaction revision: a `versionable=false`
+        // update reuses its node's CURRENT revision (overwriting in place), so
+        // two of them — or one beside a versioned write — land at different
+        // revisions. Folding them into one op wrote a volatile node at a
+        // revision the origin never wrote it at; the origin's next in-place
+        // refresh then landed BENEATH that phantom version on the replica, and
+        // the node stopped updating there forever.
+        //
+        // A transaction of only in-place updates allocates no transaction
+        // revision at all (`max_revision` is None); grouping covers it too,
+        // where it used to go unreplicated. Groups go out ascending, and only
+        // the newest carries the transaction revision as its branch head — a
+        // replica's HEAD advance is monotonic, so an older group's head below
+        // the replica's HEAD is a no-op, exactly as on the origin.
+        let groups = group_changes_by_revision(&tracked_changes);
+        let newest = groups.keys().next_back().copied();
+        for (revision, group) in &groups {
+            let branch_head = match (Some(*revision) == newest, max_revision) {
+                (true, Some(tx_rev)) => tx_rev.max(*revision),
+                _ => *revision,
+            };
             if let Err(e) = self
                 .capture_apply_revision_operation(
                     tenant_id.clone(),
                     repo_id.clone(),
                     branch_name.clone(),
-                    branch_revision,
-                    &tracked_changes,
+                    branch_head,
+                    group,
                     actor.clone(),
                     message.clone(),
                     is_system,
-                    branch_revision,
+                    *revision,
                 )
                 .await
             {
@@ -249,3 +282,26 @@ impl RocksDBTransaction {
         Ok(())
     }
 }
+
+/// Partition tracked changes by the revision each was written at, ascending.
+///
+/// The unit an `ApplyRevision` replicates is "these changes, at THIS
+/// revision"; a change written elsewhere (an in-place `versionable=false`
+/// update) needs its own op or a replica writes it at the wrong key.
+pub(crate) fn group_changes_by_revision(
+    tracked_changes: &HashMap<String, crate::replication::NodeChanges>,
+) -> BTreeMap<HLC, HashMap<String, crate::replication::NodeChanges>> {
+    let mut groups: BTreeMap<HLC, HashMap<String, crate::replication::NodeChanges>> =
+        BTreeMap::new();
+    for (node_id, change) in tracked_changes {
+        groups
+            .entry(change.revision)
+            .or_default()
+            .insert(node_id.clone(), change.clone());
+    }
+    groups
+}
+
+#[cfg(test)]
+#[path = "capture_tests.rs"]
+mod tests;

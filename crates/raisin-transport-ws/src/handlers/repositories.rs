@@ -66,6 +66,7 @@ where
             default_language: "en".to_string(),
             supported_languages: vec!["en".to_string()],
             locale_fallback_chains: std::collections::HashMap::new(),
+            localized_names: Default::default(),
         }
     };
 
@@ -188,6 +189,8 @@ where
 
     // Extract updated configuration from payload or use existing
     let config: RepositoryConfig = if let Some(config_value) = payload.config {
+        // A config that does not mention `localized_names` keeps it.
+        let keeps_name_config = config_value.get("localized_names").is_none();
         let mut new_config: RepositoryConfig =
             serde_json::from_value(config_value).map_err(|e| {
                 WsError::InvalidRequest(format!("Invalid repository configuration: {}", e))
@@ -197,6 +200,9 @@ where
         // overlay check and a full-text rebuild, which only
         // PATCH /api/repositories/{repo}/translation-config does.
         new_config.default_language = existing.config.default_language;
+        if keeps_name_config {
+            new_config.localized_names = existing.config.localized_names;
+        }
         new_config
     } else {
         // If no config provided, update only description if present
@@ -207,6 +213,7 @@ where
             default_language: existing.config.default_language,
             supported_languages: existing.config.supported_languages,
             locale_fallback_chains: existing.config.locale_fallback_chains,
+            localized_names: existing.config.localized_names,
         }
     };
 

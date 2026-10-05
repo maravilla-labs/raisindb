@@ -48,8 +48,10 @@ impl AggregateSpec {
             order_desc = r
                 .trim()
                 .split(',')
+                .map(str::trim)
                 .filter(|s| !s.is_empty())
-                .map(|s| s == "d")
+                // The name was upper-cased above, so the marker is `D`.
+                .map(|s| s.eq_ignore_ascii_case("d"))
                 .collect();
         }
         Some(Self {

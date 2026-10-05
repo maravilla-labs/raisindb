@@ -14,6 +14,10 @@
 
 pub(crate) mod crud; // This is now a directory with sub-modules
 pub mod helpers;
+mod index_writes;
+mod merge_window;
+pub use index_writes::SKIP_UNCHANGED_ENV;
+pub(crate) use merge_window::{merge_window_open, open_merge_window};
 mod mvcc;
 mod ordering;
 mod publishing;
@@ -24,7 +28,7 @@ mod trait_impl;
 mod validation;
 
 // Re-export StorageNode for use within this crate
-pub(crate) use storage_node::StorageNode;
+pub(crate) use storage_node::{PropertiesMode, StorageNode, StorageNodeHead};
 
 // Attribution carried into replication capture by every direct (non-transaction)
 // write path. The transaction path resolves the same pair from its AuthContext.
@@ -33,19 +37,28 @@ pub(crate) use replication_capture::WriteAttribution;
 // Re-export hash_property_value for use by property_index repository
 pub(crate) use helpers::hash_property_value;
 pub(crate) use ordering::{
-    child_is_under, node_path_at, parent_index_id, parse_ordered_child_key, put_ordered_child,
-    stored_order_label,
+    child_is_under, current_order_label, last_live_order_label, live_entry_under_label,
+    mint_append_label, node_path_at, parent_index_id, parse_ordered_child_key, put_ordered_child,
+    sorts_after, stored_order_label, stored_order_label_at, CurrentLabel,
 };
 
 // Re-export the stale property-index tombstone helper for the transactional
 // write path (both write paths must keep the property index hygienic).
-pub(crate) use crud::indexing::property_indexes::add_stale_property_tombstones;
+/// In-place record writers vs the `node_path` backfill (one guard, both sides).
+pub(crate) use crud::indexing::in_place_guard::{backfill_write_guard, in_place_write_guard};
+/// The ONE node-record writer (plan Phases 10/10b): every live `NODES` blob.
+pub(crate) use crud::indexing::node_record::{parent_id_of, write_node_record};
 pub(crate) use crud::indexing::reference_indexes::{
     add_reference_index_entries, add_stale_reference_tombstones, walk_references,
 };
+pub(crate) use crud::indexing::unique_delta::{
+    end_claims_at, unique_claims, write_unique_delta, UniqueClaim, UniqueHalf, UniqueSide,
+};
+pub(crate) use crud::indexing::unique_guard::{claim_prefix, owned_unique_names, CommitClaims};
 pub(crate) use crud::indexing::unique_indexes::{
     extract_unique_property_names, tombstone_unique_entries, write_unique_entries,
 };
+pub(crate) use crud::indexing::PropertyWrite;
 
 use raisin_error::Result;
 use raisin_events::EventBus;
@@ -113,6 +126,9 @@ pub struct NodeRepositoryImpl {
     /// schema lookups and one secret-store slot, rather than each layer
     /// building its own — which is how the two would drift.
     vaulter: crate::vaulting::Vaulter,
+    /// `index.skip_unchanged` and the cluster node id its gate reads the
+    /// rebuild state under (plan Phase 7, `index_writes.rs`).
+    index_writes: Arc<index_writes::IndexWritePolicy>,
 }
 
 impl NodeRepositoryImpl {
@@ -152,7 +168,13 @@ impl NodeRepositoryImpl {
             path_reservations: Arc::new(StdMutex::new(HashMap::new())),
             reservation_owner_counter: Arc::new(AtomicU64::new(1)),
             vaulter,
+            index_writes: Arc::new(index_writes::IndexWritePolicy::from_env()),
         }
+    }
+
+    /// The database handle (for the localized name lookup's direct reads).
+    pub(crate) fn db_handle(&self) -> &Arc<DB> {
+        &self.db
     }
 
     /// Seal any plaintext sitting in a field declared `encrypted: true`.

@@ -153,18 +153,29 @@ impl OperationApplicator {
         // The default language this node had before the update, to notice a
         // default-language change: base content is full-text indexed under the
         // default language, and this node's index is its own to rebuild.
-        let previous_default_language = existing
+        let previous_config = existing
             .as_deref()
             .and_then(|bytes| rmp_serde::from_slice::<raisin_context::RepositoryInfo>(bytes).ok())
-            .map(|info| info.config.default_language);
+            .map(|info| info.config);
+        let previous_default_language = previous_config
+            .as_ref()
+            .map(|config| config.default_language.clone());
 
-        // Serialize and write using helper
-        serialize_and_write_compact(
+        // One batch with the localized name index state flip when its
+        // configuration changed (plan Phase 12: the replicated change must
+        // not leave this node's index Ready under the old configuration).
+        let value = rmp_serde::to_vec(repository).map_err(|e| {
+            raisin_error::Error::storage(format!("apply_update_repository encode: {e}"))
+        })?;
+        let _ = cf;
+        crate::localized_name::config_change::write_repository_record(
             &self.db,
-            cf,
-            key,
-            repository,
-            &format!("apply_update_repository_{}/{}", tenant_id, repo_id),
+            tenant_id,
+            repo_id,
+            &key,
+            &value,
+            previous_config.as_ref(),
+            &repository.config,
         )?;
 
         // Only emit RepositoryCreated event for NEW repositories

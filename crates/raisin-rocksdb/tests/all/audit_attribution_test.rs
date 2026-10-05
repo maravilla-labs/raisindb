@@ -130,6 +130,7 @@ async fn setup() -> Result<(Arc<RocksDBStorage>, Arc<RocksDBAuditRepo>, TempDir)
                 default_branch: BRANCH.to_string(),
                 description: Some("audit attribution test".to_string()),
                 tags: HashMap::new(),
+                localized_names: Default::default(),
             },
         )
         .await?;
@@ -453,8 +454,9 @@ async fn reads_do_not_cross_tenant_or_branch() -> Result<()> {
 
 /// Decision (3): ONE logical delete must produce ONE audit row.
 ///
-/// `apply_delete_node` used to call `apply_replicated_delete` (which emits
-/// `Deleted`) and then emit `Deleted` a second time with byte-identical
+/// The (since removed, plan "Phase 11d") `apply_delete_node` used to call
+/// `apply_replicated_delete` (which emits `Deleted`) and then emit `Deleted`
+/// a second time with byte-identical
 /// arguments. Two rows is wrong on its own; once attribution made the rows
 /// identical it also became visible. The duplicate is not cosmetic — every
 /// `Deleted` subscriber ran twice, including the trigger/job dispatcher.
@@ -465,8 +467,8 @@ async fn a_replicated_delete_produces_exactly_one_audit_row() -> Result<()> {
 
     let (storage, audit, _tmp) = setup().await?;
 
-    // A node that actually exists locally: apply_delete_node loads the latest
-    // snapshot and no-ops when the node is missing.
+    // A node that actually exists locally: an id-only delete loads the
+    // latest snapshot and no-ops when the node is missing.
     let id = create_as(&storage, "/doomed", AUDITED_TYPE, user("alice")).await?;
     settle().await;
 
@@ -486,8 +488,11 @@ async fn a_replicated_delete_produces_exactly_one_audit_row() -> Result<()> {
         tenant_id: TENANT.to_string(),
         repo_id: REPO.to_string(),
         branch: BRANCH.to_string(),
-        op_type: OpType::DeleteNode {
+        op_type: OpType::DeleteNodeSnapshot {
             node_id: id.clone(),
+            revision,
+            node: None,
+            parent_id: None,
         },
         revision: Some(revision),
         actor: "alice".to_string(),
@@ -556,6 +561,8 @@ async fn a_replicated_snapshot_delete_produces_exactly_one_audit_row() -> Result
         op_type: OpType::DeleteNodeSnapshot {
             node_id: id.clone(),
             revision,
+            node: None,
+            parent_id: None,
         },
         revision: Some(revision),
         actor: "alice".to_string(),

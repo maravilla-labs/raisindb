@@ -83,6 +83,17 @@ pub async fn execute_project_batch<S: Storage + 'static>(
             for proj_expr in &exprs {
                 let expr_start = std::time::Instant::now();
 
+                // A top-level RESOLVE: one frontier walk per chunk of the
+                // batch's rows (see `project_resolve`).
+                if ctx.batched_fetch {
+                    if let Some(args) = crate::physical_plan::project_resolve::resolve_args(&proj_expr.expr) {
+                        let rows: Vec<_> = batch.iter().collect();
+                        let column = crate::physical_plan::project_resolve::resolve_column(args, &rows, &ctx).await?;
+                        output_columns.insert(proj_expr.alias.clone(), column);
+                        continue;
+                    }
+                }
+
                 // Try columnar evaluation first (fast path)
                 let result_column = match try_eval_columnar(&proj_expr.expr, &batch, &mut column_cache, &ctx).await {
                     Ok(col) => {

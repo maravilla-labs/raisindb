@@ -1,12 +1,15 @@
 //! Invalidating compound index state for writes this node did not index, and
 //! the build's compare-and-set.
 //!
-//! Compound and unique entries are written by the local write paths only. A
-//! replicated upsert and a merge apply write none (until Phase 8 step 3 / 2.10),
-//! so after either one this node's keyspace no longer matches its node records,
-//! and a `Ready` record would let the planner serve stale rows. The apply path
-//! therefore marks every recorded index of the workspace `NotBuilt` — fail
-//! closed: those queries scan until a local rebuild runs.
+//! Every write path maintains compound entries — the replicated upsert and the
+//! merge resolution too, since plan Phase 8 step 3 — EXCEPT a write that
+//! cannot: a replicated upsert whose node-type definitions are not cached
+//! (resolving them on the apply path is the NodeType read the deadlock rule
+//! forbids), the legacy apply arms, and a commit-time correction with cold
+//! definitions. After one of those this node's keyspace no longer matches its
+//! node records, and a `Ready` record would let the planner serve stale rows.
+//! So such a write marks every recorded index of the workspace `NotBuilt` —
+//! fail closed: those queries scan until the local build it requests runs.
 //!
 //! The marker is a monotonic counter (`stale_generation`). A build reads it
 //! when it starts and stamps `Ready` only if it is unchanged when it finishes;
@@ -37,7 +40,7 @@ use crate::{cf, cf_handle};
 /// Serializes every compound state transition that must not interleave.
 static TRANSITIONS: Mutex<()> = Mutex::new(());
 
-fn transitions() -> std::sync::MutexGuard<'static, ()> {
+pub(super) fn transitions() -> std::sync::MutexGuard<'static, ()> {
     // The guarded section only reads and writes RocksDB; a panic in it leaves
     // nothing half-updated in memory, so a poisoned lock is still usable.
     TRANSITIONS.lock().unwrap_or_else(|e| e.into_inner())
@@ -131,6 +134,49 @@ impl CompoundStateStore {
             self.put_unlocked(tenant_id, repo_id, branch, workspace, &state)?;
         }
         Ok(())
+    }
+
+    /// Mark the indexes named `names` `NotBuilt` in every workspace of the
+    /// branch that has a record for them (a declaration changed: the NodeType
+    /// names no workspace). Returns the workspaces marked.
+    pub fn mark_names_on_branch(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        names: &[String],
+    ) -> Result<Vec<String>> {
+        let _guard = transitions();
+        let cf = cf_handle(&self.db, cf::INDEX_STATUS)?;
+        let prefix = format!("compound_index\0{tenant_id}\0{repo_id}\0{branch}\0").into_bytes();
+        let mut marked: Vec<(String, CompoundIndexState)> = Vec::new();
+        for item in crate::prefix_scan(&self.db, cf, &prefix) {
+            let (key, value) =
+                item.map_err(|e| Error::storage(format!("compound state scan failed: {}", e)))?;
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            // Remainder: `{workspace}\0{index_name}`.
+            let rest = String::from_utf8_lossy(&key[prefix.len()..]).into_owned();
+            let Some((workspace, name)) = rest.split_once('\0') else {
+                continue;
+            };
+            if !names.iter().any(|n| n == name) {
+                continue;
+            }
+            if let Ok(mut state) = rmp_serde::from_slice::<CompoundIndexState>(&value) {
+                mark(&mut state);
+                marked.push((workspace.to_string(), state));
+            }
+        }
+        let mut workspaces = Vec::new();
+        for (workspace, state) in marked {
+            self.put_unlocked(tenant_id, repo_id, branch, &workspace, &state)?;
+            if !workspaces.contains(&workspace) {
+                workspaces.push(workspace);
+            }
+        }
+        Ok(workspaces)
     }
 
     /// Mark EVERY compound state record on this node stale.

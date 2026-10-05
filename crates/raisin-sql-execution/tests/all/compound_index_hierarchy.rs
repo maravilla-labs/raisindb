@@ -31,13 +31,13 @@ const TENANT: &str = "t_cih";
 const REPO: &str = "r_cih";
 const BRANCH: &str = "main";
 const WS: &str = "ws";
-const NODE_TYPE: &str = "test:Message";
+pub(super) const NODE_TYPE: &str = "test:Message";
 
 fn scope() -> StorageScope<'static> {
     StorageScope::new(TENANT, REPO, BRANCH, WS)
 }
 
-fn message_type() -> NodeType {
+pub(super) fn message_type() -> NodeType {
     NodeType {
         id: Some(NODE_TYPE.to_string()),
         name: NODE_TYPE.to_string(),
@@ -84,7 +84,7 @@ fn message_type() -> NodeType {
     }
 }
 
-fn node(id: &str, path: &str, parent: &str) -> Node {
+pub(super) fn node(id: &str, path: &str, parent: &str) -> Node {
     Node {
         id: id.to_string(),
         path: path.to_string(),

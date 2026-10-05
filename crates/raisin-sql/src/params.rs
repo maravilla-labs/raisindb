@@ -117,7 +117,7 @@ pub fn substitute_params_with(
 /// - Booleans: Unquoted true/false
 /// - Null: NULL keyword
 /// - Arrays/Objects: JSON string representation (single-quoted, escaped)
-fn format_param_value(value: &JsonValue) -> String {
+pub fn format_param_value(value: &JsonValue) -> String {
     match value {
         JsonValue::Null => "NULL".to_string(),
 

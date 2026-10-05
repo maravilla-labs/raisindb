@@ -408,9 +408,13 @@ impl NodeRepositoryImpl {
                 return Ok(None);
             }
 
-            // Found valid node at acceptable revision - deserialize and materialize path if needed
+            // The path AS OF THE READ, not as of the blob: a later ancestor
+            // move writes NODE_PATH above the blob's revision, and reading
+            // the path at the blob's revision returned the pre-move path.
+            let path_at = max_revision.copied().unwrap_or(crate::mvcc_read::NEWEST);
             let node = self.deserialize_node_with_path_as(
-                &value, tenant_id, repo_id, branch, workspace, node_id, &revision, properties,
+                &value, tenant_id, repo_id, branch, workspace, node_id, &path_at, &revision,
+                properties,
             )?;
 
             return Ok(Some(node));

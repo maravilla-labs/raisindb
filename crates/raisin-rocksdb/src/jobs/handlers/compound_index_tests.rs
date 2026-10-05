@@ -2,11 +2,12 @@
 
 use super::*;
 use crate::repositories::{BranchRepositoryImpl, RevisionRepositoryImpl};
+use raisin_models::nodes::Node;
 use raisin_storage::compound::CompoundBuildPhase;
 use raisin_storage::jobs::{JobId, JobStatus};
 use raisin_storage::{
-    BranchRepository, BranchScope, CommitMetadata, CreateNodeOptions, NodeRepository,
-    NodeTypeRepository, Storage, StorageScope,
+    BranchRepository, BranchScope, CommitMetadata, CompoundIndexRepository, CreateNodeOptions,
+    NodeRepository, NodeTypeRepository, Storage, StorageScope,
 };
 use std::collections::HashMap;
 
@@ -186,4 +187,55 @@ async fn compound_build_is_still_serialized_on_one_node() {
         None,
         "the second build on one node must skip"
     );
+}
+
+/// A node the build cannot place (no NODE_PATH) must not be dropped from an
+/// index the build then stamps `Ready`: the build refuses BEFORE it clears,
+/// so the entries that exist survive and the index stays unusable.
+#[tokio::test]
+async fn compound_build_refuses_before_clearing_an_unplaceable_node() {
+    let (storage, _dir) = setup().await;
+    let locks: raisin_locks::LockManagerHandle =
+        Arc::new(raisin_locks::InProcessLockManager::new());
+    let (job, context) = job();
+    handler(&storage, &locks, "local")
+        .handle(&job, &context)
+        .await
+        .unwrap();
+    assert_eq!(state(&storage), Some(CompoundBuildPhase::Ready));
+
+    let db = storage.db();
+    let cf_path = cf_handle(db, cf::NODE_PATH).unwrap();
+    let prefix = keys::node_path_key_prefix(T, R, B, WS, "n1");
+    let doomed: Vec<Box<[u8]>> = crate::prefix_scan(db, cf_path, &prefix)
+        .map(|item| item.unwrap().0)
+        .take_while(|key| key.starts_with(&prefix))
+        .collect();
+    assert!(!doomed.is_empty());
+    for key in doomed {
+        db.delete_cf(cf_path, key).unwrap();
+    }
+    crate::compound_state::CompoundStateStore::new(db.clone())
+        .mark_not_built(T, R, B, WS, INDEX)
+        .unwrap();
+
+    assert!(handler(&storage, &locks, "local")
+        .handle(&job, &context)
+        .await
+        .is_err());
+    assert_eq!(state(&storage), Some(CompoundBuildPhase::NotBuilt));
+    let listed = storage
+        .compound_index()
+        .scan_compound_index(
+            StorageScope::new(T, R, B, WS),
+            INDEX,
+            &[raisin_storage::CompoundColumnValue::String("a".into())],
+            false,
+            true,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 3, "the refused build must not clear entries");
 }

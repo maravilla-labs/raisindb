@@ -52,6 +52,7 @@ impl TestStorage {
             default_branch: "main".to_string(),
             description: Some("branch fork publish test".to_string()),
             tags: HashMap::new(),
+            localized_names: Default::default(),
         };
         storage
             .repository_management()

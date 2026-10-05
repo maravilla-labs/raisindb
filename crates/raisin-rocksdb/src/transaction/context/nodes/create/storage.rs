@@ -11,7 +11,11 @@ use crate::{cf, cf_handle, keys};
 
 /// Write node to batch with versioned key
 ///
-/// Serializes the node and writes it to the transaction batch.
+/// Stages the node RECORD — a `StorageNode` blob plus its `NODE_PATH` entry —
+/// through the one record writer
+/// (`crud::indexing::node_record::write_node_record`). Before Phase 10 this
+/// path stored the full `Node` (path embedded) and no `NODE_PATH`; such
+/// blobs are still read by the path read rule, never written.
 /// Returns the node key for conflict tracking.
 ///
 /// # Arguments
@@ -22,6 +26,7 @@ use crate::{cf, cf_handle, keys};
 /// * `branch` - The branch name
 /// * `workspace` - The workspace name
 /// * `node` - The node to write
+/// * `parent_id` - The parent's id (`"/"` or `None` for a root child)
 /// * `revision` - The HLC revision for versioning
 ///
 /// # Returns
@@ -40,21 +45,25 @@ pub(super) fn write_node_to_batch(
     branch: &str,
     workspace: &str,
     node: &Node,
+    parent_id: Option<&str>,
     revision: &HLC,
 ) -> Result<Vec<u8>> {
-    let cf_nodes = cf_handle(&tx.db, cf::NODES)?;
-
     let mut batch = tx
         .batch
         .lock()
         .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
 
-    let node_key =
-        keys::node_key_versioned(tenant_id, repo_id, branch, workspace, &node.id, revision);
-    let node_value = rmp_serde::to_vec_named(node)
-        .map_err(|e| raisin_error::Error::storage(format!("Serialization error: {}", e)))?;
-
-    batch.put_cf(cf_nodes, node_key.clone(), node_value);
+    let node_key = crate::repositories::nodes::crud::indexing::node_record::write_node_record(
+        &tx.db,
+        &mut batch,
+        tenant_id,
+        repo_id,
+        branch,
+        workspace,
+        node,
+        crate::repositories::nodes::crud::indexing::node_record::parent_id_of(parent_id),
+        revision,
+    )?;
 
     // Virtual-mount registry, in THIS batch. Writing it anywhere else — an event
     // handler, a follow-up commit — is what lets a mount exist with no registry

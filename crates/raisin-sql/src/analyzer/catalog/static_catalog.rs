@@ -171,6 +171,11 @@ impl Catalog for StaticCatalog {
             || self.workspaces.contains(&name.to_string())
     }
 
+    fn has_workspace_table(&self, name: &str) -> bool {
+        // Exactly the condition `get_workspace_table` answers under.
+        self.is_workspace(name)
+    }
+
     fn get_workspace_table(&self, table_name: &str) -> Option<TableDef> {
         // First, try to resolve as a mapped table name (CamelCase -> workspace)
         let _workspace_name = self

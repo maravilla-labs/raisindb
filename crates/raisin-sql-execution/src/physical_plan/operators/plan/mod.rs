@@ -212,6 +212,8 @@ define_physical_plan! {
             /// same way the index writer encoded the key.
             equality_columns: Vec<(String, String, CompoundColumnType)>,
             pre_sorted: bool,
+            /// Direction of the INDEX scan (`true` = index order), not the
+            /// query's: a `Timestamp` order column is stored newest-first.
             ascending: bool,
             projection: Option<Vec<String>>,
             filter: Option<TypedExpr>,
@@ -236,6 +238,21 @@ define_physical_plan! {
         },
         /// Path index scan for exact path lookups (O(1))
         PathIndexScan {
+            tenant_id: String,
+            repo_id: String,
+            branch: String,
+            workspace: String,
+            table: String,
+            alias: Option<String>,
+            path: String,
+            projection: Option<Vec<String>>,
+        },
+        /// Localized URL lookup (plan Phase 12): `WHERE locale = 'fr' AND
+        /// __localized_path = '/produits/chaise'`, answered by the localized
+        /// name index (depth x 1-2 seeks) instead of a scan. The locale comes
+        /// from the statement at execution; a row is emitted only when the
+        /// node's canonical localized path IS the requested one.
+        LocalizedPathLookup {
             tenant_id: String,
             repo_id: String,
             branch: String,
@@ -443,7 +460,9 @@ define_physical_plan! {
         /// Project (select) specific expressions
         Project {
             input: Box<PhysicalPlan>,
-            exprs: Vec<ProjectionExpr>,
+            /// Shared, so executing a (cached) plan does not copy its
+            /// expressions — a `SELECT *` has one per column.
+            exprs: std::sync::Arc<[ProjectionExpr]>,
         },
         /// Sort rows by one or more expressions (blocking operator)
         Sort {

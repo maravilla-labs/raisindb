@@ -74,6 +74,27 @@ impl raisin_replication::CheckpointIngestor for RocksDbCheckpointIngestor {
             format!("Failed to spawn checkpoint open task: {}", e)
         ))??;
 
+        // Step 1b: Skip-unchanged writes stop BEFORE the copy starts. Local
+        // writes keep running while the column families are copied in many
+        // independent batches, and must not take a peer version as a proven
+        // predecessor (its writer may have left holes this node's rebuild
+        // never saw). A failure aborts the ingest before anything is copied.
+        crate::management::async_indexing::repair::invalidate_rebuilds_for_ingest(&self.db)
+            .map_err(|e| {
+                raisin_replication::CoordinatorError::Storage(format!(
+                    "Failed to invalidate property index rebuilds before checkpoint copy: {}",
+                    e
+                ))
+            })?;
+        // The localized name index's state records too (plan Phase 12): the
+        // copy brings peer claims this node's records never vouched for.
+        crate::localized_name::state::mark_all_not_built(self.db.db()).map_err(|e| {
+            raisin_replication::CoordinatorError::Storage(format!(
+                "Failed to mark localized name state NotBuilt before checkpoint copy: {}",
+                e
+            ))
+        })?;
+
         // Step 2: Copy all data from ALL column families in checkpoint to target database
         // CRITICAL: Must iterate through each column family separately!
         let target_db = self.db.db().clone();
@@ -121,12 +142,17 @@ impl raisin_replication::CheckpointIngestor for RocksDbCheckpointIngestor {
                     ))
                 })?;
 
-                let target_cf = target_db.cf_handle(cf_name).ok_or_else(|| {
-                    raisin_replication::CoordinatorError::Storage(format!(
-                        "Column family '{}' not found in target database",
-                        cf_name
-                    ))
-                })?;
+                // A CF this binary does not know (a peer on a newer release
+                // added it) is skipped with a warning, never fatal: the data in
+                // it is derived or new, and refusing the whole checkpoint would
+                // leave this node unable to bootstrap at all (plan Phase 12.0).
+                let Some(target_cf) = target_db.cf_handle(cf_name) else {
+                    tracing::warn!(
+                        cf = %cf_name,
+                        "checkpoint carries a column family this binary does not know; skipping it"
+                    );
+                    continue;
+                };
 
                 let mut batch = WriteBatch::default();
                 let mut cf_count = 0usize;
@@ -220,7 +246,20 @@ impl raisin_replication::CheckpointIngestor for RocksDbCheckpointIngestor {
         // This is the blunt, correct response for a bulk path. It does not
         // re-initialize anything, so it does not reintroduce the problems the
         // note above describes.
-        raisin_core::invalidate_all_derived_caches();
+        // Scoped to THIS database: a cache keyed by database (the compound
+        // definitions) drops only its entries here, every other cache drops all.
+        raisin_core::invalidate_derived_caches_for_database(&self.db.db().path().to_string_lossy());
+
+        // Again AFTER the copy: INDEX_STATUS came with it, and a peer that
+        // once ingested this node's state record may have brought back a
+        // `done`. Propagated, not logged: a stale `done` here is a hole.
+        crate::management::async_indexing::repair::invalidate_rebuilds_for_ingest(&self.db)
+            .map_err(|e| {
+                raisin_replication::CoordinatorError::Storage(format!(
+                    "Failed to invalidate property index rebuilds after checkpoint copy: {}",
+                    e
+                ))
+            })?;
 
         // The copy may have re-imported corruption a repair already cleaned
         // here (from an unrepaired peer). The repairs are data-detected and
@@ -250,6 +289,30 @@ impl raisin_replication::CheckpointIngestor for RocksDbCheckpointIngestor {
                 error = %e,
                 "checkpoint ingest: could not mark compound index state stale"
             ),
+        }
+
+        // Same for the localized name index (plan Phase 12): the peer's state
+        // records and claims arrived; fail the records closed (the lookup
+        // falls back) and queue this node's own builds. Propagated, not
+        // logged: INDEX_STATUS was just put-merged from the peer, so a failure
+        // here would leave the PEER's `Ready` in force on this node.
+        let marked =
+            crate::localized_name::state::mark_all_not_built(self.db.db()).map_err(|e| {
+                raisin_replication::CoordinatorError::Storage(format!(
+                    "Failed to mark localized name state NotBuilt after checkpoint copy: {}",
+                    e
+                ))
+            })?;
+        tracing::info!(marked, "checkpoint ingest: localized name state NotBuilt");
+        if crate::localized_name::enabled() {
+            if let Err(e) = crate::management::async_indexing::repair::start_chain(
+                &self.db,
+                crate::management::async_indexing::repair::RepairKind::LocalizedNames,
+            )
+            .await
+            {
+                tracing::warn!(error = %e, "checkpoint ingest: could not queue localized name builds");
+            }
         }
 
         Ok(num_keys)

@@ -155,12 +155,6 @@ The storage system is configured via `RocksDBConfig`. Key settings include:
 - **`operation_queue_batch_timeout_ms`** - Batch timeout (default: 10ms)
 - **`cluster_node_id`** - Unique node identifier (required for replication)
 
-### Operation Log Compaction
-
-- **`oplog_compaction_min_age_secs`** - Minimum age before compaction (default: 3600s)
-- **`oplog_merge_property_updates`** - Merge consecutive property updates (default: true)
-- **`oplog_compaction_batch_size`** - Operations per compaction batch (default: 1000)
-
 ## Background Job System
 
 The storage system includes a unified background job system for asynchronous processing:
@@ -173,7 +167,6 @@ The storage system includes a unified background job system for asynchronous pro
 - **Snapshot** - Create RocksDB snapshots
 - **ReplicationGC** - Clean up old replication metadata
 - **ReplicationSync** - Pull operations from peers
-- **OpLogCompaction** - Compact operation logs
 
 ### Job System Architecture
 

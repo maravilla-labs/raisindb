@@ -29,11 +29,9 @@ Different operation types use different CRDTs:
 
 | Target | CRDT Type | Behavior |
 |--------|-----------|----------|
-| Properties | Last-Write-Wins | Vector clock + timestamp + node_id tie-breaking |
+| Node snapshots | Last-Write-Wins | Vector clock + timestamp + node_id tie-breaking |
 | Relations | Last-Write-Wins | Most recent add/remove wins |
-| Ordered Lists | RGA | Replicated Growable Array with tombstones |
-| Moves | Last-Write-Wins | With conflict event emission |
-| Deletes | Delete-Wins | Prevents resurrection of deleted entities |
+| Node deletes | Delete-Wins | The applicator's tombstones prevent resurrection |
 
 ## Quick Start
 
@@ -52,10 +50,9 @@ let op = Operation::new(
     "tenant1".to_string(),
     "repo1".to_string(),
     "main".to_string(),
-    OpType::SetProperty {
-        node_id: "abc123".to_string(),
-        property_name: "title".to_string(),
-        value: PropertyValue::String("Hello World".to_string()),
+    OpType::CreateTag {
+        tag_name: "v1".to_string(),
+        revision: "1700000000000-0".to_string(),
     },
     "user@example.com".to_string(),
 );
@@ -101,17 +98,16 @@ max_connections_per_peer = 4
 The system supports comprehensive operation types:
 
 ### Node Operations
-- `CreateNode`, `DeleteNode`, `RenameNode`, `MoveNode`
-- `SetProperty`, `DeleteProperty`
-- `SetArchetype`, `SetOrderKey`, `SetOwner`
-- `PublishNode`, `UnpublishNode`
-- `SetTranslation`, `DeleteTranslation`
+- `ApplyRevision` (one commit's node changes; decomposed before sending into)
+  `UpsertNodeSnapshot`, `DeleteNodeSnapshot`
+- `UpsertTranslationOverlay` (one translation version at its original revision)
+
+The pre-v2 granular node ops (`CreateNode`, `DeleteNode`, `SetProperty`,
+`MoveNode`, the list ops, ...) are gone; one in a saved oplog decodes as
+`Unknown` and is skipped.
 
 ### Relation Operations
 - `AddRelation`, `RemoveRelation`
-
-### List Operations (RGA CRDT)
-- `ListInsertAfter`, `ListDelete`
 
 ### Schema Operations
 - `UpdateNodeType`, `DeleteNodeType`
@@ -178,7 +174,6 @@ WebSocket handlers for real-time replication:
 | `tcp_server` | Low-level TCP replication server |
 | `tcp_protocol` | MessagePack protocol messages |
 | `gc` | Garbage collection strategies |
-| `compaction` | Operation log compaction |
 | `config` | Cluster configuration |
 | `metrics` | Replication metrics collection |
 

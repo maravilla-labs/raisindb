@@ -4,7 +4,7 @@ use super::*;
 use raisin_models::permissions::{Operation, Permission, ResolvedPermissions};
 
 /// A reader holding read on `workspace` only.
-fn reader_of(workspace: &str) -> AuthContext {
+pub(super) fn reader_of(workspace: &str) -> AuthContext {
     AuthContext::for_user("reader").with_permissions(ResolvedPermissions {
         user_id: "reader".into(),
         email: None,

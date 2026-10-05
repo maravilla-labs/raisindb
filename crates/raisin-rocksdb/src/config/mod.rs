@@ -128,6 +128,13 @@ pub struct RocksDBConfig {
     pub replication_enabled: bool,
     /// List of replication peers (for pull-based sync)
     pub replication_peers: Vec<ReplicationPeerConfig>,
+    /// Some cluster or replication setting is present on this server — a
+    /// cluster node id, a replication port or peers — whether or not
+    /// operation capture (`replication_enabled`) is on. The replication
+    /// coordinator starts from those settings alone and applies peers'
+    /// operations at their ORIGINAL revisions, so a node configured this way
+    /// must be treated as replicating (see [`Self::replicates`]).
+    pub replication_configured: bool,
 
     // Operation queue configuration (async capture for high throughput)
     /// Enable async operation queue for non-blocking operation capture
@@ -138,18 +145,6 @@ pub struct RocksDBConfig {
     pub operation_queue_batch_size: usize,
     /// Batch timeout in milliseconds (max wait for full batch)
     pub operation_queue_batch_timeout_ms: u64,
-
-    // Operation log compaction configuration
-    /// Enable periodic operation log compaction
-    pub oplog_compaction_enabled: bool,
-    /// Compaction interval in seconds (default: 21600 = 6 hours)
-    pub oplog_compaction_interval_secs: u64,
-    /// Minimum age of operations to compact in seconds (default: 3600 = 1 hour)
-    pub oplog_compaction_min_age_secs: u64,
-    /// Whether to merge consecutive SetProperty operations
-    pub oplog_merge_property_updates: bool,
-    /// Maximum operations to process per compaction run
-    pub oplog_compaction_batch_size: usize,
 
     /// Trigger circuit breaker configuration — guards against a single
     /// tenant's runaway trigger/function loop growing the job registry
@@ -181,6 +176,23 @@ pub struct RocksDBConfig {
     /// test can reach the degradation path without writing a quarter of a
     /// million entries.
     pub spatial_max_entries_per_cell: usize,
+
+    /// `index.skip_unchanged` (plan Phases 7 and 7b): an update writes only
+    /// the PROPERTY_INDEX entries that changed instead of re-putting all of
+    /// them. Default ON. Takes effect on a branch only once this node has run
+    /// the `property_index` repair there (the rebuild fills the holes full
+    /// re-puts used to heal by accident), which with the flag on queues itself
+    /// per branch in the background (`RAISIN_PROPERTY_INDEX_AUTO_REBUILD=0`
+    /// stops that). `RAISIN_INDEX_SKIP_UNCHANGED=0`/`1` overrides this field
+    /// either way. Turning it off is always a safe rollback.
+    pub index_skip_unchanged: bool,
+
+    /// Run-collapse GC (plan Phase 9): allow the admin-triggered
+    /// `collapse_runs` index repair. Default OFF; never runs at boot or on a
+    /// schedule. `RAISIN_HISTORY_GC_COLLAPSE_RUNS=1` also turns it on.
+    /// Turning it off is the rollback: what already ran deleted only
+    /// redundant versions.
+    pub history_gc_collapse_runs: bool,
 }
 
 /// Compression types supported by RocksDB
@@ -370,6 +382,34 @@ impl RocksDBConfig {
     /// [`Self::spatial_max_entries_per_cell`]).
     pub fn with_spatial_max_entries_per_cell(mut self, max_entries: usize) -> Self {
         self.spatial_max_entries_per_cell = max_entries;
+        self
+    }
+
+    /// Set `index.skip_unchanged` (see [`Self::index_skip_unchanged`]).
+    pub fn with_index_skip_unchanged(mut self, enabled: bool) -> Self {
+        self.index_skip_unchanged = enabled;
+        self
+    }
+
+    /// Whether this node may apply operations from peers, by any of the
+    /// settings that start replication. Run-collapse refuses when it does:
+    /// there is no cluster-wide causal-stability watermark.
+    pub fn replicates(&self) -> bool {
+        self.replication_enabled
+            || !self.replication_peers.is_empty()
+            || self.replication_configured
+    }
+
+    /// Mark that cluster/replication settings are present (see
+    /// [`Self::replication_configured`]).
+    pub fn with_replication_configured(mut self, configured: bool) -> Self {
+        self.replication_configured = configured;
+        self
+    }
+
+    /// Allow run-collapse GC (see [`Self::history_gc_collapse_runs`]).
+    pub fn with_history_gc_collapse_runs(mut self, enabled: bool) -> Self {
+        self.history_gc_collapse_runs = enabled;
         self
     }
 

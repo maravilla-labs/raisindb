@@ -40,7 +40,7 @@ pub(super) fn load_node_at(
 ) -> Result<Option<Node>> {
     let cf_nodes = cf_handle(db, cf::NODES)?;
     let prefix = keys::node_key_prefix(tenant_id, repo_id, branch, workspace, node_id);
-    let Some((_, bytes)) =
+    let Some((blob_revision, bytes)) =
         crate::mvcc_read::newest_at_or_before(db, cf_nodes, &prefix, Some(max_revision))?
     else {
         return Ok(None);
@@ -57,6 +57,7 @@ pub(super) fn load_node_at(
         workspace,
         node_id,
         max_revision,
+        &blob_revision,
     )
     .map(Some)
 }

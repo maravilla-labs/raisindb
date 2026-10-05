@@ -33,6 +33,12 @@
 //! That is strictly stronger: there is no window in which a node holds the record
 //! but not its index entry, and no dependence on the job system being healthy.
 
+pub mod compound;
+pub(crate) mod key_owner;
+pub mod localized_node_names;
+pub mod node_commit;
+pub mod node_lock;
+pub mod property_delta;
 pub mod property_walk;
 pub mod spatial;
 pub mod spatial_policy;
@@ -41,6 +47,15 @@ mod spatial_tests;
 pub mod spatial_tombstone;
 pub mod spatial_walk;
 
+pub use node_commit::NodeCommit;
+pub use node_lock::{lock_nodes, NodeWriteGuard};
+pub(crate) use property_delta::reassert_successors;
+pub use property_delta::{
+    corrected_staged_writes, in_place_scans_capped, resolve_baseline, skipped_unchanged_entries,
+    tombstone_all_entries, tombstone_superseded_entries, write_property_index_delta, Baseline,
+    DeltaCounts, InPlace, InPlaceTargets, OwnedBaseline, PendingDeltaCheck, PropertyIndexTarget,
+    StagedDeltaCheck,
+};
 pub use property_walk::{walk_properties, walk_properties_mut, WalkCursor};
 pub use spatial::{
     write_node_spatial_indexes, write_spatial_property, SpatialIndexTargets, TombstonePrecisions,

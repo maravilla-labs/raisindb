@@ -20,6 +20,10 @@ mod history;
 // Workspace delta overlay
 mod workspace_delta;
 
+// Localized URL lookup (plan Phase 12)
+mod localized;
+pub use localized::LocalizedNode;
+
 // UpdateBuilder fluent API
 mod update_builder;
 pub use update_builder::UpdateBuilder;

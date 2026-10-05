@@ -37,10 +37,9 @@ mod relation_operations;
 mod secret_operations;
 mod tag_operations;
 mod tenant_operations;
+mod translation_operations;
 mod user_operations;
 
 // Re-export the main applicator
 mod applicator;
-pub use applicator::{
-    scoped_miss_fallbacks, unknown_workspace_scans, OperationApplicator, WorkspaceHint,
-};
+pub use applicator::{unknown_workspace_scans, OperationApplicator, WorkspaceHint};

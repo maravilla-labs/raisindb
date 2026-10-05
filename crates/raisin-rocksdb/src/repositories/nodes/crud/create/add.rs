@@ -39,6 +39,16 @@ impl NodeRepositoryImpl {
         // Node::ensure_write_timestamps for why every write path must do this).
         node.ensure_write_timestamps();
 
+        // The id's stored versions, recorded before anything is read: the
+        // commit re-checks them under the node's lock (`StagedDeltaCheck`,
+        // plan Phase 7b), so a version of this id committed in between is
+        // ended rather than left live beside this create's `NoPrior` put.
+        let pending_check = crate::indexing::StagedDeltaCheck::before_read(
+            &self.db,
+            &crate::indexing::IndexCtx::new(tenant_id, repo_id, branch, workspace),
+            &node.id,
+        )?;
+
         // VALIDATION 1: Check workspace allowed_node_types
         let is_root_node = node.parent_path().map(|p| p == "/").unwrap_or(false);
         self.validate_workspace_allows_node_type(
@@ -129,14 +139,37 @@ impl NodeRepositoryImpl {
 
         let order_label_time = order_step_start.elapsed().as_micros();
 
-        // Use shared indexing helper (DRY - eliminates 200+ lines of duplication)
-        self.add_node_indexes_to_batch(
-            &mut batch, &node, tenant_id, repo_id, branch, workspace, &revision,
+        // Localized node name uniqueness, when the repository enforces it (plan
+        // Phase 12; `None` otherwise): checked now, and again at the commit
+        // step under the branch lock (`localized_name::unique::deferred`).
+        let name_check = crate::localized_name::unique::NameCheck::staged(
+            &self.db,
+            crate::localized_name::keys::NameScope::new(tenant_id, repo_id, branch, workspace),
+            &node,
+            None,
+            &revision,
+            crate::localized_name::sync::Overrides::new(),
         )?;
 
-        // Add compound indexes if NodeType defines them
-        self.add_compound_indexes_to_batch(
-            &mut batch, &node, tenant_id, repo_id, branch, workspace, &revision,
+        // Use shared indexing helper (DRY - eliminates 200+ lines of duplication)
+        self.add_node_indexes_to_batch(
+            &mut batch,
+            &node,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            &revision,
+            crate::repositories::nodes::PropertyWrite::CREATE,
+        )?;
+
+        // Add compound indexes if NodeType defines them (a create: no prior).
+        self.add_compound_delta_to_batch(
+            &mut batch,
+            &crate::indexing::IndexCtx::new(tenant_id, repo_id, branch, workspace),
+            crate::indexing::Baseline::NoPrior,
+            &node,
+            &revision,
         )
         .await?;
 
@@ -161,9 +194,13 @@ impl NodeRepositoryImpl {
         // the branch record lock so a concurrent writer cannot regress HEAD.
         let step_start = std::time::Instant::now();
 
+        // Locked like every write of the node, and re-validated (plan Phase 7b).
+        let mut commit = crate::indexing::NodeCommit::new(tenant_id, repo_id, branch);
+        commit.check(pending_check.at(&revision), Some(node.clone()));
+        commit.check_name(name_check);
         let updated_branch = self
             .branch_repo
-            .write_batch_with_head(batch, tenant_id, repo_id, branch, revision)
+            .write_nodes_with_head(batch, tenant_id, repo_id, branch, revision, &commit)
             .await?;
 
         let rocksdb_write_time = step_start.elapsed().as_micros();

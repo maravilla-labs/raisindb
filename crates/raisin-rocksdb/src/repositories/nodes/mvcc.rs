@@ -35,7 +35,7 @@ impl NodeRepositoryImpl {
 
                 // Deserialize node and materialize path if needed
                 let node = self.deserialize_node_with_path(
-                    &bytes, tenant_id, repo_id, branch, workspace, node_id, revision,
+                    &bytes, tenant_id, repo_id, branch, workspace, node_id, revision, revision,
                 )?;
                 Ok(Some(node))
             }
@@ -103,8 +103,16 @@ impl NodeRepositoryImpl {
                 }
 
                 // Deserialize node and materialize path if needed
+                // Path as of the read (`max_revision`), not the blob's revision.
                 let node = self.deserialize_node_with_path(
-                    &value, tenant_id, repo_id, branch, workspace, node_id, &rev,
+                    &value,
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    node_id,
+                    max_revision,
+                    &rev,
                 )?;
                 return Ok(Some(node));
             }
@@ -266,7 +274,7 @@ impl NodeRepositoryImpl {
             } else {
                 // Deserialize node and materialize path if needed
                 let node = self.deserialize_node_with_path(
-                    &value, tenant_id, repo_id, branch, workspace, node_id, &revision,
+                    &value, tenant_id, repo_id, branch, workspace, node_id, &revision, &revision,
                 )?;
                 history.push((revision, Some(node)));
             }
@@ -339,8 +347,10 @@ impl NodeRepositoryImpl {
                         nodes_map.insert(node_id, None);
                     } else {
                         // Deserialize node and materialize path if needed
+                        // Path as of the read, not the blob's revision.
                         let node = self.deserialize_node_with_path(
-                            &value, tenant_id, repo_id, branch, workspace, &node_id, &node_rev,
+                            &value, tenant_id, repo_id, branch, workspace, &node_id, revision,
+                            &node_rev,
                         )?;
                         nodes_map.insert(node_id, Some(node));
                     }

@@ -57,6 +57,11 @@ pub struct UpdateRepositoryRequest {
     /// is; change it with `PATCH /api/repositories/{repo}/translation-config`.
     #[serde(default)]
     pub supported_languages: Option<Vec<String>>,
+
+    /// Settings of the localized name index (plan Phase 12):
+    /// `{ "enforce_unique": false }`. Omitted: kept as it is.
+    #[serde(default)]
+    pub localized_names: Option<raisin_context::LocalizedNameConfig>,
 }
 
 /// Request to update translation configuration
@@ -219,6 +224,7 @@ pub async fn create_repository(
             default_language,
             supported_languages,
             locale_fallback_chains: std::collections::HashMap::new(),
+            localized_names: Default::default(),
         };
 
         repo_mgmt
@@ -306,7 +312,10 @@ pub async fn update_repository(
         // Kept as it is: changing it is a re-index, done by PATCH translation-config
         default_language: existing.config.default_language,
         supported_languages,
-        locale_fallback_chains: existing.config.locale_fallback_chains, // Preserve existing fallback chains
+        locale_fallback_chains: existing.config.locale_fallback_chains, // Preserve existing fallback chains,
+        localized_names: req
+            .localized_names
+            .unwrap_or(existing.config.localized_names),
     };
 
     repo_mgmt

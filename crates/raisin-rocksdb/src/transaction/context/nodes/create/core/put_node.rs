@@ -46,6 +46,14 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
     // A node above HEAD is the SAME node, so the correct answer is UPDATE.
     // Falling through to update supersedes it with a fresh revision, and the
     // commit advances HEAD past it — that is the self-heal.
+    //
+    // The node's stored versions are recorded BEFORE `existing_node` (this
+    // write's index baseline unless a proven predecessor replaces it) is
+    // read: the commit re-checks them under the node's commit lock
+    // (`indexing::StagedDeltaCheck`, plan Phase 7b). Only for the node's
+    // first write in this transaction.
+    let index_ctx = crate::indexing::IndexCtx::new(&tenant_id, &repo_id, &branch, workspace);
+    let pending_check = tx.pending_delta_check(&index_ctx, &normalized_node.id)?;
     let existing_node = match super::super::super::read::get_node(tx, workspace, &node.id).await? {
         Some(found) => Some(found),
         None => super::super::super::read::get_node_ignoring_head(tx, workspace, &node.id).await?,
@@ -286,7 +294,16 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
         None
     };
     let revision = match reused_revision {
-        Some(hlc) => hlc,
+        Some(hlc) => {
+            // An in-place write: the commit takes the in-place guard
+            // (`in_place_guard.rs`) so the `node_path` backfill cannot land a
+            // stale NODE_PATH entry on this revision under it.
+            tx.metadata
+                .lock()
+                .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?
+                .in_place_record_write = true;
+            hlc
+        }
         None => tx.get_or_allocate_transaction_revision()?,
     };
 
@@ -369,145 +386,55 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
         .capture_secret_versions(&tenant_id, &repo_id, &branch, &vault_actor, &secret_ops)
         .await;
 
-    // 7. Update read cache for read-your-writes semantics
-    cache::update_read_cache(
-        tx,
-        workspace,
-        &normalized_node,
-        old_path.as_deref().filter(|_| path_changed),
-    )?;
-
-    // 8. Write node to batch
-    let node_key = storage::write_node_to_batch(
-        tx,
-        &tenant_id,
-        &repo_id,
-        &branch,
-        workspace,
-        &normalized_node,
-        &revision,
-    )?;
-    tx.record_write(node_key)?;
-
-    // 9. Write path index
-    storage::write_path_index(
-        tx,
-        &tenant_id,
-        &repo_id,
-        &branch,
-        workspace,
-        &normalized_node.path,
-        &normalized_node.id,
-        &revision,
-        old_path.as_deref().filter(|_| path_changed),
-    )?;
-
-    // 9a. Tombstone old spatial indexes on update (before re-indexing)
-    if let Some(ref old_node) = existing_node {
-        indexing::tombstone_spatial_properties(
-            tx,
-            &tenant_id,
-            &repo_id,
-            &branch,
-            workspace,
-            old_node,
-            Some(&normalized_node),
+    // 11-pre. The index baseline (plan Phase 7). Unchanged entries may be
+    // skipped only against a proven predecessor: never for an in-place write
+    // (full put against the version it overwrites, at max(R, newest group
+    // entry)), and never when this transaction already wrote or moved the node
+    // — its entries at R are then staged in this very batch, and a diff
+    // against the committed predecessor would leave them live.
+    let in_place = reused_revision.is_some();
+    let touched_in_tx = {
+        let cache = tx
+            .read_cache
+            .lock()
+            .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
+        let key = (workspace.to_string(), normalized_node.id.clone());
+        cache.nodes.contains_key(&key) || cache.moved_nodes.contains_key(&key)
+    };
+    // The baseline is proven now, at staging; the commit re-checks it under
+    // the node's commit lock against the versions recorded before
+    // `existing_node` was read (above) — whatever `index.skip_unchanged`
+    // says: a full write also derives the entries it ENDS from the version it
+    // read. An in-place write is re-checked too (a racing in-place rewrite at
+    // the same revision changes the marker's hash), and so is a create (a
+    // version of the id committed in between must be ended).
+    let resolve_in_place_targets = in_place && tx.node_repo.index_skip_unchanged();
+    if let Some(pending) = pending_check {
+        let check = if in_place {
+            pending.in_place_at(&revision, resolve_in_place_targets)
+        } else {
+            pending.at(&revision)
+        };
+        tx.record_delta_check(workspace, check)?;
+    }
+    let baseline = match existing_node.as_ref() {
+        None => crate::indexing::OwnedBaseline::NoPrior,
+        Some(existing) if in_place || touched_in_tx => {
+            crate::indexing::OwnedBaseline::Full(Some(existing.clone()))
+        }
+        Some(existing) => tx.node_repo.delta_baseline(
+            &index_ctx,
+            &normalized_node.id,
             &revision,
-        )?;
-    }
+            Some(existing),
+        )?,
+    };
 
-    // 9b. Tombstone stale property-index values on update (value changed /
-    // property removed / published tag flipped) — otherwise equality scans on
-    // the OLD value keep matching this node forever.
-    if let Some(ref old_node) = existing_node {
-        indexing::tombstone_stale_property_indexes(
-            tx,
-            &tenant_id,
-            &repo_id,
-            &branch,
-            workspace,
-            old_node,
-            &normalized_node,
-            &revision,
-        )?;
-    }
-
-    // 10. Index all properties
-    indexing::index_node_properties(
-        tx,
-        &tenant_id,
-        &repo_id,
-        &branch,
-        workspace,
-        &normalized_node,
-        &revision,
-    )?;
-
-    // 10b. Tombstone stale reference-index entries on update (reference
-    // removed / retargeted) — otherwise REFERENCES()/backlinks keep matching
-    // this node against the OLD target forever.
-    if let Some(ref old_node) = existing_node {
-        indexing::tombstone_stale_reference_indexes(
-            tx,
-            &tenant_id,
-            &repo_id,
-            &branch,
-            workspace,
-            old_node,
-            &normalized_node,
-            &revision,
-        )?;
-    }
-
-    // 11. Index references
-    indexing::index_node_references(
-        tx,
-        &tenant_id,
-        &repo_id,
-        &branch,
-        workspace,
-        &normalized_node,
-        &revision,
-    )?;
-
-    // 11a. Handle unique index updates
-    if let Some(ref old_node) = existing_node {
-        indexing::tombstone_unique_properties(
-            tx, &tenant_id, &repo_id, &branch, workspace, old_node, &revision,
-        )
-        .await?;
-    }
-    indexing::index_unique_properties(
-        tx,
-        &tenant_id,
-        &repo_id,
-        &branch,
-        workspace,
-        &normalized_node,
-        &revision,
-    )
-    .await?;
-
-    // 11b. Handle compound index updates: tombstone the OLD value entries first
-    // (a column value change such as status held -> confirmed must not leave a
-    // stale old-value entry live), then write the new entries.
-    if let Some(ref old_node) = existing_node {
-        indexing::tombstone_compound_indexes_tx(
-            tx, &tenant_id, &repo_id, &branch, workspace, old_node,
-        )?;
-    }
-    indexing::index_compound_indexes(
-        tx,
-        &tenant_id,
-        &repo_id,
-        &branch,
-        workspace,
-        &normalized_node,
-        &revision,
-    )
-    .await?;
-
-    // 12. Handle ORDERED_CHILDREN index
+    // 12. ORDERED_CHILDREN, BEFORE the node record is cached or written: the
+    // label it mints is the node's `order_key`, and the blob must carry the
+    // label the index holds (`Node.order_key == ORDERED_CHILDREN label`).
+    // Stamping it after the blob was written left every stored record with
+    // the client's (usually empty) order_key.
     let parent_id = ordering::lookup_parent_id(
         tx,
         &tenant_id,
@@ -547,8 +474,8 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
     }
 
     // 12b. Add or update ordering entry
-    if let Some(parent_id_val) = parent_id {
-        let (order_label, is_new_node) = ordering::add_ordered_child(
+    let ordering_entry = match parent_id.as_ref() {
+        Some(parent_id_val) => Some(ordering::add_ordered_child(
             tx,
             &tenant_id,
             &repo_id,
@@ -557,11 +484,156 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
             &parent_id_val,
             &normalized_node,
             &revision,
-        )?;
-
+            existing_node.as_ref(),
+        )?),
+        None => None,
+    };
+    if let Some((order_label, _)) = &ordering_entry {
         normalized_node.order_key = order_label.clone();
+    }
 
-        // 13. Track changes
+    // 7. Update read cache for read-your-writes semantics
+    cache::update_read_cache(
+        tx,
+        workspace,
+        &normalized_node,
+        old_path.as_deref().filter(|_| path_changed),
+    )?;
+
+    // 8. Write node to batch
+    let node_key = storage::write_node_to_batch(
+        tx,
+        &tenant_id,
+        &repo_id,
+        &branch,
+        workspace,
+        &normalized_node,
+        parent_id.as_deref(),
+        &revision,
+    )?;
+    tx.record_write(node_key)?;
+
+    // 9. Write path index
+    storage::write_path_index(
+        tx,
+        &tenant_id,
+        &repo_id,
+        &branch,
+        workspace,
+        &normalized_node.path,
+        &normalized_node.id,
+        &revision,
+        old_path.as_deref().filter(|_| path_changed),
+    )?;
+
+    // 9a. Tombstone old spatial indexes on update (before re-indexing)
+    if let Some(ref old_node) = existing_node {
+        indexing::tombstone_spatial_properties(
+            tx,
+            &tenant_id,
+            &repo_id,
+            &branch,
+            workspace,
+            old_node,
+            Some(&normalized_node),
+            &revision,
+        )?;
+    }
+
+    // 10. Index all properties through the one delta writer: stale values of
+    // the replaced version tombstoned (value changed / property removed /
+    // published tag flipped), new entries put — only the changed ones under a
+    // proven predecessor.
+    // An in-place write's above-R group lookup (opt-in with the flag, see
+    // `property_delta::in_place`), read BEFORE the batch mutex is taken.
+    let in_place_targets = if resolve_in_place_targets {
+        Some(crate::indexing::InPlaceTargets::resolve(
+            &tx.db,
+            &index_ctx,
+            existing_node.as_ref(),
+            &normalized_node,
+            &revision,
+        )?)
+    } else {
+        None
+    };
+    indexing::index_node_properties(
+        tx,
+        &tenant_id,
+        &repo_id,
+        &branch,
+        workspace,
+        &normalized_node,
+        &revision,
+        crate::repositories::nodes::PropertyWrite {
+            baseline: baseline.as_ref(),
+            in_place: if in_place {
+                crate::indexing::InPlace::Reused(in_place_targets.as_ref())
+            } else {
+                crate::indexing::InPlace::No
+            },
+        },
+    )?;
+
+    // 10b. Tombstone stale reference-index entries on update (reference
+    // removed / retargeted) — otherwise REFERENCES()/backlinks keep matching
+    // this node against the OLD target forever.
+    if let Some(ref old_node) = existing_node {
+        indexing::tombstone_stale_reference_indexes(
+            tx,
+            &tenant_id,
+            &repo_id,
+            &branch,
+            workspace,
+            old_node,
+            &normalized_node,
+            &revision,
+        )?;
+    }
+
+    // 11. Index references (every reference: only PROPERTY_INDEX skips)
+    indexing::index_node_references(
+        tx,
+        &tenant_id,
+        &repo_id,
+        &branch,
+        workspace,
+        &normalized_node,
+        &revision,
+    )?;
+
+    // 11a. Handle unique index updates (every claim re-put; changed ones
+    // tombstoned).
+    indexing::write_unique_properties(
+        tx,
+        &tenant_id,
+        &repo_id,
+        &branch,
+        workspace,
+        existing_node.as_ref(),
+        &normalized_node,
+        &revision,
+        in_place,
+    )
+    .await?;
+
+    // 11b. Compound index: the old tuple tombstoned (a status held ->
+    // confirmed flip must not leave `held` matching), the new one written, both
+    // derived against the property index's baseline.
+    indexing::write_compound_indexes(
+        tx,
+        &tenant_id,
+        &repo_id,
+        &branch,
+        workspace,
+        baseline.as_ref(),
+        &normalized_node,
+        &revision,
+    )
+    .await?;
+
+    // 13. Track changes
+    if let Some((order_label, is_new_node)) = ordering_entry {
         if is_new_node {
             tracking::track_create(tx, workspace, &normalized_node, revision)?;
         } else if let Some(ref old_node) = existing_node {

@@ -287,16 +287,23 @@ impl RepositoryManagementRepository for RepositoryManagementRepositoryImpl {
         config: RepositoryConfig,
     ) -> Result<()> {
         if let Some(mut info) = self.get_repository(tenant_id, repo_id).await? {
-            info.config = config;
+            let previous = std::mem::replace(&mut info.config, config);
 
             let key = keys::repository_key(tenant_id, repo_id);
             let value = rmp_serde::to_vec(&info)
                 .map_err(|e| raisin_error::Error::storage(format!("Serialization error: {}", e)))?;
 
-            let cf = cf_handle(&self.db, cf::REGISTRY)?;
-            self.db
-                .put_cf(cf, key, value)
-                .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+            // A localized-name configuration change flips the index state in
+            // the same batch (plan Phase 12).
+            crate::localized_name::config_change::write_repository_record(
+                &self.db,
+                tenant_id,
+                repo_id,
+                &key,
+                &value,
+                Some(&previous),
+                &info.config,
+            )?;
 
             // Capture operation for replication
             if let Some(ref capture) = self.operation_capture {

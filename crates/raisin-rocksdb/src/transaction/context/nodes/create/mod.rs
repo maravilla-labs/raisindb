@@ -48,10 +48,11 @@
 //! - `tracking`: Change tracking for replication and events
 //! - `references`: Path-based reference resolution
 
+mod append_label;
 mod cache;
 mod coercion;
 mod core;
-mod indexing;
+pub(super) mod indexing;
 mod metadata;
 mod ordering;
 pub(crate) mod references;
@@ -60,5 +61,6 @@ mod tracking;
 mod validation;
 
 // Re-export the public API
+pub(crate) use append_label::{next_append_label_tx, record_appended_label_tx};
 pub use core::{add_node, put_node};
 pub(crate) use tracking::track_reorder;

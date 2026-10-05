@@ -162,6 +162,7 @@ export enum RequestType {
   NodeUpdate = 'node_update',
   NodeDelete = 'node_delete',
   NodeGet = 'node_get',
+  NodeGetByLocalizedPath = 'node_get_by_localized_path',
   NodeQuery = 'node_query',
   NodeQueryByPath = 'node_query_by_path',
   NodeQueryByProperty = 'node_query_by_property',
@@ -519,6 +520,30 @@ export interface NodeGetPayload {
  * Node history payload (git-style "file history").
  * Identify the node by either `node_id` or `path`.
  */
+/**
+ * Payload of `node_get_by_localized_path`: a node by its localized URL path
+ * (`/produits/chaise` in `fr`).
+ */
+export interface NodeGetByLocalizedPathPayload {
+  locale: string;
+  path: string;
+}
+
+/**
+ * A node found by its localized path: the node translated into the locale,
+ * its canonical and canonical localized paths, hreflang alternates (hidden
+ * and unreadable locales omitted) and whether the request should be
+ * redirected (301) to `canonical_localized_path`.
+ */
+export interface LocalizedNode {
+  node: Node;
+  canonical_path: string;
+  canonical_localized_path: string;
+  redirect: boolean;
+  alternates: Record<string, string>;
+  served_by: 'default_language' | 'index' | 'fallback';
+}
+
 export interface NodeHistoryPayload {
   node_id?: string;
   path?: string;

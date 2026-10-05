@@ -29,9 +29,8 @@
 //! - `delete_without_cascade`: Delete a node only if it has no children
 //!
 //! Internal helpers (pub(in super::super)):
-//! - `delete_node_with_revision`: Delete single node with specific revision
-//! - `delete_descendants_with_revision`: Delete all descendants with revision
-//! - `delete_tree_with_single_batch`: Optimized whole-tree deletion
+//! - `stage_tree_delete`: Stage a whole-tree deletion into one batch (the
+//!   caller commits it through the node commit step, plan Phase 7b)
 //! - `add_node_tombstones_to_batch`: Core tombstone writing logic
 
 mod single;

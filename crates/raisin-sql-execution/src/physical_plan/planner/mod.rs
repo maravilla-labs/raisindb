@@ -25,6 +25,8 @@ mod vector_search;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_compound_review;
+#[cfg(test)]
 mod tests_spatial;
 
 use super::catalog::IndexCatalog;
@@ -43,7 +45,7 @@ use std::sync::Arc;
 /// When populated via [`PhysicalPlanner::set_schema_statistics`], the planner
 /// uses these counts to derive per-column selectivity instead of falling back
 /// to hard-coded defaults (e.g. `1 / node_type_count` instead of `0.05`).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SchemaStats {
     /// Number of distinct NodeType definitions on this branch.
     pub node_type_count: usize,
@@ -172,6 +174,10 @@ pub struct PhysicalPlanner {
     /// When set, equality predicates on `node_type` and `archetype` columns
     /// use `1 / count` instead of the default 0.05 heuristic.
     schema_stats: Option<SchemaStats>,
+    /// The revision the statement is pinned to (`__revision = N`); `None`
+    /// for a HEAD read. A compound index answers only reads at or above its
+    /// build's history floor (`CompoundAvailability::at_revision`).
+    read_revision: Option<raisin_hlc::HLC>,
 }
 
 impl PhysicalPlanner {
@@ -207,6 +213,7 @@ impl PhysicalPlanner {
             index_catalog: Arc::new(RocksDBIndexCatalog::new()),
             compound_indexes: Vec::new(),
             schema_stats: None,
+            read_revision: None,
         }
     }
 
@@ -226,6 +233,7 @@ impl PhysicalPlanner {
             index_catalog: Arc::new(RocksDBIndexCatalog::new()),
             compound_indexes: Vec::new(),
             schema_stats: None,
+            read_revision: None,
         }
     }
 
@@ -245,6 +253,7 @@ impl PhysicalPlanner {
             index_catalog: catalog,
             compound_indexes: Vec::new(),
             schema_stats: None,
+            read_revision: None,
         }
     }
 
@@ -318,13 +327,15 @@ impl PhysicalPlanner {
         else {
             return raisin_storage::compound::CompoundAvailability::NotBuilt;
         };
-        self.index_catalog.compound_index_availability(
-            &self.default_tenant_id,
-            &self.default_repo_id,
-            branch,
-            workspace,
-            definition,
-        )
+        self.index_catalog
+            .compound_index_availability(
+                &self.default_tenant_id,
+                &self.default_repo_id,
+                branch,
+                workspace,
+                definition,
+            )
+            .at_revision(self.read_revision.as_ref())
     }
 
     /// Convert a logical plan to a physical plan (public entry point)

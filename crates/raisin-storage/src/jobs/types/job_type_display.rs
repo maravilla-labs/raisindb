@@ -76,9 +76,6 @@ impl fmt::Display for JobType {
                     write!(f, "ReplicationSync({}/{})", tenant_id, repo_id)
                 }
             }
-            Self::OpLogCompaction { tenant_id, repo_id } => {
-                write!(f, "OpLogCompaction({}/{})", tenant_id, repo_id)
-            }
             Self::PropertyIndexBuild {
                 tenant_id,
                 repo_id,

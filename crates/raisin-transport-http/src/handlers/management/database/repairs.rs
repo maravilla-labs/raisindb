@@ -117,8 +117,10 @@ fn rocksdb(state: &AppState) -> Result<&raisin_rocksdb::RocksDBStorage, HandlerE
 
 fn kind(repair: &str) -> Result<RepairKind, HandlerError> {
     RepairKind::from_slug(repair).ok_or_else(|| {
+        let expected: Vec<&str> = RepairKind::ALL.iter().map(RepairKind::slug).collect();
         bad_request(format!(
-            "unknown repair '{repair}' (expected ordered_children or path_tombstone)"
+            "unknown repair '{repair}' (expected one of: {})",
+            expected.join(", ")
         ))
     })
 }

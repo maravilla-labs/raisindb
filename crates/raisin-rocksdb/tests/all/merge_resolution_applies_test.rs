@@ -64,6 +64,7 @@ impl Env {
                     default_branch: "main".to_string(),
                     description: Some("merge resolution test".to_string()),
                     tags: HashMap::new(),
+                    localized_names: Default::default(),
                 },
             )
             .await?;

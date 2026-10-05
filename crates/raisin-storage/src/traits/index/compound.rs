@@ -39,6 +39,32 @@ pub enum CompoundColumnValue {
     Boolean(bool),
 }
 
+impl CompoundColumnValue {
+    /// The ONE encoding of a `String` column's value, shared by the index
+    /// writers and the SQL executor's equality prefix.
+    ///
+    /// A string the property decoder reads back as a DATE is stored as that
+    /// date: `PropertyValue` is untagged, and any string
+    /// `DateTime::parse_from_rfc3339` accepts decodes as `Date`. A writer
+    /// deriving entries from the in-memory node saw the string, one deriving
+    /// them from the stored version (a baseline, a rebuild) saw the date — two
+    /// different keys for one value, so an update could never tombstone what
+    /// the insert wrote, and a rebuild left such nodes out of the index. Both
+    /// spellings therefore encode as the date's canonical RFC3339 text.
+    pub fn text(value: &str) -> Self {
+        match chrono::DateTime::parse_from_rfc3339(value) {
+            Ok(dt) => Self::date_text(dt.with_timezone(&chrono::Utc)),
+            Err(_) => Self::String(value.to_string()),
+        }
+    }
+
+    /// A `Date` value in a `String` column: its canonical RFC3339 text (UTC,
+    /// `Z`, the shortest exact fraction) — see [`Self::text`].
+    pub fn date_text(value: chrono::DateTime<chrono::Utc>) -> Self {
+        Self::String(value.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true))
+    }
+}
+
 /// Compound index repository for multi-column queries with ORDER BY.
 ///
 /// Compound indexes enable efficient execution of queries like:
@@ -94,8 +120,13 @@ pub trait CompoundIndexRepository: Send + Sync {
     /// Scans the index for entries matching all provided equality column values.
     /// Results are returned in index order (sorted by trailing timestamp column).
     ///
+    /// Each `(tuple, node)` is decided by its newest entry at or below
+    /// `max_revision` (`None` = every stored entry): a read at a past revision
+    /// sees the index as it stood then.
+    ///
     /// # Returns
     /// Vector of (node_id, optional_timestamp) entries in index order.
+    #[allow(clippy::too_many_arguments)]
     fn scan_compound_index(
         &self,
         scope: StorageScope<'_>,
@@ -104,6 +135,7 @@ pub trait CompoundIndexRepository: Send + Sync {
         published_only: bool,
         ascending: bool,
         limit: Option<usize>,
+        max_revision: Option<&HLC>,
     ) -> impl std::future::Future<Output = Result<Vec<CompoundIndexScanEntry>>> + Send;
 
     /// Remove all compound index entries for a node across all indexes.

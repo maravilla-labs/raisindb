@@ -128,6 +128,14 @@ pub trait Storage: Send + Sync {
         None
     }
 
+    /// The localized name index (plan Phase 12): localized URL lookup.
+    ///
+    /// `None` means the backend has no such index; `NodeService` reports
+    /// localized lookup as unsupported rather than guessing.
+    fn localized_names(&self) -> Option<Arc<dyn crate::localized::LocalizedNameSource>> {
+        None
+    }
+
     /// Operator surface for the spatial index: local state, a physical entry
     /// census, and rebuild scheduling.
     ///

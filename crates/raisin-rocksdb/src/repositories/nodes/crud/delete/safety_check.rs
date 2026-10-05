@@ -18,7 +18,6 @@ impl NodeRepositoryImpl {
         workspace: &str,
         node_id: &str,
     ) -> Result<()> {
-        let cf_reference = cf_handle(&self.db, cf::REFERENCE_INDEX)?;
         let cf_relation = cf_handle(&self.db, cf::RELATION_INDEX)?;
 
         let mut referencing_nodes = Vec::new();
@@ -34,7 +33,6 @@ impl NodeRepositoryImpl {
 
         // Check for incoming references (both published and unpublished)
         self.check_incoming_references(
-            cf_reference,
             &mut referencing_nodes,
             &node,
             tenant_id,
@@ -74,7 +72,6 @@ impl NodeRepositoryImpl {
     #[allow(clippy::too_many_arguments)]
     async fn check_incoming_references(
         &self,
-        cf_reference: &rocksdb::ColumnFamily,
         referencing_nodes: &mut Vec<String>,
         node: &raisin_models::nodes::Node,
         tenant_id: &str,
@@ -84,69 +81,49 @@ impl NodeRepositoryImpl {
         node_id: &str,
     ) -> Result<()> {
         for published in [false, true] {
-            // Reverse index is keyed by the TARGET's node id (stable across moves).
-            let ref_prefix = keys::reference_reverse_prefix(
-                tenant_id, repo_id, branch, workspace, workspace, &node.id, published,
-            );
-
-            let iter = crate::prefix_scan(&self.db, cf_reference, &ref_prefix);
-
+            // Reverse index is keyed by the TARGET's node id (stable across
+            // moves). Read through the shared reader: only a reference whose
+            // NEWEST entry is live still exists.
+            let referrers = crate::repositories::reference_index::live_referrers(
+                &self.db,
+                raisin_storage::StorageScope::new(tenant_id, repo_id, branch, workspace),
+                workspace,
+                &node.id,
+                published,
+                None,
+            )?;
             let mut seen_sources = HashSet::new();
-
-            for item in iter {
-                let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
-
-                if !key.starts_with(&ref_prefix) {
-                    break;
-                }
-
-                if is_tombstone(&value) {
+            for (source_node_id, _property_path) in referrers {
+                if source_node_id == node_id || !seen_sources.insert(source_node_id.clone()) {
                     continue;
                 }
-
-                // Parse key to extract source_node_id
-                // Key format: {tenant}\0{repo}\0{branch}\0{workspace}\0ref_rev{_pub}\0{target_workspace}\0{target_path}\0{source_node_id}\0{property_path}\0{~revision}
-                let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
-                if parts.len() >= 8 {
-                    let source_node_id = String::from_utf8_lossy(parts[7]).to_string();
-
-                    tracing::debug!(
-                        "check_delete_safety: Found reference from source_node_id='{}' to target='{}'",
-                        source_node_id, node.path
-                    );
-
-                    if source_node_id != node_id && !seen_sources.contains(&source_node_id) {
-                        seen_sources.insert(source_node_id.clone());
-
-                        match self
-                            .get_impl(
-                                tenant_id,
-                                repo_id,
-                                branch,
-                                workspace,
-                                &source_node_id,
-                                false,
-                            )
-                            .await
-                        {
-                            Ok(Some(source_node)) => {
-                                referencing_nodes.push(source_node.path.clone());
-                            }
-                            Ok(None) => {
-                                tracing::warn!(
-                                    "check_delete_safety: Source node '{}' not found - reference index may be stale",
-                                    source_node_id
-                                );
-                            }
-                            Err(e) => {
-                                tracing::error!(
-                                    "check_delete_safety: Error getting source node '{}': {}",
-                                    source_node_id,
-                                    e
-                                );
-                                return Err(e);
-                            }
-                        }
+                match self
+                    .get_impl(
+                        tenant_id,
+                        repo_id,
+                        branch,
+                        workspace,
+                        &source_node_id,
+                        false,
+                    )
+                    .await
+                {
+                    Ok(Some(source_node)) => {
+                        referencing_nodes.push(source_node.path.clone());
+                    }
+                    Ok(None) => {
+                        tracing::warn!(
+                            "check_delete_safety: Source node '{}' not found - reference index may be stale",
+                            source_node_id
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "check_delete_safety: Error getting source node '{}': {}",
+                            source_node_id,
+                            e
+                        );
+                        return Err(e);
                     }
                 }
             }

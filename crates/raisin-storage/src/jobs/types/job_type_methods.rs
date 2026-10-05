@@ -186,9 +186,6 @@ impl JobType {
                 repo_id,
                 peer_id.as_deref().unwrap_or("*")
             ),
-            Self::OpLogCompaction { tenant_id, repo_id } => {
-                format!("oplog_compact:{}:{}", tenant_id, repo_id)
-            }
             Self::BulkSql { sql, actor } => {
                 let sp = if sql.len() > 32 { &sql[..32] } else { sql };
                 format!("bulk_sql:{}:{}", actor, sp)
@@ -456,7 +453,6 @@ impl JobType {
             | Self::RelationConsistencyCheck { .. }
             | Self::ReplicationGC { .. }
             | Self::ReplicationSync { .. }
-            | Self::OpLogCompaction { .. }
             | Self::HuggingFaceModelDownload { .. }
             | Self::HuggingFaceModelDelete { .. }
             | Self::AssetProcessing { .. } => JobCategory::Background,
@@ -533,7 +529,6 @@ impl JobType {
             | Self::NodeDeleteCleanup { .. }
             | Self::RelationConsistencyCheck { .. }
             | Self::ReplicationGC { .. }
-            | Self::OpLogCompaction { .. }
             | Self::TreeSnapshot { .. }
             | Self::AuthSessionCleanup { .. }
             | Self::AuthTokenCleanup { .. }

@@ -290,6 +290,22 @@ impl NodeTypeRepositoryImpl {
     /// write because a status record could not be updated would take down
     /// package installs for a bookkeeping problem, and the fail-closed default
     /// already covers the case where the record is missing entirely.
+    /// Refresh the branch's cached index definitions after a NodeType write
+    /// (see `indexing::compound::defs::refresh_branch`). A failure leaves them
+    /// dropped — cold, never stale — and is logged, not propagated: the write
+    /// itself succeeded.
+    pub(super) async fn refresh_index_definitions(
+        &self,
+        scope: raisin_storage::BranchScope<'_>,
+        written: &str,
+    ) {
+        if let Err(e) =
+            crate::indexing::compound::defs::refresh_branch(&self.db, self, scope, &[written]).await
+        {
+            tracing::warn!(error = %e, "could not refresh index definitions after a NodeType write");
+        }
+    }
+
     pub(super) fn invalidate_changed_compound_state(
         db: &Arc<DB>,
         tenant_id: &str,
@@ -298,89 +314,26 @@ impl NodeTypeRepositoryImpl {
         existing: Option<&NodeType>,
         incoming: &NodeType,
     ) {
-        use std::collections::HashMap;
-
-        let hashes = |nt: Option<&NodeType>| -> HashMap<String, u64> {
-            nt.and_then(|n| n.compound_indexes.as_ref())
-                .map(|indexes| {
-                    indexes
-                        .iter()
-                        .map(|i| (i.name.clone(), i.definition_hash()))
-                        .collect()
-                })
+        let declared = |nt: Option<&NodeType>| {
+            nt.and_then(|n| n.compound_indexes.clone())
                 .unwrap_or_default()
         };
-
-        let before = hashes(existing);
-        let after = hashes(Some(incoming));
-
-        let mut stale: Vec<&String> = Vec::new();
-        for (name, hash) in &after {
-            if before.get(name) != Some(hash) {
-                stale.push(name);
-            }
-        }
-        for name in before.keys() {
-            if !after.contains_key(name) {
-                stale.push(name);
-            }
-        }
+        let stale = crate::indexing::compound::defs::changed_index_names(
+            &declared(existing),
+            &declared(Some(incoming)),
+        );
         if stale.is_empty() {
             return;
         }
 
-        let store = crate::compound_state::CompoundStateStore::new(db.clone());
         // A NodeType is branch-scoped but compound state is per WORKSPACE, and
-        // the declaration does not name one. Clearing across every workspace
-        // that has a record is the conservative reading: a spurious extra
-        // rebuild costs time, a missed one costs correctness.
-        let workspaces = match Self::workspaces_with_compound_state(db, tenant_id, repo_id, branch)
+        // the declaration does not name one: every workspace with a record is
+        // marked (a spurious rebuild costs time, a missed one correctness).
+        if let Err(e) = crate::compound_state::CompoundStateStore::new(db.clone())
+            .mark_names_on_branch(tenant_id, repo_id, branch, &stale)
         {
-            Ok(w) => w,
-            Err(e) => {
-                tracing::warn!(error = %e, "could not enumerate compound index state; skipping invalidation");
-                return;
-            }
-        };
-        for workspace in workspaces {
-            for name in &stale {
-                if let Err(e) = store.mark_not_built(tenant_id, repo_id, branch, &workspace, name) {
-                    tracing::warn!(
-                        index = %name,
-                        workspace = %workspace,
-                        error = %e,
-                        "could not invalidate compound index build state"
-                    );
-                }
-            }
+            tracing::warn!(error = %e, "could not invalidate compound index build state");
         }
-    }
-
-    /// Workspaces on this branch that carry at least one compound state record.
-    fn workspaces_with_compound_state(
-        db: &Arc<DB>,
-        tenant_id: &str,
-        repo_id: &str,
-        branch: &str,
-    ) -> Result<Vec<String>> {
-        let cf = cf_handle(db, cf::INDEX_STATUS)?;
-        let prefix = format!("compound_index\0{tenant_id}\0{repo_id}\0{branch}\0").into_bytes();
-        let mut out = std::collections::BTreeSet::new();
-        for item in crate::prefix_scan(&db, cf, &prefix) {
-            let (key, _) = item
-                .map_err(|e| RaisinError::storage(format!("compound state scan failed: {}", e)))?;
-            if !key.starts_with(&prefix) {
-                break;
-            }
-            // Remainder is `{workspace}\0{index_name}`.
-            let rest = &key[prefix.len()..];
-            if let Some(sep) = rest.iter().position(|b| *b == 0) {
-                if let Ok(ws) = std::str::from_utf8(&rest[..sep]) {
-                    out.insert(ws.to_string());
-                }
-            }
-        }
-        Ok(out.into_iter().collect())
     }
 
     pub(super) fn apply_versioning(node_type: NodeType, existing: Option<&NodeType>) -> NodeType {

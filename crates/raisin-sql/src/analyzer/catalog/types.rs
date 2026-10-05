@@ -55,7 +55,7 @@ impl SchemaTableKind {
 }
 
 /// Table definition
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TableDef {
     pub name: String,
     pub columns: Vec<ColumnDef>,
@@ -76,7 +76,7 @@ impl TableDef {
 }
 
 /// Column definition
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ColumnDef {
     pub name: String,
     pub data_type: DataType,
@@ -152,6 +152,15 @@ pub enum GeneratedExpr {
     /// This is the whole point of a wildcard path: it says WHICH geometry
     /// matched. NULL on any row not produced by a spatial access path.
     SpatialMatchedPath,
+    /// `__node_name` - the node's own TRANSLATED name in the query's locale
+    /// (its `/__node_name` overlay, the localized name index's selector, plan
+    /// Phase 12); NULL when it has none there. Populated only when projected.
+    LocalizedNodeName,
+    /// `__localized_path` - the node's canonical LOCALIZED path in the query's
+    /// locale (each segment the node's translated name there, else its name). Populated
+    /// only when projected; `WHERE locale = 'fr' AND __localized_path = $1`
+    /// is answered by the `LocalizedPathLookup` operator.
+    LocalizedPath,
 }
 
 impl GeneratedExpr {
@@ -164,12 +173,18 @@ impl GeneratedExpr {
     /// `__tree_order` deliberately do NOT do this: they are populated by ordinary
     /// scans and carry a value on rows people actually look at.
     pub fn hidden_from_wildcard(&self) -> bool {
-        matches!(self, Self::SpatialDistance | Self::SpatialMatchedPath)
+        matches!(
+            self,
+            Self::SpatialDistance
+                | Self::SpatialMatchedPath
+                | Self::LocalizedNodeName
+                | Self::LocalizedPath
+        )
     }
 }
 
 /// Index definition (for optimizer hints)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct IndexDef {
     pub name: String,
     pub columns: Vec<String>,

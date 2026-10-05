@@ -65,6 +65,7 @@ impl TestFixture {
             default_branch: BRANCH.to_string(),
             description: Some("Tombstone test repository".to_string()),
             tags: HashMap::new(),
+            localized_names: Default::default(),
         };
         storage
             .repository_management()

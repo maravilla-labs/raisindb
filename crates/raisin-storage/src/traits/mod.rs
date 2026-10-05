@@ -44,8 +44,9 @@ pub use index::{
     PropertyScanEntry, ReferenceIndexRepository,
 };
 pub use node::{
-    apply_child_order_from_branch, CrossBranchCopySummary, CrossBranchNodeChange, NodeRepository,
-    OrderedChild,
+    apply_child_order_from_branch, get_many_by_loop, BatchReadItem, CrossBranchCopySummary,
+    CrossBranchNodeChange, NodeLocator, NodeRepository, OrderedChild, PropertiesRead, ReadOpts,
+    ReadSnapshot,
 };
 pub use processing_rules::ProcessingRulesRepository;
 pub use registry::{RegistryRepository, TreeRepository};

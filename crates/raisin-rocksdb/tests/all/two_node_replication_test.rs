@@ -6,6 +6,7 @@
 //! - Replicate content (nodes, schema, translations, users)
 //! - Properly merge operations using CRDT rules
 
+use crate::replicated_node_ops::CaptureNodeSnapshot;
 use nanoid;
 use once_cell::sync::Lazy;
 use raisin_hlc::HLC;
@@ -309,7 +310,7 @@ async fn test_basic_two_node_sync() {
     let start_time = Instant::now();
     let _op = storage1
         .operation_capture()
-        .capture_create_node(
+        .capture_node_snapshot(
             "tenant1".to_string(),
             "repo1".to_string(),
             "main".to_string(),
@@ -407,7 +408,7 @@ async fn test_bidirectional_updates() {
     // Create node on node1
     storage1
         .operation_capture()
-        .capture_create_node(
+        .capture_node_snapshot(
             "tenant1".to_string(),
             "repo1".to_string(),
             "main".to_string(),
@@ -440,7 +441,7 @@ async fn test_bidirectional_updates() {
     // Create another node on node2 (simulates concurrent edit)
     storage2
         .operation_capture()
-        .capture_create_node(
+        .capture_node_snapshot(
             "tenant1".to_string(),
             "repo1".to_string(),
             "main".to_string(),
@@ -718,15 +719,14 @@ async fn test_translation_sync() {
     // Set translation on node1
     storage1
         .operation_capture()
-        .capture_set_translation(
+        .capture_operation(
             "tenant1".to_string(),
             "repo1".to_string(),
             "main".to_string(),
-            "article-1".to_string(),
-            "en".to_string(),
-            "title".to_string(),
-            serde_json::json!({"text": "Hello World"}),
+            translation_version("article-1", "en", false),
             "user1".to_string(),
+            None,
+            false,
         )
         .await
         .unwrap();
@@ -740,7 +740,7 @@ async fn test_translation_sync() {
         Duration::from_secs(5),
     )
     .await
-    .expect("SetTranslation should replicate to node2");
+    .expect("the translation should replicate to node2");
 
     // Verify translation operation on node2
     let oplog2 = OpLogRepository::new(storage2.db().clone());
@@ -752,21 +752,21 @@ async fn test_translation_sync() {
 
     use raisin_replication::OpType;
     assert!(
-        matches!(ops2[0].op_type, OpType::SetTranslation { .. }),
-        "Should be SetTranslation operation"
+        matches!(ops2[0].op_type, OpType::UpsertTranslationOverlay { .. }),
+        "Should be a translation version operation"
     );
 
     // Delete translation on node2
     storage2
         .operation_capture()
-        .capture_delete_translation(
+        .capture_operation(
             "tenant1".to_string(),
             "repo1".to_string(),
             "main".to_string(),
-            "article-1".to_string(),
-            "fr".to_string(),
-            "description".to_string(),
+            translation_version("article-1", "fr", true),
             "user2".to_string(),
+            None,
+            false,
         )
         .await
         .unwrap();
@@ -780,7 +780,7 @@ async fn test_translation_sync() {
         Duration::from_secs(5),
     )
     .await
-    .expect("DeleteTranslation should replicate to node1");
+    .expect("the translation deletion should replicate to node1");
 
     // Verify deletion replicated to node1
     let oplog1 = OpLogRepository::new(storage1.db().clone());
@@ -794,13 +794,13 @@ async fn test_translation_sync() {
         "Node1 should have delete operation from node2"
     );
     assert!(
-        matches!(ops1[0].op_type, OpType::DeleteTranslation { .. }),
-        "Should be DeleteTranslation operation"
+        matches!(ops1[0].op_type, OpType::UpsertTranslationOverlay { .. }),
+        "Should be a translation version operation"
     );
 
     println!("✅ Translation sync test passed!");
-    println!("   - SetTranslation on node1 → replicated to node2");
-    println!("   - DeleteTranslation on node2 → replicated to node1");
+    println!("   - translation on node1 → replicated to node2");
+    println!("   - translation deletion on node2 → replicated to node1");
 }
 
 #[tokio::test]
@@ -948,7 +948,7 @@ async fn test_multiple_operations_sequence() {
     for i in 1..=5 {
         storage1
             .operation_capture()
-            .capture_create_node(
+            .capture_node_snapshot(
                 "tenant1".to_string(),
                 "repo1".to_string(),
                 "main".to_string(),
@@ -1010,4 +1010,27 @@ async fn test_multiple_operations_sequence() {
     println!("   - 5 operations created on node1");
     println!("   - All operations replicated to node2 in order");
     println!("   - Sequence numbers are monotonic and consistent");
+}
+
+/// A translation version op, through the generic capture path.
+fn translation_version(node_id: &str, locale: &str, deleted: bool) -> raisin_replication::OpType {
+    let overlay = if deleted {
+        raisin_replication::ReplicatedOverlay::Deleted
+    } else {
+        let mut data = std::collections::HashMap::new();
+        data.insert(
+            raisin_models::translations::JsonPointer::new("/title"),
+            raisin_models::nodes::properties::PropertyValue::String("Hello World".into()),
+        );
+        raisin_replication::ReplicatedOverlay::Properties { data }
+    };
+    raisin_replication::OpType::UpsertTranslationOverlay {
+        workspace: "ws".to_string(),
+        node_id: node_id.to_string(),
+        locale: locale.to_string(),
+        block_uuid: None,
+        overlay,
+        revision: raisin_hlc::HLC::now(),
+        history_complete_from: None,
+    }
 }

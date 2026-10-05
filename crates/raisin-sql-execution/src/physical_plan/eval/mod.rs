@@ -27,12 +27,14 @@ mod json_ops;
 mod pattern;
 mod regex_ops;
 mod resolve_eval;
+mod resolve_path_eval;
 mod vector_ops;
 
 // Public API - re-export the main functions
 pub use self::async_eval::{eval_expr_async, generate_embedding_cached};
 pub(crate) use self::casting::cast_literal;
 pub use self::core::eval_expr;
+pub(crate) use self::resolve_eval::eval_resolve_rows;
 
 // Re-export function context for system functions (CURRENT_USER, etc.)
 pub use self::functions::{clear_function_context, set_function_context, FunctionContext};

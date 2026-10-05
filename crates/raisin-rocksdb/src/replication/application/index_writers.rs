@@ -1,111 +1,14 @@
 //! Index writing helpers for node properties and relations
 //!
-//! This module provides utilities for writing property indexes, reference indexes,
-//! and relation indexes to RocksDB during replication.
+//! This module provides utilities for writing property indexes (through the
+//! one delta writer), reference indexes, and relation indexes to RocksDB
+//! during replication.
 
-use crate::{keys, repositories::hash_property_value};
+use crate::keys;
 use raisin_error::Result;
 use raisin_hlc::HLC;
-use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
 use rocksdb::WriteBatch;
-
-/// Write all property indexes for a node to a batch
-///
-/// This includes:
-/// - Custom properties with hashed values
-/// - System fields (__node_type, __name, __archetype, etc.)
-/// - Timestamp fields (__created_at, __updated_at)
-pub fn write_property_indexes(
-    batch: &mut WriteBatch,
-    cf_property: &rocksdb::ColumnFamily,
-    tenant_id: &str,
-    repo_id: &str,
-    branch: &str,
-    workspace: &str,
-    node: &Node,
-    revision: &HLC,
-) {
-    let is_published = node.published_at.is_some();
-
-    // Index custom properties with hashed values
-    for (prop_name, prop_value) in &node.properties {
-        let value_hash = hash_property_value(prop_value);
-        let prop_key = keys::property_index_key_versioned(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            prop_name,
-            &value_hash,
-            revision,
-            &node.id,
-            is_published,
-        );
-        batch.put_cf(cf_property, prop_key, node.id.as_bytes());
-    }
-
-    // Helper closure for writing system fields
-    let mut write_field = |field: &str, value: &str| {
-        if value.is_empty() {
-            return;
-        }
-        let key = keys::property_index_key_versioned(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            field,
-            value,
-            revision,
-            &node.id,
-            is_published,
-        );
-        batch.put_cf(cf_property, key, node.id.as_bytes());
-    };
-
-    // Write system field indexes
-    write_field("__node_type", &node.node_type);
-    write_field("__name", &node.name);
-    if let Some(ref archetype) = node.archetype {
-        write_field("__archetype", archetype);
-    }
-    if let Some(ref created_by) = node.created_by {
-        write_field("__created_by", created_by);
-    }
-    if let Some(ref updated_by) = node.updated_by {
-        write_field("__updated_by", updated_by);
-    }
-    // Write timestamp fields using microsecond precision
-    if let Some(created_at) = node.created_at {
-        let key = keys::property_index_key_versioned_timestamp(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            "__created_at",
-            created_at.timestamp_micros(),
-            revision,
-            &node.id,
-            is_published,
-        );
-        batch.put_cf(cf_property, key, node.id.as_bytes());
-    }
-    if let Some(updated_at) = node.updated_at {
-        let key = keys::property_index_key_versioned_timestamp(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            "__updated_at",
-            updated_at.timestamp_micros(),
-            revision,
-            &node.id,
-            is_published,
-        );
-        batch.put_cf(cf_property, key, node.id.as_bytes());
-    }
-}
 
 /// Write reference indexes for a node to a batch
 ///
@@ -227,8 +130,23 @@ pub struct ReplicationIndexCfs<'a> {
 /// `policies` must be resolved by the caller (see
 /// [`crate::indexing::NodeSpatialPolicies::from_local_state`]) because policy
 /// resolution reads schema records, which is async, and this path is sync.
+///
+/// The PROPERTY_INDEX half is the ONE writer (`indexing::property_delta`),
+/// never a skipping one here: `baseline` is `Full(replaced)` (the version this
+/// one supersedes, whose values it no longer carries are tombstoned) — the
+/// apply path keeps full puts until oracle stage 3 proves the delta under
+/// permuted two-origin delivery (plan Phase 7 item 2) — or, when versions
+/// ABOVE `revision` are already stored, `OutOfOrder`: a cluster node is both
+/// an origin and a replica, so a successor may be a LOCAL write that skipped
+/// unchanged entries, and only re-asserting it keeps this write's tombstones
+/// from masking them. Membership (IS_A / HAS_MIXIN) is written like on the
+/// origin — this writer used to omit it, so `IS_A(...)` was empty on every
+/// replica. `in_place`: the revision is one a version is already stored at
+/// (`versionable=false`).
+#[allow(clippy::too_many_arguments)]
 pub fn write_all_node_indexes(
     batch: &mut WriteBatch,
+    db: &rocksdb::DB,
     cfs: &ReplicationIndexCfs<'_>,
     tenant_id: &str,
     repo_id: &str,
@@ -237,17 +155,32 @@ pub fn write_all_node_indexes(
     node: &Node,
     revision: &HLC,
     policies: &crate::indexing::NodeSpatialPolicies,
+    baseline: crate::indexing::Baseline<'_>,
+    in_place: bool,
 ) -> Result<()> {
-    write_property_indexes(
+    debug_assert!(!matches!(
+        baseline,
+        crate::indexing::Baseline::Predecessor(_)
+    ));
+    crate::indexing::write_property_index_delta(
         batch,
-        cfs.property,
-        tenant_id,
-        repo_id,
-        branch,
-        workspace,
+        crate::indexing::PropertyIndexTarget {
+            db,
+            cf: cfs.property,
+        },
+        &crate::indexing::IndexCtx::new(tenant_id, repo_id, branch, workspace),
+        baseline,
         node,
         revision,
-    );
+        // A replicated in-place write lands at its revision: the above-R
+        // group lookup is the local writers' opt-in (see `property_delta::
+        // in_place`), and the apply path has no skip-unchanged flag.
+        if in_place {
+            crate::indexing::InPlace::Reused(None)
+        } else {
+            crate::indexing::InPlace::No
+        },
+    )?;
 
     write_reference_indexes(
         batch,

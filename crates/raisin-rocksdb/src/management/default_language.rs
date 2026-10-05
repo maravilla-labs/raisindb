@@ -71,9 +71,10 @@ impl OverlayCount {
 
 /// Count the live translation overlays in `locale` on every branch of the repository.
 ///
-/// "Live" is the newest revision of an overlay: not deleted with its node (a
-/// tombstone) and not deleted as a translation (an empty overlay). A `Hidden`
-/// overlay counts — it is a real per-locale decision on top of base content.
+/// "Live" is the newest revision of an overlay: not deleted (a tombstone),
+/// not ended by a delete of its node, and not deleted as a translation (an
+/// empty overlay). A `Hidden` overlay counts — it is a real per-locale
+/// decision on top of base content.
 ///
 /// Reads the data column families rather than `TRANSLATION_INDEX`, which is
 /// append-only and would keep counting overlays that have since been deleted.
@@ -160,11 +161,30 @@ fn count_live_in_cf(
         if !branches.contains(&*String::from_utf8_lossy(parts[2])) {
             continue;
         }
-        if is_live_overlay(&value) {
+        if is_live_overlay(&value) && !ended_by_node_delete(db, &parts, &key)? {
             count += 1;
         }
     }
     Ok(count)
+}
+
+/// A live overlay version (node or block) a delete of its node has ended —
+/// the one reader's rule (`translation_read::ended_by_node_delete`), so a
+/// deleted node's translations are not counted. The node id is segment 5 in
+/// both column families (`…\0translations\0{node}` / `…\0block_trans\0{node}`).
+fn ended_by_node_delete(db: &rocksdb::DB, parts: &[&[u8]], key: &[u8]) -> Result<bool> {
+    let text = |i: usize| String::from_utf8_lossy(parts[i]).into_owned();
+    let Ok(revision) = crate::keys::extract_revision_from_key(key) else {
+        return Ok(false);
+    };
+    let (tenant, repo, branch, workspace) = (text(0), text(1), text(2), text(3));
+    crate::translation_read::ended_by_node_delete(
+        db,
+        (&tenant, &repo, &branch, &workspace),
+        &text(5),
+        &revision,
+        None,
+    )
 }
 
 /// Length of the key prefix ending with (and including) its `n`th NUL byte.

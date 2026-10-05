@@ -56,6 +56,8 @@ impl OperationApplicator {
             node_type.name
         );
 
+        self.refresh_index_definitions(tenant_id, repo_id, branch, &node_type.name)
+            .await;
         self.emit_schema_event(
             tenant_id,
             repo_id,
@@ -204,6 +206,8 @@ impl OperationApplicator {
             keys::nodetype_name_prefix,
         )?;
 
+        self.refresh_index_definitions(tenant_id, repo_id, branch, node_type_id)
+            .await;
         self.emit_schema_event(
             tenant_id,
             repo_id,

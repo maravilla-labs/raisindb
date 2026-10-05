@@ -28,11 +28,41 @@ use raisin_error::Result;
 use raisin_hlc::HLC;
 use rocksdb::{AsColumnFamilyRef, ReadOptions, DB};
 
+mod baseline;
+mod deletes;
 mod node_decode;
+mod node_path;
+#[cfg(test)]
+mod path_rule_tests;
+mod point;
+mod source;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use node_decode::deserialize_node_with_path;
+pub(crate) use baseline::{
+    node_version_at_or_before, node_version_before, node_versions_above, predecessor, StoredVersion,
+};
+#[cfg(test)]
+pub(crate) use deletes::WALKS;
+pub(crate) use deletes::{deletes_in_range, deletes_in_range_counted, NodeLifeline};
+pub use node_decode::decode_node_blob;
+pub(crate) use node_decode::{
+    decode_entry_with_path, deserialize_node_with_path, deserialize_node_with_path_as,
+    deserialize_node_with_path_in, embedded_path_of,
+};
+pub(crate) use node_path::{
+    current_path, embedded_path_may_win, embedded_path_wins, materialize_path, materialize_path_in,
+    CurrentPath, EmbeddedPath, NodeScope,
+};
+pub(crate) use point::{node_record_revision_in, node_version_in, path_index_entry_in, PathEntry};
+pub(crate) use source::{DbRead, Recorded, SnapshotRead, VersionedRead};
+
+/// The bound for "newest, whatever its revision": a read with no
+/// `max_revision` materializes paths as of the newest NODE_PATH entry.
+pub(crate) const NEWEST: HLC = HLC {
+    timestamp_ms: u64::MAX,
+    counter: u64::MAX,
+};
 
 /// The newest entry under `prefix` whose revision is `<= max_revision` — or
 /// the newest entry at all when `max_revision` is `None` — together with its
@@ -111,42 +141,44 @@ pub(crate) fn newest_at_or_before_with<R>(
     Ok(None)
 }
 
-/// Materialize a node's path from the `NODE_PATH` index at `target_revision`.
+/// Whether ANY entry under `prefix` at or before `max_revision` satisfies
+/// `matches` — walked newest first, stopping at the first match.
 ///
-/// The ONE implementation: the repository read path, the transaction read path
-/// and the index rebuilds all resolve a `StorageNode` blob's path through here.
-/// Which source wins — a blob's embedded path or this index — is decided by the
-/// callers (`deserialize_node_with_path*`), not here.
-///
-/// # Errors
-/// - the newest entry at or before `target_revision` is a tombstone (the node
-///   was deleted);
-/// - there is no entry at or before `target_revision`;
-/// - the stored path is not UTF-8.
-pub(crate) fn materialize_path(
+/// For a question about an entry's existence rather than about the newest
+/// one ("has this node ever held this UNIQUE claim?"): the answer must not
+/// depend on which OTHER entries a node happens to have applied yet.
+pub(crate) fn any_at_or_before(
     db: &DB,
-    tenant_id: &str,
-    repo_id: &str,
-    branch: &str,
-    workspace: &str,
-    node_id: &str,
-    target_revision: &HLC,
-) -> Result<String> {
-    let prefix = keys::node_path_key_prefix(tenant_id, repo_id, branch, workspace, node_id);
-    let cf = crate::cf_handle(db, crate::cf::NODE_PATH)?;
-
-    match newest_at_or_before(db, cf, &prefix, Some(target_revision))? {
-        Some((_, value)) if crate::repositories::nodes::helpers::is_tombstone(&value) => {
-            Err(raisin_error::Error::storage(format!(
-                "Node {} was deleted (tombstone in NODE_PATH)",
-                node_id
-            )))
-        }
-        Some((_, value)) => String::from_utf8(value)
-            .map_err(|e| raisin_error::Error::storage(format!("Invalid path encoding: {}", e))),
-        None => Err(raisin_error::Error::storage(format!(
-            "Path not found for node_id={} at revision={}",
-            node_id, target_revision
-        ))),
+    cf: &impl AsColumnFamilyRef,
+    prefix: &[u8],
+    max_revision: &HLC,
+    mut matches: impl FnMut(HLC, &[u8]) -> bool,
+) -> Result<bool> {
+    let mut opts = ReadOptions::default();
+    opts.set_total_order_seek(true);
+    if let Some(upper) = crate::prefix_successor(prefix) {
+        opts.set_iterate_upper_bound(upper);
     }
+    let mut iter = db.raw_iterator_cf_opt(cf, opts);
+    let mut seek = Vec::with_capacity(prefix.len() + 16);
+    seek.extend_from_slice(prefix);
+    seek.extend_from_slice(&max_revision.encode_descending());
+    iter.seek(&seek);
+    while iter.valid() {
+        let Some(key) = iter.key() else {
+            break;
+        };
+        if !key.starts_with(prefix) {
+            break;
+        }
+        if let Ok(revision) = keys::extract_revision_from_key(key) {
+            if &revision <= max_revision && matches(revision, iter.value().unwrap_or_default()) {
+                return Ok(true);
+            }
+        }
+        iter.next();
+    }
+    iter.status()
+        .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+    Ok(false)
 }

@@ -42,30 +42,56 @@ impl NodeRepositoryImpl {
     ) -> Result<String> {
         let last_label =
             self.get_last_order_label(tenant_id, repo_id, branch, workspace, parent_id)?;
+        Ok(mint_append_label(
+            last_label.as_deref(),
+            parent_id,
+            revision,
+        ))
+    }
+}
 
-        let fractional = match last_label.as_deref() {
-            Some(last) => {
-                // Strip the `::{HLC}` suffix first — `inc` parses hex and would
-                // reject the separator.
-                let previous = fractional_index::extract_fractional(last);
-                match fractional_index::inc(previous) {
-                    Ok(label) => label,
-                    Err(e) => {
-                        tracing::warn!(
-                            parent_id = %parent_id,
-                            last_label = %last,
-                            error = %e,
-                            "Corrupt order label detected, falling back to first()"
-                        );
-                        fractional_index::first()
-                    }
+/// THE append minter: the label that sorts after `last` (the parent's current
+/// last label, if any), suffixed with `revision`.
+///
+/// Every append site mints through this — the repository's
+/// `next_append_label` and the transaction's `next_append_label_tx` (which
+/// differ only in where they READ `last` from: the transaction consults its
+/// own not-yet-committed appends first). A second minter is how a move and a
+/// create in one transaction once minted byte-identical labels.
+///
+/// A corrupt or unparsable previous label is not fatal: it logs and restarts
+/// from `first()`, matching the pre-existing tolerance of these paths.
+pub(crate) fn mint_append_label(last: Option<&str>, parent_id: &str, revision: &HLC) -> String {
+    let fractional = match last {
+        Some(last) => {
+            // Strip the `::{HLC}` suffix first — `inc` parses hex and would
+            // reject the separator.
+            let previous = fractional_index::extract_fractional(last);
+            match fractional_index::inc(previous) {
+                Ok(label) => label,
+                Err(e) => {
+                    tracing::warn!(
+                        parent_id = %parent_id,
+                        last_label = %last,
+                        error = %e,
+                        "Corrupt order label detected, falling back to first()"
+                    );
+                    fractional_index::first()
                 }
             }
-            None => fractional_index::first(),
-        };
+        }
+        None => fractional_index::first(),
+    };
+    format_order_label(&fractional, revision)
+}
 
-        Ok(format_order_label(&fractional, revision))
-    }
+/// Whether `label` sorts after `other` in EDITORIAL order: by fractional part
+/// first (that is the order), the full label only as the tie-break. A plain
+/// string comparison of two full labels is wrong when their fractional parts
+/// differ in length — the `::` separator then compares against a digit.
+pub(crate) fn sorts_after(label: &str, other: &str) -> bool {
+    (fractional_index::extract_fractional(label), label)
+        > (fractional_index::extract_fractional(other), other)
 }
 
 /// Assemble a full order label from its fractional part and revision.

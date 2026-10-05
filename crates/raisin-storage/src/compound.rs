@@ -61,6 +61,26 @@ impl CompoundAvailability {
             Self::Unusable(reason) => reason.clone(),
         }
     }
+
+    /// This availability for a read AT `read` (`None`: the branch HEAD).
+    ///
+    /// `built_through` is the build's HISTORY FLOOR: a build writes each
+    /// node's version as of the branch HEAD it read (and every version above
+    /// it), never the history below — the tombstones that ended superseded
+    /// tuples and every older version's entries are gone. A read pinned below
+    /// the floor is therefore `Unusable` (the planner keeps the predicates and
+    /// scans). A HEAD read is never below it: HEAD only advances.
+    pub fn at_revision(self, read: Option<&HLC>) -> Self {
+        match (&self, read) {
+            (Self::Ready { built_through, .. }, Some(at)) if at < built_through => {
+                Self::Unusable(format!(
+                    "compound index history starts at its build ({built_through}); \
+                     a read at {at} is answered by a scan"
+                ))
+            }
+            _ => self,
+        }
+    }
 }
 
 /// How far along a build is.
@@ -93,7 +113,9 @@ pub struct CompoundIndexState {
     /// means the keyspace holds entries under a layout the planner would
     /// misread.
     pub definition_hash: u64,
-    /// Highest revision covered by the build.
+    /// The build's history floor: the branch HEAD the build read. Entries are
+    /// complete for reads at or above it, and only for those (see
+    /// [`CompoundAvailability::at_revision`]).
     pub built_through: HLC,
     /// Build progress.
     pub phase: CompoundBuildPhase,
@@ -120,7 +142,25 @@ pub struct CompoundIndexState {
 }
 
 impl CompoundIndexState {
-    pub const VERSION: u8 = 1;
+    /// Record format version. **2** (plan Phase 8): an index built by an
+    /// earlier writer is UNUSABLE until rebuilt. Phase 8's writer DERIVES a
+    /// node's old entries from its stored version instead of scanning for
+    /// them, so every entry must be one that derivation reproduces — and the
+    /// earlier writers stored date-like strings in their raw spelling (the
+    /// derivation now encodes them canonically, `CompoundColumnValue::text`)
+    /// and overwrote superseded entries in place (no history for the
+    /// revision-bounded reader). A v1 record reads `Unusable` (a scan) until
+    /// the index is rebuilt — by an admin `REBUILD`, or by the sweeps when
+    /// `RAISIN_COMPOUND_FORMAT_REBUILD` is on (see [`Self::is_format_upgrade`]).
+    pub const VERSION: u8 = 2;
+
+    /// Whether this record is from an older format: the index is unusable
+    /// only because the binary moved on, not because anything marked it. The
+    /// sweeps leave such an index to an admin rebuild by default — a format
+    /// bump must not rebuild every index on every node at boot.
+    pub fn is_format_upgrade(&self) -> bool {
+        self.v < Self::VERSION
+    }
 
     /// A fresh `Ready` record for a declaration that has just been built.
     pub fn ready(definition: &CompoundIndexDefinition, built_through: HLC) -> Self {
@@ -203,105 +243,5 @@ pub trait CompoundStateSource: Send + Sync {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use raisin_models::nodes::properties::schema::{CompoundColumnType, CompoundIndexColumn};
-
-    fn def(name: &str, cols: &[(&str, CompoundColumnType)]) -> CompoundIndexDefinition {
-        CompoundIndexDefinition {
-            name: name.to_string(),
-            columns: cols
-                .iter()
-                .map(|(p, t)| CompoundIndexColumn {
-                    property: p.to_string(),
-                    column_type: t.clone(),
-                    ascending: None,
-                })
-                .collect(),
-            has_order_column: false,
-            owner_node_type: None,
-        }
-    }
-
-    #[test]
-    fn a_ready_record_matching_its_declaration_is_ready() {
-        let d = def("idx", &[("status", CompoundColumnType::String)]);
-        let state = CompoundIndexState::ready(&d, HLC::new(7, 0));
-        assert!(state.availability_for(&d).is_ready());
-    }
-
-    /// The case the record exists for. Entries in the keyspace were written
-    /// under the OLD columns; reading them through the new layout is silent
-    /// corruption, so a changed declaration must read as unusable.
-    #[test]
-    fn a_changed_declaration_makes_the_build_unusable() {
-        let built = def("idx", &[("status", CompoundColumnType::String)]);
-        let state = CompoundIndexState::ready(&built, HLC::new(7, 0));
-
-        let reordered = def(
-            "idx",
-            &[
-                ("buyer", CompoundColumnType::String),
-                ("status", CompoundColumnType::String),
-            ],
-        );
-        match state.availability_for(&reordered) {
-            CompoundAvailability::Unusable(reason) => {
-                assert!(reason.contains("different declaration"), "{reason}");
-            }
-            other => panic!("expected Unusable, got {other:?}"),
-        }
-    }
-
-    /// Column ORDER is identity: `(a, b)` and `(b, a)` produce different key
-    /// bytes, so they must not share a fingerprint.
-    #[test]
-    fn column_order_changes_the_fingerprint() {
-        let ab = def(
-            "idx",
-            &[
-                ("a", CompoundColumnType::String),
-                ("b", CompoundColumnType::String),
-            ],
-        );
-        let ba = def(
-            "idx",
-            &[
-                ("b", CompoundColumnType::String),
-                ("a", CompoundColumnType::String),
-            ],
-        );
-        assert_ne!(ab.definition_hash(), ba.definition_hash());
-    }
-
-    /// A type change alters the ENCODING (`Integer` is big-endian bytes,
-    /// `String` is UTF-8), so it must invalidate the build too.
-    #[test]
-    fn column_type_changes_the_fingerprint() {
-        let as_string = def("idx", &[("qty", CompoundColumnType::String)]);
-        let as_int = def("idx", &[("qty", CompoundColumnType::Integer)]);
-        assert_ne!(as_string.definition_hash(), as_int.definition_hash());
-    }
-
-    /// A rebuild CLEARS the keyspace before writing, so mid-build there is no
-    /// complete generation to serve — unlike spatial, where `Building` stays
-    /// queryable against the older entries.
-    #[test]
-    fn a_building_record_is_not_queryable() {
-        let d = def("idx", &[("status", CompoundColumnType::String)]);
-        let mut state = CompoundIndexState::ready(&d, HLC::new(7, 0));
-        state.phase = CompoundBuildPhase::Building;
-        assert!(!state.availability_for(&d).is_ready());
-    }
-
-    #[test]
-    fn an_unsupported_record_version_is_unusable() {
-        let d = def("idx", &[("status", CompoundColumnType::String)]);
-        let mut state = CompoundIndexState::ready(&d, HLC::new(7, 0));
-        state.v = CompoundIndexState::VERSION + 1;
-        assert!(matches!(
-            state.availability_for(&d),
-            CompoundAvailability::Unusable(_)
-        ));
-    }
-}
+#[path = "compound_tests.rs"]
+mod tests;

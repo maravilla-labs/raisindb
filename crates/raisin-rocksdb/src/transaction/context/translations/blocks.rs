@@ -12,20 +12,8 @@
 use raisin_error::Result;
 use raisin_models::translations::LocaleOverlay;
 
-use crate::transaction::types::is_tombstone;
 use crate::transaction::RocksDBTransaction;
-use crate::{cf, cf_handle, keys};
-
-/// `{tenant}\0{repo}\0{branch}\0{ws}\0block_trans\0{node_id}\0` — the node-scoped prefix.
-fn node_prefix(
-    tenant_id: &str,
-    repo_id: &str,
-    branch: &str,
-    workspace: &str,
-    node_id: &str,
-) -> String {
-    format!("{tenant_id}\0{repo_id}\0{branch}\0{workspace}\0block_trans\0{node_id}\0")
-}
+use crate::translation_write::OverlayTarget;
 
 fn tx_scope(tx: &RocksDBTransaction) -> Result<(String, String, String)> {
     let meta = tx
@@ -53,24 +41,28 @@ pub async fn store_block_translation(
     let (tenant_id, repo_id, branch) = tx_scope(tx)?;
     let revision = tx.get_or_allocate_transaction_revision()?;
 
-    let overlay_json = serde_json::to_vec(&overlay)
-        .map_err(|e| raisin_error::Error::storage(format!("JSON serialization error: {}", e)))?;
-
-    let mut key = format!(
-        "{}{block_uuid}\0{locale}\0",
-        node_prefix(&tenant_id, &repo_id, &branch, workspace, node_id)
-    )
-    .into_bytes();
-    key.extend_from_slice(&keys::encode_descending_revision(&revision));
-
-    {
+    let key = {
         let mut batch = tx
             .batch
             .lock()
             .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
-        let cf_block = cf_handle(&tx.db, cf::BLOCK_TRANSLATIONS)?;
-        batch.put_cf(cf_block, &key, overlay_json);
-    }
+        let target = OverlayTarget {
+            tenant_id: &tenant_id,
+            repo_id: &repo_id,
+            branch: &branch,
+            workspace,
+            node_id,
+            block_uuid: Some(block_uuid),
+            locale,
+        };
+        crate::translation_write::stage_version(
+            &tx.db,
+            &mut batch,
+            &target,
+            Some(&overlay),
+            &revision,
+        )?
+    };
 
     {
         let mut cache = tx
@@ -117,28 +109,16 @@ pub async fn get_block_translation(
     }
 
     let (tenant_id, repo_id, branch) = tx_scope(tx)?;
-    let prefix = format!(
-        "{}{block_uuid}\0{locale}\0",
-        node_prefix(&tenant_id, &repo_id, &branch, workspace, node_id)
-    );
-
-    let cf_block = cf_handle(&tx.db, cf::BLOCK_TRANSLATIONS)?;
-    for item in crate::prefix_scan(&tx.db, cf_block, &prefix) {
-        let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
-        if !key.starts_with(prefix.as_bytes()) {
-            break;
-        }
-        if is_tombstone(&value) {
-            continue;
-        }
-        let overlay: LocaleOverlay = serde_json::from_slice(&value).map_err(|e| {
-            raisin_error::Error::storage(format!("JSON deserialization error: {}", e))
-        })?;
-        tx.record_read(key.to_vec())?;
-        return Ok(Some(overlay));
-    }
-
-    Ok(None)
+    // The newest version decides; a tombstone there means deleted — this
+    // reader used to skip it and return an OLDER live version.
+    let Some(version) = crate::translation_read::read_block_version(
+        &tx.db, &tenant_id, &repo_id, &branch, workspace, node_id, block_uuid, locale, None,
+    )?
+    else {
+        return Ok(None);
+    };
+    tx.record_read(version.key)?;
+    Ok(version.overlay)
 }
 
 /// Every `(block_uuid, locale)` this node has a block overlay for.
@@ -151,40 +131,12 @@ pub async fn list_block_translations_for_node(
     node_id: &str,
 ) -> Result<Vec<(String, String)>> {
     let (tenant_id, repo_id, branch) = tx_scope(tx)?;
-    let prefix = node_prefix(&tenant_id, &repo_id, &branch, workspace, node_id);
-
-    let cf_block = cf_handle(&tx.db, cf::BLOCK_TRANSLATIONS)?;
-    let mut found = std::collections::HashSet::new();
-
-    for item in crate::prefix_scan(&tx.db, cf_block, &prefix) {
-        let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
-        if !key.starts_with(prefix.as_bytes()) {
-            break;
-        }
-        if is_tombstone(&value) {
-            continue;
-        }
-        let Some(suffix) = key.strip_prefix(prefix.as_bytes()) else {
-            continue;
-        };
-        // {block_uuid}\0{locale}\0{~revision} — split on BYTES: the trailing
-        // encoded revision is not valid UTF-8, so decoding the suffix as a whole
-        // silently drops the entry.
-        let mut parts = suffix.splitn(3, |b| *b == 0);
-        let (Some(block_uuid), Some(locale)) = (parts.next(), parts.next()) else {
-            continue;
-        };
-        let (Ok(block_uuid), Ok(locale)) =
-            (std::str::from_utf8(block_uuid), std::str::from_utf8(locale))
-        else {
-            continue;
-        };
-        // `orphaned` occupies the locale position but is a marker, not a locale.
-        if locale == "orphaned" {
-            continue;
-        }
-        found.insert((block_uuid.to_string(), locale.to_string()));
-    }
+    let mut found: std::collections::HashSet<(String, String)> =
+        crate::translation_read::live_block_overlays(
+            &tx.db, &tenant_id, &repo_id, &branch, workspace, node_id, None,
+        )?
+        .into_iter()
+        .collect();
 
     {
         let cache = tx

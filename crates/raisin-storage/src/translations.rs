@@ -193,24 +193,52 @@ pub trait TranslationRepository: Send + Sync {
         node_id: &str,
     ) -> Result<Vec<(String, LocaleCode)>>;
 
-    /// List all nodes that have translations in a specific locale.
+    /// Every live BLOCK-level overlay of this node in one of `locales`, as of
+    /// `revision`: `(block_uuid, locale, overlay)`.
+    ///
+    /// What the resolver applies: ONE read for the node and its whole
+    /// fallback chain, bounded by the read revision. Listing at HEAD and then
+    /// reading each block at `revision` both misses blocks a later delete of
+    /// the node ended (a time-travel read lost them) and repeats the node's
+    /// delete check once per `(block, locale)`.
+    #[allow(clippy::too_many_arguments)]
+    async fn get_block_translations_for_node(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        node_id: &str,
+        locales: &[LocaleCode],
+        revision: &HLC,
+    ) -> Result<Vec<(String, LocaleCode, LocaleOverlay)>>;
+
+    /// List all nodes of one branch and workspace that have a translation in a
+    /// specific locale as of `revision`.
     ///
     /// Used for reverse lookups: "which nodes are translated to French?"
+    /// Translations are branch-scoped, so the answer is too: a translation
+    /// deleted (or written) on another branch does not change it.
     ///
     /// # Arguments
     ///
     /// * `tenant_id` - Tenant identifier
     /// * `repo_id` - Repository identifier
+    /// * `branch` - Branch whose overlays decide
+    /// * `workspace` - Workspace whose overlays decide
     /// * `locale` - Locale code to query
     /// * `revision` - Revision (HLC)
     ///
     /// # Returns
     ///
     /// Vector of node IDs that have translations in this locale.
+    #[allow(clippy::too_many_arguments)]
     async fn list_nodes_with_translation(
         &self,
         tenant_id: &str,
         repo_id: &str,
+        branch: &str,
+        workspace: &str,
         locale: &LocaleCode,
         revision: &HLC,
     ) -> Result<Vec<String>>;

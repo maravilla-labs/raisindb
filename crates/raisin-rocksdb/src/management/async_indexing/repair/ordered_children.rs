@@ -50,7 +50,7 @@ pub struct OrderedChildrenCounts {
 }
 
 /// A raw iterator over exactly `prefix`, starting strictly after `cursor`.
-pub(super) fn iterate_from<'a>(
+pub(crate) fn iterate_from<'a>(
     db: &'a DB,
     cf_name: &str,
     prefix: &[u8],
@@ -228,6 +228,7 @@ fn repair_one_delete(
         b,
         ws,
         delete.node_id,
+        &delete.before,
         &delete.before,
     ) else {
         counts.unresolved += 1;

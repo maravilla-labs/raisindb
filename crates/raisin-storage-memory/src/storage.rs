@@ -110,10 +110,25 @@ impl TranslationRepository for NoopTranslationRepo {
         Ok(Vec::new())
     }
 
+    async fn get_block_translations_for_node(
+        &self,
+        _tenant_id: &str,
+        _repo_id: &str,
+        _branch: &str,
+        _workspace: &str,
+        _node_id: &str,
+        _locales: &[LocaleCode],
+        _revision: &raisin_hlc::HLC,
+    ) -> Result<Vec<(String, LocaleCode, LocaleOverlay)>> {
+        Ok(Vec::new())
+    }
+
     async fn list_nodes_with_translation(
         &self,
         _tenant_id: &str,
         _repo_id: &str,
+        _branch: &str,
+        _workspace: &str,
         _locale: &LocaleCode,
         _revision: &raisin_hlc::HLC,
     ) -> Result<Vec<String>> {

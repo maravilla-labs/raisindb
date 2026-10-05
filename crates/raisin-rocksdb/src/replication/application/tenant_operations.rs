@@ -140,22 +140,28 @@ pub(super) async fn apply_update_repository(
     let cf = cf_handle(&applicator.db, cf::REGISTRY)?;
 
     // Check if repository exists (for event emission)
-    let is_new_repository = match applicator.db.get_cf(cf, &key) {
-        Ok(Some(_bytes)) => false, // Repository exists, this is an update
-        Ok(None) => true,          // Doesn't exist, it's new
-        Err(e) => {
-            tracing::error!("Failed to check existing repository: {}", e);
-            return Err(raisin_error::Error::storage(e.to_string()));
-        }
-    };
+    let existing = applicator.db.get_cf(cf, &key).map_err(|e| {
+        tracing::error!("Failed to check existing repository: {}", e);
+        raisin_error::Error::storage(e.to_string())
+    })?;
+    let is_new_repository = existing.is_none();
+    let previous_config = existing
+        .as_deref()
+        .and_then(|bytes| rmp_serde::from_slice::<raisin_context::RepositoryInfo>(bytes).ok())
+        .map(|info| info.config);
 
-    // Serialize and write using helper
-    serialize_and_write_compact(
+    // The one repository-record writer (localized name state flip, Phase 12).
+    let value = rmp_serde::to_vec(repository).map_err(|e| {
+        raisin_error::Error::storage(format!("apply_update_repository encode: {e}"))
+    })?;
+    crate::localized_name::config_change::write_repository_record(
         &applicator.db,
-        cf,
-        key,
-        repository,
-        &format!("apply_update_repository_{}/{}", tenant_id, repo_id),
+        tenant_id,
+        repo_id,
+        &key,
+        &value,
+        previous_config.as_ref(),
+        &repository.config,
     )?;
 
     // Only emit RepositoryCreated event for NEW repositories

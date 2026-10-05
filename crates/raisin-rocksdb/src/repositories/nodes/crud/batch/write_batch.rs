@@ -56,6 +56,7 @@ impl NodeRepositoryImpl {
             revision,
             order_label,
             None,
+            super::super::indexing::PropertyWrite::CREATE,
         )
     }
 
@@ -70,27 +71,24 @@ impl NodeRepositoryImpl {
         revision: &HLC,
         order_label: Option<&str>,
         parent_id_override: Option<&str>,
+        write: super::super::indexing::PropertyWrite<'_>,
     ) -> Result<()> {
-        // Get column family handles
-        let cf_nodes = cf_handle(&self.db, cf::NODES)?;
         let cf_path = cf_handle(&self.db, cf::PATH_INDEX)?;
-        let cf_node_path = cf_handle(&self.db, cf::NODE_PATH)?;
         let cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
 
-        // Convert Node to StorageNode (excludes path from blob)
-        let storage_node = StorageNode::from_node(node, parent_id_override.map(|s| s.to_string()));
-
-        // Serialize StorageNode with named fields (NOT Node - path is excluded)
-        // Using to_vec_named ensures nested types like RaisinReference serialize with
-        // field names (e.g., "raisin:ref", "raisin:workspace"), avoiding ambiguity
-        // with plain string arrays during deserialization.
-        let node_value = rmp_serde::to_vec_named(&storage_node)
-            .map_err(|e| raisin_error::Error::storage(format!("Serialization error: {}", e)))?;
-
-        // 1. Store node blob with versioned key
-        let node_key =
-            keys::node_key_versioned(tenant_id, repo_id, branch, workspace, &node.id, revision);
-        batch.put_cf(cf_nodes, node_key, node_value);
+        // 1 + 3. The node record — StorageNode blob (no path) and its
+        // NODE_PATH entry — through the ONE record writer.
+        super::super::indexing::node_record::write_node_record(
+            &self.db,
+            batch,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            node,
+            parent_id_override.map(|s| s.to_string()),
+            revision,
+        )?;
 
         // 2. Index by path with versioned key (path -> node_id)
         let path_key = keys::path_index_key_versioned(
@@ -98,23 +96,15 @@ impl NodeRepositoryImpl {
         );
         batch.put_cf(cf_path, path_key, node.id.as_bytes());
 
-        // 3. Index node_path with versioned key (node_id -> path) for O(1) path materialization
-        let node_path_key = keys::node_path_key_versioned(
-            tenant_id, repo_id, branch, workspace, &node.id, revision,
-        );
-        batch.put_cf(cf_node_path, node_path_key, node.path.as_bytes());
-
-        // 4. Add property indexes (delegates to indexing module)
-        self.add_property_indexes(batch, node, tenant_id, repo_id, branch, workspace, revision)?;
-
-        // 5. Add system property indexes (__name, __node_type, ...) - without
-        // these, nodes created through this batch path (e.g. deep create)
-        // are invisible to list_by_type
-        self.add_system_property_indexes(
-            batch, node, tenant_id, repo_id, branch, workspace, revision,
+        // 4 + 5. Property and pseudo-property entries (__name, __node_type,
+        // membership, ...) through the ONE writer — without the pseudo ones,
+        // nodes created through this batch path (e.g. deep create) are
+        // invisible to list_by_type.
+        self.write_property_entries(
+            batch, node, tenant_id, repo_id, branch, workspace, revision, write,
         )?;
 
-        // 6. Add reference indexes (delegates to indexing module)
+        // 6. Add reference indexes (every reference, never skipped)
         self.add_reference_indexes(batch, node, tenant_id, repo_id, branch, workspace, revision)?;
 
         // 7. Add relation indexes (delegates to indexing module)

@@ -146,6 +146,7 @@ impl PhysicalPlan {
                 | PhysicalPlan::CompoundIndexScan { .. }
                 | PhysicalPlan::PropertyRangeScan { .. }
                 | PhysicalPlan::PathIndexScan { .. }
+                | PhysicalPlan::LocalizedPathLookup { .. }
                 | PhysicalPlan::NodeIdScan { .. }
                 | PhysicalPlan::FullTextScan { .. }
                 | PhysicalPlan::NeighborsScan { .. }

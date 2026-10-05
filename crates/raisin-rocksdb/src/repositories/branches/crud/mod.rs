@@ -103,10 +103,41 @@ impl BranchRepository for BranchRepositoryImpl {
         let value = rmp_serde::to_vec(&branch)
             .map_err(|e| raisin_error::Error::storage(format!("Serialization error: {}", e)))?;
 
+        // A branch created under the name of a deleted one starts with no
+        // repair state: an inherited `property_index` `done` would turn on
+        // skip-unchanged over an index this node never rebuilt.
+        // (Only when no record exists: re-putting a live branch keeps it.)
         let cf = cf_handle(&self.db, cf::BRANCHES)?;
+        let mut batch = rocksdb::WriteBatch::default();
+        let exists = self
+            .db
+            .get_cf(cf, &key)
+            .map_err(|e| raisin_error::Error::storage(e.to_string()))?
+            .is_some();
+        if !exists {
+            crate::management::async_indexing::repair::forget_branch_rebuild_state(
+                &self.db,
+                &mut batch,
+                tenant_id,
+                repo_id,
+                branch_name,
+            )?;
+        }
+        batch.put_cf(cf, key, value);
         self.db
-            .put_cf(cf, key, value)
+            .write(batch)
             .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+        // A new branch has no `property_index` rebuild here: queue it in the
+        // background (plan Phase 7b). A fork asks once its index copy is done
+        // (`copy_branch_indexes`), never before.
+        if !exists && effective_revision.is_none() {
+            crate::management::async_indexing::repair::request_property_index_rebuild(
+                &self.db,
+                tenant_id,
+                repo_id,
+                Some(branch_name),
+            );
+        }
 
         // Capture operation for replication WITH the initial branch head as the revision
         if let Some(ref capture) = self.operation_capture {
@@ -145,6 +176,14 @@ impl BranchRepository for BranchRepositoryImpl {
                 max_revision,
             )
             .await?;
+            // The copied compound keyspace is as complete as the source's:
+            // so is its build state (see `compound_state::fork`).
+            crate::compound_state::CompoundStateStore::new(self.db.clone()).inherit_on_fork(
+                tenant_id,
+                repo_id,
+                &source_branch_for_indexes,
+                branch_name,
+            )?;
 
             // Queue background job to copy revision history if requested
             if include_revision_history {
@@ -321,8 +360,18 @@ impl BranchRepository for BranchRepositoryImpl {
                 )));
             }
 
+            // The branch's repair state records go with it (see create).
+            let mut batch = rocksdb::WriteBatch::default();
+            crate::management::async_indexing::repair::forget_branch_rebuild_state(
+                &self.db,
+                &mut batch,
+                tenant_id,
+                repo_id,
+                branch_name,
+            )?;
+            batch.delete_cf(cf, key);
             self.db
-                .delete_cf(cf, key)
+                .write(batch)
                 .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
 
             if let Some(ref capture) = self.operation_capture {

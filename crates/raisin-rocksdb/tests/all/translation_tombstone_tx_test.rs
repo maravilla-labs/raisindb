@@ -45,6 +45,7 @@ async fn setup() -> Result<(RocksDBStorage, TempDir)> {
                 default_branch: BRANCH.to_string(),
                 description: None,
                 tags: HashMap::new(),
+                localized_names: Default::default(),
             },
         )
         .await?;
@@ -77,8 +78,9 @@ async fn sorted_locales(tx: &dyn TransactionalContext) -> Result<Vec<String>> {
     Ok(locales)
 }
 
-/// Write the tombstone a node delete writes for one locale
-/// (`tombstones::tombstone_translation_data`), newer than every version so far.
+/// Write a translation tombstone for one locale (what a translation deletion
+/// or history GC's `materialize_node_deletion` stores), newer than every
+/// version so far.
 fn tombstone(storage: &RocksDBStorage, locale: &str, revision: &HLC) {
     let mut key =
         format!("{TENANT}\0{REPO}\0{BRANCH}\0{WORKSPACE}\0translations\0{NODE}\0{locale}\0")

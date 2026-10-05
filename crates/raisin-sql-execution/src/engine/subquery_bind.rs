@@ -191,7 +191,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
     }
 }
 
-fn statement_needs_binding(stmt: &AnalyzedStatement) -> bool {
+pub(crate) fn statement_needs_binding(stmt: &AnalyzedStatement) -> bool {
     match stmt {
         AnalyzedStatement::Query(q) => query_needs_binding(q),
         AnalyzedStatement::Explain(e) => statement_needs_binding(&e.target),

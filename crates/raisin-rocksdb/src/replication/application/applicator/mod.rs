@@ -20,12 +20,11 @@
 mod compound_marker;
 mod crdt_ops;
 mod db_lookups;
-mod legacy_node_ops;
-mod move_node_ops;
+mod delete_ops;
 mod newer_version;
 mod node_baseline;
 
-pub use node_baseline::{scoped_miss_fallbacks, unknown_workspace_scans, WorkspaceHint};
+pub use node_baseline::{unknown_workspace_scans, WorkspaceHint};
 mod registry_ops;
 mod relation_ops;
 mod schema_ops;
@@ -51,6 +50,24 @@ fn is_tombstone(value: &[u8]) -> bool {
     crate::keys::is_tombstone_value(value)
 }
 
+/// The nodes an op writes on its branch — what [`OperationApplicator::
+/// apply_operation`] locks (`indexing::node_lock`). `None` for ops that write
+/// no node record or node index.
+fn node_ids_of(op_type: &OpType) -> Option<Vec<&str>> {
+    Some(match op_type {
+        OpType::ApplyRevision { node_changes, .. } => node_changes
+            .iter()
+            .map(|change| change.node.id.as_str())
+            .collect(),
+        OpType::UpsertNodeSnapshot { node, .. } => vec![node.id.as_str()],
+        OpType::DeleteNodeSnapshot { node_id, .. } => vec![node_id.as_str()],
+        _ => return None,
+    })
+}
+
+/// The workspace a replicated node is applied in. Every emitter stamps
+/// `node.workspace` (see `node_baseline`), so the `"default"` here only names
+/// where a malformed, workspace-less node lands — explicitly, with no scan.
 fn node_workspace(node: &raisin_models::nodes::Node) -> &str {
     node.workspace.as_deref().unwrap_or("default")
 }
@@ -102,6 +119,39 @@ impl OperationApplicator {
                 "Operation {} missing revision in both Operation.revision and OpType - cannot apply",
                 op.op_id
             ))),
+        }
+    }
+
+    /// After a replicated NodeType write: re-resolve the branch's cached
+    /// index definitions (compound declarations, unique names) NOW, before
+    /// any later op is applied against them — the `Event::Schema` re-warm is
+    /// asynchronous. A read between ops, never inside a node batch.
+    pub(super) async fn refresh_index_definitions(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        written: &str,
+    ) {
+        let node_types = crate::repositories::NodeTypeRepositoryImpl::new(
+            self.db.clone(),
+            Arc::new(crate::repositories::RevisionRepositoryImpl::new(
+                self.db.clone(),
+                "replication-index-defs".to_string(),
+            )),
+            self.branch_repo.clone(),
+        );
+        if let Err(e) = crate::indexing::compound::defs::refresh_branch(
+            &self.db,
+            &node_types,
+            raisin_storage::BranchScope::new(tenant_id, repo_id, branch),
+            &[written],
+        )
+        .await
+        {
+            // Dropped, not stale: the next write finds them cold and fails
+            // the compound index closed.
+            tracing::warn!(error = %e, "could not refresh index definitions after a schema op");
         }
     }
 
@@ -166,6 +216,19 @@ impl OperationApplicator {
                 "Starting to apply UpdateNodeType operation"
             );
         }
+
+        // The node commit step (plan Phase 7b): every node this op writes is
+        // locked — the SAME per-node mutex every local write funnel takes —
+        // for the whole apply, so its baseline read and its write see no
+        // local commit of those nodes land in between (and a local commit's
+        // re-validation sees no replicated write land in between either).
+        let _node_guard = match node_ids_of(&op.op_type) {
+            Some(ids) => Some(
+                crate::indexing::lock_nodes(&self.db, &op.tenant_id, &op.repo_id, &op.branch, ids)
+                    .await,
+            ),
+            None => None,
+        };
 
         match &op.op_type {
             // ========== Tenant/Deployment/Repository Operations ==========
@@ -302,103 +365,6 @@ impl OperationApplicator {
                 )
                 .await
             }
-            OpType::CreateNode {
-                node_id,
-                name,
-                node_type,
-                archetype,
-                parent_id,
-                order_key,
-                properties,
-                owner_id,
-                workspace,
-                path,
-            } => {
-                self.apply_create_node(
-                    &op.tenant_id,
-                    &op.repo_id,
-                    &op.branch,
-                    workspace.as_ref().map(|s| s.as_str()).unwrap_or("default"),
-                    node_id,
-                    name,
-                    node_type,
-                    archetype.as_deref(),
-                    parent_id.as_deref(),
-                    order_key,
-                    properties,
-                    owner_id.as_deref(),
-                    path,
-                    op,
-                )
-                .await
-            }
-            OpType::DeleteNode { node_id } => {
-                self.apply_delete_node(&op.tenant_id, &op.repo_id, &op.branch, node_id, op)
-                    .await
-            }
-            OpType::SetProperty {
-                node_id,
-                property_name,
-                value,
-            } => {
-                self.apply_set_property(
-                    &op.tenant_id,
-                    &op.repo_id,
-                    &op.branch,
-                    node_id,
-                    property_name,
-                    value,
-                    op,
-                )
-                .await
-            }
-            OpType::RenameNode {
-                node_id,
-                old_name: _,
-                new_name,
-            } => {
-                self.apply_rename_node(
-                    &op.tenant_id,
-                    &op.repo_id,
-                    &op.branch,
-                    node_id,
-                    new_name,
-                    op,
-                )
-                .await
-            }
-            OpType::MoveNode {
-                node_id,
-                old_parent_id: _,
-                new_parent_id,
-                position,
-            } => {
-                self.apply_move_node(
-                    &op.tenant_id,
-                    &op.repo_id,
-                    &op.branch,
-                    node_id,
-                    new_parent_id.as_deref(),
-                    position.as_deref(),
-                    op,
-                )
-                .await
-            }
-            OpType::SetArchetype {
-                node_id,
-                old_archetype: _,
-                new_archetype,
-            } => {
-                self.apply_set_archetype(
-                    &op.tenant_id,
-                    &op.repo_id,
-                    &op.branch,
-                    node_id,
-                    new_archetype.as_deref(),
-                    op,
-                )
-                .await
-            }
             OpType::AddRelation {
                 source_id,
                 source_workspace,
@@ -503,12 +469,19 @@ impl OperationApplicator {
                 )
                 .await
             }
-            OpType::DeleteNodeSnapshot { node_id, revision } => {
+            OpType::DeleteNodeSnapshot {
+                node_id,
+                revision,
+                node,
+                parent_id,
+            } => {
                 self.apply_delete_node_snapshot(
                     &op.tenant_id,
                     &op.repo_id,
                     &op.branch,
                     node_id,
+                    node.as_ref(),
+                    parent_id.as_deref(),
                     revision,
                     op,
                 )
@@ -638,7 +611,29 @@ impl OperationApplicator {
                 .await
             }
 
-            // ========== Not Yet Implemented ==========
+            // ========== Translations (plan Phase 11) ==========
+            OpType::UpsertTranslationOverlay { .. } => {
+                super::translation_operations::apply_translation_version(self, op).await
+            }
+
+            // ========== From a newer peer ==========
+            // Skipped, never an error: an error here is retried forever and
+            // wedges every later op from that peer behind it. It is marked
+            // applied like any other op and NOT re-dispatched after this node
+            // upgrades — see `OpType::Unknown` for the rule that follows.
+            OpType::Unknown { tag, .. } => {
+                tracing::warn!(
+                    op_id = %op.op_id,
+                    from = %op.cluster_node_id,
+                    op_type = %tag,
+                    "skipping an operation type this binary does not know"
+                );
+                Ok(())
+            }
+
+            // ========== No apply arm ==========
+            // Tenant/deployment deletes and permission grants are captured
+            // but not applied by replication (yet).
             _ => {
                 tracing::debug!("Operation type not handled by applicator: {:?}", op.op_type);
                 Ok(())

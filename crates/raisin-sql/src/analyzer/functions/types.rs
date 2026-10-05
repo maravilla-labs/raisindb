@@ -4,7 +4,7 @@ use crate::analyzer::types::DataType;
 
 /// Function signature describing a built-in function's name, parameters, return type,
 /// and metadata.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FunctionSignature {
     pub name: String,
     pub params: Vec<DataType>,

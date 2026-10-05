@@ -91,13 +91,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
 
         let physical_plan = physical_planner.plan(&logical_plan)?;
 
-        let mut ctx = ExecutionContext::new(
-            self.storage.clone(),
-            self.tenant_id.clone(),
-            self.repo_id.clone(),
-            branch,
-            workspace,
-        );
+        let mut ctx = self.new_statement_context(branch, workspace);
 
         ctx.transaction_context = self.transaction_context.clone();
 

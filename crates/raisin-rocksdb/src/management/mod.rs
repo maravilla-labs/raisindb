@@ -31,6 +31,9 @@ pub mod async_indexing;
 pub mod backup;
 pub mod compaction;
 
+// Per-(branch, CF) exclusion between run-collapse GC and inserting writers
+pub mod cf_exclusion;
+
 // Revision-history garbage collection (retention per repo/branch)
 pub mod history_gc;
 pub mod integrity;

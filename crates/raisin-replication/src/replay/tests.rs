@@ -4,7 +4,6 @@ mod tests {
     use crate::operation::OperationTarget;
     use crate::replay::ReplayEngine;
     use crate::{OpType, Operation, VectorClock};
-    use raisin_models::nodes::properties::PropertyValue;
     use std::collections::HashSet;
     use uuid::Uuid;
 
@@ -24,10 +23,12 @@ mod tests {
             tenant_id: "tenant1".to_string(),
             repo_id: "repo1".to_string(),
             branch: "main".to_string(),
-            op_type: OpType::SetProperty {
+            // One register per target: concurrent deletes of one node merge.
+            op_type: OpType::DeleteNodeSnapshot {
                 node_id: target_node_id.to_string(),
-                property_name: "title".to_string(),
-                value: PropertyValue::String(format!("Value from {}", node_id).to_string()),
+                revision: raisin_hlc::HLC::new(timestamp_ms, 0),
+                node: None,
+                parent_id: None,
             },
             revision: None,
             actor: "test".to_string(),
@@ -149,7 +150,7 @@ mod tests {
         assert_eq!(result.conflicts.len(), 1);
         assert_eq!(
             result.conflicts[0].conflict_type,
-            ConflictType::ConcurrentPropertyUpdate
+            ConflictType::ConcurrentSchemaUpdate
         );
     }
 

@@ -173,6 +173,7 @@ impl NodeRepositoryImpl {
             node,
             &unique_properties,
             revision,
+            None,
         )
     }
 }
@@ -217,7 +218,16 @@ pub(crate) fn write_unique_entries(
 }
 
 /// Tombstone `node`'s UNIQUE_INDEX entries for `unique_properties`. The sync
-/// half of [`NodeRepositoryImpl::add_unique_tombstones_to_batch`].
+/// half of [`NodeRepositoryImpl::add_unique_tombstones_to_batch`], and the
+/// delete tombstoner every delete funnel uses (repository, transaction,
+/// cascade, prune, merge, replication).
+///
+/// Each claim is ended through `unique_delta::end_claim`, the one place a
+/// claim is ended: a claim key is `(type, property, value hash, revision)` —
+/// no node id — so a delete and another node claiming the same value at the
+/// same revision write ONE key (a promotion replacing a re-created node
+/// does), and that key is left to its holder, committed or in this commit
+/// (`held`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn tombstone_unique_entries(
     batch: &mut WriteBatch,
@@ -229,22 +239,17 @@ pub(crate) fn tombstone_unique_entries(
     node: &Node,
     unique_properties: &[String],
     revision: &HLC,
+    held: Option<&super::unique_guard::CommitClaims>,
 ) -> Result<()> {
-    let unique_manager = crate::repositories::UniqueIndexManager::new(db.clone());
+    let ctx = crate::indexing::IndexCtx::new(tenant_id, repo_id, branch, workspace);
     for prop_name in unique_properties {
         if let Some(prop_value) = node.properties.get(prop_name) {
-            let value_hash = hash_property_value(prop_value);
-            unique_manager.add_unique_tombstone_to_batch(
-                batch,
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                &node.node_type,
-                prop_name,
-                &value_hash,
-                revision,
-            )?;
+            let claim = (
+                node.node_type.clone(),
+                prop_name.clone(),
+                hash_property_value(prop_value),
+            );
+            super::unique_delta::end_claim(batch, db, &ctx, &claim, &node.id, revision, held)?;
         }
     }
     Ok(())

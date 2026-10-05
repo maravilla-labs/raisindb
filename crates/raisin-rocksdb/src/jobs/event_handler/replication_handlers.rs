@@ -22,6 +22,9 @@ impl UnifiedJobEventHandler {
             "Processing OperationBatchApplied event"
         );
 
+        // Cold-definition compound build requests from the batch just applied.
+        self.drain_cold_compound_requests().await;
+
         // For catch-up scenarios (large operation batches), check if property indexes
         // need to be built for the common branch/workspace combinations.
         let branch = "main";

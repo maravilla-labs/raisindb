@@ -41,6 +41,7 @@ impl RocksDBTransaction {
             message: metadata.message.clone(),
             is_system: metadata.is_system,
             bookkeeping: metadata.bookkeeping,
+            in_place_record_write: metadata.in_place_record_write,
         })
     }
 

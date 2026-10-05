@@ -59,6 +59,69 @@ impl NodeRepository for NodeRepositoryImpl {
             .await
     }
 
+    async fn get_for_read(
+        &self,
+        scope: StorageScope<'_>,
+        locator: &raisin_storage::NodeLocator,
+        max_revision: Option<&HLC>,
+        opts: &raisin_storage::ReadOpts,
+    ) -> Result<Option<Node>> {
+        let StorageScope {
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+        } = scope;
+        let mode = match opts.properties {
+            raisin_storage::PropertiesRead::Load => super::storage_node::PropertiesMode::Load,
+            raisin_storage::PropertiesRead::Skip => super::storage_node::PropertiesMode::Skip,
+        };
+        match locator {
+            raisin_storage::NodeLocator::Id(id) => {
+                self.dispatch_get_as(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    id,
+                    max_revision,
+                    opts.has_children,
+                    mode,
+                )
+                .await
+            }
+            raisin_storage::NodeLocator::Path(path) => {
+                self.get_by_path_impl_as(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    path,
+                    max_revision,
+                    opts.has_children,
+                    mode,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn get_many_for_read(
+        &self,
+        scope: BranchScope<'_>,
+        items: &[raisin_storage::BatchReadItem],
+        at: &HLC,
+        snapshot: Option<&raisin_storage::ReadSnapshot>,
+        opts: raisin_storage::ReadOpts,
+    ) -> Result<Vec<Option<Node>>> {
+        self.get_many_for_read_impl(scope, items, at, snapshot, opts)
+            .await
+    }
+
+    fn open_read_snapshot(&self) -> Option<raisin_storage::ReadSnapshot> {
+        Some(super::crud::read::RocksReadSnapshot::open_handle(&self.db))
+    }
+
     async fn get_with_children(
         &self,
         scope: StorageScope<'_>,

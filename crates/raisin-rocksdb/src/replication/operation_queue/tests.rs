@@ -27,10 +27,11 @@ async fn test_queue_enqueue_and_process() {
         tenant_id: "tenant1".to_string(),
         repo_id: "repo1".to_string(),
         branch: "main".to_string(),
-        op_type: OpType::SetProperty {
+        op_type: OpType::DeleteNodeSnapshot {
             node_id: "node1".to_string(),
-            property_name: "title".to_string(),
-            value: raisin_models::nodes::properties::PropertyValue::String("Test".to_string()),
+            revision: raisin_hlc::HLC::new(1, 0),
+            node: None,
+            parent_id: None,
         },
         actor: "test_user".to_string(),
         agent: None,
@@ -75,10 +76,11 @@ async fn test_batch_processing() {
             tenant_id: "tenant1".to_string(),
             repo_id: "repo1".to_string(),
             branch: "main".to_string(),
-            op_type: OpType::SetProperty {
+            op_type: OpType::DeleteNodeSnapshot {
                 node_id: format!("node{}", i),
-                property_name: "value".to_string(),
-                value: raisin_models::nodes::properties::PropertyValue::Integer(i as i64),
+                revision: raisin_hlc::HLC::new(1, 0),
+                node: None,
+                parent_id: None,
             },
             actor: "test_user".to_string(),
             agent: None,
@@ -125,10 +127,11 @@ async fn test_queue_full_backpressure() {
             tenant_id: "tenant1".to_string(),
             repo_id: "repo1".to_string(),
             branch: "main".to_string(),
-            op_type: OpType::SetProperty {
+            op_type: OpType::DeleteNodeSnapshot {
                 node_id: format!("node{}", i),
-                property_name: "value".to_string(),
-                value: raisin_models::nodes::properties::PropertyValue::Integer(i as i64),
+                revision: raisin_hlc::HLC::new(1, 0),
+                node: None,
+                parent_id: None,
             },
             actor: "test_user".to_string(),
             agent: None,
@@ -145,10 +148,11 @@ async fn test_queue_full_backpressure() {
         tenant_id: "tenant1".to_string(),
         repo_id: "repo1".to_string(),
         branch: "main".to_string(),
-        op_type: OpType::SetProperty {
+        op_type: OpType::DeleteNodeSnapshot {
             node_id: "overflow".to_string(),
-            property_name: "value".to_string(),
-            value: raisin_models::nodes::properties::PropertyValue::Integer(999),
+            revision: raisin_hlc::HLC::new(1, 0),
+            node: None,
+            parent_id: None,
         },
         actor: "test_user".to_string(),
         agent: None,
@@ -186,10 +190,11 @@ async fn test_graceful_shutdown() {
             tenant_id: "tenant1".to_string(),
             repo_id: "repo1".to_string(),
             branch: "main".to_string(),
-            op_type: OpType::SetProperty {
+            op_type: OpType::DeleteNodeSnapshot {
                 node_id: format!("node{}", i),
-                property_name: "value".to_string(),
-                value: raisin_models::nodes::properties::PropertyValue::Integer(i as i64),
+                revision: raisin_hlc::HLC::new(1, 0),
+                node: None,
+                parent_id: None,
             },
             actor: "test_user".to_string(),
             agent: None,
@@ -236,10 +241,11 @@ async fn test_timeout_based_batching() {
             tenant_id: "tenant1".to_string(),
             repo_id: "repo1".to_string(),
             branch: "main".to_string(),
-            op_type: OpType::SetProperty {
+            op_type: OpType::DeleteNodeSnapshot {
                 node_id: format!("node{}", i),
-                property_name: "value".to_string(),
-                value: raisin_models::nodes::properties::PropertyValue::Integer(i as i64),
+                revision: raisin_hlc::HLC::new(1, 0),
+                node: None,
+                parent_id: None,
             },
             actor: "test_user".to_string(),
             agent: None,

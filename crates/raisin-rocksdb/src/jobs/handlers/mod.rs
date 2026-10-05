@@ -25,7 +25,6 @@ pub mod maintenance;
 pub mod mcp_connection_refresh;
 pub mod mcp_tool_discovery;
 pub mod node_delete_cleanup;
-pub mod oplog_compaction;
 pub mod package_create_from_selection;
 pub mod package_export;
 pub mod package_install;
@@ -86,7 +85,6 @@ pub use integration_token_refresh::{token_refresh_dedup_key, IntegrationTokenRef
 pub use maintenance::{install_vector_management, MaintenanceJobHandler};
 pub use mcp_tool_discovery::{McpDiscoveryDeps, McpToolDiscoveryHandler};
 pub use node_delete_cleanup::NodeDeleteCleanupHandler;
-pub use oplog_compaction::OpLogCompactionHandler;
 pub use package_create_from_selection::PackageCreateFromSelectionHandler;
 pub use package_export::PackageExportHandler;
 pub use package_install::{
@@ -138,7 +136,6 @@ pub struct JobHandlerRegistry {
     pub snapshot: Arc<SnapshotHandler>,
     pub replication_gc: Arc<ReplicationGCHandler>,
     pub replication_sync: Arc<ReplicationSyncHandler>,
-    pub oplog_compaction: Arc<OpLogCompactionHandler>,
     pub property_index: Arc<PropertyIndexJobHandler>,
     pub compound_index: Arc<CompoundIndexJobHandler>,
     /// Spatial index build / backfill. `Option` so the (already very long)
@@ -202,7 +199,6 @@ impl JobHandlerRegistry {
         snapshot: Arc<SnapshotHandler>,
         replication_gc: Arc<ReplicationGCHandler>,
         replication_sync: Arc<ReplicationSyncHandler>,
-        oplog_compaction: Arc<OpLogCompactionHandler>,
         property_index: Arc<PropertyIndexJobHandler>,
         compound_index: Arc<CompoundIndexJobHandler>,
         bulk_sql: Arc<BulkSqlHandler>,
@@ -246,7 +242,6 @@ impl JobHandlerRegistry {
             snapshot,
             replication_gc,
             replication_sync,
-            oplog_compaction,
             property_index,
             compound_index,
             spatial_index: None,
@@ -398,11 +393,6 @@ impl JobHandlerRegistry {
             }
             JobType::ReplicationSync { .. } => self
                 .replication_sync
-                .handle(job, context)
-                .await
-                .map(|_| None),
-            JobType::OpLogCompaction { .. } => self
-                .oplog_compaction
                 .handle(job, context)
                 .await
                 .map(|_| None),
