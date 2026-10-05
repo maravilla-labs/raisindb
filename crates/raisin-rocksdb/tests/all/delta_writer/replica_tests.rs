@@ -28,7 +28,25 @@ fn later(offset_ms: u64) -> HLC {
     HLC::new(chrono::Utc::now().timestamp_millis() as u64 + offset_ms, 0)
 }
 
+/// Apply a replicated upsert of `node` as an up-to-date origin sends it: its
+/// write layer stamped `created_at` / `updated_at` (a fixed instant when the
+/// fixture left them unset). [`upsert_as_stored`] sends it verbatim.
 pub(super) async fn upsert(
+    applicator: &OperationApplicator,
+    node: &Node,
+    label: &str,
+    revision: HLC,
+) {
+    let mut node = node.clone();
+    let stamped = chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("instant");
+    node.created_at.get_or_insert(stamped);
+    node.updated_at.get_or_insert(stamped);
+    upsert_as_stored(applicator, &node, label, revision).await
+}
+
+/// [`upsert`] without the origin's stamps: a LEGACY version, written before
+/// the write layer stamped timestamps, replicated as its origin stored it.
+pub(super) async fn upsert_as_stored(
     applicator: &OperationApplicator,
     node: &Node,
     label: &str,

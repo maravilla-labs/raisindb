@@ -807,7 +807,7 @@ async fn schema_and_workspace_events_queue_compound_index_builds() {
                 },
             ],
             has_order_column: true,
-            owner_node_type: None,
+            owner: None,
         }]),
     };
     storage

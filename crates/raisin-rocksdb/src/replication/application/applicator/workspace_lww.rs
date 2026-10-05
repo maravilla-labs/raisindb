@@ -117,6 +117,7 @@ mod tests {
             created_at: ts(created),
             updated_at: updated.map(ts),
             config: WorkspaceConfig::default(),
+            compound_indexes: None,
         }
     }
 

@@ -233,7 +233,7 @@ pub async fn sweep_compound_index_builds_at_boot(storage: &RocksDBStorage) -> Re
                 };
                 for workspace in workspaces {
                     match storage
-                        .sweep_compound_index_builds(
+                        .sweep_compound_index_builds_at_boot_for(
                             &tenant_id,
                             &repo_id,
                             &branch.name,

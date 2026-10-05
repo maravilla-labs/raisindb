@@ -20,7 +20,8 @@
 //!   background jobs, after boot, one branch at a time) on every branch where
 //!   it has not completed — see `auto_node_path.rs` (plan Phase 10b) — and
 //!   the chains built on it: `localized_names`, `property_index` and
-//!   `block_overlay_tombstones` (`auto_block_overlays.rs`, plan Phase 11c).
+//!   `block_overlay_tombstones` (`auto_block_overlays.rs`, plan Phase 11c)
+//!   and `compound_builds` (`compound_builds.rs`, plan Phase 13f).
 //!
 //! [`run_repair`] is the entry point the job handler and the admin endpoint
 //! call.
@@ -32,11 +33,15 @@
 //! against it while it runs (`management::cf_exclusion`).
 
 mod auto_block_overlays;
+mod auto_compound;
 mod auto_node_path;
 mod auto_property_index;
 mod auto_targets;
 mod block_overlay_tombstones;
 mod branches;
+mod compound_builds;
+mod compound_detect;
+mod compound_items;
 mod cursor;
 mod enqueue;
 mod headroom;
@@ -58,6 +63,11 @@ pub use auto_block_overlays::{
     auto_enabled as block_overlay_auto_enabled, pending_branches as pending_block_overlay_branches,
     schedule_after_start as schedule_block_overlay_tombstones, BLOCK_OVERLAY_AUTO_ENV,
 };
+pub use auto_compound::{
+    enqueue_if_owed as enqueue_compound_builds_if_owed, request as request_compound_builds,
+    restart_after_ingest as restart_compound_builds_after_ingest,
+    schedule_after_start as schedule_compound_builds,
+};
 pub use auto_node_path::{
     auto_backfill_enabled, continue_chain, continue_node_path_backfill_chain,
     enqueue_pending_node_path_backfills, pending_node_path_branches, schedule_chain,
@@ -71,6 +81,8 @@ pub use auto_property_index::{
 };
 pub use auto_targets::{after_link, enqueue_branch, record_link_outcome};
 pub use block_overlay_tombstones::BlockOverlayCounts;
+pub use compound_builds::{CompoundBuildCounts, START_DELAY as COMPOUND_BUILDS_START_DELAY};
+pub use compound_detect::pending_branches as pending_compound_build_branches;
 pub(crate) use cursor::BoundedWriter;
 pub use cursor::{load_state, state_key, BatchReport, CommitHook, RepairState};
 pub(crate) use enqueue::list_repositories;
@@ -78,7 +90,7 @@ pub use enqueue::{
     enqueue_index_repair, reenqueue_repairs_after_checkpoint, reenqueue_repairs_after_ingest,
 };
 pub use enqueue::{mark_repairs_pending, mark_repairs_pending_on};
-pub use headroom::{check_headroom, check_headroom_assuming};
+pub use headroom::{check_headroom, check_headroom_assuming, check_output_headroom};
 pub use kind::RepairKind;
 pub use node_path_backfill::NodePathCounts;
 pub use options::{RepairOptions, RepairReport};
@@ -118,6 +130,11 @@ pub async fn run_repair(
         // Any replication setting, not just operation capture: the
         // coordinator applies peers' ops from a node id and port alone.
         options.cluster_mode |= storage.config().replicates();
+    }
+    if kind == RepairKind::CompoundBuilds {
+        // Async: each build awaits its keyspace lock and runs its passes on
+        // a blocking thread (plan Phase 13f).
+        return compound_builds::run(storage, tenant_id, repo_id, branch, &options).await;
     }
     if kind == RepairKind::ResyncTranslations {
         // Async: it captures replication ops as it goes.
@@ -297,10 +314,11 @@ fn repair_branch(
                 (kind == RepairKind::PropertyIndexVerify).then_some(options.sample_every),
             )?
         }
-        RepairKind::ResyncTranslations => {
-            return Err(raisin_error::Error::Validation(
-                "resync_translations runs through run_repair (it is async)".to_string(),
-            ))
+        RepairKind::ResyncTranslations | RepairKind::CompoundBuilds => {
+            return Err(raisin_error::Error::Validation(format!(
+                "{} runs through run_repair (it is async)",
+                kind.slug()
+            )))
         }
         RepairKind::LocalizedNames => crate::localized_name::rebuild::rebuild_branch(
             db,

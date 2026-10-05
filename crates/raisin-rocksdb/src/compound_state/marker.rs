@@ -11,10 +11,11 @@
 //! So such a write marks every recorded index of the workspace `NotBuilt` —
 //! fail closed: those queries scan until the local build it requests runs.
 //!
-//! The marker is a monotonic counter (`stale_generation`). A build reads it
-//! when it starts and stamps `Ready` only if it is unchanged when it finishes;
-//! otherwise a write it may not have seen arrived mid-build and its `Ready`
-//! would overwrite the marker that write set. The store refuses any write that
+//! The marker is a monotonic counter (`stale_generation`), and every mark
+//! also clears the registered build's TICKET (`build_token`, see
+//! `build_cas.rs`). A build stamps `Ready` only while the record still
+//! carries its own ticket; otherwise a write it may not have seen arrived
+//! mid-build and its `Ready` would overwrite the marker that write set. The store refuses any write that
 //! LOWERS the counter (`CompoundStateStore::stage`), so no path can reset it
 //! and re-open that window.
 //!
@@ -46,10 +47,35 @@ pub(super) fn transitions() -> std::sync::MutexGuard<'static, ()> {
     TRANSITIONS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Mark `state` stale: `NotBuilt`, generation advanced.
-fn mark(state: &mut CompoundIndexState) {
+/// Which of a workspace's compound state records a mark covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StaleScope {
+    /// Every record.
+    All,
+    /// The node types' indexes only (a write whose types were cold but whose
+    /// workspace indexes it maintained).
+    TypeOwned,
+    /// The workspace's own indexes only (a declaration change).
+    WorkspaceOwned,
+}
+
+impl StaleScope {
+    fn covers(self, index_name: &str) -> bool {
+        let workspace_owned = CompoundIndexDefinition::is_workspace_index_name(index_name);
+        match self {
+            StaleScope::All => true,
+            StaleScope::TypeOwned => !workspace_owned,
+            StaleScope::WorkspaceOwned => workspace_owned,
+        }
+    }
+}
+
+/// Mark `state` stale: `NotBuilt`, generation advanced, and the registered
+/// build's ticket cleared — the build in flight can no longer stamp `Ready`.
+pub(super) fn mark(state: &mut CompoundIndexState) {
     state.phase = CompoundBuildPhase::NotBuilt;
     state.stale_generation = state.stale_generation.saturating_add(1);
+    state.build_token = 0;
 }
 
 impl CompoundStateStore {
@@ -76,16 +102,41 @@ impl CompoundStateStore {
     /// rule). An index with no record yet reads `NotBuilt` already.
     pub fn write_marking_stale(
         &self,
-        mut batch: WriteBatch,
+        batch: WriteBatch,
         tenant_id: &str,
         repo_id: &str,
         branch: &str,
         workspace: &str,
     ) -> Result<usize> {
+        self.write_marking_stale_in(
+            batch,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            StaleScope::All,
+        )
+    }
+
+    /// [`Self::write_marking_stale`] for the records `scope` covers only — a
+    /// write that maintained the workspace's own indexes but not its types'
+    /// (or the reverse) leaves the ones it did maintain `Ready`.
+    pub fn write_marking_stale_in(
+        &self,
+        mut batch: WriteBatch,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        scope: StaleScope,
+    ) -> Result<usize> {
         let _guard = transitions();
         let states = self.list_for_workspace(tenant_id, repo_id, branch, workspace)?;
         let mut keys = Vec::with_capacity(states.len());
         for mut state in states {
+            if !scope.covers(&state.index_name) {
+                continue;
+            }
             mark(&mut state);
             keys.push(self.stage(&mut batch, tenant_id, repo_id, branch, workspace, &state)?);
         }
@@ -111,7 +162,26 @@ impl CompoundStateStore {
         branch: &str,
         workspace: &str,
     ) -> Result<usize> {
-        self.write_marking_stale(WriteBatch::default(), tenant_id, repo_id, branch, workspace)
+        self.mark_workspace_stale_in(tenant_id, repo_id, branch, workspace, StaleScope::All)
+    }
+
+    /// [`Self::mark_workspace_stale`] for the records `scope` covers.
+    pub fn mark_workspace_stale_in(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        scope: StaleScope,
+    ) -> Result<usize> {
+        self.write_marking_stale_in(
+            WriteBatch::default(),
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            scope,
+        )
     }
 
     /// Flip one index's record to `NotBuilt` (its declaration changed), and
@@ -210,103 +280,5 @@ impl CompoundStateStore {
             .map_err(|e| Error::storage(format!("Failed to mark compound state stale: {}", e)))?;
         self.clear_cache();
         Ok(marked)
-    }
-
-    /// Register a build of `definition` and return the generation it runs
-    /// under, to be handed back to [`Self::complete_build`].
-    ///
-    /// The FIRST build of an index also writes a `Building` record, so that a
-    /// mark arriving during it has a record to advance. A rebuild of an index
-    /// that already has a record leaves the record's phase alone — use
-    /// [`Self::begin_rebuild`] when the build first CLEARS the keyspace.
-    pub fn begin_build(
-        &self,
-        tenant_id: &str,
-        repo_id: &str,
-        branch: &str,
-        workspace: &str,
-        definition: &CompoundIndexDefinition,
-        head: raisin_hlc::HLC,
-    ) -> Result<u64> {
-        self.begin(
-            tenant_id, repo_id, branch, workspace, definition, head, false,
-        )
-    }
-
-    /// [`Self::begin_build`] for a build that empties the keyspace first: the
-    /// record goes to `Building` (unusable) whatever its phase was, keeping its
-    /// generation, so the planner never trusts `Ready` over a cleared keyspace.
-    pub fn begin_rebuild(
-        &self,
-        tenant_id: &str,
-        repo_id: &str,
-        branch: &str,
-        workspace: &str,
-        definition: &CompoundIndexDefinition,
-        head: raisin_hlc::HLC,
-    ) -> Result<u64> {
-        self.begin(
-            tenant_id, repo_id, branch, workspace, definition, head, true,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn begin(
-        &self,
-        tenant_id: &str,
-        repo_id: &str,
-        branch: &str,
-        workspace: &str,
-        definition: &CompoundIndexDefinition,
-        head: raisin_hlc::HLC,
-        force_building: bool,
-    ) -> Result<u64> {
-        let _guard = transitions();
-        let existing = read_state(
-            &self.db,
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            &definition.name,
-        )?;
-        let generation = existing.as_ref().map_or(0, |s| s.stale_generation);
-        if existing.is_none() || force_building {
-            let mut building = CompoundIndexState::ready(definition, head);
-            building.phase = CompoundBuildPhase::Building;
-            building.stale_generation = generation;
-            self.put_unlocked(tenant_id, repo_id, branch, workspace, &building)?;
-        }
-        Ok(generation)
-    }
-
-    /// Stamp `ready` if no mark arrived since [`Self::begin_build`] returned
-    /// `started_under`. Returns whether it was stamped; `false` leaves the
-    /// record `NotBuilt` for the next build.
-    pub fn complete_build(
-        &self,
-        tenant_id: &str,
-        repo_id: &str,
-        branch: &str,
-        workspace: &str,
-        mut ready: CompoundIndexState,
-        started_under: u64,
-    ) -> Result<bool> {
-        let _guard = transitions();
-        let current = read_state(
-            &self.db,
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            &ready.index_name,
-        )?
-        .map_or(0, |state| state.stale_generation);
-        if current != started_under {
-            return Ok(false);
-        }
-        ready.stale_generation = current;
-        self.put_unlocked(tenant_id, repo_id, branch, workspace, &ready)?;
-        Ok(true)
     }
 }

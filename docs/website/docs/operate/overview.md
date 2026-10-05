@@ -101,6 +101,30 @@ These handlers call into `raisin-indexer` and `raisin-embeddings` for Tantivy an
 - `vector/rebuild` re-adds the stored embeddings to the HNSW index, with no embedding provider calls.
 - `vector/regenerate` queues re-embedding for stored vectors with the wrong dimensions and, from v0.6.46, for embedding-eligible nodes that have no embedding; `?force=true` re-embeds every stored embedding.
 
+### Compound indexes build themselves
+
+Compound indexes are local to each node and are rebuilt in the background by the
+`compound_builds` job, one branch at a time, paced and only with enough free
+disk (twice the compound index's size), after the job system starts and again
+after a checkpoint is ingested. It builds:
+
+- the built-in folder index (`@__children_by_created_at`, see
+  [Indexes](../access/sql/indexes.md)) on every workspace that has not opted out
+  (`config.builtin_indexes.children_by_created_at: false`), and drops the entries
+  of a workspace that opted out;
+- every compound index whose build-state record is from an older format, so no
+  manual rebuild is needed after an upgrade.
+
+Until an index is rebuilt on a node, queries there scan and return the same rows
+more slowly. The job is visible and can be started like any index repair:
+`POST /api/management/{repo}/repairs/compound_builds` fans it out to every node
+and `GET /api/management/{repo}/repairs/compound_builds/status` reports each
+node's state.
+
+| Env | Purpose | Default |
+|-----|---------|---------|
+| `RAISIN_COMPOUND_FORMAT_REBUILD` | `0`/`false`/`off`/`no` stops the automatic rebuild of older-format compound indexes; they then wait for a manual rebuild (`reindex/start` with `index_types: ["compound"]`) | on |
+
 ## Deleting a Repository
 
 `DELETE /api/repositories/{repo_id}` (or `raisindb repo delete <repo> --yes`) is irreversible. From v0.6.46 it removes all of the repository's data: every key it owns in every column family (nodes, revisions, branches, tags, translations, types, embeddings, indexes), the registry entry, its jobs including queued full-text and embedding jobs, and the full-text and vector index directories. In a cluster the delete is replicated and each peer removes its own copy. It keeps tenant-wide data (identities, sessions, admin users, tenant AI/auth/embedding configuration), the query-embedding cache, and uploaded binaries in the binary store, whose files can be referenced from more than one place. Up to v0.6.45 the delete removed only the registry entry, so a repository recreated under the same id came back with the old data.

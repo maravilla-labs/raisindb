@@ -103,4 +103,7 @@ pub struct RepairReport {
     /// Block-overlay delete tombstone counts (plan Phase 11c).
     #[serde(default)]
     pub block_overlays: super::BlockOverlayCounts,
+    /// Compound builds and drops (plan Phase 13f).
+    #[serde(default)]
+    pub compound: super::CompoundBuildCounts,
 }

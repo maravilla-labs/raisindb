@@ -19,11 +19,12 @@ use std::collections::BTreeSet;
 pub type CompoundGroup = Vec<u8>;
 
 /// Every compound entry `node` indexes under `defs` (its type's resolved
-/// declarations). An index whose columns the node cannot fill is skipped —
-/// the writer's long-standing rule (a node without the column is simply not
-/// in that index).
-pub fn compound_entries(
-    defs: &[CompoundIndexDefinition],
+/// declarations, plus its workspace's own — the callers in this module chain
+/// them). An index whose columns the node cannot fill is skipped — the
+/// writer's long-standing rule (a node without the column is simply not in
+/// that index).
+pub fn compound_entries<'d>(
+    defs: impl IntoIterator<Item = &'d CompoundIndexDefinition>,
     ctx: &IndexCtx<'_>,
     node: &Node,
 ) -> BTreeSet<CompoundGroup> {
@@ -60,6 +61,42 @@ pub fn compound_entries(
         ));
     }
     out
+}
+
+/// The system timestamps the write layer stamps on every node version
+/// (`Node::ensure_write_timestamps`). A version WITHOUT one is legacy data
+/// (written before the stamping fix), not a modeling choice.
+const SYSTEM_ORDER_COLUMNS: [&str; 2] = ["__created_at", "__updated_at"];
+
+/// Whether `node` belongs in `def` but has no entry there: every leading
+/// (equality) column derives, yet the trailing ORDER column is a system
+/// timestamp the version lacks.
+///
+/// [`compound_entries`] skips such a node, which is right for a leading
+/// column (a node with no value cannot match the equality the planner seeks)
+/// and WRONG for the order column: `CHILD_OF(p) ORDER BY created_at` must
+/// return a child with a NULL `created_at` — the row scan does — and an
+/// index without it answers short, with no residual left to notice. A build
+/// that meets one counts it ([`super::build::BuildOutcome::unindexable`]) and
+/// never stamps `Ready`, so the planner keeps scanning (fail closed).
+pub fn unrepresentable(def: &CompoundIndexDefinition, node: &Node) -> bool {
+    if !def.has_order_column {
+        return false;
+    }
+    let Some((order, leading)) = def.columns.split_last() else {
+        return false;
+    };
+    if !SYSTEM_ORDER_COLUMNS.contains(&order.property.as_str()) {
+        return false;
+    }
+    let value = |column: &raisin_models::nodes::properties::schema::CompoundIndexColumn| {
+        crate::repositories::NodeRepositoryImpl::extract_compound_column_value(
+            node,
+            &column.property,
+            &column.column_type,
+        )
+    };
+    leading.iter().all(|column| value(column).is_some()) && value(order).is_none()
 }
 
 /// The key of `group`'s entry for `node_id` at `revision`.

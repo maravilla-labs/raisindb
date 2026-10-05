@@ -93,6 +93,23 @@ fn encode_equality_value(
     }
 }
 
+/// Whether every node the index read yields becomes a row (so a read cut at
+/// a multiple of the LIMIT cannot come back short): no residual filter, no
+/// row-level security, and no locale other than the default (a translation
+/// can hide a node).
+fn index_read_is_exact<S: Storage>(
+    filter: &Option<raisin_sql::analyzer::TypedExpr>,
+    ctx: &ExecutionContext<S>,
+    locales: &[String],
+) -> bool {
+    filter.is_none()
+        && ctx.auth_context.is_none()
+        && (ctx.repository_config.is_none()
+            || locales
+                .iter()
+                .all(|locale| locale.as_str() == ctx.default_language.as_ref()))
+}
+
 /// Execute a compound index scan.
 ///
 /// Scans a compound (multi-column) index for efficient ORDER BY + filter queries.
@@ -130,6 +147,7 @@ pub async fn execute_compound_index_scan<S: Storage + 'static>(
             projection,
             filter,
             limit,
+            ..
         } => (
             tenant_id.clone(),
             repo_id.clone(),
@@ -188,8 +206,19 @@ pub async fn execute_compound_index_scan<S: Storage + 'static>(
         // chunk's node read below uses the same one.
         let scan_revision = ctx_clone.statement_snapshot().await?;
 
-        // Request 10x limit to account for post-index filtering
-        let scan_limit = limit.map(|l| l.saturating_mul(10).max(100));
+        // The index read may be cut short only when nothing after it can drop
+        // a row: no residual filter, no RLS, no locale that can hide a node.
+        // Otherwise a cut read returns a SHORT page with no error — a keyset
+        // cursor past the cut (`created_at < $cursor`) reads entries that all
+        // fail the filter and ends pagination early. The read itself is one
+        // equality group either way (`scan_compound_index` collects the group
+        // before it truncates); the rows are fetched in chunks below and stop
+        // at `limit`.
+        let scan_limit = if index_read_is_exact(&filter, &ctx_clone, &locales_to_use) {
+            limit.map(|l| l.saturating_mul(10).max(100))
+        } else {
+            None
+        };
         let scan_results = storage
             .compound_index()
             .scan_compound_index(

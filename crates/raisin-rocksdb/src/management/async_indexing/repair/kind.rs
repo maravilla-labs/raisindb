@@ -45,6 +45,13 @@ pub enum RepairKind {
     /// GC reclaim them and raw scans see them deleted. Queued automatically
     /// per branch (`auto_block_overlays`), and by the admin fan-out.
     BlockOverlayTombstones,
+    /// Compound index builds that run by themselves (plan Phase 13f): the
+    /// built-in workspace indexes not `Ready` on this node, older-format
+    /// indexes (unless `RAISIN_COMPOUND_FORMAT_REBUILD=0`), every other
+    /// unready declared index of the branch, and the DROP of workspace
+    /// indexes no longer declared. Queued automatically per branch
+    /// (`compound_builds.rs`), and by the admin fan-out.
+    CompoundBuilds,
 }
 
 impl RepairKind {
@@ -60,11 +67,12 @@ impl RepairKind {
             Self::ResyncTranslations => "resync_translations",
             Self::LocalizedNames => "localized_names",
             Self::BlockOverlayTombstones => "block_overlay_tombstones",
+            Self::CompoundBuilds => "compound_builds",
         }
     }
 
     /// Every repair, in the order the console lists them.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::OrderedChildren,
         Self::PathTombstone,
         Self::NodePath,
@@ -74,6 +82,7 @@ impl RepairKind {
         Self::ResyncTranslations,
         Self::LocalizedNames,
         Self::BlockOverlayTombstones,
+        Self::CompoundBuilds,
     ];
 
     /// The inverse of [`Self::slug`], over [`Self::ALL`].
@@ -94,6 +103,7 @@ impl RepairKind {
             Self::ResyncTranslations => cf::TRANSLATION_DATA,
             Self::LocalizedNames => cf::LOCALIZED_NAME_INDEX,
             Self::BlockOverlayTombstones => cf::BLOCK_TRANSLATIONS,
+            Self::CompoundBuilds => cf::COMPOUND_INDEX,
         }
     }
 

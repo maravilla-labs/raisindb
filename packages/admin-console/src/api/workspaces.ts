@@ -23,6 +23,14 @@ export interface WorkspaceConfig {
   node_type_pins: Record<string, number | null> // null = latest, number = pinned revision
   // Legacy field for backward compatibility
   node_type_refs?: Record<string, number | null>
+  // Built-in workspace indexes (all on when absent); set a switch to false to
+  // opt the workspace out, e.g. { children_by_created_at: false }.
+  builtin_indexes?: BuiltinIndexes
+}
+
+export interface BuiltinIndexes {
+  // (__parent_path, __created_at): index-served CHILD_OF ... ORDER BY created_at
+  children_by_created_at?: boolean
 }
 
 export interface PagedResponse<T> {

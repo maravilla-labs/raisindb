@@ -496,6 +496,7 @@ impl PhysicalPlan {
             }
             PhysicalPlan::CompoundIndexScan {
                 index_name,
+                owner,
                 equality_columns,
                 ascending,
                 limit,
@@ -509,7 +510,7 @@ impl PhysicalPlan {
                 // `ascending` is the INDEX direction (a Timestamp order column
                 // is stored newest-first), so print it as such.
                 format!(
-                    "CompoundIndexScan: {} [{}] {} limit_hint={}",
+                    "CompoundIndexScan: {} [{}] {} limit_hint={} (owner: {})",
                     index_name,
                     cols_str,
                     if *ascending {
@@ -519,7 +520,8 @@ impl PhysicalPlan {
                     },
                     limit
                         .map(|l| l.to_string())
-                        .unwrap_or_else(|| "none".to_string())
+                        .unwrap_or_else(|| "none".to_string()),
+                    owner
                 )
             }
             PhysicalPlan::Distinct { on_columns, .. } => {

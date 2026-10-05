@@ -7,7 +7,12 @@
 //! the two doors cannot produce different workspaces.
 //!
 //! Only the definition's own fields are writable: `name` (INSERT only),
-//! `description`, `allowed_node_types`, `allowed_root_node_types`, `depends_on`.
+//! `description`, `allowed_node_types`, `allowed_root_node_types`, `depends_on`,
+//! `compound_indexes` (the workspace's own compound indexes, plan Phase 13e —
+//! a JSON array shaped like a NodeType's `compound_indexes`, or NULL),
+//! `builtin_indexes` (the built-in index switches, plan Phase 13f — a JSON
+//! object such as `{"children_by_created_at": false}`, or NULL for the
+//! defaults; stored in `config.builtin_indexes`).
 //! Configuration (default branch, …) stays with the management API.
 
 use crate::physical_plan::executor::ExecutionContext;
@@ -27,6 +32,8 @@ const WRITABLE: &[&str] = &[
     "allowed_node_types",
     "allowed_root_node_types",
     "depends_on",
+    "compound_indexes",
+    "builtin_indexes",
 ];
 
 /// A workspace name is a URL segment and a SQL table name. Lowercase letters,
@@ -60,6 +67,46 @@ fn string_list(column: &str, value: &PropertyValue) -> Result<Vec<String>, Error
     extract_string_array(value).map_err(|e| Error::Validation(format!("Column '{column}': {e}")))
 }
 
+/// The workspace's compound indexes from a JSON array (as a value or as its
+/// text), NULL for none. Declarations are validated by their shape only; the
+/// build state machinery decides when an index is usable.
+fn compound_indexes(
+    value: &PropertyValue,
+) -> Result<Option<Vec<raisin_models::nodes::properties::schema::CompoundIndexDefinition>>, Error> {
+    let json = match value {
+        PropertyValue::Null => return Ok(None),
+        PropertyValue::String(text) => serde_json::from_str::<serde_json::Value>(text)
+            .map_err(|e| Error::Validation(format!("Column 'compound_indexes': {e}")))?,
+        other => serde_json::to_value(other)
+            .map_err(|e| Error::Validation(format!("Column 'compound_indexes': {e}")))?,
+    };
+    serde_json::from_value(json).map(Some).map_err(|e| {
+        Error::Validation(format!(
+            "Column 'compound_indexes' must be an array of compound index declarations: {e}"
+        ))
+    })
+}
+
+/// The built-in index switches from a JSON object (as a value or as its
+/// text), NULL for the defaults (every built-in index on).
+fn builtin_indexes(
+    value: &PropertyValue,
+) -> Result<Option<raisin_models::workspace::BuiltinIndexes>, Error> {
+    let json = match value {
+        PropertyValue::Null => return Ok(None),
+        PropertyValue::String(text) => serde_json::from_str::<serde_json::Value>(text)
+            .map_err(|e| Error::Validation(format!("Column 'builtin_indexes': {e}")))?,
+        other => serde_json::to_value(other)
+            .map_err(|e| Error::Validation(format!("Column 'builtin_indexes': {e}")))?,
+    };
+    serde_json::from_value(json).map(Some).map_err(|e| {
+        Error::Validation(format!(
+            "Column 'builtin_indexes' must be an object such as \
+             {{\"children_by_created_at\": false}}: {e}"
+        ))
+    })
+}
+
 fn apply(ws: &mut Workspace, column: &str, value: &PropertyValue) -> Result<(), Error> {
     match column {
         "description" => {
@@ -76,6 +123,8 @@ fn apply(ws: &mut Workspace, column: &str, value: &PropertyValue) -> Result<(), 
         "allowed_node_types" => ws.allowed_node_types = string_list(column, value)?,
         "allowed_root_node_types" => ws.allowed_root_node_types = string_list(column, value)?,
         "depends_on" => ws.depends_on = string_list(column, value)?,
+        "compound_indexes" => ws.compound_indexes = compound_indexes(value)?,
+        "builtin_indexes" => ws.config.builtin_indexes = builtin_indexes(value)?,
         other => {
             return Err(Error::Validation(format!(
                 "Column '{other}' of Workspaces is not writable over SQL; writable: {}",

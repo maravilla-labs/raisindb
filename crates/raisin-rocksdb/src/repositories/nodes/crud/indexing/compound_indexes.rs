@@ -38,7 +38,7 @@ impl NodeRepositoryImpl {
     ) -> Result<()> {
         let types = crate::indexing::compound::types_of(&baseline, new);
         let defs = self.index_defs(ctx, &types).await?;
-        if !defs.any_compound() {
+        if !crate::indexing::compound::writes_compound(&self.db, ctx, &defs)? {
             return Ok(());
         }
         write_compound_delta(batch, &self.db, ctx, &defs, baseline, new, revision)?;

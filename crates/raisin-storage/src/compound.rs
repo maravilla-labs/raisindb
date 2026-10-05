@@ -139,6 +139,18 @@ pub struct CompoundIndexState {
     /// Appended with a default so records written before it decode as `0`.
     #[serde(default)]
     pub stale_generation: u64,
+    /// The TICKET of the build that registered this record (`0`: none), so a
+    /// build's compare-and-set `Ready` matches its OWN registration and
+    /// nothing else. Drawn at random when a build begins and cleared by every
+    /// mark, so a build loses when another build registered after it (the
+    /// generation alone does not move then), when a mark arrived, when the
+    /// record was deleted and recreated (a drop resets the generation), or
+    /// when a checkpoint ingest put a PEER's record over it — none of which
+    /// can reproduce a ticket this process drew.
+    ///
+    /// Appended with a default, like `stale_generation`.
+    #[serde(default)]
+    pub build_token: u64,
 }
 
 impl CompoundIndexState {
@@ -172,6 +184,7 @@ impl CompoundIndexState {
             phase: CompoundBuildPhase::Ready,
             nodes_indexed: 0,
             stale_generation: 0,
+            build_token: 0,
         }
     }
 

@@ -4,7 +4,7 @@ use super::{
     CanonicalPredicate, CompoundIndexDefinition, Error, Expr, Literal, PhysicalPlanner,
     SchemaStats, TypedExpr,
 };
-use raisin_models::nodes::properties::schema::CompoundColumnType;
+use raisin_models::nodes::properties::schema::{CompoundColumnType, CompoundIndexOwner};
 
 /// One matched equality column: (property, value, declared column type).
 ///
@@ -100,23 +100,30 @@ impl PhysicalPlanner {
         self.schema_stats = Some(stats);
     }
 
-    /// Try to match a compound index for the given query pattern
-    ///
-    /// Returns Some((index_name, equality_columns, ascending, claims_order)) if a
-    /// compound index matches, None otherwise.
+    /// Every compound index that matches the given query pattern, BEST FIRST,
+    /// each with whether it matched all its equality columns (`full`).
     ///
     /// Matching rules:
     /// 1. A LEADING PREFIX (>= 1) of the index's equality columns must have
     ///    matching equality predicates. Full prefix matches are preferred over
-    ///    partial ones; among equals, more matched columns win.
+    ///    partial ones; among equals, more matched columns win; then one that
+    ///    serves the ORDER BY (`claims_order`); then a USER-declared index over
+    ///    a built-in one (plan Phase 13f: an explicit declaration that matches
+    ///    as well still wins); then declaration order.
     /// 2. `claims_order` is true only when ALL equality columns matched AND the
     ///    trailing order column satisfies the query's ORDER BY — a partial match
     ///    iterates in residual-column order, which is NOT the ORDER BY order.
-    pub(super) fn try_match_compound_index(
+    ///
+    /// The caller takes the first candidate that is USABLE (built, and not an
+    /// editorial listing it would reorder): an unbuilt best match must not
+    /// shadow a built one that answers as well — with the built-in folder
+    /// index on every workspace, that would be every user index that ties it.
+    pub(super) fn rank_compound_indexes(
         &self,
         predicates: &[CanonicalPredicate],
         order_by: Option<(&str, bool)>,
-    ) -> Option<CompoundIndexMatch> {
+        workspace: &str,
+    ) -> Vec<(CompoundIndexMatch, bool)> {
         let mut equality_map: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
 
@@ -170,12 +177,11 @@ impl PhysicalPlanner {
         }
 
         if equality_map.is_empty() {
-            return None;
+            return Vec::new();
         }
 
-        // Track the best candidate: full matches beat partial ones, then more
-        // matched columns win.
-        let mut best: Option<(CompoundIndexMatch, bool, usize)> = None; // (match, full, count)
+        // Every candidate with its rank: (match, full, count, claims, user).
+        let mut ranked: Vec<(CompoundIndexMatch, bool, usize, bool, bool)> = Vec::new();
 
         // The query's node type, if it pinned one. An index belongs to the
         // NodeType that declared it, and may only answer a query scoped to that
@@ -224,12 +230,27 @@ impl PhysicalPlanner {
             // The entries only cover that one type, so the answer would be a
             // silent subset. Falling back to a scan is slower and correct; that
             // trade is not close, because the failure it replaces is invisible.
-            if let Some(owner) = index.owner_node_type.as_deref() {
-                let scoped_by_node_type = queried_node_type.map(|q| q == owner).unwrap_or(false);
-                let scoped_by_membership = membership_types.iter().any(|t| *t == owner);
-                if !scoped_by_node_type && !scoped_by_membership {
-                    continue;
+            //
+            // A WORKSPACE-owned index (plan Phase 13e) is the opposite case: its
+            // keyspace holds every node of that workspace, whatever the type, so
+            // it may serve ANY query on that workspace — typed (the `node_type`
+            // predicate stays a residual filter unless it is an index column)
+            // or untyped. On another workspace it holds nothing.
+            match &index.owner {
+                Some(CompoundIndexOwner::NodeType(owner)) => {
+                    let scoped_by_node_type =
+                        queried_node_type.map(|q| q == owner).unwrap_or(false);
+                    let scoped_by_membership = membership_types.iter().any(|t| t == owner);
+                    if !scoped_by_node_type && !scoped_by_membership {
+                        continue;
+                    }
                 }
+                Some(CompoundIndexOwner::Workspace(owner)) => {
+                    if owner != workspace {
+                        continue;
+                    }
+                }
+                None => {}
             }
 
             let equality_column_count = if index.has_order_column {
@@ -290,30 +311,26 @@ impl PhysicalPlanner {
 
             let candidate = (index.name.clone(), matched_columns, ascending, claims_order);
             let count = candidate.1.len();
-
-            let better = match &best {
-                None => true,
-                Some((_, best_full, best_count)) => {
-                    (full && !best_full) || (full == *best_full && count > *best_count)
-                }
-            };
-            if better {
-                best = Some((candidate, full, count));
-            }
+            let user_declared =
+                !raisin_models::workspace::builtin_indexes::is_builtin_stored_name(&index.name);
+            ranked.push((candidate, full, count, claims_order, user_declared));
         }
 
-        if let Some(((name, cols, asc, claims_order), full, count)) = best {
-            tracing::info!(
-                "   Matched compound index '{}' with {} equality columns (full={}, claims_order={})",
-                name,
-                count,
-                full,
-                claims_order
-            );
-            return Some((name, cols, asc, claims_order));
-        }
-
-        None
+        // Stable: declaration order breaks the remaining ties.
+        ranked.sort_by(|a, b| (b.1, b.2, b.3, b.4).cmp(&(a.1, a.2, a.3, a.4)));
+        ranked
+            .into_iter()
+            .map(|(candidate, full, count, claims_order, _)| {
+                tracing::debug!(
+                    "   Matched compound index '{}' with {} equality columns (full={}, claims_order={})",
+                    candidate.0,
+                    count,
+                    full,
+                    claims_order
+                );
+                (candidate, full)
+            })
+            .collect()
     }
 
     /// Check if an expression can be evaluated at plan time (without row context)

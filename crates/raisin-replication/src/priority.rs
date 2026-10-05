@@ -162,6 +162,7 @@ mod tests {
                     created_at: raisin_models::timestamp::StorageTimestamp::now(),
                     updated_at: None,
                     config: raisin_models::workspace::WorkspaceConfig::default(),
+                    compound_indexes: None,
                 },
             },
             101,

@@ -13,10 +13,13 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::nodes::properties::schema::CompoundIndexDefinition;
 use crate::nodes::types::initial_structure::InitialNodeStructure;
 use crate::timestamp::StorageTimestamp;
 
+pub mod builtin_indexes;
 pub mod delta;
+pub use builtin_indexes::BuiltinIndexes;
 pub use delta::DeltaOp;
 
 /// Workspace configuration for branch and NodeType version management
@@ -43,6 +46,25 @@ pub struct WorkspaceConfig {
     /// field does not rewrite any stored workspace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spatial: Option<crate::nodes::properties::spatial_policy::SpatialWorkspaceSchema>,
+
+    /// Built-in workspace indexes (plan Phase 13f). `None` means every
+    /// built-in index is ON (the default); a workspace opts out per index,
+    /// e.g. `builtin_indexes: { children_by_created_at: false }`. Replicated
+    /// with the workspace record like `spatial`, so each node notices the
+    /// change and builds or drops its own entries.
+    ///
+    /// Skipped when `None`, so adding it rewrites no stored workspace. (Every
+    /// persisted and network encoding of a workspace is NAMED msgpack or
+    /// JSON; a positional encoding would shift around a skipped field.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtin_indexes: Option<BuiltinIndexes>,
+}
+
+impl WorkspaceConfig {
+    /// The built-in index switches in force (defaults when unset).
+    pub fn effective_builtin_indexes(&self) -> BuiltinIndexes {
+        self.builtin_indexes.clone().unwrap_or_default()
+    }
 }
 
 fn default_branch_name() -> String {
@@ -55,6 +77,7 @@ impl Default for WorkspaceConfig {
             default_branch: default_branch_name(),
             node_type_pins: HashMap::new(),
             spatial: None,
+            builtin_indexes: None,
         }
     }
 }
@@ -76,6 +99,17 @@ pub struct Workspace {
     pub updated_at: Option<StorageTimestamp>, // Timestamp for when the workspace was last updated (i64 nanos in binary, RFC3339 in JSON)
     #[serde(default)]
     pub config: WorkspaceConfig, // Workspace configuration
+    /// Compound indexes owned by THIS workspace (plan Phase 13e): each covers
+    /// every node of the workspace, whatever its node type, so an untyped
+    /// listing (`CHILD_OF('/a') ORDER BY created_at DESC LIMIT n`) can be
+    /// index-served. Authored like a NodeType's `compound_indexes`; stored
+    /// under a workspace keyspace name — see [`Self::owned_compound_indexes`].
+    ///
+    /// LAST and skipped when absent: a workspace without workspace indexes
+    /// serializes byte-for-byte as before, in the named and the compact
+    /// (replication) encodings alike, so an older peer still decodes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compound_indexes: Option<Vec<CompoundIndexDefinition>>,
 }
 fn default_created_at() -> StorageTimestamp {
     StorageTimestamp::now()
@@ -93,7 +127,48 @@ impl Workspace {
             description: None,
             updated_at: None,
             config: WorkspaceConfig::default(),
+            compound_indexes: None,
         }
+    }
+
+    /// This workspace's compound indexes as the writers, builds and planner
+    /// see them: each stored under the workspace keyspace name
+    /// (`@{name}`, [`CompoundIndexDefinition::owned_by_workspace`]) with the
+    /// owner stamped. A nameless declaration is ignored; a repeated name
+    /// keeps its first declaration (one keyspace per name).
+    ///
+    /// The BUILT-IN indexes the config leaves on (plan Phase 13f,
+    /// [`builtin_indexes`]) come last, derived from the config and never
+    /// from the stored declarations: a user declaration with a reserved name
+    /// (`__…`) is ignored here (and refused when the workspace is written).
+    pub fn owned_compound_indexes(&self) -> Vec<CompoundIndexDefinition> {
+        let mut out: Vec<CompoundIndexDefinition> = Vec::new();
+        let builtin = self.config.effective_builtin_indexes().declarations();
+        for index in self.compound_indexes.iter().flatten().chain(builtin.iter()) {
+            if index.name.is_empty() || index.columns.is_empty() {
+                continue;
+            }
+            let is_builtin = builtin.iter().any(|b| std::ptr::eq(b, index));
+            if !is_builtin && builtin_indexes::is_reserved_authored_name(&index.name) {
+                continue;
+            }
+            let owned = index.owned_by_workspace(&self.name);
+            if !out.iter().any(|o| o.name == owned.name) {
+                out.push(owned);
+            }
+        }
+        out
+    }
+
+    /// The user declarations whose authored name is reserved for built-in
+    /// indexes (`__…`): a workspace write carrying one is refused.
+    pub fn reserved_compound_index_names(&self) -> Vec<String> {
+        self.compound_indexes
+            .iter()
+            .flatten()
+            .filter(|index| builtin_indexes::is_reserved_authored_name(&index.name))
+            .map(|index| index.name.clone())
+            .collect()
     }
 
     pub fn update_allowed_node_types(
@@ -108,87 +183,4 @@ impl Workspace {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::{TimeZone, Utc};
-    use serde_json::json;
-
-    #[test]
-    fn deserializes_workspace_from_map_initial_structure() {
-        let value = json!({
-            "name": "access_control",
-            "allowed_node_types": ["raisin:User", "raisin:Role"],
-            "allowed_root_node_types": ["raisin:User", "raisin:Role"],
-            "depends_on": [],
-            "initial_structure": {
-                "children": [
-                    {"name": "Users", "node_type": "raisin:AclFolder"},
-                    {"name": "Roles", "node_type": "raisin:AclFolder"}
-                ]
-            },
-            "config": {
-                "default_branch": "main",
-                "node_type_pins": {}
-            }
-        });
-
-        let workspace: Workspace =
-            serde_json::from_value(value).expect("map-based workspace should deserialize");
-
-        let children = workspace
-            .initial_structure
-            .as_ref()
-            .and_then(|s| s.children.as_ref())
-            .expect("children must be present");
-
-        assert_eq!(children.len(), 2);
-        assert_eq!(children[0].name, "Users");
-        assert_eq!(children[1].name, "Roles");
-    }
-
-    #[test]
-    fn deserializes_workspace_from_map_with_rfc3339_timestamps() {
-        let value = json!({
-            "name": "test_workspace",
-            "allowed_node_types": ["raisin:User"],
-            "allowed_root_node_types": ["raisin:User"],
-            "depends_on": [],
-            "created_at": "2023-11-14T22:13:20Z",
-            "updated_at": "2023-11-14T22:21:40Z"
-        });
-
-        let workspace: Workspace =
-            serde_json::from_value(value).expect("RFC3339 timestamps should deserialize");
-
-        assert_eq!(workspace.name, "test_workspace");
-        assert_eq!(workspace.created_at.timestamp(), 1_700_000_000);
-        assert_eq!(
-            workspace
-                .updated_at
-                .expect("expected updated_at")
-                .timestamp(),
-            1_700_000_500
-        );
-    }
-
-    #[test]
-    fn serializes_workspace_with_rfc3339_timestamps() {
-        let workspace = Workspace {
-            name: "test_workspace".to_string(),
-            description: None,
-            allowed_node_types: vec!["raisin:User".to_string()],
-            allowed_root_node_types: vec!["raisin:User".to_string()],
-            depends_on: vec![],
-            initial_structure: None,
-            created_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap().into(),
-            updated_at: Some(Utc.timestamp_opt(1_700_000_500, 0).unwrap().into()),
-            config: WorkspaceConfig::default(),
-        };
-
-        let json = serde_json::to_value(&workspace).expect("should serialize");
-
-        // Verify timestamps are RFC3339 strings (chrono's to_rfc3339 uses +00:00 format)
-        assert!(json["created_at"].as_str().unwrap().contains("2023-11-14"));
-        assert!(json["updated_at"].as_str().unwrap().contains("2023-11-14"));
-    }
-}
+mod tests;

@@ -84,7 +84,19 @@ pub(super) async fn execute_schema_table_scan<S: Storage + 'static>(
                 .list(RepoScope::new(&tenant_id, &repo_id))
                 .await?
                 .iter()
-                .map(|m| serde_json::to_value(m).unwrap_or(serde_json::Value::Null))
+                .map(|m| {
+                    let mut row = serde_json::to_value(m).unwrap_or(serde_json::Value::Null);
+                    // The built-in index switches IN FORCE (plan Phase 13f),
+                    // defaults included — `config` shows only what was set.
+                    if let Some(object) = row.as_object_mut() {
+                        object.insert(
+                            "builtin_indexes".to_string(),
+                            serde_json::to_value(m.config.effective_builtin_indexes())
+                                .unwrap_or(serde_json::Value::Null),
+                        );
+                    }
+                    row
+                })
                 .collect(),
         };
 

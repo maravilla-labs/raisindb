@@ -58,15 +58,11 @@ pub fn repo_config() -> RepositoryConfig {
     }
 }
 
-fn node_type(name: &str, versionable: bool) -> NodeType {
-    let mut nt: NodeType =
-        serde_json::from_value(serde_json::json!({ "name": name })).expect("node type literal");
-    nt.id = Some(name.to_string());
-    nt.strict = Some(false);
-    nt.allowed_children = vec!["*".to_string()];
-    nt.indexable = Some(true);
-    nt.versionable = Some(versionable);
-    nt.compound_indexes = Some(vec![CompoundIndexDefinition {
+/// `(__parent_path, __created_at)` — declared by every node type (type-owned)
+/// AND by the workspace (plan Phase 13e: workspace-owned, stored as
+/// `@folder_time`), under the same authored name on purpose.
+fn folder_time() -> CompoundIndexDefinition {
+    CompoundIndexDefinition {
         name: "folder_time".to_string(),
         columns: vec![
             CompoundIndexColumn {
@@ -81,8 +77,19 @@ fn node_type(name: &str, versionable: bool) -> NodeType {
             },
         ],
         has_order_column: true,
-        owner_node_type: None,
-    }]);
+        owner: None,
+    }
+}
+
+fn node_type(name: &str, versionable: bool) -> NodeType {
+    let mut nt: NodeType =
+        serde_json::from_value(serde_json::json!({ "name": name })).expect("node type literal");
+    nt.id = Some(name.to_string());
+    nt.strict = Some(false);
+    nt.allowed_children = vec!["*".to_string()];
+    nt.indexable = Some(true);
+    nt.versionable = Some(versionable);
+    nt.compound_indexes = Some(vec![folder_time()]);
     nt
 }
 
@@ -120,10 +127,11 @@ impl Env {
             .expect("main branch");
         storage
             .workspaces()
-            .put(
-                RepoScope::new(TENANT, REPO),
-                raisin_models::workspace::Workspace::new(WS.to_string()),
-            )
+            .put(RepoScope::new(TENANT, REPO), {
+                let mut ws = raisin_models::workspace::Workspace::new(WS.to_string());
+                ws.compound_indexes = Some(vec![folder_time()]);
+                ws
+            })
             .await
             .expect("workspace");
         for (name, versionable) in [(PAGE, true), (DOC, true), (VOLATILE, false)] {

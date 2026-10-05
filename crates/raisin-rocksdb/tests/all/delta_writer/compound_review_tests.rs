@@ -30,7 +30,7 @@ pub(super) fn by_title() -> CompoundIndexDefinition {
             column_type: CompoundColumnType::String,
         }],
         has_order_column: false,
-        owner_node_type: None,
+        owner: None,
     }
 }
 
@@ -212,9 +212,11 @@ async fn rebuild_refuses_before_clearing_when_a_node_cannot_be_placed() -> Resul
     Ok(())
 }
 
-/// An index whose record is merely an older FORMAT is not rebuilt by a sweep
-/// (at boot, on every node at once) unless the operator turns that on; one
-/// that is genuinely stale is.
+/// An index whose record is merely an older FORMAT is never a per-index
+/// sweep job (at boot that would be every index on every node at once): the
+/// `compound_builds` repair owns it (plan Phase 13f,
+/// `compound_format_tests::format_upgrade_is_rebuilt_automatically_unless_switched_off`).
+/// One that is genuinely stale still is.
 #[tokio::test]
 async fn format_upgrade_is_left_to_an_admin_rebuild() -> Result<()> {
     let env = Env::new(false).await?;
@@ -224,13 +226,14 @@ async fn format_upgrade_is_left_to_an_admin_rebuild() -> Result<()> {
     v1.v = CompoundIndexState::VERSION - 1;
     store.put(TENANT, REPO, "main", WS, &v1)?;
     assert!(!env.compound_ready("main"));
-    if !raisin_rocksdb::compound_state::format_rebuild_enabled() {
-        let queued = env
-            .storage
-            .sweep_compound_index_builds(TENANT, REPO, "main", WS)
-            .await?;
-        assert_eq!(queued, 0, "a format upgrade is an admin rebuild");
-    }
+    let queued = env
+        .storage
+        .sweep_compound_index_builds(TENANT, REPO, "main", WS)
+        .await?;
+    assert_eq!(
+        queued, 0,
+        "a format upgrade is the compound_builds repair's"
+    );
     let mut stale = CompoundIndexState::ready(&by_cat(), HLC::new(1, 0));
     stale.phase = raisin_storage::compound::CompoundBuildPhase::NotBuilt;
     store.put(TENANT, REPO, "main", WS, &stale)?;

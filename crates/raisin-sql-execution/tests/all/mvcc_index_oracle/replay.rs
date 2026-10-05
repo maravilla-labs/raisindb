@@ -206,21 +206,30 @@ pub async fn replay(ops_a: &[Op], ops_b: &[Op], delivery: Delivery, seed: u64) -
     }
     // Every replicated write was warm, so the replica's compound index is
     // still `Ready` — the compound templates below are index-served there.
-    if let Ok(Some(state)) = raisin_rocksdb::compound_state::read_state(
-        replica.storage.db(),
-        TENANT,
-        REPO,
-        MAIN,
-        WS,
-        "folder_time",
-    ) {
-        if !matches!(
-            state.phase,
-            raisin_storage::compound::CompoundBuildPhase::Ready
+    // The type-owned, the workspace-owned (plan Phase 13e) and the built-in
+    // (plan Phase 13f) index alike.
+    for index in ["folder_time", "@folder_time", "@__children_by_created_at"] {
+        if let Ok(Some(state)) = raisin_rocksdb::compound_state::read_state(
+            replica.storage.db(),
+            TENANT,
+            REPO,
+            MAIN,
+            WS,
+            index,
         ) {
+            if !matches!(
+                state.phase,
+                raisin_storage::compound::CompoundBuildPhase::Ready
+            ) {
+                anomalies.push(format!(
+                    "replica compound index {index} left {:?}: a replicated write did not \
+                     maintain it",
+                    state.phase
+                ));
+            }
+        } else {
             anomalies.push(format!(
-                "replica compound index left {:?}: a replicated write did not maintain it",
-                state.phase
+                "replica compound index {index} has no state record"
             ));
         }
     }

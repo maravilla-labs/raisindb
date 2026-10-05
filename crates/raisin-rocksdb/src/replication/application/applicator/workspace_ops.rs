@@ -110,6 +110,12 @@ impl OperationApplicator {
                 tenant_id, repo_id, workspace_id
             ),
         )?;
+        crate::indexing::compound::workspace_defs::declarations_written(
+            &self.db,
+            tenant_id,
+            repo_id,
+            workspace_id,
+        );
 
         // Peers must see a workspace event, or everything that keys off one (WS
         // subscriptions, config caches, policy reconciliation) stays blind to a
@@ -168,6 +174,12 @@ impl OperationApplicator {
                 tenant_id, repo_id, workspace_id
             ),
         )?;
+        crate::indexing::compound::workspace_defs::declarations_written(
+            &self.db,
+            tenant_id,
+            repo_id,
+            workspace_id,
+        );
 
         tracing::info!(
             "✅ Workspace deleted successfully: {}/{}/{}",

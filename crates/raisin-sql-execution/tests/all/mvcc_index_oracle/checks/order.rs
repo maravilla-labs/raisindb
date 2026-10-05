@@ -54,10 +54,8 @@ impl Checker<'_> {
         let only_rev = self.where_rev(s);
         let content_stable = s.tainted.is_empty();
 
-        // Compound (__parent_path, __created_at): a typed folder listing. The
-        // planner takes the compound index only with a `node_type =` (a bare
-        // CHILD_OF plans as a PrefixScan — the known-failing
-        // `compound_index_hierarchy` test on main).
+        // Compound (__parent_path, __created_at): a typed folder listing,
+        // served by the TYPE-owned `folder_time`.
         for p in sample_parents(s, 2) {
             let sql = format!(
                 "SELECT id FROM '{WS}' WHERE CHILD_OF('{}') AND node_type = '{PAGE}'{rev} ORDER BY created_at DESC LIMIT 3",
@@ -77,6 +75,29 @@ impl Checker<'_> {
                 name::COMPOUND
             } else {
                 name::COMPOUND_HISTORICAL
+            };
+            self.grouped(template, s, &sql, &groups, 3).await;
+        }
+
+        // The UNTYPED folder listing (plan Phase 13e): every child whatever
+        // its type, served by the WORKSPACE-owned `@folder_time` (a type-owned
+        // index would be a silent subset; the planner refuses it here).
+        for p in sample_parents(s, 2) {
+            let sql = format!(
+                "SELECT id FROM '{WS}' WHERE CHILD_OF('{}'){rev} ORDER BY created_at DESC LIMIT 3",
+                lit(&path_of(s, &p))
+            );
+            let mut groups = by_stamp(
+                s.tree
+                    .kids(&p)
+                    .iter()
+                    .map(|c| (c.as_str(), s.tree.nodes[c].created)),
+            );
+            groups.reverse();
+            let template = if self.at_head {
+                name::COMPOUND_WORKSPACE
+            } else {
+                name::COMPOUND_WORKSPACE_HISTORICAL
             };
             self.grouped(template, s, &sql, &groups, 3).await;
         }

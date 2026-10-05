@@ -11,6 +11,7 @@ mod accessors;
 mod deltas;
 mod init;
 mod jobs;
+pub(crate) use jobs::create_compound_index_handler;
 mod replication;
 pub(crate) mod repo_purge;
 mod tenant_wipe;

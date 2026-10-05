@@ -133,6 +133,11 @@ impl NodeCommit {
     /// a value over, a prune and its replacement) would erase that node's
     /// claim (plan Phase 13a).
     pub fn revalidate(&self, db: &Arc<DB>, batch: &mut WriteBatch) -> Result<usize> {
+        // Entries staged under a workspace declaration that has changed since.
+        super::property_delta::fail_changed_declarations(
+            db,
+            self.checks.iter().map(|(check, _)| check),
+        )?;
         let mut held = self.held.clone();
         for (check, final_version) in &self.checks {
             check.hold_claims(db, final_version.as_ref(), &mut held);

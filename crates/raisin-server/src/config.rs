@@ -18,8 +18,10 @@ pub struct ReplicationPeer {
     pub port: u16,
     /// Base URL of the peer's HTTP API (e.g. `http://10.0.0.2:8080`). Only
     /// cluster-wide admin operations use it — an index repair is enqueued on
-    /// every node by forwarding to this address. Without it the peer is
-    /// reported `unreachable` by those operations; replication is unaffected.
+    /// every node by forwarding to this address. A peer without it is left
+    /// out of the fan-out entirely (`startup/storage.rs` drops it from the
+    /// peer list, so those operations neither reach it nor report it);
+    /// replication is unaffected.
     #[serde(default)]
     pub http_url: Option<String>,
 }

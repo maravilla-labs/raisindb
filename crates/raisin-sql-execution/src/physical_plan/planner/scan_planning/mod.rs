@@ -707,28 +707,19 @@ impl PhysicalPlanner {
             .as_ref()
             .map(|(col, asc)| (col.as_str(), *asc));
 
-        let (index_name, equality_columns, ascending, claims_order) =
-            self.try_match_compound_index(canonical, order_by_ref)?;
-
-        // A declaration is not a built index. Consult the persisted build state
-        // and DECLINE unless it says Ready for this exact declaration.
-        //
-        // This must sit between the match and the plan, never earlier: the match
-        // is what tells us WHICH index we would use, and availability is
-        // per-index. And it must not be skipped for speed — below this point the
-        // matched equality predicates are removed from the residual filter, so a
-        // scan over an empty or stale keyspace yields missing rows with nothing
-        // downstream to catch it.
-        let availability = self.compound_availability(workspace, branch, &index_name);
-        if !availability.is_ready() {
-            tracing::warn!(
-                index = %index_name,
-                workspace = %workspace,
-                detail = %availability.explain_reason(),
-                "compound index matched the query but is not usable; falling back to another access path"
-            );
-            return None;
-        }
+        // The first USABLE candidate, best first. Only candidates as complete
+        // as the best one (all full, or all partial): an unusable full match
+        // falls back to the other access paths as it always has, never to a
+        // weaker partial compound match.
+        let ranked = self.rank_compound_indexes(canonical, order_by_ref, workspace);
+        let top_full = ranked.first()?.1;
+        let (index_name, equality_columns, ascending, claims_order) = ranked
+            .into_iter()
+            .filter(|(_, full)| *full == top_full)
+            .map(|(candidate, _)| candidate)
+            .find(|candidate| {
+                self.compound_candidate_usable(candidate, context, workspace, branch)
+            })?;
 
         let used_props: std::collections::HashSet<String> = equality_columns
             .iter()
@@ -814,6 +805,12 @@ impl PhysicalPlanner {
             workspace: workspace.to_string(),
             table: table.to_string(),
             alias: alias.clone(),
+            owner: self
+                .compound_indexes
+                .iter()
+                .find(|index| index.name == index_name)
+                .map(|index| index.owner_label())
+                .unwrap_or_else(|| "unowned".to_string()),
             index_name,
             equality_columns,
             pre_sorted: claims_order,

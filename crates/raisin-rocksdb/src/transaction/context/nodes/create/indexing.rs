@@ -196,7 +196,7 @@ pub(in crate::transaction::context::nodes) async fn write_compound_indexes(
     let ctx = crate::indexing::IndexCtx::new(tenant_id, repo_id, branch, workspace);
     let types = crate::indexing::compound::types_of(&baseline, node);
     let defs = tx.node_repo.index_defs(&ctx, &types).await?;
-    if !defs.any_compound() {
+    if !crate::indexing::compound::writes_compound(&tx.db, &ctx, &defs)? {
         return Ok(());
     }
     let mut batch = tx

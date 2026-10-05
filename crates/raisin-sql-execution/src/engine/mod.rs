@@ -18,6 +18,7 @@ mod ai_config;
 mod batch;
 mod branch;
 pub mod catalog_cache;
+pub(crate) mod compound_defs;
 #[cfg(test)]
 mod embedding_config_reader_tests;
 mod handlers;

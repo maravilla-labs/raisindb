@@ -95,7 +95,16 @@ pub(super) async fn load<R: NodeTypeRepository>(
         if chain.len() >= MAX_DEPTH || !seen.insert(nt.name.clone()) {
             break;
         }
-        chain.push(nt.compound_indexes.clone().unwrap_or_default());
+        // A workspace keyspace name is never a NodeType's (refused at
+        // NodeType write; ignored here should one exist anyway).
+        chain.push(
+            nt.compound_indexes
+                .iter()
+                .flatten()
+                .filter(|d| !CompoundIndexDefinition::is_workspace_index_name(&d.name))
+                .cloned()
+                .collect(),
+        );
         current = match nt.extends.as_deref() {
             Some(parent) if !parent.is_empty() => {
                 repo.get(scope, parent, Some(&NEWEST)).await.ok().flatten()
@@ -188,6 +197,20 @@ impl DefsSet {
             }
         }
         Some(Self(out))
+    }
+
+    /// A set that knows NONE of `types`' own declarations: the writer then
+    /// maintains the workspace's indexes only (which need no NodeType read).
+    /// For a write whose types are cold — the caller marks the TYPES' indexes
+    /// stale instead (`StaleScope::TypeOwned`).
+    pub fn workspace_only<'t>(types: impl IntoIterator<Item = &'t str>) -> Self {
+        let none = Arc::new(TypeIndexDefs::default());
+        Self(
+            types
+                .into_iter()
+                .map(|name| (name.to_string(), none.clone()))
+                .collect(),
+        )
     }
 
     /// A set built from known definitions (tests, a build that resolved them).

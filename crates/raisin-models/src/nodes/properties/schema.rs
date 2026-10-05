@@ -213,24 +213,62 @@ pub struct CompoundIndexDefinition {
     #[serde(default)]
     pub has_order_column: bool,
 
-    /// The NodeType this definition was read off, populated at LOAD time.
+    /// The record this definition was read off — a NodeType or a Workspace —
+    /// populated at LOAD time. `None` only for a definition built by hand
+    /// (tests, a DDL conversion before it is stored): no ownership is claimed.
     ///
     /// Not part of the authored declaration and never persisted (`skip`): it is
-    /// derived from the record the definition came out of. It exists because
-    /// the planner has to answer "may this index serve this query?", and until
-    /// it did, matching was on PROPERTY NAME ALONE — so a
-    /// `commerce:StockReservation` index leading with `status` was selected to
-    /// answer a `studio:Event` query in a different workspace, returning zero
-    /// rows at full speed with no error. Any common name (`status`, `code`,
-    /// `email`, `slug`) had the same hazard: the first type to index it won
-    /// every unqualified query on it, repo-wide.
+    /// derived from the record the definition came out of, so every stored
+    /// definition decodes exactly as before. It exists because the planner has
+    /// to answer "may this index serve this query?", and until it did,
+    /// matching was on PROPERTY NAME ALONE — so a `commerce:StockReservation`
+    /// index leading with `status` was selected to answer a `studio:Event`
+    /// query in a different workspace, returning zero rows at full speed with
+    /// no error. A NodeType-owned index holds only that type's nodes; a
+    /// Workspace-owned one holds EVERY node of its workspace, which is what
+    /// lets an untyped folder listing be index-served (plan Phase 13e).
     ///
     /// Deliberately NOT part of `definition_hash`: the owner does not change
-    /// the key bytes, so entries written before this field existed remain
-    /// valid and no rebuild is required.
+    /// the key bytes. (A workspace owner is ALSO visible in the name — see
+    /// [`WORKSPACE_INDEX_PREFIX`] — because the name is the keyspace.)
     #[serde(default, skip)]
-    pub owner_node_type: Option<String>,
+    pub owner: Option<CompoundIndexOwner>,
 }
+
+/// Who declared a compound index, and therefore which nodes its keyspace holds.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CompoundIndexOwner {
+    /// Declared by this NodeType (inherited along `extends`): only nodes of
+    /// that type family are in the keyspace. May serve a query only when the
+    /// query is scoped to the type (`node_type =` or `IS_A`).
+    NodeType(String),
+    /// Declared by this workspace: every node of the workspace, whatever its
+    /// type, is in the keyspace. May serve any query on that workspace, typed
+    /// or untyped.
+    Workspace(String),
+}
+
+impl std::fmt::Display for CompoundIndexOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NodeType(name) => write!(f, "node type {name}"),
+            Self::Workspace(name) => write!(f, "workspace {name}"),
+        }
+    }
+}
+
+/// The keyspace prefix of a WORKSPACE-owned compound index.
+///
+/// An index NAME addresses the keyspace (`…cidx\0{name}\0…`) and the build
+/// state record (`compound_index\0…\0{workspace}\0{name}`), and nothing else
+/// tells two declarations apart. A workspace index is therefore stored under
+/// `@{authored name}`, and a NodeType may not declare a name starting with
+/// `@` (refused at NodeType write, ignored by every loader). So a workspace
+/// `folder_time` and a NodeType `folder_time` can never share entries or a
+/// state record, without any cross-record validation — which could not work
+/// anyway: NodeTypes are per branch, workspaces per repository, and both
+/// replicate independently.
+pub const WORKSPACE_INDEX_PREFIX: &str = "@";
 
 /// A column in a compound index definition.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, JsonSchema)]
@@ -258,6 +296,38 @@ impl CompoundIndexDefinition {
     /// under the old reading are no longer valid, even for an identical
     /// `columns` list.
     pub const NORMALIZER_VERSION: u32 = 1;
+
+    /// Whether `name` is a workspace-owned keyspace (see
+    /// [`WORKSPACE_INDEX_PREFIX`]).
+    pub fn is_workspace_index_name(name: &str) -> bool {
+        name.starts_with(WORKSPACE_INDEX_PREFIX)
+    }
+
+    /// This authored declaration as owned by `workspace`: stored under the
+    /// workspace keyspace name, with the owner stamped. THE one derivation —
+    /// the writers, the builds and the planner all go through
+    /// `Workspace::owned_compound_indexes`, which calls this.
+    pub fn owned_by_workspace(&self, workspace: &str) -> Self {
+        let mut owned = self.clone();
+        owned.name = format!("{WORKSPACE_INDEX_PREFIX}{}", self.name);
+        owned.owner = Some(CompoundIndexOwner::Workspace(workspace.to_string()));
+        owned
+    }
+
+    /// This declaration as owned by `node_type`.
+    pub fn owned_by_node_type(&self, node_type: &str) -> Self {
+        let mut owned = self.clone();
+        owned.owner = Some(CompoundIndexOwner::NodeType(node_type.to_string()));
+        owned
+    }
+
+    /// A short description of the owner, for EXPLAIN and logs.
+    pub fn owner_label(&self) -> String {
+        match &self.owner {
+            Some(owner) => owner.to_string(),
+            None => "unowned".to_string(),
+        }
+    }
 
     /// A stable fingerprint of everything that determines the KEY BYTES this
     /// index produces.

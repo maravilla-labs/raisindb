@@ -161,27 +161,19 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         // Compound indexes for this branch: the named NodeType's when the
         // WHERE clause pins one, otherwise every index on the branch (a
         // hierarchy query is usually written without `node_type =`).
-        let compound = match helpers::extract_node_type_from_analyzed(analyzed) {
-            Some(node_type_name) => {
-                helpers::load_compound_indexes(
-                    &*self.storage,
-                    &self.tenant_id,
-                    &self.repo_id,
-                    &self.branch,
-                    &node_type_name,
-                )
-                .await
-            }
-            None => {
-                helpers::load_all_compound_indexes(
-                    &*self.storage,
-                    &self.tenant_id,
-                    &self.repo_id,
-                    &self.branch,
-                )
-                .await
-            }
-        };
+        // Plus the queried workspace's OWN indexes (plan Phase 13e), which
+        // serve typed and untyped statements alike.
+        let workspace = query_workspace(analyzed);
+        let node_type = helpers::extract_node_type_from_analyzed(analyzed);
+        let compound = super::compound_defs::planner_compound_indexes(
+            &*self.storage,
+            &self.tenant_id,
+            &self.repo_id,
+            &self.branch,
+            Some(&workspace),
+            node_type.as_deref(),
+        )
+        .await;
         // Gated inside on the WHERE clause containing a node_type/archetype
         // equality — see `schema_stats_for`.
         let schema_stats = self
@@ -191,7 +183,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             tenant: self.tenant_id.clone(),
             repo: self.repo_id.clone(),
             branch: self.branch.clone(),
-            workspace: query_workspace(analyzed),
+            workspace,
             compound,
             schema_stats,
         }

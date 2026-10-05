@@ -141,7 +141,7 @@ async fn bootstrap() -> (Arc<raisin_rocksdb::RocksDBStorage>, tempfile::TempDir)
                 },
             ],
             has_order_column: true,
-            owner_node_type: None,
+            owner: None,
         }]),
     );
     for nt in [folder, item] {

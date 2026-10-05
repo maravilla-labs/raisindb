@@ -14,6 +14,7 @@
 //! - `join_planning` - Index lookup join optimization
 
 mod compound_index;
+mod compound_usable;
 mod filter_analysis;
 mod join_planning;
 mod plan_dispatch;

@@ -26,6 +26,8 @@ pub(crate) mod vmount_capture;
 mod spatial_reconcile_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod workspace_compound_tests;
 
 use crate::jobs::{
     dispatcher::JobDispatcher, trigger_registry::TriggerRegistry, BatchIndexAggregator,

@@ -169,7 +169,7 @@ pub(crate) fn convert_compound_indexes(
             has_order_column: idx.has_order_column,
             // Set when the definition is LOADED off a NodeType, not when it is
             // authored — the DDL statement does not name its own owner.
-            owner_node_type: None,
+            owner: None,
         })
         .collect()
 }

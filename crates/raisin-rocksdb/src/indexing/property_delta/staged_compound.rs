@@ -9,6 +9,7 @@
 //! compound entries must follow the version STORED at the move's revision,
 //! not the one the move listed before an update committed in between.
 
+use crate::compound_state::StaleScope;
 use crate::indexing::{Baseline, IndexCtx};
 use raisin_error::Result;
 use raisin_hlc::HLC;
@@ -17,9 +18,10 @@ use rocksdb::{WriteBatch, DB};
 
 /// The full compound write of `node` against what is stored now. Definitions
 /// from the cache (this runs under the commit lock: no NodeType read); cold →
-/// the workspace's compound indexes are marked `NotBuilt` BEFORE this batch
+/// the types' compound indexes are marked `NotBuilt` BEFORE this batch
 /// commits (the safe order — a crash costs a rebuild, never a `Ready` over a
-/// missed correction) and a local build is requested.
+/// missed correction) and a local build is requested. The workspace's own
+/// indexes need no NodeType (plan Phase 13e): corrected either way.
 pub(super) fn correct_compound(
     db: &std::sync::Arc<DB>,
     batch: &mut WriteBatch,
@@ -28,32 +30,40 @@ pub(super) fn correct_compound(
     node: &Node,
     revision: &HLC,
 ) -> Result<()> {
-    use crate::indexing::compound::{types_of, write_compound_delta, DefsSet};
+    use crate::indexing::compound::{types_of, write_compound_delta, writes_compound, DefsSet};
     let scope = raisin_storage::BranchScope::new(ctx.tenant_id, ctx.repo_id, ctx.branch);
     let types = types_of(&baseline, node);
     match DefsSet::peek(db, scope, types.iter().copied()) {
-        Some(defs) if defs.any_compound() => {
-            write_compound_delta(batch, db, ctx, &defs, baseline, node, revision)?;
+        Some(defs) => {
+            if writes_compound(db, ctx, &defs)? {
+                write_compound_delta(batch, db, ctx, &defs, baseline, node, revision)?;
+            }
         }
-        Some(_) => {}
-        None => fail_compound_closed(db, ctx, &types)?,
+        None => {
+            let workspace_only = DefsSet::workspace_only(types.iter().copied());
+            write_compound_delta(batch, db, ctx, &workspace_only, baseline, node, revision)?;
+            fail_compound_closed(db, ctx, &types, StaleScope::TypeOwned)?;
+        }
     }
     Ok(())
 }
 
-/// Mark the workspace's compound indexes `NotBuilt` BEFORE the batch commits
-/// (a crash costs a rebuild, never a `Ready` over a missed correction) and
-/// request the local build, naming `types` so the drain resolves them.
+/// Mark the workspace's compound indexes `scope` covers `NotBuilt` BEFORE
+/// the batch commits (a crash costs a rebuild, never a `Ready` over a missed
+/// correction) and request the local build, naming `types` so the drain
+/// resolves them.
 pub(super) fn fail_compound_closed(
     db: &std::sync::Arc<DB>,
     ctx: &IndexCtx<'_>,
     types: &[&str],
+    scope: StaleScope,
 ) -> Result<()> {
-    crate::compound_state::CompoundStateStore::new(db.clone()).mark_workspace_stale(
+    crate::compound_state::CompoundStateStore::new(db.clone()).mark_workspace_stale_in(
         ctx.tenant_id,
         ctx.repo_id,
         ctx.branch,
         ctx.workspace,
+        scope,
     )?;
     crate::indexing::compound::cold::request_build_for(
         db,
@@ -82,7 +92,9 @@ pub(super) fn correct_rekey(
     moved: Option<&Node>,
     revision: &HLC,
 ) -> Result<bool> {
-    use crate::indexing::compound::{tombstone_compound_for_delete, write_compound_delta, DefsSet};
+    use crate::indexing::compound::{
+        tombstone_compound_for_delete, write_compound_delta, writes_compound, DefsSet,
+    };
     let Some(moved) = moved else {
         return Ok(false);
     };
@@ -124,8 +136,13 @@ pub(super) fn correct_rekey(
         moved.node_type.as_str(),
     ];
     let scope = raisin_storage::BranchScope::new(ctx.tenant_id, ctx.repo_id, ctx.branch);
-    match DefsSet::peek(db, scope, types) {
-        Some(defs) if defs.any_compound() => {
+    let defs = DefsSet::peek(db, scope, types);
+    let writes = match &defs {
+        Some(defs) => writes_compound(db, ctx, defs)?,
+        None => false,
+    };
+    match defs {
+        Some(defs) if writes => {
             // What the staged re-key put that the stored version lacks …
             write_compound_delta(
                 batch,
@@ -150,7 +167,7 @@ pub(super) fn correct_rekey(
         }
         Some(_) => Ok(false),
         None => {
-            fail_compound_closed(db, ctx, &types)?;
+            fail_compound_closed(db, ctx, &types, StaleScope::All)?;
             Ok(true)
         }
     }

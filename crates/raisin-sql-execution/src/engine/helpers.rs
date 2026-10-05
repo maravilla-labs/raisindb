@@ -161,7 +161,7 @@ static COMPOUND_INDEX_CACHE: std::sync::OnceLock<
     raisin_core::TtlCache<std::sync::Arc<Vec<CompoundIndexDefinition>>>,
 > = std::sync::OnceLock::new();
 
-fn compound_index_cache(
+pub(crate) fn compound_index_cache(
 ) -> &'static raisin_core::TtlCache<std::sync::Arc<Vec<CompoundIndexDefinition>>> {
     COMPOUND_INDEX_CACHE.get_or_init(|| {
         let cache = raisin_core::TtlCache::new(std::time::Duration::from_secs(30));
@@ -229,15 +229,18 @@ pub(crate) async fn load_all_compound_indexes<S: Storage>(
     let mut seen = std::collections::HashSet::new();
     let mut all: Vec<CompoundIndexDefinition> = Vec::new();
     for node_type in node_types {
-        let owner = node_type.name.clone();
         if let Some(indexes) = node_type.compound_indexes {
-            for mut index in indexes {
+            for index in indexes {
+                // A workspace keyspace name is never a NodeType's (refused at
+                // NodeType write; ignored here should one exist anyway).
+                if CompoundIndexDefinition::is_workspace_index_name(&index.name) {
+                    continue;
+                }
                 if seen.insert(index.name.clone()) {
                     // Stamp the declaring type. Without it the planner matches
                     // on property NAME alone and will happily answer one type's
                     // query from another type's index.
-                    index.owner_node_type = Some(owner.clone());
-                    all.push(index);
+                    all.push(index.owned_by_node_type(&node_type.name));
                 }
             }
         }
@@ -337,11 +340,8 @@ async fn load_compound_indexes_uncached<S: Storage>(
                     return Some(
                         indexes
                             .iter()
-                            .cloned()
-                            .map(|mut i| {
-                                i.owner_node_type = Some(node_type_name.to_string());
-                                i
-                            })
+                            .filter(|i| !CompoundIndexDefinition::is_workspace_index_name(&i.name))
+                            .map(|i| i.owned_by_node_type(node_type_name))
                             .collect(),
                     );
                 }

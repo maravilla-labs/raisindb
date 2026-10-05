@@ -83,6 +83,10 @@ pub struct StagedDeltaCheck {
     scope: Scope,
     revision: HLC,
     mode: Mode,
+    /// The workspace-declaration change sequence when the check was recorded
+    /// (`staged_declarations`): a declaration that changed after it makes the
+    /// staged workspace-index entries suspect.
+    declarations_seq: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +110,7 @@ enum Mode {
 pub struct PendingDeltaCheck {
     scope: Scope,
     markers: Markers,
+    declarations_seq: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -159,6 +164,7 @@ impl PendingDeltaCheck {
                 markers: self.markers,
                 in_place,
             },
+            declarations_seq: self.declarations_seq,
         }
     }
 }
@@ -169,6 +175,8 @@ impl StagedDeltaCheck {
     pub fn before_read(db: &DB, ctx: &IndexCtx<'_>, node_id: &str) -> Result<PendingDeltaCheck> {
         Ok(PendingDeltaCheck {
             scope: Scope::new(ctx, node_id),
+            // Before the markers, and so before the write reads anything.
+            declarations_seq: crate::indexing::compound::workspace_defs::change_seq(),
             markers: markers(db, ctx, node_id)?,
         })
     }
@@ -186,6 +194,7 @@ impl StagedDeltaCheck {
             scope: Scope::new(ctx, node_id),
             revision: *revision,
             mode: Mode::Always,
+            declarations_seq: crate::indexing::compound::workspace_defs::change_seq(),
         }
     }
 
@@ -198,6 +207,7 @@ impl StagedDeltaCheck {
             scope: Scope::new(ctx, &listed.id),
             revision: *revision,
             mode: Mode::Rekey(Box::new(listed.clone())),
+            declarations_seq: crate::indexing::compound::workspace_defs::change_seq(),
         }
     }
 
@@ -207,6 +217,20 @@ impl StagedDeltaCheck {
 
     pub fn node_id(&self) -> &str {
         &self.scope.node_id
+    }
+
+    /// `(tenant, repo, branch, workspace)` and the declaration sequence the
+    /// check was recorded at (`staged_declarations`).
+    pub(super) fn declarations_scope(&self) -> ((&str, &str, &str, &str), u64) {
+        (
+            (
+                &self.scope.tenant_id,
+                &self.scope.repo_id,
+                &self.scope.branch,
+                &self.scope.workspace,
+            ),
+            self.declarations_seq,
+        )
     }
 
     /// [`Self::revalidate_final`] for a write that stores `node` at the
@@ -298,7 +322,12 @@ impl StagedDeltaCheck {
                         .map(|n| n.node_type.as_str())
                         .into_iter()
                         .collect();
-                    super::staged_compound::fail_compound_closed(db, &ctx, &types)?;
+                    super::staged_compound::fail_compound_closed(
+                        db,
+                        &ctx,
+                        &types,
+                        crate::compound_state::StaleScope::All,
+                    )?;
                     if now.0 == at_stage.0 {
                         return Ok(true);
                     }

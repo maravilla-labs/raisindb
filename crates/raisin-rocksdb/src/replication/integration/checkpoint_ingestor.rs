@@ -222,6 +222,28 @@ impl raisin_replication::CheckpointIngestor for RocksDbCheckpointIngestor {
             "Checkpoint ingestion complete via copy-based approach"
         );
 
+        // FIRST, before anything can read them: the copy brought the PEER's
+        // compound state records, and a peer's `Ready` describes the peer's
+        // apply history, not this node's — the compound keyspace is local and
+        // was never checked against these records. Fail them closed; a local
+        // rebuild re-earns `Ready`. (A local build in flight registered a
+        // ticket the peer's record does not carry and the mark clears, so it
+        // cannot stamp `Ready` over the ingest either — `compound_state::
+        // build_cas`.) Propagated, not logged: a failure here would leave the
+        // PEER's `Ready` in force on this node.
+        let marked = crate::compound_state::CompoundStateStore::new(self.db.db().clone())
+            .mark_all_stale()
+            .map_err(|e| {
+                raisin_replication::CoordinatorError::Storage(format!(
+                    "Failed to mark compound index state stale after checkpoint copy: {}",
+                    e
+                ))
+            })?;
+        tracing::info!(
+            marked,
+            "checkpoint ingest: compound index state marked NotBuilt pending local rebuild"
+        );
+
         // NOTE: We do NOT emit RepositoryCreated events after checkpoint restoration.
         // The checkpoint contains a complete copy of all data including:
         // - NodeTypes (in NODE_TYPES CF)
@@ -275,20 +297,17 @@ impl raisin_replication::CheckpointIngestor for RocksDbCheckpointIngestor {
             }
         }
 
-        // The copy brought the PEER's compound state records, and a peer's
-        // `Ready` describes the peer's apply history, not this node's — the
-        // compound keyspace is local and was never checked against these
-        // records. Fail them closed; a local rebuild re-earns `Ready`.
-        match crate::compound_state::CompoundStateStore::new(self.db.db().clone()).mark_all_stale()
+        // This node's own compound rebuild (the records were failed closed
+        // right after the copy, above): every branch is owed a
+        // `compound_builds` link again, one branch at a time (plan Phase 13f;
+        // AFTER the mark, so no link can judge the peer's `Ready` records).
+        if let Err(e) =
+            crate::management::async_indexing::repair::restart_compound_builds_after_ingest(
+                &self.db,
+            )
+            .await
         {
-            Ok(marked) => tracing::info!(
-                marked,
-                "checkpoint ingest: compound index state marked NotBuilt pending local rebuild"
-            ),
-            Err(e) => tracing::error!(
-                error = %e,
-                "checkpoint ingest: could not mark compound index state stale"
-            ),
+            tracing::warn!(error = %e, "checkpoint ingest: could not queue compound builds");
         }
 
         // Same for the localized name index (plan Phase 12): the peer's state

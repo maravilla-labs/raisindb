@@ -2,6 +2,7 @@
 //! revision and compares the answer with the model's.
 
 mod batch_get;
+mod builtin;
 mod content;
 mod localized;
 mod nodes_cf;
@@ -34,6 +35,14 @@ pub mod name {
     pub const REFERENCES: &str = "references";
     pub const COMPOUND: &str = "compound_child_of_order_by_created_at";
     pub const COMPOUND_HISTORICAL: &str = "compound_child_of_order_by_created_at_past_revision";
+    /// The UNTYPED folder listing, served by the workspace-owned index (plan
+    /// Phase 13e).
+    pub const COMPOUND_WORKSPACE: &str = "workspace_compound_child_of_order_by_created_at";
+    pub const COMPOUND_WORKSPACE_HISTORICAL: &str =
+        "workspace_compound_child_of_order_by_created_at_past_revision";
+    /// The BUILT-IN `@__children_by_created_at` keyspace read directly (plan
+    /// Phase 13f), wherever its record vouches for it.
+    pub const BUILTIN_FOLDER: &str = "builtin_children_by_created_at";
     pub const TS_ORDER: &str = "order_by_timestamp_limit";
     pub const TS_RANGE: &str = "timestamp_range";
     pub const COUNT: &str = "count";
@@ -166,6 +175,7 @@ impl<'a> Checker<'a> {
         self.batch_get(s).await;
         self.tree_templates(s).await;
         self.order_templates(s).await;
+        self.builtin_folder_index(s).await;
         self.content_templates(s).await;
         self.localized_templates(s).await;
         if at_head {

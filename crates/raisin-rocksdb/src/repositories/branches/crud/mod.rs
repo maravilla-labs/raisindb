@@ -176,14 +176,27 @@ impl BranchRepository for BranchRepositoryImpl {
                 max_revision,
             )
             .await?;
-            // The copied compound keyspace is as complete as the source's:
-            // so is its build state (see `compound_state::fork`).
-            crate::compound_state::CompoundStateStore::new(self.db.clone()).inherit_on_fork(
-                tenant_id,
-                repo_id,
-                &source_branch_for_indexes,
-                branch_name,
-            )?;
+            // The copied compound keyspace is as complete as the source's
+            // when the fork is at or above each index's build floor: so is
+            // its build state then. Below a floor the copy has holes; that
+            // index is `NotBuilt` on the fork and built there in the
+            // background (see `compound_state::fork`).
+            let inherited = crate::compound_state::CompoundStateStore::new(self.db.clone())
+                .inherit_on_fork(
+                    tenant_id,
+                    repo_id,
+                    &source_branch_for_indexes,
+                    branch_name,
+                    max_revision,
+                )?;
+            if inherited.withheld > 0 {
+                crate::management::async_indexing::repair::request_compound_builds(
+                    &self.db,
+                    tenant_id,
+                    repo_id,
+                    branch_name,
+                );
+            }
 
             // Queue background job to copy revision history if requested
             if include_revision_history {

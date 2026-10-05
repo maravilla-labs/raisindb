@@ -87,6 +87,7 @@ async fn register_workspace(storage: &raisin_rocksdb::RocksDBStorage, name: &str
                 created_at: raisin_models::StorageTimestamp::now(),
                 updated_at: None,
                 config: Default::default(),
+                compound_indexes: None,
             },
         )
         .await

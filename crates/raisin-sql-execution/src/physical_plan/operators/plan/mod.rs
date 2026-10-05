@@ -207,6 +207,9 @@ define_physical_plan! {
             table: String,
             alias: Option<String>,
             index_name: String,
+            /// Who declared the index (`node type X` / `workspace W`), for
+            /// EXPLAIN: a workspace-owned index serves untyped queries.
+            owner: String,
             /// Matched equality columns as (property, value, declared type).
             /// The type is carried so the executor encodes the scan prefix the
             /// same way the index writer encoded the key.

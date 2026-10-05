@@ -84,6 +84,7 @@ async fn test_deleted_node_visible_in_old_revision() -> Result<()> {
         created_at: chrono::Utc::now(),
         updated_at: Some(chrono::Utc::now()),
         config: raisin_models::workspace::WorkspaceConfig::default(),
+        compound_indexes: None,
     };
     storage
         .workspaces()
@@ -337,6 +338,7 @@ async fn test_tree_structure_changes_across_revisions() -> Result<()> {
         created_at: chrono::Utc::now(),
         updated_at: Some(chrono::Utc::now()),
         config: raisin_models::workspace::WorkspaceConfig::default(),
+        compound_indexes: None,
     };
     storage
         .workspaces()

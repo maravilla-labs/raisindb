@@ -392,8 +392,18 @@ where
     // as the equivalent SELECT (which loads them in execute_query). Without
     // this, a WHERE clause served by a CompoundIndexScan for SELECT would
     // degrade to a slower scan when re-planned here.
-    if let Some(node_type_name) = crate::engine::helpers::extract_node_type_from_expr(filter) {
-        if let Some(indexes) = crate::engine::helpers::load_compound_indexes(
+    // The workspace's own indexes (plan Phase 13e) apply with or without a
+    // node type; NodeType indexes only when the filter names the type.
+    let node_type = crate::engine::helpers::extract_node_type_from_expr(filter);
+    let workspace_indexes = crate::engine::compound_defs::load_workspace_compound_indexes(
+        &*ctx.storage,
+        &ctx.tenant_id,
+        &ctx.repo_id,
+        workspace,
+    )
+    .await;
+    let mut indexes = match node_type {
+        Some(node_type_name) => crate::engine::helpers::load_compound_indexes(
             &*ctx.storage,
             &ctx.tenant_id,
             &ctx.repo_id,
@@ -401,9 +411,12 @@ where
             &node_type_name,
         )
         .await
-        {
-            physical_planner.set_compound_indexes(indexes);
-        }
+        .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    indexes.extend(workspace_indexes);
+    if !indexes.is_empty() {
+        physical_planner.set_compound_indexes(indexes);
     }
 
     let physical_plan = physical_planner.plan(&optimized)?;

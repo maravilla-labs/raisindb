@@ -81,6 +81,17 @@ impl WorkspaceRepository for WorkspaceRepositoryImpl {
     async fn put(&self, scope: RepoScope<'_>, ws: Workspace) -> Result<()> {
         let tenant_id = scope.tenant_id;
         let repo_id = scope.repo_id;
+        // `__…` names the BUILT-IN workspace indexes (plan Phase 13f), which
+        // are derived from `config.builtin_indexes`, never declared.
+        if let Some(name) = ws.reserved_compound_index_names().first() {
+            return Err(raisin_error::Error::Validation(format!(
+                "workspace '{}' compound index '{name}': names starting with '{}' are \
+                 reserved for built-in indexes (switch those with \
+                 config.builtin_indexes)",
+                ws.name,
+                raisin_models::workspace::builtin_indexes::RESERVED_INDEX_NAME_PREFIX
+            )));
+        }
         let key = keys::workspace_key(tenant_id, repo_id, &ws.name);
 
         // Check if workspace already exists to determine event type
@@ -109,6 +120,9 @@ impl WorkspaceRepository for WorkspaceRepositoryImpl {
         self.db
             .put_cf(cf, key, value)
             .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+        crate::indexing::compound::workspace_defs::declarations_written(
+            &self.db, tenant_id, repo_id, &ws.name,
+        );
 
         // Capture for replication. Errors are logged, not propagated: a
         // replication hiccup must not fail a durable local write, which matches

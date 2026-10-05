@@ -151,6 +151,20 @@ impl NodeTypeRepository for NodeTypeRepositoryImpl {
             .resolve_head_revision(tenant_id, repo_id, branch)
             .await?;
 
+        // `@` names a WORKSPACE keyspace (plan Phase 13e); a NodeType claiming
+        // one would share entries and build state with a workspace index.
+        if let Some(index) = node_type.compound_indexes.iter().flatten().find(|i| {
+            raisin_models::nodes::properties::schema::CompoundIndexDefinition::is_workspace_index_name(&i.name)
+        }) {
+            return Err(RaisinError::Validation(format!(
+                "NodeType '{}' compound index '{}': names starting with '{}' are reserved for \
+                 workspace-owned compound indexes",
+                node_type.name,
+                index.name,
+                raisin_models::nodes::properties::schema::WORKSPACE_INDEX_PREFIX
+            )));
+        }
+
         let existing = self.get(scope, &node_type.name, None).await?;
 
         Self::warn_on_suspect_compound_indexes(&node_type);

@@ -29,6 +29,7 @@ mod in_place;
 mod probe;
 mod staged;
 mod staged_compound;
+mod staged_declarations;
 mod staged_markers;
 mod staged_neighbours;
 mod staged_rederive;
@@ -40,6 +41,7 @@ pub(crate) use entries::{entries_of, EntryValue, PropertyEntry};
 pub use in_place::{in_place_scans_capped, InPlace, InPlaceTargets};
 pub(crate) use probe::{entry_state_as_of, EntryState};
 pub use staged::{corrected_staged_writes, PendingDeltaCheck, StagedDeltaCheck};
+pub use staged_declarations::fail_changed_declarations;
 
 use crate::indexing::IndexCtx;
 use crate::keys::TOMBSTONE_VALUE as TOMBSTONE;

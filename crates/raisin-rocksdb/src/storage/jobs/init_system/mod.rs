@@ -15,6 +15,7 @@
 mod ai_handlers;
 mod flow_handlers;
 mod indexing_handlers;
+pub(crate) use indexing_handlers::create_compound_index_handler;
 mod integration_handlers;
 mod package_handlers;
 mod replication_handlers;
@@ -409,6 +410,11 @@ impl RocksDBStorage {
         // wrote (plan Phase 11c): a cleanup queued in the background, one
         // branch at a time, never on the boot path.
         crate::management::async_indexing::repair::schedule_block_overlay_tombstones(self.clone());
+
+        // Built-in workspace indexes (plan Phase 13f) and indexes of an older
+        // state format build themselves: the `compound_builds` chain, one
+        // branch at a time, never on the boot path.
+        crate::management::async_indexing::repair::schedule_compound_builds(self.clone());
 
         tracing::info!(
             realtime_workers = pools_config.realtime.dispatcher_workers,

@@ -590,7 +590,7 @@ fn compound_index_declined_when_not_built() {
             },
         ],
         has_order_column: false,
-        owner_node_type: None,
+        owner: None,
     }]);
 
     let filter = LogicalPlan::Filter {
@@ -633,7 +633,11 @@ fn a_compound_index_serves_only_its_owning_node_type() {
             ascending: None,
         }],
         has_order_column: false,
-        owner_node_type: Some("commerce:StockReservation".to_string()),
+        owner: Some(
+            raisin_models::nodes::properties::schema::CompoundIndexOwner::NodeType(
+                "commerce:StockReservation".to_string(),
+            ),
+        ),
     };
 
     let plan_for = |predicate: TypedExpr| {
@@ -715,7 +719,7 @@ fn planner_with_compound_index() -> PhysicalPlanner {
             },
         ],
         has_order_column: true,
-        owner_node_type: None,
+        owner: None,
     }]);
     planner
 }
@@ -821,7 +825,7 @@ fn test_compound_index_declined_when_not_built_with_string_cast() {
             },
         ],
         has_order_column: false,
-        owner_node_type: None,
+        owner: None,
     }]);
 
     let filter = LogicalPlan::Filter {
@@ -1156,12 +1160,12 @@ fn planner_with_parent_path_index() -> PhysicalPlanner {
             },
         ],
         has_order_column: true,
-        owner_node_type: None,
+        owner: None,
     }]);
     planner
 }
 
-fn child_of(path: &str) -> TypedExpr {
+pub(super) fn child_of(path: &str) -> TypedExpr {
     use raisin_sql::analyzer::{Expr, FunctionCategory, FunctionSignature};
     TypedExpr::new(
         Expr::Function {

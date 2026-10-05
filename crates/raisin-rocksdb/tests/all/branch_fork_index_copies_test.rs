@@ -139,7 +139,7 @@ fn member_type() -> NodeType {
                 },
             ],
             has_order_column: true,
-            owner_node_type: None,
+            owner: None,
         }]),
         extends: None,
         mixins: Vec::new(),

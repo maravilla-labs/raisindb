@@ -480,6 +480,23 @@ pub(crate) fn workspaces_table() -> TableDef {
                 nullable: true,
                 generated: None,
             },
+            // The workspace's own compound indexes (plan Phase 13e): authored
+            // like a NodeType's `compound_indexes`; NULL when it declares none.
+            ColumnDef {
+                name: "compound_indexes".into(),
+                data_type: DataType::JsonB,
+                nullable: true,
+                generated: None,
+            },
+            // The built-in index switches in force (plan Phase 13f), e.g.
+            // `{"children_by_created_at": true}`; writable (stored in
+            // `config.builtin_indexes`).
+            ColumnDef {
+                name: "builtin_indexes".into(),
+                data_type: DataType::JsonB,
+                nullable: true,
+                generated: None,
+            },
             ColumnDef {
                 name: "created_at".into(),
                 data_type: DataType::Text,

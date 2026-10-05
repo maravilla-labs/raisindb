@@ -100,6 +100,7 @@ pub(super) fn pending_branches(
             super::auto_property_index::pending_property_index_branches(storage)
         }
         RepairKind::BlockOverlayTombstones => super::auto_block_overlays::pending_branches(storage),
+        RepairKind::CompoundBuilds => super::compound_detect::pending_branches(storage),
         _ => Ok(Vec::new()),
     }
 }

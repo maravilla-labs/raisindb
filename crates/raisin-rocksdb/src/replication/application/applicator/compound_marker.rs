@@ -11,17 +11,20 @@
 //!   use, in the node's own batch: the compound index stays `Ready` and
 //!   replica compound queries are index-served (Phase 2.5's "mark `NotBuilt`
 //!   on every upsert" is retired for these writes);
-//! - **cold** — writes the node without them and marks every recorded
-//!   compound index of the workspace `NotBuilt` IN THE SAME BATCH, under the
-//!   compound transition lock (`CompoundStateStore::write_marking_stale`, the
-//!   generation that keeps a running build from stamping `Ready` over it),
-//!   and requests a local build (`indexing::compound::cold`), which warms the
-//!   cache so the next write is warm. Never a silent skip. UNIQUE has no
+//! - **cold** — writes the node without its TYPES' entries and marks those
+//!   indexes `NotBuilt` IN THE SAME BATCH, under the compound transition lock
+//!   (`CompoundStateStore::write_marking_stale_in`, the generation that keeps
+//!   a running build from stamping `Ready` over it), and requests a local
+//!   build (`indexing::compound::cold`), which warms the cache so the next
+//!   write is warm. Never a silent skip. The WORKSPACE's own indexes need no
+//!   NodeType (plan Phase 13e), so they are maintained inline and stay
+//!   `Ready` — one cold type must not take every listing offline. UNIQUE has no
 //!   availability gate; a cold write derives its claims from the claims the
 //!   replaced version owns in the index instead (`cold_unique_delta`, plan
 //!   Phase 13a), so it never leaves a stale claim live.
 
-use crate::indexing::compound::{cold, types_of, write_compound_delta, DefsSet};
+use crate::compound_state::StaleScope;
+use crate::indexing::compound::{cold, types_of, workspace_defs, write_compound_delta, DefsSet};
 use crate::indexing::{Baseline, IndexCtx};
 use crate::repositories::nodes::{
     end_claims_at, owned_unique_names, write_unique_delta, UniqueSide,
@@ -69,6 +72,9 @@ impl OperationApplicator {
     ) -> Result<()> {
         let scope = BranchScope::new(ctx.tenant_id, ctx.repo_id, ctx.branch);
         let types = types_of(&baseline, node);
+        // Before the declarations are read: a change between that read and the
+        // write below fails the workspace's own indexes closed with it.
+        let declarations_seq = workspace_defs::change_seq();
         let Some(defs) = DefsSet::peek(&self.db, scope, types.iter().copied()) else {
             // Requested even with no compound index recorded: the drain also
             // warms the definitions the UNIQUE claims need — these types
@@ -83,13 +89,22 @@ impl OperationApplicator {
                 &types,
             );
             self.cold_unique_delta(&mut batch, ctx, baseline, node, revision, in_place)?;
-            return self.write_marking_compound_stale(
-                batch,
-                ctx.tenant_id,
-                ctx.repo_id,
-                ctx.branch,
-                ctx.workspace,
-            );
+            let workspace_only = DefsSet::workspace_only(types.iter().copied());
+            write_compound_delta(
+                &mut batch,
+                &self.db,
+                ctx,
+                &workspace_only,
+                baseline,
+                node,
+                revision,
+            )?;
+            let stale = if self.declarations_changed(ctx, declarations_seq)? {
+                StaleScope::All
+            } else {
+                StaleScope::TypeOwned
+            };
+            return self.write_marking_compound_stale_in(batch, ctx, stale);
         };
         write_compound_delta(&mut batch, &self.db, ctx, &defs, baseline, node, revision)?;
 
@@ -108,9 +123,53 @@ impl OperationApplicator {
             let next = first.as_ref().map(|n| side(&defs, n));
             end_claims_at(&mut batch, &self.db, ctx, new_side, next, first_rev)?;
         }
+        if self.declarations_changed(ctx, declarations_seq)? {
+            return self.write_marking_compound_stale_in(batch, ctx, StaleScope::WorkspaceOwned);
+        }
         self.db
             .write(batch)
             .map_err(|e| raisin_error::Error::storage(format!("Failed to apply upsert: {}", e)))
+    }
+
+    /// Whether `ctx`'s workspace declarations changed after `seq`: the
+    /// workspace-index entries just staged may follow the old layout.
+    fn declarations_changed(&self, ctx: &IndexCtx<'_>, seq: u64) -> Result<bool> {
+        workspace_defs::changed_since(&self.db, ctx.tenant_id, ctx.repo_id, ctx.workspace, seq)
+    }
+
+    /// Commit `batch` (a replicated node write this path did not fully
+    /// compound-index: cold types, or a declaration that changed under it)
+    /// together with the stale mark for the records `scope` covers,
+    /// atomically, and request a local build.
+    ///
+    /// A failure here fails the apply and nothing was written, so the op is
+    /// redelivered — the only answer that cannot leave `Ready` over stale
+    /// entries.
+    fn write_marking_compound_stale_in(
+        &self,
+        batch: WriteBatch,
+        ctx: &IndexCtx<'_>,
+        scope: StaleScope,
+    ) -> Result<()> {
+        let store = crate::compound_state::CompoundStateStore::new(self.db.clone());
+        let marked = store.write_marking_stale_in(
+            batch,
+            ctx.tenant_id,
+            ctx.repo_id,
+            ctx.branch,
+            ctx.workspace,
+            scope,
+        )?;
+        if marked > 0 {
+            cold::request_build(
+                &self.db,
+                ctx.tenant_id,
+                ctx.repo_id,
+                ctx.branch,
+                ctx.workspace,
+            );
+        }
+        Ok(())
     }
 
     /// The UNIQUE half of a COLD upsert (plan Phase 13a). Without the
@@ -167,42 +226,6 @@ impl OperationApplicator {
                 properties: kept,
             });
             end_claims_at(batch, &self.db, ctx, new_side, next, first_rev)?;
-        }
-        Ok(())
-    }
-
-    /// Commit `batch` (a replicated node write to `workspace` that this path
-    /// did not compound-index — a cold upsert, or a legacy op handler that
-    /// writes no index entries at all) together with the stale mark for the
-    /// workspace's compound indexes, atomically, and request a local build.
-    ///
-    /// A failure here fails the apply and nothing was written, so the op is
-    /// redelivered — the only answer that cannot leave `Ready` over stale
-    /// entries.
-    pub(in crate::replication::application) fn write_marking_compound_stale(
-        &self,
-        batch: WriteBatch,
-        tenant_id: &str,
-        repo_id: &str,
-        branch: &str,
-        workspace: &str,
-    ) -> Result<()> {
-        let store = crate::compound_state::CompoundStateStore::new(self.db.clone());
-        let marked = store.write_marking_stale(batch, tenant_id, repo_id, branch, workspace)?;
-        // Every mark asks for the local build that re-earns `Ready` (the job
-        // event handler drains the request: warm definitions, sweep builds).
-        if marked > 0 {
-            cold::request_build(&self.db, tenant_id, repo_id, branch, workspace);
-        }
-        if marked > 0 {
-            tracing::debug!(
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                marked,
-                "replicated write: compound indexes marked NotBuilt until a local rebuild"
-            );
         }
         Ok(())
     }

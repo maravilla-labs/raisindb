@@ -21,36 +21,35 @@
 //! The pass streams: one node's versions in memory at a time, bounded batches.
 //! A node that cannot be decoded or placed in the tree (no path) is COUNTED,
 //! never silently dropped: [`precheck`] refuses before anything is cleared,
-//! and a writing pass that meets one must not stamp `Ready`.
+//! and a writing pass that meets one must not stamp `Ready`. So is a node an
+//! index wants but cannot hold — a legacy version with no system timestamp in
+//! the index's ORDER column (`BuildOutcome::unindexable`): the row scan lists
+//! it with a NULL, the index could list it nowhere.
 
-use super::entries::{compound_entries, entry_key, CompoundGroup};
+use super::entries::{compound_entries, entry_key, unrepresentable, CompoundGroup};
+use super::pace::Pace;
 use super::writer::LIVE;
 use crate::indexing::IndexCtx;
 use crate::keys::{self, TOMBSTONE_VALUE as TOMBSTONE};
 use crate::{cf, cf_handle};
 use raisin_error::{Error, Result};
 use raisin_hlc::HLC;
-use raisin_models::nodes::properties::schema::CompoundIndexDefinition;
 use raisin_models::nodes::Node;
-use rocksdb::{WriteBatch, DB};
-use std::collections::{BTreeSet, HashMap};
+use rocksdb::{ColumnFamily, WriteBatch, DB};
+use std::collections::BTreeSet;
 
-/// Per node type, the declarations a build writes (types absent: none).
-pub type Wanted = HashMap<String, Vec<CompoundIndexDefinition>>;
-
-/// What one pass saw.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct BuildOutcome {
-    /// Nodes with at least one version of a wanted type.
-    pub nodes: usize,
-    /// Live entries written.
-    pub entries: usize,
-    /// Nodes that could not be decoded or placed (no path).
-    pub unplaceable: usize,
-}
+pub use super::build_gate::{
+    precheck, precheck_assuming, refuse_unplaceable, BuildOutcome, BUILD_FREE_FLOOR,
+};
+pub use super::wanted::Wanted;
 
 /// Entries per committed batch.
 const BATCH_ENTRIES: usize = 10_000;
+
+/// Per-entry bytes beyond key and value in the estimate a precheck makes of
+/// a build's output (RocksDB's internal key trailer, memtable and index
+/// overhead) — deliberately generous.
+const ENTRY_OVERHEAD: u64 = 32;
 
 /// Just enough of a stored node to decide whether the build wants it (the
 /// untagged `PropertyValue` decode stays out of the scan for other types).
@@ -65,32 +64,35 @@ enum Raw {
     Wanted(Vec<u8>),
 }
 
-/// Before anything is cleared: the disk headroom check and a read-only pass
-/// that refuses when any node cannot be placed — the clear would delete
-/// entries the build cannot write back.
-pub fn precheck(db: &DB, ctx: &IndexCtx<'_>, wanted: &Wanted, floor: &HLC) -> Result<()> {
-    crate::management::async_indexing::repair::check_headroom(db, cf::COMPOUND_INDEX)?;
-    let seen = run(db, ctx, wanted, floor, false)?;
-    refuse_unplaceable(ctx, &seen)
+/// The read-only pass of [`precheck`]: everything [`write`] would see and
+/// write, written nowhere (`BuildOutcome::estimated_bytes` sums the output).
+pub(super) fn dry_run(
+    db: &DB,
+    ctx: &IndexCtx<'_>,
+    wanted: &Wanted,
+    floor: &HLC,
+) -> Result<BuildOutcome> {
+    run(db, ctx, wanted, floor, false, 0)
 }
 
 /// The writing pass (after the caller cleared the keyspace and read `floor`).
-/// The caller stamps `Ready` only when [`BuildOutcome::unplaceable`] is 0.
+/// The caller stamps `Ready` only when [`BuildOutcome::complete`].
 pub fn write(db: &DB, ctx: &IndexCtx<'_>, wanted: &Wanted, floor: &HLC) -> Result<BuildOutcome> {
-    run(db, ctx, wanted, floor, true)
+    run(db, ctx, wanted, floor, true, 0)
 }
 
-/// The error a build returns when nodes could not be placed.
-pub fn refuse_unplaceable(ctx: &IndexCtx<'_>, seen: &BuildOutcome) -> Result<()> {
-    if seen.unplaceable == 0 {
-        return Ok(());
-    }
-    Err(Error::storage(format!(
-        "refusing to build compound indexes for {}/{}/{}/{}: {} node(s) could not be \
-         decoded or placed in the tree (no path); the index stays unusable (scan) until \
-         that is repaired",
-        ctx.tenant_id, ctx.repo_id, ctx.branch, ctx.workspace, seen.unplaceable
-    )))
+/// [`write`], holding the average write rate at `max_bytes_per_sec` (0:
+/// unlimited) by sleeping between batches — for the automatic builds (plan
+/// Phase 13f), which must not saturate the disk a live node serves from. Run
+/// it on a blocking thread.
+pub fn write_paced(
+    db: &DB,
+    ctx: &IndexCtx<'_>,
+    wanted: &Wanted,
+    floor: &HLC,
+    max_bytes_per_sec: u64,
+) -> Result<BuildOutcome> {
+    run(db, ctx, wanted, floor, true, max_bytes_per_sec)
 }
 
 fn run(
@@ -99,9 +101,10 @@ fn run(
     wanted: &Wanted,
     floor: &HLC,
     writing: bool,
+    max_bytes_per_sec: u64,
 ) -> Result<BuildOutcome> {
     let mut out = BuildOutcome::default();
-    if wanted.values().all(Vec::is_empty) {
+    if wanted.is_empty() {
         return Ok(out);
     }
     let prefix = keys::KeyBuilder::new()
@@ -120,6 +123,7 @@ fn run(
         writing,
         batch: WriteBatch::default(),
         out: &mut out,
+        pace: Pace::new(max_bytes_per_sec),
     };
     // Keys are `…\0nodes\0{id}\0{~rev}`, newest first per id: collect the
     // versions above the floor and the first at or below it, skip the rest.
@@ -171,6 +175,7 @@ struct Pass<'a, 'o> {
     writing: bool,
     batch: WriteBatch,
     out: &'o mut BuildOutcome,
+    pace: Pace,
 }
 
 impl Pass<'_, '_> {
@@ -182,7 +187,7 @@ impl Pass<'_, '_> {
             return Raw::Deleted;
         }
         match rmp_serde::from_slice::<NodeTypeProbe>(value) {
-            Ok(probe) if !self.wanted.contains_key(&probe.node_type) => Raw::OtherType,
+            Ok(probe) if !self.wanted.wants(&probe.node_type) => Raw::OtherType,
             Ok(_) => Raw::Wanted(value.to_vec()),
             Err(e) => {
                 // The full decode has the last word.
@@ -233,25 +238,34 @@ impl Pass<'_, '_> {
                 Err(e) => return self.unplaceable(id, &e.to_string()),
             }
         }
-        if !self.writing {
+        // A version an index wants but cannot hold (a legacy version with no
+        // system timestamp in its order column): fail the build closed.
+        if let Some(index) = decoded.iter().find_map(|(_, node)| {
+            let node = node.as_ref()?;
+            self.wanted
+                .defs_for(&node.node_type)
+                .find(|def| unrepresentable(def, node))
+        }) {
+            tracing::warn!(
+                node_id = %id,
+                index = %index.name,
+                "compound build: node has no value for the index's order column \
+                 (a legacy version without the system timestamp); the index cannot list it"
+            );
+            self.out.unindexable += 1;
             return Ok(());
         }
         let cf_compound = cf_handle(self.db, cf::COMPOUND_INDEX)?;
         let mut prev: BTreeSet<CompoundGroup> = BTreeSet::new();
         for (revision, node) in decoded {
             let cur = node
-                .map(|n| {
-                    let defs = self.wanted.get(&n.node_type).map_or(&[][..], Vec::as_slice);
-                    compound_entries(defs, self.ctx, &n)
-                })
+                .map(|n| compound_entries(self.wanted.defs_for(&n.node_type), self.ctx, &n))
                 .unwrap_or_default();
             for group in prev.difference(&cur) {
-                self.batch
-                    .put_cf(cf_compound, entry_key(group, &revision, id), TOMBSTONE);
+                self.emit(cf_compound, entry_key(group, &revision, id), TOMBSTONE);
             }
             for group in cur.difference(&prev) {
-                self.batch
-                    .put_cf(cf_compound, entry_key(group, &revision, id), LIVE);
+                self.emit(cf_compound, entry_key(group, &revision, id), LIVE);
                 self.out.entries += 1;
             }
             prev = cur;
@@ -260,6 +274,15 @@ impl Pass<'_, '_> {
             self.flush()?;
         }
         Ok(())
+    }
+
+    /// One entry of the output: counted toward the precheck's estimate, and
+    /// staged only by the writing pass.
+    fn emit(&mut self, cf: &ColumnFamily, key: Vec<u8>, value: &[u8]) {
+        self.out.estimated_bytes += key.len() as u64 + value.len() as u64 + ENTRY_OVERHEAD;
+        if self.writing {
+            self.batch.put_cf(cf, key, value);
+        }
     }
 
     fn unplaceable(&mut self, id: &str, why: &str) -> Result<()> {
@@ -272,8 +295,11 @@ impl Pass<'_, '_> {
         if self.batch.is_empty() {
             return Ok(());
         }
+        let bytes = self.batch.size_in_bytes() as u64;
         self.db
             .write(std::mem::take(&mut self.batch))
-            .map_err(|e| Error::storage(format!("compound build batch write failed: {e}")))
+            .map_err(|e| Error::storage(format!("compound build batch write failed: {e}")))?;
+        self.pace.after_commit(bytes);
+        Ok(())
     }
 }

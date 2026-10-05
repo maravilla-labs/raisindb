@@ -19,7 +19,12 @@
 
 mod batched_fetch_tests;
 mod bulk_sql_rls;
+mod compound_builtin_listing;
+mod compound_builtin_measure;
 mod compound_index_hierarchy;
+mod compound_workspace_limit;
+mod compound_workspace_listing;
+mod compound_workspace_measure;
 mod count_scan_rls;
 mod created_event_nonsystem;
 mod current_user_gating;

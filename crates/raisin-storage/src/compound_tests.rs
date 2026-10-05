@@ -13,7 +13,7 @@ fn def(name: &str, cols: &[(&str, CompoundColumnType)]) -> CompoundIndexDefiniti
             })
             .collect(),
         has_order_column: false,
-        owner_node_type: None,
+        owner: None,
     }
 }
 

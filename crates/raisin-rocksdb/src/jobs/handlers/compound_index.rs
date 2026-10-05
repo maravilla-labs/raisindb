@@ -7,7 +7,7 @@ use crate::{cf, cf_handle, keys};
 use raisin_error::{Error, Result};
 use raisin_hlc::HLC;
 use raisin_storage::jobs::{JobContext, JobInfo, JobType};
-use rocksdb::{WriteBatch, DB};
+use rocksdb::DB;
 use std::sync::Arc;
 
 use crate::repositories::{BranchRepositoryImpl, NodeTypeRepositoryImpl, RevisionRepositoryImpl};
@@ -187,225 +187,28 @@ impl CompoundIndexJobHandler {
         };
 
         let result = self
-            .build(
-                job,
+            .build_index(
+                &job.id.to_string(),
                 tenant_id,
                 repo_id,
                 branch,
                 workspace,
                 node_type_name,
                 index_name,
+                0,
             )
-            .await;
+            .await
+            .map(|_| ());
 
         if let (Some(lm), Some(token)) = (&self.lock_manager, lease) {
             let _ = lm.release(&lock_key, token).await;
         }
         result
     }
-
-    /// The build itself, split out so the lease above is always released.
-    ///
-    /// A mark that arrives DURING a build (a replicated write whose definitions
-    /// were cold, a merge) makes the final `Ready` lose its compare-and-set; the
-    /// build then runs again, a bounded number of times — the request that
-    /// marked it was usually what queued this very job, so waiting for another
-    /// trigger would leave the index scan-only.
-    #[allow(clippy::too_many_arguments)]
-    async fn build(
-        &self,
-        job: &JobInfo,
-        tenant_id: &str,
-        repo_id: &str,
-        branch: &str,
-        workspace: &str,
-        node_type_name: &str,
-        index_name: &str,
-    ) -> Result<()> {
-        const ATTEMPTS: usize = 3;
-        for attempt in 1..=ATTEMPTS {
-            if self
-                .build_once(
-                    job,
-                    tenant_id,
-                    repo_id,
-                    branch,
-                    workspace,
-                    node_type_name,
-                    index_name,
-                )
-                .await?
-            {
-                return Ok(());
-            }
-            tracing::info!(
-                job_id = %job.id,
-                index = %index_name,
-                attempt,
-                "Compound index build finished behind a newer stale mark; building again"
-            );
-        }
-        Ok(())
-    }
-
-    /// One build pass; `Ok(true)` when it stamped `Ready`.
-    #[allow(clippy::too_many_arguments)]
-    async fn build_once(
-        &self,
-        job: &JobInfo,
-        tenant_id: &str,
-        repo_id: &str,
-        branch: &str,
-        workspace: &str,
-        node_type_name: &str,
-        index_name: &str,
-    ) -> Result<bool> {
-        use crate::indexing::compound::build;
-        let scope = raisin_storage::BranchScope::new(tenant_id, repo_id, branch);
-        // The definitions READ FROM STORAGE (never cache-first, so a cache
-        // lagging a declaration change cannot hand the build the old columns),
-        // inheritance included: every type whose resolved declarations carry
-        // this index NAME writes into its keyspace. The same answer warms the
-        // cache the replication apply path maintains the index from.
-        let fresh = crate::indexing::compound::defs::fresh_branch(
-            &self.db,
-            &self.node_type_repo,
-            scope,
-            &[],
-        )
-        .await?;
-        let declaring = fresh
-            .get(node_type_name)
-            .ok_or_else(|| Error::NotFound(format!("NodeType '{}' not found", node_type_name)))?;
-        let index_def = declaring
-            .compound
-            .iter()
-            .find(|idx| idx.name == index_name)
-            .cloned()
-            .ok_or_else(|| {
-                Error::NotFound(format!(
-                    "Compound index '{}' not found in NodeType '{}'",
-                    index_name, node_type_name
-                ))
-            })?;
-        let wanted: build::Wanted = fresh
-            .iter()
-            .filter_map(|(name, defs)| {
-                let def = defs.compound.iter().find(|d| d.name == index_name)?;
-                Some((name.clone(), vec![def.clone()]))
-            })
-            .collect();
-        let ctx = crate::indexing::IndexCtx::new(tenant_id, repo_id, branch, workspace);
-
-        // Refuse BEFORE the clear: a node the build cannot place would lose
-        // its entries to the clear and never get them back.
-        build::precheck(
-            &self.db,
-            &ctx,
-            &wanted,
-            &self.branch_head(tenant_id, repo_id, branch)?,
-        )?;
-
-        // Register the build BEFORE clearing or reading any node: a mark that
-        // arrives after this point advances the generation and makes the
-        // final `Ready` lose — see `compound_state::marker`.
-        let state_store = crate::compound_state::CompoundStateStore::new(self.db.clone());
-        let started_under = state_store.begin_rebuild(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            &index_def,
-            self.branch_head(tenant_id, repo_id, branch)?,
-        )?;
-
-        // The clear and re-derive insert below existing entries: hold the
-        // (branch, COMPOUND) against run-collapse until the build is written.
-        let _inserting = crate::management::cf_exclusion::enter_inserter_async(
-            &self.db,
-            tenant_id,
-            repo_id,
-            branch,
-            crate::cf::COMPOUND_INDEX,
-        )
-        .await;
-        // Clear this index's keyspace (both tags), THEN read the floor and
-        // scan: a write committed before the floor read is in the scan, one
-        // after it writes its own entries over the cleared keyspace.
-        self.clear_index(tenant_id, repo_id, branch, workspace, index_name)?;
-        let floor = self.branch_head(tenant_id, repo_id, branch)?;
-        let outcome = build::write(&self.db, &ctx, &wanted, &floor)?;
-        if outcome.unplaceable > 0 {
-            state_store.mark_not_built(tenant_id, repo_id, branch, workspace, index_name)?;
-            build::refuse_unplaceable(&ctx, &outcome)?;
-        }
-
-        // Stamp the state record LAST, and only on success: this flips the
-        // planner's fail-closed gate open — for reads at or above the floor.
-        // Compare-and-set against marks that arrived during the build.
-        let mut state = raisin_storage::compound::CompoundIndexState::ready(&index_def, floor);
-        state.nodes_indexed = outcome.nodes as u64;
-        let stamped = state_store.complete_build(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            state,
-            started_under,
-        )?;
-        if stamped {
-            tracing::info!(
-                job_id = %job.id,
-                nodes = outcome.nodes,
-                entries = outcome.entries,
-                floor = %floor,
-                "Compound index build completed"
-            );
-        }
-        Ok(stamped)
-    }
-
-    /// Delete every entry of one index (both tags) — the keyspace is rebuilt
-    /// from the nodes right after.
-    fn clear_index(
-        &self,
-        tenant_id: &str,
-        repo_id: &str,
-        branch: &str,
-        workspace: &str,
-        index_name: &str,
-    ) -> Result<()> {
-        let cf_compound = cf_handle(&self.db, cf::COMPOUND_INDEX)?;
-        for published in [false, true] {
-            let prefix = keys::compound_index_prefix(
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                index_name,
-                &[],
-                published,
-            );
-            let mut batch = WriteBatch::default();
-            for item in crate::prefix_scan(&self.db, cf_compound, &prefix) {
-                let (key, _) = item.map_err(|e| Error::storage(e.to_string()))?;
-                if !key.starts_with(&prefix) {
-                    break;
-                }
-                batch.delete_cf(cf_compound, key);
-                if batch.len() >= 10_000 {
-                    self.db
-                        .write(std::mem::take(&mut batch))
-                        .map_err(|e| Error::storage(e.to_string()))?;
-                }
-            }
-            self.db
-                .write(batch)
-                .map_err(|e| Error::storage(e.to_string()))?;
-        }
-        Ok(())
-    }
 }
+
+#[path = "compound_index_build.rs"]
+mod build_impl;
 
 #[cfg(test)]
 #[path = "compound_index_tests.rs"]

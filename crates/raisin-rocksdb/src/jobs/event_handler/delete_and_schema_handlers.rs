@@ -183,6 +183,15 @@ impl UnifiedJobEventHandler {
                 None,
             )
             .await;
+            // A declaration removed or a built-in index switched off (plan
+            // Phase 13f) leaves entries no sweep sees: the `compound_builds`
+            // link drops them (queued only when the data shows owed work).
+            crate::management::async_indexing::repair::request_compound_builds(
+                self.storage.db(),
+                &workspace_event.tenant_id,
+                &workspace_event.repository_id,
+                &branch.name,
+            );
         }
         Ok(())
     }

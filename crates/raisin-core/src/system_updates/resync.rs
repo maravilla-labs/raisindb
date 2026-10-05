@@ -205,6 +205,12 @@ fn merge_workspace_allow_lists(base: &Workspace, stored: &Workspace) -> Workspac
         &base.allowed_root_node_types,
         &stored.allowed_root_node_types,
     );
+    // An operator's opt-out of a built-in index (plan Phase 13f, settable
+    // over SQL on any workspace) is the operator's, not the YAML's: unless
+    // the YAML itself sets the switches, the stored ones survive the resync.
+    if merged.config.builtin_indexes.is_none() {
+        merged.config.builtin_indexes = stored.config.builtin_indexes.clone();
+    }
     merged
 }
 
@@ -749,6 +755,31 @@ mod tests {
         let merged = merge_workspace_allow_lists(&base, &stored);
         assert_eq!(merged.allowed_node_types, vec!["a", "b", "c"]);
         assert_eq!(merged.allowed_root_node_types, vec!["r1", "r2"]);
+    }
+
+    /// The unattended resync used to write the YAML's config wholesale, so an
+    /// operator's opt-out of the built-in `(parent, created_at)` index was
+    /// silently reverted (index ON, rebuilt on every node) whenever the
+    /// workspace's definition hash changed.
+    #[test]
+    fn a_builtin_index_opt_out_survives_the_resync() {
+        use raisin_models::workspace::BuiltinIndexes;
+        let base = workspace("w", &["a"], &[]);
+        let mut stored = workspace("w", &["a"], &[]);
+        stored.config.builtin_indexes = Some(BuiltinIndexes {
+            children_by_created_at: false,
+        });
+        let merged = merge_workspace_allow_lists(&base, &stored);
+        assert_eq!(merged.config.builtin_indexes, stored.config.builtin_indexes);
+
+        // The YAML's own setting still wins.
+        let mut yaml_on = workspace("w", &["a"], &[]);
+        yaml_on.config.builtin_indexes = Some(BuiltinIndexes::default());
+        let merged = merge_workspace_allow_lists(&yaml_on, &stored);
+        assert_eq!(
+            merged.config.builtin_indexes,
+            Some(BuiltinIndexes::default())
+        );
     }
 
     #[test]

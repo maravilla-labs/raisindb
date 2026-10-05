@@ -63,27 +63,16 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         // loading declarations from the wrong branch is how an index that exists
         // reads as absent.
         if let Some(filter) = helpers::statement_filter(analyzed) {
-            let compound = match helpers::extract_node_type_from_expr(filter) {
-                Some(node_type_name) => {
-                    helpers::load_compound_indexes(
-                        &*self.storage,
-                        &self.tenant_id,
-                        &self.repo_id,
-                        &branch,
-                        &node_type_name,
-                    )
-                    .await
-                }
-                None => {
-                    helpers::load_all_compound_indexes(
-                        &*self.storage,
-                        &self.tenant_id,
-                        &self.repo_id,
-                        &branch,
-                    )
-                    .await
-                }
-            };
+            let node_type = helpers::extract_node_type_from_expr(filter);
+            let compound = crate::engine::compound_defs::planner_compound_indexes(
+                &*self.storage,
+                &self.tenant_id,
+                &self.repo_id,
+                &branch,
+                Some(&workspace),
+                node_type.as_deref(),
+            )
+            .await;
             if let Some(indexes) = compound {
                 physical_planner.set_compound_indexes(indexes);
             }

@@ -46,7 +46,7 @@ fn definition() -> CompoundIndexDefinition {
             column_type: CompoundColumnType::String,
         }],
         has_order_column: false,
-        owner_node_type: None,
+        owner: None,
     }
 }
 

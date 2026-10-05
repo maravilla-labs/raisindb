@@ -29,7 +29,7 @@ Project: 2 expressions
 |---|---|---|
 | `PathIndexScan` | the path index | one lookup per path |
 | `PropertyIndexScan` | the property index | one seek per matching value |
-| `CompoundIndexScan` | a declared compound index | one seek, rows already ordered |
+| `CompoundIndexScan` | a declared compound index (workspace or NodeType) | one seek, rows already ordered |
 | `PrefixScan` | the editorial-order index (`CHILD_OF`, `DESCENDANT_OF`) | proportional to the subtree |
 | `ReferenceIndexScan` | the reverse reference index (`REFERENCES(...)`) | proportional to the backlinks |
 | `TableScan` | every node in the workspace | proportional to the workspace — avoid on hot paths |
@@ -95,12 +95,120 @@ re-sort them alphabetically. See [Editorial ordering](./editorial-ordering.md).
 
 A compound index is only needed when a query filters on one value AND orders
 by another — for example the newest items in a folder. It is declared on the
-NodeType:
+**workspace** (it then holds every node of the workspace, whatever its type) or
+on a **NodeType** (it then holds only that type's nodes). The most common one,
+a folder listing by creation time, is **built in**: you do not declare it.
+
+### Built in: newest- and oldest-first folder listings
+
+Every workspace carries a built-in index on `(__parent_path, __created_at)`,
+so a folder listing by creation time is index-served out of the box — newest
+or oldest first, with or without a `LIMIT`, typed or untyped, with or without
+other predicates:
+
+```sql
+SELECT id, name FROM stories
+WHERE CHILD_OF('/site/news')
+ORDER BY created_at DESC LIMIT 20
+```
+
+```
+Limit: limit=20, offset=0
+  Project: 2 expressions
+    CompoundIndexScan: @__children_by_created_at [__parent_path=/site/news] index-order limit_hint=20 (owner: workspace stories)
+```
+
+It costs one index entry per node: written on create, re-keyed on move, ended
+on delete. An update that changes neither the parent nor `created_at` writes
+nothing to it. There is no built-in `updated_at` index (it would be rewritten
+on every update), and `CHILD_OF` with `ORDER BY __order` or with no `ORDER BY`
+keeps the editorial order. `DESCENDANT_OF` does not use it: a subtree is a path
+range, not one parent.
+
+The index is built in the background on every node, per branch, after an
+upgrade or when a workspace is created: until it is ready on that node, the
+listing scans and returns the same rows more slowly. An index you declare
+yourself that matches a query as well or better is preferred over it.
+
+**Opting out.** A workspace that never lists folders by creation time (an
+append-only log, say) can switch it off in its configuration:
+
+```yaml
+name: audit_log
+config:
+  builtin_indexes:
+    children_by_created_at: false
+```
+
+or over SQL (`NULL` restores the default, on):
+
+```sql
+UPDATE Workspaces
+SET builtin_indexes = '{"children_by_created_at": false}'::jsonb
+WHERE name = 'audit_log'
+```
+
+The same `config.builtin_indexes` object is accepted by the workspace API.
+Switching it off takes effect at once (the planner stops using it), and the
+background job then deletes its entries. Switching it back on builds it again
+in the background. `SELECT builtin_indexes FROM Workspaces` shows the switches
+in force. Index names starting with `__` are reserved for built-in indexes and
+cannot be declared.
+
+### On the workspace: folder listings
+
+A folder listing usually names no node type. Declare the index on the
+workspace, in its YAML (`workspaces/stories.yaml` in a package) or through the
+workspace API:
+
+```yaml
+name: stories
+compound_indexes:
+  - name: folder_recent
+    columns:
+      - property: __parent_path
+        column_type: String
+      - property: __created_at
+        column_type: Timestamp
+    has_order_column: true
+```
+
+```sql
+SELECT id, name FROM stories
+WHERE CHILD_OF('/site/news')
+ORDER BY created_at DESC LIMIT 20      -- every child, whatever its type
+```
+
+```
+Limit: limit=20, offset=0
+  Project: 2 expressions
+    CompoundIndexScan: @folder_recent [__parent_path=/site/news] index-order limit_hint=20 (owner: workspace stories)
+```
+
+The `@` marks a workspace index: it lives in its own keyspace, so a NodeType
+index of the same name never shares entries with it. The same declaration can be
+made over SQL:
+
+```sql
+UPDATE Workspaces
+SET compound_indexes = '[{"name":"folder_recent","columns":[
+      {"property":"__parent_path","column_type":"String"},
+      {"property":"__created_at","column_type":"Timestamp"}],
+    "has_order_column":true}]'::jsonb
+WHERE name = 'stories'
+```
+
+A workspace index matched on `__parent_path` alone is used only when it also
+serves the `ORDER BY`. `CHILD_OF('/x') ORDER BY __order` (editorial order) and a
+`CHILD_OF` with no `ORDER BY` keep reading the editorial-order index, in the
+order editors arranged.
+
+### On a NodeType: listings of one type
 
 ```yaml
 name: site:NewsItem
 compound_indexes:
-  - name: site_news_recent        # branch-global: prefix it with the type
+  - name: site_news_recent
     columns:
       - property: __parent_path
         column_type: String
@@ -111,13 +219,23 @@ compound_indexes:
 
 ```sql
 SELECT name FROM stories
-WHERE CHILD_OF('/site/news')
-ORDER BY created_at DESC LIMIT 10     -- a CompoundIndexScan once declared
+WHERE CHILD_OF('/site/news') AND node_type = 'site:NewsItem'
+ORDER BY created_at DESC LIMIT 10
 ```
 
-Every column is an object with an explicit `column_type`. Only `String`
-equality columns and a trailing `Timestamp` order column are supported, and
-nodes written before the index was declared need a rebuild before they appear.
+A NodeType index serves only a query scoped to that type (`node_type = ...` or
+`IS_A(...)`). An untyped query never uses it: it would silently miss every node
+of another type. Names starting with `@` are reserved for workspace indexes.
+
+### For both
+
+Every column is an object with an explicit `column_type`. `String` equality
+columns (including `__parent_path` and `__node_type`) and a trailing
+`Timestamp` order column (`__created_at`, `__updated_at`) are supported;
+`__order` is not an index column. A declared index is not used until it is
+built: declaring or changing one queues a build on every node, and until it
+finishes the query scans and returns the same rows more slowly. `EXPLAIN` shows
+`CompoundIndexScan` once it is ready.
 
 ## Reading referenced nodes
 

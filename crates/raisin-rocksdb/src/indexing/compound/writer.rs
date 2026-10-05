@@ -22,6 +22,7 @@ use crate::indexing::{Baseline, IndexCtx};
 use crate::keys::TOMBSTONE_VALUE as TOMBSTONE;
 use raisin_error::Result;
 use raisin_hlc::HLC;
+use raisin_models::nodes::properties::schema::CompoundIndexDefinition;
 use raisin_models::nodes::Node;
 use rocksdb::{ColumnFamily, WriteBatch, DB};
 use std::collections::BTreeSet;
@@ -49,8 +50,26 @@ fn cf(db: &DB) -> Result<&ColumnFamily> {
     crate::cf_handle(db, crate::cf::COMPOUND_INDEX)
 }
 
-fn entries_of(defs: &DefsSet, ctx: &IndexCtx<'_>, node: &Node) -> BTreeSet<CompoundGroup> {
-    compound_entries(defs.compound(&node.node_type), ctx, node)
+/// `node`'s entries: its type's declarations plus its workspace's own
+/// (`workspace` — [`super::workspace_defs::for_ctx`], read once per write).
+fn entries_of(
+    defs: &DefsSet,
+    workspace: &[CompoundIndexDefinition],
+    ctx: &IndexCtx<'_>,
+    node: &Node,
+) -> BTreeSet<CompoundGroup> {
+    compound_entries(
+        defs.compound(&node.node_type).iter().chain(workspace),
+        ctx,
+        node,
+    )
+}
+
+/// Whether a write of a node of `defs`' types into `ctx`'s workspace
+/// maintains any compound index — its types', or its workspace's (plan
+/// Phase 13e). The one test every caller's "nothing to do" shortcut uses.
+pub fn writes_compound(db: &DB, ctx: &IndexCtx<'_>, defs: &DefsSet) -> Result<bool> {
+    Ok(defs.any_compound() || !super::workspace_defs::for_ctx(db, ctx)?.is_empty())
 }
 
 /// Write `new`'s compound entries at `revision` against `baseline`.
@@ -68,6 +87,8 @@ pub fn write_compound_delta(
     revision: &HLC,
 ) -> Result<CompoundCounts> {
     let cf = cf(db)?;
+    let ws = super::workspace_defs::for_ctx(db, ctx)?;
+    let ws = &ws[..];
     let (prior, successors) = match baseline {
         Baseline::Predecessor(old) => (Some(old), &[][..]),
         Baseline::Full(prior) => (prior, &[][..]),
@@ -75,9 +96,9 @@ pub fn write_compound_delta(
         Baseline::NoPrior => (None, &[][..]),
     };
     let old = prior
-        .map(|old| entries_of(defs, ctx, old))
+        .map(|old| entries_of(defs, ws, ctx, old))
         .unwrap_or_default();
-    let new_entries = entries_of(defs, ctx, new);
+    let new_entries = entries_of(defs, ws, ctx, new);
     let skip = matches!(baseline, Baseline::Predecessor(_));
     let mut counts = CompoundCounts::default();
 
@@ -106,12 +127,12 @@ pub fn write_compound_delta(
         // `revision`, which the tombstones above would otherwise mask.
         let first_entries = first
             .as_ref()
-            .map(|node| entries_of(defs, ctx, node))
+            .map(|node| entries_of(defs, ws, ctx, node))
             .unwrap_or_default();
         for group in new_entries.difference(&first_entries) {
             batch.put_cf(cf, entry_key(group, first_rev, &new.id), TOMBSTONE);
         }
-        reassert_successors(batch, cf, ctx, defs, &new.id, successors);
+        reassert_successors(batch, cf, ctx, defs, ws, &new.id, successors);
     }
     if counts.skipped > 0 {
         SKIPPED.fetch_add(counts.skipped as u64, Ordering::Relaxed);
@@ -166,12 +187,13 @@ pub(crate) fn reassert_successors(
     cf: &ColumnFamily,
     ctx: &IndexCtx<'_>,
     defs: &DefsSet,
+    workspace: &[CompoundIndexDefinition],
     node_id: &str,
     successors: &[crate::mvcc_read::StoredVersion],
 ) {
     for (at, version) in successors {
         if let Some(version) = version {
-            for group in entries_of(defs, ctx, version) {
+            for group in entries_of(defs, workspace, ctx, version) {
                 batch.put_cf(cf, entry_key(&group, at, node_id), LIVE);
             }
         }
@@ -191,9 +213,10 @@ pub fn tombstone_superseded_compound(
     revision: &HLC,
 ) -> Result<usize> {
     let cf = cf(db)?;
-    let new_entries = entries_of(defs, ctx, new);
+    let ws = super::workspace_defs::for_ctx(db, ctx)?;
+    let new_entries = entries_of(defs, &ws, ctx, new);
     let mut written = 0;
-    for group in entries_of(defs, ctx, old).difference(&new_entries) {
+    for group in entries_of(defs, &ws, ctx, old).difference(&new_entries) {
         let at = landing_revision(db, cf, group, &old.id, revision)?;
         batch.put_cf(cf, entry_key(group, &at, &old.id), TOMBSTONE);
         written += 1;

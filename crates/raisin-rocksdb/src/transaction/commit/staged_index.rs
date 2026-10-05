@@ -93,6 +93,11 @@ impl RocksDBTransaction {
             // Recorded, then nothing written (an aborted step): `None`.
             None => cache.moved_nodes.get(key).map(Some),
         };
+        // Entries staged under a workspace declaration that has changed since.
+        crate::indexing::property_delta::fail_changed_declarations(
+            &self.db,
+            cache.delta_checks.values(),
+        )?;
         // Every node's UNIQUE claims first, so no correction (appended after
         // the whole batch) ends a value another node of this transaction
         // took at the same revision (plan Phase 13a; `NodeCommit::revalidate`).

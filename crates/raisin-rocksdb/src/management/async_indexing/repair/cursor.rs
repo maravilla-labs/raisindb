@@ -32,7 +32,10 @@ pub struct RepairState {
     pub updated_at: String,
     /// The `property_index` rebuild's invalidation epoch when this run
     /// STARTED (kept across a resume): `done` is committed only while it is
-    /// still current (`property_state::rebuild_epoch`).
+    /// still current (`property_state::rebuild_epoch`). For a `failed`
+    /// `compound_builds` link: the work the branch still owed when it failed
+    /// (`compound_detect::work_fingerprint`), which a targeted request
+    /// compares before running it again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub epoch: Option<String>,
 }
