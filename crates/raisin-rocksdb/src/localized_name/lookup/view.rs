@@ -16,6 +16,7 @@ use rocksdb::DB;
 use std::collections::BTreeMap;
 
 /// A live node and its chain overlays as of the read revision.
+#[derive(Clone)]
 pub(crate) struct NodeView {
     /// The node record WITHOUT its property map (`node_head_at`): a lookup
     /// verifies ids, names and paths, never properties.

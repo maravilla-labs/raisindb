@@ -6,8 +6,11 @@ use super::lookup::{LocalizedLookup, ServedBy};
 use crate::repositories::nodes::NodeRepositoryImpl;
 use raisin_error::Result;
 use raisin_hlc::HLC;
-use raisin_storage::localized::{LocalizedNameSource, LocalizedResolution, LocalizedServedBy};
+use raisin_storage::localized::{
+    LocalizedNameSession, LocalizedNameSource, LocalizedResolution, LocalizedServedBy,
+};
 use raisin_storage::scope::StorageScope;
+use std::sync::Arc;
 
 /// The RocksDB localized name source (a cheap clone of the node repository).
 pub struct RocksLocalizedNames {
@@ -84,5 +87,18 @@ impl LocalizedNameSource for RocksLocalizedNames {
             locale,
             max_revision,
         )
+    }
+
+    fn session(
+        &self,
+        scope: StorageScope<'_>,
+        locale: &str,
+        max_revision: Option<&HLC>,
+    ) -> Result<Arc<dyn LocalizedNameSession>> {
+        Ok(Arc::new(LocalizedLookup::new(&self.nodes).session(
+            name_scope(&scope),
+            locale,
+            max_revision,
+        )?))
     }
 }

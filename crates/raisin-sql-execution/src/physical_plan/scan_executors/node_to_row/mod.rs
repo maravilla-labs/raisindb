@@ -17,6 +17,8 @@ mod embedding;
 mod fields;
 mod localized;
 
+pub(crate) use localized::{page_names, wants_localized_names};
+
 use crate::physical_plan::executor::{ExecutionContext, Row};
 use raisin_error::Error;
 use raisin_models::nodes::Node;
@@ -47,6 +49,9 @@ pub(crate) struct OrderContext<'a> {
     /// projected) — walking every ancestor (plan Phase 13b measured that
     /// recomputation at ~40 % of a localized path lookup).
     pub localized_path: Option<&'a str>,
+    /// `__node_name` / `__localized_path` as the scan already read them for a
+    /// whole page (`localized::page_names`). `None` reads them per row.
+    pub names: Option<&'a raisin_storage::localized::LocalizedNames>,
 }
 
 impl<'a> OrderContext<'a> {
@@ -208,6 +213,7 @@ async fn convert<S: Storage>(
         effective_locale,
         projection,
         order_ctx.and_then(|c| c.localized_path),
+        order_ctx.and_then(|c| c.names),
     )
     .await?;
 

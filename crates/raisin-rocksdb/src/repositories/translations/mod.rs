@@ -257,6 +257,30 @@ impl TranslationRepository for RocksDBTranslationRepository {
         .await
     }
 
+    async fn get_chain_overlays(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        node_ids: &[&str],
+        chain: &[LocaleCode],
+        revision: &HLC,
+        with_blocks: bool,
+    ) -> Result<Vec<raisin_storage::ChainOverlays>> {
+        queries::get_chain_overlays(
+            &self.db,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            node_ids,
+            chain,
+            revision,
+            with_blocks,
+        )
+    }
+
     async fn get_translations_batch(
         &self,
         tenant_id: &str,

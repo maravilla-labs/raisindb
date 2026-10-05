@@ -13,7 +13,7 @@ use raisin_error::{Error, Result};
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
 use raisin_models::translations::{JsonPointer, LocaleCode, LocaleOverlay};
-use raisin_storage::TranslationRepository;
+use raisin_storage::{ChainOverlays, TranslationRepository};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -39,54 +39,137 @@ impl<R: TranslationRepository> TranslationResolver<R> {
         repo_id: &str,
         branch: &str,
         workspace: &str,
-        mut node: Node,
+        node: Node,
         locale: &LocaleCode,
         revision: &raisin_hlc::HLC,
     ) -> Result<Option<Node>> {
-        let fallback_chain = self.config.get_fallback_chain(locale.as_str());
-
-        // LEAST specific first, so the requested locale is applied LAST and wins.
-        //
-        // The chain is ordered most-specific-first (`fr-CA`, `fr`, `en`), and each
-        // overlay is merged over the node as it is found — so walking it forwards
-        // let `fr` overwrite the `fr-CA` values that had just been applied, i.e.
-        // exactly backwards. A field the more specific locale did not translate
-        // still shows through, because the less specific overlay was applied
-        // underneath it rather than instead of it.
-        //
-        // `Hidden` is order-independent: hidden anywhere in the chain hides the node.
-        //
-        // ONE read gives every block overlay of this node in the whole chain, AS
-        // OF `revision`. Almost no node has any, and the answer is reused for
-        // every locale in the chain — where the old shape walked the node's whole
-        // property tree and issued a point read per block uuid it found, per
-        // locale. It used to be a HEAD listing followed by a point read per
-        // block: a time-travel read lost every block a later delete of the node
-        // ended, and each point read repeated the node's delete check.
-        let chain = parse_chain(&fallback_chain)?;
-        let block_overlays = self
-            .repository
-            .get_block_translations_for_node(
-                tenant_id, repo_id, branch, workspace, &node.id, &chain, revision,
+        let mut resolved = self
+            .resolve_nodes(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                vec![node],
+                locale,
+                revision,
             )
             .await?;
+        Ok(resolved.pop().flatten())
+    }
 
-        for fallback_locale in fallback_chain.into_iter().rev() {
-            let locale_code = LocaleCode::parse(&fallback_locale)?;
+    /// [`Self::resolve_node`] for every node of a page, in ONE storage read
+    /// (`get_chain_overlays`): the answer for each node, aligned with
+    /// `nodes` — `None` where the node is hidden in the chain.
+    ///
+    /// This is THE resolution: `resolve_node` is a page of one, and
+    /// `resolve_nodes_batch` filters this. A scan resolving row by row paid
+    /// several iterator opens and a walk of the node's history per row and
+    /// chain locale; a page pays one iterator per column family.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn resolve_nodes(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        nodes: Vec<Node>,
+        locale: &LocaleCode,
+        revision: &raisin_hlc::HLC,
+    ) -> Result<Vec<Option<Node>>> {
+        Ok(self
+            .resolve_page(
+                tenant_id, repo_id, branch, workspace, nodes, locale, revision, false, true,
+            )
+            .await?
+            .nodes)
+    }
 
-            let overlay = self
-                .repository
-                .get_translation(
-                    tenant_id,
-                    repo_id,
-                    branch,
-                    workspace,
-                    &node.id,
-                    &locale_code,
-                    revision,
-                )
-                .await?;
+    /// [`Self::resolve_nodes`] (or, without `with_properties`, the
+    /// visibility question alone), also handing back each node's node-level
+    /// chain overlays when `keep_overlays` — what the localized name columns
+    /// of the same rows are decided from, so they need not be read twice.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn resolve_page(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        nodes: Vec<Node>,
+        locale: &LocaleCode,
+        revision: &raisin_hlc::HLC,
+        keep_overlays: bool,
+        with_properties: bool,
+    ) -> Result<ResolvedPage> {
+        let chain_names = self.config.get_fallback_chain(locale.as_str());
+        if nodes.is_empty() {
+            return Ok(ResolvedPage {
+                chain: chain_names,
+                ..ResolvedPage::default()
+            });
+        }
+        // The chain is ordered most-specific-first (`fr-CA`, `fr`, `en`).
+        let chain = parse_chain(&chain_names)?;
+        // ONE read gives, per node, every node overlay and (when the
+        // properties are merged) every block overlay of the whole chain AS OF
+        // `revision`. Almost no node has block overlays, and the answer is
+        // reused for every locale in the chain — where the old shape walked
+        // the node's whole property tree and issued a point read per block
+        // uuid it found, per locale. (It used to be a HEAD listing followed by
+        // a point read per block: a time-travel read lost every block a later
+        // delete of the node ended.)
+        let ids: Vec<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
+        let overlays = self
+            .repository
+            .get_chain_overlays(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                &ids,
+                &chain,
+                revision,
+                with_properties,
+            )
+            .await?;
+        let mut page = ResolvedPage {
+            chain: chain_names,
+            nodes: Vec::with_capacity(nodes.len()),
+            overlays: Vec::new(),
+        };
+        for (node, overlays) in nodes.into_iter().zip(overlays) {
+            if keep_overlays {
+                page.overlays.push(overlays.node.clone());
+            }
+            page.nodes.push(if with_properties {
+                self.apply_chain(node, &chain, overlays)?
+            } else {
+                (!hidden_in_chain(&overlays.node)).then_some(node)
+            });
+        }
+        Ok(page)
+    }
 
+    /// Merge one node's chain overlays into it.
+    ///
+    /// LEAST specific first, so the requested locale is applied LAST and wins.
+    /// Walking the chain forwards let `fr` overwrite the `fr-CA` values that
+    /// had just been applied, i.e. exactly backwards. A field the more
+    /// specific locale did not translate still shows through, because the
+    /// less specific overlay was applied underneath it rather than instead of
+    /// it. `Hidden` is order-independent: hidden anywhere in the chain hides
+    /// the node.
+    fn apply_chain(
+        &self,
+        mut node: Node,
+        chain: &[LocaleCode],
+        overlays: ChainOverlays,
+    ) -> Result<Option<Node>> {
+        let ChainOverlays {
+            node: node_overlays,
+            blocks: block_overlays,
+        } = overlays;
+        for (locale_code, overlay) in chain.iter().zip(node_overlays).rev() {
             if let Some(overlay) = overlay {
                 match overlay {
                     LocaleOverlay::Hidden => {
@@ -104,7 +187,7 @@ impl<R: TranslationRepository> TranslationResolver<R> {
             // itself has one. They used to hang off the node-overlay branch above,
             // so a block translated in a locale where the node had no overlay of
             // its own was stored, listed, and never resolved.
-            self.apply_block_overlays_for_locale(&mut node, &block_overlays, &locale_code)?;
+            self.apply_block_overlays_for_locale(&mut node, &block_overlays, locale_code)?;
         }
 
         Ok(Some(node))
@@ -127,25 +210,44 @@ impl<R: TranslationRepository> TranslationResolver<R> {
         locale: &LocaleCode,
         revision: &raisin_hlc::HLC,
     ) -> Result<bool> {
-        for fallback_locale in self.config.get_fallback_chain(locale.as_str()) {
-            let locale_code = LocaleCode::parse(&fallback_locale)?;
-            let overlay = self
-                .repository
-                .get_translation(
-                    tenant_id,
-                    repo_id,
-                    branch,
-                    workspace,
-                    node_id,
-                    &locale_code,
-                    revision,
-                )
-                .await?;
-            if matches!(overlay, Some(LocaleOverlay::Hidden)) {
-                return Ok(false);
-            }
+        let visible = self
+            .visible_nodes(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                &[node_id],
+                locale,
+                revision,
+            )
+            .await?;
+        Ok(visible.first().copied().unwrap_or(true))
+    }
+
+    /// [`Self::is_visible`] for a page of nodes in one storage read, aligned
+    /// with `node_ids`. No block overlay is read.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn visible_nodes(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        node_ids: &[&str],
+        locale: &LocaleCode,
+        revision: &raisin_hlc::HLC,
+    ) -> Result<Vec<bool>> {
+        if node_ids.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(true)
+        let chain = parse_chain(&self.config.get_fallback_chain(locale.as_str()))?;
+        let overlays = self
+            .repository
+            .get_chain_overlays(
+                tenant_id, repo_id, branch, workspace, node_ids, &chain, revision, false,
+            )
+            .await?;
+        Ok(overlays.iter().map(|o| !hidden_in_chain(&o.node)).collect())
     }
 
     /// Apply the block overlays that belong to ONE locale of the fallback chain.
@@ -192,10 +294,8 @@ impl<R: TranslationRepository> TranslationResolver<R> {
         merge_into_map(&mut node.properties, &segments, value)
     }
 
-    /// Batch resolve multiple nodes with translations for the given locale.
-    ///
-    /// Uses batch translation fetching for 10-100x better performance
-    /// than calling `resolve_node` individually for each node.
+    /// Batch resolve multiple nodes with translations for the given locale,
+    /// dropping the ones hidden in it: [`Self::resolve_nodes`], filtered.
     pub async fn resolve_nodes_batch(
         &self,
         tenant_id: &str,
@@ -206,90 +306,33 @@ impl<R: TranslationRepository> TranslationResolver<R> {
         locale: &LocaleCode,
         revision: &raisin_hlc::HLC,
     ) -> Result<Vec<Node>> {
-        if nodes.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let fallback_chain = self.config.get_fallback_chain(locale.as_str());
-        let node_ids: Vec<String> = nodes.iter().map(|n| n.id.clone()).collect();
-
-        let mut nodes_by_id: HashMap<String, Node> =
-            nodes.into_iter().map(|n| (n.id.clone(), n)).collect();
-        let mut hidden_nodes: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-        // Same ordering rule as `resolve_node`: least specific first, so the
-        // requested locale is applied last and wins over what it falls back to.
-        for fallback_locale in fallback_chain.into_iter().rev() {
-            let locale_code = LocaleCode::parse(&fallback_locale)?;
-
-            let translations = self
-                .repository
-                .get_translations_batch(
-                    tenant_id,
-                    repo_id,
-                    branch,
-                    workspace,
-                    &node_ids,
-                    &locale_code,
-                    revision,
-                )
-                .await?;
-
-            for (node_id, overlay) in translations {
-                if hidden_nodes.contains(&node_id) {
-                    continue;
-                }
-
-                match overlay {
-                    LocaleOverlay::Hidden => {
-                        hidden_nodes.insert(node_id.clone());
-                        nodes_by_id.remove(&node_id);
-                    }
-                    LocaleOverlay::Properties { data } => {
-                        if let Some(node) = nodes_by_id.get_mut(&node_id) {
-                            for (pointer, value) in data {
-                                let segments = pointer.segments();
-                                if segments.is_empty() {
-                                    continue;
-                                }
-                                merge_into_map(&mut node.properties, &segments, value)?;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Block overlays, once per surviving node. Kept OUT of the locale loop
-        // above: the inventory scan is per node, not per locale, and a node's
-        // block overlays are applied in the same least-specific-first order.
-        let chain: Vec<LocaleCode> = parse_chain(&self.config.get_fallback_chain(locale.as_str()))?
+        Ok(self
+            .resolve_nodes(
+                tenant_id, repo_id, branch, workspace, nodes, locale, revision,
+            )
+            .await?
             .into_iter()
-            .rev()
-            .collect();
-
-        for node in nodes_by_id.values_mut() {
-            let block_overlays = self
-                .repository
-                .get_block_translations_for_node(
-                    tenant_id, repo_id, branch, workspace, &node.id, &chain, revision,
-                )
-                .await?;
-            if block_overlays.is_empty() {
-                continue;
-            }
-            for locale_code in &chain {
-                self.apply_block_overlays_for_locale(node, &block_overlays, locale_code)?;
-            }
-        }
-
-        let result: Vec<Node> = node_ids
-            .into_iter()
-            .filter_map(|id| nodes_by_id.remove(&id))
-            .collect();
-
-        Ok(result)
+            .flatten()
+            .collect())
     }
+}
+
+/// A page of nodes as [`TranslationResolver::resolve_page`] resolved it.
+#[derive(Debug, Default)]
+pub struct ResolvedPage {
+    /// The fallback chain, most specific first.
+    pub chain: Vec<String>,
+    /// Each node resolved, aligned with the input; `None`: hidden.
+    pub nodes: Vec<Option<Node>>,
+    /// Each node's node-level overlay per chain locale (empty unless kept).
+    pub overlays: Vec<Vec<Option<LocaleOverlay>>>,
+}
+
+/// Hidden anywhere in the chain hides the node.
+fn hidden_in_chain(overlays: &[Option<LocaleOverlay>]) -> bool {
+    overlays
+        .iter()
+        .any(|overlay| matches!(overlay, Some(LocaleOverlay::Hidden)))
 }
 
 /// The fallback chain as locale codes, in the chain's order.

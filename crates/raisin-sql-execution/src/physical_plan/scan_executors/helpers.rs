@@ -201,52 +201,108 @@ pub(super) async fn resolve_node_for_locale_as<S: Storage>(
     locale: &str,
     with_properties: bool,
 ) -> Result<Option<Node>, Error> {
+    Ok(
+        resolve_nodes_for_locale_as(vec![node], ctx, locale, with_properties)
+            .await?
+            .pop()
+            .flatten(),
+    )
+}
+
+/// Nodes per storage read when a scan resolves a page of rows at once: the
+/// read is synchronous, so a whole unbounded subtree is not one call.
+const RESOLVE_CHUNK: usize = 256;
+
+/// [`resolve_node_for_locale_as`] for a page of a scan, aligned with `nodes`
+/// (`None`: hidden in this locale). One storage read per chunk instead of
+/// several per row — what made a localized tree read cost ~7x the
+/// default-language one. Rows come out exactly as resolving each alone.
+pub(super) async fn resolve_nodes_for_locale_as<S: Storage>(
+    nodes: Vec<Node>,
+    ctx: &ExecutionContext<S>,
+    locale: &str,
+    with_properties: bool,
+) -> Result<Vec<Option<Node>>, Error> {
+    Ok(
+        resolve_page_for_locale(nodes, ctx, locale, with_properties, false)
+            .await?
+            .nodes,
+    )
+}
+
+/// A page of a scan resolved in one locale.
+#[derive(Default)]
+pub(super) struct LocalizedPage {
+    /// Each node resolved, aligned with the input; `None`: hidden.
+    pub nodes: Vec<Option<Node>>,
+    /// The fallback chain `overlays` is aligned with.
+    pub chain: Vec<String>,
+    /// Each node's node-level overlays in `chain`, as resolution read them
+    /// at the statement's revision — empty when not kept, or when nothing
+    /// was resolved (the default language).
+    pub overlays: Vec<Vec<Option<raisin_models::translations::LocaleOverlay>>>,
+}
+
+/// [`resolve_nodes_for_locale_as`], also keeping each node's chain overlays
+/// when `keep_overlays` and the statement's revision is pinned (the
+/// localized name columns of the same rows are decided from them at that
+/// revision, `ExecutionContext::statement_snapshot`).
+pub(super) async fn resolve_page_for_locale<S: Storage>(
+    nodes: Vec<Node>,
+    ctx: &ExecutionContext<S>,
+    locale: &str,
+    with_properties: bool,
+    keep_overlays: bool,
+) -> Result<LocalizedPage, Error> {
+    let unresolved = |nodes: Vec<Node>| LocalizedPage {
+        nodes: nodes.into_iter().map(Some).collect(),
+        ..LocalizedPage::default()
+    };
     // Skip translation if:
     // 1. No repository_config is set (translation not configured)
     // 2. The locale matches the default language (no translation needed)
     if ctx.repository_config.is_none() || locale == ctx.default_language.as_ref() {
-        return Ok(Some(node));
+        return Ok(unresolved(nodes));
     }
 
     // Parse locale code
     let locale_code = LocaleCode::parse(locale)
         .map_err(|e| Error::Validation(format!("Invalid locale '{}': {}", locale, e)))?;
 
-    // Get revision for translation lookup
-    let revision = ctx.max_revision.unwrap_or_else(raisin_hlc::HLC::now);
-
     // The statement's resolver, built once rather than once per row.
     let Some(resolver) = ctx.translation_resolver() else {
-        return Ok(Some(node));
+        return Ok(unresolved(nodes));
     };
 
-    if !with_properties {
-        let visible = resolver
-            .is_visible(
+    // Get revision for translation lookup — once, so every chunk reads at it.
+    let revision = ctx.max_revision.unwrap_or_else(raisin_hlc::HLC::now);
+    let keep_overlays = keep_overlays && ctx.max_revision.is_some();
+
+    let mut page = LocalizedPage {
+        nodes: Vec::with_capacity(nodes.len()),
+        ..LocalizedPage::default()
+    };
+    let mut rest = nodes.into_iter().peekable();
+    while rest.peek().is_some() {
+        let chunk: Vec<Node> = rest.by_ref().take(RESOLVE_CHUNK).collect();
+        let resolved = resolver
+            .resolve_page(
                 &ctx.tenant_id,
                 &ctx.repo_id,
                 &ctx.branch,
                 &ctx.workspace,
-                &node.id,
+                chunk,
                 &locale_code,
                 &revision,
+                keep_overlays,
+                with_properties,
             )
             .await?;
-        return Ok(visible.then_some(node));
+        page.chain = resolved.chain;
+        page.nodes.extend(resolved.nodes);
+        page.overlays.extend(resolved.overlays);
     }
-
-    // Resolve translation for this node
-    resolver
-        .resolve_node(
-            &ctx.tenant_id,
-            &ctx.repo_id,
-            &ctx.branch,
-            &ctx.workspace,
-            node,
-            &locale_code,
-            &revision,
-        )
-        .await
+    Ok(page)
 }
 
 /// Columns `node_to_row` fills from the node record itself, never from

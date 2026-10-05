@@ -122,3 +122,48 @@ pub(super) async fn get_translations_batch(
 
     Ok(result)
 }
+
+/// [`raisin_storage::TranslationRepository::get_chain_overlays`]: a page of
+/// nodes through ONE snapshot and one iterator per column family, each node
+/// decided by `translation_read::node_chain_in` (one `NODES` walk per node).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn get_chain_overlays(
+    db: &Arc<DB>,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    workspace: &str,
+    node_ids: &[&str],
+    chain: &[LocaleCode],
+    revision: &HLC,
+    with_blocks: bool,
+) -> Result<Vec<raisin_storage::ChainOverlays>> {
+    crate::translation_history::ensure_complete_at(db, tenant_id, repo_id, branch, revision)?;
+    let names: Vec<&str> = chain.iter().map(|l| l.as_str()).collect();
+    let snapshot = db.snapshot();
+    let mut src = crate::mvcc_read::SnapshotRead::new(db, &snapshot);
+    let mut out = Vec::with_capacity(node_ids.len());
+    for node_id in node_ids {
+        let found = crate::translation_read::node_chain_in(
+            &mut src,
+            (tenant_id, repo_id, branch, workspace),
+            node_id,
+            &names,
+            Some(revision),
+            with_blocks,
+        )?;
+        out.push(raisin_storage::ChainOverlays {
+            node: found.node,
+            blocks: found
+                .blocks
+                .into_iter()
+                .filter_map(|version| {
+                    LocaleCode::parse(&version.locale)
+                        .ok()
+                        .map(|locale| (version.block_uuid, locale, version.overlay))
+                })
+                .collect(),
+        });
+    }
+    Ok(out)
+}

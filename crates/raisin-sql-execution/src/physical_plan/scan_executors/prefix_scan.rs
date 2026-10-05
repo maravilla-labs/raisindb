@@ -10,8 +10,8 @@
 //! 1. **Direct Children Only** - Uses fast list_by_parent or list_root API
 //! 2. **All Descendants** - Uses ORDERED_CHILDREN traversal for tree-ordered results
 
-use super::helpers::{get_locales_to_use, resolve_node_for_locale_as, scan_needs_properties};
-use super::node_to_row::{node_to_row, OrderContext};
+use super::helpers::{get_locales_to_use, resolve_page_for_locale, scan_needs_properties};
+use super::node_to_row::{node_to_row, page_names, wants_localized_names, OrderContext};
 use super::{SCAN_COUNT_CEILING, SCAN_TIME_LIMIT, TIME_CHECK_INTERVAL};
 use crate::physical_plan::executor::{ExecutionContext, ExecutionError, RowStream};
 use crate::physical_plan::operators::PhysicalPlan;
@@ -229,14 +229,10 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
                     break 'pages;
                 }
 
+                // Filter the page, then resolve every surviving node's locale
+                // overlays in one read per locale (see `localize_page`).
+                let mut kept = Vec::with_capacity(fetched);
                 for (node, order_label) in nodes {
-                    if let Some(lim) = limit {
-                        if emitted >= lim {
-                            tracing::debug!("PrefixScan early termination: reached limit of {}", lim);
-                            break 'pages;
-                        }
-                    }
-
                     // Advance the cursor for every entry examined, including ones
                     // filtered out below — otherwise a page whose rows are all
                     // denied would re-request the same page forever.
@@ -269,13 +265,26 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
                     } else {
                         node
                     };
+                    kept.push((node, order_label));
+                }
 
-                    let order_ctx = OrderContext::label(&order_label);
+                let (mut localized, names) = localize_page(&kept, &ctx_clone, &workspace, &projection, &locales_to_use, !skip_properties).await?;
+                for (i, (_, order_label)) in kept.iter().enumerate() {
+                    if let Some(lim) = limit {
+                        if emitted >= lim {
+                            tracing::debug!("PrefixScan early termination: reached limit of {}", lim);
+                            break 'pages;
+                        }
+                    }
 
-                    for locale in &locales_to_use {
-                        let translated_node = match resolve_node_for_locale_as(node.clone(), &ctx_clone, locale, !skip_properties).await? {
-                            Some(n) => n,
-                            None => continue,
+                    for (l, locale) in locales_to_use.iter().enumerate() {
+                        let Some(translated_node) = localized[l][i].take() else {
+                            continue;
+                        };
+                        let order_ctx = OrderContext {
+                            order_label: Some(order_label),
+                            names: names[l].as_ref().map(|n| &n[i]),
+                            ..OrderContext::default()
                         };
 
                         let row = node_to_row(&translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale, Some(&order_ctx)).await?;
@@ -328,14 +337,8 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
 
             let mut emitted = 0usize;
 
+            let mut kept = Vec::with_capacity(nodes.len());
             for node in nodes {
-                if let Some(lim) = limit {
-                    if emitted >= lim {
-                        tracing::debug!("PrefixScan early termination: reached limit of {}", lim);
-                        break;
-                    }
-                }
-
                 safety_scanned += 1;
 
                 if safety_scanned > SCAN_COUNT_CEILING {
@@ -362,22 +365,27 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
                 } else {
                     node
                 };
+                kept.push((node, ()));
+            }
 
-                for locale in &locales_to_use {
-                    let translated_node = match resolve_node_for_locale_as(node.clone(), &ctx_clone, locale, !skip_properties).await? {
-                        Some(n) => n,
-                        None => continue,
+            let (mut localized, names) = localize_page(&kept, &ctx_clone, &workspace, &projection, &locales_to_use, !skip_properties).await?;
+            'nodes: for i in 0..kept.len() {
+                for (l, locale) in locales_to_use.iter().enumerate() {
+                    if limit.is_some_and(|lim| emitted >= lim) {
+                        tracing::debug!("PrefixScan early termination: reached limit");
+                        break 'nodes;
+                    }
+                    let Some(translated_node) = localized[l][i].take() else {
+                        continue;
                     };
 
-                    let row = node_to_row(&translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale, None,).await?;
+                    let order_ctx = OrderContext {
+                        names: names[l].as_ref().map(|n| &n[i]),
+                        ..OrderContext::default()
+                    };
+                    let row = node_to_row(&translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale, Some(&order_ctx)).await?;
                     yield row;
                     emitted += 1;
-                    if let Some(lim) = limit {
-                        if emitted >= lim {
-                            tracing::debug!("PrefixScan early termination: reached limit of {}", lim);
-                            break;
-                        }
-                    }
                 }
             }
         } else {
@@ -439,6 +447,7 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
                         break 'subtree;
                     }
 
+                    let mut kept = Vec::with_capacity(fetched);
                     for (node, tree_order) in nodes {
                         // Advance the cursor for every node examined, including the
                         // ones skipped below, or a page that yields nothing would be
@@ -450,12 +459,6 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
                         // return '/parent' itself).
                         if node.id == parent_id {
                             continue;
-                        }
-                        if let Some(lim) = limit {
-                            if emitted >= lim {
-                                tracing::debug!("PrefixScan early termination: reached limit of {}", lim);
-                                break 'subtree;
-                            }
                         }
 
                         safety_scanned += 1;
@@ -484,16 +487,26 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
                         } else {
                             node
                         };
+                        kept.push((node, tree_order));
+                    }
 
-                        let order_ctx = OrderContext {
-                            tree_order: Some(&tree_order),
-                            ..OrderContext::default()
-                        };
+                    let (mut localized, names) = localize_page(&kept, &ctx_clone, &workspace, &projection, &locales_to_use, !skip_properties).await?;
+                    for (i, (_, tree_order)) in kept.iter().enumerate() {
+                        if let Some(lim) = limit {
+                            if emitted >= lim {
+                                tracing::debug!("PrefixScan early termination: reached limit of {}", lim);
+                                break 'subtree;
+                            }
+                        }
 
-                        for locale in &locales_to_use {
-                            let translated_node = match resolve_node_for_locale_as(node.clone(), &ctx_clone, locale, !skip_properties).await? {
-                                Some(n) => n,
-                                None => continue,
+                        for (l, locale) in locales_to_use.iter().enumerate() {
+                            let Some(translated_node) = localized[l][i].take() else {
+                                continue;
+                            };
+                            let order_ctx = OrderContext {
+                                tree_order: Some(tree_order),
+                                names: names[l].as_ref().map(|n| &n[i]),
+                                ..OrderContext::default()
                             };
 
                             let row = node_to_row(&translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale, Some(&order_ctx)).await?;
@@ -526,4 +539,41 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
             }
         }
     }))
+}
+
+/// A filtered page as its rows need it, per locale.
+type LocalizedRows = (
+    Vec<Vec<Option<raisin_models::nodes::Node>>>,
+    Vec<Option<Vec<raisin_storage::localized::LocalizedNames>>>,
+);
+
+/// Every node of a filtered page in every locale: `[locale][node]`, `None`
+/// where the node is hidden in that locale — and, when the projection names
+/// them, the localized name columns `[locale][node]`. One resolution read and
+/// one name read per locale for the page instead of several per row; the
+/// name read reuses the overlays resolution read for the same rows.
+async fn localize_page<S: Storage, T>(
+    kept: &[(raisin_models::nodes::Node, T)],
+    ctx: &ExecutionContext<S>,
+    workspace: &str,
+    projection: &Option<Vec<String>>,
+    locales: &[String],
+    with_properties: bool,
+) -> Result<LocalizedRows, Error> {
+    let (want_name, want_path) = wants_localized_names(projection);
+    // Resolution reads the statement's workspace; reuse only what is this
+    // scan's.
+    let keep = (want_name || want_path) && workspace == ctx.workspace.as_ref();
+    let base: Vec<&raisin_models::nodes::Node> = kept.iter().map(|(node, _)| node).collect();
+    let mut nodes_out = Vec::with_capacity(locales.len());
+    let mut names_out = Vec::with_capacity(locales.len());
+    for locale in locales {
+        let nodes = kept.iter().map(|(node, _)| node.clone()).collect();
+        let page = resolve_page_for_locale(nodes, ctx, locale, with_properties, keep).await?;
+        let known =
+            (!page.overlays.is_empty()).then(|| (page.chain.as_slice(), page.overlays.as_slice()));
+        names_out.push(page_names(ctx, workspace, locale, projection, &base, known).await?);
+        nodes_out.push(page.nodes);
+    }
+    Ok((nodes_out, names_out))
 }

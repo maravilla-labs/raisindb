@@ -10,9 +10,11 @@ use raisin_core::services::reference_resolver::ResolveMemo;
 use raisin_core::services::translation_resolver::TranslationResolver;
 use raisin_error::Error;
 use raisin_hlc::HLC;
+use raisin_storage::localized::LocalizedNameSession;
 use raisin_storage::{BranchRepository, NodeRepository, ReadSnapshot, Storage};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// See the module docs. Shared by every clone of one statement's context.
 pub struct StatementState<S: Storage> {
@@ -28,6 +30,10 @@ pub struct StatementState<S: Storage> {
     /// The storage view every batched read of the statement goes through,
     /// opened on first use and released with the statement.
     read_snapshot: OnceLock<Option<ReadSnapshot>>,
+    /// `__node_name` / `__localized_path` readers, one per `(branch,
+    /// workspace, locale)`: each remembers the ancestors it resolved, which
+    /// is sound because every read of the statement is at ONE snapshot.
+    localized_names: Mutex<HashMap<(String, String, String), Arc<dyn LocalizedNameSession>>>,
 }
 
 impl<S: Storage> Default for StatementState<S> {
@@ -38,6 +44,7 @@ impl<S: Storage> Default for StatementState<S> {
             translation_resolver: OnceLock::new(),
             embedding_unavailable_warned: AtomicBool::new(false),
             read_snapshot: OnceLock::new(),
+            localized_names: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -87,6 +94,51 @@ impl<S: Storage> ExecutionContext<S> {
             .read_snapshot
             .get_or_init(|| self.storage.nodes().open_read_snapshot())
             .clone()
+    }
+
+    /// The statement's localized name reader for `workspace` in `locale`, at
+    /// the statement snapshot — `None` when the storage has no localized
+    /// name lookup.
+    pub async fn localized_name_session(
+        &self,
+        workspace: &str,
+        locale: &str,
+    ) -> Result<Option<Arc<dyn LocalizedNameSession>>, Error> {
+        let Some(source) = self.storage.localized_names() else {
+            return Ok(None);
+        };
+        let key = (
+            self.branch.to_string(),
+            workspace.to_string(),
+            locale.to_string(),
+        );
+        if let Some(session) = self.lock_localized_names().get(&key) {
+            return Ok(Some(session.clone()));
+        }
+        let snapshot = self.statement_snapshot().await?;
+        let scope = raisin_storage::StorageScope::new(
+            &self.tenant_id,
+            &self.repo_id,
+            &self.branch,
+            workspace,
+        );
+        let session = source.session(scope, locale, Some(&snapshot))?;
+        Ok(Some(
+            self.lock_localized_names()
+                .entry(key)
+                .or_insert(session)
+                .clone(),
+        ))
+    }
+
+    fn lock_localized_names(
+        &self,
+    ) -> std::sync::MutexGuard<'_, HashMap<(String, String, String), Arc<dyn LocalizedNameSession>>>
+    {
+        self.statement
+            .localized_names
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// RESOLVE's memo for this statement.

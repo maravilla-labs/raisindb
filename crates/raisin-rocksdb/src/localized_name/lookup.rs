@@ -20,6 +20,7 @@
 //! hidden must all look the same there.
 
 mod paths;
+pub(crate) mod session;
 pub(crate) mod view;
 
 use super::config::{self, NameConfig};
@@ -210,6 +211,33 @@ impl<'a> LocalizedLookup<'a> {
         path: &str,
         bound: Option<&HLC>,
     ) -> Result<Option<NodeView>> {
+        Self::by_path_in(src, scope, chain, path, bound)
+    }
+
+    /// [`Self::by_path`] without a lookup.
+    fn by_path_in(
+        src: &mut impl VersionedRead,
+        scope: NameScope<'_>,
+        chain: &[String],
+        path: &str,
+        bound: Option<&HLC>,
+    ) -> Result<Option<NodeView>> {
+        Ok(Self::by_path_known(src, scope, chain, path, bound, None)?.map(|v| v.into_owned()))
+    }
+
+    /// [`Self::by_path_in`] for a caller already holding `known`, a view
+    /// loaded through `src` at `bound`: when `PATH_INDEX` names its node, it
+    /// IS the view `by_path` would load, and is used as it is (the name
+    /// session reaching a row's own segment). The answer is a view of its
+    /// own either way — `Cow` keeps the borrowed one unloaded.
+    pub(super) fn by_path_known<'v>(
+        src: &mut impl VersionedRead,
+        scope: NameScope<'_>,
+        chain: &[String],
+        path: &str,
+        bound: Option<&HLC>,
+        known: Option<&'v NodeView>,
+    ) -> Result<Option<std::borrow::Cow<'v, NodeView>>> {
         let entry = crate::mvcc_read::path_index_entry_in(
             src,
             scope.tenant_id,
@@ -222,7 +250,11 @@ impl<'a> LocalizedLookup<'a> {
         let Some((_, Some(id))) = entry else {
             return Ok(None);
         };
-        Ok(NodeView::load_in(src, scope, &id, chain, bound)?.filter(|v| v.node.path == path))
+        let view = match known.filter(|v| v.node.id == id) {
+            Some(view) => Some(std::borrow::Cow::Borrowed(view)),
+            None => NodeView::load_in(src, scope, &id, chain, bound)?.map(std::borrow::Cow::Owned),
+        };
+        Ok(view.filter(|v| v.node.path == path))
     }
 
     /// The child of the parent whose own name is `segment` in the first chain

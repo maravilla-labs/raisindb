@@ -12,7 +12,9 @@ use crate::physical_plan::executor::{ExecutionContext, Row};
 use raisin_error::Error;
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
-use raisin_storage::{Storage, StorageScope};
+use raisin_models::translations::LocaleOverlay;
+use raisin_storage::localized::{KnownNode, LocalizedNames};
+use raisin_storage::Storage;
 
 /// `known_path`: the row's canonical localized path when the scan already
 /// resolved it (`LocalizedPathLookup`); computed otherwise.
@@ -26,6 +28,7 @@ pub(super) async fn insert_localized_fields<S: Storage>(
     locale: &str,
     projection: &Option<Vec<String>>,
     known_path: Option<&str>,
+    known_names: Option<&LocalizedNames>,
 ) -> Result<(), Error> {
     let named = |col: &str| {
         projection
@@ -36,24 +39,90 @@ pub(super) async fn insert_localized_fields<S: Storage>(
     if !want_name && !want_path {
         return Ok(());
     }
-    let source = ctx.storage.localized_names();
-    let scope = StorageScope::new(&ctx.tenant_id, &ctx.repo_id, &ctx.branch, workspace);
-    let snapshot = ctx.statement_snapshot().await?;
+    // A path the scan already resolved is not asked again.
+    let ask_path = want_path && known_path.is_none();
+    let names = if let Some(known) = known_names {
+        known.clone()
+    } else if want_name || ask_path {
+        match ctx.localized_name_session(workspace, locale).await? {
+            Some(session) => session
+                .names(&[node.id.as_str()], want_name, ask_path)?
+                .pop()
+                .unwrap_or_default(),
+            None => LocalizedNames::default(),
+        }
+    } else {
+        LocalizedNames::default()
+    };
     let text = |v: Option<String>| v.map_or(PropertyValue::Null, PropertyValue::String);
     if want_name {
-        let name = match &source {
-            Some(s) => s.node_name(scope, &node.id, locale, Some(&snapshot))?,
-            None => None,
-        };
-        row.insert(format!("{qualifier}.__node_name"), text(name));
+        row.insert(format!("{qualifier}.__node_name"), text(names.node_name));
     }
     if want_path {
-        let path = match (known_path, &source) {
-            (Some(known), _) => Some(known.to_string()),
-            (None, Some(s)) => s.localized_path(scope, &node.id, locale, Some(&snapshot))?,
-            (None, None) => None,
+        let path = match known_path {
+            Some(known) => Some(known.to_string()),
+            None => names.localized_path,
         };
         row.insert(format!("{qualifier}.__localized_path"), text(path));
     }
     Ok(())
+}
+
+/// Which of `__node_name` / `__localized_path` the projection names.
+pub(crate) fn wants_localized_names(projection: &Option<Vec<String>>) -> (bool, bool) {
+    let named = |col: &str| {
+        projection
+            .as_ref()
+            .is_some_and(|p| p.iter().any(|c| c == col))
+    };
+    (named("__node_name"), named("__localized_path"))
+}
+
+/// The localized name columns of a whole page of a scan in one read, aligned
+/// with `nodes` — handed to [`super::node_to_row`] through
+/// `OrderContext::names`. `None` when the projection names neither.
+///
+/// `known`: the fallback chain and each node's node-level overlays in it, as
+/// translation resolution of these rows read them at the statement snapshot
+/// — then the name reader does not read them again.
+pub(crate) async fn page_names<S: Storage>(
+    ctx: &ExecutionContext<S>,
+    workspace: &str,
+    locale: &str,
+    projection: &Option<Vec<String>>,
+    nodes: &[&Node],
+    known: Option<(&[String], &[Vec<Option<LocaleOverlay>>])>,
+) -> Result<Option<Vec<LocalizedNames>>, Error> {
+    let (want_name, want_path) = wants_localized_names(projection);
+    if !want_name && !want_path {
+        return Ok(None);
+    }
+    let Some(session) = ctx.localized_name_session(workspace, locale).await? else {
+        return Ok(Some(vec![LocalizedNames::default(); nodes.len()]));
+    };
+    let known = known.filter(|(_, overlays)| overlays.len() == nodes.len());
+    // The read is synchronous: an unbounded subtree is not one call.
+    let mut out = Vec::with_capacity(nodes.len());
+    for (at, chunk) in nodes.chunks(256).enumerate() {
+        match known {
+            Some((chain, overlays)) => {
+                let rows: Vec<KnownNode<'_>> = chunk
+                    .iter()
+                    .zip(&overlays[at * 256..])
+                    .map(|(node, overlays)| KnownNode {
+                        node,
+                        chain,
+                        overlays,
+                    })
+                    .collect();
+                out.extend(session.names_known(&rows, want_name, want_path)?);
+            }
+            None => {
+                let ids: Vec<&str> = chunk.iter().map(|n| n.id.as_str()).collect();
+                out.extend(session.names(&ids, want_name, want_path)?);
+            }
+        }
+        tokio::task::yield_now().await;
+    }
+    Ok(Some(out))
 }

@@ -446,4 +446,63 @@ pub trait TranslationRepository: Send + Sync {
         node_id: &str,
         locale: &LocaleCode,
     ) -> Result<()>;
+
+    /// Everything the translation resolver applies to each of `node_ids` in
+    /// the fallback `chain`, as of `revision` — one [`ChainOverlays`] per id,
+    /// in the order given.
+    ///
+    /// The answer is exactly what a [`Self::get_translation`] per chain
+    /// locale plus one [`Self::get_block_translations_for_node`] (when
+    /// `with_blocks`) would give for each node; the default does precisely
+    /// that. A backend overrides it to read a whole page of a scan through
+    /// one set of iterators instead of opening several per node (a localized
+    /// tree read paid ~7x the default-language read for this).
+    #[allow(clippy::too_many_arguments)]
+    async fn get_chain_overlays(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        node_ids: &[&str],
+        chain: &[LocaleCode],
+        revision: &HLC,
+        with_blocks: bool,
+    ) -> Result<Vec<ChainOverlays>> {
+        let mut out = Vec::with_capacity(node_ids.len());
+        for node_id in node_ids {
+            let blocks = if with_blocks {
+                self.get_block_translations_for_node(
+                    tenant_id, repo_id, branch, workspace, node_id, chain, revision,
+                )
+                .await?
+            } else {
+                Vec::new()
+            };
+            let mut node = Vec::with_capacity(chain.len());
+            for locale in chain {
+                node.push(
+                    self.get_translation(
+                        tenant_id, repo_id, branch, workspace, node_id, locale, revision,
+                    )
+                    .await?,
+                );
+            }
+            out.push(ChainOverlays { node, blocks });
+        }
+        Ok(out)
+    }
+}
+
+/// One node's overlays in a fallback chain, as [`TranslationRepository::get_chain_overlays`]
+/// reads them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ChainOverlays {
+    /// The node-level overlay of each chain locale, aligned with the chain
+    /// (`None`: no live overlay in that locale).
+    pub node: Vec<Option<LocaleOverlay>>,
+    /// Every live block overlay in a chain locale, `(block_uuid, locale,
+    /// overlay)`, in the order `get_block_translations_for_node` gives them.
+    /// Empty when blocks were not asked for.
+    pub blocks: Vec<(String, LocaleCode, LocaleOverlay)>,
 }

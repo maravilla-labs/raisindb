@@ -69,6 +69,7 @@ use raisin_models::translations::LocaleOverlay;
 use rocksdb::DB;
 
 mod blocks;
+mod chain;
 mod projected;
 #[cfg(test)]
 mod projected_tests;
@@ -80,6 +81,7 @@ pub(crate) use blocks::{
     live_block_overlays, live_block_versions, read_block_version, stored_live_block_overlays,
     LiveBlockVersion,
 };
+pub(crate) use chain::{node_chain_in, NodeChain};
 pub(crate) use projected::decode_overlay_keeping;
 pub(crate) use scan::{for_each_newest, for_each_newest_in};
 

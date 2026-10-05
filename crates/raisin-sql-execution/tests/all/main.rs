@@ -48,6 +48,7 @@ mod limit_pushdown_tests;
 mod localized_name_null_compare;
 mod localized_name_uniqueness;
 mod localized_paths;
+mod localized_read_bench;
 mod locks_sql_test;
 mod move_copy_order_at_root;
 mod mvcc_index_oracle;

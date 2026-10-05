@@ -67,7 +67,7 @@ pub use repository::{
 };
 
 // Re-export translation types
-pub use translations::TranslationRepository;
+pub use translations::{ChainOverlays, TranslationRepository};
 
 // Re-export management types
 pub use management::{

@@ -3,12 +3,11 @@
 
 use super::view::NodeView;
 use super::{LocalizedLookup, Resolution, ServedBy};
-use crate::localized_name::config;
 use crate::localized_name::keys::NameScope;
-use crate::localized_name::lookup::view::join_path;
 use crate::mvcc_read::VersionedRead;
 use raisin_error::Result;
 use raisin_hlc::HLC;
+use raisin_storage::localized::LocalizedNameSession;
 
 impl LocalizedLookup<'_> {
     /// A path in the default language: the canonical path itself.
@@ -42,38 +41,11 @@ impl LocalizedLookup<'_> {
         locale: &str,
         bound: Option<&HLC>,
     ) -> Result<Option<String>> {
-        let db = self.nodes.db_handle();
-        // One snapshot-pinned iterator per column family for the whole walk,
-        // config included, as the lookup (plan Phase 13d).
-        let snapshot = db.snapshot();
-        let mut src = crate::mvcc_read::SnapshotRead::new(db, &snapshot);
-        let Some(cfg) = config::load_in(&mut src, scope.tenant_id, scope.repo_id)? else {
-            return Ok(None);
-        };
-        let chain = cfg.fallback_chain(locale);
-        let Some(target) = NodeView::load_in(&mut src, scope, node_id, &chain, bound)? else {
-            return Ok(None);
-        };
-        let names: Vec<String> = target
-            .node
-            .path
-            .split('/')
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .collect();
-        let mut segments = Vec::with_capacity(names.len());
-        let mut path = "/".to_string();
-        for name in &names {
-            path = join_path(&path, name);
-            let Some(view) = self.by_path(&mut src, scope, &chain, &path, bound)? else {
-                return Ok(None);
-            };
-            if !view.visible() {
-                return Ok(None);
-            }
-            segments.push(view.segment(&chain, &cfg));
-        }
-        Ok(Some(format!("/{}", segments.join("/"))))
+        Ok(self
+            .session(scope, locale, bound)?
+            .names(&[node_id], false, true)?
+            .pop()
+            .and_then(|names| names.localized_path))
     }
 
     /// The node's own name in `locale` (first chain locale with one) —
@@ -85,20 +57,20 @@ impl LocalizedLookup<'_> {
         locale: &str,
         bound: Option<&HLC>,
     ) -> Result<Option<String>> {
-        let db = self.nodes.db_handle();
-        let Some(cfg) = config::load(db, scope.tenant_id, scope.repo_id)? else {
-            return Ok(None);
-        };
-        let chain = cfg.fallback_chain(locale);
-        let Some(view) = NodeView::load(db, scope, node_id, &chain, bound)? else {
-            return Ok(None);
-        };
-        if !view.visible() {
-            return Ok(None);
-        }
-        Ok(chain.iter().find_map(|l| match view.name_in(l, &cfg) {
-            crate::indexing::localized_node_names::NameIn::Name(s) => Some(s),
-            _ => None,
-        }))
+        Ok(self
+            .session(scope, locale, bound)?
+            .names(&[node_id], true, false)?
+            .pop()
+            .and_then(|names| names.node_name))
+    }
+
+    /// A name session of `(scope, locale, bound)` (`session.rs`).
+    pub fn session(
+        &self,
+        scope: NameScope<'_>,
+        locale: &str,
+        bound: Option<&HLC>,
+    ) -> Result<super::session::NameSession> {
+        super::session::NameSession::open(self.nodes.db_handle().clone(), scope, locale, bound)
     }
 }
