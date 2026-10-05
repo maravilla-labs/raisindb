@@ -496,6 +496,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             package_assets = stats.package_assets_installed,
             translations = stats.translations_applied,
             translations_skipped = stats.translations_skipped,
+            translations_kept = stats.translations_kept,
             "Package installation completed"
         );
 

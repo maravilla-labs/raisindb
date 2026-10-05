@@ -200,3 +200,231 @@ async fn package_overlay_colliding_with_a_sibling_is_accepted_when_not_enforced(
     let b = id_of(&storage, "/site/b").await;
     assert_eq!(claimants(&storage, &site, "a"), vec![b]);
 }
+
+// ---------------------------------------------------------------------------
+// A package's overlays obey the same install decision as its `.node.yaml`.
+//
+// `store_translation` replaces the whole locale overlay, so an overlay applied
+// to an existing node on a `skip` path wipes everything editors changed since
+// the first install — translated fields, the native `/__node_name`, a `Hidden`
+// marker — on every `--mode sync` redeploy.
+// ---------------------------------------------------------------------------
+
+mod sync_policy {
+    use super::*;
+    use raisin_models::nodes::properties::PropertyValue;
+    use raisin_models::translations::{JsonPointer, LocaleOverlay};
+    use raisin_packages::{SyncConfig, SyncDefaults, SyncFilter, SyncMode};
+    use raisin_storage::transactional::{TransactionalContext, TransactionalStorage};
+
+    /// `defaults: mode: skip`, with `/site/managed` under a `replace` root.
+    fn skip_default_config() -> SyncConfig {
+        SyncConfig {
+            defaults: SyncDefaults {
+                mode: SyncMode::Skip,
+                ..SyncDefaults::default()
+            },
+            filters: vec![SyncFilter {
+                root: format!("/{WS}/site/managed"),
+                mode: Some(SyncMode::Replace),
+                direction: None,
+                filter_type: Default::default(),
+                include: Vec::new(),
+                exclude: Vec::new(),
+                on_conflict: None,
+                properties: None,
+            }],
+            ..SyncConfig::default()
+        }
+    }
+
+    fn package() -> Vec<ContentEntry> {
+        vec![
+            folder("/site"),
+            folder("/site/page"),
+            folder("/site/hidden"),
+            folder("/site/managed"),
+            overlay("/site/page", "title: Titre v1\n__node_name: page-v1\n"),
+            overlay("/site/hidden", "title: Masque v1\n"),
+            overlay("/site/managed", "title: Gere v1\n"),
+        ]
+    }
+
+    async fn install_with(
+        storage: &Arc<RocksDBStorage>,
+        mode: InstallMode,
+        cfg: Option<&SyncConfig>,
+    ) -> InstallStats {
+        let mut stats = InstallStats::default();
+        PackageInstallHandler::new(storage.clone(), Arc::new(JobRegistry::new()))
+            .install_sorted_entries(
+                package(),
+                &HashMap::new(),
+                TENANT,
+                REPO,
+                BRANCH,
+                &JobId::new(),
+                mode,
+                cfg,
+                &HashMap::new(),
+                None,
+                &mut stats,
+            )
+            .await
+            .expect("per-entry rejections are collected, not returned");
+        assert!(
+            stats.content_errors.is_empty(),
+            "{:?}",
+            stats.content_errors
+        );
+        stats
+    }
+
+    async fn tx(storage: &RocksDBStorage) -> Box<dyn TransactionalContext> {
+        let tx = storage.begin_context().await.unwrap();
+        tx.set_tenant_repo(TENANT, REPO).unwrap();
+        tx.set_branch(BRANCH).unwrap();
+        tx.set_actor("editor").unwrap();
+        tx.set_auth_context(raisin_models::auth::AuthContext::system())
+            .unwrap();
+        tx
+    }
+
+    async fn fr(storage: &RocksDBStorage, path: &str) -> LocaleOverlay {
+        let id = id_of(storage, path).await;
+        tx(storage)
+            .await
+            .get_translation(WS, &id, "fr")
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{path} has a fr overlay"))
+    }
+
+    fn field(overlay: &LocaleOverlay, key: &str) -> Option<String> {
+        match overlay
+            .properties_ref()?
+            .get(&JsonPointer::new(format!("/{key}")))?
+        {
+            PropertyValue::String(s) => Some(s.clone()),
+            other => panic!("{key}: {other:?}"),
+        }
+    }
+
+    fn props(pairs: &[(&str, &str)]) -> LocaleOverlay {
+        LocaleOverlay::properties(
+            pairs
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        JsonPointer::new(format!("/{k}")),
+                        PropertyValue::String(v.to_string()),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    /// What an editor does in Studio after the first install.
+    async fn editor_changes(storage: &RocksDBStorage) {
+        let page = id_of(storage, "/site/page").await;
+        let hidden = id_of(storage, "/site/hidden").await;
+        let managed = id_of(storage, "/site/managed").await;
+        let tx = tx(storage).await;
+        tx.set_message("editor").unwrap();
+        tx.store_translation(
+            WS,
+            &page,
+            "fr",
+            props(&[("title", "Titre editeur"), ("__node_name", "page-editeur")]),
+        )
+        .await
+        .unwrap();
+        tx.store_translation(WS, &hidden, "fr", LocaleOverlay::Hidden)
+            .await
+            .unwrap();
+        tx.store_translation(WS, &managed, "fr", props(&[("title", "Gere editeur")]))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    async fn first_install_then_edit(storage: &Arc<RocksDBStorage>) {
+        let cfg = skip_default_config();
+        install_with(storage, InstallMode::Sync, Some(&cfg)).await;
+        editor_changes(storage).await;
+    }
+
+    #[tokio::test]
+    async fn fresh_install_applies_overlays_even_on_skip_paths() {
+        let (_dir, storage) = setup(false).await;
+        let cfg = skip_default_config();
+        let stats = install_with(&storage, InstallMode::Sync, Some(&cfg)).await;
+
+        assert_eq!(stats.translations_applied, 3, "every node was created now");
+        assert_eq!(stats.translations_kept, 0);
+        let page = fr(&storage, "/site/page").await;
+        assert_eq!(field(&page, "title").as_deref(), Some("Titre v1"));
+        assert_eq!(field(&page, "__node_name").as_deref(), Some("page-v1"));
+        let hidden = fr(&storage, "/site/hidden").await;
+        assert_eq!(field(&hidden, "title").as_deref(), Some("Masque v1"));
+    }
+
+    #[tokio::test]
+    async fn sync_redeploy_keeps_overlays_on_skip_paths_and_reapplies_replace_roots() {
+        let (_dir, storage) = setup(false).await;
+        first_install_then_edit(&storage).await;
+
+        let cfg = skip_default_config();
+        let stats = install_with(&storage, InstallMode::Sync, Some(&cfg)).await;
+
+        assert_eq!(stats.translations_kept, 2, "page + hidden are skip paths");
+        assert_eq!(stats.translations_applied, 1, "managed is a replace root");
+
+        // The editor's overlay — translated field AND native node name — survives.
+        let page = fr(&storage, "/site/page").await;
+        assert_eq!(field(&page, "title").as_deref(), Some("Titre editeur"));
+        assert_eq!(field(&page, "__node_name").as_deref(), Some("page-editeur"));
+        // The Hidden marker survives.
+        assert!(
+            matches!(fr(&storage, "/site/hidden").await, LocaleOverlay::Hidden),
+            "the editor's Hidden overlay must not be reset"
+        );
+        // The replace root is package-owned and re-applied.
+        let managed = fr(&storage, "/site/managed").await;
+        assert_eq!(field(&managed, "title").as_deref(), Some("Gere v1"));
+    }
+
+    #[tokio::test]
+    async fn overwrite_redeploy_reapplies_every_overlay() {
+        let (_dir, storage) = setup(false).await;
+        first_install_then_edit(&storage).await;
+
+        let cfg = skip_default_config();
+        let stats = install_with(&storage, InstallMode::Overwrite, Some(&cfg)).await;
+
+        assert_eq!(stats.translations_kept, 0);
+        assert_eq!(stats.translations_applied, 3);
+        let page = fr(&storage, "/site/page").await;
+        assert_eq!(field(&page, "title").as_deref(), Some("Titre v1"));
+        assert_eq!(field(&page, "__node_name").as_deref(), Some("page-v1"));
+        let hidden = fr(&storage, "/site/hidden").await;
+        assert_eq!(field(&hidden, "title").as_deref(), Some("Masque v1"));
+        let managed = fr(&storage, "/site/managed").await;
+        assert_eq!(field(&managed, "title").as_deref(), Some("Gere v1"));
+    }
+
+    #[tokio::test]
+    async fn skip_mode_without_sync_config_keeps_existing_overlays() {
+        let (_dir, storage) = setup(false).await;
+        first_install_then_edit(&storage).await;
+
+        let stats = install_with(&storage, InstallMode::Skip, None).await;
+
+        assert_eq!(stats.translations_kept, 3);
+        assert_eq!(stats.translations_applied, 0);
+        assert!(matches!(
+            fr(&storage, "/site/hidden").await,
+            LocaleOverlay::Hidden
+        ));
+    }
+}

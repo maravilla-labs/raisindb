@@ -51,6 +51,11 @@ pub(super) struct InstallStats {
     pub migrations_skipped: usize,
     pub translations_applied: usize,
     pub translations_skipped: usize,
+    /// Overlays NOT applied because their node existed before this install
+    /// and its path resolves to a mode that leaves existing content alone
+    /// (`skip`). Distinct from `translations_skipped`, which counts overlays
+    /// whose target node is missing.
+    pub translations_kept: usize,
     /// Per-entry rejections, one message each.
     ///
     /// Content entries no longer abort the install on the first bad node, so

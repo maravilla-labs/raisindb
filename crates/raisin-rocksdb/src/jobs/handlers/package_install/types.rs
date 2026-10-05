@@ -48,6 +48,19 @@ pub(super) fn effective_install_mode_for_path(
     resolve_install_policy_for_path(install_mode, sync_config, workspace, node_path).mode
 }
 
+/// Does an install under this (already path-resolved) mode leave a node
+/// that existed BEFORE this install untouched?
+///
+/// The one rule shared by every content entry that targets an existing node:
+/// the `.node.yaml` itself (`install_content_node`) and its translation
+/// overlays (`install_translation`). Keeping it in one place is what stops a
+/// `mode: skip` path from protecting the node's base properties while a
+/// `--mode sync` redeploy silently resets every locale overlay an editor
+/// changed after the first install.
+pub(super) fn leaves_existing_alone(effective_mode: InstallMode) -> bool {
+    matches!(effective_mode, InstallMode::Skip)
+}
+
 /// The effective mode for a path, plus (when the package's own `sync:`
 /// policy determined or overrode it) a human-readable explanation for
 /// display in dry-run previews.

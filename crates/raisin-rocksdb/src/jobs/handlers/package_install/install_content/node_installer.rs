@@ -24,7 +24,7 @@ use raisin_models::nodes::Node;
 use raisin_storage::jobs::JobId;
 use raisin_storage::transactional::{TransactionalContext, TransactionalStorage};
 use raisin_storage::Storage;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::jobs::handlers::package_install::content_types::{
     compute_content_hash, derive_content_path, AssetFileDef, BundledBinary, ContentEntry,
@@ -33,7 +33,9 @@ use crate::jobs::handlers::package_install::content_types::{
 use crate::jobs::handlers::package_install::handler::PackageInstallHandler;
 use crate::jobs::handlers::package_install::install_content::reference_sort::strip_path_references;
 use crate::jobs::handlers::package_install::translation::derive_node_name_from_base_path;
-use crate::jobs::handlers::package_install::types::{effective_install_mode_for_path, InstallMode};
+use crate::jobs::handlers::package_install::types::{
+    effective_install_mode_for_path, leaves_existing_alone, InstallMode,
+};
 
 use super::resolve_folder_type;
 
@@ -169,6 +171,12 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         // reported as a cascade of that cause (see `record_rejection`).
         let mut rejected: HashMap<String, String> = HashMap::new();
 
+        // `(workspace, path)` of every node THIS install created. A node that
+        // did not exist before the install must receive its translation
+        // overlays even on a `skip` path; one that did must not (see
+        // `install_translation`). Tracked explicitly rather than inferred.
+        let mut created: HashSet<(String, String)> = HashSet::new();
+
         for batch in entries.chunks(CONTENT_BATCH_SIZE) {
             let tx = self.storage.begin_context().await?;
             tx.set_tenant_repo(tenant_id, repo_id)?;
@@ -236,27 +244,34 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                                     "Installing skeleton for circular-reference node"
                                 );
 
-                                self.install_content_node(
-                                    tx.as_ref(),
-                                    workspace,
-                                    &skeleton,
-                                    legacy_path.as_deref(),
-                                    job_id,
-                                    install_mode,
-                                    sync_config,
-                                    folder_type,
-                                    stats,
-                                )
-                                .await?;
+                                let wrote = self
+                                    .install_content_node(
+                                        tx.as_ref(),
+                                        workspace,
+                                        &skeleton,
+                                        legacy_path.as_deref(),
+                                        job_id,
+                                        install_mode,
+                                        sync_config,
+                                        folder_type,
+                                        &mut created,
+                                        stats,
+                                    )
+                                    .await?;
 
-                                // Save original node for second pass
-                                let mut original = node.clone();
-                                original.properties.remove("__deferred_references");
-                                deferred_nodes.push((
-                                    workspace.clone(),
-                                    original,
-                                    folder_type.to_string(),
-                                ));
+                                // Save original node for second pass — only if
+                                // the first pass wrote it. A node the install
+                                // decision left alone (`skip` on an existing
+                                // node) must not be rewritten by the re-upsert.
+                                if wrote {
+                                    let mut original = node.clone();
+                                    original.properties.remove("__deferred_references");
+                                    deferred_nodes.push((
+                                        workspace.clone(),
+                                        original,
+                                        folder_type.to_string(),
+                                    ));
+                                }
                             } else {
                                 self.install_content_node(
                                     tx.as_ref(),
@@ -267,6 +282,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                                     install_mode,
                                     sync_config,
                                     folder_type,
+                                    &mut created,
                                     stats,
                                 )
                                 .await?;
@@ -296,6 +312,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                                 sync_config,
                                 folder_type,
                                 binary_store,
+                                &mut created,
                                 stats,
                             )
                             .await?;
@@ -313,6 +330,9 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                                 locale,
                                 overlay,
                                 job_id,
+                                install_mode,
+                                sync_config,
+                                &created,
                                 stats,
                             )
                             .await?;
@@ -384,7 +404,10 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         Ok(())
     }
 
-    /// Install a single content node within a transaction
+    /// Install a single content node within a transaction.
+    ///
+    /// Returns whether the node was written (created or updated); `false`
+    /// means the install decision left an existing node alone.
     #[allow(clippy::too_many_arguments)]
     async fn install_content_node(
         &self,
@@ -396,8 +419,9 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         install_mode: InstallMode,
         sync_config: Option<&raisin_packages::SyncConfig>,
         folder_type: &str,
+        created: &mut HashSet<(String, String)>,
         stats: &mut InstallStats,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let node_path = node.path.clone();
         let install_mode =
             effective_install_mode_for_path(install_mode, sync_config, workspace, &node_path);
@@ -455,46 +479,40 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             "Package install: processing content node"
         );
 
-        match install_mode {
-            InstallMode::Skip => {
-                if existing.is_some() {
-                    tracing::debug!(
-                        job_id = %job_id,
-                        workspace = %workspace,
-                        path = %node_path,
-                        "Content node already exists at path, skipping (skip mode)"
-                    );
-                    stats.content_nodes_skipped += 1;
-                    return Ok(());
-                }
-                tx.upsert_deep_node(workspace, node, folder_type).await?;
-                stats.content_nodes_created += 1;
-            }
-            InstallMode::Overwrite | InstallMode::Sync => {
-                tx.upsert_deep_node(workspace, node, folder_type).await?;
-                if existing.is_some() {
-                    tracing::debug!(
-                        job_id = %job_id,
-                        workspace = %workspace,
-                        path = %node_path,
-                        mode = ?install_mode,
-                        "Updated existing content node"
-                    );
-                    stats.content_nodes_synced += 1;
-                } else {
-                    tracing::debug!(
-                        job_id = %job_id,
-                        workspace = %workspace,
-                        path = %node_path,
-                        mode = ?install_mode,
-                        "Created new content node"
-                    );
-                    stats.content_nodes_created += 1;
-                }
-            }
+        if existing.is_some() && leaves_existing_alone(install_mode) {
+            tracing::debug!(
+                job_id = %job_id,
+                workspace = %workspace,
+                path = %node_path,
+                "Content node already exists at path, skipping (skip mode)"
+            );
+            stats.content_nodes_skipped += 1;
+            return Ok(false);
         }
 
-        Ok(())
+        tx.upsert_deep_node(workspace, node, folder_type).await?;
+        if existing.is_some() {
+            tracing::debug!(
+                job_id = %job_id,
+                workspace = %workspace,
+                path = %node_path,
+                mode = ?install_mode,
+                "Updated existing content node"
+            );
+            stats.content_nodes_synced += 1;
+        } else {
+            tracing::debug!(
+                job_id = %job_id,
+                workspace = %workspace,
+                path = %node_path,
+                mode = ?install_mode,
+                "Created new content node"
+            );
+            created.insert((workspace.to_string(), node_path));
+            stats.content_nodes_created += 1;
+        }
+
+        Ok(true)
     }
 
     /// Install a single binary file as a raisin:Asset node within a transaction
@@ -514,6 +532,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         sync_config: Option<&raisin_packages::SyncConfig>,
         folder_type: &str,
         binary_store: Option<&super::super::types::BinaryStorageCallback>,
+        created: &mut HashSet<(String, String)>,
         stats: &mut InstallStats,
     ) -> Result<()> {
         // Skip binary files if no storage callback configured
@@ -683,6 +702,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                 path = %asset_path,
                 "Created binary asset node"
             );
+            created.insert((workspace.to_string(), asset_path.clone()));
             stats.content_nodes_created += 1;
         }
         stats.binary_files_installed += 1;
@@ -766,6 +786,15 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
     }
 
     /// Install a translation for a content node within a transaction
+    ///
+    /// An overlay follows its base node's install decision. `store_translation`
+    /// REPLACES the whole locale overlay (translated fields, the localized
+    /// `/__node_name`, a `Hidden` marker), so applying it to a node that
+    /// existed before this install on a path resolved to `skip` would wipe
+    /// whatever editors changed since — exactly what the node's own
+    /// `.node.yaml` is protected from. A node this install created always gets
+    /// its overlays, whatever the mode, or a fresh install ships untranslated.
+    #[allow(clippy::too_many_arguments)]
     async fn install_translation(
         &self,
         tx: &dyn TransactionalContext,
@@ -774,12 +803,29 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         locale: &str,
         overlay: &raisin_models::translations::LocaleOverlay,
         job_id: &JobId,
+        install_mode: InstallMode,
+        sync_config: Option<&raisin_packages::SyncConfig>,
+        created: &HashSet<(String, String)>,
         stats: &mut InstallStats,
     ) -> Result<()> {
         let node_name = derive_node_name_from_base_path(base_node_yaml_path);
         let node_path = derive_content_path(base_node_yaml_path, &node_name);
+        let install_mode =
+            effective_install_mode_for_path(install_mode, sync_config, workspace, &node_path);
 
         match tx.get_node_by_path(workspace, &node_path).await? {
+            Some(node)
+                if leaves_existing_alone(install_mode)
+                    && !created.contains(&(workspace.to_string(), node_path.clone())) =>
+            {
+                tracing::debug!(
+                    job_id = %job_id, workspace = %workspace,
+                    node_path = %node_path, node_id = %node.id, locale = %locale,
+                    mode = ?install_mode,
+                    "Node existed before this install and its path is skip; keeping its translation overlay"
+                );
+                stats.translations_kept += 1;
+            }
             Some(node) => {
                 tx.store_translation(workspace, &node.id, locale, overlay.clone())
                     .await?;
