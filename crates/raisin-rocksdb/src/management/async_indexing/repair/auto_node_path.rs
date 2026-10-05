@@ -101,6 +101,7 @@ pub(super) fn pending_branches(
         }
         RepairKind::BlockOverlayTombstones => super::auto_block_overlays::pending_branches(storage),
         RepairKind::CompoundBuilds => super::compound_detect::pending_branches(storage),
+        RepairKind::TimestampBackfill => super::auto_timestamps::pending_branches(storage),
         _ => Ok(Vec::new()),
     }
 }

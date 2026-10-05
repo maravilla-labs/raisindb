@@ -6,6 +6,8 @@
 mod batch_ops;
 mod management;
 
+pub(crate) use batch_ops::HeadWrite;
+
 use crate::{cf, cf_handle, keys};
 use raisin_context::{
     Branch, BranchDiff, BranchDivergence, ConflictResolution, MergeConflict, MergeResult,

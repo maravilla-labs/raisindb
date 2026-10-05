@@ -5,7 +5,8 @@
 //! Phase 13e: workspace-owned compound indexes (`workspace_compound_tests`,
 //! `workspace_compound_race_tests`); plan Phase 13f: the built-in workspace
 //! index and the automatic `compound_builds` repair (`builtin_index_tests`,
-//! `builtin_review_tests`).
+//! `builtin_review_tests`); plan Phase 13g: the timestamp backfill that
+//! unblocks it on legacy data (`timestamp_backfill_tests`).
 //!
 //! Every test here runs with `index.skip_unchanged` ON and the branch rebuilt
 //! by the `property_index` repair (unless it says otherwise), so the writers
@@ -32,5 +33,7 @@ mod replica_tests;
 mod review_origin_tests;
 mod review_replica_tests;
 mod review_state_tests;
+mod timestamp_backfill_review_tests;
+mod timestamp_backfill_tests;
 mod workspace_compound_race_tests;
 mod workspace_compound_tests;

@@ -52,6 +52,16 @@ pub enum RepairKind {
     /// indexes no longer declared. Queued automatically per branch
     /// (`compound_builds.rs`), and by the admin fan-out.
     CompoundBuilds,
+    /// Give every live node whose NEWEST version has no `created_at` /
+    /// `updated_at` the timestamps its history implies (first and newest
+    /// revision), through the repository write funnel as the system actor —
+    /// a new revision, every derived index maintained, replicated, no node
+    /// event (plan Phase 13g). Unblocks compound indexes over a system
+    /// timestamp (the built-in `@__children_by_created_at`). Queued
+    /// automatically per branch (`auto_timestamps.rs`,
+    /// `RAISIN_TIMESTAMP_BACKFILL=0` turns that off), and by the admin
+    /// fan-out.
+    TimestampBackfill,
 }
 
 impl RepairKind {
@@ -68,11 +78,12 @@ impl RepairKind {
             Self::LocalizedNames => "localized_names",
             Self::BlockOverlayTombstones => "block_overlay_tombstones",
             Self::CompoundBuilds => "compound_builds",
+            Self::TimestampBackfill => "timestamp_backfill",
         }
     }
 
     /// Every repair, in the order the console lists them.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::OrderedChildren,
         Self::PathTombstone,
         Self::NodePath,
@@ -83,6 +94,7 @@ impl RepairKind {
         Self::LocalizedNames,
         Self::BlockOverlayTombstones,
         Self::CompoundBuilds,
+        Self::TimestampBackfill,
     ];
 
     /// The inverse of [`Self::slug`], over [`Self::ALL`].
@@ -104,6 +116,8 @@ impl RepairKind {
             Self::LocalizedNames => cf::LOCALIZED_NAME_INDEX,
             Self::BlockOverlayTombstones => cf::BLOCK_TRANSLATIONS,
             Self::CompoundBuilds => cf::COMPOUND_INDEX,
+            // New node versions (it sizes each chunk's output itself).
+            Self::TimestampBackfill => cf::NODES,
         }
     }
 
@@ -118,7 +132,12 @@ impl RepairKind {
     pub(super) fn inserts(&self) -> bool {
         !matches!(
             self,
-            Self::PropertyIndexVerify | Self::CollapseRuns | Self::ResyncTranslations
+            Self::PropertyIndexVerify
+                | Self::CollapseRuns
+                | Self::ResyncTranslations
+                // Ordinary writes through the write funnel, at fresh
+                // revisions (or in place, as any `versionable: false` edit).
+                | Self::TimestampBackfill
         )
     }
 }

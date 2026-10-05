@@ -156,6 +156,17 @@ impl PendingDeltaCheck {
         self.with(revision, Some(resolved_targets))
     }
 
+    /// The revisions of the newest NODES version and the newest NODE_PATH
+    /// entry recorded (`None`: none stored) — what a write that rewrites the
+    /// version it read IN PLACE checks it may (the timestamp backfill, plan
+    /// Phase 13g review).
+    pub fn recorded_revisions(&self) -> (Option<HLC>, Option<HLC>) {
+        (
+            self.markers.0.map(|(revision, _)| revision),
+            self.markers.1.map(|(revision, _)| revision),
+        )
+    }
+
     fn with(self, revision: &HLC, in_place: Option<bool>) -> StagedDeltaCheck {
         StagedDeltaCheck {
             scope: self.scope,
@@ -209,6 +220,27 @@ impl StagedDeltaCheck {
             mode: Mode::Rekey(Box::new(listed.clone())),
             declarations_seq: crate::indexing::compound::workspace_defs::change_seq(),
         }
+    }
+
+    /// Whether a version of the node was written since the markers were
+    /// recorded — a record write (the NODES marker changed: revision or, for
+    /// an in-place rewrite, bytes) or an index-only re-key (an ancestor
+    /// move). A NODE_PATH entry at a revision NODES already held (the
+    /// `node_path` backfill) is not one. A check that recorded nothing is
+    /// never superseded. Call under the node's commit lock: a CONDITIONAL
+    /// commit (`NodeCommit::only_if_unchanged`) then writes nothing.
+    pub fn superseded(&self, db: &DB) -> Result<bool> {
+        let Mode::Recorded {
+            markers: at_stage, ..
+        } = &self.mode
+        else {
+            return Ok(false);
+        };
+        let ctx = self.scope.ctx();
+        let now = markers(db, &ctx, &self.scope.node_id)?;
+        Ok(now.0 != at_stage.0
+            || (now.1 != at_stage.1
+                && index_only_path_write(db, &ctx, &self.scope.node_id, &at_stage.1)?))
     }
 
     pub fn workspace(&self) -> &str {

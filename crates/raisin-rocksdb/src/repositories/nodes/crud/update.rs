@@ -22,9 +22,39 @@ impl NodeRepositoryImpl {
         repo_id: &str,
         branch: &str,
         workspace: &str,
-        mut node: Node,
+        node: Node,
         attribution: crate::repositories::nodes::WriteAttribution<'_>,
     ) -> Result<()> {
+        self.update_impl_as(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            node,
+            attribution,
+            &super::UpdateMode::Edit,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// [`Self::update_impl`] as `mode` says: an edit, or the timestamp
+    /// backfill (plan Phase 13g), which rewrites the STORED version with its
+    /// missing timestamps filled and nothing else — the same funnel, so every
+    /// derived index, the revision index and replication see it like any
+    /// write. Returns whether a version was written (a backfill of a node
+    /// that already has both timestamps, or no longer exists, writes nothing).
+    #[allow(clippy::too_many_arguments)]
+    pub(in super::super) async fn update_impl_as(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        mut node: Node,
+        attribution: crate::repositories::nodes::WriteAttribution<'_>,
+        mode: &super::UpdateMode,
+    ) -> Result<bool> {
         let update_start = std::time::Instant::now();
 
         // CRITICAL: Normalize parent field from path before saving
@@ -35,18 +65,22 @@ impl NodeRepositoryImpl {
         // It's only populated at the service layer for API responses
         node.has_children = None;
 
-        // VALIDATION 1: Check workspace allowed_node_types
+        // VALIDATION 1: Check workspace allowed_node_types. Placement rules
+        // judge an EDIT; a backfill moves nothing and changes no type, and
+        // must not be refused for legacy placements a later rule forbids.
         let is_root_node = node.parent_path().map(|p| p == "/").unwrap_or(false);
-        self.validate_workspace_allows_node_type(
-            StorageScope::new(tenant_id, repo_id, branch, workspace),
-            &node.node_type,
-            is_root_node,
-        )
-        .await?;
+        if mode.is_edit() {
+            self.validate_workspace_allows_node_type(
+                StorageScope::new(tenant_id, repo_id, branch, workspace),
+                &node.node_type,
+                is_root_node,
+            )
+            .await?;
+        }
 
         // VALIDATION 2: Check NodeType.allowed_children if node has a parent
         // This is opportunistic: only validate if parent exists, allowing flexible node creation order
-        if let Some(parent_path) = node.parent_path() {
+        if let Some(parent_path) = node.parent_path().filter(|_| mode.is_edit()) {
             if parent_path != "/" {
                 // Try to get parent node - if it exists, validate allowed_children
                 if let Some(parent) = self
@@ -85,6 +119,8 @@ impl NodeRepositoryImpl {
             .await?
         {
             Some(n) => n,
+            // Deleted since the backfill listed it: nothing to fill.
+            None if !mode.is_edit() => return Ok(false),
             None => {
                 return Err(raisin_error::Error::NotFound(format!(
                     "Cannot update node '{}' - node does not exist. Use create/add instead.",
@@ -92,6 +128,15 @@ impl NodeRepositoryImpl {
                 )));
             }
         };
+        // A backfill writes the version it just read — never a caller's copy
+        // read earlier, which a write landing meanwhile would make stale —
+        // with only its missing timestamps filled; none missing: no write.
+        if !mode.is_edit() {
+            match mode.backfilled(&old_node) {
+                Some(filled) => node = filled,
+                None => return Ok(false),
+            }
+        }
 
         // VALIDATION 3a: Reject a `properties` change to an immutable node,
         // and resolve `old_node`'s NodeType once for reuse at the revision
@@ -125,10 +170,14 @@ impl NodeRepositoryImpl {
         // Never let an incoming None wipe the original creation metadata.
         // (updated_by cannot be resolved here: the repository layer has no
         // actor; put_node handles that where an auth context exists.)
-        node.updated_at = Some(chrono::Utc::now());
-        // Bump the node's own edit counter from the STORED value, mirroring
-        // put_node. See the note there for why this is not the MVCC revision.
-        node.version = old_node.version.saturating_add(1);
+        // (A backfill is not an edit: it keeps the stored `updated_at` when
+        // there is one, and the edit counter.)
+        if mode.is_edit() {
+            node.updated_at = Some(chrono::Utc::now());
+            // Bump the node's own edit counter from the STORED value, mirroring
+            // put_node. See the note there for why this is not the MVCC revision.
+            node.version = old_node.version.saturating_add(1);
+        }
         if node.created_at.is_none() {
             node.created_at = old_node.created_at;
         }
@@ -138,8 +187,12 @@ impl NodeRepositoryImpl {
 
         // VALIDATION 4: Check unique property constraints (O(1) lookup using UNIQUE_INDEX CF)
         // This allows the same node to keep its unique values (no conflict with itself)
-        self.check_unique_constraints(&node, tenant_id, repo_id, branch, workspace)
-            .await?;
+        // A backfill changes no property, so it claims no value it did not
+        // hold; legacy duplicates must not refuse it.
+        if mode.is_edit() {
+            self.check_unique_constraints(&node, tenant_id, repo_id, branch, workspace)
+                .await?;
+        }
 
         // ========== Vault `encrypted` schema fields ==========
         //
@@ -185,9 +238,26 @@ impl NodeRepositoryImpl {
         // monotonic-advance guard (`new_head <= branch.head` => skip), so a
         // reused older-or-equal revision is naturally a no-op there without
         // any special-casing here.
+        //
+        // A backfill rewrites the version it read IN PLACE at that version's
+        // revision whenever it can (see `update_mode`'s module doc): a racing
+        // or not-yet-applied edit carries a higher revision and wins.
         let step_start = std::time::Instant::now();
         let mut reused_revision = false;
-        let revision = if old_node_type
+        let backfill_at = if mode.is_edit() {
+            None
+        } else {
+            use raisin_storage::BranchRepository as _;
+            let head = self
+                .branch_repo
+                .get_head(tenant_id, repo_id, branch)
+                .await?;
+            mode.backfill_in_place_at(pending_check.recorded_revisions(), head)
+        };
+        let revision = if let Some(at) = backfill_at {
+            reused_revision = true;
+            at
+        } else if old_node_type
             .as_ref()
             .map(|t| t.versionable == Some(false))
             .unwrap_or(false)
@@ -309,14 +379,19 @@ impl NodeRepositoryImpl {
         // Localized node name uniqueness, when the repository enforces it (plan
         // Phase 12; `None` otherwise): checked now, and again at the commit
         // step under the branch lock (`localized_name::unique::deferred`).
-        let name_check = crate::localized_name::unique::NameCheck::staged(
-            &self.db,
-            crate::localized_name::keys::NameScope::new(tenant_id, repo_id, branch, workspace),
-            &node,
-            None,
-            &revision,
-            crate::localized_name::sync::Overrides::new(),
-        )?;
+        // A backfill changes no name: a legacy duplicate must not refuse it.
+        let name_check = if mode.is_edit() {
+            crate::localized_name::unique::NameCheck::staged(
+                &self.db,
+                crate::localized_name::keys::NameScope::new(tenant_id, repo_id, branch, workspace),
+                &node,
+                None,
+                &revision,
+                crate::localized_name::sync::Overrides::new(),
+            )?
+        } else {
+            None
+        };
 
         self.add_node_indexes_to_batch(
             &mut batch,
@@ -344,17 +419,22 @@ impl NodeRepositoryImpl {
             .await?;
 
         // Unique claims: tombstone the claims that changed, re-put every new
-        // one (never skipped — see `write_unique_delta`).
-        self.add_unique_delta_to_batch(
-            &mut batch,
-            Some(&old_node),
-            &node,
-            &ctx,
-            &revision,
-            reused_revision,
-            crate::repositories::nodes::UniqueHalf::Both,
-        )
-        .await?;
+        // one (never skipped — see `write_unique_delta`). Not for a backfill:
+        // it changes no claim, and its unconditional re-put would hand a
+        // legacy duplicate the value another node holds (which then refuses
+        // every edit of that node as a violation).
+        if mode.is_edit() {
+            self.add_unique_delta_to_batch(
+                &mut batch,
+                Some(&old_node),
+                &node,
+                &ctx,
+                &revision,
+                reused_revision,
+                crate::repositories::nodes::UniqueHalf::Both,
+            )
+            .await?;
+        }
 
         let index_prep_time = step_start.elapsed().as_micros();
 
@@ -367,66 +447,29 @@ impl NodeRepositoryImpl {
 
         let revision_index_time = step_start.elapsed().as_micros();
 
-        // ========== STEP 5: RocksDB write batch (single atomic operation) ==========
-        // Branch HEAD advance rides in the same batch; the write happens under
-        // the branch record lock so a concurrent writer cannot regress HEAD.
+        // ========== STEP 5: write, then capture for replication ==========
         let step_start = std::time::Instant::now();
-
-        let mut commit = crate::indexing::NodeCommit::new(tenant_id, repo_id, branch);
-        commit.check(staged_check, Some(node.clone()));
-        commit.check_name(name_check);
-        let updated_branch = self
-            .branch_repo
-            .write_batch_with_head_as(
+        let written = self
+            .commit_update(
                 batch,
-                tenant_id,
-                repo_id,
-                branch,
-                revision,
-                reused_revision,
-                Some(&commit),
+                super::update_commit::StagedUpdate {
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    node: &node,
+                    revision,
+                    reused_revision,
+                    mode,
+                    attribution,
+                    staged_check,
+                    name_check,
+                    vault_actor: &vault_actor,
+                    secret_ops: &secret_ops,
+                },
             )
             .await?;
-
         let rocksdb_write_time = step_start.elapsed().as_micros();
-
-        // ========== STEP 6: Capture replication events (after atomic write) ==========
-        // Capture branch HEAD update for replication
-        self.branch_repo
-            .capture_head_update_for_replication(
-                tenant_id,
-                repo_id,
-                branch,
-                &updated_branch,
-                revision,
-            )
-            .await;
-
-        // ========== STEP 6b: Capture secret versions, BEFORE the node ==========
-        // Same `(tenant, repo)` lane as the node operation below, and earlier in
-        // it — which is what makes a peer's causal buffer hold the node snapshot
-        // until the secret has landed. See
-        // `replication/operation_capture/secret_ops.rs`.
-        self.capture_secret_versions(tenant_id, repo_id, branch, &vault_actor, &secret_ops)
-            .await;
-
-        // ========== STEP 7: Capture operation for replication ==========
-        // Full-snapshot ApplyRevision (like the transaction commit path).
-        // Per-property SetProperty ops cannot express removed properties or
-        // path/name/type changes, so peers would drift.
-        self.capture_apply_revision_snapshot(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            vec![(
-                node.clone(),
-                raisin_replication::operation::ReplicatedNodeChangeKind::Upsert,
-            )],
-            revision,
-            attribution,
-        )
-        .await;
 
         let total_time = update_start.elapsed().as_micros();
 
@@ -455,6 +498,6 @@ impl NodeRepositoryImpl {
             );
         }
 
-        Ok(())
+        Ok(written)
     }
 }

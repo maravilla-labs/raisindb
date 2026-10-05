@@ -7,11 +7,27 @@ use super::CompoundIndexJobHandler;
 use raisin_error::{Error, Result};
 use raisin_models::nodes::properties::schema::CompoundIndexDefinition;
 
+/// How a build ended (plan Phase 13g told the expected refusal apart).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildResult {
+    /// Stamped `Ready`.
+    Ready,
+    /// Every attempt lost its compare-and-set to a newer stale mark.
+    NotReady,
+    /// Refused before clearing anything: this many nodes have no value for
+    /// the index's ORDER column (legacy versions without `created_at` /
+    /// `updated_at`). An expected state, not a failure: the index stays
+    /// unusable (scan) until the `timestamp_backfill` repair has rewritten
+    /// them, and that repair re-requests the build when it finishes.
+    MissingOrderValues(u64),
+}
+
 impl CompoundIndexJobHandler {
     /// Build one compound index: `owner` is the declaring (or any carrying)
     /// node type's name, or `workspace:{name}` for a workspace-owned index
     /// (told apart by the `@` keyspace name). `max_bytes_per_sec` paces the
-    /// writing pass (0: unlimited). Returns whether the index ends `Ready`.
+    /// writing pass (0: unlimited). Returns how the build ended; a refusal
+    /// for missing order-column values is a result, not an error.
     ///
     /// Takes the keyspace lock first, so two builders of one index on this
     /// node queue rather than interleave; one that waited finds the index
@@ -33,7 +49,7 @@ impl CompoundIndexJobHandler {
         owner: &str,
         index_name: &str,
         max_bytes_per_sec: u64,
-    ) -> Result<bool> {
+    ) -> Result<BuildResult> {
         let _keyspace = crate::indexing::compound::keyspace::lock(
             &self.db, tenant_id, repo_id, branch, workspace, index_name,
         )
@@ -48,9 +64,9 @@ impl CompoundIndexJobHandler {
                     index = %index_name,
                     "compound index is already Ready (built while this build waited)"
                 );
-                return Ok(true);
+                return Ok(BuildResult::Ready);
             }
-            if self
+            match self
                 .build_once(
                     label,
                     tenant_id,
@@ -63,7 +79,8 @@ impl CompoundIndexJobHandler {
                 )
                 .await?
             {
-                return Ok(true);
+                BuildResult::NotReady => {}
+                ended => return Ok(ended),
             }
             tracing::info!(
                 job = %label,
@@ -72,7 +89,7 @@ impl CompoundIndexJobHandler {
                 "Compound index build finished behind a newer stale mark; building again"
             );
         }
-        Ok(false)
+        Ok(BuildResult::NotReady)
     }
 
     fn ready(
@@ -160,7 +177,8 @@ impl CompoundIndexJobHandler {
         Ok((index_def, wanted))
     }
 
-    /// One build pass; `Ok(true)` when it stamped `Ready`. The scans run on a
+    /// One build pass: `Ready` when it stamped `Ready`, `NotReady` when a
+    /// newer mark won the compare-and-set. The scans run on a
     /// blocking thread (they stream a whole workspace, and a paced pass
     /// sleeps between batches).
     #[allow(clippy::too_many_arguments)]
@@ -174,7 +192,7 @@ impl CompoundIndexJobHandler {
         index_def: &CompoundIndexDefinition,
         wanted: crate::indexing::compound::build::Wanted,
         max_bytes_per_sec: u64,
-    ) -> Result<bool> {
+    ) -> Result<BuildResult> {
         use crate::indexing::compound::{build, keyspace};
         let index_name = index_def.name.as_str();
         let scope = Scope {
@@ -189,11 +207,14 @@ impl CompoundIndexJobHandler {
         // would lose its entries to the clear and never get them back, and a
         // volume that cannot take the build's output must not be filled.
         let head = self.branch_head(tenant_id, repo_id, branch)?;
-        scope
+        let precheck = scope
             .blocking(wanted.clone(), move |db, ctx, wanted| {
-                build::precheck(db, ctx, wanted, &head)
+                build::precheck_build(db, ctx, wanted, &head, None)
             })
             .await?;
+        if let build::Precheck::MissingOrderValues(nodes) = precheck {
+            return Ok(BuildResult::MissingOrderValues(nodes as u64));
+        }
 
         // Register the build BEFORE clearing or reading any node: a mark that
         // arrives after this point clears the build's ticket and makes the
@@ -232,8 +253,14 @@ impl CompoundIndexJobHandler {
             state_store.mark_not_built(tenant_id, repo_id, branch, workspace, index_name)?;
             build::refuse_unplaceable(
                 &crate::indexing::IndexCtx::new(tenant_id, repo_id, branch, workspace),
-                &outcome,
+                &build::BuildOutcome {
+                    unindexable: 0,
+                    ..outcome
+                },
             )?;
+            // A version without the order column committed between the
+            // precheck and the scan: the same expected refusal.
+            return Ok(BuildResult::MissingOrderValues(outcome.unindexable as u64));
         }
 
         // Stamp the state record LAST, and only on success: this flips the
@@ -259,7 +286,11 @@ impl CompoundIndexJobHandler {
                 "Compound index build completed"
             );
         }
-        Ok(stamped)
+        Ok(if stamped {
+            BuildResult::Ready
+        } else {
+            BuildResult::NotReady
+        })
     }
 }
 

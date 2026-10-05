@@ -89,27 +89,35 @@ async fn a_fork_below_the_build_floor_does_not_inherit_ready() -> Result<()> {
 /// A child with no `created_at` (legacy data) has no built-in entry, so a
 /// `Ready` index would list the folder without it while the row scan lists
 /// it with a NULL. The build refuses instead; the planner keeps scanning.
+/// Since plan Phase 13g the refusal is an expected state recorded on the
+/// link (no error, no job retries); `timestamp_backfill_tests` resolves it.
 #[tokio::test]
 async fn a_child_without_created_at_is_not_dropped_from_the_builtin_listing() -> Result<()> {
     let env = Env::new(false).await?;
     legacy_child(&env).await?;
-    assert!(
-        env.compound_builds("main").await.is_err(),
+    let link = env.compound_builds("main").await?;
+    assert_eq!(
+        (
+            link.compound.refused,
+            link.compound.refused_missing_order_values
+        ),
+        (1, 1),
         "the build must refuse a node it cannot list"
     );
     assert!(!env.builtin_ready("main"), "the index stays failed closed");
     Ok(())
 }
 
-/// A branch whose link failed used to be re-linked by every targeted request
-/// (each workspace event, each cold drain): a full workspace rescan that
-/// failed the same way, indefinitely. Now it waits for the next start —
-/// unless the work it owes changed.
+/// A branch whose link failed (or, since plan Phase 13g, was refused) used
+/// to be re-linked by every targeted request (each workspace event, each
+/// cold drain): a full workspace rescan that ended the same way,
+/// indefinitely. Now it waits for the next start — unless the work it owes
+/// changed.
 #[tokio::test]
 async fn a_failed_branch_is_not_relinked_on_every_request() -> Result<()> {
     let env = Env::new(false).await?;
     legacy_child(&env).await?;
-    assert!(env.compound_builds("main").await.is_err());
+    assert_eq!(env.compound_builds("main").await?.compound.refused, 1);
     assert_eq!(
         enqueue_compound_builds_if_owed(&env.storage, TENANT, REPO, "main").await?,
         0,

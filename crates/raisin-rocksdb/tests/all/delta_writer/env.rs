@@ -63,9 +63,23 @@ impl Env {
     /// A fresh repository with `main` and `WS`; `skip` turns
     /// `index.skip_unchanged` on and rebuilds `main` (so it takes effect).
     pub(super) async fn new(skip: bool) -> Result<Self> {
+        Self::new_with(skip, false).await
+    }
+
+    /// [`Self::new`]; `replicate` turns replication (operation capture) on,
+    /// so the writes land in the oplog a peer would receive.
+    pub(super) async fn new_with(skip: bool, replicate: bool) -> Result<Self> {
         let temp_dir =
             tempfile::tempdir().map_err(|e| raisin_error::Error::Backend(e.to_string()))?;
-        let storage = Arc::new(RocksDBStorage::new(temp_dir.path())?);
+        let mut config = raisin_rocksdb::RocksDBConfig::default();
+        config.path = temp_dir.path().to_path_buf();
+        config.replication_enabled = replicate;
+        let storage = Arc::new(if replicate {
+            config.cluster_node_id = Some("origin".to_string());
+            RocksDBStorage::with_config(config)?
+        } else {
+            RocksDBStorage::new(temp_dir.path())?
+        });
         storage
             .registry()
             .register_tenant(TENANT, HashMap::new())

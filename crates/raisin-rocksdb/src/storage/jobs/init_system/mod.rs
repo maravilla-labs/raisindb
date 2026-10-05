@@ -416,6 +416,12 @@ impl RocksDBStorage {
         // branch at a time, never on the boot path.
         crate::management::async_indexing::repair::schedule_compound_builds(self.clone());
 
+        // Nodes written before `created_at`/`updated_at` were stamped get
+        // them from their history (plan Phase 13g), so the built-in index can
+        // build there: the `timestamp_backfill` chain, one branch at a time,
+        // never on the boot path (`RAISIN_TIMESTAMP_BACKFILL=0` turns it off).
+        crate::management::async_indexing::repair::schedule_timestamp_backfill(self.clone());
+
         tracing::info!(
             realtime_workers = pools_config.realtime.dispatcher_workers,
             realtime_max_handlers = pools_config.realtime.max_concurrent_handlers,

@@ -117,6 +117,7 @@ pub async fn after_link(
         RepairKind::PropertyIndex => super::auto_property_index::auto_rebuild_enabled(storage),
         RepairKind::BlockOverlayTombstones => super::auto_block_overlays::auto_enabled(),
         RepairKind::CompoundBuilds => true,
+        RepairKind::TimestampBackfill => super::auto_timestamps::auto_enabled(),
         _ => return,
     };
     record_link_outcome(kind, tenant_id, repo_id, branch, succeeded);

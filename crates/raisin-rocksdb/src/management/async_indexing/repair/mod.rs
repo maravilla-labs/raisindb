@@ -21,7 +21,8 @@
 //!   it has not completed — see `auto_node_path.rs` (plan Phase 10b) — and
 //!   the chains built on it: `localized_names`, `property_index` and
 //!   `block_overlay_tombstones` (`auto_block_overlays.rs`, plan Phase 11c)
-//!   and `compound_builds` (`compound_builds.rs`, plan Phase 13f).
+//!   and `compound_builds` (`compound_builds.rs`, plan Phase 13f) and
+//!   `timestamp_backfill` (`auto_timestamps.rs`, plan Phase 13g).
 //!
 //! [`run_repair`] is the entry point the job handler and the admin endpoint
 //! call.
@@ -37,6 +38,7 @@ mod auto_compound;
 mod auto_node_path;
 mod auto_property_index;
 mod auto_targets;
+mod auto_timestamps;
 mod block_overlay_tombstones;
 mod branches;
 mod compound_builds;
@@ -56,6 +58,8 @@ mod path_tombstone;
 mod property_index;
 mod property_state;
 mod requests;
+mod timestamp_backfill;
+mod timestamp_scan;
 mod translation_resync;
 mod translation_resync_scan;
 
@@ -65,6 +69,7 @@ pub use auto_block_overlays::{
 };
 pub use auto_compound::{
     enqueue_if_owed as enqueue_compound_builds_if_owed, request as request_compound_builds,
+    request_after_backfill as request_compound_builds_after_backfill,
     restart_after_ingest as restart_compound_builds_after_ingest,
     schedule_after_start as schedule_compound_builds,
 };
@@ -80,8 +85,17 @@ pub use auto_property_index::{
     schedule_after_start as schedule_property_index_rebuild, PROPERTY_INDEX_AUTO_REBUILD_ENV,
 };
 pub use auto_targets::{after_link, enqueue_branch, record_link_outcome};
+pub use auto_timestamps::{
+    auto_enabled as timestamp_backfill_auto_enabled, override_auto as override_timestamp_backfill,
+    pending_branches as pending_timestamp_backfill_branches,
+    restart_after_ingest as restart_timestamp_backfill_after_ingest,
+    schedule_after_start as schedule_timestamp_backfill, TIMESTAMP_BACKFILL_ENV,
+};
 pub use block_overlay_tombstones::BlockOverlayCounts;
-pub use compound_builds::{CompoundBuildCounts, START_DELAY as COMPOUND_BUILDS_START_DELAY};
+pub use compound_builds::{
+    CompoundBuildCounts, REFUSED_STATUS as COMPOUND_BUILDS_REFUSED_STATUS,
+    START_DELAY as COMPOUND_BUILDS_START_DELAY,
+};
 pub use compound_detect::pending_branches as pending_compound_build_branches;
 pub(crate) use cursor::BoundedWriter;
 pub use cursor::{load_state, state_key, BatchReport, CommitHook, RepairState};
@@ -103,6 +117,7 @@ pub use property_state::{
 };
 pub use requests::register_requester;
 pub(crate) use requests::{debounced, registered_storage_for, registered_storages};
+pub use timestamp_backfill::TimestampBackfillCounts;
 pub use translation_resync::TranslationResyncCounts;
 
 use crate::{cf, keys};
@@ -135,6 +150,10 @@ pub async fn run_repair(
         // Async: each build awaits its keyspace lock and runs its passes on
         // a blocking thread (plan Phase 13f).
         return compound_builds::run(storage, tenant_id, repo_id, branch, &options).await;
+    }
+    if kind == RepairKind::TimestampBackfill {
+        // Async: every node goes through the repository write funnel.
+        return timestamp_backfill::run(storage, tenant_id, repo_id, branch, &options).await;
     }
     if kind == RepairKind::ResyncTranslations {
         // Async: it captures replication ops as it goes.
@@ -314,7 +333,9 @@ fn repair_branch(
                 (kind == RepairKind::PropertyIndexVerify).then_some(options.sample_every),
             )?
         }
-        RepairKind::ResyncTranslations | RepairKind::CompoundBuilds => {
+        RepairKind::ResyncTranslations
+        | RepairKind::CompoundBuilds
+        | RepairKind::TimestampBackfill => {
             return Err(raisin_error::Error::Validation(format!(
                 "{} runs through run_repair (it is async)",
                 kind.slug()

@@ -22,3 +22,7 @@ mod helpers;
 pub(crate) mod indexing;
 pub(crate) mod read;
 mod update;
+mod update_commit;
+mod update_mode;
+
+pub(crate) use update_mode::UpdateMode;

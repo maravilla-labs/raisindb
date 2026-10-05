@@ -310,6 +310,17 @@ impl raisin_replication::CheckpointIngestor for RocksDbCheckpointIngestor {
             tracing::warn!(error = %e, "checkpoint ingest: could not queue compound builds");
         }
 
+        // The peer's NODES may carry versions without `created_at` /
+        // `updated_at`: the timestamp backfill is owed again (plan Phase 13g).
+        if let Err(e) =
+            crate::management::async_indexing::repair::restart_timestamp_backfill_after_ingest(
+                &self.db,
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "checkpoint ingest: could not queue the timestamp backfill");
+        }
+
         // Same for the localized name index (plan Phase 12): the peer's state
         // records and claims arrived; fail the records closed (the lookup
         // falls back) and queue this node's own builds. Propagated, not

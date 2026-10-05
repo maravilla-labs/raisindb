@@ -121,9 +121,47 @@ more slowly. The job is visible and can be started like any index repair:
 and `GET /api/management/{repo}/repairs/compound_builds/status` reports each
 node's state.
 
+A build that finds nodes with no value for the index's order column (nodes
+written before `created_at`/`updated_at` were stamped, up to v0.1.75) does not
+run, because the index could not list those nodes. That is an expected state,
+not a job failure: the job logs one warning with the node count, saves its
+status as `refused_missing_order_values` with the count in
+`refused_missing_order_values` (shown by the status endpoint), and is not
+retried. The `timestamp_backfill` job below fixes those nodes and asks for the
+build again when it finishes.
+
+### Legacy nodes get their timestamps
+
+The `timestamp_backfill` job gives every live node whose newest version has no
+`created_at` the time of its first stored revision on that branch (the oldest
+one kept, if history cleanup removed the first), and a missing `updated_at` the
+time of its newest revision. Nodes that already have both are not touched,
+deleted nodes are skipped, and nothing else on the node changes.
+
+Each fixed node is rewritten in place, at the revision of the version that was
+read, as the `system` user through the normal write path. It gets no new
+revision and the branch head does not move, so history, branch comparison and
+merges are unchanged. Any edit made at the same time has a later revision and
+wins, on this server and on every replica. If the node changes between the
+read and the write, nothing is written and the next run tries again. Every
+index is updated, and the change replicates to other nodes like any other
+write. No node events are published, so triggers, webhooks and subscriptions
+do not fire for this job.
+
+It runs by itself after the job system starts and again after a checkpoint is
+ingested, one branch at a time, paced, and resumes where it stopped after a
+restart. A branch whose compound index build was refused because of nodes
+without timestamps is picked up again at the next start. Each batch first
+checks that the disk has room for what it writes. When a branch is done and
+nodes were fixed, its compound index builds are requested again. To run
+it by hand: `POST /api/management/{repo}/repairs/timestamp_backfill` (body
+`{"dry_run": true}` only counts; `"branch"` limits it to one branch) and
+`GET /api/management/{repo}/repairs/timestamp_backfill/status`.
+
 | Env | Purpose | Default |
 |-----|---------|---------|
 | `RAISIN_COMPOUND_FORMAT_REBUILD` | `0`/`false`/`off`/`no` stops the automatic rebuild of older-format compound indexes; they then wait for a manual rebuild (`reindex/start` with `index_types: ["compound"]`) | on |
+| `RAISIN_TIMESTAMP_BACKFILL` | `0`/`false`/`off`/`no` stops the automatic `timestamp_backfill` job. Folder listings on workspaces with legacy nodes then keep scanning (correct, slower), and the endpoint above still runs the job by hand | on |
 
 ## Deleting a Repository
 

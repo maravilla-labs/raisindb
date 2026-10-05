@@ -172,6 +172,38 @@ async fn resolve_path_returns_the_id() {
     assert_eq!(text(&none[0], "id"), None);
 }
 
+/// Plan Phase 13g item 4: the FROM-less (scalar) path evaluates every
+/// function the planned path does. It kept its own list of async functions,
+/// without RESOLVE_PATH, so this failed with "Unknown function: RESOLVE_PATH"
+/// in production while the same call with `FROM 'ws' LIMIT 1` worked.
+#[tokio::test]
+async fn resolve_path_without_from() {
+    let (storage, _dir, chair) = setup().await;
+    let engine = engine(&storage);
+    let out = rows(
+        &engine,
+        &format!("SELECT RESOLVE_PATH('{WS}', 'fr', '/produits/chaise') AS id"),
+    )
+    .await;
+    assert_eq!(out.len(), 1, "a FROM-less SELECT is one row");
+    assert_eq!(text(&out[0], "id"), Some(chair.clone()));
+    let none = rows(
+        &engine,
+        &format!("SELECT RESOLVE_PATH('{WS}', 'fr', '/produits/nope') AS id"),
+    )
+    .await;
+    assert_eq!(text(&none[0], "id"), None);
+    // In a WHERE clause too: the gate looks at the whole statement.
+    let gated = rows(
+        &engine,
+        &format!(
+            "SELECT 'found' AS hit WHERE RESOLVE_PATH('{WS}', 'fr', '/produits/chaise') = '{chair}'"
+        ),
+    )
+    .await;
+    assert_eq!(gated.len(), 1);
+}
+
 #[tokio::test]
 async fn node_name_and_localized_path_columns() {
     let (storage, _dir, chair) = setup().await;

@@ -39,7 +39,8 @@ use rocksdb::{ColumnFamily, WriteBatch, DB};
 use std::collections::BTreeSet;
 
 pub use super::build_gate::{
-    precheck, precheck_assuming, refuse_unplaceable, BuildOutcome, BUILD_FREE_FLOOR,
+    missing_order_values_message, precheck, precheck_assuming, precheck_build, refuse_unplaceable,
+    BuildOutcome, Precheck, BUILD_FREE_FLOOR,
 };
 pub use super::wanted::Wanted;
 

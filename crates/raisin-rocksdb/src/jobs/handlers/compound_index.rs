@@ -198,7 +198,19 @@ impl CompoundIndexJobHandler {
                 0,
             )
             .await
-            .map(|_| ());
+            .map(|ended| {
+                // Expected, not a failure: no retries, no ERROR (plan Phase
+                // 13g). The `timestamp_backfill` repair re-requests the build.
+                if let build_impl::BuildResult::MissingOrderValues(nodes) = ended {
+                    tracing::warn!(
+                        "{}",
+                        crate::indexing::compound::build::missing_order_values_message(
+                            &crate::indexing::IndexCtx::new(tenant_id, repo_id, branch, workspace),
+                            nodes as usize,
+                        )
+                    );
+                }
+            });
 
         if let (Some(lm), Some(token)) = (&self.lock_manager, lease) {
             let _ = lm.release(&lock_key, token).await;
@@ -209,6 +221,7 @@ impl CompoundIndexJobHandler {
 
 #[path = "compound_index_build.rs"]
 mod build_impl;
+pub use build_impl::BuildResult;
 
 #[cfg(test)]
 #[path = "compound_index_tests.rs"]

@@ -31,6 +31,7 @@ mod resolve_path_eval;
 mod vector_ops;
 
 // Public API - re-export the main functions
+pub(crate) use self::async_eval::has_async_call;
 pub use self::async_eval::{eval_expr_async, generate_embedding_cached};
 pub(crate) use self::casting::cast_literal;
 pub use self::core::eval_expr;

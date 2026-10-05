@@ -91,8 +91,11 @@ fn is_async_function(name: &str) -> bool {
     .any(|f| f.eq_ignore_ascii_case(name))
 }
 
-/// Does `expr` call an async function anywhere inside it?
-fn has_async_call(expr: &TypedExpr) -> bool {
+/// Does `expr` call an async function anywhere inside it? THE registry of
+/// what needs the async evaluator ([`is_async_function`]), for every caller
+/// that must decide whether to build an execution context (the FROM-less
+/// scalar path among them).
+pub(crate) fn has_async_call(expr: &TypedExpr) -> bool {
     if let Expr::Function { name, .. } = &expr.expr {
         if is_async_function(name) {
             return true;

@@ -33,6 +33,12 @@ pub struct NodeCommit {
     /// Localized name uniqueness checks, run again under the branch record
     /// lock (`localized_name::unique::deferred`). Empty unless enforced.
     names: Vec<crate::localized_name::unique::NameCheck>,
+    /// Write nothing when a checked node was written since its read
+    /// ([`Self::only_if_unchanged`]).
+    conditional: bool,
+    /// The revision record a commit that advances its branch HEAD stores
+    /// ([`Self::record_revision`]).
+    record: Option<raisin_storage::RevisionMeta>,
 }
 
 impl NodeCommit {
@@ -80,6 +86,49 @@ impl NodeCommit {
     ) -> &mut Self {
         self.names.extend(check);
         self
+    }
+
+    /// Make the commit CONDITIONAL: under the node lock, when any checked
+    /// node has been written since the check recorded it
+    /// ([`StagedDeltaCheck::superseded`]), the commit writes nothing — the
+    /// write it staged is dropped, not corrected. For a writer that rewrites
+    /// the version it READ and must never put that content back over a
+    /// newer one (the timestamp backfill, plan Phase 13g review). Honoured
+    /// by `BranchRepositoryImpl::write_batch_with_head_as`, which reports it
+    /// (`HeadWrite::Superseded`).
+    pub fn only_if_unchanged(&mut self) -> &mut Self {
+        self.conditional = true;
+        self
+    }
+
+    /// Whether a conditional commit must write nothing (see
+    /// [`Self::only_if_unchanged`]). Call with [`Self::lock`] held.
+    pub(crate) fn superseded(&self, db: &DB) -> Result<bool> {
+        if !self.conditional {
+            return Ok(false);
+        }
+        for (check, _) in &self.checks {
+            if check.superseded(db)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// The revision record (`RevisionMeta`) to store when the commit
+    /// advances its branch HEAD to `meta.revision`: its `parent` is set to
+    /// the HEAD it replaces, under the branch record lock, in the commit's
+    /// batch (`BranchRepositoryImpl::write_batch_with_head_as`). Without it
+    /// the next commit's parent is a revision with no record, and every
+    /// ancestry walk (divergence, merge, conflict detection) stops there.
+    pub(crate) fn record_revision(&mut self, meta: raisin_storage::RevisionMeta) -> &mut Self {
+        self.record = Some(meta);
+        self
+    }
+
+    /// The revision record carried (see [`Self::record_revision`]).
+    pub(crate) fn revision_record(&self) -> Option<&raisin_storage::RevisionMeta> {
+        self.record.as_ref()
     }
 
     /// Run the carried localized name checks. Call with the branch record

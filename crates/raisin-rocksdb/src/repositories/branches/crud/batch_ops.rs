@@ -10,6 +10,32 @@ use raisin_hlc::HLC;
 
 use super::super::{lock_branch_record, BranchRepositoryImpl};
 
+/// What [`BranchRepositoryImpl::write_batch_with_head_as`] did.
+#[derive(Debug)]
+pub(crate) enum HeadWrite {
+    /// The batch was written. `meta`: the revision record stored with it —
+    /// the commit carried one and its HEAD advanced (`NodeCommit::record_revision`).
+    Written {
+        branch: Branch,
+        meta: Option<Box<raisin_storage::RevisionMeta>>,
+    },
+    /// A CONDITIONAL commit found a checked node written since its read and
+    /// wrote nothing (`NodeCommit::only_if_unchanged`).
+    Superseded,
+}
+
+impl HeadWrite {
+    /// The branch, for a commit that cannot be superseded (not conditional).
+    fn written(self) -> Result<Branch> {
+        match self {
+            Self::Written { branch, .. } => Ok(branch),
+            Self::Superseded => Err(raisin_error::Error::internal(
+                "an unconditional commit reported itself superseded",
+            )),
+        }
+    }
+}
+
 impl BranchRepositoryImpl {
     /// Add a branch HEAD advance to `batch` and write the batch, atomically
     /// with respect to every other writer of the branch record.
@@ -39,7 +65,8 @@ impl BranchRepositoryImpl {
             false,
             None,
         )
-        .await
+        .await?
+        .written()
     }
 
     /// [`Self::write_batch_with_head`] for a batch that writes nodes: their
@@ -62,13 +89,19 @@ impl BranchRepositoryImpl {
             false,
             Some(commit),
         )
-        .await
+        .await?
+        .written()
     }
 
     /// [`Self::write_batch_with_head`], for a batch that rewrites a node IN
     /// PLACE when `in_place` is set: the write then holds the in-place guard
     /// (`repositories/nodes/crud/indexing/in_place_guard.rs`), so the
     /// `node_path` backfill cannot land a stale entry on the same revision.
+    ///
+    /// A `commit` that carries a revision record stores it in the batch when
+    /// the HEAD advances, its `parent` the HEAD replaced (read under the
+    /// branch record lock). A CONDITIONAL commit whose nodes were written
+    /// since their read writes nothing and returns [`HeadWrite::Superseded`].
     pub(crate) async fn write_batch_with_head_as(
         &self,
         mut batch: rocksdb::WriteBatch,
@@ -78,7 +111,7 @@ impl BranchRepositoryImpl {
         new_head: HLC,
         in_place: bool,
         commit: Option<&crate::indexing::NodeCommit>,
-    ) -> Result<Branch> {
+    ) -> Result<HeadWrite> {
         use raisin_storage::BranchRepository;
 
         // The commit step of the nodes this batch writes (plan Phase 7b):
@@ -88,6 +121,9 @@ impl BranchRepositoryImpl {
         let node_guard = match commit {
             Some(commit) => {
                 let guard = commit.lock(&self.db).await;
+                if commit.superseded(&self.db)? {
+                    return Ok(HeadWrite::Superseded);
+                }
                 commit.revalidate(&self.db, &mut batch)?;
                 guard.before_write().await;
                 Some(guard)
@@ -118,6 +154,7 @@ impl BranchRepositoryImpl {
         );
         // Monotonic advance (see update_head): a racing earlier commit must
         // never move the head back below an already-visible later revision.
+        let mut meta = None;
         if new_head <= branch.head {
             tracing::debug!(
                 "write_batch_with_head: skipping non-advancing head update branch={} current={:?} candidate={:?}",
@@ -126,6 +163,22 @@ impl BranchRepositoryImpl {
                 new_head
             );
         } else {
+            // The revision record of the new HEAD, its parent the HEAD it
+            // replaces — in the same batch, so no commit can land between.
+            if let Some(record) = commit.and_then(|c| c.revision_record()) {
+                let mut record = record.clone();
+                record.revision = new_head;
+                record.parent = Some(branch.head);
+                let value = rmp_serde::to_vec(&record).map_err(|e| {
+                    raisin_error::Error::storage(format!("RevisionMeta serialization error: {e}"))
+                })?;
+                batch.put_cf(
+                    cf_handle(&self.db, cf::REVISIONS)?,
+                    keys::revision_meta_key(tenant_id, repo_id, &new_head),
+                    value,
+                );
+                meta = Some(Box::new(record));
+            }
             branch.head = new_head;
 
             let key = keys::branch_key(tenant_id, repo_id, branch_name);
@@ -164,7 +217,7 @@ impl BranchRepositoryImpl {
         .map_err(|e| raisin_error::Error::storage(format!("Write task failed to join: {}", e)))?
         .map_err(|e| raisin_error::Error::storage(format!("Atomic write failed: {}", e)))?;
 
-        Ok(branch)
+        Ok(HeadWrite::Written { branch, meta })
     }
 
     /// Capture branch HEAD update for replication (call after batch is written)

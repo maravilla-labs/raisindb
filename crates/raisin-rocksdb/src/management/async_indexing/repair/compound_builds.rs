@@ -61,7 +61,21 @@ pub struct CompoundBuildCounts {
     pub failed: u64,
     /// Node-type indexes skipped: no type declares them any more.
     pub undeclared: u64,
+    /// Builds refused because nodes have no value for the index's ORDER
+    /// column (legacy versions without `created_at`/`updated_at`): an
+    /// expected state, not a failure (plan Phase 13g). The
+    /// `timestamp_backfill` repair resolves it and re-requests the link.
+    #[serde(default)]
+    pub refused: u64,
+    /// The nodes those refusals counted.
+    #[serde(default)]
+    pub refused_missing_order_values: u64,
 }
+
+/// The status a link that ended with refused builds (and no failure) saves:
+/// pending at the next start, and not re-linked by a targeted request while
+/// the owed work is unchanged — `timestamp_backfill` re-requests it.
+pub const REFUSED_STATUS: &str = "refused_missing_order_values";
 
 /// Run the repair on one branch, or every branch of the repository.
 pub(super) async fn run(
@@ -113,7 +127,7 @@ async fn link(
         report.compound.dropped = work.len() as u64 - report.compound.built;
         return Ok(report);
     }
-    save(db, &key, "running", None, 0, None)?;
+    save(db, &key, "running", None, 0, None, None)?;
     let handler = crate::storage::create_compound_index_handler(storage, None);
     let mut first_error: Option<Error> = None;
     let mut done = 0u64;
@@ -124,7 +138,7 @@ async fn link(
     let mut round = 1;
     let still_owed = loop {
         for item in &work {
-            let undeclared = report.compound.undeclared;
+            let (undeclared, refused) = (report.compound.undeclared, report.compound.refused);
             let ctx = (tenant_id, repo_id, branch);
             match super::compound_items::run_item(
                 storage,
@@ -142,13 +156,18 @@ async fn link(
                     first_error.get_or_insert(e);
                     given_up.insert(item.key());
                 }
-                Ok(()) if report.compound.undeclared > undeclared => {
+                // Undeclared, or refused for missing order-column values:
+                // re-checking it within this link would only refuse again.
+                Ok(())
+                    if report.compound.undeclared > undeclared
+                        || report.compound.refused > refused =>
+                {
                     given_up.insert(item.key());
                 }
                 Ok(()) => {}
             }
             done += 1;
-            save(db, &key, "running", Some(&item.key()), done, None)?;
+            save(db, &key, "running", Some(&item.key()), done, None, None)?;
         }
         // Re-read the work: a request that found this link live queued
         // nothing (a workspace created or switched meanwhile), and a
@@ -166,7 +185,11 @@ async fn link(
     report.completed = first_error.is_none();
     // A failed link records the work the branch still owes, so a targeted
     // request does not re-run it until that changes (`auto_compound`).
-    let failed_on = if report.completed {
+    let refused = report.compound.refused > 0;
+    // A refused link records the owed work as a failed one does: a targeted
+    // request does not re-run it until that changes (`auto_compound`), and
+    // the backfill that resolves it re-requests it explicitly.
+    let failed_on = if report.completed && !refused {
         None
     } else {
         Some(work_fingerprint(&branch_work(
@@ -175,12 +198,14 @@ async fn link(
     };
     // Work left after the last re-check keeps the branch pending (`queued`),
     // never `done` over work it did not do.
-    let status = match (report.completed, still_owed.is_empty()) {
-        (false, _) => "failed",
-        (true, true) => "done",
-        (true, false) => "queued",
+    let status = match (report.completed, refused, still_owed.is_empty()) {
+        (false, _, _) => "failed",
+        (true, true, _) => REFUSED_STATUS,
+        (true, false, true) => "done",
+        (true, false, false) => "queued",
     };
-    save(db, &key, status, None, done, failed_on)?;
+    let refused_nodes = refused.then_some(report.compound.refused_missing_order_values);
+    save(db, &key, status, None, done, failed_on, refused_nodes)?;
     tracing::info!(
         tenant_id,
         repo_id,
@@ -188,6 +213,8 @@ async fn link(
         built = report.compound.built,
         dropped = report.compound.dropped,
         failed = report.compound.failed,
+        refused = report.compound.refused,
+        refused_missing_order_values = report.compound.refused_missing_order_values,
         "compound_builds finished a branch"
     );
     match first_error {
@@ -207,6 +234,7 @@ fn save(
     cursor: Option<&str>,
     written: u64,
     failed_on: Option<String>,
+    refused_missing_order_values: Option<u64>,
 ) -> Result<()> {
     let state = super::RepairState {
         status: status.to_string(),
@@ -215,6 +243,7 @@ fn save(
         written,
         updated_at: chrono::Utc::now().to_rfc3339(),
         epoch: failed_on,
+        refused_missing_order_values,
     };
     let bytes = serde_json::to_vec(&state)
         .map_err(|e| Error::storage(format!("repair state encode: {e}")))?;

@@ -49,7 +49,8 @@ pub fn request(db: &DB, tenant_id: &str, repo_id: &str, branch: &str) {
 /// Queue the targeted link when the branch owes work and has none live.
 /// Returns how many jobs it queued (0 or 1).
 ///
-/// A branch whose last link FAILED is skipped while the work it owes is the
+/// A branch whose last link FAILED (or was refused for missing order-column
+/// values, plan Phase 13g) is skipped while the work it owes is the
 /// work it failed on (`work_fingerprint` on its state record): the plan's "no
 /// retries, a failed branch retried at the next start". Without this every
 /// workspace event and cold drain re-queued a full link that re-scanned the
@@ -60,6 +61,84 @@ pub async fn enqueue_if_owed(
     tenant_id: &str,
     repo_id: &str,
     branch: &str,
+) -> Result<usize> {
+    enqueue_owed(storage, tenant_id, repo_id, branch, false).await
+}
+
+/// After the `timestamp_backfill` repair rewrote nodes of `(tenant, repo,
+/// branch)` (plan Phase 13g): queue the branch's link even though its last
+/// link was refused on that very work — the backfill is what changed, and
+/// the owed-work fingerprint cannot see it. Queued even when the record owes
+/// nothing: a user-declared workspace or NodeType index whose own
+/// `CompoundIndexBuild` job refused records nothing a request could see,
+/// and the link builds every unready index (`branch_work(all_unready)`). A
+/// link that FAILED (no headroom, unplaceable nodes) on unchanged work is
+/// still left to the next start. Returns how many jobs it queued (0 or 1).
+///
+/// A link of the branch that is live right now may have judged the nodes
+/// before the backfill reached them; it would save the refusal and nothing
+/// would re-run it before the next start. So while one is live, a background
+/// task waits for it to end (polling, bounded by [`AFTER_BACKFILL_WAIT`]) and
+/// asks again.
+pub async fn request_after_backfill(
+    storage: &RocksDBStorage,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+) -> Result<usize> {
+    let kind = RepairKind::CompoundBuilds;
+    if !branch_job_active(storage, kind, tenant_id, repo_id, branch).await {
+        return enqueue_owed(storage, tenant_id, repo_id, branch, true).await;
+    }
+    let (Some(storage), Ok(handle)) = (
+        registered_storage_for(storage.db()),
+        tokio::runtime::Handle::try_current(),
+    ) else {
+        return Ok(0);
+    };
+    let target = (
+        tenant_id.to_string(),
+        repo_id.to_string(),
+        branch.to_string(),
+    );
+    handle.spawn(async move {
+        let (t, r, b) = (&target.0, &target.1, &target.2);
+        for _ in 0..AFTER_BACKFILL_POLLS {
+            tokio::time::sleep(AFTER_BACKFILL_POLL).await;
+            if branch_job_active(&storage, kind, t, r, b).await {
+                continue;
+            }
+            if let Err(e) = enqueue_owed(&storage, t, r, b, true).await {
+                tracing::warn!(error = %e, "could not queue a compound_builds link after a backfill");
+            }
+            return;
+        }
+        tracing::info!(
+            tenant_id = %t,
+            repo_id = %r,
+            branch = %b,
+            "a compound_builds link stayed live past the backfill's wait; the next start builds what it refused"
+        );
+    });
+    Ok(0)
+}
+
+/// How often, and how many times, [`request_after_backfill`] looks for the
+/// live link to end.
+const AFTER_BACKFILL_POLL: std::time::Duration = std::time::Duration::from_secs(5);
+const AFTER_BACKFILL_POLLS: u32 = 120;
+/// The bound on that wait (10 minutes).
+pub const AFTER_BACKFILL_WAIT: std::time::Duration =
+    std::time::Duration::from_secs(5 * AFTER_BACKFILL_POLLS as u64);
+
+/// `after_backfill`: queue even when nothing is owed, and past a refusal's
+/// fingerprint (never past a failure's) — see [`request_after_backfill`].
+async fn enqueue_owed(
+    storage: &RocksDBStorage,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    after_backfill: bool,
 ) -> Result<usize> {
     let kind = RepairKind::CompoundBuilds;
     let db = storage.db();
@@ -72,11 +151,17 @@ pub async fn enqueue_if_owed(
         &repair_node_id(storage),
     )?;
     let owed_work = branch_work(db, tenant_id, repo_id, branch, false)?;
-    let owed = state.as_ref().is_none_or(|s| s.status != "done") || !owed_work.is_empty();
+    let owed = after_backfill
+        || state.as_ref().is_none_or(|s| s.status != "done")
+        || !owed_work.is_empty();
     if !owed {
         return Ok(0);
     }
-    if let Some(failed) = state.filter(|s| s.status == "failed") {
+    let ended_short = |s: &super::RepairState| {
+        s.status == "failed"
+            || (!after_backfill && s.status == super::compound_builds::REFUSED_STATUS)
+    };
+    if let Some(failed) = state.filter(ended_short) {
         if failed.epoch.as_deref() == Some(work_fingerprint(&owed_work).as_str()) {
             tracing::debug!(
                 tenant_id,

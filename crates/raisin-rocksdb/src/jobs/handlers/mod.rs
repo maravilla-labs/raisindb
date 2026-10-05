@@ -58,7 +58,7 @@ pub use auth::{
 };
 pub use bulk_sql::{BulkSqlHandler, SqlExecutorCallback};
 pub use calendar_expand::CalendarExpandHandler;
-pub use compound_index::CompoundIndexJobHandler;
+pub use compound_index::{BuildResult as CompoundBuildResult, CompoundIndexJobHandler};
 pub use copy_tree::{CopyTreeExecutorCallback, CopyTreeHandler};
 pub use embedding::EmbeddingJobHandler;
 pub use flow_callbacks::{

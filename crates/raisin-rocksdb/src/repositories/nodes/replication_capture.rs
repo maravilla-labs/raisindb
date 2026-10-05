@@ -198,4 +198,45 @@ impl NodeRepositoryImpl {
             tracing::warn!(error = %e, "Failed to capture ApplyRevision for direct write");
         }
     }
+
+    /// Capture the revision record a direct write stored with its HEAD
+    /// advance, as `CreateRevisionMeta` — a replica stores the same record,
+    /// so its ancestry walks do not stop at the replicated revision. Call
+    /// BEFORE the `UpdateBranch` capture (the transaction commit's order).
+    pub(crate) async fn capture_revision_meta(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        meta: raisin_storage::RevisionMeta,
+    ) {
+        if !self.operation_capture.is_enabled() {
+            return;
+        }
+        let (branch, actor, message, is_system, revision) = (
+            meta.branch.clone(),
+            meta.actor.clone(),
+            meta.message.clone(),
+            meta.is_system,
+            meta.revision,
+        );
+        if let Err(e) = self
+            .operation_capture
+            .capture_operation_with_attribution(
+                tenant_id.to_string(),
+                repo_id.to_string(),
+                branch,
+                raisin_replication::OpType::CreateRevisionMeta {
+                    revision_meta: meta,
+                },
+                actor,
+                None,
+                Some(message),
+                is_system,
+                Some(revision),
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "Failed to capture a revision record for a direct write");
+        }
+    }
 }

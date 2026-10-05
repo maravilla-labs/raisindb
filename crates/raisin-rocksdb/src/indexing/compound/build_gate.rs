@@ -61,9 +61,49 @@ pub fn precheck_assuming(
     floor: &HLC,
     free_bytes: Option<u64>,
 ) -> Result<()> {
+    match precheck_build(db, ctx, wanted, floor, free_bytes)? {
+        Precheck::Proceed => Ok(()),
+        Precheck::MissingOrderValues(nodes) => {
+            Err(Error::storage(missing_order_values_message(ctx, nodes)))
+        }
+    }
+}
+
+/// What [`precheck_build`] decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Precheck {
+    /// Clear and build.
+    Proceed,
+    /// Nodes have no value for an index's ORDER column (legacy versions
+    /// without `created_at`/`updated_at`): the build must not run, and that is
+    /// an expected state the `timestamp_backfill` repair resolves — not a
+    /// failure (plan Phase 13g). Carries the node count.
+    MissingOrderValues(usize),
+}
+
+/// [`precheck_assuming`], telling the expected refusal (missing order-column
+/// values) apart from the failures (headroom, unplaceable nodes), which stay
+/// errors. The background builds record the former quietly; the admin
+/// `REBUILD … compound` reports both as errors.
+pub fn precheck_build(
+    db: &DB,
+    ctx: &IndexCtx<'_>,
+    wanted: &Wanted,
+    floor: &HLC,
+    free_bytes: Option<u64>,
+) -> Result<Precheck> {
     repair::check_headroom_assuming(db, cf::COMPOUND_INDEX, free_bytes)?;
     let seen = dry_run(db, ctx, wanted, floor)?;
-    refuse_unplaceable(ctx, &seen)?;
+    refuse_unplaceable(
+        ctx,
+        &BuildOutcome {
+            unindexable: 0,
+            ..seen
+        },
+    )?;
+    if seen.unindexable > 0 {
+        return Ok(Precheck::MissingOrderValues(seen.unindexable));
+    }
     repair::check_output_headroom(db, seen.estimated_bytes, BUILD_FREE_FLOOR, free_bytes).map_err(
         |e| {
             Error::Validation(format!(
@@ -71,6 +111,20 @@ pub fn precheck_assuming(
                 ctx.tenant_id, ctx.repo_id, ctx.branch, ctx.workspace
             ))
         },
+    )?;
+    Ok(Precheck::Proceed)
+}
+
+/// THE wording of the missing-order-values refusal, for the error the admin
+/// rebuild returns and the warning the background builds log.
+pub fn missing_order_values_message(ctx: &IndexCtx<'_>, nodes: usize) -> String {
+    format!(
+        "refusing to build compound indexes for {}/{}/{}/{}: {nodes} node(s) have no value for \
+         an index's order column (a version written before created_at/updated_at were \
+         stamped); the index could not list them, so it stays unusable (scan) until they \
+         are rewritten — the `timestamp_backfill` repair does that (automatic unless \
+         RAISIN_TIMESTAMP_BACKFILL=0; POST /api/management/{{repo}}/repairs/timestamp_backfill)",
+        ctx.tenant_id, ctx.repo_id, ctx.branch, ctx.workspace
     )
 }
 
@@ -91,12 +145,9 @@ pub fn refuse_unplaceable(ctx: &IndexCtx<'_>, seen: &BuildOutcome) -> Result<()>
         )));
     }
     if seen.unindexable > 0 {
-        return Err(Error::storage(format!(
-            "refusing to build compound indexes for {}/{}/{}/{}: {} node(s) have no value for \
-             an index's order column (a version written before created_at/updated_at were \
-             stamped); the index could not list them, so it stays unusable (scan) until they \
-             are rewritten",
-            ctx.tenant_id, ctx.repo_id, ctx.branch, ctx.workspace, seen.unindexable
+        return Err(Error::storage(missing_order_values_message(
+            ctx,
+            seen.unindexable,
         )));
     }
     Ok(())

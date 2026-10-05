@@ -18,6 +18,7 @@ mod divergence;
 mod head;
 mod merge;
 
+pub(crate) use crud::HeadWrite;
 pub(crate) use head::lock_branch_record;
 
 use crate::jobs::JobDataStore;

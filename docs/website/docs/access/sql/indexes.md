@@ -130,6 +130,13 @@ upgrade or when a workspace is created: until it is ready on that node, the
 listing scans and returns the same rows more slowly. An index you declare
 yourself that matches a query as well or better is preferred over it.
 
+Nodes written by very old versions (before v0.1.75) may have no `created_at`.
+The index cannot list such a node, so it is not built while the workspace
+holds one; the `timestamp_backfill` background job gives each of them the time
+of its first stored revision (and a missing `updated_at` the time of its newest),
+then the index is built. See
+[Operations](../../operate/overview.md#compound-indexes-build-themselves).
+
 **Opting out.** A workspace that never lists folders by creation time (an
 append-only log, say) can switch it off in its configuration:
 

@@ -106,4 +106,7 @@ pub struct RepairReport {
     /// Compound builds and drops (plan Phase 13f).
     #[serde(default)]
     pub compound: super::CompoundBuildCounts,
+    /// Timestamp backfill counts (plan Phase 13g).
+    #[serde(default)]
+    pub timestamps: super::TimestampBackfillCounts,
 }

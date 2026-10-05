@@ -95,13 +95,30 @@ async fn build(
             options.max_bytes_per_sec,
         )
         .await?;
-    if built {
-        report.compound.built += 1;
-        Ok(())
-    } else {
-        Err(Error::storage(format!(
+    use crate::jobs::handlers::CompoundBuildResult;
+    match built {
+        CompoundBuildResult::Ready => {
+            report.compound.built += 1;
+            Ok(())
+        }
+        CompoundBuildResult::MissingOrderValues(nodes) => {
+            // Expected, not a failure (plan Phase 13g): recorded in the
+            // repair state, one WARN naming the fix, no error and no retry.
+            report.compound.refused += 1;
+            report.compound.refused_missing_order_values += nodes;
+            tracing::warn!(
+                index,
+                "{}",
+                crate::indexing::compound::build::missing_order_values_message(
+                    &crate::indexing::IndexCtx::new(tenant_id, repo_id, branch, workspace),
+                    nodes as usize,
+                )
+            );
+            Ok(())
+        }
+        CompoundBuildResult::NotReady => Err(Error::storage(format!(
             "compound index {index} on {workspace} did not reach Ready (kept being marked)"
-        )))
+        ))),
     }
 }
 

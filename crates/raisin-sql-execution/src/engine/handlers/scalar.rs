@@ -12,13 +12,13 @@
 //! operations are rejected.
 
 use super::super::QueryEngine;
-use crate::physical_plan::eval::{eval_expr, eval_expr_async};
+use crate::physical_plan::eval::{eval_expr, eval_expr_async, has_async_call};
 use crate::physical_plan::executor::{ExecutionContext, Row, RowStream};
 use futures::stream;
 use indexmap::IndexMap;
 use raisin_error::Error;
 use raisin_models::nodes::properties::PropertyValue;
-use raisin_sql::analyzer::{AnalyzedQuery, AnalyzedStatement, Expr, Literal, TypedExpr};
+use raisin_sql::analyzer::{AnalyzedQuery, AnalyzedStatement, Literal, TypedExpr};
 use raisin_storage::Storage;
 
 impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static> QueryEngine<S> {
@@ -44,8 +44,8 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         if q.limit == Some(0) || q.offset.unwrap_or(0) > 0 {
             return Ok(no_rows());
         }
-        let ctx = if query_has_invoke_functions(q) {
-            Some(self.scalar_eval_context().await)
+        let ctx = if query_has_async_calls(q) {
+            Some(self.scalar_eval_context(q).await)
         } else {
             None
         };
@@ -65,24 +65,21 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         Ok(Box::pin(stream::once(async move { Ok(row) })))
     }
 
-    /// The context the async evaluator needs for INVOKE / lock functions.
-    async fn scalar_eval_context(&self) -> ExecutionContext<S> {
-        let branch = self.effective_branch().await;
-        let mut ctx = self.new_statement_context(branch, "default".to_string());
-        if let Some(ref cb) = self.function_invoke {
-            ctx.function_invoke = Some(cb.clone());
-        }
-        if let Some(ref cb) = self.function_invoke_sync {
-            ctx.function_invoke_sync = Some(cb.clone());
-        }
-        if let Some(ref mgr) = self.lock_manager {
-            ctx.lock_manager = Some(mgr.clone());
-        }
-        // Propagate auth so ACL-gated functions (e.g. RAISIN_TRY_ACQUIRE) see the caller.
-        if let Some(ref auth) = self.auth_context {
-            ctx.auth_context = Some(auth.clone());
-        }
-        ctx
+    /// The context the async evaluator needs (RESOLVE_PATH, RESOLVE,
+    /// EMBEDDING, INVOKE, the lock functions …): THE context builder every
+    /// planned query runs in, so a FROM-less call sees the same storage, auth,
+    /// embedding, invoke and lock wiring as one with a FROM clause.
+    async fn scalar_eval_context(&self, q: &AnalyzedQuery) -> ExecutionContext<S> {
+        let branch = match &q.branch_override {
+            Some(branch) => branch.clone(),
+            None => self.effective_branch().await,
+        };
+        self.build_execution_context(
+            branch,
+            "default".to_string(),
+            q.max_revision,
+            q.locales.clone(),
+        )
     }
 }
 
@@ -128,36 +125,14 @@ fn no_rows() -> RowStream {
     Box::pin(stream::empty())
 }
 
-/// Whether a scalar SELECT's projection or WHERE clause calls INVOKE,
-/// INVOKE_SYNC or a lock function — those need the async evaluator.
-fn query_has_invoke_functions(q: &AnalyzedQuery) -> bool {
-    q.projection
-        .iter()
-        .any(|(expr, _)| expr_contains_invoke(expr))
-        || q.selection.as_ref().is_some_and(expr_contains_invoke)
-}
-
-/// Recursively check if an expression contains INVOKE/INVOKE_SYNC.
-fn expr_contains_invoke(expr: &TypedExpr) -> bool {
-    match &expr.expr {
-        Expr::Function { name, args, .. } => {
-            matches!(
-                name.to_uppercase().as_str(),
-                "INVOKE"
-                    | "INVOKE_SYNC"
-                    | "RAISIN_TRY_ACQUIRE"
-                    | "RAISIN_RELEASE"
-                    | "RAISIN_RENEW"
-                    | "RAISIN_CLAIM"
-                    | "RAISIN_RELEASE_CLAIM"
-            ) || args.iter().any(|a| expr_contains_invoke(a))
-        }
-        Expr::BinaryOp { left, right, .. } => {
-            expr_contains_invoke(left) || expr_contains_invoke(right)
-        }
-        Expr::UnaryOp { expr: inner, .. } => expr_contains_invoke(inner),
-        _ => false,
-    }
+/// Whether a scalar SELECT's projection or WHERE clause calls a function only
+/// the async evaluator can run — asked of the ONE registry of such functions
+/// (`eval::has_async_call`). A second list here once knew INVOKE and the lock
+/// functions but not RESOLVE_PATH, so `SELECT RESOLVE_PATH(…) AS id` with no
+/// FROM failed with "Unknown function" while the same call with a FROM worked.
+fn query_has_async_calls(q: &AnalyzedQuery) -> bool {
+    q.projection.iter().any(|(expr, _)| has_async_call(expr))
+        || q.selection.as_ref().is_some_and(has_async_call)
 }
 
 /// Convert a Literal to PropertyValue (shared between scalar and async scalar paths).

@@ -38,6 +38,12 @@ pub struct RepairState {
     /// compares before running it again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub epoch: Option<String>,
+    /// `compound_builds`: how many nodes the link's refused builds found with
+    /// no value for an index's ORDER column (status
+    /// `refused_missing_order_values`; plan Phase 13g) — an expected state
+    /// the `timestamp_backfill` repair resolves, shown by the admin status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused_missing_order_values: Option<u64>,
 }
 
 /// `{tenant}\0{repo}\0{branch}\0repair_state\0{repair}\0{node_id}`.
