@@ -13,10 +13,10 @@
 //! - **The node is resolved through the RLS-filtered read** ([`NodeService::get_by_path`]
 //!   / [`NodeService::get`]); a node the caller cannot read is "not found", never
 //!   a distinguishable refusal.
-//! - **A write requires `Update` on the node**, the same check
-//!   [`NodeService::update_node`] makes: a translation is a change to the node's
-//!   content in one locale, and hiding a node in a locale removes it from that
-//!   locale entirely.
+//! - **A write requires the `Translate` permission on the node** — the same
+//!   operation SQL's `UPDATE … FOR LOCALE` checks. Translating is its own grant,
+//!   so a translator role can translate (and hide/unhide a locale) without being
+//!   allowed to edit the node's base content; `Update` alone does not imply it.
 //! - **The overlay is keyed by the resolved node ID**, never by what the caller
 //!   sent.
 //! - **The actor is the authenticated caller** (`AuthContext::actor_id`), never a
@@ -112,7 +112,7 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
         found.ok_or_else(|| Error::NotFound(format!("Node not found: {}", node.describe())))
     }
 
-    /// Resolve `node` and require `Update` on it, exactly as `update_node` does.
+    /// Resolve `node` and require `Translate` on it (what SQL `FOR LOCALE` writes require).
     ///
     /// The check runs against the STORED node, not the read result: the read is
     /// field-filtered by RLS, and a permission condition over a field the caller
@@ -126,7 +126,10 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
             .get(self.scope(), &readable.id, self.revision.as_ref())
             .await?
             .unwrap_or(readable);
-        if !self.check_rls_permission(&stored, Operation::Update).await {
+        if !self
+            .check_rls_permission(&stored, Operation::Translate)
+            .await
+        {
             return Err(Error::PermissionDenied(format!(
                 "Permission denied: cannot translate node '{}' at path '{}'",
                 stored.id, stored.path

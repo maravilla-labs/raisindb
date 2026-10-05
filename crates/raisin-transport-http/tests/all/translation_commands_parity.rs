@@ -223,7 +223,7 @@ async fn anonymous_role(fx: &Fixture) {
             "permissions".to_string(),
             PropertyValue::Array(vec![
                 grant("/**", &["read"]),
-                grant("/writable/**", &["read", "update"]),
+                grant("/writable/**", &["read", "translate"]),
             ]),
         ),
     ]);
@@ -307,6 +307,16 @@ fn user(user_id: &str, permissions: Vec<Permission>) -> AuthContext {
 }
 
 fn writer(user_id: &str) -> AuthContext {
+    user(
+        user_id,
+        vec![Permission::new(
+            "**",
+            vec![Operation::Read, Operation::Translate],
+        )],
+    )
+}
+
+fn editor_without_translate(user_id: &str) -> AuthContext {
     user(
         user_id,
         vec![Permission::new(
@@ -491,13 +501,13 @@ async fn ws_hide_is_keyed_by_node_id_and_hides_the_node_in_sql() {
     assert_eq!(select_in_fr(&w, "/hide-me").await, vec![id]);
 }
 
-/// (b) Read-but-not-update is refused on both wires, and nothing is written.
+/// (b) Read-but-not-translate is refused on both wires, and nothing is written.
 #[tokio::test]
-async fn a_caller_without_update_permission_is_refused_on_http_and_ws() {
+async fn a_caller_without_translate_permission_is_refused_on_http_and_ws() {
     let w = world("refused").await;
     let id = node_id(&w, "/locked/page").await;
 
-    // HTTP, as the anonymous principal: may read /locked/page, may not update it.
+    // HTTP, as the anonymous principal: may read /locked/page, may not translate it.
     for (command, body) in [
         ("hide-in-locale", json!({ "locale": "fr" })),
         (
@@ -685,4 +695,46 @@ async fn http_and_ws_produce_the_same_overlay() {
             Some(LocaleOverlay::Hidden)
         ));
     }
+}
+
+/// Translating is its own grant: `Translate` without `Update` may translate and
+/// hide; `Update` without `Translate` may not. Same rule as SQL `FOR LOCALE`.
+#[tokio::test]
+async fn translate_is_its_own_permission_independent_of_update() {
+    let w = world("translate-grant").await;
+    let id = node_id(&w, "/locked/page").await;
+
+    let err = ws_call(
+        &w,
+        editor_without_translate("ed"),
+        RequestType::TranslationUpdate,
+        json!({ "node_path": "/locked/page", "locale": "fr", "properties": { "title": "x" } }),
+    )
+    .await
+    .expect_err("update without translate must be refused");
+    assert!(
+        matches!(err, raisin_transport_ws::WsError::PermissionDenied),
+        "{err:?}"
+    );
+    assert!(overlay(&w, &id, "fr").await.is_none(), "nothing written");
+
+    // read + translate, no update: a translator role
+    ws_call(
+        &w,
+        writer("tina"),
+        RequestType::TranslationUpdate,
+        json!({ "node_path": "/locked/page", "locale": "fr", "properties": { "title": "Titre" } }),
+    )
+    .await
+    .expect("translate without update is allowed");
+    assert!(overlay(&w, &id, "fr").await.is_some(), "overlay written");
+    ws_call(
+        &w,
+        writer("tina"),
+        RequestType::TranslationHide,
+        json!({ "node_path": "/locked/page", "locale": "fr" }),
+    )
+    .await
+    .expect("hide with translate");
+    assert!(select_in_fr(&w, "/locked/page").await.is_empty());
 }
