@@ -7,6 +7,19 @@ use async_trait::async_trait;
 use raisin_error::{Error, Result};
 use serde::{Deserialize, Serialize};
 
+/// The one HTTP client every provider uses.
+///
+/// `reqwest::Client::new()` loads and parses the system CA bundle (native TLS),
+/// about 30ms of OpenSSL PEM decoding. Providers are built per request — every
+/// SQL statement of a tenant with embeddings enabled builds one — so a client
+/// per provider put that cost on every query, measured as a fixed ~35ms floor
+/// under `SELECT 1`. A `Client` is an `Arc` inside; cloning shares its
+/// connection pool too.
+fn shared_client() -> reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new).clone()
+}
+
 /// How many inputs one embedding request may carry when the provider has not
 /// said otherwise.
 ///
@@ -180,7 +193,7 @@ impl OpenAIProvider {
             base_url: base_url
                 .map(|u| u.trim_end_matches('/').to_string())
                 .unwrap_or_else(|| OPENAI_API_BASE.to_string()),
-            client: reqwest::Client::new(),
+            client: shared_client(),
         })
     }
 
@@ -354,7 +367,7 @@ impl VoyageProvider {
             api_key,
             model,
             dimensions,
-            client: reqwest::Client::new(),
+            client: shared_client(),
         })
     }
 
@@ -535,7 +548,7 @@ impl OllamaProvider {
             base_url: base_url.trim_end_matches('/').to_string(),
             model,
             dimensions,
-            client: reqwest::Client::new(),
+            client: shared_client(),
         })
     }
 

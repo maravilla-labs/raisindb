@@ -133,6 +133,17 @@ impl RocksDBConfig {
         // not turn every point lookup into extra cache churn on the hottest
         // level. Pinned L0 metadata is still charged to the cache.
         block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        // Partition the index and filter of every SST. Unpartitioned, a 64MB
+        // file carries one ~1MB compressed index block, and an iterator seek
+        // that misses the cache reloads and LZ4-decodes it on EVERY level it
+        // touches — measured in production as a fixed ~27ms per property-index
+        // seek, whatever the row count. Partitioned, a seek loads one 4KB
+        // partition; the small top-level index stays pinned. Applies to SSTs
+        // written from now on (flushes and compactions rewrite the rest).
+        block_opts.set_index_type(rocksdb::BlockBasedIndexType::TwoLevelIndexSearch);
+        block_opts.set_partition_filters(true);
+        block_opts.set_metadata_block_size(4096);
+        block_opts.set_pin_top_level_index_and_filter(true);
         block_opts
     }
 
