@@ -23,7 +23,6 @@ mod node_ops;
 mod publishing;
 mod relations;
 mod transactions;
-mod translations;
 mod versioning;
 
 use axum::http::StatusCode;
@@ -47,7 +46,6 @@ use common::CommandContext;
 /// - Audit: audit_log
 /// - Transactions: commit, save, create
 /// - Relations: add-relation, remove-relation
-/// - Translations: translate, delete-translation, hide-in-locale, unhide-in-locale
 pub async fn repo_execute_command(
     state: &AppState,
     tenant_id: &str,
@@ -126,13 +124,11 @@ pub async fn repo_execute_command(
         "add-relation" => relations::handle_add_relation(&mut ctx).await,
         "remove-relation" => relations::handle_remove_relation(&mut ctx).await,
 
-        // Translations
-        "translate" => translations::handle_translate(&mut ctx).await,
-        "delete-translation" => translations::handle_delete_translation(&mut ctx).await,
-        "hide-in-locale" => translations::handle_hide_in_locale(&mut ctx).await,
-        "unhide-in-locale" => translations::handle_unhide_in_locale(&mut ctx).await,
-        "translation-staleness" => translations::handle_translation_staleness(&mut ctx).await,
-        "acknowledge-staleness" => translations::handle_acknowledge_staleness(&mut ctx).await,
+        // Translations: deliberately absent. The live implementation is
+        // `handlers/repo/commands_translation.rs`, an adapter over the one
+        // translation-command implementation in raisin-core
+        // (`services/translation_service/commands.rs`). The copy that used to
+        // sit here was a third, unreachable duplicate of it and was deleted.
 
         _ => Err(ApiError::new(
             StatusCode::NOT_IMPLEMENTED,

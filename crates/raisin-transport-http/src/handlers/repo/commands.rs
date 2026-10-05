@@ -134,28 +134,16 @@ pub async fn repo_execute_command(
         "add-relation" => handle_add_relation(&nodes_svc, path, &params).await,
         "remove-relation" => handle_remove_relation(&nodes_svc, path, &params).await,
         "translate" => {
-            super::commands_translation::handle_translate(
-                state, &nodes_svc, tenant_id, repository, branch, ws, path, &params, auth,
-            )
-            .await
+            super::commands_translation::handle_translate(&nodes_svc, path, &params).await
         }
         "delete-translation" => {
-            super::commands_translation::handle_delete_translation(
-                state, &nodes_svc, tenant_id, repository, branch, ws, path, &params, auth,
-            )
-            .await
+            super::commands_translation::handle_delete_translation(&nodes_svc, path, &params).await
         }
         "hide-in-locale" => {
-            super::commands_translation::handle_hide_in_locale(
-                state, &nodes_svc, tenant_id, repository, branch, ws, path, &params, auth,
-            )
-            .await
+            super::commands_translation::handle_hide_in_locale(&nodes_svc, path, &params).await
         }
         "unhide-in-locale" => {
-            super::commands_translation::handle_unhide_in_locale(
-                state, &nodes_svc, tenant_id, repository, branch, ws, path, &params, auth,
-            )
-            .await
+            super::commands_translation::handle_unhide_in_locale(&nodes_svc, path, &params).await
         }
         "translation-staleness" => {
             super::commands_translation::handle_translation_staleness(

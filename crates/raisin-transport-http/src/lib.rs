@@ -95,7 +95,6 @@ mod handlers {
     #[cfg(feature = "storage-rocksdb")]
     pub mod system_updates;
     pub mod tags;
-    pub mod translations;
     pub mod uploads;
     pub mod webhooks;
     #[cfg(feature = "storage-rocksdb")]

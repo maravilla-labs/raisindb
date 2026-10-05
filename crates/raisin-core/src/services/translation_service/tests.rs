@@ -109,3 +109,33 @@ async fn test_hide_node() {
         "Revision should be allocated"
     );
 }
+
+/// Both wire spellings — a JSON pointer (HTTP) and a bare property name (WS) —
+/// produce the same overlay key, and values go through `PropertyValue::from_json`.
+#[test]
+fn parse_translation_fields_accepts_pointers_and_property_names() {
+    let parsed = parse_translation_fields([
+        ("/title".to_string(), serde_json::json!("Bonjour")),
+        ("summary".to_string(), serde_json::json!("Résumé")),
+        ("/seo/description".to_string(), serde_json::json!(null)),
+    ])
+    .unwrap();
+    assert_eq!(
+        parsed.get(&JsonPointer::new("/title")),
+        Some(&PropertyValue::String("Bonjour".into()))
+    );
+    assert_eq!(
+        parsed.get(&JsonPointer::new("/summary")),
+        Some(&PropertyValue::String("Résumé".into()))
+    );
+    assert_eq!(
+        parsed.get(&JsonPointer::new("/seo/description")),
+        Some(&PropertyValue::Null)
+    );
+}
+
+#[test]
+fn node_ref_parse_distinguishes_paths_from_ids() {
+    assert_eq!(NodeRef::parse("/a/b"), NodeRef::Path("/a/b"));
+    assert_eq!(NodeRef::parse("abc-123"), NodeRef::Id("abc-123"));
+}

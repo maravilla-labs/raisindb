@@ -41,3 +41,4 @@ mod http_smoke;
 mod http_snapshot_branches;
 mod mcp_oauth_flow;
 mod support;
+mod translation_commands_parity;

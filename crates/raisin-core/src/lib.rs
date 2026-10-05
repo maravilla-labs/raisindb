@@ -129,8 +129,8 @@ pub use services::schema_stats_cache::{
 pub use services::transaction::{Transaction, TxOperation};
 pub use services::translation_resolver::TranslationResolver;
 pub use services::translation_service::{
-    BatchTranslationUpdate, BatchUpdateResult, TranslationService, TranslationUpdate,
-    TranslationUpdateResult,
+    parse_translation_fields, BatchTranslationUpdate, BatchUpdateResult, NodeRef, NodeTranslations,
+    TranslationService, TranslationUpdate, TranslationUpdateResult,
 };
 pub use services::translation_staleness::TranslationStalenessService;
 pub use services::ttl_cache::{SharedTtlCache, TtlCache};

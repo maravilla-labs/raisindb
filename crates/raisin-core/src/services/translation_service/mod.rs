@@ -27,7 +27,10 @@
 //! - Time-travel queries to view translations at specific points
 //! - Rollback capabilities
 
+mod commands;
 mod operations;
+
+pub use commands::{parse_translation_fields, NodeRef, NodeTranslations};
 
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::translations::{JsonPointer, LocaleCode};
