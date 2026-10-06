@@ -774,6 +774,7 @@ const DERIVED_INDEXES: &[&str] = &[
     cf::COMPOUND_INDEX,
     cf::UNIQUE_INDEX,
     cf::EMBEDDINGS,
+    cf::NODE_DELETES,
 ];
 
 /// Which blob candidates (by id) are still mentioned by surviving data: any

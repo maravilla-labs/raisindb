@@ -57,6 +57,9 @@ const TENANT_PREFIXED_CFS: &[&str] = &[
     // Localized name index (plan Phase 12). Not covered by any exhaustiveness
     // test except `tenant_wipe_lists_cf` below — the classic omission.
     cf::LOCALIZED_NAME_INDEX,
+    // Node delete index (`crate::node_delete_index`). Same caveat: only this
+    // list and its test reach it.
+    cf::NODE_DELETES,
     // Workspace / versioning
     cf::WORKSPACES,
     cf::BRANCHES,

@@ -88,6 +88,9 @@ pub struct RepairReport {
     /// NODE_PATH backfill counts.
     #[serde(default)]
     pub node_path: NodePathCounts,
+    /// `node_delete_index` backfill counts.
+    #[serde(default)]
+    pub node_deletes: crate::node_delete_index::NodeDeleteCounts,
     /// PROPERTY_INDEX rebuild / verify counts.
     #[serde(default)]
     pub property_index: PropertyIndexCounts,

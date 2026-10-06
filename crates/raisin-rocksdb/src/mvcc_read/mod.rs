@@ -44,7 +44,9 @@ pub(crate) use baseline::{
 };
 #[cfg(test)]
 pub(crate) use deletes::WALKS;
-pub(crate) use deletes::{deletes_in_range, deletes_in_range_counted, NodeLifeline};
+pub(crate) use deletes::{
+    deletes_in_range, deletes_in_range_counted, record_at_or_before_in, NodeLifeline,
+};
 pub use node_decode::decode_node_blob;
 pub(crate) use node_decode::{
     decode_entry_with_path, deserialize_node_with_path, deserialize_node_with_path_as,

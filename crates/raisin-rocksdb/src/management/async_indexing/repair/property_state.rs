@@ -178,6 +178,10 @@ pub fn forget_branch_rebuild_state(
     // re-created under this name is a fork, never built here, and must not
     // read the deleted branch's `Ready`.
     crate::localized_name::state::stage_forget_branch(db, batch, tenant_id, repo_id, branch)?;
+    // And the node delete index's readiness: whatever NODES the name holds
+    // now (a fork's copy, a deleted branch's leftovers) was never backfilled
+    // under this record.
+    crate::node_delete_index::state::stage_forget_branch(db, batch, tenant_id, repo_id, branch)?;
     Ok(())
 }
 

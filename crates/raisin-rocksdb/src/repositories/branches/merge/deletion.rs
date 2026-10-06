@@ -108,6 +108,16 @@ pub(super) async fn write_resolved_deletion(
         ),
         keys::TOMBSTONE_VALUE,
     );
+    // ...and its `NODE_DELETES` entry beside it, for the same reason: this is
+    // the one node tombstone written outside the delete funnel, and a `Ready`
+    // branch must hold an entry for every tombstone (`crate::node_delete_index`).
+    crate::node_delete_index::stage_delete(
+        &mut batch,
+        db,
+        (tenant_id, repo_id, target_branch, workspace),
+        node_id,
+        revision,
+    )?;
     if superseded.is_empty() {
         // The delete funnel above materializes block-overlay `T`s (plan Phase
         // 11c); with no live version on either side it did not run.

@@ -422,6 +422,13 @@ impl RocksDBStorage {
         // never on the boot path (`RAISIN_TIMESTAMP_BACKFILL=0` turns it off).
         crate::management::async_indexing::repair::schedule_timestamp_backfill(self.clone());
 
+        // Branches whose `NODE_DELETES` is not `Ready` (every branch of a
+        // database written before it existed) are backfilled in the
+        // background, one branch at a time, never on the boot path; their
+        // translation reads walk node history until then
+        // (`RAISIN_NODE_DELETE_INDEX_AUTO=0` turns that off).
+        crate::node_delete_index::auto::schedule_after_start(self.clone());
+
         tracing::info!(
             realtime_workers = pools_config.realtime.dispatcher_workers,
             realtime_max_handlers = pools_config.realtime.max_concurrent_handlers,

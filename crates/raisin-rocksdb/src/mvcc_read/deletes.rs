@@ -12,31 +12,45 @@ use raisin_hlc::HLC;
 use rocksdb::DB;
 use std::ops::ControlFlow;
 
-/// What a node's `NODES` history says about the overlay versions stored at
-/// or after `from`, read at `to` (`None`: HEAD): every record in
-/// `[from, to]` plus the newest one below `from`, newest first.
+/// What a node's history says about the overlay versions stored at or after
+/// `from`, read at `to` (`None`: HEAD).
 ///
-/// An overlay version at `R` is ENDED at `to` ([`Self::ends`]) when
-/// - the node has a delete tombstone in `[R, to]` — the delete ended it; or
+/// An overlay version at `R` is ENDED at `to` ([`Self::ends_in`]) when
+/// - the node has a delete tombstone in `(R, to]` — the delete ended it; or
 /// - the node's newest record at or before `R` is a delete tombstone — it was
 ///   written into a DEAD generation (a peer that had not seen the delete, a
 ///   merge replaying a branch's translation onto a node the target deleted,
-///   a write racing the delete). Such a version stays ended after a recreate
-///   under the same id: the recreate starts a new generation above it.
+///   a write racing the delete), or the delete is AT `R`. Such a version
+///   stays ended after a recreate under the same id: the recreate starts a
+///   new generation above it.
 ///
 /// Built once per node and bound, it decides every version of the node: a
-/// listing or the resolver walks `NODES` once, not once per overlay.
+/// listing or the resolver reads the node's history once, not once per
+/// overlay. Two ways to read it, one answer:
+///
+/// - **Walked**: every `NODES` record in `[from, to]` plus the newest one
+///   below `from`, newest first — O(edits after `from`), each a node blob.
+/// - **Indexed**, when the branch's `NODE_DELETES` is `Ready`
+///   (`crate::node_delete_index`): one seek over the node's recorded deletes,
+///   and a `NODES` seek only for a delete the answer depends on. A node that
+///   was never deleted costs one seek. Equivalence is argued in
+///   `node_delete_index::lifeline` and tested against this walk over random
+///   histories.
 pub(crate) struct NodeLifeline {
-    /// `(revision, is_tombstone)`, newest first.
-    records: Vec<(HLC, bool)>,
+    kind: Kind,
     /// Key and value bytes the walk read (a repair charges them to its
-    /// throttle).
+    /// throttle; 0 when indexed).
     pub(crate) bytes_read: u64,
 }
 
+enum Kind {
+    /// `(revision, is_tombstone)`, newest first.
+    Walked(Vec<(HLC, bool)>),
+    Indexed(crate::node_delete_index::IndexedLifeline),
+}
+
 impl NodeLifeline {
-    /// Walk `node_id`'s records from `to` down to the newest one below
-    /// `from`.
+    /// Read `node_id`'s lifeline from `from` up to `to`.
     pub(crate) fn read(
         db: &DB,
         scope: (&str, &str, &str, &str),
@@ -47,8 +61,30 @@ impl NodeLifeline {
         Self::read_in(&mut super::DbRead(db), scope, node_id, from, to)
     }
 
-    /// [`Self::read`] through a read source.
+    /// [`Self::read`] through a read source: indexed when the branch's
+    /// delete index is ready in that source's view, walked otherwise.
     pub(crate) fn read_in(
+        src: &mut impl super::VersionedRead,
+        scope: (&str, &str, &str, &str),
+        node_id: &str,
+        from: &HLC,
+        to: Option<&HLC>,
+    ) -> Result<Self> {
+        let (tenant_id, repo_id, branch, _) = scope;
+        if crate::node_delete_index::state::ready_in(src, (tenant_id, repo_id, branch))? {
+            let indexed =
+                crate::node_delete_index::IndexedLifeline::read_in(src, scope, node_id, from, to)?;
+            return Ok(Self {
+                kind: Kind::Indexed(indexed),
+                bytes_read: 0,
+            });
+        }
+        Self::walked_in(src, scope, node_id, from, to)
+    }
+
+    /// The walk, whatever the index says: the fallback, and the reference
+    /// the indexed answer is tested against.
+    pub(crate) fn walked_in(
         src: &mut impl super::VersionedRead,
         scope: (&str, &str, &str, &str),
         node_id: &str,
@@ -65,27 +101,66 @@ impl NodeLifeline {
             }
         })?;
         Ok(Self {
-            records,
+            kind: Kind::Walked(records),
             bytes_read,
         })
     }
 
-    /// Whether an overlay version stored at `version` (at or after the
-    /// `from` this was read with) is ended at the bound (see the type).
-    pub(crate) fn ends(&self, version: &HLC) -> bool {
-        for (at, tomb) in &self.records {
-            if at > version {
-                if *tomb {
-                    return true; // a delete in (R, bound]
-                }
-                continue;
-            }
-            // The newest record at or before R decides: a delete at R, or a
-            // dead generation.
-            return *tomb;
-        }
-        false
+    /// Whether this lifeline was read from the delete index.
+    pub(crate) fn is_indexed(&self) -> bool {
+        matches!(self.kind, Kind::Indexed(_))
     }
+
+    /// Whether an overlay version stored at `version` (at or after the
+    /// `from` this was read with) is ended at the bound (see the type),
+    /// reading through the same source the lifeline was read from.
+    pub(crate) fn ends_in(
+        &self,
+        src: &mut impl super::VersionedRead,
+        version: &HLC,
+    ) -> Result<bool> {
+        match &self.kind {
+            Kind::Walked(records) => Ok(walked_ends(records, version)),
+            Kind::Indexed(indexed) => indexed.ends_in(src, version),
+        }
+    }
+
+    /// [`Self::ends_in`] on the live database.
+    pub(crate) fn ends(&self, db: &DB, version: &HLC) -> Result<bool> {
+        self.ends_in(&mut super::DbRead(db), version)
+    }
+}
+
+/// The walked lifeline's rule over its records.
+fn walked_ends(records: &[(HLC, bool)], version: &HLC) -> bool {
+    for (at, tomb) in records {
+        if at > version {
+            if *tomb {
+                return true; // a delete in (R, bound]
+            }
+            continue;
+        }
+        // The newest record at or before R decides: a delete at R, or a
+        // dead generation.
+        return *tomb;
+    }
+    false
+}
+
+/// The newest `NODES` record of the node under `node_prefix` at or before
+/// `at`, as `(revision, is_tombstone)` — one seek, nothing decoded, the same
+/// key filter as the walk.
+pub(crate) fn record_at_or_before_in(
+    src: &mut impl super::VersionedRead,
+    node_prefix: &[u8],
+    at: &HLC,
+) -> Result<Option<(HLC, bool)>> {
+    let mut found = None;
+    walk_prefix_in(src, node_prefix, Some(at), |rev, tomb| {
+        found = Some((rev, tomb));
+        ControlFlow::Break(())
+    })?;
+    Ok(found)
 }
 
 /// Every delete tombstone of `node_id` in `[from, to]`, newest first.
@@ -148,22 +223,33 @@ fn walk_in(
     scope: (&str, &str, &str, &str),
     node_id: &str,
     to: Option<&HLC>,
-    mut visit: impl FnMut(HLC, bool) -> ControlFlow<()>,
+    visit: impl FnMut(HLC, bool) -> ControlFlow<()>,
 ) -> Result<u64> {
     #[cfg(test)]
     WALKS.with(|walks| walks.set(walks.get() + 1));
     let (tenant_id, repo_id, branch, workspace) = scope;
     let prefix = keys::node_key_prefix(tenant_id, repo_id, branch, workspace, node_id);
+    walk_prefix_in(src, &prefix, to, visit)
+}
+
+/// The records under one node's `NODES` prefix at or below `to`, newest
+/// first, until `visit` breaks.
+fn walk_prefix_in(
+    src: &mut impl super::VersionedRead,
+    prefix: &[u8],
+    to: Option<&HLC>,
+    mut visit: impl FnMut(HLC, bool) -> ControlFlow<()>,
+) -> Result<u64> {
     let seek = match to {
         Some(to) => {
-            let mut seek = prefix.clone();
+            let mut seek = prefix.to_vec();
             seek.extend_from_slice(&to.encode_descending());
             seek
         }
-        None => prefix.clone(),
+        None => prefix.to_vec(),
     };
     let mut bytes = 0u64;
-    src.scan(cf::NODES, &prefix, &seek, &mut |key, value| {
+    src.scan(cf::NODES, prefix, &seek, &mut |key, value| {
         bytes += (key.len() + value.len()) as u64;
         // Anything under the prefix that is not `{prefix}{16-byte revision}`
         // is skipped, never the end of the read.

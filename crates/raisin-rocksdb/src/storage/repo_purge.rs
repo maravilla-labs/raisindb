@@ -107,6 +107,10 @@ pub(crate) const REPO_CF_REGISTRY: &[(&str, RepoScope)] = &[
         RepoScope::RepoPrefixed("{t}\0{r}\0{branch}\0{ws}\0lname{_of}\0…"),
     ),
     (
+        cf::NODE_DELETES,
+        RepoScope::RepoPrefixed("{t}\0{r}\0{branch}\0{ws}\0{node_id}\0{~rev}"),
+    ),
+    (
         cf::EMBEDDINGS,
         RepoScope::RepoPrefixed("{t}\0{r}\0{branch}\0{ws}\0…"),
     ),

@@ -63,6 +63,7 @@ pub mod management;
 pub mod mcp_listener;
 pub mod monitoring;
 mod mvcc_read;
+pub mod node_delete_index;
 pub mod node_dev;
 pub mod oauth_store;
 pub mod one_time_token;
@@ -369,6 +370,13 @@ pub mod cf {
     // Both end with the descending HLC (`RevisionLocator::Tail`); every text
     // segment is null-free. See `crate::localized_name`.
     pub const LOCALIZED_NAME_INDEX: &str = "localized_name_index";
+
+    // Every node delete, as a key (derived from the `NODES` tombstones, written
+    // in the same batch by the one delete funnel; see `crate::node_delete_index`).
+    // Key format: {tenant}\0{repo}\0{branch}\0{ws}\0{node_id}\0{~rev:16}, empty value.
+    // It turns "was this node deleted in (R, B]?" — the translation read rule's
+    // question — into one seek instead of a walk over the node's history.
+    pub const NODE_DELETES: &str = "node_deletes";
 }
 
 /// Column families a released build created and a later one no longer uses.
@@ -441,6 +449,7 @@ pub(crate) fn all_column_families() -> Vec<&'static str> {
         cf::AUDIT_LOG,
         cf::SECRETS,
         cf::LOCALIZED_NAME_INDEX,
+        cf::NODE_DELETES,
     ]
 }
 

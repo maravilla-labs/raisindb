@@ -62,6 +62,14 @@ pub enum RepairKind {
     /// `RAISIN_TIMESTAMP_BACKFILL=0` turns that off), and by the admin
     /// fan-out.
     TimestampBackfill,
+    /// Derive `NODE_DELETES` from the branch's `NODES` tombstones (the
+    /// entries deletes made before the index existed never wrote), then
+    /// stamp the branch `Ready`, which switches its translation reads from
+    /// the node-history walk to the index (`crate::node_delete_index`).
+    /// Queued automatically per branch (`node_delete_index::auto`,
+    /// `RAISIN_NODE_DELETE_INDEX_AUTO=0` turns that off), and by the admin
+    /// fan-out.
+    NodeDeleteIndex,
 }
 
 impl RepairKind {
@@ -79,11 +87,12 @@ impl RepairKind {
             Self::BlockOverlayTombstones => "block_overlay_tombstones",
             Self::CompoundBuilds => "compound_builds",
             Self::TimestampBackfill => "timestamp_backfill",
+            Self::NodeDeleteIndex => "node_delete_index",
         }
     }
 
     /// Every repair, in the order the console lists them.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::OrderedChildren,
         Self::PathTombstone,
         Self::NodePath,
@@ -95,6 +104,7 @@ impl RepairKind {
         Self::BlockOverlayTombstones,
         Self::CompoundBuilds,
         Self::TimestampBackfill,
+        Self::NodeDeleteIndex,
     ];
 
     /// The inverse of [`Self::slug`], over [`Self::ALL`].
@@ -118,6 +128,7 @@ impl RepairKind {
             Self::CompoundBuilds => cf::COMPOUND_INDEX,
             // New node versions (it sizes each chunk's output itself).
             Self::TimestampBackfill => cf::NODES,
+            Self::NodeDeleteIndex => cf::NODE_DELETES,
         }
     }
 

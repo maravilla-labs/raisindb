@@ -45,6 +45,15 @@ impl BranchRepositoryImpl {
         })
         .await
         .map_err(|e| raisin_error::Error::storage(format!("branch index copy panicked: {e}")))??;
+        // Its `NODE_DELETES` backfill too, unless the copy kept it `Ready`.
+        if !crate::node_delete_index::is_ready(&self.db, tenant_id, repo_id, target_branch) {
+            crate::node_delete_index::auto::request_backfill(
+                &self.db,
+                tenant_id,
+                repo_id,
+                target_branch,
+            );
+        }
         // The target (a fork, or a merge from an unrebuilt source) may now owe
         // its `property_index` rebuild: queue it in the background (plan Phase
         // 7b; a no-op when it is still `done`).
@@ -58,6 +67,72 @@ impl BranchRepositoryImpl {
     }
 
     fn copy_branch_indexes_blocking(
+        db: &DB,
+        tenant_id: &str,
+        repo_id: &str,
+        source_branch: &str,
+        target_branch: &str,
+        max_revision: &HLC,
+    ) -> Result<()> {
+        // The target stops trusting its node delete index while tombstones
+        // arrive without their entries (NODES is copied before NODE_DELETES);
+        // `after_branch_copy` re-stamps it only when it was `Ready` and the
+        // source stayed `Ready` throughout. Paired whatever the copy's outcome.
+        let ticket = crate::node_delete_index::state::before_branch_copy(
+            db,
+            tenant_id,
+            repo_id,
+            source_branch,
+            target_branch,
+        )?;
+        let copied = Self::copy_registered_cfs(
+            db,
+            tenant_id,
+            repo_id,
+            source_branch,
+            target_branch,
+            max_revision,
+        );
+        crate::node_delete_index::state::after_branch_copy(
+            db,
+            tenant_id,
+            repo_id,
+            source_branch,
+            target_branch,
+            ticket.filter(|_| copied.is_ok()),
+        )?;
+        copied?;
+
+        // The target now holds the SOURCE's entries for every node it
+        // replayed. Unless the source's PROPERTY_INDEX was rebuilt by this
+        // writer too, those may carry the holes the rebuild exists to fill
+        // (pre-Phase-7 replica history without membership), and a skip-
+        // unchanged write would never heal them: the target falls back to
+        // full puts until it is rebuilt.
+        crate::management::async_indexing::repair::invalidate_after_branch_copy(
+            db,
+            tenant_id,
+            repo_id,
+            source_branch,
+            target_branch,
+        )?;
+        // Likewise the repairs run-collapse requires (ORDERED_CHILDREN's): a
+        // merge from an unrepaired source brings unrepaired history into a
+        // target whose records say `done`, and collapse there would fold a
+        // stale entry into a run the repair later reshapes (plan Phase 9).
+        crate::management::history_gc::collapse::rearm_after_branch_copy(
+            db,
+            tenant_id,
+            repo_id,
+            source_branch,
+            target_branch,
+        )?;
+
+        Ok(())
+    }
+
+    /// Every column family the registry copies, in registry order.
+    fn copy_registered_cfs(
         db: &DB,
         tenant_id: &str,
         repo_id: &str,
@@ -101,31 +176,6 @@ impl BranchRepositoryImpl {
                 target_branch
             );
         }
-
-        // The target now holds the SOURCE's entries for every node it
-        // replayed. Unless the source's PROPERTY_INDEX was rebuilt by this
-        // writer too, those may carry the holes the rebuild exists to fill
-        // (pre-Phase-7 replica history without membership), and a skip-
-        // unchanged write would never heal them: the target falls back to
-        // full puts until it is rebuilt.
-        crate::management::async_indexing::repair::invalidate_after_branch_copy(
-            db,
-            tenant_id,
-            repo_id,
-            source_branch,
-            target_branch,
-        )?;
-        // Likewise the repairs run-collapse requires (ORDERED_CHILDREN's): a
-        // merge from an unrepaired source brings unrepaired history into a
-        // target whose records say `done`, and collapse there would fold a
-        // stale entry into a run the repair later reshapes (plan Phase 9).
-        crate::management::history_gc::collapse::rearm_after_branch_copy(
-            db,
-            tenant_id,
-            repo_id,
-            source_branch,
-            target_branch,
-        )?;
 
         Ok(())
     }

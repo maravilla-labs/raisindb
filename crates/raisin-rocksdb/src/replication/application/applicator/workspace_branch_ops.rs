@@ -89,6 +89,16 @@ impl OperationApplicator {
                 tenant_id, repo_id, branch.name
             ),
         )?;
+        if current_head.is_none() {
+            // A branch new here has no `NODE_DELETES` readiness (its record
+            // was forgotten above): ask for its backfill now that it exists.
+            crate::node_delete_index::auto::request_backfill(
+                &self.db,
+                tenant_id,
+                repo_id,
+                &branch.name,
+            );
+        }
 
         tracing::info!(
             "✅ Branch applied successfully: {}/{}/{}",

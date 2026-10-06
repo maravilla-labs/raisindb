@@ -9,8 +9,9 @@
 //! node's revisions above each overlay once per locale. Reading a page of rows
 //! through one [`crate::mvcc_read::SnapshotRead`] makes it one iterator per
 //! column family for the page, and the lifeline is built once per node from
-//! its oldest live candidate — `NodeLifeline::ends` answers every newer
-//! version from that one walk (the same argument as `retain_not_ended`).
+//! its oldest live candidate — `NodeLifeline::ends_in` answers every newer
+//! version from that one read (the same argument as `retain_not_ended`): one
+//! seek on `NODE_DELETES` when the branch's index is ready, one walk if not.
 //!
 //! The answer is the per-locale readers' answer: the same newest-at-or-before
 //! seek, the same decoder, the same `ends` rule.
@@ -85,7 +86,7 @@ pub(crate) fn node_chain_in(
         )?;
     }
 
-    // ONE walk of the node's history, from its oldest live candidate.
+    // ONE read of the node's lifeline, from its oldest live candidate.
     let oldest = node
         .iter()
         .filter_map(|(revision, _)| *revision)
@@ -94,11 +95,19 @@ pub(crate) fn node_chain_in(
     if let Some(oldest) = oldest {
         let lifeline = NodeLifeline::read_in(src, scope, node_id, &oldest, bound)?;
         for entry in node.iter_mut() {
-            if entry.0.is_some_and(|revision| lifeline.ends(&revision)) {
-                entry.1 = None;
+            if let Some(revision) = entry.0 {
+                if lifeline.ends_in(src, &revision)? {
+                    entry.1 = None;
+                }
             }
         }
-        stored_blocks.retain(|b| !lifeline.ends(&b.2));
+        let mut kept = Vec::with_capacity(stored_blocks.len());
+        for block in stored_blocks {
+            if !lifeline.ends_in(src, &block.2)? {
+                kept.push(block);
+            }
+        }
+        stored_blocks = kept;
     }
 
     let mut blocks = Vec::with_capacity(stored_blocks.len());

@@ -5,6 +5,10 @@
 //! Run (release, it is a measurement):
 //!   cargo test --release -p raisin-sql-execution --test all -- \
 //!     --ignored --nocapture localized_read_bench
+//! `BENCH_EDITS` (default 20) sets how often every node is edited after it
+//! was translated; the bench measures each case twice — with the node delete
+//! check walking node history (index not ready), then after the
+//! `node_delete_index` backfill made the branch ready — and prints both.
 //!
 //! The tree is `/site/s{i}/c{j}/p{k}` (5 × 6 × 6 pages, ~215 nodes). Most
 //! nodes carry an `fr` overlay with a translated `title` and `__node_name`, a
@@ -284,6 +288,10 @@ async fn time(engine: &QueryEngine<Store>, sql: &str, iters: usize) -> (f64, usi
     (best, n)
 }
 
+/// The whole tree: a big page (~216 rows).
+const BIG: &str = "SELECT path, properties->>'title' AS t FROM stories \
+                   WHERE DESCENDANT_OF('/site')";
+
 #[tokio::test]
 #[ignore = "localized tree-read benchmark; run with --release --ignored --nocapture"]
 async fn localized_read_bench() {
@@ -296,8 +304,60 @@ async fn localized_read_bench() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(20);
     let (storage, _dir, ids) = seed(edits).await;
-    let e = engine(&storage);
+    println!(
+        "\n=== localized tree read ({} nodes, {edits} edits after translation, {iters} iters) ===",
+        ids.len()
+    );
 
+    // BEFORE: the branch's node delete index is not built, so every overlay
+    // read walks the node's history above the overlay (a database written
+    // before the index, or one whose backfill has not run yet).
+    assert!(!raisin_rocksdb::node_delete_index::is_ready(
+        storage.db(),
+        T,
+        R,
+        B
+    ));
+    println!("\n--- node-delete check by NODES history walk (index not ready) ---");
+    let before = measure(&storage, &ids, iters).await;
+
+    // AFTER: the backfill builds it and makes the branch ready; the check is
+    // one seek on NODE_DELETES.
+    let reports = raisin_rocksdb::management::async_indexing::repair::run_repair(
+        &storage,
+        T,
+        R,
+        Some(B),
+        raisin_rocksdb::management::async_indexing::repair::RepairKind::NodeDeleteIndex,
+        raisin_rocksdb::management::async_indexing::repair::RepairOptions {
+            check_headroom: false,
+            max_bytes_per_sec: 0,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(reports[0].node_deletes.ready, "{:?}", reports[0]);
+    println!("\n--- node-delete check by NODE_DELETES seek (index ready) ---");
+    let after = measure(&storage, &ids, iters).await;
+
+    println!("\n--- before -> after ---");
+    for ((label, b), (_, a)) in before.iter().zip(&after) {
+        println!(
+            "  {label:<26} {b:>9.2} -> {a:>9.2} µs  ({:>5.2}x)",
+            b / a.max(f64::MIN_POSITIVE)
+        );
+    }
+    println!();
+}
+
+/// Time every case and the storage primitives; returns `(label, µs)`.
+async fn measure(
+    storage: &Arc<Store>,
+    ids: &HashMap<String, String>,
+    iters: usize,
+) -> Vec<(String, f64)> {
+    let e = engine(storage);
     let cases = [
         ("default", BASE.to_string()),
         ("fr", format!("{BASE} AND locale = 'fr'")),
@@ -314,28 +374,32 @@ async fn localized_read_bench() {
             BASE.replace("AS t", "AS t, __node_name, __localized_path") + " AND locale = 'fr'",
         ),
         ("fr-CH", format!("{BASE} AND locale = 'fr-CH'")),
+        ("big default", BIG.to_string()),
+        ("big fr", format!("{BIG} AND locale = 'fr'")),
+        (
+            "big fr+both",
+            BIG.replace("AS t", "AS t, __node_name, __localized_path") + " AND locale = 'fr'",
+        ),
     ];
-    println!(
-        "\n=== localized tree read ({} nodes, {edits} edits after translation, {iters} iters) ===",
-        ids.len()
-    );
     // One untimed pass over every case first: the block cache and the
     // compactions the seeding left behind then do not land on one case.
     for (_, sql) in &cases {
         rows(&e, sql).await;
     }
+    let mut out = Vec::new();
     let mut base_us = 0.0;
     for (label, sql) in &cases {
         let (us, n) = time(&e, sql, iters).await;
-        if *label == "default" {
+        if label.ends_with("default") {
             base_us = us;
         }
         println!(
-            "  {label:<9} {:>8.1} µs  {n:>3} rows  {:>6.1} µs/row  {:>5.2}x default",
+            "  {label:<12} {:>8.1} µs  {n:>3} rows  {:>6.2} µs/row  {:>5.2}x default",
             us,
             us / n.max(1) as f64,
             us / base_us
         );
+        out.push((format!("{label} (µs/row)"), us / n.max(1) as f64));
     }
 
     // Per-call cost of the storage primitives a localized row used to issue.
@@ -358,10 +422,9 @@ async fn localized_read_bench() {
         .await
         .unwrap();
     }
-    println!(
-        "\n  get_translation              {:>6.2} µs/call",
-        start.elapsed().as_secs_f64() * 1e6 / reps as f64
-    );
+    let per_call = start.elapsed().as_secs_f64() * 1e6 / reps as f64;
+    println!("\n  get_translation              {per_call:>6.2} µs/call");
+    out.push(("get_translation (µs/call)".to_string(), per_call));
     let chain = vec![fr.clone(), LocaleCode::parse("de").unwrap()];
     let start = Instant::now();
     for _ in 0..reps {
@@ -378,31 +441,28 @@ async fn localized_read_bench() {
         .await
         .unwrap();
     }
-    println!(
-        "  get_block_translations       {:>6.2} µs/call",
-        start.elapsed().as_secs_f64() * 1e6 / reps as f64
-    );
+    let per_call = start.elapsed().as_secs_f64() * 1e6 / reps as f64;
+    println!("  get_block_translations       {per_call:>6.2} µs/call");
+    out.push(("get_block_translations (µs/call)".to_string(), per_call));
     let names = storage.localized_names().expect("localized names");
     let scope = StorageScope::new(T, R, B, WS);
     let start = Instant::now();
     for _ in 0..reps {
         names.node_name(scope, node_id, "fr", Some(&head)).unwrap();
     }
-    println!(
-        "  node_name                    {:>6.2} µs/call",
-        start.elapsed().as_secs_f64() * 1e6 / reps as f64
-    );
+    let per_call = start.elapsed().as_secs_f64() * 1e6 / reps as f64;
+    println!("  node_name                    {per_call:>6.2} µs/call");
+    out.push(("node_name (µs/call)".to_string(), per_call));
     let start = Instant::now();
     for _ in 0..reps {
         names
             .localized_path(scope, node_id, "fr", Some(&head))
             .unwrap();
     }
-    println!(
-        "  localized_path (depth 4)     {:>6.2} µs/call",
-        start.elapsed().as_secs_f64() * 1e6 / reps as f64
-    );
-    println!();
+    let per_call = start.elapsed().as_secs_f64() * 1e6 / reps as f64;
+    println!("  localized_path (depth 4)     {per_call:>6.2} µs/call");
+    out.push(("localized_path (µs/call)".to_string(), per_call));
+    out
 }
 
 /// The statement-scoped read answers exactly what the per-node storage calls

@@ -95,6 +95,17 @@ impl raisin_replication::CheckpointIngestor for RocksDbCheckpointIngestor {
             ))
         })?;
 
+        // The node delete index's readiness too: the copy brings peer NODES
+        // tombstones whose entries this node may never have (a peer on an
+        // older binary, or not yet backfilled), so reads walk NODES until this
+        // node's own backfill has seen them.
+        crate::node_delete_index::state::mark_all_not_built(self.db.db()).map_err(|e| {
+            raisin_replication::CoordinatorError::Storage(format!(
+                "Failed to mark node delete index NotBuilt before checkpoint copy: {}",
+                e
+            ))
+        })?;
+
         // Step 2: Copy all data from ALL column families in checkpoint to target database
         // CRITICAL: Must iterate through each column family separately!
         let target_db = self.db.db().clone();
@@ -282,6 +293,21 @@ impl raisin_replication::CheckpointIngestor for RocksDbCheckpointIngestor {
                     e
                 ))
             })?;
+
+        // Again AFTER the copy (INDEX_STATUS came with it, and a backfill that
+        // ran during the copy cannot vouch for what it brought), then queue
+        // this node's backfill. Propagated: a peer's `Ready` must not survive.
+        let marked =
+            crate::node_delete_index::state::mark_all_not_built(self.db.db()).map_err(|e| {
+                raisin_replication::CoordinatorError::Storage(format!(
+                    "Failed to mark node delete index NotBuilt after checkpoint copy: {}",
+                    e
+                ))
+            })?;
+        tracing::info!(marked, "checkpoint ingest: node delete index NotBuilt");
+        if let Err(e) = crate::node_delete_index::auto::restart_after_ingest(&self.db).await {
+            tracing::warn!(error = %e, "checkpoint ingest: could not queue the node delete index backfill");
+        }
 
         // The copy may have re-imported corruption a repair already cleaned
         // here (from an unrepaired peer). The repairs are data-detected and

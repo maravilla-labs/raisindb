@@ -291,6 +291,8 @@ fn repair_branch(
         ..RepairReport::default()
     };
 
+    // `node_delete_index`: the build generation the run stamps `Ready` under.
+    let mut delete_index_generation = None;
     let completed = match kind {
         RepairKind::OrderedChildren => {
             let scope = ordered_children::Scope {
@@ -359,6 +361,17 @@ fn repair_branch(
             &mut writer,
             &mut report.block_overlays,
         )?,
+        RepairKind::NodeDeleteIndex => {
+            let scope = (tenant_id, repo_id, branch);
+            delete_index_generation =
+                crate::node_delete_index::backfill::begin(db, scope, &mut writer, resumed)?;
+            crate::node_delete_index::backfill::node_delete_pass(
+                db,
+                scope,
+                &mut writer,
+                &mut report.node_deletes,
+            )?
+        }
         RepairKind::CollapseRuns => {
             crate::management::history_gc::collapse::collapse_branch_at_head(
                 db,
@@ -382,6 +395,15 @@ fn repair_branch(
         }
     } else if completed {
         writer.commit("done")?;
+        if kind == RepairKind::NodeDeleteIndex {
+            // After the last batch is committed: the entries it vouches for
+            // are all on disk.
+            report.node_deletes.ready = crate::node_delete_index::backfill::finish(
+                db,
+                (tenant_id, repo_id, branch),
+                delete_index_generation,
+            )?;
+        }
         if kind == RepairKind::PropertyIndexVerify
             && report.property_index.missing > 0
             && !options.dry_run

@@ -30,8 +30,10 @@
 //! peer that had not seen the delete, a merge replaying a branch's
 //! translation onto a node the target deleted, a write racing the delete),
 //! and a later recreate under the same id does not bring it back
-//! ([`ended_by_node_delete`]; `mvcc_read::NodeLifeline`, one bounded `NODES`
-//! walk, nothing decoded, asked once per node by every listing). Block
+//! ([`ended_by_node_delete`]; `mvcc_read::NodeLifeline`, asked once per node
+//! by every listing: one seek on the `NODE_DELETES` index once the branch's
+//! is `Ready`, otherwise one bounded `NODES` walk, nothing decoded —
+//! `crate::node_delete_index` has the equivalence). Block
 //! overlays follow the rule since plan Phase 11c; before it a deleted node's
 //! block overlays stayed live forever, and a node recreated under the same
 //! id got them back.
@@ -216,17 +218,17 @@ pub(crate) fn read_version_in(
     else {
         return Ok(None);
     };
-    if version.overlay.is_some()
-        && crate::mvcc_read::NodeLifeline::read_in(
+    if version.overlay.is_some() {
+        let lifeline = crate::mvcc_read::NodeLifeline::read_in(
             src,
             scope,
             node_id,
             &version.revision,
             max_revision,
-        )?
-        .ends(&version.revision)
-    {
-        version.overlay = None;
+        )?;
+        if lifeline.ends_in(src, &version.revision)? {
+            version.overlay = None;
+        }
     }
     Ok(Some(version))
 }
@@ -244,10 +246,8 @@ pub(crate) fn ended_by_node_delete(
     version_revision: &HLC,
     bound: Option<&HLC>,
 ) -> Result<bool> {
-    Ok(
-        crate::mvcc_read::NodeLifeline::read(db, scope, node_id, version_revision, bound)?
-            .ends(version_revision),
-    )
+    crate::mvcc_read::NodeLifeline::read(db, scope, node_id, version_revision, bound)?
+        .ends(db, version_revision)
 }
 
 /// `NodeLifeline::ends` for every candidate of one node at once: one walk
@@ -264,7 +264,12 @@ pub(crate) fn retain_not_ended<T>(
         return Ok(());
     };
     let lifeline = crate::mvcc_read::NodeLifeline::read(db, scope, node_id, &oldest, bound)?;
-    candidates.retain(|candidate| !lifeline.ends(&revision_of(candidate)));
+    let mut ended = Vec::with_capacity(candidates.len());
+    for candidate in candidates.iter() {
+        ended.push(lifeline.ends(db, &revision_of(candidate))?);
+    }
+    let mut ended = ended.into_iter();
+    candidates.retain(|_| !ended.next().unwrap_or(false));
     Ok(())
 }
 

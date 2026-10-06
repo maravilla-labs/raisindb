@@ -201,6 +201,21 @@ pub(crate) const BRANCH_CF_REGISTRY: &[(&str, BranchScope)] = &[
         cf::LOCALIZED_NAME_INDEX,
         copied("localized_name_index", RevisionLocator::Tail),
     ),
+    // {tenant}\0{repo}\0{branch}\0{ws}\0{node_id}\0{~rev}
+    // Copied exactly like NODES (bounded by the same `max_revision`), whose
+    // tombstones it indexes: the fork's copy of NODES carries the source's
+    // tombstones, so it needs their entries. It MUST stay AFTER `cf::NODES` in
+    // this table (the table is the copy order): a delete committed on the
+    // source while the fork runs puts its tombstone and its entry in one
+    // batch, so copying NODES first means every copied tombstone's entry
+    // already exists when this CF is copied. The fork's READINESS is not
+    // copied (INDEX_STATUS is not), so a fork reads by the history walk until
+    // its own backfill — or `copy_branch_indexes` re-stamps a target that was
+    // ready, from a source that stayed ready (`node_delete_index::state`).
+    (
+        cf::NODE_DELETES,
+        copied("node_deletes", RevisionLocator::Tail),
+    ),
     // ---- branch-scoped, deliberately NOT copied ----------------------------
     (
         cf::ORDER_INDEX,

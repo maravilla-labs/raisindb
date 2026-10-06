@@ -72,6 +72,8 @@ mod move_tree_stale_child_link_test;
 mod multi_node_crdt_integration;
 mod named_embedding_specs_test;
 mod nested_reference_paths_test;
+mod node_delete_index_backfill_test;
+mod node_delete_index_test;
 mod node_dev_test;
 mod node_history_test;
 mod node_path_auto_backfill_test;

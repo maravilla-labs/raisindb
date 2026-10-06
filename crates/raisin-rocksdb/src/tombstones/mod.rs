@@ -24,6 +24,9 @@
 //! 11. **LOCALIZED_NAME_INDEX** - Localized URL segments (plan Phase 12)
 //! 12. **BLOCK_TRANSLATIONS** - `T` at the delete for every block overlay
 //!     live there (plan Phase 11c; hygiene, see below)
+//! 13. **NODE_DELETES** - the delete as a key, so the translation read rule
+//!     asks one seek instead of walking the node's history
+//!     (`crate::node_delete_index`)
 //!
 //! A node delete ends its overlays — node AND block — by a READ rule
 //! (`translation_read::ended_by_node_delete`); that is what makes them absent
@@ -66,6 +69,7 @@ pub const DELETION_COLUMN_FAMILIES: &[&str] = &[
     cf::SECRETS,
     cf::LOCALIZED_NAME_INDEX,
     cf::BLOCK_TRANSLATIONS,
+    cf::NODE_DELETES,
 ];
 
 /// Context for tombstone operations
@@ -169,6 +173,20 @@ pub fn add_node_tombstones_with_parent(
 
     // 1. NODES - Tombstone node data
     core_tombstones::tombstone_node_data(batch, ctx, cfs, node, revision);
+
+    // 1b. NODE_DELETES - the delete as a key, in the SAME batch as the
+    //     tombstone: on a `Ready` branch every tombstone must have its entry
+    //     (`crate::node_delete_index`), and this funnel is every delete path
+    //     — transaction, repository, cascade, cross-branch prune, merge, and
+    //     the replication apply (derived: written locally for remote deletes
+    //     too).
+    crate::node_delete_index::stage_delete(
+        batch,
+        db,
+        (ctx.tenant_id, ctx.repo_id, ctx.branch, ctx.workspace),
+        &node.id,
+        revision,
+    )?;
 
     // 2. PATH_INDEX - Tombstone path index (never over another node's entry)
     core_tombstones::tombstone_path_index(batch, db, ctx, cfs, node, revision)?;

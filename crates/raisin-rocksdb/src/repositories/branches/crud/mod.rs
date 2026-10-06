@@ -139,6 +139,13 @@ impl BranchRepository for BranchRepositoryImpl {
                 repo_id,
                 Some(branch_name),
             );
+            // Nor a `NODE_DELETES` readiness (a fork asks after its copy).
+            crate::node_delete_index::auto::request_backfill(
+                &self.db,
+                tenant_id,
+                repo_id,
+                branch_name,
+            );
         }
 
         // Capture operation for replication WITH the initial branch head as the revision
