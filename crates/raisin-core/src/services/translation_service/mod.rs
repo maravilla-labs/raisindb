@@ -29,8 +29,10 @@
 
 mod commands;
 mod operations;
+mod policy;
 
 pub use commands::{parse_translation_fields, NodeRef, NodeTranslations};
+pub use policy::TranslationWriteTarget;
 
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::translations::{JsonPointer, LocaleCode};

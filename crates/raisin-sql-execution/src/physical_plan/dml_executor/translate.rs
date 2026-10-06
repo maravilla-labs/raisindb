@@ -11,11 +11,12 @@
 
 use crate::physical_plan::executor::{ExecutionContext, Row, RowStream};
 use futures::stream;
+use raisin_core::{NodeRef, NodeService, TranslationWriteTarget};
 use raisin_error::Error;
 use raisin_models::auth::AuthContext;
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_sql::analyzer::{AnalyzedTranslateFilter, AnalyzedTranslationValue};
-use raisin_storage::{NodeRepository, Storage, StorageScope};
+use raisin_storage::Storage;
 
 /// Merge this statement's pointers onto whatever the node already has for the
 /// locale.
@@ -96,9 +97,9 @@ pub async fn execute_translate<
     );
 
     // Step 1: Find target node(s) based on filter
-    let node_ids = resolve_translate_targets(filter, workspace_id, branch, ctx).await?;
+    let targets = resolve_translate_targets(filter, workspace_id, branch, ctx).await?;
 
-    if node_ids.is_empty() {
+    if targets.is_empty() {
         tracing::debug!("TRANSLATE: No nodes matched the filter");
         let mut result_row = Row::new();
         result_row.insert("affected_rows".to_string(), PropertyValue::Integer(0));
@@ -121,7 +122,7 @@ pub async fn execute_translate<
     tracing::debug!(
         "TRANSLATE: Built overlay with {} fields for {} node(s)",
         overlay_data.len(),
-        node_ids.len()
+        targets.len()
     );
 
     // Step 3: Store translation for each node
@@ -130,7 +131,7 @@ pub async fn execute_translate<
         tx_lock.is_some()
     };
 
-    let affected_count = node_ids.len();
+    let affected_count = targets.len();
 
     if use_active_txn {
         tracing::debug!("TRANSLATE using active transaction context");
@@ -142,7 +143,8 @@ pub async fn execute_translate<
         use raisin_storage::transactional::TransactionalContext;
         txn_ctx.set_branch(branch)?;
 
-        for node_id in &node_ids {
+        for target in &targets {
+            let node_id = target.node.id.as_str();
             tracing::debug!("TRANSLATE storing translation for node {}", node_id);
             let overlay = merged_overlay(
                 txn_ctx.as_ref(),
@@ -180,7 +182,11 @@ pub async fn execute_translate<
             target, props_str, locale
         );
         txn_ctx.set_message(&message)?;
-        txn_ctx.set_actor(&super::bulk_operations::sql_actor(ctx, "sql-translate"))?;
+        // The shared policy named the actor; every target was authorized
+        // for the same caller, so they agree.
+        if let Some(target) = targets.first() {
+            txn_ctx.set_actor(&target.actor)?;
+        }
 
         let auth = ctx
             .auth_context
@@ -188,7 +194,8 @@ pub async fn execute_translate<
             .unwrap_or_else(AuthContext::anonymous);
         txn_ctx.set_auth_context(auth)?;
 
-        for node_id in &node_ids {
+        for target in &targets {
+            let node_id = target.node.id.as_str();
             tracing::debug!("TRANSLATE storing translation for node {}", node_id);
             let overlay = merged_overlay(
                 txn_ctx.as_ref(),
@@ -222,140 +229,69 @@ pub async fn execute_translate<
     Ok(Box::pin(stream::once(async move { Ok(result_row) })))
 }
 
-/// Resolve translate filter to a list of target node IDs.
+/// Resolve the translate filter to the node(s) the caller may translate.
+///
+/// Everything that is POLICY — finding the node, treating an unreadable one as
+/// not found, requiring `Translate` on it (graph `RELATES` conditions
+/// included), keying by id, naming the actor — is
+/// [`NodeService::authorize_translation_write`], the same call the HTTP and
+/// WebSocket translation commands make, so the three surfaces cannot drift
+/// apart again. Only the `node_type` guard is SQL's own.
+///
+/// SQL runs with no auth context as the system (no RLS), as every scan here
+/// does; the shared check denies on no auth, so that is said explicitly.
 async fn resolve_translate_targets<S>(
     filter: &Option<AnalyzedTranslateFilter>,
     workspace_id: &str,
     branch: &str,
     ctx: &ExecutionContext<S>,
-) -> Result<Vec<String>, Error>
+) -> Result<Vec<TranslationWriteTarget>, Error>
 where
-    S: Storage + 'static,
+    S: Storage + raisin_storage::transactional::TransactionalStorage + 'static,
 {
-    match filter {
-        Some(AnalyzedTranslateFilter::Path(path)) => {
-            let node = ctx
-                .storage
-                .nodes()
-                .get_by_path(
-                    StorageScope::new(&ctx.tenant_id, &ctx.repo_id, branch, workspace_id),
-                    path,
-                    None,
-                )
-                .await?
-                .ok_or_else(|| Error::NotFound(format!("Node at path '{}' not found", path)))?;
-
-            check_translate_permission(&node, ctx, workspace_id, branch).await?;
-            Ok(vec![node.id])
-        }
-        Some(AnalyzedTranslateFilter::Id(id)) => {
-            let node = ctx
-                .storage
-                .nodes()
-                .get(
-                    StorageScope::new(&ctx.tenant_id, &ctx.repo_id, branch, workspace_id),
-                    id,
-                    None,
-                )
-                .await?
-                .ok_or_else(|| Error::NotFound(format!("Node with id '{}' not found", id)))?;
-
-            check_translate_permission(&node, ctx, workspace_id, branch).await?;
-            Ok(vec![id.clone()])
-        }
+    let (node_ref, expected_type) = match filter {
+        Some(AnalyzedTranslateFilter::Path(path)) => (NodeRef::Path(path), None),
+        Some(AnalyzedTranslateFilter::Id(id)) => (NodeRef::Id(id), None),
         Some(AnalyzedTranslateFilter::PathAndType { path, node_type }) => {
-            let node = ctx
-                .storage
-                .nodes()
-                .get_by_path(
-                    StorageScope::new(&ctx.tenant_id, &ctx.repo_id, branch, workspace_id),
-                    path,
-                    None,
-                )
-                .await?
-                .ok_or_else(|| Error::NotFound(format!("Node at path '{}' not found", path)))?;
-
-            if node.node_type != *node_type {
-                return Err(Error::Validation(format!(
-                    "Node at path '{}' has type '{}', expected '{}'",
-                    path, node.node_type, node_type
-                )));
-            }
-
-            check_translate_permission(&node, ctx, workspace_id, branch).await?;
-            Ok(vec![node.id])
+            (NodeRef::Path(path), Some(node_type))
         }
         Some(AnalyzedTranslateFilter::IdAndType { id, node_type }) => {
-            let node = ctx
-                .storage
-                .nodes()
-                .get(
-                    StorageScope::new(&ctx.tenant_id, &ctx.repo_id, branch, workspace_id),
-                    id,
-                    None,
-                )
-                .await?
-                .ok_or_else(|| Error::NotFound(format!("Node with id '{}' not found", id)))?;
-
-            if node.node_type != *node_type {
-                return Err(Error::Validation(format!(
-                    "Node with id '{}' has type '{}', expected '{}'",
-                    id, node.node_type, node_type
-                )));
-            }
-
-            check_translate_permission(&node, ctx, workspace_id, branch).await?;
-            Ok(vec![id.clone()])
+            (NodeRef::Id(id), Some(node_type))
         }
-        Some(AnalyzedTranslateFilter::NodeType(_node_type)) => Err(Error::Validation(
-            "TRANSLATE with WHERE node_type = '...' (bulk update) is not yet supported. \
+        Some(AnalyzedTranslateFilter::NodeType(_node_type)) => {
+            return Err(Error::Validation(
+                "TRANSLATE with WHERE node_type = '...' (bulk update) is not yet supported. \
                  Please use WHERE path = '...' or WHERE id = '...' to update individual nodes."
-                .to_string(),
-        )),
-        None => Err(Error::Validation(
-            "TRANSLATE requires a WHERE clause to identify target node(s)".to_string(),
-        )),
-    }
-}
+                    .to_string(),
+            ))
+        }
+        None => {
+            return Err(Error::Validation(
+                "TRANSLATE requires a WHERE clause to identify target node(s)".to_string(),
+            ))
+        }
+    };
 
-/// Check TRANSLATE permission on a node via RLS.
-async fn check_translate_permission<S: Storage>(
-    node: &raisin_models::nodes::Node,
-    ctx: &ExecutionContext<S>,
-    workspace_id: &str,
-    branch: &str,
-) -> Result<(), Error> {
-    if let Some(ref auth) = ctx.auth_context {
-        use raisin_core::services::rls_filter;
-        use raisin_models::permissions::{Operation, PermissionScope};
-        use raisin_storage::scope::BranchScope;
-        let scope = PermissionScope::new(workspace_id, branch);
-        // Fast path: build the graph resolver only when a `RELATES` condition is present.
-        let allowed = if auth.uses_graph_rls() {
-            let revision = ctx.max_revision.unwrap_or_else(raisin_hlc::HLC::now);
-            let resolver = ctx.storage.graph_resolver(
-                BranchScope::new(&ctx.tenant_id, &ctx.repo_id, branch),
-                &revision,
-            );
-            rls_filter::can_perform_async(
-                node,
-                Operation::Translate,
-                auth,
-                &scope,
-                resolver.as_deref(),
-            )
-            .await
-        } else {
-            rls_filter::can_perform(node, Operation::Translate, auth, &scope)
-        };
-        if !allowed {
-            return Err(Error::PermissionDenied(format!(
-                "Cannot translate node '{}'",
-                node.id
+    let auth = ctx.auth_context.clone().unwrap_or_else(AuthContext::system);
+    let nodes = NodeService::new_with_context(
+        ctx.storage.clone(),
+        ctx.tenant_id.to_string(),
+        ctx.repo_id.to_string(),
+        branch.to_string(),
+        workspace_id.to_string(),
+    )
+    .with_auth(auth);
+    let target = nodes.authorize_translation_write(node_ref).await?;
+
+    if let Some(node_type) = expected_type {
+        if target.node.node_type != *node_type {
+            return Err(Error::Validation(format!(
+                "Node '{}' has type '{}', expected '{}'",
+                target.node.path, target.node.node_type, node_type
             )));
         }
     }
-    Ok(())
+    Ok(vec![target])
 }
 
 /// Convert AnalyzedTranslationValue to PropertyValue.

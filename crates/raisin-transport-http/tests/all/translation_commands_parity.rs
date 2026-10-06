@@ -1,8 +1,11 @@
-//! Translation writes over HTTP (`raisin:cmd/translate|hide-in-locale|…`) and
-//! over WebSocket (`translation_update|translation_hide|…`) are ONE
-//! implementation (`NodeService` translation commands in raisin-core). Proved
-//! here against one RocksDB, over the real HTTP router and the real WS
-//! dispatcher:
+//! Translation writes over HTTP (`raisin:cmd/translate|hide-in-locale|…`),
+//! over WebSocket (`translation_update|translation_hide|…`) and over SQL
+//! (`UPDATE … FOR LOCALE`) share ONE policy
+//! (`NodeService::authorize_translation_write` in raisin-core): resolution,
+//! readability, the `Translate` permission (graph `RELATES` included), id keying
+//! and the actor. SQL keeps only its own transactional write. Proved here
+//! against one RocksDB, over the real HTTP router, the real WS dispatcher and
+//! the real SQL engine:
 //!
 //! - a WS hide is keyed by the node ID, so `WHERE path = $1 AND locale = 'fr'`
 //!   stops returning the node (the old WS handler keyed it by PATH, so the
@@ -74,6 +77,10 @@ async fn world(label: &str) -> World {
         "/hide-me",
         "/via-http",
         "/via-ws",
+        "/via-sql",
+        "/owner",
+        "/owned",
+        "/unowned",
     ] {
         let name = path.rsplit('/').next().unwrap();
         let id = format!("id-{}", path.trim_start_matches('/').replace('/', "-"));
@@ -411,19 +418,46 @@ async fn actor(w: &World, node_id: &str, locale: &str) -> String {
         .actor
 }
 
-/// `SELECT id FROM content WHERE path = $1 AND locale = 'fr'`, as the system.
-async fn select_in_fr(w: &World, path: &str) -> Vec<String> {
+fn sql_engine(w: &World, auth: AuthContext) -> raisin_sql_execution::QueryEngine<RocksDBStorage> {
     let mut catalog = raisin_sql_execution::StaticCatalog::default_nodes_schema();
     catalog.register_workspace(WS.to_string());
-    let engine = raisin_sql_execution::QueryEngine::new(w.storage().clone(), TENANT, REPO, BRANCH)
+    raisin_sql_execution::QueryEngine::new(w.storage().clone(), TENANT, REPO, BRANCH)
         .with_catalog(Arc::new(catalog))
         .with_repository_config(raisin_context::RepositoryConfig {
             default_language: "en".to_string(),
-            supported_languages: vec!["en".into(), "fr".into()],
+            supported_languages: vec!["en".into(), "fr".into(), "de".into()],
             default_branch: BRANCH.to_string(),
             ..raisin_context::RepositoryConfig::default()
         })
-        .with_auth(AuthContext::system());
+        .with_auth(auth)
+}
+
+/// Run one SQL statement as `auth` to completion; the first error, if any.
+async fn sql(w: &World, auth: AuthContext, statement: &str) -> Result<(), raisin_error::Error> {
+    let mut stream = sql_engine(w, auth).execute(statement).await?;
+    while let Some(row) = stream.next().await {
+        row?;
+    }
+    Ok(())
+}
+
+/// `UPDATE content FOR LOCALE 'fr' SET title = 'x' WHERE path = '<path>'`.
+async fn sql_translate(
+    w: &World,
+    auth: AuthContext,
+    path: &str,
+) -> Result<(), raisin_error::Error> {
+    sql(
+        w,
+        auth,
+        &format!("UPDATE {WS} FOR LOCALE 'fr' SET title = 'x' WHERE path = '{path}'"),
+    )
+    .await
+}
+
+/// `SELECT id FROM content WHERE path = $1 AND locale = 'fr'`, as the system.
+async fn select_in_fr(w: &World, path: &str) -> Vec<String> {
+    let engine = sql_engine(w, AuthContext::system());
     let format = |v: &Value| match v {
         Value::String(s) => format!("'{}'", s.replace('\'', "''")),
         other => other.to_string(),
@@ -737,4 +771,221 @@ async fn translate_is_its_own_permission_independent_of_update() {
     .await
     .expect("hide with translate");
     assert!(select_in_fr(&w, "/locked/page").await.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// SQL `UPDATE … FOR LOCALE`: the same policy as HTTP and WS
+// ---------------------------------------------------------------------------
+
+/// The matrix over SQL, with WS alongside where the verdicts must agree:
+/// read-only and update-without-translate refused, unreadable (including
+/// translate-without-read) not found, translate-without-update allowed, the
+/// overlay keyed by id, the actor the caller.
+#[tokio::test]
+async fn sql_for_locale_applies_the_same_policy_as_http_and_ws() {
+    let w = world("sql-policy").await;
+    let id = node_id(&w, "/locked/page").await;
+    let by_id = format!("UPDATE {WS} FOR LOCALE 'fr' SET title = 'x' WHERE id = '{id}'");
+
+    for auth in [reader("bob"), editor_without_translate("ed")] {
+        let err = sql_translate(&w, auth.clone(), "/locked/page")
+            .await
+            .expect_err("SQL by path must be refused");
+        assert!(
+            matches!(err, raisin_error::Error::PermissionDenied(_)),
+            "{err:?}"
+        );
+        let err = sql(&w, auth.clone(), &by_id)
+            .await
+            .expect_err("SQL by id must be refused");
+        assert!(
+            matches!(err, raisin_error::Error::PermissionDenied(_)),
+            "{err:?}"
+        );
+        let err = ws_call(
+            &w,
+            auth,
+            RequestType::TranslationUpdate,
+            json!({ "node_path": "/locked/page", "locale": "fr", "properties": { "title": "x" } }),
+        )
+        .await
+        .expect_err("WS must be refused");
+        assert!(
+            matches!(err, raisin_transport_ws::WsError::PermissionDenied),
+            "{err:?}"
+        );
+    }
+
+    // Unreadable is not found — never a refusal that confirms the node exists.
+    // Holding `Translate` without `Read` does not change that.
+    let translate_only = user(
+        "tom",
+        vec![Permission::new("**", vec![Operation::Translate])],
+    );
+    for auth in [user("eve", vec![]), translate_only] {
+        for statement in [
+            format!("UPDATE {WS} FOR LOCALE 'fr' SET title = 'x' WHERE path = '/locked/page'"),
+            by_id.clone(),
+        ] {
+            let err = sql(&w, auth.clone(), &statement)
+                .await
+                .expect_err("unreadable");
+            assert!(
+                matches!(err, raisin_error::Error::NotFound(_)),
+                "{statement}: {err:?}"
+            );
+        }
+        let err = ws_call(
+            &w,
+            auth,
+            RequestType::TranslationUpdate,
+            json!({ "node_path": "/locked/page", "locale": "fr", "properties": { "title": "x" } }),
+        )
+        .await
+        .expect_err("unreadable over WS");
+        assert!(
+            !matches!(err, raisin_transport_ws::WsError::PermissionDenied),
+            "{err:?}"
+        );
+    }
+    assert!(overlay(&w, &id, "fr").await.is_none(), "nothing written");
+
+    // Translate without Update: allowed, keyed by the id, attributed to the caller.
+    sql_translate(&w, writer("tina"), "/locked/page")
+        .await
+        .expect("translate without update is allowed over SQL");
+    let Some(LocaleOverlay::Properties { data }) = overlay(&w, &id, "fr").await else {
+        panic!("SQL must write a properties overlay on the node id");
+    };
+    assert_eq!(data.len(), 1);
+    assert!(
+        overlay(&w, "/locked/page", "fr").await.is_none(),
+        "nothing may be keyed by the path"
+    );
+    assert_eq!(actor(&w, &id, "fr").await, "tina");
+}
+
+/// A `Translate` grant conditioned on the relation graph is evaluated with a
+/// graph resolver on every surface: the related node may be translated, the
+/// unrelated one may not.
+#[tokio::test]
+async fn a_relates_conditioned_translate_grant_is_honoured_on_sql_and_ws() {
+    let w = world("sql-graph").await;
+    let owner = node_id(&w, "/owner").await;
+    let owned = node_id(&w, "/owned").await;
+    let unowned = node_id(&w, "/unowned").await;
+    sql(
+        &w,
+        AuthContext::system(),
+        &format!(
+            "RELATE FROM id='{owned}' IN WORKSPACE '{WS}' \
+             TO id='{owner}' IN WORKSPACE '{WS}' TYPE 'OWNED_BY'"
+        ),
+    )
+    .await
+    .expect("relate");
+
+    let translator = || {
+        user(
+            "owner",
+            vec![
+                Permission::new("**", vec![Operation::Read]),
+                Permission::new("**", vec![Operation::Translate])
+                    .with_condition("node.id RELATES auth.local_user_id VIA 'OWNED_BY'"),
+            ],
+        )
+        .with_local_user_id(owner.clone())
+    };
+    assert!(translator().uses_graph_rls());
+
+    sql_translate(&w, translator(), "/owned")
+        .await
+        .expect("SQL: related node is translatable");
+    assert!(overlay(&w, &owned, "fr").await.is_some());
+    ws_call(
+        &w,
+        translator(),
+        RequestType::TranslationUpdate,
+        json!({ "node_path": "/owned", "locale": "de", "properties": { "title": "Hallo" } }),
+    )
+    .await
+    .expect("WS: related node is translatable");
+    assert!(overlay(&w, &owned, "de").await.is_some());
+
+    let err = sql_translate(&w, translator(), "/unowned")
+        .await
+        .expect_err("SQL: unrelated node refused");
+    assert!(
+        matches!(err, raisin_error::Error::PermissionDenied(_)),
+        "{err:?}"
+    );
+    let err = ws_call(
+        &w,
+        translator(),
+        RequestType::TranslationUpdate,
+        json!({ "node_path": "/unowned", "locale": "fr", "properties": { "title": "x" } }),
+    )
+    .await
+    .expect_err("WS: unrelated node refused");
+    assert!(
+        matches!(err, raisin_transport_ws::WsError::PermissionDenied),
+        "{err:?}"
+    );
+    assert!(overlay(&w, &unowned, "fr").await.is_none());
+}
+
+/// The same scalar input gives the same overlay over HTTP, WS and SQL, and SQL
+/// records the caller as the actor, like the other two.
+#[tokio::test]
+async fn http_ws_and_sql_produce_the_same_overlay() {
+    let w = world("sql-parity").await;
+    let fields = json!({ "title": "Bonjour", "views": 3, "ratio": 1.5, "featured": true });
+
+    let http_fields: serde_json::Map<String, Value> = fields
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(k, v)| (format!("/{k}"), v.clone()))
+        .collect();
+    let (status, text) = http_cmd(
+        &w,
+        "/via-http",
+        "translate",
+        json!({ "locale": "fr", "translations": http_fields }),
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    ws_call(
+        &w,
+        writer("alice"),
+        RequestType::TranslationUpdate,
+        json!({ "node_path": "/via-ws", "locale": "fr", "properties": fields }),
+    )
+    .await
+    .expect("WS translate");
+    sql(
+        &w,
+        writer("alice"),
+        &format!(
+            "UPDATE {WS} FOR LOCALE 'fr' SET title = 'Bonjour', views = 3, \
+             ratio = 1.5, featured = true WHERE path = '/via-sql'"
+        ),
+    )
+    .await
+    .expect("SQL translate");
+
+    let mut overlays = Vec::new();
+    for path in ["/via-http", "/via-ws", "/via-sql"] {
+        match overlay(&w, &node_id(&w, path).await, "fr").await {
+            Some(LocaleOverlay::Properties { data }) => overlays.push(data),
+            other => panic!("{path}: expected a properties overlay, got {other:?}"),
+        }
+    }
+    assert_eq!(overlays[0].len(), 4);
+    assert_eq!(overlays[0], overlays[1], "HTTP vs WS");
+    assert_eq!(overlays[0], overlays[2], "HTTP vs SQL");
+
+    let sql_id = node_id(&w, "/via-sql").await;
+    assert_eq!(actor(&w, &sql_id, "fr").await, "alice");
 }

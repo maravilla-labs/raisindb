@@ -130,7 +130,7 @@ pub use services::transaction::{Transaction, TxOperation};
 pub use services::translation_resolver::TranslationResolver;
 pub use services::translation_service::{
     parse_translation_fields, BatchTranslationUpdate, BatchUpdateResult, NodeRef, NodeTranslations,
-    TranslationService, TranslationUpdate, TranslationUpdateResult,
+    TranslationService, TranslationUpdate, TranslationUpdateResult, TranslationWriteTarget,
 };
 pub use services::translation_staleness::TranslationStalenessService;
 pub use services::ttl_cache::{SharedTtlCache, TtlCache};

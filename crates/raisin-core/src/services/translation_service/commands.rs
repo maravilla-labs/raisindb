@@ -8,19 +8,9 @@
 //! overlays were invisible to every reader), recorded the actor as `"system"`,
 //! and checked no permission at all, while the HTTP one let the request body
 //! name the actor. These methods are what a transport calls instead, so the
-//! rules below hold whichever wire a write arrived on:
-//!
-//! - **The node is resolved through the RLS-filtered read** ([`NodeService::get_by_path`]
-//!   / [`NodeService::get`]); a node the caller cannot read is "not found", never
-//!   a distinguishable refusal.
-//! - **A write requires the `Translate` permission on the node** — the same
-//!   operation SQL's `UPDATE … FOR LOCALE` checks. Translating is its own grant,
-//!   so a translator role can translate (and hide/unhide a locale) without being
-//!   allowed to edit the node's base content; `Update` alone does not imply it.
-//! - **The overlay is keyed by the resolved node ID**, never by what the caller
-//!   sent.
-//! - **The actor is the authenticated caller** (`AuthContext::actor_id`), never a
-//!   value from the request.
+//! rules hold whichever wire a write arrived on. The rules themselves — node
+//! resolution, readability, the `Translate` permission, id keying, the actor —
+//! live in [`super::policy`], which SQL's `UPDATE … FOR LOCALE` calls too.
 //!
 //! Transports parse their wire format, call one of these, and map the result.
 
@@ -28,12 +18,8 @@ use std::collections::HashMap;
 
 use raisin_error::{Error, Result};
 use raisin_models::nodes::properties::PropertyValue;
-use raisin_models::nodes::Node;
-use raisin_models::permissions::Operation;
 use raisin_models::translations::{JsonPointer, LocaleCode};
-use raisin_storage::{
-    transactional::TransactionalStorage, BranchRepository, NodeRepository, Storage,
-};
+use raisin_storage::{transactional::TransactionalStorage, BranchRepository, Storage};
 
 use super::{TranslationService, TranslationUpdateResult};
 use crate::services::node_service::NodeService;
@@ -63,7 +49,7 @@ impl<'a> NodeRef<'a> {
         }
     }
 
-    fn describe(&self) -> &'a str {
+    pub(super) fn describe(&self) -> &'a str {
         match self {
             NodeRef::Path(p) | NodeRef::Id(p) => p,
         }
@@ -103,41 +89,6 @@ pub fn parse_translation_fields(
 }
 
 impl<S: Storage + TransactionalStorage> NodeService<S> {
-    /// Resolve `node` through the RLS-filtered read; unreadable is not found.
-    async fn resolve_translation_target(&self, node: NodeRef<'_>) -> Result<Node> {
-        let found = match node {
-            NodeRef::Path(path) => self.get_by_path(path).await?,
-            NodeRef::Id(id) => self.get(id).await?,
-        };
-        found.ok_or_else(|| Error::NotFound(format!("Node not found: {}", node.describe())))
-    }
-
-    /// Resolve `node` and require `Translate` on it (what SQL `FOR LOCALE` writes require).
-    ///
-    /// The check runs against the STORED node, not the read result: the read is
-    /// field-filtered by RLS, and a permission condition over a field the caller
-    /// cannot see must still evaluate against the real value. A draft that only
-    /// exists as a workspace delta has no stored row, so its read result is used.
-    async fn resolve_translation_write_target(&self, node: NodeRef<'_>) -> Result<Node> {
-        let readable = self.resolve_translation_target(node).await?;
-        let stored = self
-            .storage
-            .nodes()
-            .get(self.scope(), &readable.id, self.revision.as_ref())
-            .await?
-            .unwrap_or(readable);
-        if !self
-            .check_rls_permission(&stored, Operation::Translate)
-            .await
-        {
-            return Err(Error::PermissionDenied(format!(
-                "Permission denied: cannot translate node '{}' at path '{}'",
-                stored.id, stored.path
-            )));
-        }
-        Ok(stored)
-    }
-
     fn translation_service(&self) -> TranslationService<S> {
         TranslationService::new(self.storage.clone())
     }
@@ -153,17 +104,17 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
         translations: HashMap<JsonPointer, PropertyValue>,
         message: Option<String>,
     ) -> Result<TranslationUpdateResult> {
-        let target = self.resolve_translation_write_target(node).await?;
+        let target = self.authorize_translation_write(node).await?;
         self.translation_service()
             .update_translation(
                 &self.tenant_id,
                 &self.repo_id,
                 &self.branch,
                 &self.workspace_id,
-                &target.id,
+                &target.node.id,
                 locale,
                 translations,
-                &self.commit_actor(),
+                &target.actor,
                 message,
             )
             .await
@@ -176,16 +127,16 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
         locale: &LocaleCode,
         message: Option<String>,
     ) -> Result<TranslationUpdateResult> {
-        let target = self.resolve_translation_write_target(node).await?;
+        let target = self.authorize_translation_write(node).await?;
         self.translation_service()
             .delete_translation(
                 &self.tenant_id,
                 &self.repo_id,
                 &self.branch,
                 &self.workspace_id,
-                &target.id,
+                &target.node.id,
                 locale,
-                &self.commit_actor(),
+                &target.actor,
                 message,
             )
             .await
@@ -198,16 +149,16 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
         locale: &LocaleCode,
         message: Option<String>,
     ) -> Result<TranslationUpdateResult> {
-        let target = self.resolve_translation_write_target(node).await?;
+        let target = self.authorize_translation_write(node).await?;
         self.translation_service()
             .hide_node(
                 &self.tenant_id,
                 &self.repo_id,
                 &self.branch,
                 &self.workspace_id,
-                &target.id,
+                &target.node.id,
                 locale,
-                &self.commit_actor(),
+                &target.actor,
                 message,
             )
             .await
@@ -223,16 +174,16 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
         locale: &LocaleCode,
         message: Option<String>,
     ) -> Result<TranslationUpdateResult> {
-        let target = self.resolve_translation_write_target(node).await?;
+        let target = self.authorize_translation_write(node).await?;
         self.translation_service()
             .unhide_node(
                 &self.tenant_id,
                 &self.repo_id,
                 &self.branch,
                 &self.workspace_id,
-                &target.id,
+                &target.node.id,
                 locale,
-                &self.commit_actor(),
+                &target.actor,
                 Some(message.unwrap_or_else(|| "Unhide node".to_string())),
             )
             .await
