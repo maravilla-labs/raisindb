@@ -41,14 +41,30 @@ use crate::api::{NodeAddResourceCallback, ResourceGetBinaryCallback};
 ///
 /// # Returns
 /// - Base64-encoded binary data
-pub fn create_resource_get_binary<B>(binary_storage: Arc<B>) -> ResourceGetBinaryCallback
+pub fn create_resource_get_binary<B>(
+    binary_storage: Arc<B>,
+    tenant_id: String,
+) -> ResourceGetBinaryCallback
 where
     B: BinaryStorage + 'static,
 {
     Arc::new(move |storage_key: String| {
         let storage = binary_storage.clone();
+        let tenant_id = tenant_id.clone();
 
         Box::pin(async move {
+            // The key comes from node content (or straight from the caller):
+            // only this tenant's blobs are readable through it.
+            if !raisin_core::blob_key_belongs_to(
+                &tenant_id,
+                &storage_key,
+                raisin_core::BlobKeyPolicy::AllowLegacy,
+            ) {
+                return Err(raisin_error::Error::NotFound(format!(
+                    "No stored file '{}'",
+                    storage_key
+                )));
+            }
             // Get binary data from storage
             let data = storage.get(&storage_key).await.map_err(|e| {
                 raisin_error::Error::Backend(format!(
@@ -279,3 +295,32 @@ where
 //         assert!(result.is_err());
 //     }
 // }
+
+#[cfg(test)]
+mod tenant_scope_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn get_binary_reads_only_the_callers_tenant() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(raisin_binary::FilesystemBinaryStorage::new(
+            dir.path(),
+            None,
+        ));
+        let mine = store
+            .put_bytes(b"mine", None, Some("bin"), None, Some("t1"))
+            .await
+            .unwrap();
+        let theirs = store
+            .put_bytes(b"theirs", None, Some("bin"), None, Some("t2"))
+            .await
+            .unwrap();
+        let get = create_resource_get_binary(store, "t1".to_string());
+        assert_eq!(get(mine.key).await.unwrap(), "bWluZQ==");
+        assert!(matches!(
+            get(theirs.key).await,
+            Err(raisin_error::Error::NotFound(_))
+        ));
+        assert!(get("t1/../t2/x".to_string()).await.is_err());
+    }
+}

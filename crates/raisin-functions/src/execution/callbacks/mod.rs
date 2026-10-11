@@ -158,6 +158,7 @@ where
         // Resource operations
         resource_get_binary: Some(resources::create_resource_get_binary(
             deps.binary_storage.clone(),
+            tenant_id.clone(),
         )),
 
         // Function execution - only available if job system dependencies are provided
