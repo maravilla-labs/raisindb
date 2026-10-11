@@ -34,6 +34,27 @@ pub fn init_binary_storage(data_dir: &str) -> Arc<FilesystemBinaryStorage> {
     bin
 }
 
+/// Uncommitted blob writes older than this are a dead process's leftovers.
+const PARTIAL_BLOB_GRACE: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Remove what writers killed mid-write left behind: filesystem `.partial`
+/// files and object-storage multipart uploads older than an hour. A live
+/// write is never that old without touching its file, and the no-orphan
+/// guarantee of a package build rests on this sweep for `kill -9`.
+pub fn sweep_partial_blobs_at_boot<B: BinaryStorage + 'static>(bin: &Arc<B>) {
+    let bin = bin.clone();
+    tokio::spawn(async move {
+        match bin.sweep_partials(PARTIAL_BLOB_GRACE).await {
+            Ok(0) => tracing::debug!("Boot partial-blob sweep: nothing to remove"),
+            Ok(removed) => tracing::info!(
+                removed,
+                "Boot partial-blob sweep: removed stale partial writes"
+            ),
+            Err(e) => tracing::warn!(error = %e, "Boot partial-blob sweep failed"),
+        }
+    });
+}
+
 /// Register the builtin package init handler and scan existing repositories.
 #[cfg(feature = "storage-rocksdb")]
 pub async fn register_builtin_package_handler<B: BinaryStorage + 'static>(

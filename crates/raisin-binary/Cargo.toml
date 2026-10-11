@@ -17,6 +17,11 @@ tokio = { workspace = true }
 tokio-util = { version = "0.7", features = ["io"] }
 http-body-util = { version = "0.1", optional = true }
 aws-smithy-types = { version = "1", features = ["rt-tokio"], optional = true }
+sha2 = "0.10"
+hex = { workspace = true }
+flate2 = "1"
+crc32fast = "1.4"
+fs4 = { version = "0.13", default-features = false }
 
 [features]
 default = ["fs"]
@@ -25,3 +30,5 @@ s3 = ["dep:aws-sdk-s3", "dep:http-body-util", "dep:aws-smithy-types"]
 
 [dev-dependencies]
 tempfile.workspace = true
+zip = { workspace = true }
+rand = "0.8"

@@ -1,16 +1,27 @@
 #[cfg(feature = "s3")]
 use aws_sdk_s3 as s3;
-#[cfg(feature = "s3")]
-use aws_sdk_s3::primitives::ByteStream;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures_core::Stream;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
+    ops::Range,
     path::{Path, PathBuf},
     pin::Pin,
 };
+
+mod dyn_store;
+mod hashing;
+#[cfg(feature = "s3")]
+mod s3_writer;
+pub mod space;
+mod writer;
+pub mod zip_stream;
+
+pub use dyn_store::{erase, DynBinaryStorage};
+pub use hashing::{sha256_hex_to_base64, HashingWriter, StreamDigest, StreamHasher};
+pub use writer::{BlobMeta, BlobWriter, BoxFuture, StorageSpace, WriteHint, PARTIAL_DIR};
 
 /// A boxed byte stream returned by [`BinaryStorage::get_stream`].
 pub type ByteReadStream = Pin<Box<dyn Stream<Item = std::io::Result<Bytes>> + Send>>;
@@ -211,6 +222,62 @@ pub trait BinaryStorage: Send + Sync {
     ) -> impl std::future::Future<Output = anyhow::Result<Option<Vec<ListedBlob>>>> + Send {
         async { Ok(None) }
     }
+
+    /// Open an incremental write that becomes visible only at
+    /// [`BlobWriter::commit`]. See [`writer`](crate::BlobWriter) for the
+    /// no-orphan contract.
+    fn begin_write(
+        &self,
+        hint: WriteHint,
+    ) -> impl std::future::Future<Output = anyhow::Result<Box<dyn BlobWriter>>> + Send;
+
+    /// Stream the half-open byte range `range` of a blob.
+    ///
+    /// The range must lie within the blob (`range.end <= size`); an empty
+    /// range yields an empty stream. Only the requested bytes are read.
+    fn get_range(
+        &self,
+        key: &str,
+        range: Range<u64>,
+    ) -> impl std::future::Future<Output = anyhow::Result<ByteReadStream>> + Send;
+
+    /// Size and modification time of a blob, `None` if it does not exist.
+    fn head(
+        &self,
+        key: &str,
+    ) -> impl std::future::Future<Output = anyhow::Result<Option<BlobMeta>>> + Send;
+
+    /// Free and total space of the volume this store writes to, or `None`
+    /// when the backend cannot observe it (object storage). Callers apply
+    /// [`space::check_room`] to the answer.
+    fn available_space(
+        &self,
+    ) -> impl std::future::Future<Output = anyhow::Result<Option<StorageSpace>>> + Send {
+        async { Ok(None) }
+    }
+
+    /// Remove uncommitted writes older than `older_than` — what a process
+    /// killed mid-write left behind. Returns how many were removed.
+    fn sweep_partials(
+        &self,
+        older_than: std::time::Duration,
+    ) -> impl std::future::Future<Output = anyhow::Result<usize>> + Send {
+        let _ = older_than;
+        async { Ok(0) }
+    }
+}
+
+/// Check a requested range against a blob's size.
+fn check_range(range: &Range<u64>, size: u64) -> anyhow::Result<()> {
+    if range.start > range.end || range.end > size {
+        anyhow::bail!(
+            "range {}..{} is outside a blob of {} bytes",
+            range.start,
+            range.end,
+            size
+        );
+    }
+    Ok(())
 }
 
 pub struct FilesystemBinaryStorage {
@@ -256,44 +323,21 @@ impl BinaryStorage for FilesystemBinaryStorage {
         content_type: Option<&'a str>,
         ext: Option<&'a str>,
         original_name: Option<&'a str>,
-        _size_hint: Option<u64>,
+        size_hint: Option<u64>,
         tenant_context: Option<&'a str>,
     ) -> anyhow::Result<StoredObject>
     where
         S: Stream<Item = Result<Bytes, std::io::Error>> + Send + 'a,
     {
-        use futures_util::StreamExt;
-        use tokio::io::AsyncWriteExt;
-
-        // Generate key with optional tenant prefix for multi-tenant isolation
-        let key = Self::generate_key(ext, tenant_context);
-        let path = self.base_dir.join(&key);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let mut file = tokio::fs::File::create(&path).await?;
-        let mut total: i64 = 0;
-        let mut stream = Box::pin(stream);
-        while let Some(chunk) = stream.next().await.transpose()? {
-            total += chunk.len() as i64;
-            file.write_all(&chunk).await?;
-        }
-        file.flush().await?;
-        let url = if let Some(base) = &self.url_base {
-            format!("{}/{}", base.trim_end_matches('/'), key)
-        } else {
-            format!("file://{}", path.to_string_lossy())
+        let hint = WriteHint {
+            content_type: content_type.map(str::to_string),
+            ext: ext.map(str::to_string),
+            original_name: original_name.map(str::to_string),
+            tenant_context: tenant_context.map(str::to_string),
+            size_hint,
         };
-        let now = Utc::now();
-        Ok(StoredObject {
-            key,
-            url,
-            name: original_name.map(|s| s.to_string()),
-            size: total,
-            mime_type: content_type.map(|s| s.to_string()),
-            created_at: now,
-            updated_at: now,
-        })
+        let writer = self.begin_write(hint).await?;
+        write_stream_and_commit(writer, stream).await
     }
 
     fn get(&self, key: &str) -> impl std::future::Future<Output = anyhow::Result<Bytes>> + Send {
@@ -373,6 +417,119 @@ impl BinaryStorage for FilesystemBinaryStorage {
                 .map_err(|e| anyhow::anyhow!("listing blobs failed: {e}"))?
         }
     }
+
+    async fn begin_write(&self, hint: WriteHint) -> anyhow::Result<Box<dyn BlobWriter>> {
+        let key = Self::generate_key(hint.ext.as_deref(), hint.tenant_context.as_deref());
+        let url = self.url_for(&key);
+        let writer = writer::FsBlobWriter::open(&self.base_dir, key, url, &hint).await?;
+        Ok(Box::new(writer))
+    }
+
+    fn get_range(
+        &self,
+        key: &str,
+        range: Range<u64>,
+    ) -> impl std::future::Future<Output = anyhow::Result<ByteReadStream>> + Send {
+        let validation_result = validate_key(key);
+        let path = self.base_dir.join(key);
+        async move {
+            use tokio::io::{AsyncReadExt, AsyncSeekExt};
+            validation_result?;
+            let mut file = tokio::fs::File::open(&path).await?;
+            let size = file.metadata().await?.len();
+            check_range(&range, size)?;
+            file.seek(std::io::SeekFrom::Start(range.start)).await?;
+            let limited = file.take(range.end - range.start);
+            let stream = tokio_util::io::ReaderStream::with_capacity(limited, 256 * 1024);
+            Ok(Box::pin(stream) as ByteReadStream)
+        }
+    }
+
+    fn head(
+        &self,
+        key: &str,
+    ) -> impl std::future::Future<Output = anyhow::Result<Option<BlobMeta>>> + Send {
+        let validation_result = validate_key(key);
+        let path = self.base_dir.join(key);
+        async move {
+            validation_result?;
+            match tokio::fs::metadata(&path).await {
+                Ok(meta) if meta.is_file() => Ok(Some(BlobMeta {
+                    size: meta.len(),
+                    modified: meta.modified().ok().map(DateTime::<Utc>::from),
+                })),
+                Ok(_) => Ok(None),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(e.into()),
+            }
+        }
+    }
+
+    fn available_space(
+        &self,
+    ) -> impl std::future::Future<Output = anyhow::Result<Option<StorageSpace>>> + Send {
+        let base = self.base_dir.clone();
+        async move {
+            tokio::task::spawn_blocking(move || {
+                // The store's directory may not exist yet; its volume is the
+                // nearest existing ancestor's.
+                let mut probe = base.as_path();
+                while !probe.exists() {
+                    match probe.parent() {
+                        Some(p) => probe = p,
+                        None => break,
+                    }
+                }
+                let stats = fs4::statvfs(probe)?;
+                Ok(Some(StorageSpace {
+                    available: stats.available_space(),
+                    total: stats.total_space(),
+                }))
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("free-space query failed: {e}"))?
+        }
+    }
+
+    fn sweep_partials(
+        &self,
+        older_than: std::time::Duration,
+    ) -> impl std::future::Future<Output = anyhow::Result<usize>> + Send {
+        let base = self.base_dir.clone();
+        async move {
+            tokio::task::spawn_blocking(move || writer::sweep_fs_partials(&base, older_than))
+                .await
+                .map_err(|e| anyhow::anyhow!("partial sweep failed: {e}"))?
+        }
+    }
+}
+
+/// Drain `stream` into `writer` and commit it; abort on any error.
+async fn write_stream_and_commit<S>(
+    mut writer: Box<dyn BlobWriter>,
+    stream: S,
+) -> anyhow::Result<StoredObject>
+where
+    S: Stream<Item = Result<Bytes, std::io::Error>> + Send,
+{
+    use futures_util::StreamExt;
+    use tokio::io::AsyncWriteExt;
+
+    let mut stream = Box::pin(stream);
+    let copied: anyhow::Result<()> = async {
+        while let Some(chunk) = stream.next().await.transpose()? {
+            writer.write_all(&chunk).await?;
+        }
+        Ok(())
+    }
+    .await;
+    match copied {
+        Ok(()) => writer.commit().await,
+        Err(e) => {
+            let _ = writer.abort().await;
+            Err(e)
+        }
+    }
 }
 
 /// Every regular file under `base`, keyed by its `/`-separated relative path.
@@ -389,6 +546,10 @@ fn list_files(base: &Path) -> anyhow::Result<Vec<ListedBlob>> {
             let file_type = entry.file_type()?;
             let path = entry.path();
             if file_type.is_dir() {
+                // Uncommitted writes are not blobs yet.
+                if dir == base && entry.file_name() == PARTIAL_DIR {
+                    continue;
+                }
                 dirs.push(path);
             } else if file_type.is_file() {
                 let Ok(rel) = path.strip_prefix(base) else {
@@ -456,54 +617,24 @@ impl BinaryStorage for S3BinaryStorage {
         content_type: Option<&'a str>,
         ext: Option<&'a str>,
         original_name: Option<&'a str>,
-        _size_hint: Option<u64>,
+        size_hint: Option<u64>,
         tenant_context: Option<&'a str>,
     ) -> impl std::future::Future<Output = anyhow::Result<StoredObject>> + Send
     where
         S: Stream<Item = Result<Bytes, std::io::Error>> + Send + 'a,
     {
+        // One write path: the multipart writer (a single PutObject below one
+        // part), so nothing is spooled to a local temp file any more.
+        let hint = WriteHint {
+            content_type: content_type.map(str::to_string),
+            ext: ext.map(str::to_string),
+            original_name: original_name.map(str::to_string),
+            tenant_context: tenant_context.map(str::to_string),
+            size_hint,
+        };
         async move {
-            use futures_util::StreamExt;
-            use tokio::io::AsyncWriteExt;
-            // Spool to a temporary file to avoid full buffering in memory and satisfy SDK body bounds
-            let tmp_path =
-                std::env::temp_dir().join(format!("raisin-upload-{}.tmp", nanoid::nanoid!()));
-            let mut file = tokio::fs::File::create(&tmp_path).await?;
-            let mut total: i64 = 0;
-            let mut s = Box::pin(stream);
-            while let Some(chunk) = s.next().await.transpose()? {
-                total += chunk.len() as i64;
-                file.write_all(&chunk).await?;
-            }
-            file.flush().await?;
-
-            // Generate key with optional tenant prefix for multi-tenant isolation
-            let key = FilesystemBinaryStorage::generate_key(ext, tenant_context);
-            let body = ByteStream::from_path(tmp_path.clone()).await?;
-            self.client
-                .put_object()
-                .bucket(&self.bucket)
-                .key(&key)
-                .set_content_type(content_type.map(|s| s.to_string()))
-                .body(body)
-                .send()
-                .await?;
-            let _ = tokio::fs::remove_file(tmp_path).await;
-            let now = Utc::now();
-            let url = if let Some(base) = &self.public_base {
-                format!("{}/{}", base.trim_end_matches('/'), key)
-            } else {
-                key.clone()
-            };
-            Ok(StoredObject {
-                key,
-                url,
-                name: original_name.map(|s| s.to_string()),
-                size: total,
-                mime_type: content_type.map(|s| s.to_string()),
-                created_at: now,
-                updated_at: now,
-            })
+            let writer = self.begin_write(hint).await?;
+            write_stream_and_commit(writer, stream).await
         }
     }
 
@@ -569,6 +700,98 @@ impl BinaryStorage for S3BinaryStorage {
         }
     }
 
+    fn begin_write(
+        &self,
+        hint: WriteHint,
+    ) -> impl std::future::Future<Output = anyhow::Result<Box<dyn BlobWriter>>> + Send {
+        let key = FilesystemBinaryStorage::generate_key(
+            hint.ext.as_deref(),
+            hint.tenant_context.as_deref(),
+        );
+        let url = self.url_for(&key);
+        let writer = s3_writer::S3BlobWriter::new(
+            self.client.clone(),
+            self.bucket.clone(),
+            key,
+            url,
+            hint.original_name,
+            hint.content_type,
+        );
+        async move { Ok(Box::new(writer) as Box<dyn BlobWriter>) }
+    }
+
+    fn get_range(
+        &self,
+        key: &str,
+        range: Range<u64>,
+    ) -> impl std::future::Future<Output = anyhow::Result<ByteReadStream>> + Send {
+        let validation_result = validate_key(key);
+        let bucket = self.bucket.clone();
+        let client = self.client.clone();
+        let key = key.to_string();
+        async move {
+            validation_result?;
+            if range.start > range.end {
+                anyhow::bail!("range {}..{} is inverted", range.start, range.end);
+            }
+            if range.start == range.end {
+                let empty = futures_util::stream::empty::<std::io::Result<Bytes>>();
+                return Ok(Box::pin(empty) as ByteReadStream);
+            }
+            let response = client
+                .get_object()
+                .bucket(&bucket)
+                .key(&key)
+                .range(format!("bytes={}-{}", range.start, range.end - 1))
+                .send()
+                .await?;
+            let reader = response.body.into_async_read();
+            let stream = tokio_util::io::ReaderStream::new(reader);
+            Ok(Box::pin(stream) as ByteReadStream)
+        }
+    }
+
+    fn head(
+        &self,
+        key: &str,
+    ) -> impl std::future::Future<Output = anyhow::Result<Option<BlobMeta>>> + Send {
+        let validation_result = validate_key(key);
+        let bucket = self.bucket.clone();
+        let client = self.client.clone();
+        let key = key.to_string();
+        async move {
+            validation_result?;
+            match client.head_object().bucket(&bucket).key(&key).send().await {
+                Ok(out) => Ok(Some(BlobMeta {
+                    size: out.content_length().unwrap_or(0).max(0) as u64,
+                    modified: out
+                        .last_modified()
+                        .and_then(|t| DateTime::<Utc>::from_timestamp(t.secs(), t.subsec_nanos())),
+                })),
+                Err(e) => {
+                    let not_found = e
+                        .as_service_error()
+                        .map(|se| se.is_not_found())
+                        .unwrap_or(false);
+                    if not_found {
+                        Ok(None)
+                    } else {
+                        Err(e.into())
+                    }
+                }
+            }
+        }
+    }
+
+    fn sweep_partials(
+        &self,
+        older_than: std::time::Duration,
+    ) -> impl std::future::Future<Output = anyhow::Result<usize>> + Send {
+        let client = self.client.clone();
+        let bucket = self.bucket.clone();
+        async move { s3_writer::sweep_s3_multipart(&client, &bucket, older_than).await }
+    }
+
     fn get_as_path(
         &self,
         key: &str,
@@ -632,5 +855,160 @@ mod tests {
         // A store whose directory was never created holds nothing.
         let empty = FilesystemBinaryStorage::new(dir.path().join("missing"), None);
         assert!(empty.list_blobs().await.unwrap().unwrap().is_empty());
+    }
+
+    async fn read_all(stream: ByteReadStream) -> Vec<u8> {
+        use futures_util::StreamExt;
+        let chunks: Vec<_> = stream.collect().await;
+        chunks
+            .into_iter()
+            .flat_map(|c| c.unwrap().to_vec())
+            .collect()
+    }
+
+    fn files_under(dir: &Path) -> usize {
+        list_files(dir).map(|v| v.len()).unwrap_or(0)
+            + std::fs::read_dir(dir.join(PARTIAL_DIR))
+                .map(|d| d.count())
+                .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn an_aborted_write_leaves_no_object() {
+        use tokio::io::AsyncWriteExt;
+        let dir = tempfile::tempdir().unwrap();
+        let store = FilesystemBinaryStorage::new(dir.path(), None);
+        let mut w = store
+            .begin_write(WriteHint::new().ext("rap").tenant(Some("t1")))
+            .await
+            .unwrap();
+        w.write_all(&[7u8; 100_000]).await.unwrap();
+        assert_eq!(w.bytes_written(), 100_000);
+        let key = w.key().to_string();
+        // Invisible until commit.
+        assert!(store.head(&key).await.unwrap().is_none());
+        w.abort().await.unwrap();
+        assert!(store.head(&key).await.unwrap().is_none());
+        assert_eq!(files_under(dir.path()), 0);
+    }
+
+    #[tokio::test]
+    async fn a_dropped_write_leaves_no_object() {
+        use tokio::io::AsyncWriteExt;
+        let dir = tempfile::tempdir().unwrap();
+        let store = FilesystemBinaryStorage::new(dir.path(), None);
+        {
+            let mut w = store.begin_write(WriteHint::new()).await.unwrap();
+            w.write_all(b"half an archive").await.unwrap();
+        }
+        assert_eq!(files_under(dir.path()), 0);
+    }
+
+    #[tokio::test]
+    async fn a_committed_write_reads_back_by_range() {
+        use tokio::io::AsyncWriteExt;
+        let dir = tempfile::tempdir().unwrap();
+        let store = FilesystemBinaryStorage::new(dir.path(), None);
+        let data: Vec<u8> = (0..1_000_000u32).map(|i| (i % 251) as u8).collect();
+        let mut w = store
+            .begin_write(
+                WriteHint::new()
+                    .ext("bin")
+                    .content_type("application/octet-stream"),
+            )
+            .await
+            .unwrap();
+        for chunk in data.chunks(65_537) {
+            w.write_all(chunk).await.unwrap();
+        }
+        let stored = w.commit().await.unwrap();
+        assert_eq!(stored.size, data.len() as i64);
+        assert_eq!(
+            stored.mime_type.as_deref(),
+            Some("application/octet-stream")
+        );
+
+        let meta = store.head(&stored.key).await.unwrap().unwrap();
+        assert_eq!(meta.size, data.len() as u64);
+
+        for r in [0..0u64, 0..1, 10..20, 999_990..1_000_000, 0..1_000_000] {
+            let got = read_all(store.get_range(&stored.key, r.clone()).await.unwrap()).await;
+            assert_eq!(got, &data[r.start as usize..r.end as usize]);
+        }
+        assert!(store.get_range(&stored.key, 0..1_000_001).await.is_err());
+        // The partial directory is empty and is not listed as a blob.
+        let listed = store.list_blobs().await.unwrap().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].key, stored.key);
+    }
+
+    #[tokio::test]
+    async fn put_stream_goes_through_the_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FilesystemBinaryStorage::new(dir.path(), None);
+        let s = futures_util::stream::iter(vec![
+            Ok(Bytes::from_static(b"ab")),
+            Err(std::io::Error::other("client went away")),
+        ]);
+        assert!(store
+            .put_stream(s, None, None, None, None, None)
+            .await
+            .is_err());
+        // A failed upload leaves nothing, not a truncated blob.
+        assert_eq!(files_under(dir.path()), 0);
+    }
+
+    #[tokio::test]
+    async fn the_boot_sweep_removes_stale_partials_only() {
+        use tokio::io::AsyncWriteExt;
+        let dir = tempfile::tempdir().unwrap();
+        let store = FilesystemBinaryStorage::new(dir.path(), None);
+        // Simulate a process killed mid-write: a partial nobody owns.
+        let mut w = store.begin_write(WriteHint::new()).await.unwrap();
+        w.write_all(b"orphan").await.unwrap();
+        std::mem::forget(w);
+        assert_eq!(files_under(dir.path()), 1);
+        // Fresh partials survive a sweep with a grace period...
+        assert_eq!(
+            store
+                .sweep_partials(std::time::Duration::from_secs(3600))
+                .await
+                .unwrap(),
+            0
+        );
+        // ...stale ones do not.
+        assert_eq!(
+            store
+                .sweep_partials(std::time::Duration::ZERO)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(files_under(dir.path()), 0);
+    }
+
+    #[tokio::test]
+    async fn free_space_is_observable_on_the_filesystem() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FilesystemBinaryStorage::new(dir.path().join("not-yet-created"), None);
+        let space = store.available_space().await.unwrap().unwrap();
+        assert!(space.total > 0);
+        assert!(space.available <= space.total);
+    }
+
+    #[tokio::test]
+    async fn the_dyn_view_streams_too() {
+        use tokio::io::AsyncWriteExt;
+        let dir = tempfile::tempdir().unwrap();
+        let store: std::sync::Arc<dyn DynBinaryStorage> = erase(std::sync::Arc::new(
+            FilesystemBinaryStorage::new(dir.path(), None),
+        ));
+        let mut w = store.begin_write(WriteHint::new()).await.unwrap();
+        w.write_all(b"0123456789").await.unwrap();
+        let stored = w.commit().await.unwrap();
+        let got = read_all(store.get_range(&stored.key, 3..7).await.unwrap()).await;
+        assert_eq!(got, b"3456");
+        store.delete(&stored.key).await.unwrap();
+        assert!(store.head(&stored.key).await.unwrap().is_none());
     }
 }

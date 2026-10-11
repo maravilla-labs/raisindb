@@ -544,6 +544,7 @@ async fn main() {
     let bin = startup::binary::init_binary_storage().await;
     #[cfg(not(feature = "s3"))]
     let bin = startup::binary::init_binary_storage(&server_config.data_dir);
+    startup::binary::sweep_partial_blobs_at_boot(&bin);
 
     // Revision-history GC, orphaned blobs, job history, operation log and
     // compaction, on `[storage] maintenance_interval_minutes`. Without it

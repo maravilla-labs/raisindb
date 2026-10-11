@@ -7425,14 +7425,21 @@ dependencies = [
  "aws-smithy-types",
  "bytes",
  "chrono",
+ "crc32fast",
+ "flate2",
+ "fs4",
  "futures-core",
  "futures-util",
+ "hex",
  "http-body-util",
  "nanoid",
+ "rand 0.8.5",
  "serde",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tokio-util",
+ "zip 2.4.2",
 ]
 
 [[package]]
