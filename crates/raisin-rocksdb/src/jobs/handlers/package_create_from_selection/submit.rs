@@ -141,13 +141,18 @@ pub async fn submit_package_build(
             "At least one path must be selected".to_string(),
         ));
     }
-    super::request::selection_roots(&request.selected_paths)?;
-    if let Some(r) = &request.record {
-        if r.workspace.is_empty() || !r.path.starts_with('/') {
-            return Err(Error::Validation(
-                "Build record needs a workspace and an absolute path".to_string(),
-            ));
+    for root in super::request::selection_roots(&request.selected_paths)? {
+        if !super::scope::workspace_allowed(&root.workspace) {
+            return Err(Error::Forbidden(format!(
+                "forbidden: workspace '{}' can never be exported",
+                root.workspace
+            )));
         }
+    }
+    // The engine writes the record with its own privileges: it must be a
+    // build state node of THIS tenant, repository and branch.
+    if let Some(r) = &request.record {
+        super::scope::validate_record(storage, tenant, repo, branch, &r.clone().into()).await?;
     }
 
     let registry = storage.job_registry();
@@ -301,24 +306,18 @@ pub struct BuildStatus {
     pub result: Option<serde_json::Value>,
 }
 
-/// Look up a package build job of this tenant. Any other job — another
-/// tenant's, or not a package build — reads as not found.
+/// Look up a package build job of this tenant and repository. Any other job
+/// — another tenant's or repository's, or not a package build — reads as not
+/// found.
 pub async fn package_build_status(
     storage: &Arc<RocksDBStorage>,
     tenant: &str,
+    repo: &str,
     job_id: &str,
 ) -> Result<Option<BuildStatus>> {
-    let Ok(info) = storage
-        .job_registry()
-        .get_job_info(&JobId(job_id.to_string()))
-        .await
-    else {
+    let Some(info) = super::scope::scoped_job(storage, tenant, repo, job_id).await else {
         return Ok(None);
     };
-    if info.tenant != tenant || !matches!(info.job_type, JobType::PackageCreateFromSelection { .. })
-    {
-        return Ok(None);
-    }
     let (status, error) = match &info.status {
         JobStatus::Scheduled => ("scheduled", None),
         JobStatus::Completed => ("completed", None),
@@ -335,25 +334,22 @@ pub async fn package_build_status(
     }))
 }
 
-/// Cancel a package build of this tenant: cooperatively first — the build
-/// stops at its next chunk, aborts its writers (no partial object), writes
-/// `cancelled` onto its record — and by aborting the task if it has not
-/// stopped within [`CANCEL_GRACE`]. Returns `false` for an unknown or
-/// foreign job, `true` once it is no longer running.
+/// Cancel a package build of this tenant and repository: cooperatively first
+/// — the build stops at its next chunk, aborts its writers (no partial
+/// object), writes `cancelled` onto its record — and by aborting the task if
+/// it has not stopped within [`CANCEL_GRACE`]. Returns `false` for an unknown
+/// or foreign job, `true` once it is no longer running.
 pub async fn cancel_package_build(
     storage: &Arc<RocksDBStorage>,
     tenant: &str,
+    repo: &str,
     job_id: &str,
 ) -> Result<bool> {
     let registry = storage.job_registry();
-    let id = JobId(job_id.to_string());
-    let Ok(info) = registry.get_job_info(&id).await else {
+    let Some(info) = super::scope::scoped_job(storage, tenant, repo, job_id).await else {
         return Ok(false);
     };
-    if info.tenant != tenant || !matches!(info.job_type, JobType::PackageCreateFromSelection { .. })
-    {
-        return Ok(false);
-    }
+    let id = info.id.clone();
     if matches!(
         info.status,
         JobStatus::Completed | JobStatus::Failed(_) | JobStatus::Cancelled

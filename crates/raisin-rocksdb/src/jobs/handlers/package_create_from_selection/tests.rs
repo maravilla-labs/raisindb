@@ -35,7 +35,7 @@ use std::sync::Arc;
 const T: &str = "pkg-t";
 const R: &str = "pkg-r";
 const B: &str = "main";
-const RECORD: &str = "/packages/site/b-1";
+const RECORD: &str = "/packages/site/b-1/state";
 
 struct Fixture {
     _dir: tempfile::TempDir,
@@ -77,10 +77,27 @@ fn folder_type() -> NodeType {
     }
 }
 
+fn loose_type(name: &str) -> NodeType {
+    let mut t = folder_type();
+    t.id = Some(name.to_string());
+    t.name = name.to_string();
+    t
+}
+
 async fn create(storage: &RocksDBStorage, ws: &str, path: &str, props: Vec<(&str, PropertyValue)>) {
+    create_typed(storage, ws, path, "raisin:Folder", props).await
+}
+
+async fn create_typed(
+    storage: &RocksDBStorage,
+    ws: &str,
+    path: &str,
+    node_type: &str,
+    props: Vec<(&str, PropertyValue)>,
+) {
     let node = Node {
         id: uuid::Uuid::new_v4().to_string(),
-        node_type: "raisin:Folder".to_string(),
+        node_type: node_type.to_string(),
         properties: props.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
         ..Default::default()
     };
@@ -100,6 +117,43 @@ async fn create(storage: &RocksDBStorage, ws: &str, path: &str, props: Vec<(&str
         )
         .await
         .unwrap_or_else(|e| panic!("create {ws}:{path}: {e}"));
+}
+
+/// The context a write by `actor` commits under: a user (with write access)
+/// for a person, the plain system context otherwise — the principal the
+/// write path stamps as `updated_by`.
+fn writer_context(actor: &str) -> AuthContext {
+    if actor == "system" {
+        AuthContext::system()
+    } else if let Some(agent) = actor.strip_prefix("agent:") {
+        AuthContext::system().with_agent(&format!("agent:{agent}"))
+    } else {
+        AuthContext::for_user(actor)
+            .with_permissions(raisin_models::permissions::ResolvedPermissions::system_admin())
+    }
+}
+
+/// Create a build request node through a transaction whose principal is
+/// `actor`, as a person's write through the API would be.
+async fn create_request_by(storage: &RocksDBStorage, path: &str, actor: &str) {
+    use raisin_storage::transactional::TransactionalStorage;
+    let tx = storage.begin_context().await.unwrap();
+    tx.set_tenant_repo(T, R).unwrap();
+    tx.set_branch(B).unwrap();
+    tx.set_actor(actor).unwrap();
+    tx.set_auth_context(writer_context(actor)).unwrap();
+    tx.set_validate_schema(false).unwrap();
+    let node = Node {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: path.rsplit('/').next().unwrap().to_string(),
+        path: path.to_string(),
+        node_type: "raisin:Folder".to_string(),
+        ..Default::default()
+    };
+    tx.add_deep_node("settings", &node, "raisin:Folder")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
 }
 
 fn file_resource(key: &str, size: usize, mime: &str) -> PropertyValue {
@@ -151,16 +205,29 @@ async fn fixture(pages: usize, big_asset: usize) -> Fixture {
         .create_branch(T, R, B, "system", None, None, false, false)
         .await
         .unwrap();
-    storage
-        .node_types()
-        .upsert(
-            BranchScope::new(T, R, B),
-            folder_type(),
-            CommitMetadata::system("seed"),
-        )
-        .await
-        .unwrap();
-    for ws in ["content", "assets", "settings", "packages"] {
+    for nt in [
+        folder_type(),
+        loose_type(super::scope::RECORD_NODE_TYPE),
+        loose_type("raisin:User"),
+        loose_type("raisin:Identity"),
+    ] {
+        storage
+            .node_types()
+            .upsert(
+                BranchScope::new(T, R, B),
+                nt,
+                CommitMetadata::system("seed"),
+            )
+            .await
+            .unwrap();
+    }
+    for ws in [
+        "content",
+        "assets",
+        "settings",
+        "packages",
+        "raisin:access_control",
+    ] {
         let mut w = Workspace::new(ws.to_string());
         w.config.default_branch = B.to_string();
         WorkspaceService::new(storage.clone())
@@ -230,10 +297,35 @@ async fn fixture(pages: usize, big_asset: usize) -> Fixture {
     )
     .await;
 
-    create(
+    // The request node, written by a person (alice) — the actor a binding
+    // build resolves — and two users: alice the administrator, bob not.
+    create_request_by(&storage, "/packages/site/b-1", "alice").await;
+    for (id, roles) in [("alice", vec!["system_admin"]), ("bob", vec![])] {
+        create_typed(
+            &storage,
+            "raisin:access_control",
+            &format!("/users/{id}"),
+            "raisin:User",
+            vec![
+                ("user_id", PropertyValue::String(id.into())),
+                (
+                    "roles",
+                    PropertyValue::Array(
+                        roles
+                            .into_iter()
+                            .map(|r| PropertyValue::String(r.into()))
+                            .collect(),
+                    ),
+                ),
+            ],
+        )
+        .await;
+    }
+    create_typed(
         &storage,
         "settings",
         RECORD,
+        super::scope::RECORD_NODE_TYPE,
         vec![("status", PropertyValue::String("queued".into()))],
     )
     .await;
@@ -1099,4 +1191,243 @@ async fn an_artifact_a_forked_record_still_names_is_kept() {
         f.blobs.head(&archive_key).await.unwrap().is_some(),
         "the fork still names it"
     );
+}
+
+fn request_for(record_path: &str, key: &str) -> PackageBuildRequest {
+    let mut r = request(key);
+    r.record = Some(RecordRefWire {
+        workspace: "settings".into(),
+        path: record_path.into(),
+    });
+    r
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn builds_records_and_jobs_stay_in_their_own_scope() {
+    let f = fixture(2, 16).await;
+    let submitted = submit_package_build(&f.storage, T, R, B, &request("s1"), &requester())
+        .await
+        .unwrap();
+    // Another repository cannot see or stop this job.
+    assert!(
+        super::submit::package_build_status(&f.storage, T, "other-repo", &submitted.job_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        !super::submit::cancel_package_build(&f.storage, T, "other-repo", &submitted.job_id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        super::submit::package_build_status(&f.storage, "other-tenant", R, &submitted.job_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        super::submit::package_build_status(&f.storage, T, R, &submitted.job_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // The record must be a build state node of this repository.
+    create_typed(
+        &f.storage,
+        "settings",
+        "/packages/site/b-9/state",
+        "raisin:Folder",
+        vec![],
+    )
+    .await;
+    for path in [
+        "/packages/site/b-1",           // the request node, not the state
+        "/packages/site/b-9/state",     // wrong node type
+        "/packages/site/missing/state", // does not exist
+        "/elsewhere/site/b-1/state",    // wrong shape
+    ] {
+        let err = submit_package_build(&f.storage, T, R, B, &request_for(path, path), &requester())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, raisin_error::Error::Validation(_)),
+            "{path}: {err}"
+        );
+    }
+    let mut wrong_ws = request("s2");
+    wrong_ws.record = Some(RecordRefWire {
+        workspace: "content".into(),
+        path: RECORD.into(),
+    });
+    assert!(
+        submit_package_build(&f.storage, T, R, B, &wrong_ws, &requester())
+            .await
+            .is_err()
+    );
+    // The same record path in another repository does not exist there.
+    assert!(
+        submit_package_build(&f.storage, T, "other-repo", B, &request("s3"), &requester())
+            .await
+            .is_err()
+    );
+
+    // A denylisted workspace is refused outright.
+    let mut secrets = request("s4");
+    secrets.selected_paths = vec![SelectedPath {
+        workspace: "settings".into(),
+        path: "/*".into(),
+    }];
+    let err = submit_package_build(&f.storage, T, R, B, &secrets, &requester())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, raisin_error::Error::Forbidden(_)), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_denylisted_node_type_under_a_selected_subtree_is_never_archived() {
+    let f = fixture(2, 16).await;
+    create_typed(
+        &f.storage,
+        "content",
+        "/site/s0/leaked-identity",
+        "raisin:Identity",
+        vec![(
+            "password_hash",
+            PropertyValue::String("$argon2id$secret".into()),
+        )],
+    )
+    .await;
+    let submitted = submit_package_build(&f.storage, T, R, B, &request("d1"), &requester())
+        .await
+        .unwrap();
+    run(&f, &handler(&f, None), &submitted.job_id)
+        .await
+        .unwrap();
+    let rec = record(&f).await;
+    let (archive_key, _) = resource_key(&rec, "artifact");
+    let archive = f.blobs.get(&archive_key).await.unwrap();
+    assert!(!archive.windows(16).any(|w| w == b"$argon2id$secret"));
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive.to_vec())).unwrap();
+    let mut inv = String::new();
+    zip.by_name("inventory.jsonl")
+        .unwrap()
+        .read_to_string(&mut inv)
+        .unwrap();
+    assert!(!inv.contains("leaked-identity"));
+    let Some(PropertyValue::Object(counters)) = rec.get("counters") else {
+        panic!("no counters");
+    };
+    assert_eq!(counters.get("skipped"), Some(&PropertyValue::Integer(1)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_binding_build_runs_as_the_person_who_requested_it_and_nobody_else() {
+    let f = fixture(2, 16).await;
+    crate::package_build::install(&f.storage);
+    let scope = || crate::package_build::CallScope {
+        tenant: T,
+        repo: R,
+        branch: B,
+    };
+    // The function itself runs as the system; that is NOT the actor.
+    let ok = crate::package_build::call(
+        scope(),
+        &AuthContext::system(),
+        "createFromSelection",
+        serde_json::to_value(request("a1")).unwrap(),
+    )
+    .await
+    .unwrap();
+    let job_id = ok["job_id"].as_str().unwrap().to_string();
+    let ctx = f
+        .storage
+        .job_data_store()
+        .get(T, &JobId(job_id))
+        .unwrap()
+        .unwrap();
+    let actor =
+        raisin_core::services::package_export_access::requester_from_metadata(&ctx.metadata)
+            .unwrap();
+    assert_eq!(actor.user_id.as_deref(), Some("alice"));
+    assert!(!actor.is_system);
+
+    // Requests created by a machine, by a non-admin, or with a forged
+    // created_by are refused.
+    for (run, writer, forged_created_by) in [
+        ("m1", "agent:/agents/bot", None),
+        ("m2", "system", None),
+        ("m3", "bob", None),
+        ("m4", "bob", Some("alice")),
+        ("m5", "nobody-here", None),
+    ] {
+        let parent = format!("/packages/site/{run}");
+        if let Some(claimed) = forged_created_by {
+            use raisin_storage::transactional::TransactionalStorage;
+            let tx = f.storage.begin_context().await.unwrap();
+            tx.set_tenant_repo(T, R).unwrap();
+            tx.set_branch(B).unwrap();
+            tx.set_actor(writer).unwrap();
+            tx.set_auth_context(writer_context(writer)).unwrap();
+            tx.set_validate_schema(false).unwrap();
+            let node = Node {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: run.to_string(),
+                path: parent.clone(),
+                node_type: "raisin:Folder".to_string(),
+                created_by: Some(claimed.to_string()),
+                ..Default::default()
+            };
+            tx.add_deep_node("settings", &node, "raisin:Folder")
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+        } else {
+            create_request_by(&f.storage, &parent, writer).await;
+        }
+        let state = format!("{parent}/state");
+        create_typed(
+            &f.storage,
+            "settings",
+            &state,
+            super::scope::RECORD_NODE_TYPE,
+            vec![],
+        )
+        .await;
+        let err = crate::package_build::call(
+            scope(),
+            &AuthContext::system(),
+            "createFromSelection",
+            serde_json::to_value(request_for(&state, run)).unwrap(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, raisin_error::Error::Forbidden(_)),
+            "{run}: {err}"
+        );
+    }
+
+    // A binding call may not name another branch, and must name a record.
+    let mut other_branch = serde_json::to_value(request("a2")).unwrap();
+    other_branch["branch"] = serde_json::json!("publish");
+    assert!(crate::package_build::call(
+        scope(),
+        &AuthContext::system(),
+        "createFromSelection",
+        other_branch
+    )
+    .await
+    .is_err());
+    let mut no_record = request("a3");
+    no_record.record = None;
+    assert!(crate::package_build::call(
+        scope(),
+        &AuthContext::system(),
+        "createFromSelection",
+        serde_json::to_value(no_record).unwrap()
+    )
+    .await
+    .is_err());
 }

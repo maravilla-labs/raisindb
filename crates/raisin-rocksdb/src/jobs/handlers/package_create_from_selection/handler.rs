@@ -439,6 +439,13 @@ impl PackageCreateFromSelectionHandler {
             if request::covered_by(&spec.roots, idx) {
                 continue;
             }
+            if !super::scope::workspace_allowed(&root.workspace) {
+                return Err(Stop::Refused {
+                    code: "forbidden",
+                    message: format!("workspace '{}' can never be exported", root.workspace),
+                    detail: None,
+                });
+            }
             let scope = StorageScope::new(tenant, repo, branch, &root.workspace);
             let (start_id, single) = if root.whole_workspace() {
                 (crate::constants::ROOT_PARENT_ID.to_string(), None)
@@ -511,6 +518,13 @@ impl PackageCreateFromSelectionHandler {
                         progress.counters.skipped += 1;
                         continue;
                     };
+                    // Secrets and credentials never leave, whatever the
+                    // selection compiled to (a node can appear under a
+                    // selected subtree after dispatch).
+                    if !super::scope::node_type_allowed(&node.node_type) {
+                        progress.counters.skipped += 1;
+                        continue;
+                    }
                     let has_children = archive::embedded_file(&node).is_none()
                         && self
                             .storage

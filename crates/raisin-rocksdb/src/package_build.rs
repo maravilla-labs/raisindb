@@ -46,17 +46,17 @@ pub struct CallScope<'a> {
 /// `raisin.packages.<method>(args)`:
 ///
 /// - `createFromSelection(request)` — the HTTP request body
-///   ([`PackageBuildRequest`]: `name`, `version?`, `selected_paths`,
-///   `include_node_types?`, `record?`, `register_package?`,
-///   `idempotency_key?`, `title?`, `description?`, `author?`), plus an
-///   optional `branch`. Returns `{job_id, existing, status: "scheduled"}`.
+///   ([`PackageBuildRequest`]), with `record` REQUIRED. Returns
+///   `{job_id, existing, status: "scheduled"}`.
 /// - `cancel({jobId})` — cooperative cancel (≤ 5 s, then abort). Returns
-///   `{job_id, cancelled}`; `cancelled: false` for an unknown job.
+///   `{job_id, cancelled}`; `cancelled: false` for an unknown or foreign job.
 /// - `status({jobId})` — `{job_id, status, progress, error, result}` or
-///   `null` for an unknown job.
+///   `null` for an unknown or foreign job.
 ///
-/// The caller must be allowed to export packages (system, or an
-/// administrator); the build reads the selection as that caller.
+/// Everything is scoped to the calling function's tenant, repository and
+/// branch; nothing in `args` can widen it. The build's actor is never the
+/// function's identity nor anything in the request: it is the person who
+/// created the record's request node (see `scope::requester_from_record`).
 pub async fn call(
     scope: CallScope<'_>,
     auth: &AuthContext,
@@ -70,16 +70,37 @@ pub async fn call(
     })?;
     match method {
         "createFromSelection" => {
-            let branch = args
-                .get("branch")
-                .and_then(Value::as_str)
-                .unwrap_or(scope.branch)
-                .to_string();
+            if args.get("branch").is_some() {
+                return Err(Error::Validation(
+                    "a package build runs on the calling function's branch; 'branch' is not accepted"
+                        .into(),
+                ));
+            }
             let request: PackageBuildRequest = serde_json::from_value(args)
                 .map_err(|e| Error::Validation(format!("Invalid package build request: {e}")))?;
-            let submitted =
-                submit_package_build(&storage, scope.tenant, scope.repo, &branch, &request, auth)
-                    .await?;
+            let record: crate::jobs::handlers::package_create_from_selection::RecordRef = request
+                .record
+                .clone()
+                .ok_or_else(|| Error::Validation("'record' is required".into()))?
+                .into();
+            let requester =
+                crate::jobs::handlers::package_create_from_selection::scope::requester_from_record(
+                    &storage,
+                    scope.tenant,
+                    scope.repo,
+                    scope.branch,
+                    &record,
+                )
+                .await?;
+            let submitted = submit_package_build(
+                &storage,
+                scope.tenant,
+                scope.repo,
+                scope.branch,
+                &request,
+                &requester,
+            )
+            .await?;
             Ok(json!({
                 "job_id": submitted.job_id,
                 "existing": submitted.existing,
@@ -89,14 +110,15 @@ pub async fn call(
         "cancel" => {
             let job_id = job_id_of(&args)?;
             authorize(auth)?;
-            let cancelled = cancel_package_build(&storage, scope.tenant, &job_id).await?;
+            let cancelled =
+                cancel_package_build(&storage, scope.tenant, scope.repo, &job_id).await?;
             Ok(json!({ "job_id": job_id, "cancelled": cancelled }))
         }
         "status" => {
             let job_id = job_id_of(&args)?;
             authorize(auth)?;
             Ok(
-                match package_build_status(&storage, scope.tenant, &job_id).await? {
+                match package_build_status(&storage, scope.tenant, scope.repo, &job_id).await? {
                     Some(status) => serde_json::to_value(status).unwrap_or(Value::Null),
                     None => Value::Null,
                 },

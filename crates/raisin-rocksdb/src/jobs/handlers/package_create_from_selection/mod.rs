@@ -17,6 +17,7 @@ mod mirror;
 mod progress;
 mod registration;
 mod request;
+pub mod scope;
 mod submit;
 #[cfg(test)]
 mod tests;
