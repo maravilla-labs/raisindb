@@ -171,3 +171,100 @@ async fn files_and_listings_come_from_ranged_reads() {
 
     let _ = bin.delete(&stored.key).await;
 }
+
+#[tokio::test]
+async fn zip_bombs_stop_at_the_cap() {
+    let f = Fixture::new("pkg-bomb", REPO, BRANCH, &["packages"], &["raisin:Package"]).await;
+    // 80 MiB of zeros deflates to ~80 KB.
+    let zeros = vec![0u8; 80 * 1024 * 1024];
+    let mut inner = ZipStreamWriter::new(Vec::new());
+    inner
+        .write_entry("bomb.yaml", Compression::Deflate(9), &zeros)
+        .await
+        .unwrap();
+    let inner = inner.finish().await.unwrap();
+    let mut zip = ZipStreamWriter::new(Vec::new());
+    zip.write_entry("bomb.yaml", Compression::Deflate(9), &zeros)
+        .await
+        .unwrap();
+    zip.write_entry("nested.rap", Compression::Stored, &inner)
+        .await
+        .unwrap();
+    zip.write_entry("manifest.yaml", Compression::Deflate(6), MANIFEST)
+        .await
+        .unwrap();
+    let archive = zip.finish().await.unwrap();
+    drop(zeros);
+    assert!(archive.len() < 1_000_000);
+
+    let bin = FilesystemBinaryStorage::new("./.data/uploads", Some("/files".into()));
+    let stored = bin
+        .put_bytes(
+            &archive,
+            Some("application/zip"),
+            Some("rap"),
+            None,
+            Some(TENANT),
+        )
+        .await
+        .unwrap();
+    let mut resource = HashMap::new();
+    resource.insert("key".to_string(), PropertyValue::String(stored.key.clone()));
+    let mut props = HashMap::new();
+    props.insert("resource".to_string(), PropertyValue::Object(resource));
+    f.storage
+        .nodes()
+        .create(
+            StorageScope::new(TENANT, REPO, BRANCH, "packages"),
+            raisin_models::nodes::Node {
+                id: "package-bomb".into(),
+                name: "bomb".into(),
+                path: "/bomb".into(),
+                parent: Some("/".into()),
+                node_type: "raisin:Package".into(),
+                properties: props,
+                ..Default::default()
+            },
+            CreateNodeOptions {
+                validate_schema: false,
+                validate_parent_allows_child: false,
+                validate_workspace_allows_type: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let base = format!("/api/packages/{REPO}/{BRANCH}/head/bomb");
+
+    // A top-level bomb: the response stops early (ratio guard), never 80 MiB.
+    let res = f
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("{base}/raisin:file/bomb.yaml"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    match res.into_body().collect().await {
+        Ok(b) => assert!(b.to_bytes().len() < 80 * 1024 * 1024),
+        Err(_) => {} // the stream was cut: the cap held
+    }
+
+    // A bomb inside a nested archive (read in memory) is refused.
+    let (status, body) = get(&f.app, &format!("{base}/raisin:file/nested.rap/bomb.yaml")).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+
+    // The manifest beside them is still readable.
+    let (status, body) = get(&f.app, &format!("{base}/raisin:file/manifest.yaml")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, MANIFEST);
+    let _ = bin.delete(&stored.key).await;
+}

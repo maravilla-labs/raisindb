@@ -668,6 +668,9 @@ fn parse_central_record(c: &mut Cursor<'_>) -> anyhow::Result<CentralEntry> {
     let comment_len = c.u16()? as usize;
     c.take(2 + 2 + 4)?;
     let mut local_header_offset = c.u32()? as u64;
+    if name_len > MAX_ENTRY_NAME {
+        return Err(bad(format!("entry name of {name_len} bytes")));
+    }
     let name = String::from_utf8_lossy(c.take(name_len)?).into_owned();
     let extra = c.take(extra_len)?;
     c.take(comment_len)?;
@@ -722,12 +725,18 @@ where
     }
     let cd = fetch(cd_offset..cd_offset + cd_size).await?;
     let mut c = Cursor::new(&cd);
-    let mut out = Vec::with_capacity(entries.min(1 << 20) as usize);
+    // Never sized from the declared count beyond a small bound: the records
+    // themselves (bounded by `max_cd_bytes`) are what is parsed.
+    let mut out = Vec::with_capacity(entries.min(4096) as usize);
     for _ in 0..entries {
         out.push(parse_central_record(&mut c)?);
     }
     Ok(out)
 }
+
+/// Longest entry name a reader accepts. The format allows 64 KiB; nothing
+/// this engine writes comes close, and a listing echoes names back.
+pub const MAX_ENTRY_NAME: usize = 4096;
 
 /// Window used by [`find_entry`] to walk a central directory.
 const FIND_WINDOW: u64 = 256 * 1024;
@@ -805,64 +814,135 @@ where
     Ok(start..start + entry.compressed_size)
 }
 
-/// Inflate a raw-deflate byte stream as it arrives.
-pub fn inflate_stream(input: crate::ByteReadStream) -> crate::ByteReadStream {
+/// Bounds on what inflating untrusted data may produce.
+///
+/// A deflate stream can expand ~1000×, so a few kilobytes of a crafted entry
+/// can claim gigabytes. Output is produced in small chunks (never sized from
+/// anything the archive declares), and the stream fails as soon as it passes
+/// `max_output` bytes or `max_ratio` times its input (plus a small slack so
+/// tiny, legitimately very compressible entries still pass).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InflateLimits {
+    pub max_output: u64,
+    pub max_ratio: u64,
+}
+
+impl InflateLimits {
+    /// Output a ratio guard always allows, however small the input.
+    pub const RATIO_SLACK: u64 = 1024 * 1024;
+    /// The largest chunk one poll produces.
+    pub const CHUNK: usize = 256 * 1024;
+
+    fn exceeded(&self, total_in: u64, total_out: u64) -> Option<String> {
+        if total_out > self.max_output {
+            return Some(format!(
+                "inflated output passed the limit of {} bytes",
+                self.max_output
+            ));
+        }
+        let allowed = total_in
+            .saturating_mul(self.max_ratio)
+            .saturating_add(Self::RATIO_SLACK);
+        if total_out > allowed {
+            return Some(format!(
+                "inflated output is more than {}× its compressed size",
+                self.max_ratio
+            ));
+        }
+        None
+    }
+}
+
+/// Inflate a raw-deflate byte stream as it arrives, within `limits`.
+///
+/// Each poll inflates at most [`InflateLimits::CHUNK`] bytes of output,
+/// carrying unconsumed input over to the next poll, so memory is one chunk
+/// whatever the entry expands to. Passing a limit ends the stream with an
+/// error; so does a stream that ends before its final block.
+pub fn inflate_stream(
+    input: crate::ByteReadStream,
+    limits: InflateLimits,
+) -> crate::ByteReadStream {
     use futures_util::StreamExt;
     struct State {
         input: crate::ByteReadStream,
         inflater: flate2::Decompress,
+        pending: Bytes,
+        input_done: bool,
         done: bool,
+        limits: InflateLimits,
     }
     let state = State {
         input,
         inflater: flate2::Decompress::new(false),
+        pending: Bytes::new(),
+        input_done: false,
         done: false,
+        limits,
     };
-    Box::pin(futures_util::stream::unfold(state, |mut st| async move {
-        loop {
-            if st.done {
-                return None;
-            }
-            let chunk = match st.input.next().await {
-                Some(Ok(c)) => c,
-                Some(Err(e)) => {
-                    st.done = true;
-                    return Some((Err(e), st));
-                }
-                None => return None,
-            };
-            let mut out = Vec::with_capacity(chunk.len() * 4 + 1024);
-            let mut input: &[u8] = &chunk;
+    let fail = |st: &mut State, msg: String| {
+        st.done = true;
+        std::io::Error::new(std::io::ErrorKind::InvalidData, msg)
+    };
+    Box::pin(futures_util::stream::unfold(
+        state,
+        move |mut st| async move {
             loop {
-                if out.capacity() - out.len() < 1024 {
-                    out.reserve(64 * 1024);
+                if st.done {
+                    return None;
                 }
-                let before = st.inflater.total_in();
-                let status =
-                    match st
-                        .inflater
-                        .decompress_vec(input, &mut out, flate2::FlushDecompress::None)
-                    {
-                        Ok(s) => s,
-                        Err(e) => {
+                if st.pending.is_empty() && !st.input_done {
+                    match st.input.next().await {
+                        Some(Ok(c)) => st.pending = c,
+                        Some(Err(e)) => {
                             st.done = true;
-                            return Some((Err(std::io::Error::other(e)), st));
+                            return Some((Err(e), st));
                         }
-                    };
-                input = &input[(st.inflater.total_in() - before) as usize..];
+                        None => st.input_done = true,
+                    }
+                }
+                let mut out = Vec::with_capacity(InflateLimits::CHUNK);
+                let before_in = st.inflater.total_in();
+                let before_out = st.inflater.total_out();
+                let flush = if st.input_done {
+                    flate2::FlushDecompress::Finish
+                } else {
+                    flate2::FlushDecompress::None
+                };
+                let status = match st.inflater.decompress_vec(&st.pending, &mut out, flush) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let err = fail(&mut st, format!("corrupt deflate data: {e}"));
+                        return Some((Err(err), st));
+                    }
+                };
+                let consumed = (st.inflater.total_in() - before_in) as usize;
+                st.pending = st.pending.slice(consumed..);
+                if let Some(msg) = st
+                    .limits
+                    .exceeded(st.inflater.total_in(), st.inflater.total_out())
+                {
+                    let err = fail(&mut st, msg);
+                    return Some((Err(err), st));
+                }
+                let produced = st.inflater.total_out() - before_out;
                 if status == flate2::Status::StreamEnd {
                     st.done = true;
-                    break;
+                    if out.is_empty() {
+                        return None;
+                    }
+                    return Some((Ok(Bytes::from(out)), st));
                 }
-                if input.is_empty() && out.len() < out.capacity() {
-                    break;
+                if !out.is_empty() {
+                    return Some((Ok(Bytes::from(out)), st));
+                }
+                if consumed == 0 && produced == 0 && (st.input_done || !st.pending.is_empty()) {
+                    let err = fail(&mut st, "truncated or corrupt deflate stream".to_string());
+                    return Some((Err(err), st));
                 }
             }
-            if !out.is_empty() {
-                return Some((Ok(Bytes::from(out)), st));
-            }
-        }
-    }))
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -1026,7 +1106,13 @@ mod tests {
                         .collect::<Vec<_>>(),
                 ));
                 let body = if entry.is_deflated() {
-                    inflate_stream(body)
+                    inflate_stream(
+                        body,
+                        InflateLimits {
+                            max_output: entry.size,
+                            max_ratio: 2000,
+                        },
+                    )
                 } else {
                     body
                 };
@@ -1079,6 +1165,108 @@ mod tests {
         assert!(
             largest.load(std::sync::atomic::Ordering::Relaxed) <= FIND_WINDOW.max(22 + 65_535 + 20)
         );
+    }
+
+    fn deflate_raw(data: &[u8]) -> Vec<u8> {
+        let mut c = flate2::Compress::new(flate2::Compression::new(9), false);
+        let mut out = Vec::with_capacity(data.len() / 100 + 1024);
+        loop {
+            let before = c.total_in() as usize;
+            let st = c
+                .compress_vec(&data[before..], &mut out, flate2::FlushCompress::Finish)
+                .unwrap();
+            if st == flate2::Status::StreamEnd {
+                return out;
+            }
+            out.reserve(64 * 1024);
+        }
+    }
+
+    async fn drain(s: crate::ByteReadStream) -> (u64, Option<std::io::Error>, usize) {
+        use futures_util::StreamExt;
+        let mut s = s;
+        let mut total = 0u64;
+        let mut largest = 0usize;
+        while let Some(c) = s.next().await {
+            match c {
+                Ok(c) => {
+                    largest = largest.max(c.len());
+                    total += c.len() as u64;
+                }
+                Err(e) => return (total, Some(e), largest),
+            }
+        }
+        (total, None, largest)
+    }
+
+    #[tokio::test]
+    async fn a_zip_bomb_is_refused_within_bounded_memory() {
+        // 64 MiB of zeros deflates to ~64 KB: a 1000× bomb.
+        let zeros = vec![0u8; 64 * 1024 * 1024];
+        let bomb = Bytes::from(deflate_raw(&zeros));
+        drop(zeros);
+        assert!(bomb.len() < 200_000);
+        let one = |b: Bytes| -> crate::ByteReadStream {
+            Box::pin(futures_util::stream::iter(vec![Ok(b)]))
+        };
+
+        // The ratio guard: refused long before 64 MiB, in small chunks.
+        let (out, err, largest) = drain(inflate_stream(
+            one(bomb.clone()),
+            InflateLimits {
+                max_output: u64::MAX,
+                max_ratio: 100,
+            },
+        ))
+        .await;
+        assert!(err.unwrap().to_string().contains("compressed size"));
+        assert!(
+            out < 100 * bomb.len() as u64
+                + InflateLimits::RATIO_SLACK
+                + InflateLimits::CHUNK as u64
+        );
+        assert!(largest <= InflateLimits::CHUNK);
+
+        // The absolute cap.
+        let (out, err, _) = drain(inflate_stream(
+            one(bomb.clone()),
+            InflateLimits {
+                max_output: 1_000_000,
+                max_ratio: u64::MAX,
+            },
+        ))
+        .await;
+        assert!(err.unwrap().to_string().contains("limit"));
+        assert!(out <= 1_000_000 + InflateLimits::CHUNK as u64);
+
+        // Within limits the whole thing comes out, chunk by chunk.
+        let (out, err, largest) = drain(inflate_stream(
+            one(bomb),
+            InflateLimits {
+                max_output: 64 * 1024 * 1024,
+                max_ratio: 2000,
+            },
+        ))
+        .await;
+        assert!(err.is_none());
+        assert_eq!(out, 64 * 1024 * 1024);
+        assert!(largest <= InflateLimits::CHUNK);
+    }
+
+    #[tokio::test]
+    async fn a_truncated_deflate_stream_is_an_error() {
+        let data = deflate_raw(&b"hello world ".repeat(10_000));
+        let cut = Bytes::from(data[..data.len() / 2].to_vec());
+        let s: crate::ByteReadStream = Box::pin(futures_util::stream::iter(vec![Ok(cut)]));
+        let (_, err, _) = drain(inflate_stream(
+            s,
+            InflateLimits {
+                max_output: u64::MAX,
+                max_ratio: u64::MAX,
+            },
+        ))
+        .await;
+        assert!(err.is_some());
     }
 
     #[tokio::test]

@@ -32,8 +32,23 @@ const MAX_NESTING_DEPTH: usize = 3;
 /// A listing reads the whole central directory; this bounds what it may hold.
 const MAX_LISTED_CENTRAL_DIRECTORY: u64 = 64 * 1024 * 1024;
 
-/// A nested `.rap` is opened in memory; this bounds how large one may be.
+/// A nested `.rap` is opened in memory; this bounds how large one may be —
+/// counted on the bytes actually read, never on the size it declares.
 const MAX_NESTED_ARCHIVE: u64 = 256 * 1024 * 1024;
+
+/// The largest deflated entry `raisin:file` inflates for a response. Stored
+/// entries (media) stream from storage as-is and are not bounded by this.
+const MAX_INFLATED_FILE: u64 = 512 * 1024 * 1024;
+
+/// Deflate reaches ~1032:1 on degenerate input; package content (YAML, JSON,
+/// text) compresses 5–50×. An entry inflating past this is refused as a bomb.
+const MAX_INFLATE_RATIO: u64 = 256;
+
+/// The largest file read out of a NESTED archive, which happens in memory.
+const MAX_NESTED_FILE: u64 = 64 * 1024 * 1024;
+
+/// Entries a listing returns before refusing the archive as unbrowsable.
+const MAX_LISTED_ENTRIES: usize = 200_000;
 
 /// List contents of a package ZIP without extracting.
 ///
@@ -193,7 +208,7 @@ async fn serve_file_at_path(
         .await
         .map_err(|e| ApiError::validation_failed(format!("Invalid ZIP file: {e}")))?
         .ok_or_else(|| ApiError::not_found(format!("File '{}' not found in package", zip_path)))?;
-    let body = entry_stream(state, resource_key, &entry).await?;
+    let body = entry_stream(state, resource_key, &entry, MAX_INFLATED_FILE).await?;
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
@@ -234,13 +249,21 @@ async fn fetch_range(
 
 async fn outer_entries(state: &AppState, key: &str) -> Result<Vec<CentralEntry>, ApiError> {
     let len = archive_len(state, key).await?;
-    zip_stream::read_central_directory(
+    let entries = zip_stream::read_central_directory(
         len,
         |r| fetch_range(state, key, r),
         MAX_LISTED_CENTRAL_DIRECTORY,
     )
     .await
-    .map_err(|e| ApiError::validation_failed(format!("Invalid ZIP file: {e}")))
+    .map_err(|e| ApiError::validation_failed(format!("Invalid ZIP file: {e}")))?;
+    if entries.len() > MAX_LISTED_ENTRIES {
+        return Err(ApiError::validation_failed(format!(
+            "The archive has {} entries, more than the {} a listing returns",
+            entries.len(),
+            MAX_LISTED_ENTRIES
+        )));
+    }
+    Ok(entries)
 }
 
 /// The (uncompressed) body of one top-level entry, streamed.
@@ -248,6 +271,7 @@ async fn entry_stream(
     state: &AppState,
     key: &str,
     entry: &CentralEntry,
+    max_output: u64,
 ) -> Result<ByteReadStream, ApiError> {
     let range = zip_stream::entry_data_range(entry, |r| fetch_range(state, key, r))
         .await
@@ -257,11 +281,25 @@ async fn entry_stream(
         .get_range(key, range)
         .await
         .map_err(storage_error)?;
-    Ok(if entry.is_deflated() {
-        zip_stream::inflate_stream(raw)
-    } else {
-        raw
-    })
+    if !entry.is_deflated() {
+        return Ok(raw);
+    }
+    // The declared size is a claim, not a fact: it bounds what is inflated
+    // (a response's Content-Length is exactly this), and the ratio guard
+    // stops a bomb that lies about it.
+    if entry.size > max_output {
+        return Err(ApiError::validation_failed(format!(
+            "'{}' inflates to {} bytes, more than the {} this endpoint serves",
+            entry.name, entry.size, max_output
+        )));
+    }
+    Ok(zip_stream::inflate_stream(
+        raw,
+        zip_stream::InflateLimits {
+            max_output: entry.size,
+            max_ratio: MAX_INFLATE_RATIO,
+        },
+    ))
 }
 
 /// A nested `.rap`, read into memory (bounded by [`MAX_NESTED_ARCHIVE`]).
@@ -283,10 +321,22 @@ async fn open_nested(
             outer_path, MAX_NESTED_ARCHIVE
         )));
     }
-    let mut body = entry_stream(state, key, &entry).await?;
-    let mut data = Vec::with_capacity(entry.size as usize);
+    // Counted on what actually arrives (a stored entry's raw range is its
+    // COMPRESSED size, which may differ from the size it declares); nothing
+    // is preallocated from a declared size.
+    let mut body = entry_stream(state, key, &entry, MAX_NESTED_ARCHIVE).await?;
+    let mut data = Vec::with_capacity(entry.size.min(1024 * 1024) as usize);
     while let Some(chunk) = body.next().await {
-        data.extend_from_slice(&chunk.map_err(|e| storage_error(e.into()))?);
+        let chunk = chunk.map_err(|e| {
+            ApiError::validation_failed(format!("Unreadable nested archive '{outer_path}': {e}"))
+        })?;
+        if data.len() as u64 + chunk.len() as u64 > MAX_NESTED_ARCHIVE {
+            return Err(ApiError::validation_failed(format!(
+                "Nested archive '{}' is larger than {} bytes and cannot be browsed",
+                outer_path, MAX_NESTED_ARCHIVE
+            )));
+        }
+        data.extend_from_slice(&chunk);
     }
     ZipArchive::new(Cursor::new(data)).map_err(|e| {
         ApiError::validation_failed(format!("Invalid nested ZIP file '{}': {}", outer_path, e))
@@ -354,9 +404,18 @@ fn read_file_from_archive(
         .by_name(path)
         .map_err(|_| ApiError::not_found(format!("File '{}' not found in archive", path)))?;
 
+    // Bounded on the bytes actually inflated, not on the declared size.
     let mut contents = Vec::new();
-    file.read_to_end(&mut contents)
+    let read = (&mut file)
+        .take(MAX_NESTED_FILE + 1)
+        .read_to_end(&mut contents)
         .map_err(|e| ApiError::storage_error(format!("Failed to read file: {}", e)))?;
+    if read as u64 > MAX_NESTED_FILE {
+        return Err(ApiError::validation_failed(format!(
+            "'{}' inflates to more than {} bytes",
+            path, MAX_NESTED_FILE
+        )));
+    }
 
     Ok(contents)
 }
@@ -383,6 +442,13 @@ fn browse_archive_at_path(
         return browse_archive_at_path(&mut nested_archive, inner_path, depth + 1);
     }
 
+    if archive.len() > MAX_LISTED_ENTRIES {
+        return Err(ApiError::validation_failed(format!(
+            "The archive has {} entries, more than the {} a listing returns",
+            archive.len(),
+            MAX_LISTED_ENTRIES
+        )));
+    }
     let mut names = Vec::with_capacity(archive.len());
     for i in 0..archive.len() {
         let file = archive
