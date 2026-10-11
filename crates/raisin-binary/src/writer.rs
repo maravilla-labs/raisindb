@@ -20,6 +20,7 @@
 //! [`BinaryStorage::put_stream`]: crate::BinaryStorage::put_stream
 //! [`BinaryStorage::sweep_partials`]: crate::BinaryStorage::sweep_partials
 
+use crate::owner::Owner;
 use crate::StoredObject;
 use chrono::{DateTime, Utc};
 use std::future::Future;
@@ -84,18 +85,33 @@ impl WriteHint {
     }
 }
 
-/// The file name of a partial: the sanitised stable id, else a random one.
-pub(crate) fn partial_file_name(partial_id: Option<&str>) -> String {
-    match partial_id
-        .map(|id| {
-            id.chars()
-                .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-                .collect::<String>()
-        })
+fn sanitized_id(partial_id: &str) -> String {
+    partial_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect()
+}
+
+/// The file name of a partial: `{owner tag}--{stable id or random}.part`.
+pub(crate) fn partial_file_name(owner: &Owner, partial_id: Option<&str>) -> String {
+    let id = partial_id
+        .map(sanitized_id)
         .filter(|id| !id.is_empty())
-    {
-        Some(id) => format!("{id}.part"),
-        None => format!("{}.part", nanoid::nanoid!()),
+        .unwrap_or_else(|| nanoid::nanoid!());
+    format!("{}--{}.part", owner.tag(), id)
+}
+
+/// Does `file_name` hold the partial with stable id `partial_id`, whoever
+/// wrote it (a retry after a restart runs under a new boot id)?
+pub(crate) fn is_partial_named(file_name: &str, partial_id: &str) -> bool {
+    let id = sanitized_id(partial_id);
+    if id.is_empty() {
+        return false;
+    }
+    let wanted = format!("{id}.part");
+    match crate::owner::split_tagged(file_name) {
+        Some((_, rest)) => rest == wanted,
+        None => file_name == wanted,
     }
 }
 
@@ -144,6 +160,7 @@ pub(crate) struct FsBlobWriter {
 impl FsBlobWriter {
     pub(crate) async fn open(
         base_dir: &Path,
+        owner: &Owner,
         key: String,
         url: String,
         hint: &WriteHint,
@@ -151,7 +168,7 @@ impl FsBlobWriter {
         let partial_dir = base_dir.join(PARTIAL_DIR);
         tokio::fs::create_dir_all(&partial_dir).await?;
         // `create` truncates: a stable id reused by a retry starts clean.
-        let partial = partial_dir.join(partial_file_name(hint.partial_id.as_deref()));
+        let partial = partial_dir.join(partial_file_name(owner, hint.partial_id.as_deref()));
         let file = tokio::fs::File::create(&partial).await?;
         Ok(Self {
             file: Some(file),
@@ -274,9 +291,13 @@ impl Drop for FsBlobWriter {
     }
 }
 
-/// Remove filesystem partials last modified more than `older_than` ago.
+/// Remove the filesystem partials provably abandoned: those of THIS node from
+/// an earlier boot (see [`crate::owner`]). Another node's partials and this
+/// process's own are kept whatever their age. A partial without an owner tag
+/// (written before tags existed) is removed once older than `older_than`.
 pub(crate) fn sweep_fs_partials(
     base_dir: &Path,
+    owner: &Owner,
     older_than: std::time::Duration,
 ) -> anyhow::Result<usize> {
     let dir = base_dir.join(PARTIAL_DIR);
@@ -295,10 +316,32 @@ pub(crate) fn sweep_fs_partials(
         if !meta.is_file() {
             continue;
         }
-        let stale = meta.modified().map(|m| m <= cutoff).unwrap_or(true);
-        if stale && std::fs::remove_file(entry.path()).is_ok() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let dead = match crate::owner::split_tagged(&name) {
+            Some((tag, _)) => owner.outlived(tag),
+            None => meta.modified().map(|m| m <= cutoff).unwrap_or(false),
+        };
+        if dead && std::fs::remove_file(entry.path()).is_ok() {
             removed += 1;
         }
     }
     Ok(removed)
+}
+
+/// Remove every partial with stable id `partial_id`; returns whether any was.
+pub(crate) fn discard_fs_partial(base_dir: &Path, partial_id: &str) -> anyhow::Result<bool> {
+    let dir = base_dir.join(PARTIAL_DIR);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.into()),
+    };
+    let mut any = false;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if is_partial_named(&name, partial_id) && std::fs::remove_file(entry.path()).is_ok() {
+            any = true;
+        }
+    }
+    Ok(any)
 }

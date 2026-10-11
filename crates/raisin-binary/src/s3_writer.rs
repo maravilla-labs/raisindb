@@ -5,15 +5,19 @@
 //! whatever the object's size. A blob smaller than one part never starts a
 //! multipart upload at all and is sent with a single `PutObject` at commit.
 //! `abort` (and dropping an unfinished writer) aborts the multipart upload,
-//! so no object and no billable parts are left behind; a killed process's
-//! uploads are aborted by [`sweep_s3_multipart`].
+//! so no object and no billable parts are left behind. A killed process's
+//! uploads are aborted by [`sweep_s3_multipart`] — only those this node
+//! journaled in an earlier boot, never by listing the bucket: a shared
+//! bucket holds other services' uploads and other nodes' live ones.
 
+use crate::owner::Owner;
 use crate::writer::{BlobWriter, BoxFuture};
 use crate::StoredObject;
 use aws_sdk_s3 as s3;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use chrono::Utc;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::AsyncWrite;
@@ -37,6 +41,33 @@ pub(crate) struct S3BlobWriter {
     pending: Option<PartFuture>,
     written: u64,
     finished: bool,
+    journal: Option<PathBuf>,
+}
+
+/// `{journal}/{node}/{boot}`: this process's journal directory.
+pub(crate) fn journal_dir(root: Option<&Path>, owner: &Owner) -> Option<PathBuf> {
+    root.map(|r| r.join(&owner.node).join(&owner.boot))
+}
+
+fn journal_entry(dir: &Path, upload_id: &str) -> PathBuf {
+    // Upload ids are opaque provider strings; keep the file name tame.
+    let safe: String = upload_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    dir.join(safe)
+}
+
+fn forget_upload(journal: &Option<PathBuf>, upload_id: &str) {
+    if let Some(dir) = journal {
+        let _ = std::fs::remove_file(journal_entry(dir, upload_id));
+    }
 }
 
 impl S3BlobWriter {
@@ -47,8 +78,10 @@ impl S3BlobWriter {
         url: String,
         name: Option<String>,
         content_type: Option<String>,
+        journal: Option<PathBuf>,
     ) -> Self {
         Self {
+            journal,
             client,
             bucket,
             key,
@@ -74,19 +107,29 @@ impl S3BlobWriter {
         let key = self.key.clone();
         let content_type = self.content_type.clone();
         let upload_id = self.upload_id.clone();
+        let journal = self.journal.clone();
         self.pending = Some(Box::pin(async move {
             let upload_id = match upload_id {
                 Some(id) => id,
-                None => client
-                    .create_multipart_upload()
-                    .bucket(&bucket)
-                    .key(&key)
-                    .set_content_type(content_type)
-                    .send()
-                    .await?
-                    .upload_id()
-                    .map(str::to_string)
-                    .ok_or_else(|| anyhow::anyhow!("multipart upload returned no upload id"))?,
+                None => {
+                    let id = client
+                        .create_multipart_upload()
+                        .bucket(&bucket)
+                        .key(&key)
+                        .set_content_type(content_type)
+                        .send()
+                        .await?
+                        .upload_id()
+                        .map(str::to_string)
+                        .ok_or_else(|| anyhow::anyhow!("multipart upload returned no upload id"))?;
+                    // Journaled the moment it exists, so a crash from here on
+                    // leaves something a later boot of this node can abort.
+                    if let Some(dir) = &journal {
+                        std::fs::create_dir_all(dir)?;
+                        std::fs::write(journal_entry(dir, &id), key.as_bytes())?;
+                    }
+                    id
+                }
             };
             let out = client
                 .upload_part()
@@ -194,6 +237,7 @@ impl BlobWriter for S3BlobWriter {
                     )
                     .send()
                     .await?;
+                forget_upload(&self.journal, &upload_id);
             }
             self.finished = true;
             let now = Utc::now();
@@ -220,9 +264,10 @@ impl BlobWriter for S3BlobWriter {
                     .abort_multipart_upload()
                     .bucket(&self.bucket)
                     .key(&self.key)
-                    .upload_id(upload_id)
+                    .upload_id(&upload_id)
                     .send()
                     .await?;
+                forget_upload(&self.journal, &upload_id);
             }
             Ok(())
         })
@@ -243,62 +288,115 @@ impl Drop for S3BlobWriter {
         let client = self.client.clone();
         let bucket = self.bucket.clone();
         let key = self.key.clone();
+        let journal = self.journal.clone();
         handle.spawn(async move {
-            let _ = client
+            if client
                 .abort_multipart_upload()
                 .bucket(bucket)
                 .key(key)
-                .upload_id(upload_id)
+                .upload_id(&upload_id)
                 .send()
-                .await;
+                .await
+                .is_ok()
+            {
+                forget_upload(&journal, &upload_id);
+            }
         });
     }
 }
 
-/// Abort multipart uploads started more than `older_than` ago.
+/// What a sweep would abort: every upload this node journaled under a boot
+/// other than `owner.boot`, as `(journal file, key, upload id)`.
+pub(crate) fn dead_uploads(root: &Path, owner: &Owner) -> Vec<(PathBuf, String, String)> {
+    let mut out = Vec::new();
+    let node_dir = root.join(&owner.node);
+    let Ok(boots) = std::fs::read_dir(&node_dir) else {
+        return out;
+    };
+    for boot in boots.flatten() {
+        if boot.file_name().to_string_lossy() == owner.boot {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(boot.path()) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let upload_id = e.file_name().to_string_lossy().into_owned();
+            if let Ok(key) = std::fs::read_to_string(e.path()) {
+                out.push((e.path(), key, upload_id));
+            }
+        }
+    }
+    out
+}
+
+/// Abort the multipart uploads this node journaled in an earlier boot.
+/// Never lists the bucket: without a journal it does nothing.
 pub(crate) async fn sweep_s3_multipart(
     client: &s3::Client,
     bucket: &str,
-    older_than: std::time::Duration,
+    journal: Option<&Path>,
+    owner: &Owner,
 ) -> anyhow::Result<usize> {
-    let cutoff = std::time::SystemTime::now()
-        .checked_sub(older_than)
-        .unwrap_or(std::time::UNIX_EPOCH);
+    let Some(root) = journal else {
+        return Ok(0);
+    };
     let mut removed = 0;
-    let mut key_marker: Option<String> = None;
-    let mut upload_marker: Option<String> = None;
-    loop {
-        let page = client
-            .list_multipart_uploads()
+    for (file, key, upload_id) in dead_uploads(root, owner) {
+        if key.is_empty() || key.starts_with('/') {
+            continue;
+        }
+        let aborted = client
+            .abort_multipart_upload()
             .bucket(bucket)
-            .set_key_marker(key_marker.clone())
-            .set_upload_id_marker(upload_marker.clone())
+            .key(&key)
+            .upload_id(&upload_id)
             .send()
-            .await?;
-        for upload in page.uploads() {
-            let started = upload
-                .initiated()
-                .and_then(|t| std::time::SystemTime::try_from(*t).ok());
-            let stale = started.map(|t| t <= cutoff).unwrap_or(false);
-            if let (true, Some(key), Some(id)) = (stale, upload.key(), upload.upload_id()) {
-                if client
-                    .abort_multipart_upload()
-                    .bucket(bucket)
-                    .key(key)
-                    .upload_id(id)
-                    .send()
-                    .await
-                    .is_ok()
-                {
-                    removed += 1;
-                }
+            .await;
+        // Gone already (completed or aborted elsewhere) counts as done too.
+        let done = match &aborted {
+            Ok(_) => true,
+            Err(e) => e
+                .as_service_error()
+                .map(|se| se.is_no_such_upload())
+                .unwrap_or(false),
+        };
+        if done {
+            let _ = std::fs::remove_file(&file);
+            removed += aborted.is_ok() as usize;
+        }
+    }
+    // Empty boot directories of this node go too.
+    if let Ok(boots) = std::fs::read_dir(root.join(&owner.node)) {
+        for b in boots.flatten() {
+            if b.file_name().to_string_lossy() != owner.boot {
+                let _ = std::fs::remove_dir(b.path());
             }
         }
-        if page.is_truncated() != Some(true) {
-            break;
-        }
-        key_marker = page.next_key_marker().map(str::to_string);
-        upload_marker = page.next_upload_id_marker().map(str::to_string);
     }
     Ok(removed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_this_nodes_earlier_boots_are_swept() {
+        let dir = tempfile::tempdir().unwrap();
+        let me = Owner::new("node-a", "boot2");
+        for (o, id) in [
+            (Owner::new("node-a", "boot1"), "dead-upload"),
+            (me.clone(), "live-upload"),
+            (Owner::new("node-b", "boot1"), "other-node-upload"),
+        ] {
+            let d = journal_dir(Some(dir.path()), &o).unwrap();
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(journal_entry(&d, id), format!("t/2026/01/01/{id}.rap")).unwrap();
+        }
+        let dead = dead_uploads(dir.path(), &me);
+        assert_eq!(dead.len(), 1);
+        assert_eq!(dead[0].2, "dead-upload");
+        assert_eq!(dead[0].1, "t/2026/01/01/dead-upload.rap");
+    }
 }

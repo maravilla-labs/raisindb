@@ -13,6 +13,7 @@ use std::{
 
 mod dyn_store;
 mod hashing;
+pub mod owner;
 #[cfg(feature = "s3")]
 mod s3_writer;
 pub mod space;
@@ -294,6 +295,7 @@ fn check_range(range: &Range<u64>, size: u64) -> anyhow::Result<()> {
 pub struct FilesystemBinaryStorage {
     base_dir: PathBuf,
     url_base: Option<String>,
+    owner: owner::Owner,
 }
 
 impl FilesystemBinaryStorage {
@@ -301,7 +303,15 @@ impl FilesystemBinaryStorage {
         Self {
             base_dir: base_dir.into(),
             url_base,
+            owner: owner::Owner::current().clone(),
         }
+    }
+
+    /// Write partials as `owner` (tests, and an embedder with its own node
+    /// identity) instead of this process.
+    pub fn with_owner(mut self, owner: owner::Owner) -> Self {
+        self.owner = owner;
+        self
     }
 
     /// Generate a storage key with optional tenant/deployment prefix
@@ -433,7 +443,8 @@ impl BinaryStorage for FilesystemBinaryStorage {
     async fn begin_write(&self, hint: WriteHint) -> anyhow::Result<Box<dyn BlobWriter>> {
         let key = Self::generate_key(hint.ext.as_deref(), hint.tenant_context.as_deref());
         let url = self.url_for(&key);
-        let writer = writer::FsBlobWriter::open(&self.base_dir, key, url, &hint).await?;
+        let writer =
+            writer::FsBlobWriter::open(&self.base_dir, &self.owner, key, url, &hint).await?;
         Ok(Box::new(writer))
     }
 
@@ -498,20 +509,12 @@ impl BinaryStorage for FilesystemBinaryStorage {
         &self,
         partial_id: &str,
     ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send {
-        let path = self
-            .base_dir
-            .join(PARTIAL_DIR)
-            .join(writer::partial_file_name(Some(partial_id)));
-        let stable = !partial_id.is_empty();
+        let base = self.base_dir.clone();
+        let id = partial_id.to_string();
         async move {
-            if !stable {
-                return Ok(false);
-            }
-            match tokio::fs::remove_file(&path).await {
-                Ok(()) => Ok(true),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-                Err(e) => Err(e.into()),
-            }
+            tokio::task::spawn_blocking(move || writer::discard_fs_partial(&base, &id))
+                .await
+                .map_err(|e| anyhow::anyhow!("partial discard failed: {e}"))?
         }
     }
 
@@ -520,10 +523,13 @@ impl BinaryStorage for FilesystemBinaryStorage {
         older_than: std::time::Duration,
     ) -> impl std::future::Future<Output = anyhow::Result<usize>> + Send {
         let base = self.base_dir.clone();
+        let owner = self.owner.clone();
         async move {
-            tokio::task::spawn_blocking(move || writer::sweep_fs_partials(&base, older_than))
-                .await
-                .map_err(|e| anyhow::anyhow!("partial sweep failed: {e}"))?
+            tokio::task::spawn_blocking(move || {
+                writer::sweep_fs_partials(&base, &owner, older_than)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("partial sweep failed: {e}"))?
         }
     }
 }
@@ -602,6 +608,11 @@ pub struct S3BinaryStorage {
     bucket: String,
     // If set, compose public URL as `${public_base}/${key}`; otherwise fallback to client signer URL
     public_base: Option<String>,
+    owner: owner::Owner,
+    // Where in-flight multipart uploads are journaled, so a later boot of
+    // THIS node can abort exactly its own dead ones (see `owner`). Without a
+    // journal no multipart upload is ever aborted by a sweep.
+    upload_journal: Option<PathBuf>,
 }
 
 #[cfg(feature = "s3")]
@@ -630,7 +641,19 @@ impl S3BinaryStorage {
             client,
             bucket,
             public_base,
+            owner: owner::Owner::current().clone(),
+            upload_journal: std::env::var("RAISIN_S3_UPLOAD_JOURNAL")
+                .ok()
+                .filter(|d| !d.is_empty())
+                .map(PathBuf::from),
         })
+    }
+
+    /// Journal in-flight multipart uploads under `dir` (a node-local path
+    /// that survives restarts), enabling the boot sweep for this node.
+    pub fn with_upload_journal(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.upload_journal = Some(dir.into());
+        self
     }
 }
 #[cfg(feature = "s3")]
@@ -741,6 +764,7 @@ impl BinaryStorage for S3BinaryStorage {
             url,
             hint.original_name,
             hint.content_type,
+            s3_writer::journal_dir(self.upload_journal.as_deref(), &self.owner),
         );
         async move { Ok(Box::new(writer) as Box<dyn BlobWriter>) }
     }
@@ -814,7 +838,10 @@ impl BinaryStorage for S3BinaryStorage {
     ) -> impl std::future::Future<Output = anyhow::Result<usize>> + Send {
         let client = self.client.clone();
         let bucket = self.bucket.clone();
-        async move { s3_writer::sweep_s3_multipart(&client, &bucket, older_than).await }
+        let journal = self.upload_journal.clone();
+        let owner = self.owner.clone();
+        let _ = older_than;
+        async move { s3_writer::sweep_s3_multipart(&client, &bucket, journal.as_deref(), &owner).await }
     }
 
     fn get_as_path(
@@ -984,32 +1011,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_boot_sweep_removes_stale_partials_only() {
+    async fn the_boot_sweep_removes_only_this_nodes_earlier_boots() {
         use tokio::io::AsyncWriteExt;
         let dir = tempfile::tempdir().unwrap();
-        let store = FilesystemBinaryStorage::new(dir.path(), None);
-        // Simulate a process killed mid-write: a partial nobody owns.
-        let mut w = store.begin_write(WriteHint::new()).await.unwrap();
-        w.write_all(b"orphan").await.unwrap();
-        std::mem::forget(w);
-        assert_eq!(files_under(dir.path()), 1);
-        // Fresh partials survive a sweep with a grace period...
+        let orphan = |node: &str, boot: &str| {
+            let store = FilesystemBinaryStorage::new(dir.path(), None)
+                .with_owner(owner::Owner::new(node, boot));
+            async move {
+                let mut w = store.begin_write(WriteHint::new()).await.unwrap();
+                w.write_all(b"partial").await.unwrap();
+                std::mem::forget(w);
+            }
+        };
+        orphan("node-a", "boot1").await; // this node, a dead process
+        orphan("node-a", "boot2").await; // this node, the live process
+        orphan("node-b", "boot1").await; // another node sharing the volume
+        std::fs::write(dir.path().join(PARTIAL_DIR).join("legacy.part"), b"x").unwrap();
+        assert_eq!(files_under(dir.path()), 4);
+
+        let me = FilesystemBinaryStorage::new(dir.path(), None)
+            .with_owner(owner::Owner::new("node-a", "boot2"));
+        // Even with no grace at all, only the dead process's partial goes —
+        // plus the untagged legacy one, which only ages out.
         assert_eq!(
-            store
-                .sweep_partials(std::time::Duration::from_secs(3600))
-                .await
-                .unwrap(),
-            0
-        );
-        // ...stale ones do not.
-        assert_eq!(
-            store
-                .sweep_partials(std::time::Duration::ZERO)
+            me.sweep_partials(std::time::Duration::from_secs(3600))
                 .await
                 .unwrap(),
             1
         );
-        assert_eq!(files_under(dir.path()), 0);
+        assert_eq!(
+            me.sweep_partials(std::time::Duration::ZERO).await.unwrap(),
+            1
+        );
+        let left: Vec<String> = std::fs::read_dir(dir.path().join(PARTIAL_DIR))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left.len(), 2);
+        assert!(
+            left.iter().any(|n| n.starts_with("node_a.boot2--")),
+            "own live partial kept"
+        );
+        assert!(
+            left.iter().any(|n| n.starts_with("node_b.boot1--")),
+            "other node's kept"
+        );
     }
 
     #[tokio::test]
@@ -1051,9 +1097,12 @@ mod tests {
             .await
             .unwrap();
         std::mem::forget(w);
-        let part = dir.path().join(PARTIAL_DIR).join("pkgbuild-job1.part");
+        let part = dir.path().join(PARTIAL_DIR).join(format!(
+            "{}--pkgbuild-job1.part",
+            owner::Owner::current().tag()
+        ));
         assert!(part.exists());
-        // …is found by name and discarded.
+        // …is found by name (whichever boot wrote it) and discarded.
         assert!(store.discard_partial("pkgbuild-job/1").await.unwrap());
         assert!(!part.exists());
         assert!(!store.discard_partial("pkgbuild-job/1").await.unwrap());
