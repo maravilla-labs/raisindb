@@ -59,7 +59,7 @@ pub async fn list_package_contents(
         .map_err(|e| ApiError::storage_error(format!("Failed to get package node: {}", e)))?
         .ok_or_else(|| ApiError::not_found(format!("Package '{}' not found", package_name)))?;
 
-    let resource_key = extract_resource_key(&node)?;
+    let resource_key = extract_resource_key(&node, tenant_id)?;
     // The central directory alone, by ranged reads: no entry body is read.
     let entries: Vec<ZipEntry> = outer_entries(&state, resource_key)
         .await?
@@ -100,7 +100,7 @@ pub async fn get_package_file(
         .map_err(|e| ApiError::storage_error(format!("Failed to get package node: {}", e)))?
         .ok_or_else(|| ApiError::not_found(format!("Package '{}' not found", package_name)))?;
 
-    let resource_key = extract_resource_key(&node)?;
+    let resource_key = extract_resource_key(&node, tenant_id)?;
     serve_file_at_path(&state, resource_key, &file_path).await
 }
 
@@ -125,7 +125,7 @@ pub(super) async fn browse_package_impl(
         .map_err(|e| ApiError::storage_error(format!("Failed to get package node: {}", e)))?
         .ok_or_else(|| ApiError::not_found(format!("Package '{}' not found", package_path)))?;
 
-    let resource_key = extract_resource_key(&node)?;
+    let resource_key = extract_resource_key(&node, tenant_id)?;
     if let Some((outer_path, inner_path)) = split_at_rap_boundary(zip_path) {
         let mut nested = open_nested(state, resource_key, outer_path).await?;
         return browse_archive_at_path(&mut nested, inner_path, 2);
@@ -160,7 +160,7 @@ pub(super) async fn get_file_from_package_impl(
         .map_err(|e| ApiError::storage_error(format!("Failed to get package node: {}", e)))?
         .ok_or_else(|| ApiError::not_found(format!("Package '{}' not found", package_path)))?;
 
-    let resource_key = extract_resource_key(&node)?;
+    let resource_key = extract_resource_key(&node, tenant_id)?;
     serve_file_at_path(state, resource_key, zip_path).await
 }
 
@@ -295,8 +295,21 @@ async fn open_nested(
 
 // --- Archive helpers ---
 
-/// Extract the resource key from a package node.
-fn extract_resource_key(node: &models::nodes::Node) -> Result<&str, ApiError> {
+/// Extract the resource key from a package node — only one this tenant may
+/// read: the key is node content and could name another tenant's blob.
+fn extract_resource_key<'n>(
+    node: &'n models::nodes::Node,
+    tenant_id: &str,
+) -> Result<&'n str, ApiError> {
+    let key = extract_resource_key_unchecked(node)?;
+    if raisin_core::blob_key_belongs_to(tenant_id, key, raisin_core::BlobKeyPolicy::AllowLegacy) {
+        Ok(key)
+    } else {
+        Err(ApiError::not_found("Package has no readable archive"))
+    }
+}
+
+fn extract_resource_key_unchecked(node: &models::nodes::Node) -> Result<&str, ApiError> {
     let resource = node
         .properties
         .get("resource")

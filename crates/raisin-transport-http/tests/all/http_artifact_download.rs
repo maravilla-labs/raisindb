@@ -112,9 +112,21 @@ async fn uploaded(f: &Fixture, name: &str, artifact: bool) {
         let Some(PropertyValue::Resource(r)) = node.properties.get_mut("file") else {
             panic!("no file resource");
         };
-        r.metadata
-            .get_or_insert_with(Default::default)
-            .insert("sha256".into(), PropertyValue::String(sha_hex(BYTES)));
+        // As a build writes it: the blob under this tenant's and repo's
+        // artifact namespace, the digest on the envelope.
+        let stored = raisin_binary::BinaryStorage::put_bytes(
+            &raisin_binary::FilesystemBinaryStorage::new("./.data/uploads", None),
+            BYTES,
+            Some("application/zip"),
+            Some("rap"),
+            None,
+            Some(&raisin_core::artifact_key_namespace(TENANT, REPO)),
+        )
+        .await
+        .unwrap();
+        let meta = r.metadata.get_or_insert_with(Default::default);
+        meta.insert("sha256".into(), PropertyValue::String(sha_hex(BYTES)));
+        meta.insert("storage_key".into(), PropertyValue::String(stored.key));
         f.storage
             .nodes()
             .update(
@@ -324,4 +336,72 @@ async fn signing_needs_read_access_and_ordinary_assets_keep_300s() {
     let res = get(&f.raw, &url, &[]).await;
     assert_eq!(res.status, StatusCode::OK);
     assert!(res.headers.get("etag").is_none(), "no digest, no validator");
+}
+
+#[tokio::test]
+async fn a_resource_pointing_at_another_tenants_blob_is_neither_served_nor_signed() {
+    use raisin_binary::BinaryStorage;
+    let f = Fixture::new(
+        "artifact-foreign",
+        REPO,
+        BRANCH,
+        &[WS],
+        &["asset", "raisin:Folder"],
+    )
+    .await;
+    uploaded(&f, "victim.bin", false).await;
+    // Another tenant's blob in the same store…
+    let bin = raisin_binary::FilesystemBinaryStorage::new("./.data/uploads", None);
+    let foreign = bin
+        .put_bytes(
+            b"another tenant's file",
+            None,
+            Some("bin"),
+            None,
+            Some("other-tenant"),
+        )
+        .await
+        .unwrap();
+    // …and a node of THIS tenant whose Resource is rewritten to name it.
+    let scope = StorageScope::new(TENANT, REPO, BRANCH, WS);
+    let mut node = f
+        .storage
+        .nodes()
+        .get_by_path(scope, "/runs/victim.bin", None)
+        .await
+        .unwrap()
+        .unwrap();
+    let Some(PropertyValue::Resource(r)) = node.properties.get_mut("file") else {
+        panic!("no file resource");
+    };
+    r.metadata.get_or_insert_with(Default::default).insert(
+        "storage_key".into(),
+        PropertyValue::String(foreign.key.clone()),
+    );
+    f.storage
+        .nodes()
+        .update(
+            scope,
+            node,
+            UpdateNodeOptions {
+                validate_schema: false,
+                allow_type_change: false,
+                operation_meta: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let read = get(
+        &f.app,
+        &format!("/api/repository/{REPO}/{BRANCH}/head/{WS}/runs/victim.bin/raisin:display"),
+        &[],
+    )
+    .await;
+    assert_eq!(read.status, StatusCode::NOT_FOUND);
+    assert_ne!(read.body, b"another tenant's file");
+    let (status, url, _) = sign(&f.app, "victim.bin").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(url.is_empty());
+    let _ = bin.delete(&foreign.key).await;
 }

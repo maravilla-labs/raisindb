@@ -42,11 +42,15 @@ pub use utils::{
     verify_asset_signature, verify_asset_signature_bound,
 };
 pub mod asset_urls;
+pub mod blob_scope;
 pub use asset_urls::{
     artifact_url_ttl_secs, build_signed_asset_url, build_signed_asset_url_bound,
     configured_public_base_url, content_sha256_of, is_valid_asset_command, signature_property,
     signed_asset_path, SignedAssetUrl, DEFAULT_ARTIFACT_URL_TTL_SECS, DEFAULT_ASSET_PROPERTY,
     MAX_ARTIFACT_URL_TTL_SECS,
+};
+pub use blob_scope::{
+    artifact_key_namespace, blob_key_belongs_to, is_artifact_key_of, BlobKeyPolicy,
 };
 pub mod asset_grants;
 pub use asset_grants::{

@@ -45,14 +45,34 @@ pub(super) trait ChunkHook: Send {
     fn chunk(&mut self, n: u64) -> raisin_binary::BoxFuture<'_, Result<()>>;
 }
 
+/// Why a node's embedded file was not packed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SkipReason {
+    /// The key is not this tenant's: a node property pointing at a blob the
+    /// exporter has no claim to (another tenant's, or a legacy unprefixed
+    /// key that cannot be attributed). Never read.
+    ForeignKey,
+    /// The key is this tenant's but the store has no such blob.
+    Missing,
+}
+
+impl SkipReason {
+    pub(super) fn code(self) -> &'static str {
+        match self {
+            SkipReason::ForeignKey => "foreign_key",
+            SkipReason::Missing => "missing",
+        }
+    }
+}
+
 /// What writing one node produced.
 pub(super) struct Written {
     pub line: InventoryLine,
     /// Bytes written to the archive (uncompressed), entries included.
     pub bytes: u64,
     pub files: u64,
-    /// The node names an embedded file that could not be read.
-    pub missing_binary: Option<String>,
+    /// The node names an embedded file that was not packed, and why.
+    pub missing_binary: Option<(String, SkipReason)>,
 }
 
 /// Sort every object's keys, recursively.
@@ -151,6 +171,7 @@ pub(super) fn embedded_file(node: &Node) -> Option<(String, Option<String>)> {
 pub(super) async fn write_content_node<W: AsyncWrite + Unpin + Send>(
     zip: &mut ZipStreamWriter<W>,
     store: &dyn DynBinaryStorage,
+    tenant: &str,
     workspace: &str,
     node: &Node,
     has_children: bool,
@@ -172,8 +193,21 @@ pub(super) async fn write_content_node<W: AsyncWrite + Unpin + Send>(
         zip.write_entry(&meta_entry, Compression::Deflate(6), yaml.as_bytes())
             .await
             .map_err(io)?;
-        match store.get_stream(&storage_key).await {
-            Ok((_len, mut body)) => {
+        // The key is node content, so it proves nothing by itself: only a
+        // blob under this tenant's own prefix is read (see raisin_core::
+        // blob_scope). Anything else is skipped and reported, never fetched.
+        let owned = raisin_core::blob_key_belongs_to(
+            tenant,
+            &storage_key,
+            raisin_core::BlobKeyPolicy::Strict,
+        );
+        let fetched = if owned {
+            store.get_stream(&storage_key).await.ok()
+        } else {
+            None
+        };
+        match fetched {
+            Some((_len, mut body)) => {
                 let entry_name = format!("content/{}{}{}", workspace, parent, node.name);
                 let mut entry = zip
                     .start_entry(&entry_name, Compression::for_content_type(mime.as_deref()))
@@ -194,7 +228,14 @@ pub(super) async fn write_content_node<W: AsyncWrite + Unpin + Send>(
                     bytes: digest.size,
                 });
             }
-            Err(_) => missing_binary = Some(storage_key),
+            None => {
+                let reason = if owned {
+                    SkipReason::Missing
+                } else {
+                    SkipReason::ForeignKey
+                };
+                missing_binary = Some((storage_key, reason));
+            }
         }
     } else if is_folder_type(&node.node_type) || has_children {
         let entry = format!(
@@ -221,6 +262,7 @@ pub(super) async fn write_content_node<W: AsyncWrite + Unpin + Send>(
             hash,
             bytes: yaml.len() as u64,
             bin,
+            bin_skipped: missing_binary.as_ref().map(|(_, r)| r.code().to_string()),
         },
         bytes,
         files,
@@ -247,6 +289,7 @@ pub(super) async fn write_node_type<W: AsyncWrite + Unpin + Send>(
             hash: content_hash(json),
             bytes: yaml.len() as u64,
             bin: None,
+            bin_skipped: None,
         },
         bytes: yaml.len() as u64,
         files: 1,

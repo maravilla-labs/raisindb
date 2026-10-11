@@ -862,3 +862,68 @@ async fn rss_bench() {
         started.elapsed()
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_node_pointing_at_another_tenants_blob_is_not_packed() {
+    let f = fixture(3, 16).await;
+    // Another tenant's blob, and a node in THIS tenant whose Resource names
+    // its key — node properties are writable content.
+    let foreign = f
+        .blobs
+        .put_bytes(
+            b"other tenant's secret",
+            Some("application/pdf"),
+            Some("pdf"),
+            None,
+            Some("other-tenant"),
+        )
+        .await
+        .unwrap();
+    assert!(foreign.key.starts_with("other-tenant/"));
+    create(
+        &f.storage,
+        "assets",
+        "/media/stolen.pdf",
+        vec![("file", file_resource(&foreign.key, 21, "application/pdf"))],
+    )
+    .await;
+
+    let submitted = submit_package_build(&f.storage, T, R, B, &request("k8"), &requester())
+        .await
+        .unwrap();
+    run(&f, &handler(&f, None), &submitted.job_id)
+        .await
+        .unwrap();
+
+    let rec = record(&f).await;
+    let (archive_key, _) = resource_key(&rec, "artifact");
+    // Artifacts are minted under this tenant and repository.
+    assert!(
+        raisin_core::is_artifact_key_of(T, R, &archive_key),
+        "{archive_key}"
+    );
+    let archive = f.blobs.get(&archive_key).await.unwrap();
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive.to_vec())).unwrap();
+    assert!(zip.by_name("content/assets/media/stolen.pdf").is_err());
+    let all: Vec<String> = (0..zip.len())
+        .map(|i| zip.by_index(i).unwrap().name().to_string())
+        .collect();
+    assert!(!all.iter().any(|n| n.ends_with("/stolen.pdf")));
+    let mut inv = String::new();
+    zip.by_name("inventory.jsonl")
+        .unwrap()
+        .read_to_string(&mut inv)
+        .unwrap();
+    let line: InventoryLine = inv
+        .lines()
+        .map(|l| serde_json::from_str::<InventoryLine>(l).unwrap())
+        .find(|l| l.path == "/media/stolen.pdf")
+        .unwrap();
+    assert!(line.bin.is_none());
+    assert_eq!(line.bin_skipped.as_deref(), Some("foreign_key"));
+    // The genuinely missing one is reported as such, the foreign one too.
+    let Some(PropertyValue::Object(counters)) = rec.get("counters") else {
+        panic!("no counters");
+    };
+    assert_eq!(counters.get("warnings"), Some(&PropertyValue::Integer(2)));
+}

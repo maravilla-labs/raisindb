@@ -368,6 +368,27 @@ async fn serve_asset_property(
         })
         .ok_or_else(|| ApiError::not_found("Resource has no storage_key in metadata"))?;
 
+    // The key is node content: a node may name ANY key, including another
+    // tenant's blob. Only this tenant's keys are served (the legacy
+    // unprefixed form too, for an ordinary asset); a generated artifact must
+    // carry this tenant's prefix. Anything else answers as missing.
+    let policy = if raisin_core::content_sha256_of(resource).is_some() {
+        raisin_core::BlobKeyPolicy::Strict
+    } else {
+        raisin_core::BlobKeyPolicy::AllowLegacy
+    };
+    if !raisin_core::blob_key_belongs_to(tenant_id, &storage_key, policy) {
+        tracing::warn!(
+            tenant = %tenant_id,
+            node = %node.path,
+            property = %prop_name,
+            "Refused to serve a Resource whose storage key is outside this tenant"
+        );
+        return Err(ApiError::not_found(
+            "Resource has no storage_key in metadata",
+        ));
+    }
+
     // Get filename
     let filename = resource
         .name
@@ -743,6 +764,30 @@ pub(crate) async fn sign_asset_url_internal(
         }
         _ => None,
     };
+    // Never mint a URL for a key outside this tenant (see serve_asset_property).
+    if let Some(raisin_models::nodes::properties::PropertyValue::Resource(r)) =
+        node.properties.get(property_path)
+    {
+        let key = r
+            .metadata
+            .as_ref()
+            .and_then(|m| match m.get("storage_key") {
+                Some(raisin_models::nodes::properties::PropertyValue::String(k)) => {
+                    Some(k.as_str())
+                }
+                _ => None,
+            });
+        let policy = if content_sha.is_some() {
+            raisin_core::BlobKeyPolicy::Strict
+        } else {
+            raisin_core::BlobKeyPolicy::AllowLegacy
+        };
+        if let Some(key) = key {
+            if !raisin_core::blob_key_belongs_to(tenant_id, key, policy) {
+                return Err(ApiError::not_found("Node not found"));
+            }
+        }
+    }
     let lifetime = match (&content_sha, request.command.as_str()) {
         (Some(_), "download") => request
             .expires_in

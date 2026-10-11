@@ -31,6 +31,10 @@ pub(super) struct InventoryLine {
     pub bytes: u64,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub bin: Option<BinaryRef>,
+    /// The node names an embedded file that was NOT packed: `missing` (no
+    /// such blob) or `foreign_key` (the key is not this tenant's, never read).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub bin_skipped: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,6 +246,7 @@ mod tests {
                 sha256: "ab".into(),
                 bytes: 7,
             }),
+            bin_skipped: None,
         }
     }
 
@@ -326,6 +331,7 @@ mod tests {
                 sha256: "def".into(),
                 bytes: 834221,
             }),
+            bin_skipped: None,
         };
         assert_eq!(
             serde_json::to_string(&l).unwrap(),

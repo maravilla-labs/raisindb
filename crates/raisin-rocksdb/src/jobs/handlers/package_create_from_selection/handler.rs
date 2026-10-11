@@ -366,7 +366,7 @@ impl PackageCreateFromSelectionHandler {
                     .content_type("application/zip")
                     .ext("rap")
                     .original_name(format!("{}-{}.rap", spec.name, spec.version))
-                    .tenant(Some(tenant))
+                    .tenant(Some(raisin_core::artifact_key_namespace(tenant, repo)))
                     .partial_id(archive_partial_id(&job.id)),
             )
             .await
@@ -467,6 +467,7 @@ impl PackageCreateFromSelectionHandler {
                     let written = archive::write_content_node(
                         &mut zip,
                         store.as_ref(),
+                        tenant,
                         &root.workspace,
                         &node,
                         has_children,
@@ -475,15 +476,21 @@ impl PackageCreateFromSelectionHandler {
                     .await
                     .map_err(|e| progress.stop_for(e))?;
                     progress.check_cancel()?;
-                    if let Some(key) = &written.missing_binary {
+                    if let Some((_, reason)) = &written.missing_binary {
                         progress.counters.warnings += 1;
+                        let why = match reason {
+                            archive::SkipReason::Missing => "has no stored file",
+                            archive::SkipReason::ForeignKey => {
+                                "names a stored file outside this tenant, which was not read"
+                            }
+                        };
                         progress
                             .mirror
                             .log(
                                 "warn",
                                 format!(
-                                    "source_unreadable: {}:{} has no stored file ({}); continued without it",
-                                    root.workspace, node.path, key
+                                    "source_unreadable: {}:{} {why}; continued without it",
+                                    root.workspace, node.path
                                 ),
                             )
                             .await;
@@ -583,7 +590,7 @@ impl PackageCreateFromSelectionHandler {
                     .content_type("application/jsonl")
                     .ext("jsonl")
                     .original_name("inventory.jsonl")
-                    .tenant(Some(tenant))
+                    .tenant(Some(raisin_core::artifact_key_namespace(tenant, repo)))
                     .partial_id(inventory_partial_id(&job.id)),
             )
             .await
@@ -618,7 +625,7 @@ impl PackageCreateFromSelectionHandler {
 
         let (manifest_obj, manifest_sha) = put_small(
             store.as_ref(),
-            tenant,
+            &raisin_core::artifact_key_namespace(tenant, repo),
             "manifest.yaml",
             "yaml",
             "application/yaml",
@@ -653,7 +660,7 @@ impl PackageCreateFromSelectionHandler {
 
         let log = put_small(
             store.as_ref(),
-            tenant,
+            &raisin_core::artifact_key_namespace(tenant, repo),
             "build.log",
             "log",
             "text/plain",
@@ -781,7 +788,7 @@ fn spill_dir() -> std::path::PathBuf {
 /// Write a small blob in one go; returns it with its sha256.
 async fn put_small(
     store: &dyn DynBinaryStorage,
-    tenant: &str,
+    namespace: &str,
     name: &str,
     ext: &str,
     mime: &str,
@@ -793,7 +800,7 @@ async fn put_small(
                 .content_type(mime)
                 .ext(ext)
                 .original_name(name)
-                .tenant(Some(tenant)),
+                .tenant(Some(namespace)),
         )
         .await
         .map_err(blob)?;
