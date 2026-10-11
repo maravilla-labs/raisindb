@@ -55,8 +55,14 @@ pub async fn add_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
         .and_then(|a| a.principal_id())
         .or(tx.get_actor()?)
         .unwrap_or_else(|| "anonymous".to_string());
-    normalized_node.updated_by = Some(actor.clone());
-    if normalized_node.created_by.is_none() {
+    // Authorship is a SERVER stamp: a client-supplied created_by is never
+    // kept (it would let anyone claim a node was written by someone else),
+    // except under an explicit trusted import.
+    let trusted = tx.is_trusted_import();
+    if !trusted || normalized_node.updated_by.is_none() {
+        normalized_node.updated_by = Some(actor.clone());
+    }
+    if !trusted || normalized_node.created_by.is_none() {
         normalized_node.created_by = Some(actor);
     }
 

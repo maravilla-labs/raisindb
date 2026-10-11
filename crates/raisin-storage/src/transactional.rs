@@ -358,6 +358,19 @@ pub trait TransactionalContext: Send + Sync {
     /// * `enabled` - Whether to enable schema validation (default: true)
     fn set_validate_schema(&self, enabled: bool) -> Result<()>;
 
+    /// Mark this transaction as a TRUSTED IMPORT: the `created_by` /
+    /// `updated_by` of the nodes it writes are kept as supplied.
+    ///
+    /// Without it (the default), authorship is a server stamp: a create
+    /// records the transaction's principal as both, and an update keeps the
+    /// stored `created_by` and records the principal as `updated_by`,
+    /// whatever the node carried — so a client can never claim a node was
+    /// written by someone else. Only engine code restoring data it already
+    /// trusts (an import of its own export) sets this.
+    fn set_trusted_import(&self, _trusted: bool) -> Result<()> {
+        Ok(())
+    }
+
     /// Check if schema validation is enabled.
     ///
     /// Returns true (default) if schema validation is enabled,

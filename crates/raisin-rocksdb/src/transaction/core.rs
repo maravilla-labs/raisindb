@@ -108,6 +108,11 @@ pub struct RocksDBTransaction {
     /// Can be disabled via TransactionalContext::set_validate_schema(false) for bulk imports
     pub(super) validate_schema: Arc<Mutex<bool>>,
 
+    /// Trusted import (default: false). Only then are `created_by` /
+    /// `updated_by` taken from the node supplied; otherwise authorship is
+    /// always stamped from this transaction's principal.
+    pub(super) trusted_import: Arc<Mutex<bool>>,
+
     /// Owner token for CREATE path reservations held by this transaction.
     ///
     /// `add_node` reserves each created path in the shared registry on
@@ -212,6 +217,7 @@ impl RocksDBTransaction {
             replication_coordinator,
             storage,
             validate_schema: Arc::new(Mutex::new(true)), // Default: validation enabled
+            trusted_import: Arc::new(Mutex::new(false)),
             path_reservation_owner,
             reserved_create_paths: Arc::new(Mutex::new(HashSet::new())),
             vaulted_secrets: Arc::new(Mutex::new(HashMap::new())),
@@ -449,6 +455,21 @@ impl RocksDBTransaction {
     pub(super) fn set_validate_schema_enabled(&self, enabled: bool) {
         *self
             .validate_schema
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = enabled;
+    }
+
+    /// Is this a trusted import (supplied authorship kept)?
+    pub(super) fn is_trusted_import(&self) -> bool {
+        *self
+            .trusted_import
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(super) fn set_trusted_import_enabled(&self, enabled: bool) {
+        *self
+            .trusted_import
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = enabled;
     }

@@ -158,6 +158,9 @@ mod pending_names;
 mod replication;
 mod types;
 
+#[cfg(test)]
+mod authorship_tests;
+
 // Re-export the main transaction type
 pub use core::RocksDBTransaction;
 pub(crate) use inflight::oldest_inflight_revision;

@@ -621,6 +621,11 @@ impl TransactionalContext for RocksDBTransaction {
         self.is_validate_schema_enabled()
     }
 
+    fn set_trusted_import(&self, trusted: bool) -> Result<()> {
+        self.set_trusted_import_enabled(trusted);
+        Ok(())
+    }
+
     /// Add a relationship from source node to target node within the transaction
     ///
     /// Creates both forward (outgoing) and reverse (incoming) index entries.

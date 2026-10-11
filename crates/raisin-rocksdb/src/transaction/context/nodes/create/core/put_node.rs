@@ -102,7 +102,9 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
         // history take. `version` counts writes to THIS node, which is the
         // number an optimistic-concurrency check wants.
         normalized_node.version = existing.version.saturating_add(1);
-        if normalized_node.created_by.is_none() {
+        // Authorship is a server stamp: an update never rewrites who
+        // created the node (unless this is a trusted import).
+        if !tx.is_trusted_import() || normalized_node.created_by.is_none() {
             normalized_node.created_by = existing.created_by.clone();
         }
         if normalized_node.created_at.is_none() {
@@ -113,7 +115,7 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
         // not every create path carries them from build time (see
         // Node::ensure_write_timestamps).
         normalized_node.updated_by = Some(actor.clone());
-        if normalized_node.created_by.is_none() {
+        if !tx.is_trusted_import() || normalized_node.created_by.is_none() {
             normalized_node.created_by = Some(actor);
         }
         normalized_node.ensure_write_timestamps();
