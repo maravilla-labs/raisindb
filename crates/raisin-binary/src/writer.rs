@@ -46,6 +46,11 @@ pub struct WriteHint {
     pub original_name: Option<String>,
     pub tenant_context: Option<String>,
     pub size_hint: Option<u64>,
+    /// A stable name for the uncommitted write, so a later attempt of the
+    /// same work can find (and overwrite or discard) what an interrupted one
+    /// left — see [`BinaryStorage::discard_partial`](crate::BinaryStorage::discard_partial).
+    /// Only `[A-Za-z0-9_-]` is kept. Without one the name is random.
+    pub partial_id: Option<String>,
 }
 
 impl WriteHint {
@@ -71,6 +76,26 @@ impl WriteHint {
     pub fn tenant(mut self, v: Option<impl Into<String>>) -> Self {
         self.tenant_context = v.map(Into::into);
         self
+    }
+
+    pub fn partial_id(mut self, v: impl Into<String>) -> Self {
+        self.partial_id = Some(v.into());
+        self
+    }
+}
+
+/// The file name of a partial: the sanitised stable id, else a random one.
+pub(crate) fn partial_file_name(partial_id: Option<&str>) -> String {
+    match partial_id
+        .map(|id| {
+            id.chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                .collect::<String>()
+        })
+        .filter(|id| !id.is_empty())
+    {
+        Some(id) => format!("{id}.part"),
+        None => format!("{}.part", nanoid::nanoid!()),
     }
 }
 
@@ -125,7 +150,8 @@ impl FsBlobWriter {
     ) -> anyhow::Result<Self> {
         let partial_dir = base_dir.join(PARTIAL_DIR);
         tokio::fs::create_dir_all(&partial_dir).await?;
-        let partial = partial_dir.join(format!("{}.part", nanoid::nanoid!()));
+        // `create` truncates: a stable id reused by a retry starts clean.
+        let partial = partial_dir.join(partial_file_name(hint.partial_id.as_deref()));
         let file = tokio::fs::File::create(&partial).await?;
         Ok(Self {
             file: Some(file),

@@ -40,6 +40,8 @@ pub trait DynBinaryStorage: Send + Sync {
 
     fn available_space(&self) -> BoxFuture<'_, anyhow::Result<Option<StorageSpace>>>;
 
+    fn discard_partial<'a>(&'a self, partial_id: &'a str) -> BoxFuture<'a, anyhow::Result<bool>>;
+
     fn sweep_partials(
         &self,
         older_than: std::time::Duration,
@@ -76,6 +78,10 @@ impl<T: BinaryStorage + 'static> DynBinaryStorage for Erased<T> {
 
     fn available_space(&self) -> BoxFuture<'_, anyhow::Result<Option<StorageSpace>>> {
         Box::pin(BinaryStorage::available_space(&*self.0))
+    }
+
+    fn discard_partial<'a>(&'a self, partial_id: &'a str) -> BoxFuture<'a, anyhow::Result<bool>> {
+        Box::pin(BinaryStorage::discard_partial(&*self.0, partial_id))
     }
 
     fn sweep_partials(

@@ -619,6 +619,9 @@ impl DynBinaryStorage for Shrinking {
             }))
         })
     }
+    fn discard_partial<'a>(&'a self, id: &'a str) -> BoxFuture<'a, anyhow::Result<bool>> {
+        self.inner.discard_partial(id)
+    }
     fn sweep_partials(&self, d: std::time::Duration) -> BoxFuture<'_, anyhow::Result<usize>> {
         self.inner.sweep_partials(d)
     }
@@ -742,4 +745,63 @@ async fn the_function_binding_submits_reads_and_cancels() {
     )
     .await
     .is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_build_interrupted_by_a_restart_reports_lost_and_discards_its_partial() {
+    use tokio::io::AsyncWriteExt;
+    let f = fixture(5, 16).await;
+    let submitted = submit_package_build(&f.storage, T, R, B, &request("k7"), &requester())
+        .await
+        .unwrap();
+    // The first attempt got as far as writing: the record says running for
+    // this job, and its partial archive is on disk.
+    let scope = StorageScope::new(T, R, B, "settings");
+    let mut node = f
+        .storage
+        .nodes()
+        .get_by_path(scope, RECORD, None)
+        .await
+        .unwrap()
+        .unwrap();
+    node.properties
+        .insert("status".into(), PropertyValue::String("running".into()));
+    node.properties.insert(
+        "job_id".into(),
+        PropertyValue::String(submitted.job_id.clone()),
+    );
+    f.storage
+        .nodes()
+        .update(
+            scope,
+            node,
+            raisin_storage::UpdateNodeOptions {
+                validate_schema: false,
+                allow_type_change: false,
+                operation_meta: None,
+            },
+        )
+        .await
+        .unwrap();
+    let mut w = BinaryStorage::begin_write(
+        &*f.blobs,
+        WriteHint::new().partial_id(format!("pkgbuild-{}", submitted.job_id)),
+    )
+    .await
+    .unwrap();
+    w.write_all(b"half an archive").await.unwrap();
+    std::mem::forget(w);
+    assert!(!leftover_blobs(&f).await.is_empty());
+
+    // The job system re-queued it after the restart.
+    let h = handler(&f, None);
+    let err = run(&f, &h, &submitted.job_id).await.unwrap_err();
+    assert!(err.to_string().contains("lost"), "{err}");
+    let rec = record(&f).await;
+    assert_eq!(string(&rec, "status").as_deref(), Some("failed"));
+    let Some(PropertyValue::Object(e)) = rec.get("error") else {
+        panic!("no error object");
+    };
+    assert_eq!(e.get("code"), Some(&PropertyValue::String("lost".into())));
+    assert!(leftover_blobs(&f).await.is_empty(), "partial discarded");
 }

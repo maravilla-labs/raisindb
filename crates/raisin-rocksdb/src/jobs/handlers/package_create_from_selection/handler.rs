@@ -104,6 +104,33 @@ impl PackageCreateFromSelectionHandler {
             .cloned()
             .map(|r| self.watch_record_for_cancel(context, r, cancel.clone()));
 
+        // A restored job whose record already says this very job was running
+        // is the second attempt of a build the server lost mid-write (the
+        // job system re-queues what was running at a crash). The record has
+        // already shown that attempt's progress, so it is reported as `lost`
+        // rather than silently restarted, and the attempt's partial objects —
+        // named after the job, so findable — are discarded.
+        if mirror.was_running_as(&job.id).await {
+            if let Some(store) = self.storage.blob_store() {
+                let _ = store.discard_partial(&archive_partial_id(&job.id)).await;
+                let _ = store.discard_partial(&inventory_partial_id(&job.id)).await;
+            }
+            let message = "The server stopped while this build was running; the partial \
+                           archive was discarded"
+                .to_string();
+            mirror.log("error", format!("lost: {message}")).await;
+            let mut err = HashMap::new();
+            err.insert("code".to_string(), PropertyValue::String("lost".into()));
+            err.insert(
+                "message".to_string(),
+                PropertyValue::String(message.clone()),
+            );
+            let mut extra = HashMap::new();
+            extra.insert("error".to_string(), PropertyValue::Object(err));
+            mirror.terminal("failed", extra).await;
+            return Err(Error::Validation(format!("lost: {message}")));
+        }
+
         let mut committed = Committed::default();
         let outcome = self
             .build(job, context, &mut mirror, &cancel, &mut committed)
@@ -339,7 +366,8 @@ impl PackageCreateFromSelectionHandler {
                     .content_type("application/zip")
                     .ext("rap")
                     .original_name(format!("{}-{}.rap", spec.name, spec.version))
-                    .tenant(Some(tenant)),
+                    .tenant(Some(tenant))
+                    .partial_id(archive_partial_id(&job.id)),
             )
             .await
             .map_err(blob)?;
@@ -555,7 +583,8 @@ impl PackageCreateFromSelectionHandler {
                     .content_type("application/jsonl")
                     .ext("jsonl")
                     .original_name("inventory.jsonl")
-                    .tenant(Some(tenant)),
+                    .tenant(Some(tenant))
+                    .partial_id(inventory_partial_id(&job.id)),
             )
             .await
             .map_err(blob)?;
@@ -653,6 +682,15 @@ impl PackageCreateFromSelectionHandler {
             log,
         ))
     }
+}
+
+/// Stable partial names, so a later attempt of the same job can find them.
+fn archive_partial_id(job: &raisin_storage::jobs::JobId) -> String {
+    format!("pkgbuild-{}", job)
+}
+
+fn inventory_partial_id(job: &raisin_storage::jobs::JobId) -> String {
+    format!("pkgbuild-{}-inventory", job)
 }
 
 /// Aborts a spawned task when dropped.

@@ -376,6 +376,27 @@ impl Mirror {
         self.record.as_ref()
     }
 
+    /// Does the record say THIS job is already running it — i.e. is this a
+    /// re-run of an attempt that was interrupted?
+    pub(super) async fn was_running_as(&self, job_id: &JobId) -> bool {
+        use raisin_storage::{NodeRepository, Storage, StorageScope};
+        let Some(record) = &self.record else {
+            return false;
+        };
+        let scope = StorageScope::new(&self.tenant, &self.repo, &self.branch, &record.workspace);
+        let Ok(Some(node)) = self
+            .storage
+            .nodes()
+            .get_by_path(scope, &record.path, None)
+            .await
+        else {
+            return false;
+        };
+        let is = |k: &str, v: &str| matches!(node.properties.get(k), Some(PropertyValue::String(s)) if s == v);
+        is("job_id", job_id.0.as_str())
+            && (is("status", "running") || is("status", "cancel_requested"))
+    }
+
     /// A log line: to the job's live log (E5) and to the record's ring.
     /// Lines carry paths, counts and codes — never property values.
     pub(super) async fn log(&mut self, level: &'static str, msg: impl Into<String>) {

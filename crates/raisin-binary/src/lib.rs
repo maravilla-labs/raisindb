@@ -256,6 +256,17 @@ pub trait BinaryStorage: Send + Sync {
         async { Ok(None) }
     }
 
+    /// Remove the uncommitted write named by [`WriteHint::partial_id`], if
+    /// one is left over. Returns whether there was one. Object storage cannot
+    /// name an upload this way and leaves it to [`sweep_partials`](Self::sweep_partials).
+    fn discard_partial(
+        &self,
+        partial_id: &str,
+    ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send {
+        let _ = partial_id;
+        async { Ok(false) }
+    }
+
     /// Remove uncommitted writes older than `older_than` — what a process
     /// killed mid-write left behind. Returns how many were removed.
     fn sweep_partials(
@@ -335,6 +346,7 @@ impl BinaryStorage for FilesystemBinaryStorage {
             original_name: original_name.map(str::to_string),
             tenant_context: tenant_context.map(str::to_string),
             size_hint,
+            partial_id: None,
         };
         let writer = self.begin_write(hint).await?;
         write_stream_and_commit(writer, stream).await
@@ -482,6 +494,27 @@ impl BinaryStorage for FilesystemBinaryStorage {
         }
     }
 
+    fn discard_partial(
+        &self,
+        partial_id: &str,
+    ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send {
+        let path = self
+            .base_dir
+            .join(PARTIAL_DIR)
+            .join(writer::partial_file_name(Some(partial_id)));
+        let stable = !partial_id.is_empty();
+        async move {
+            if !stable {
+                return Ok(false);
+            }
+            match tokio::fs::remove_file(&path).await {
+                Ok(()) => Ok(true),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(e) => Err(e.into()),
+            }
+        }
+    }
+
     fn sweep_partials(
         &self,
         older_than: std::time::Duration,
@@ -622,6 +655,7 @@ impl BinaryStorage for S3BinaryStorage {
             original_name: original_name.map(str::to_string),
             tenant_context: tenant_context.map(str::to_string),
             size_hint,
+            partial_id: None,
         };
         async move {
             let writer = self.begin_write(hint).await?;
@@ -1001,5 +1035,35 @@ mod tests {
         assert_eq!(got, b"3456");
         store.delete(&stored.key).await.unwrap();
         assert!(store.head(&stored.key).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_stable_partial_id_is_reused_and_discardable() {
+        use tokio::io::AsyncWriteExt;
+        let dir = tempfile::tempdir().unwrap();
+        let store = FilesystemBinaryStorage::new(dir.path(), None);
+        // An interrupted attempt…
+        let mut w = store
+            .begin_write(WriteHint::new().partial_id("pkgbuild-job/1"))
+            .await
+            .unwrap();
+        w.write_all(b"first attempt, never committed")
+            .await
+            .unwrap();
+        std::mem::forget(w);
+        let part = dir.path().join(PARTIAL_DIR).join("pkgbuild-job1.part");
+        assert!(part.exists());
+        // …is found by name and discarded.
+        assert!(store.discard_partial("pkgbuild-job/1").await.unwrap());
+        assert!(!part.exists());
+        assert!(!store.discard_partial("pkgbuild-job/1").await.unwrap());
+        // A retry under the same id starts from an empty file.
+        let mut w = store
+            .begin_write(WriteHint::new().partial_id("pkgbuild-job1"))
+            .await
+            .unwrap();
+        w.write_all(b"ok").await.unwrap();
+        let stored = w.commit().await.unwrap();
+        assert_eq!(store.get(&stored.key).await.unwrap().as_ref(), b"ok");
     }
 }
