@@ -666,3 +666,80 @@ async fn an_installed_package_name_is_refused() {
         .unwrap_err();
     assert!(err.to_string().contains("name_invalid"), "{err}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_function_binding_submits_reads_and_cancels() {
+    let f = fixture(10, 16).await;
+    crate::package_build::install(&f.storage);
+    let scope = || crate::package_build::CallScope {
+        tenant: T,
+        repo: R,
+        branch: B,
+    };
+    let req = serde_json::to_value(request("k6")).unwrap();
+    let out = crate::package_build::call(scope(), &requester(), "createFromSelection", req.clone())
+        .await
+        .unwrap();
+    let job_id = out["job_id"].as_str().unwrap().to_string();
+    assert_eq!(out["existing"], false);
+    // Same key, same job (E13).
+    let again = crate::package_build::call(scope(), &requester(), "createFromSelection", req)
+        .await
+        .unwrap();
+    assert_eq!(again["job_id"], job_id.as_str());
+    assert_eq!(again["existing"], true);
+
+    let status = crate::package_build::call(
+        scope(),
+        &requester(),
+        "status",
+        serde_json::json!({ "jobId": job_id }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status["status"], "scheduled");
+
+    // Never started: cancel takes the hard path and the job ends cancelled.
+    let cancelled = crate::package_build::call(
+        scope(),
+        &requester(),
+        "cancel",
+        serde_json::json!({ "jobId": job_id }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(cancelled["cancelled"], true);
+    assert_eq!(
+        f.storage
+            .job_registry()
+            .get_status(&JobId(job_id.clone()))
+            .await
+            .unwrap(),
+        JobStatus::Cancelled
+    );
+
+    // Unknown job, unknown method, anonymous caller.
+    let unknown = crate::package_build::call(
+        scope(),
+        &requester(),
+        "status",
+        serde_json::json!({ "jobId": "nope" }),
+    )
+    .await
+    .unwrap();
+    assert!(unknown.is_null());
+    assert!(
+        crate::package_build::call(scope(), &requester(), "explode", serde_json::json!({}))
+            .await
+            .is_err()
+    );
+    let anon = AuthContext::anonymous();
+    assert!(crate::package_build::call(
+        scope(),
+        &anon,
+        "status",
+        serde_json::json!({ "jobId": job_id })
+    )
+    .await
+    .is_err());
+}

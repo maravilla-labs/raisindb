@@ -41,6 +41,7 @@ mod locks;
 mod network_policy;
 mod node_dev;
 mod nodes;
+mod packages;
 mod platform;
 mod resources;
 mod scheduler;
@@ -453,6 +454,12 @@ impl FunctionApi for RaisinFunctionApi {
 
     async fn node_dev_call(&self, method: &str, args: Value) -> Result<Value> {
         self.impl_node_dev_call(method, args).await
+    }
+
+    // ========== Package Builds ==========
+
+    async fn packages_call(&self, method: &str, args: Value) -> Result<Value> {
+        self.impl_packages_call(method, args).await
     }
 
     // ========== Scheduled Invocation Operations ==========

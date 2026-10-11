@@ -635,6 +635,24 @@ export namespace ocr {
 
 }
 
+export namespace packages {
+  /** `raisin.packages.cancel` — registry method `packages_cancel`. Returns raw JSON. */
+  export function cancel(request: string): string {
+    return call("packages_cancel", argsOf([request]));
+  }
+
+  /** `raisin.packages.createFromSelection` — registry method `packages_create_from_selection`. Returns raw JSON. */
+  export function createFromSelection(request: string): string {
+    return call("packages_create_from_selection", argsOf([request]));
+  }
+
+  /** `raisin.packages.status` — registry method `packages_status`. Returns raw JSON. */
+  export function status(request: string): string {
+    return call("packages_status", argsOf([request]));
+  }
+
+}
+
 export namespace pdf {
   /** `raisin.pdf.extractText` — registry method `pdf_extractText`. Returns raw JSON. */
   export function extractText(base64Data: string): string {

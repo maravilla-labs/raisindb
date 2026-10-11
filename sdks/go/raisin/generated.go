@@ -658,6 +658,27 @@ func (OcrAPI) Image(base64Data string, options any) (json.RawMessage, error) {
 	return callJSON("ocr_image", []any{base64Data, options})
 }
 
+// PackagesAPI is the `raisin.packages` namespace.
+type PackagesAPI struct{}
+
+// Packages is the entry point for the `raisin.packages` namespace.
+var Packages PackagesAPI
+
+// Cancel calls the RaisinDB registry method "packages_cancel".
+func (PackagesAPI) Cancel(request any) (json.RawMessage, error) {
+	return callJSON("packages_cancel", []any{request})
+}
+
+// CreateFromSelection calls the RaisinDB registry method "packages_create_from_selection".
+func (PackagesAPI) CreateFromSelection(request any) (json.RawMessage, error) {
+	return callJSON("packages_create_from_selection", []any{request})
+}
+
+// Status calls the RaisinDB registry method "packages_status".
+func (PackagesAPI) Status(request any) (json.RawMessage, error) {
+	return callJSON("packages_status", []any{request})
+}
+
 // PdfAPI is the `raisin.pdf` namespace.
 type PdfAPI struct{}
 

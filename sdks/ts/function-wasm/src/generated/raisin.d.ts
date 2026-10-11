@@ -180,6 +180,12 @@ declare namespace raisin {
     function image(base64Data: string, options: any): Promise<any>;
   }
 
+  namespace packages {
+    function cancel(request: any): Promise<any>;
+    function createFromSelection(request: any): Promise<any>;
+    function status(request: any): Promise<any>;
+  }
+
   namespace pdf {
     function extractText(base64Data: string): Promise<any>;
     function getPageCount(base64Data: string): Promise<number>;

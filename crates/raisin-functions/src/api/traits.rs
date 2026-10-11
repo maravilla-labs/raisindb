@@ -403,6 +403,19 @@ pub trait FunctionApi: Send + Sync {
         )))
     }
 
+    // ========== Package Builds ==========
+
+    /// `raisin.packages.*`: start, cancel or query a streaming package build
+    /// (`createFromSelection`, `cancel`, `status`). See
+    /// `raisin_rocksdb::package_build::call` for the request and result
+    /// shapes.
+    async fn packages_call(&self, method: &str, args: Value) -> Result<Value> {
+        let _ = args;
+        Err(raisin_error::Error::Validation(format!(
+            "engine_unsupported: package builds are not available in this runtime (method: {method})"
+        )))
+    }
+
     // ========== Scheduled Invocation Operations ==========
 
     /// Schedule a one-shot invocation of a function or flow at a fixed time.

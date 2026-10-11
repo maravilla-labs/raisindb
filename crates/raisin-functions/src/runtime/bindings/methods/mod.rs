@@ -29,6 +29,7 @@ pub mod node_dev;
 pub mod nodes;
 pub mod notify;
 pub mod ocr;
+pub mod packages;
 pub mod pdf;
 pub mod platform;
 pub mod resources;
@@ -57,6 +58,7 @@ pub fn build_registry() -> BindingsRegistry {
     methods.extend(scheduler::methods());
     methods.extend(agent_runs::methods());
     methods.extend(node_dev::methods());
+    methods.extend(packages::methods());
     methods.extend(platform::methods());
     methods.extend(notify::methods());
     methods.extend(locks::methods());

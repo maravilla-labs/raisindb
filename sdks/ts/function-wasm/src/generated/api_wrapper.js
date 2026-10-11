@@ -772,6 +772,27 @@ globalThis.raisin = {
             usage: (request) => check(__call('agent_runs_usage', [request || {}])),
         };
     })(),
+    // Streaming package builds in this repository, as this function's caller
+    // (an administrator, or the server itself for a trigger).
+    // createFromSelection({ name, version?, selected_paths: [{ workspace, path }],
+    //   include_node_types?, record?: { workspace, path }, register_package?,
+    //   idempotency_key?, title?, description?, author?, branch? })
+    //   -> { job_id, existing, status: "scheduled" }
+    // cancel({ jobId }) -> { job_id, cancelled }   (stops within seconds, no partial object)
+    // status({ jobId }) -> { job_id, status, progress, error, result } | null
+    packages: (() => {
+        const check = (r) => {
+            if (r && r.error) {
+                throw new Error(r.message || r.error);
+            }
+            return r;
+        };
+        return {
+            createFromSelection: (request) => check(__call('packages_create_from_selection', [request || {}])),
+            cancel: (request) => check(__call('packages_cancel', [request || {}])),
+            status: (request) => check(__call('packages_status', [request || {}])),
+        };
+    })(),
     scheduler: {
         // Schedule a one-shot invocation of a function or flow at a fixed
         // time. request: { targetKind: "function"|"flow", targetPath,

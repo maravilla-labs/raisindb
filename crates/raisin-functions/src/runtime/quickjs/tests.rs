@@ -2341,6 +2341,7 @@ async fn test_raisin_api_surface_snapshot() {
             "nodes",
             "notify",
             "ocr",
+            "packages",
             "pdf",
             "platform",
             "scheduler",

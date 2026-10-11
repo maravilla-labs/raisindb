@@ -555,6 +555,9 @@ async fn main() {
     // Streaming jobs (the package build) write straight into the blob store.
     #[cfg(feature = "storage-rocksdb")]
     storage.set_blob_store(raisin_binary::erase(bin.clone()));
+    // `raisin.packages.*` reaches the build through this.
+    #[cfg(feature = "storage-rocksdb")]
+    raisin_rocksdb::package_build::install(&storage);
 
     // ========================================================================
     // System definitions (built-in NodeTypes / Workspaces / packages)
