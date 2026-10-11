@@ -60,6 +60,21 @@ pub struct OrderedChild {
     pub name: String,
 }
 
+/// One page of a workspace walked in `path` order.
+///
+/// Returned by [`NodeRepository::scan_by_path_order_page`].
+#[derive(Debug, Clone, Default)]
+pub struct PathOrderPage {
+    /// Nodes in byte-wise path order (reversed when the scan was descending).
+    pub nodes: Vec<models::nodes::Node>,
+    /// Cursor for the next page, or `None` when the scan is exhausted.
+    ///
+    /// Drive pagination from this, never from `nodes.len()`: an index entry
+    /// whose node cannot be loaded counts toward the page but yields no node,
+    /// so a short page is not necessarily the last one.
+    pub next_after: Option<String>,
+}
+
 /// Summary of a cross-branch node-set copy (see
 /// [`NodeRepository::copy_nodes_across_branches`]).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -379,7 +394,7 @@ pub trait NodeRepository: Send + Sync {
 
     /// Stream ordered child IDs without loading full node objects.
     ///
-    /// This is a low-level streaming primitive for ORDER BY path optimization.
+    /// This is a low-level streaming primitive for tree-order traversals.
     /// Returns child IDs in their fractional index order (based on order_label).
     /// Memory-efficient: returns IDs only, not full Node objects.
     ///
@@ -531,6 +546,58 @@ pub trait NodeRepository: Send + Sync {
         path_prefix: &str,
         options: ListOptions,
     ) -> impl std::future::Future<Output = Result<Vec<models::nodes::Node>>> + Send;
+
+    /// Page through every node of a workspace in byte-wise `path` order — the
+    /// order `ORDER BY path` asks for.
+    ///
+    /// This is NOT tree order: `/a-b` sorts before `/a/x` because `-` is below
+    /// `/`, while a depth-first walk visits `/a/x` first. Editorial order is a
+    /// different thing again (see [`Self::scan_descendants_ordered_page`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `after_path` - Exclusive cursor: resume strictly after this path
+    ///   (strictly before it when `descending`). `None` starts at the first
+    ///   (or, descending, the last) path.
+    /// * `limit` - Maximum index entries to consume for this page.
+    /// * `descending` - Walk the path order backwards.
+    ///
+    /// The default loads every node with [`Self::list_all`] and sorts; a
+    /// backend whose path index is ordered overrides it with a seek.
+    fn scan_by_path_order_page(
+        &self,
+        scope: StorageScope<'_>,
+        after_path: Option<&str>,
+        limit: usize,
+        descending: bool,
+        options: ListOptions,
+    ) -> impl std::future::Future<Output = Result<PathOrderPage>> + Send {
+        async move {
+            let limit = limit.max(1);
+            let mut nodes: Vec<_> = self
+                .list_all(scope, options)
+                .await?
+                .into_iter()
+                .filter(|n| match after_path {
+                    None => true,
+                    Some(after) if descending => n.path.as_str() < after,
+                    Some(after) => n.path.as_str() > after,
+                })
+                .collect();
+            nodes.sort_by(|a, b| a.path.cmp(&b.path));
+            if descending {
+                nodes.reverse();
+            }
+            let exhausted = nodes.len() <= limit;
+            nodes.truncate(limit);
+            let next_after = if exhausted {
+                None
+            } else {
+                nodes.last().map(|n| n.path.clone())
+            };
+            Ok(PathOrderPage { nodes, next_after })
+        }
+    }
 
     /// Scan all descendants of a node in tree order (respecting ORDERED_CHILDREN)
     ///

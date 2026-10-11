@@ -410,6 +410,33 @@ impl NodeRepository for NodeRepositoryImpl {
         .await
     }
 
+    async fn scan_by_path_order_page(
+        &self,
+        scope: StorageScope<'_>,
+        after_path: Option<&str>,
+        limit: usize,
+        descending: bool,
+        options: ListOptions,
+    ) -> Result<raisin_storage::PathOrderPage> {
+        let StorageScope {
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+        } = scope;
+        self.scan_by_path_order_page_impl(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            after_path,
+            limit,
+            descending,
+            options.max_revision.as_ref(),
+            PropertiesMode::from_options(&options),
+        )
+    }
+
     async fn scan_descendants_ordered_page(
         &self,
         scope: StorageScope<'_>,

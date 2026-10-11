@@ -132,8 +132,8 @@ pub use traits::{
     apply_child_order_from_branch, get_many_by_loop, ArchetypeRepository, BatchReadItem,
     CompoundColumnValue, CompoundIndexRepository, CompoundIndexScanEntry, CrossBranchCopySummary,
     CrossBranchNodeChange, ElementTypeRepository, NodeLocator, NodeRepository, NodeTypeRepository,
-    OrderedChild, ProcessingRulesRepository, PropertiesRead, PropertyIndexRepository,
-    PropertyScanEntry, ReadOpts, ReadSnapshot, ReferenceIndexRepository, RegistryRepository,
-    RelationRepository, Storage, Transaction, TreeRepository, VersioningRepository,
-    WorkspaceRepository,
+    OrderedChild, PathOrderPage, ProcessingRulesRepository, PropertiesRead,
+    PropertyIndexRepository, PropertyScanEntry, ReadOpts, ReadSnapshot, ReferenceIndexRepository,
+    RegistryRepository, RelationRepository, Storage, Transaction, TreeRepository,
+    VersioningRepository, WorkspaceRepository,
 };

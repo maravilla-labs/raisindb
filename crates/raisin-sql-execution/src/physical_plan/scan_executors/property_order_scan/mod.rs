@@ -7,12 +7,12 @@
 //!
 //! Executes ordered property scans (e.g., `ORDER BY created_at LIMIT N`).
 //! Supports two modes:
-//! - **Path ordering** via DFS traversal of ORDERED_CHILDREN
+//! - **Path ordering** via paged seeks over the path index
 //! - **Property ordering** via property index scan with safety valve fallback
 //!
 //! # Module Structure
 //!
-//! - `path_order` - DFS-based ORDER BY path traversal
+//! - `path_order` - ORDER BY path, paged in path-index order
 //! - `index_order` - Property index scan with safety valve fallback
 
 mod index_order;
@@ -81,7 +81,7 @@ pub async fn execute_property_order_scan<S: Storage + 'static>(
     let locales = get_locales_to_use(&ctx_clone);
     let target_rows = limit_hint;
 
-    // Check if this is an ORDER BY path query - use hierarchical traversal
+    // ORDER BY path is served by the path index, not a property index
     if property_name == "__path" {
         return path_order::execute_path_order_scan(
             storage,

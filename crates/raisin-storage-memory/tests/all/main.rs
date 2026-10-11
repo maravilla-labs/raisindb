@@ -18,4 +18,5 @@
 #![allow(dead_code)]
 
 mod node_types_test;
+mod path_order_page;
 mod test_ordering;

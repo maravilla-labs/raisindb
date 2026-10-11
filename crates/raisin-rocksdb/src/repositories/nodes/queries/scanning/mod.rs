@@ -7,6 +7,7 @@
 //! - Path prefix scanning
 
 mod bulk_descendants;
+mod path_order;
 mod path_prefix;
 
 use super::super::helpers::is_tombstone;
@@ -64,7 +65,8 @@ impl NodeRepositoryImpl {
     /// Emission is **pre-order depth-first**: a node is emitted before its
     /// descendants, and a subtree is emitted contiguously. This is the same
     /// order `ORDER BY __tree_order` produces, and the same order the SQL table
-    /// scan and `ORDER BY path` traversal already used.
+    /// scan uses. It is NOT `ORDER BY path` order (`/a-b` sorts before `/a/x`);
+    /// that is served by `scan_by_path_order_page` over the path index.
     ///
     /// (This was breadth-first until editorial ordering became a SQL column.
     /// BFS interleaved cousins, so `DESCENDANT_OF` and a full table scan

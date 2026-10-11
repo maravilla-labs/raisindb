@@ -52,6 +52,7 @@ mod localized_read_bench;
 mod locks_sql_test;
 mod move_copy_order_at_root;
 mod mvcc_index_oracle;
+mod order_by_path_tests;
 mod pagination_navigation_tests;
 mod param_plan_cache_invalidation;
 mod param_plan_cache_tests;
