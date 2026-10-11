@@ -120,6 +120,9 @@ pub(super) struct Counters {
     pub node_types: u64,
     pub warnings: u64,
     pub skipped: u64,
+    /// Binaries packed from legacy, unprefixed keys (they predate
+    /// tenant-scoped storage; see raisin_core::blob_scope).
+    pub legacy_keys: u64,
     pub bytes_per_s: u64,
     pub per_ws: BTreeMap<String, WsCount>,
 }
@@ -303,6 +306,7 @@ fn counters_map(c: &Counters) -> HashMap<String, PropertyValue> {
     m.insert("node_types".into(), int(c.node_types));
     m.insert("warnings".into(), int(c.warnings));
     m.insert("skipped".into(), int(c.skipped));
+    m.insert("legacy_keys".into(), int(c.legacy_keys));
     m.insert("bytes_per_s".into(), int(c.bytes_per_s));
     m.insert("per_ws".into(), ws_map(&c.per_ws));
     m

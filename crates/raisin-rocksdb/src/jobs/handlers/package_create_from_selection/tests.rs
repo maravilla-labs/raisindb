@@ -1133,6 +1133,11 @@ async fn a_node_pointing_at_another_tenants_blob_is_not_packed() {
         panic!("no counters");
     };
     assert_eq!(counters.get("warnings"), Some(&PropertyValue::Integer(2)));
+    // The legacy key is packed and counted on its own.
+    assert_eq!(
+        counters.get("legacy_keys"),
+        Some(&PropertyValue::Integer(1))
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

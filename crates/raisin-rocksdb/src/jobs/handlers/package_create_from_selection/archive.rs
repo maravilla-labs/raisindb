@@ -54,6 +54,10 @@ pub(super) enum SkipReason {
     ForeignKey,
     /// The key is this tenant's but the store has no such blob.
     Missing,
+    /// A legacy unprefixed key while legacy keys are switched off
+    /// (`RAISIN_LEGACY_BLOB_KEYS=deny`): it predates tenant-scoped storage
+    /// and cannot be attributed to this tenant.
+    LegacyKey,
 }
 
 impl SkipReason {
@@ -61,6 +65,7 @@ impl SkipReason {
         match self {
             SkipReason::ForeignKey => "foreign_key",
             SkipReason::Missing => "missing",
+            SkipReason::LegacyKey => "legacy_key",
         }
     }
 }
@@ -73,6 +78,8 @@ pub(super) struct Written {
     pub files: u64,
     /// The node names an embedded file that was not packed, and why.
     pub missing_binary: Option<(String, SkipReason)>,
+    /// The packed file has a legacy, unprefixed key.
+    pub legacy_key: bool,
 }
 
 /// Sort every object's keys, recursively.
@@ -186,6 +193,7 @@ pub(super) async fn write_content_node<W: AsyncWrite + Unpin + Send>(
     let mut files = 1u64;
     let mut bin = None;
     let mut missing_binary = None;
+    let mut legacy_key = false;
 
     if let Some((storage_key, mime)) = embedded_file(node) {
         let parent = parent_path(path);
@@ -204,6 +212,7 @@ pub(super) async fn write_content_node<W: AsyncWrite + Unpin + Send>(
             &storage_key,
             raisin_core::BlobKeyPolicy::AllowLegacy,
         );
+        let legacy = raisin_core::is_legacy_key(&storage_key);
         let fetched = if owned {
             store.get_stream(&storage_key).await.ok()
         } else {
@@ -230,10 +239,13 @@ pub(super) async fn write_content_node<W: AsyncWrite + Unpin + Send>(
                     sha256: digest.sha256,
                     bytes: digest.size,
                 });
+                legacy_key = legacy;
             }
             None => {
                 let reason = if owned {
                     SkipReason::Missing
+                } else if legacy {
+                    SkipReason::LegacyKey
                 } else {
                     SkipReason::ForeignKey
                 };
@@ -270,6 +282,7 @@ pub(super) async fn write_content_node<W: AsyncWrite + Unpin + Send>(
         bytes,
         files,
         missing_binary,
+        legacy_key,
     })
 }
 
@@ -297,6 +310,7 @@ pub(super) async fn write_node_type<W: AsyncWrite + Unpin + Send>(
         bytes: yaml.len() as u64,
         files: 1,
         missing_binary: None,
+        legacy_key: false,
     })
 }
 

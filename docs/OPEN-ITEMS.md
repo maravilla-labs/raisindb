@@ -1173,3 +1173,47 @@ index describing the losing side until the node is next written or the index is
 rebuilt. Fix: publish one `Updated` / `Deleted` (or `Created`) per resolution
 after the merge commit, with the merge revision — through the same emitter the
 repository write paths use.
+
+### 2.122 [P2] Legacy unprefixed blob keys cannot be attributed to a tenant
+
+**Symptom.** Blob keys are minted as `{tenant}/{yyyy}/{mm}/{dd}/{id}`, but
+some writers used to mint them without the tenant segment
+(`{yyyy}/{mm}/{dd}/{id}`) — the external-upload path until c8702205. Such a
+key belongs to no tenant provably. That cuts both ways:
+
+- **Reads stay permissive.** Asset serving, `raisin:sign`, `raisin:file` and
+  package export accept a legacy key (`BlobKeyPolicy::AllowLegacy`), so a node
+  in tenant A that names a legacy key written by tenant B gets B's bytes. A
+  key with ANOTHER tenant's prefix is refused; only the shared legacy
+  namespace is exposed.
+- **Switching it off loses the tenant's own files.** With
+  `RAISIN_LEGACY_BLOB_KEYS=deny` the same reads refuse legacy keys, and an
+  export skips its own old binaries (inventory `bin_skipped: "legacy_key"`,
+  counted as a warning). An export that packs them counts them in
+  `counters.legacy_keys`, so an application can say "N files predate
+  tenant-scoped storage".
+
+**Root cause.** The key lives in node properties (writable content), and
+nothing engine-side recorded which node a legacy blob was uploaded for, so a
+legacy key cannot be checked against an engine-recorded value.
+
+**Verdict: fix in the engine — a one-off admin repair job, then deny.**
+`JobType::BlobRekey { tenant, repo }`, run by an operator per repository:
+
+1. Walk every node (paged, all branches) and every Resource property whose
+   `metadata.storage_key` is a legacy key.
+2. Copy the blob to `{tenant}/{same date path}/{id}` through a `BlobWriter`,
+   verifying size and sha256 against the source in the same pass.
+3. Switch the reference with a bookkeeping write that changes only
+   `storage_key`/`url`, through the transaction path (so history and
+   replication carry it), and record `{old → new}` in a REGISTRY-CF journal
+   so a crash resumes instead of copying twice.
+4. Delete the old blob only when no node on any branch still names it (the
+   same reference check the package artifact ledger uses), else leave it to
+   history GC.
+5. Report counts on the job; the operator then sets
+   `RAISIN_LEGACY_BLOB_KEYS=deny`.
+
+A legacy key named by nodes of two tenants is the case the attribution gap
+exists for: the job copies it for each tenant that names it and never treats
+it as owned by one.

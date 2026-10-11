@@ -50,7 +50,8 @@ pub use asset_urls::{
     MAX_ARTIFACT_URL_TTL_SECS,
 };
 pub use blob_scope::{
-    artifact_key_namespace, blob_key_belongs_to, is_artifact_key_of, BlobKeyPolicy,
+    artifact_key_namespace, blob_key_belongs_to, blob_key_belongs_to_with, is_artifact_key_of,
+    is_legacy_key, legacy_keys_allowed, BlobKeyPolicy,
 };
 pub mod asset_grants;
 pub use asset_grants::{

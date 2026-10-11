@@ -553,6 +553,10 @@ impl PackageCreateFromSelectionHandler {
                             archive::SkipReason::ForeignKey => {
                                 "names a stored file outside this tenant, which was not read"
                             }
+                            archive::SkipReason::LegacyKey => {
+                                "names a stored file that predates tenant-scoped storage \
+                                 (legacy keys are switched off)"
+                            }
                         };
                         progress
                             .mirror
@@ -564,6 +568,9 @@ impl PackageCreateFromSelectionHandler {
                                 ),
                             )
                             .await;
+                    }
+                    if written.legacy_key {
+                        progress.counters.legacy_keys += 1;
                     }
                     if !node.node_type.is_empty() {
                         node_types_used.insert(node.node_type.clone());
