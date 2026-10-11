@@ -376,7 +376,17 @@ async fn run(
     let ctx = f.storage.job_data_store().get(T, &id).unwrap().unwrap();
     f.storage.job_registry().mark_running(&id).await.unwrap();
     f.storage.job_registry().mark_executing(&id).await.unwrap();
-    handler.handle(&job, &ctx).await
+    let out = handler.handle(&job, &ctx).await;
+    // What the worker does with a result.
+    if let Ok(Some(result)) = &out {
+        let _ = f
+            .storage
+            .job_registry()
+            .set_result(&id, result.clone())
+            .await;
+        let _ = f.storage.job_registry().mark_completed(&id).await;
+    }
+    out
 }
 
 fn handler(f: &Fixture, floor: Option<u64>) -> PackageCreateFromSelectionHandler {
@@ -779,149 +789,6 @@ fn studio_request(key: &str) -> serde_json::Value {
         "idempotency_key": key,
         "requested_by": "someone-else-entirely"
     })
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_function_binding_submits_reads_and_cancels() {
-    let f = fixture(10, 16).await;
-    crate::package_build::install(&f.storage);
-    let scope = || crate::package_build::CallScope {
-        tenant: T,
-        repo: R,
-        branch: B,
-    };
-    let sys = AuthContext::system();
-    let caps = crate::package_build::call(scope(), &sys, "capabilities", serde_json::Value::Null)
-        .await
-        .unwrap();
-    assert_eq!(caps["streaming_build"], true);
-    assert_eq!(caps["excluded_paths"], false);
-
-    let out =
-        crate::package_build::call(scope(), &sys, "createFromSelection", studio_request("k6"))
-            .await
-            .unwrap();
-    let job_id = out["job_id"].as_str().unwrap().to_string();
-    assert_eq!(out["existing"], false);
-    // Same key, same job (E13).
-    let again =
-        crate::package_build::call(scope(), &sys, "createFromSelection", studio_request("k6"))
-            .await
-            .unwrap();
-    assert_eq!(again["job_id"], job_id.as_str());
-    assert_eq!(again["existing"], true);
-    // excluded_paths is not a capability yet.
-    let mut excl = studio_request("k6x");
-    excl["workspace_selections"][0]["excluded_paths"] = serde_json::json!(["/site/s1"]);
-    assert!(
-        crate::package_build::call(scope(), &sys, "createFromSelection", excl)
-            .await
-            .is_err()
-    );
-
-    let status = crate::package_build::call(scope(), &sys, "status", serde_json::json!(job_id))
-        .await
-        .unwrap();
-    assert_eq!(status["status"], "scheduled");
-
-    // Run it, then read an artifact back through readRange, ledger-scoped.
-    run(&f, &handler(&f, None), &job_id).await.unwrap();
-    let rec = record(&f).await;
-    let (manifest_key, _) = resource_key(&rec, "manifest");
-    let got = crate::package_build::call(
-        scope(),
-        &sys,
-        "readRange",
-        serde_json::json!({"storage_key": manifest_key, "offset": 0, "len": 1 << 30}),
-    )
-    .await
-    .unwrap();
-    use base64::Engine as _;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(got["base64"].as_str().unwrap())
-        .unwrap();
-    assert_eq!(bytes, f.blobs.get(&manifest_key).await.unwrap().to_vec());
-    assert_eq!(got["eof"], true);
-    // A key the ledger does not know — an ordinary asset — is not readable.
-    assert!(crate::package_build::call(
-        scope(),
-        &sys,
-        "readRange",
-        serde_json::json!({"storage_key": f.seeded_blobs[0], "offset": 0, "len": 10}),
-    )
-    .await
-    .is_err());
-    // Nor is this repository's artifact from another repository.
-    let other = crate::package_build::CallScope {
-        tenant: T,
-        repo: "other-repo",
-        branch: B,
-    };
-    assert!(crate::package_build::call(
-        other,
-        &sys,
-        "readRange",
-        serde_json::json!({"storage_key": manifest_key, "offset": 0, "len": 10}),
-    )
-    .await
-    .is_err());
-
-    // deleteArtifacts takes the state node and deletes its ledger artifacts.
-    let deleted = crate::package_build::call(
-        scope(),
-        &sys,
-        "deleteArtifacts",
-        serde_json::json!({"workspace": "settings", "path": RECORD}),
-    )
-    .await
-    .unwrap();
-    assert_eq!(deleted["deleted"], 4);
-    assert!(leftover_blobs(&f).await.is_empty());
-    assert!(crate::package_build::call(
-        scope(),
-        &sys,
-        "deleteArtifacts",
-        serde_json::json!({"workspace": "content", "path": "/site"}),
-    )
-    .await
-    .is_err());
-
-    // Cancel by bare job id; unknown job, unknown method, anonymous caller.
-    let second =
-        crate::package_build::call(scope(), &sys, "createFromSelection", studio_request("k6b"))
-            .await
-            .unwrap();
-    let second_id = second["job_id"].as_str().unwrap().to_string();
-    let cancelled =
-        crate::package_build::call(scope(), &sys, "cancel", serde_json::json!(second_id))
-            .await
-            .unwrap();
-    assert_eq!(cancelled["cancelled"], true);
-    assert_eq!(
-        f.storage
-            .job_registry()
-            .get_status(&JobId(second_id.clone()))
-            .await
-            .unwrap(),
-        JobStatus::Cancelled
-    );
-    let unknown = crate::package_build::call(scope(), &sys, "status", serde_json::json!("nope"))
-        .await
-        .unwrap();
-    assert!(unknown.is_null());
-    assert!(
-        crate::package_build::call(scope(), &sys, "explode", serde_json::json!({}))
-            .await
-            .is_err()
-    );
-    assert!(crate::package_build::call(
-        scope(),
-        &AuthContext::anonymous(),
-        "status",
-        serde_json::json!(second_id)
-    )
-    .await
-    .is_err());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1442,116 +1309,6 @@ async fn a_denylisted_node_type_under_a_selected_subtree_is_never_archived() {
     assert_eq!(counters.get("skipped"), Some(&PropertyValue::Integer(1)));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_binding_build_runs_as_the_person_who_requested_it_and_nobody_else() {
-    let f = fixture(2, 16).await;
-    crate::package_build::install(&f.storage);
-    let scope = || crate::package_build::CallScope {
-        tenant: T,
-        repo: R,
-        branch: B,
-    };
-    // The function itself runs as the system; that is NOT the actor.
-    let ok = crate::package_build::call(
-        scope(),
-        &AuthContext::system(),
-        "createFromSelection",
-        serde_json::to_value(request("a1")).unwrap(),
-    )
-    .await
-    .unwrap();
-    let job_id = ok["job_id"].as_str().unwrap().to_string();
-    let ctx = f
-        .storage
-        .job_data_store()
-        .get(T, &JobId(job_id))
-        .unwrap()
-        .unwrap();
-    let actor =
-        raisin_core::services::package_export_access::requester_from_metadata(&ctx.metadata)
-            .unwrap();
-    assert_eq!(actor.user_id.as_deref(), Some("alice"));
-    assert!(!actor.is_system);
-
-    // Requests created by a machine, by a non-admin, or with a forged
-    // created_by are refused.
-    for (run, writer, forged_created_by) in [
-        ("m1", "agent:/agents/bot", None),
-        ("m2", "system", None),
-        ("m3", "bob", None),
-        ("m4", "bob", Some("alice")),
-        ("m5", "nobody-here", None),
-    ] {
-        let parent = format!("/packages/site/{run}");
-        if let Some(claimed) = forged_created_by {
-            use raisin_storage::transactional::TransactionalStorage;
-            let tx = f.storage.begin_context().await.unwrap();
-            tx.set_tenant_repo(T, R).unwrap();
-            tx.set_branch(B).unwrap();
-            tx.set_actor(writer).unwrap();
-            tx.set_auth_context(writer_context(writer)).unwrap();
-            tx.set_validate_schema(false).unwrap();
-            let node = Node {
-                id: uuid::Uuid::new_v4().to_string(),
-                name: run.to_string(),
-                path: parent.clone(),
-                node_type: "raisin:Folder".to_string(),
-                created_by: Some(claimed.to_string()),
-                ..Default::default()
-            };
-            tx.add_deep_node("settings", &node, "raisin:Folder")
-                .await
-                .unwrap();
-            tx.commit().await.unwrap();
-        } else {
-            create_request_by(&f.storage, &parent, writer).await;
-        }
-        let state = format!("{parent}/state");
-        create_typed(
-            &f.storage,
-            "settings",
-            &state,
-            super::scope::RECORD_NODE_TYPE,
-            vec![],
-        )
-        .await;
-        let err = crate::package_build::call(
-            scope(),
-            &AuthContext::system(),
-            "createFromSelection",
-            serde_json::to_value(request_for(&state, run)).unwrap(),
-        )
-        .await
-        .unwrap_err();
-        assert!(
-            matches!(err, raisin_error::Error::Forbidden(_)),
-            "{run}: {err}"
-        );
-    }
-
-    // A binding call may not name another branch, and must name a record.
-    let mut other_branch = serde_json::to_value(request("a2")).unwrap();
-    other_branch["branch"] = serde_json::json!("publish");
-    assert!(crate::package_build::call(
-        scope(),
-        &AuthContext::system(),
-        "createFromSelection",
-        other_branch
-    )
-    .await
-    .is_err());
-    let mut no_record = request("a3");
-    no_record.record = None;
-    assert!(crate::package_build::call(
-        scope(),
-        &AuthContext::system(),
-        "createFromSelection",
-        serde_json::to_value(no_record).unwrap()
-    )
-    .await
-    .is_err());
-}
-
 struct Capture(std::sync::Mutex<Vec<raisin_events::NodeEvent>>);
 
 impl raisin_events::EventHandler for Capture {
@@ -1678,4 +1435,405 @@ async fn ledger_entries_refuse_separators_and_never_change_owner() {
     // And a key outside this tenant/repo artifact namespace is never entered.
     assert!(ledger::record(&f.storage, T, R, &format!("{T}/2026/10/11/a.jpg"), &owner).is_err());
     assert!(ledger::record(&f.storage, T, "other-repo", &key, &owner).is_err());
+}
+
+// ---- the function bindings: who may act ---------------------------------
+
+fn trigger_on(node_id: &str, kind: &str) -> crate::package_build::Invoker {
+    crate::package_build::Invoker::from_execution(
+        AuthContext::system().with_agent("trigger:/triggers/package-build"),
+        Some(&serde_json::json!({"node_id": node_id, "type": kind})),
+    )
+}
+
+fn person_invoker(id: &str, admin: bool) -> crate::package_build::Invoker {
+    let mut perms = raisin_models::permissions::ResolvedPermissions::empty(id);
+    perms.is_system_admin = admin;
+    perms.permissions = vec![raisin_models::permissions::Permission::full_access("/**")];
+    crate::package_build::Invoker::from_execution(
+        AuthContext::for_user(id).with_permissions(perms),
+        None,
+    )
+}
+
+async fn node_id_at(f: &Fixture, path: &str) -> String {
+    f.storage
+        .nodes()
+        .get_by_path(StorageScope::new(T, R, B, "settings"), path, None)
+        .await
+        .unwrap()
+        .unwrap()
+        .id
+}
+
+/// A second run of the site definition, requested by `actor`.
+async fn make_run(f: &Fixture, run: &str, actor: &str) -> String {
+    let parent = format!("/packages/site/{run}");
+    create_request_by(&f.storage, &parent, actor).await;
+    let state = format!("{parent}/state");
+    create_typed(
+        &f.storage,
+        "settings",
+        &state,
+        super::scope::RECORD_NODE_TYPE,
+        vec![],
+    )
+    .await;
+    state
+}
+
+fn studio_request_for(state: &str, key: &str) -> serde_json::Value {
+    let mut r = studio_request(key);
+    r["record"]["path"] = serde_json::json!(state);
+    r
+}
+
+fn scope3<'a>(repo: &'a str) -> crate::package_build::CallScope<'a> {
+    crate::package_build::CallScope {
+        tenant: T,
+        repo,
+        branch: B,
+    }
+}
+
+async fn call_on(
+    f: &Fixture,
+    inv: &crate::package_build::Invoker,
+    method: &str,
+    args: serde_json::Value,
+) -> raisin_error::Result<serde_json::Value> {
+    crate::package_build::call_with(&f.storage, scope3(R), inv, method, args).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_bound_trigger_dispatches_once_and_reads_its_build() {
+    let f = fixture(10, 16).await;
+    let request_id = node_id_at(&f, "/packages/site/b-1").await;
+    let state_id = node_id_at(&f, RECORD).await;
+    let dispatch = trigger_on(&request_id, "Created");
+
+    let caps = call_on(&f, &dispatch, "capabilities", serde_json::Value::Null)
+        .await
+        .unwrap();
+    assert_eq!(caps["streaming_build"], true);
+    assert_eq!(caps["excluded_paths"], false);
+
+    let out = call_on(&f, &dispatch, "createFromSelection", studio_request("k6"))
+        .await
+        .unwrap();
+    let job_id = out["job_id"].as_str().unwrap().to_string();
+    assert_eq!(out["existing"], false);
+    // Same request again: the same job. Different parameters: refused.
+    let again = call_on(
+        &f,
+        &dispatch,
+        "createFromSelection",
+        studio_request("other-key"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(again["job_id"], job_id.as_str());
+    assert_eq!(again["existing"], true);
+    let mut changed = studio_request("k6");
+    changed["workspace_selections"] =
+        serde_json::json!([{"workspace": "content", "selected_paths": ["/*"]}]);
+    assert!(matches!(
+        call_on(&f, &dispatch, "createFromSelection", changed).await,
+        Err(raisin_error::Error::Conflict(_))
+    ));
+    let mut excl = studio_request("k6");
+    excl["workspace_selections"][0]["excluded_paths"] = serde_json::json!(["/site/s1"]);
+    assert!(call_on(&f, &dispatch, "createFromSelection", excl)
+        .await
+        .is_err());
+
+    // The state-node trigger (finalize) of the same definition may read.
+    let finalize = trigger_on(&state_id, "Updated");
+    assert_eq!(
+        call_on(&f, &finalize, "status", serde_json::json!(job_id))
+            .await
+            .unwrap()["status"],
+        "scheduled"
+    );
+    run(&f, &handler(&f, None), &job_id).await.unwrap();
+    let rec = record(&f).await;
+    let (manifest_key, _) = resource_key(&rec, "manifest");
+    let got = call_on(
+        &f,
+        &finalize,
+        "readRange",
+        serde_json::json!({"storage_key": manifest_key, "offset": 0, "len": 1 << 30}),
+    )
+    .await
+    .unwrap();
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(got["base64"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(bytes, f.blobs.get(&manifest_key).await.unwrap().to_vec());
+    assert_eq!(got["eof"], true);
+    // A completed job still authorizes against its record (result stamp).
+    assert_eq!(
+        call_on(&f, &finalize, "status", serde_json::json!(job_id))
+            .await
+            .unwrap()["status"],
+        "completed"
+    );
+    // An ordinary asset key is no artifact.
+    assert!(call_on(
+        &f,
+        &finalize,
+        "readRange",
+        serde_json::json!({"storage_key": f.seeded_blobs[0], "offset": 0, "len": 10}),
+    )
+    .await
+    .is_err());
+
+    let deleted = call_on(
+        &f,
+        &finalize,
+        "deleteArtifacts",
+        serde_json::json!({"workspace": "settings", "path": RECORD}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(deleted["deleted"], 4);
+    assert!(leftover_blobs(&f).await.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nobody_else_may_dispatch_cancel_read_or_delete() {
+    let f = fixture(3, 16).await;
+    let request_id = node_id_at(&f, "/packages/site/b-1").await;
+    let state_id = node_id_at(&f, RECORD).await;
+    let out = call_on(
+        &f,
+        &trigger_on(&request_id, "Created"),
+        "createFromSelection",
+        studio_request("n1"),
+    )
+    .await
+    .unwrap();
+    let job_id = out["job_id"].as_str().unwrap().to_string();
+    run(&f, &handler(&f, None), &job_id).await.unwrap();
+    let (archive_key, _) = resource_key(&record(&f).await, "artifact");
+
+    // An unrelated trigger: fired by a content node.
+    let content_id = f
+        .storage
+        .nodes()
+        .get_by_path(StorageScope::new(T, R, B, "content"), "/site", None)
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+    // Another definition's run.
+    create_request_by(&f.storage, "/packages/other/b-1", "alice").await;
+    create_typed(
+        &f.storage,
+        "settings",
+        "/packages/other/b-1/state",
+        super::scope::RECORD_NODE_TYPE,
+        vec![],
+    )
+    .await;
+    let other_def = node_id_at(&f, "/packages/other/b-1/state").await;
+
+    let strangers: Vec<(&str, crate::package_build::Invoker)> = vec![
+        (
+            "bare system",
+            crate::package_build::Invoker::from_execution(AuthContext::system(), None),
+        ),
+        // A function invoked over HTTP with a forged trigger event in its
+        // input: the identity is not a trigger run, so the event is ignored.
+        (
+            "forged event",
+            crate::package_build::Invoker::from_execution(
+                AuthContext::system(),
+                Some(&serde_json::json!({"node_id": state_id, "type": "Updated"})),
+            ),
+        ),
+        ("unrelated trigger", trigger_on(&content_id, "Updated")),
+        ("other definition", trigger_on(&other_def, "Updated")),
+        ("non-admin person", person_invoker("bob", false)),
+        (
+            "agent",
+            crate::package_build::Invoker::from_execution(
+                AuthContext::system().with_agent("agent:/agents/bot"),
+                Some(&serde_json::json!({"node_id": state_id, "type": "Updated"})),
+            ),
+        ),
+    ];
+    for (who, inv) in &strangers {
+        let forbidden = |r: raisin_error::Result<serde_json::Value>| {
+            matches!(r, Err(raisin_error::Error::Forbidden(_)))
+        };
+        assert!(
+            forbidden(call_on(&f, inv, "status", serde_json::json!(job_id)).await),
+            "{who}: status"
+        );
+        assert!(
+            forbidden(call_on(&f, inv, "cancel", serde_json::json!(job_id)).await),
+            "{who}: cancel"
+        );
+        assert!(
+            forbidden(
+                call_on(
+                    &f,
+                    inv,
+                    "readRange",
+                    serde_json::json!({"storage_key": archive_key, "offset": 0, "len": 10})
+                )
+                .await
+            ),
+            "{who}: readRange"
+        );
+        assert!(
+            forbidden(
+                call_on(
+                    &f,
+                    inv,
+                    "deleteArtifacts",
+                    serde_json::json!({"workspace": "settings", "path": RECORD})
+                )
+                .await
+            ),
+            "{who}: deleteArtifacts"
+        );
+        // Dispatching a fresh run for someone else.
+        let state = make_run(&f, &format!("x-{}", who.replace(' ', "-")), "alice").await;
+        let r = call_on(
+            &f,
+            inv,
+            "createFromSelection",
+            studio_request_for(&state, who),
+        )
+        .await;
+        assert!(
+            matches!(r, Err(raisin_error::Error::Forbidden(_))),
+            "{who}: createFromSelection {r:?}"
+        );
+    }
+    // A trigger of the right definition may not dispatch a DIFFERENT run.
+    let state = make_run(&f, "b-9", "alice").await;
+    assert!(matches!(
+        call_on(
+            &f,
+            &trigger_on(&state_id, "Updated"),
+            "createFromSelection",
+            studio_request_for(&state, "z")
+        )
+        .await,
+        Err(raisin_error::Error::Forbidden(_))
+    ));
+    // Another repository sees nothing.
+    let other = crate::package_build::call_with(
+        &f.storage,
+        scope3("other-repo"),
+        &trigger_on(&state_id, "Updated"),
+        "status",
+        serde_json::json!(job_id),
+    )
+    .await
+    .unwrap();
+    assert!(other.is_null());
+
+    // The requester in person may: an admin who can read the record.
+    let alice = person_invoker("alice", true);
+    assert_eq!(
+        call_on(&f, &alice, "status", serde_json::json!(job_id))
+            .await
+            .unwrap()["status"],
+        "completed"
+    );
+    assert!(f.blobs.head(&archive_key).await.unwrap().is_some());
+    // …and dispatch her own run, but not bob's.
+    let mine = make_run(&f, "b-10", "alice").await;
+    assert!(call_on(
+        &f,
+        &alice,
+        "createFromSelection",
+        studio_request_for(&mine, "m")
+    )
+    .await
+    .is_ok());
+    let bobs = make_run(&f, "b-11", "bob").await;
+    assert!(call_on(
+        &f,
+        &alice,
+        "createFromSelection",
+        studio_request_for(&bobs, "b")
+    )
+    .await
+    .is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dispatch_runs_as_the_requester_whatever_the_function_is() {
+    let f = fixture(2, 16).await;
+    let request_id = node_id_at(&f, "/packages/site/b-1").await;
+    let out = call_on(
+        &f,
+        &trigger_on(&request_id, "Created"),
+        "createFromSelection",
+        studio_request("a1"),
+    )
+    .await
+    .unwrap();
+    let ctx = f
+        .storage
+        .job_data_store()
+        .get(T, &JobId(out["job_id"].as_str().unwrap().to_string()))
+        .unwrap()
+        .unwrap();
+    let actor =
+        raisin_core::services::package_export_access::requester_from_metadata(&ctx.metadata)
+            .unwrap();
+    assert_eq!(actor.user_id.as_deref(), Some("alice"));
+    assert!(!actor.is_system);
+
+    // Requests written by a machine, a non-admin or nobody known are refused,
+    // even for their own trigger.
+    for (run, writer) in [
+        ("m1", "agent:/agents/bot"),
+        ("m2", "system"),
+        ("m3", "bob"),
+        ("m5", "nobody-here"),
+    ] {
+        let state = make_run(&f, run, writer).await;
+        let req_id = node_id_at(&f, &format!("/packages/site/{run}")).await;
+        let err = call_on(
+            &f,
+            &trigger_on(&req_id, "Created"),
+            "createFromSelection",
+            studio_request_for(&state, run),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, raisin_error::Error::Forbidden(_)),
+            "{run}: {err}"
+        );
+    }
+    // A binding call may not name another branch, and must name a record.
+    let mut other_branch = studio_request("a2");
+    other_branch["branch"] = serde_json::json!("publish");
+    assert!(call_on(
+        &f,
+        &trigger_on(&request_id, "Created"),
+        "createFromSelection",
+        other_branch
+    )
+    .await
+    .is_err());
+    let mut no_record = studio_request("a3");
+    no_record.as_object_mut().unwrap().remove("record");
+    assert!(call_on(
+        &f,
+        &trigger_on(&request_id, "Created"),
+        "createFromSelection",
+        no_record
+    )
+    .await
+    .is_err());
 }

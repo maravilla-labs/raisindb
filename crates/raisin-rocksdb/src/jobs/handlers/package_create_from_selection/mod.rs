@@ -18,7 +18,7 @@ mod progress;
 mod registration;
 mod request;
 pub mod scope;
-mod submit;
+pub(crate) mod submit;
 #[cfg(test)]
 mod tests;
 mod types;

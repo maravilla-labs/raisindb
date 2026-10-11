@@ -113,13 +113,173 @@ fn normalize_request(mut args: Value) -> Result<PackageBuildRequest> {
     serde_json::from_value(args).map_err(|e| invalid(e.to_string()))
 }
 
+/// Who is calling a binding, as the SERVER knows it — never read from args.
+#[derive(Debug, Clone)]
+pub struct Invoker {
+    /// The calling execution's own identity.
+    pub auth: AuthContext,
+    /// Set only for a genuine trigger run: the execution runs as the system
+    /// under a `trigger:` agent marker (written by trigger evaluation, which
+    /// also built the run's input), and this is the node whose event fired it.
+    pub trigger_event: Option<TriggerEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriggerEvent {
+    pub node_id: String,
+    /// `Created`, `Updated`, …
+    pub kind: String,
+}
+
+impl Invoker {
+    /// A trigger run, if the identity and the event both say so.
+    pub fn from_execution(auth: AuthContext, event: Option<&Value>) -> Self {
+        let is_trigger = auth.is_system
+            && auth
+                .agent
+                .as_deref()
+                .and_then(|a| a.split('@').next())
+                .is_some_and(|head| head.starts_with("trigger:"));
+        let trigger_event = if is_trigger {
+            event.and_then(|e| {
+                Some(TriggerEvent {
+                    node_id: e.get("node_id")?.as_str()?.to_string(),
+                    kind: e.get("type")?.as_str()?.to_string(),
+                })
+            })
+        } else {
+            None
+        };
+        Self {
+            auth,
+            trigger_event,
+        }
+    }
+
+    /// The calling person, if the execution runs as one.
+    fn person(&self) -> Option<&str> {
+        let a = &self.auth;
+        if a.is_system || a.is_anonymous_principal() {
+            return None;
+        }
+        a.user_id.as_deref().filter(|u| {
+            crate::jobs::handlers::package_create_from_selection::scope::looks_like_a_person(u)
+        })
+    }
+}
+
+type Record = crate::jobs::handlers::package_create_from_selection::RecordRef;
+
+/// The `/(packages|snapshots)/<key>` a build state path belongs to.
+fn definition_of(path: &str) -> Option<String> {
+    let parts: Vec<&str> = path.split('/').collect();
+    match parts.as_slice() {
+        ["", area, key, ..] if matches!(*area, "packages" | "snapshots") && !key.is_empty() => {
+            Some(format!("/{area}/{key}"))
+        }
+        _ => None,
+    }
+}
+
+/// May `invoker` act on the build whose state node is `record`?
+///
+/// - a trigger run whose event node lies under the SAME package definition
+///   (`settings:/packages/<key>/…`) as the record — the dispatch, cancel and
+///   finalize triggers Studio configures for that definition; or
+/// - a person who may export (raisin_core's export grant) AND can read the
+///   record's state node under their own row-level security.
+///
+/// The system, an API key, or a function with no such binding is refused.
+async fn entitled(
+    storage: &Arc<RocksDBStorage>,
+    scope: &CallScope<'_>,
+    invoker: &Invoker,
+    record: &Record,
+) -> Result<()> {
+    use raisin_storage::{NodeRepository, Storage, StorageScope};
+    let forbidden = || {
+        Error::Forbidden("forbidden: this execution may not act on that package build".to_string())
+    };
+    let ws = StorageScope::new(scope.tenant, scope.repo, scope.branch, &record.workspace);
+    if let Some(event) = &invoker.trigger_event {
+        let target_def = definition_of(&record.path).ok_or_else(forbidden)?;
+        let fired_by = storage
+            .nodes()
+            .get(ws, &event.node_id, None)
+            .await?
+            .ok_or_else(forbidden)?;
+        if definition_of(&fired_by.path).as_deref() == Some(target_def.as_str()) {
+            return Ok(());
+        }
+        return Err(forbidden());
+    }
+    if invoker.person().is_some() {
+        raisin_core::services::package_export_access::authorize_package_export(Some(&invoker.auth))
+            .map_err(|_| forbidden())?;
+        let state = storage
+            .nodes()
+            .get_by_path(ws, &record.path, None)
+            .await?
+            .ok_or_else(forbidden)?;
+        if raisin_core::services::package_export_access::readable_by_requester(
+            state,
+            &invoker.auth,
+            &record.workspace,
+            scope.branch,
+        )
+        .is_some()
+        {
+            return Ok(());
+        }
+    }
+    Err(forbidden())
+}
+
+/// The record a job was built for: its context (while it runs) or the stamp
+/// on its result (after).
+fn record_of_job(
+    storage: &RocksDBStorage,
+    tenant: &str,
+    job: &raisin_storage::jobs::JobInfo,
+) -> Option<Record> {
+    let from = |v: &Value| serde_json::from_value::<Record>(v.clone()).ok();
+    if let Some(r) = job
+        .result
+        .as_ref()
+        .and_then(|r| r.get("record"))
+        .and_then(from)
+    {
+        return Some(r);
+    }
+    storage
+        .job_data_store()
+        .get(tenant, &job.id)
+        .ok()
+        .flatten()
+        .and_then(|ctx| ctx.metadata.get("record").and_then(from))
+}
+
+/// A stable digest of what a dispatch asks for, so a second dispatch of the
+/// same request can be told apart from a different one.
+fn request_digest(request: &PackageBuildRequest) -> String {
+    use sha2::{Digest, Sha256};
+    let mut v = serde_json::to_value(request).unwrap_or(Value::Null);
+    if let Some(o) = v.as_object_mut() {
+        o.remove("idempotency_key");
+    }
+    hex::encode(Sha256::digest(v.to_string().as_bytes()))
+}
+
 /// The function bindings `raisin.packages.*` / `raisin.resources.readRange`:
 ///
 /// - `capabilities` → [`capabilities`].
 /// - `createFromSelection(request)` → `{job_id, existing}`. `record`
-///   (settings:/packages/<key>/<run>/state) is REQUIRED; the build's actor is
-///   the person who created the record's request node — never the
-///   function's identity nor anything in the request.
+///   (settings:/packages/<key>/<run>/state) is REQUIRED. Only the trigger
+///   fired by that run's request or state node — or the very person who
+///   created the request — may dispatch it; the build's actor is that
+///   person (from the server's stamps), never the function. A run is
+///   dispatched once: a repeat with the same request returns the same job,
+///   a repeat with a different request is refused.
 /// - `cancel(jobId)` → `{job_id, cancelled}`; cooperative, ≤ 5 s then abort.
 /// - `status(jobId)` → `{job_id, status, progress, error, result}` | null.
 /// - `deleteArtifacts({workspace, path})` → `{deleted}`: the blobs the
@@ -128,11 +288,12 @@ fn normalize_request(mut args: Value) -> Result<PackageBuildRequest> {
 ///   key the ledger records as an artifact of this tenant and repository,
 ///   at most [`MAX_READ_RANGE`] bytes.
 ///
-/// Everything is scoped to the calling function's tenant, repository and
+/// Everything after `capabilities` runs [`entitled`] for the build it
+/// touches, and is scoped to the calling function's tenant, repository and
 /// branch; a foreign job, record or key reads as unknown.
 pub async fn call(
     scope: CallScope<'_>,
-    auth: &AuthContext,
+    invoker: &Invoker,
     method: &str,
     args: Value,
 ) -> Result<Value> {
@@ -144,6 +305,21 @@ pub async fn call(
             "engine_unsupported: package builds are not running on this server".into(),
         )
     })?;
+    call_with(&storage, scope, invoker, method, args).await
+}
+
+/// [`call`] against an explicit storage (embedders and tests).
+pub async fn call_with(
+    storage: &Arc<RocksDBStorage>,
+    scope: CallScope<'_>,
+    invoker: &Invoker,
+    method: &str,
+    args: Value,
+) -> Result<Value> {
+    if method == "capabilities" {
+        return Ok(capabilities());
+    }
+    let storage = storage.clone();
     use crate::jobs::handlers::package_create_from_selection::{ledger, scope as build_scope};
     match method {
         "createFromSelection" => {
@@ -153,8 +329,8 @@ pub async fn call(
                         .into(),
                 ));
             }
-            let request = normalize_request(args)?;
-            let record: crate::jobs::handlers::package_create_from_selection::RecordRef = request
+            let mut request = normalize_request(args)?;
+            let record: Record = request
                 .record
                 .clone()
                 .ok_or_else(|| Error::Validation("'record' is required".into()))?
@@ -167,49 +343,80 @@ pub async fn call(
                 &record,
             )
             .await?;
-            let submitted = submit_package_build(
-                &storage,
-                scope.tenant,
-                scope.repo,
-                scope.branch,
-                &request,
-                &requester,
-            )
-            .await?;
+            // The deputy check: only the trigger fired by THIS run's request
+            // or state node, or the requester in person, may dispatch it.
+            dispatch_entitled(&storage, &scope, invoker, &record, &requester).await?;
+            // One dispatch per run, keyed by the record — never by a caller's
+            // key — and bound to what was asked the first time.
+            request.idempotency_key = Some(format!("{}:{}", record.workspace, record.path));
+            let digest = request_digest(&request);
+            if let Some(existing) = already_dispatched(&storage, &scope, &record).await? {
+                return match existing {
+                    (job_id, Some(d)) if d == digest => Ok(json!({
+                        "job_id": job_id, "existing": true, "status": "scheduled",
+                    })),
+                    _ => Err(Error::Conflict(
+                        "this package build was already dispatched with other parameters".into(),
+                    )),
+                };
+            }
+            let submitted =
+                crate::jobs::handlers::package_create_from_selection::submit::submit_with_digest(
+                    &storage,
+                    scope.tenant,
+                    scope.repo,
+                    scope.branch,
+                    &request,
+                    &requester,
+                    &digest,
+                )
+                .await?;
             Ok(json!({
                 "job_id": submitted.job_id,
                 "existing": submitted.existing,
                 "status": "scheduled",
             }))
         }
-        "cancel" => {
+        "cancel" | "status" => {
             let job_id = job_id_of(&args)?;
-            authorize(auth)?;
-            let cancelled =
-                cancel_package_build(&storage, scope.tenant, scope.repo, &job_id).await?;
-            Ok(json!({ "job_id": job_id, "cancelled": cancelled }))
-        }
-        "status" => {
-            let job_id = job_id_of(&args)?;
-            authorize(auth)?;
-            Ok(
-                match package_build_status(&storage, scope.tenant, scope.repo, &job_id).await? {
-                    Some(status) => serde_json::to_value(status).unwrap_or(Value::Null),
-                    None => Value::Null,
-                },
-            )
+            let Some(job) =
+                build_scope::scoped_job(&storage, scope.tenant, scope.repo, &job_id).await
+            else {
+                return Ok(if method == "cancel" {
+                    json!({ "job_id": job_id, "cancelled": false })
+                } else {
+                    Value::Null
+                });
+            };
+            let record = record_of_job(&storage, scope.tenant, &job).ok_or_else(|| {
+                Error::Forbidden(
+                    "forbidden: that job has no build record to authorize against".into(),
+                )
+            })?;
+            entitled(&storage, &scope, invoker, &record).await?;
+            if method == "cancel" {
+                let cancelled =
+                    cancel_package_build(&storage, scope.tenant, scope.repo, &job_id).await?;
+                Ok(json!({ "job_id": job_id, "cancelled": cancelled }))
+            } else {
+                Ok(
+                    match package_build_status(&storage, scope.tenant, scope.repo, &job_id).await? {
+                        Some(status) => serde_json::to_value(status).unwrap_or(Value::Null),
+                        None => Value::Null,
+                    },
+                )
+            }
         }
         "deleteArtifacts" => {
-            authorize(auth)?;
-            let record: crate::jobs::handlers::package_create_from_selection::RecordRef =
-                serde_json::from_value(args)
-                    .map_err(|e| Error::Validation(format!("expected {{workspace, path}}: {e}")))?;
+            let record: Record = serde_json::from_value(args)
+                .map_err(|e| Error::Validation(format!("expected {{workspace, path}}: {e}")))?;
             if build_scope::record_shape(&record).is_none() {
                 return Err(Error::Validation(
                     "deleteArtifacts takes a build state node (settings:/packages/<key>/<run>/state)"
                         .into(),
                 ));
             }
+            entitled(&storage, &scope, invoker, &record).await?;
             let store = storage
                 .blob_store()
                 .ok_or_else(|| Error::Validation("engine_unsupported: no blob store".into()))?;
@@ -227,19 +434,96 @@ pub async fn call(
             .await?;
             Ok(json!({ "deleted": deleted }))
         }
-        "readRange" => {
-            authorize(auth)?;
-            read_range(&storage, scope, &args).await
-        }
+        "readRange" => read_range(&storage, scope, invoker, &args).await,
         other => Err(Error::Validation(format!(
             "raisin.packages has no method '{other}'"
         ))),
     }
 }
 
+/// createFromSelection's stricter binding: the trigger fired by THIS run's
+/// request or state node (not merely the same definition), or the requester.
+async fn dispatch_entitled(
+    storage: &Arc<RocksDBStorage>,
+    scope: &CallScope<'_>,
+    invoker: &Invoker,
+    record: &Record,
+    requester: &AuthContext,
+) -> Result<()> {
+    use raisin_storage::{NodeRepository, Storage, StorageScope};
+    let forbidden = || {
+        Error::Forbidden(
+            "forbidden: only the trigger fired by this build request, or its requester, may dispatch it"
+                .to_string(),
+        )
+    };
+    if let Some(event) = &invoker.trigger_event {
+        let ws = StorageScope::new(scope.tenant, scope.repo, scope.branch, &record.workspace);
+        let request_path = build_scope_parent(record).ok_or_else(forbidden)?;
+        for path in [record.path.as_str(), request_path.as_str()] {
+            if let Some(n) = storage.nodes().get_by_path(ws, path, None).await? {
+                if n.id == event.node_id {
+                    return Ok(());
+                }
+            }
+        }
+        return Err(forbidden());
+    }
+    if let Some(person) = invoker.person() {
+        if Some(person) == requester.user_id.as_deref() {
+            return Ok(());
+        }
+    }
+    Err(forbidden())
+}
+
+fn build_scope_parent(record: &Record) -> Option<String> {
+    crate::jobs::handlers::package_create_from_selection::scope::record_shape(record)
+}
+
+/// `(job_id, digest)` if this run was already dispatched: the state node
+/// carries a job id (the mirror stamps it at the build's first write; Studio
+/// stamps it after dispatch), and the digest of that dispatch if still known.
+async fn already_dispatched(
+    storage: &Arc<RocksDBStorage>,
+    scope: &CallScope<'_>,
+    record: &Record,
+) -> Result<Option<(String, Option<String>)>> {
+    use raisin_models::nodes::properties::PropertyValue;
+    use raisin_storage::{NodeRepository, Storage, StorageScope};
+    let ws = StorageScope::new(scope.tenant, scope.repo, scope.branch, &record.workspace);
+    // A dispatch still in the registry under this record's key.
+    let key = format!("{}:{}", record.workspace, record.path);
+    let from_registry = crate::jobs::handlers::package_create_from_selection::submit::job_for_key(
+        storage,
+        scope.tenant,
+        scope.repo,
+        &key,
+    )
+    .await;
+    let stamped = match storage.nodes().get_by_path(ws, &record.path, None).await? {
+        Some(n) => match n.properties.get("job_id") {
+            Some(PropertyValue::String(s)) if !s.is_empty() => Some(s.clone()),
+            _ => None,
+        },
+        None => None,
+    };
+    let Some(job_id) = from_registry.clone().or(stamped) else {
+        return Ok(None);
+    };
+    let digest = crate::jobs::handlers::package_create_from_selection::submit::job_digest(
+        storage,
+        scope.tenant,
+        &job_id,
+    )
+    .await;
+    Ok(Some((job_id, digest)))
+}
+
 async fn read_range(
     storage: &Arc<RocksDBStorage>,
     scope: CallScope<'_>,
+    invoker: &Invoker,
     args: &Value,
 ) -> Result<Value> {
     use crate::jobs::handlers::package_create_from_selection::ledger;
@@ -262,6 +546,12 @@ async fn read_range(
     {
         return Err(not_found());
     }
+    // Reading an archive is exporting it: the same entitlement as the build.
+    let record = Record {
+        workspace: owner.workspace.clone(),
+        path: owner.path.clone(),
+    };
+    entitled(storage, &scope, invoker, &record).await?;
     let store = storage
         .blob_store()
         .ok_or_else(|| Error::Validation("engine_unsupported: no blob store".into()))?;
@@ -289,11 +579,6 @@ async fn read_range(
         "size": size,
         "eof": end >= size,
     }))
-}
-
-fn authorize(auth: &AuthContext) -> Result<()> {
-    raisin_core::services::package_export_access::authorize_package_export(Some(auth))
-        .map_err(|_| Error::Forbidden("forbidden: package builds require an administrator".into()))
 }
 
 fn job_id_of(args: &Value) -> Result<String> {

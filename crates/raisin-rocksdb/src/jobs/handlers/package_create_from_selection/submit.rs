@@ -122,6 +122,90 @@ pub async fn submit_package_build(
     request: &PackageBuildRequest,
     requester: &AuthContext,
 ) -> Result<Submitted> {
+    submit_inner(storage, tenant, repo, branch, request, requester, None).await
+}
+
+/// [`submit_package_build`], recording `digest` (what the dispatch asked for)
+/// on the job, so a later dispatch of the same run can be compared with it.
+pub async fn submit_with_digest(
+    storage: &Arc<RocksDBStorage>,
+    tenant: &str,
+    repo: &str,
+    branch: &str,
+    request: &PackageBuildRequest,
+    requester: &AuthContext,
+    digest: &str,
+) -> Result<Submitted> {
+    submit_inner(
+        storage,
+        tenant,
+        repo,
+        branch,
+        request,
+        requester,
+        Some(digest),
+    )
+    .await
+}
+
+/// Metadata / result key: the digest of the dispatch.
+pub const KEY_REQUEST_DIGEST: &str = "request_digest";
+
+/// The job registered under idempotency `key` in this tenant/repo, if the
+/// registry still holds it.
+pub async fn job_for_key(
+    storage: &Arc<RocksDBStorage>,
+    tenant: &str,
+    repo: &str,
+    key: &str,
+) -> Option<String> {
+    storage
+        .job_registry()
+        .job_for_dedup_key(&dedup_key(tenant, repo, key))
+        .await
+        .map(|id| id.to_string())
+}
+
+/// The dispatch digest of a job: its context while it runs, its result after.
+pub async fn job_digest(
+    storage: &Arc<RocksDBStorage>,
+    tenant: &str,
+    job_id: &str,
+) -> Option<String> {
+    let id = JobId(job_id.to_string());
+    if let Ok(info) = storage.job_registry().get_job_info(&id).await {
+        if let Some(d) = info
+            .result
+            .as_ref()
+            .and_then(|r| r.get(KEY_REQUEST_DIGEST))
+            .and_then(|v| v.as_str())
+        {
+            return Some(d.to_string());
+        }
+    }
+    storage
+        .job_data_store()
+        .get(tenant, &id)
+        .ok()
+        .flatten()
+        .and_then(|ctx| {
+            ctx.metadata
+                .get(KEY_REQUEST_DIGEST)
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn submit_inner(
+    storage: &Arc<RocksDBStorage>,
+    tenant: &str,
+    repo: &str,
+    branch: &str,
+    request: &PackageBuildRequest,
+    requester: &AuthContext,
+    digest: Option<&str>,
+) -> Result<Submitted> {
     package_export_access::authorize_package_export(Some(requester)).map_err(|r| {
         Error::from(Refusal {
             code: "forbidden",
@@ -226,6 +310,9 @@ pub async fn submit_package_build(
         }
     }
     metadata.extend(package_export_access::requester_metadata(requester));
+    if let Some(d) = digest {
+        metadata.insert(KEY_REQUEST_DIGEST.to_string(), serde_json::json!(d));
+    }
 
     let job_type = JobType::PackageCreateFromSelection {
         package_name: request.name.clone(),

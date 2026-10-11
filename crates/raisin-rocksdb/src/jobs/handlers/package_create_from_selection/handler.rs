@@ -215,6 +215,20 @@ impl PackageCreateFromSelectionHandler {
                 };
                 let mut value = serde_json::to_value(result).unwrap_or_default();
                 package_export_access::stamp_result_repo(&mut value, &context.repo_id);
+                // What later status/cancel calls authorize against, and what
+                // a repeated dispatch is compared with, after the context is
+                // gone.
+                if let Some(obj) = value.as_object_mut() {
+                    if let Some(r) = mirror.record() {
+                        obj.insert(
+                            "record".into(),
+                            serde_json::json!({"workspace": r.workspace, "path": r.path}),
+                        );
+                    }
+                    if let Some(d) = context.metadata.get(super::submit::KEY_REQUEST_DIGEST) {
+                        obj.insert(super::submit::KEY_REQUEST_DIGEST.into(), d.clone());
+                    }
+                }
                 Ok(Some(value))
             }
             Err(stop) => {

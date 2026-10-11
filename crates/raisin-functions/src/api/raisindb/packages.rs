@@ -15,24 +15,28 @@ use super::RaisinFunctionApi;
 impl RaisinFunctionApi {
     pub(crate) async fn impl_packages_call(&self, method: &str, args: Value) -> Result<Value> {
         let ctx = &self.context;
-        // A function with no recorded caller runs as the server (a trigger);
-        // an anonymous caller may never export.
+        // Who is calling, as the server knows it: the execution's own
+        // identity (an absent one is the bare system, which may act on no
+        // build), and — only for a genuine trigger run — the node whose event
+        // fired it. Nothing here is read from the arguments.
         let auth = match &ctx.auth_context {
-            None => AuthContext::system(),
             Some(a) if a.is_anonymous_principal() && !a.is_system => {
                 return Err(Error::Forbidden(
-                    "forbidden: an anonymous caller cannot build packages".into(),
+                    "forbidden: an anonymous caller cannot use package builds".into(),
                 ))
             }
             Some(a) => a.clone(),
+            None => AuthContext::system(),
         };
+        let invoker =
+            raisin_rocksdb::package_build::Invoker::from_execution(auth, ctx.event_data.as_ref());
         raisin_rocksdb::package_build::call(
             raisin_rocksdb::package_build::CallScope {
                 tenant: &ctx.tenant_id,
                 repo: &ctx.repo_id,
                 branch: &ctx.branch,
             },
-            &auth,
+            &invoker,
             method,
             args,
         )
