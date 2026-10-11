@@ -805,3 +805,60 @@ async fn a_build_interrupted_by_a_restart_reports_lost_and_discards_its_partial(
     assert_eq!(e.get("code"), Some(&PropertyValue::String("lost".into())));
     assert!(leftover_blobs(&f).await.is_empty(), "partial discarded");
 }
+
+/// Peak memory of a build, for a scaled flat-memory measurement (E21).
+///
+/// Run it twice in separate processes with different sizes and compare the
+/// peak RSS the OS reports (`/usr/bin/time -l` on macOS, `-v` on Linux):
+///
+/// ```sh
+/// PKG_BENCH_MB=128 /usr/bin/time -l <test-binary> --ignored rss_bench --nocapture
+/// PKG_BENCH_MB=640 /usr/bin/time -l <test-binary> --ignored rss_bench --nocapture
+/// ```
+///
+/// The asset is written to the blob store in 1 MiB chunks, so the fixture
+/// itself holds no more than one chunk either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "measurement; writes PKG_BENCH_MB twice to a temp dir"]
+async fn rss_bench() {
+    use tokio::io::AsyncWriteExt;
+    let mb: usize = std::env::var("PKG_BENCH_MB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(64);
+    let f = fixture(2_000, 16).await;
+    let mut w = BinaryStorage::begin_write(&*f.blobs, WriteHint::new().ext("mp4"))
+        .await
+        .unwrap();
+    let chunk: Vec<u8> = (0..1024 * 1024).map(|i| (i % 251) as u8).collect();
+    for _ in 0..mb {
+        w.write_all(&chunk).await.unwrap();
+    }
+    let big = w.commit().await.unwrap();
+    create(
+        &f.storage,
+        "assets",
+        "/media/bench.mp4",
+        vec![(
+            "file",
+            file_resource(&big.key, mb * 1024 * 1024, "video/mp4"),
+        )],
+    )
+    .await;
+    drop(chunk);
+
+    let submitted = submit_package_build(&f.storage, T, R, B, &request("bench"), &requester())
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    let result = run(&f, &handler(&f, None), &submitted.job_id)
+        .await
+        .unwrap()
+        .unwrap();
+    println!(
+        "rss_bench: {} MiB asset → archive {} bytes in {:?}",
+        mb,
+        result["size_bytes"],
+        started.elapsed()
+    );
+}
