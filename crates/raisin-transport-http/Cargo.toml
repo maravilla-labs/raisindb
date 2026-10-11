@@ -86,6 +86,7 @@ rocksdb = "0.24.0"
 # crate, so this is not a cycle.
 raisin-transport-ws = { path = "../raisin-transport-ws" }
 parking_lot = "0.12"
+sha2 = "0.10"
 
 [features]
 default = ["fs", "storage-rocksdb"]

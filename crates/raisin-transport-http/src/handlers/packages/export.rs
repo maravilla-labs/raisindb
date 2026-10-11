@@ -191,22 +191,25 @@ pub(super) async fn download_exported_package_impl(
             .and_then(|v| v.as_str())
             .unwrap_or("package");
 
-        let zip_data = state.bin.get(blob_key).await.map_err(|e| {
-            ApiError::storage_error(format!("Failed to retrieve exported package: {}", e))
-        })?;
-
-        let filename = format!("{}.rap", package_name);
-        Ok((
-            [
-                (axum::http::header::CONTENT_TYPE, "application/zip"),
-                (
-                    axum::http::header::CONTENT_DISPOSITION,
-                    &format!("attachment; filename=\"{}\"", filename),
-                ),
-            ],
-            zip_data.to_vec(),
+        // Streamed, never buffered: the same helper as a signed asset read.
+        let sha256 = result
+            .get("sha256")
+            .and_then(|v| v.as_str())
+            .filter(|s| s.len() == 64);
+        let disposition = format!("attachment; filename=\"{}.rap\"", package_name);
+        crate::handlers::repo::blob_serve::serve_blob(
+            state,
+            crate::handlers::repo::blob_serve::BlobResponse {
+                storage_key: blob_key,
+                mime_type: "application/zip",
+                disposition: &disposition,
+                cache_control: "private, no-store",
+                sha256,
+                range: None,
+                if_range: None,
+            },
         )
-            .into_response())
+        .await
     }
 
     #[cfg(not(feature = "storage-rocksdb"))]

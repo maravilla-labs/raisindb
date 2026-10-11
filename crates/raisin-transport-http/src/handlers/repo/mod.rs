@@ -7,6 +7,7 @@
 //! full-text search, and signed asset URLs.
 
 mod assets;
+pub(crate) mod blob_serve;
 mod commands;
 mod commands_commit;
 mod commands_translation;

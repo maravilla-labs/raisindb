@@ -167,6 +167,7 @@ pub async fn repo_post(
             &ws,
             &asset_path,
             sign_request,
+            auth.as_ref().map(|Extension(a)| a.clone()),
         )
         .await?;
         return Ok((StatusCode::OK, Json(serde_json::to_value(response.0)?)));

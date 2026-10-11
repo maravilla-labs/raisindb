@@ -131,8 +131,39 @@ pub fn sign_asset_url(
     property_path: Option<&str>,
     expires: u64,
 ) -> String {
+    sign_asset_url_bound(
+        secret,
+        tenant_id,
+        path,
+        command,
+        property_path,
+        expires,
+        None,
+    )
+}
+
+/// [`sign_asset_url`], optionally bound to the blob's content.
+///
+/// With `content_sha256`, the digest is part of the signed message, so the
+/// URL redeems only while the property still points at THAT blob: a rebuild
+/// that repoints it invalidates every URL minted for the old one. Without it
+/// the message is byte-identical to [`sign_asset_url`]'s, so every URL minted
+/// before content binding existed keeps verifying.
+pub fn sign_asset_url_bound(
+    secret: &[u8],
+    tenant_id: &str,
+    path: &str,
+    command: &str,
+    property_path: Option<&str>,
+    expires: u64,
+    content_sha256: Option<&str>,
+) -> String {
     let prop = property_path.unwrap_or("file");
-    let message = format!("{}:{}:{}:{}:{}", tenant_id, path, command, prop, expires);
+    let mut message = format!("{}:{}:{}:{}:{}", tenant_id, path, command, prop, expires);
+    if let Some(sha) = content_sha256 {
+        message.push_str(":sha256=");
+        message.push_str(sha);
+    }
     let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key size");
     mac.update(message.as_bytes());
     let result = mac.finalize();
@@ -192,6 +223,37 @@ pub fn verify_asset_signature(
 
     // Verify signature with constant-time comparison
     let expected = sign_asset_url(secret, tenant_id, path, command, property_path, expires);
+    expected.as_bytes().ct_eq(signature.as_bytes()).into()
+}
+
+/// [`verify_asset_signature`] for a URL minted by [`sign_asset_url_bound`].
+#[allow(clippy::too_many_arguments)]
+pub fn verify_asset_signature_bound(
+    secret: &[u8],
+    tenant_id: &str,
+    path: &str,
+    command: &str,
+    property_path: Option<&str>,
+    expires: u64,
+    content_sha256: Option<&str>,
+    signature: &str,
+) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if now > expires {
+        return false;
+    }
+    let expected = sign_asset_url_bound(
+        secret,
+        tenant_id,
+        path,
+        command,
+        property_path,
+        expires,
+        content_sha256,
+    );
     expected.as_bytes().ct_eq(signature.as_bytes()).into()
 }
 
@@ -384,5 +446,60 @@ mod tests {
             expires,
             &sig
         ));
+    }
+
+    #[test]
+    fn a_content_bound_signature_redeems_only_for_that_content() {
+        let path = "r/main/head/settings/packages/x/b-1@artifact";
+        let exp = u64::MAX;
+        let sha = "ab".repeat(32);
+        let bound = sign_asset_url_bound(
+            SECRET,
+            TENANT,
+            path,
+            "download",
+            Some("artifact"),
+            exp,
+            Some(&sha),
+        );
+        assert!(verify_asset_signature_bound(
+            SECRET,
+            TENANT,
+            path,
+            "download",
+            Some("artifact"),
+            exp,
+            Some(&sha),
+            &bound
+        ));
+        // Another blob (a rebuild repointed the property): refused.
+        let other = "cd".repeat(32);
+        assert!(!verify_asset_signature_bound(
+            SECRET,
+            TENANT,
+            path,
+            "download",
+            Some("artifact"),
+            exp,
+            Some(&other),
+            &bound
+        ));
+        // An unbound signature does not redeem a content-bound artifact…
+        let unbound = sign_asset_url(SECRET, TENANT, path, "download", Some("artifact"), exp);
+        assert!(!verify_asset_signature_bound(
+            SECRET,
+            TENANT,
+            path,
+            "download",
+            Some("artifact"),
+            exp,
+            Some(&sha),
+            &unbound
+        ));
+        // …and without a digest the message is the historical one (R7).
+        assert_eq!(
+            sign_asset_url_bound(SECRET, TENANT, path, "download", None, exp, None),
+            sign_asset_url(SECRET, TENANT, path, "download", None, exp)
+        );
     }
 }

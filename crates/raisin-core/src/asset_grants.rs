@@ -235,6 +235,20 @@ pub fn authorize_asset_read(
     scope: AssetReadScope<'_>,
     credential: AssetCredential<'_>,
 ) -> Result<AssetAuthorization, AssetAuthError> {
+    authorize_asset_read_bound(secret, scope, credential, None)
+}
+
+/// [`authorize_asset_read`] for a property whose envelope records a content
+/// digest: a signature must then be bound to that digest
+/// ([`crate::sign_asset_url_bound`]). An unbound signature, or one bound to
+/// another blob, is refused. Grants are unaffected — they read as their
+/// subject, under row-level security, whatever the blob.
+pub fn authorize_asset_read_bound(
+    secret: &[u8],
+    scope: AssetReadScope<'_>,
+    credential: AssetCredential<'_>,
+    content_sha256: Option<&str>,
+) -> Result<AssetAuthorization, AssetAuthError> {
     match credential {
         AssetCredential::Signature { sig, expires } => {
             if sig.is_empty() {
@@ -250,13 +264,14 @@ pub fn authorize_asset_read(
                 scope.node_path,
                 scope.property,
             );
-            let ok = crate::verify_asset_signature(
+            let ok = crate::verify_asset_signature_bound(
                 secret,
                 scope.tenant_id,
                 &signed_path,
                 scope.command,
                 crate::asset_urls::signature_property(scope.property),
                 expires,
+                content_sha256,
                 sig,
             );
             if ok {

@@ -107,14 +107,37 @@ pub fn build_signed_asset_url(
     expires: u64,
     base_url: Option<&str>,
 ) -> SignedAssetUrl {
+    build_signed_asset_url_bound(
+        secret, tenant_id, repo, branch, workspace, node_path, property, command, expires,
+        base_url, None,
+    )
+}
+
+/// [`build_signed_asset_url`], bound to the blob's content when the
+/// property's envelope records a sha256 (see [`content_sha256_of`]).
+#[allow(clippy::too_many_arguments)]
+pub fn build_signed_asset_url_bound(
+    secret: &[u8],
+    tenant_id: &str,
+    repo: &str,
+    branch: &str,
+    workspace: &str,
+    node_path: &str,
+    property: &str,
+    command: &str,
+    expires: u64,
+    base_url: Option<&str>,
+    content_sha256: Option<&str>,
+) -> SignedAssetUrl {
     let signed_path = signed_asset_path(repo, branch, workspace, node_path, property);
-    let signature = crate::sign_asset_url(
+    let signature = crate::sign_asset_url_bound(
         secret,
         tenant_id,
         &signed_path,
         command,
         signature_property(property),
         expires,
+        content_sha256,
     );
 
     let url = format!(
@@ -131,6 +154,43 @@ pub fn build_signed_asset_url(
         expires,
         signed_path,
     }
+}
+
+/// The content digest a Resource envelope records (`metadata.sha256`), if any.
+///
+/// Only generated artifacts carry one today (a package build writes it from
+/// the stream that produced the blob). Its presence is what makes a signed
+/// URL content-bound and what marks the blob as an artifact for the longer
+/// download lifetime; an ordinary upload has none and keeps both historical
+/// behaviours.
+pub fn content_sha256_of(
+    resource: &raisin_models::nodes::properties::value::Resource,
+) -> Option<&str> {
+    match resource.metadata.as_ref()?.get("sha256")? {
+        raisin_models::nodes::properties::PropertyValue::String(s)
+            if s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()) =>
+        {
+            Some(s.as_str())
+        }
+        _ => None,
+    }
+}
+
+/// Default lifetime of a signed download of an artifact: long enough to
+/// finish — and resume — a multi-gigabyte transfer on the same URL.
+pub const DEFAULT_ARTIFACT_URL_TTL_SECS: u64 = 12 * 3600;
+/// Upper bound for an artifact download's lifetime, whatever is asked for.
+pub const MAX_ARTIFACT_URL_TTL_SECS: u64 = 24 * 3600;
+
+/// The artifact download lifetime: `RAISIN_ARTIFACT_URL_TTL_SECS`, else
+/// [`DEFAULT_ARTIFACT_URL_TTL_SECS`], clamped to [`MAX_ARTIFACT_URL_TTL_SECS`].
+pub fn artifact_url_ttl_secs() -> u64 {
+    std::env::var("RAISIN_ARTIFACT_URL_TTL_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_ARTIFACT_URL_TTL_SECS)
+        .min(MAX_ARTIFACT_URL_TTL_SECS)
 }
 
 /// The deployment's canonical public base URL, or `None` when unconfigured.

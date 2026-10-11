@@ -122,6 +122,9 @@ pub(crate) async fn handle_asset_command_internal(
     // The raw `Range` header, threaded down from the request. Without it a
     // `<video>` served from here has a dead scrub bar — see `http_range`.
     range_header: Option<&str>,
+    // The raw `If-Range` header: a resumed download whose validator no longer
+    // matches gets the whole, current file instead of a spliced one.
+    if_range_header: Option<&str>,
     // The request's own principal (session or anonymous user), used only when
     // neither a signature nor a grant is presented.
     principal: Option<raisin_models::auth::AuthContext>,
@@ -188,14 +191,13 @@ pub(crate) async fn handle_asset_command_internal(
             prop_name,
             command,
             range_header,
-            cache_control,
+            if_range_header,
+            cache_control.to_string(),
         )
         .await;
     }
 
     let credential = raisin_core::AssetCredential::from_query(Some(sig), Some(exp), grant)
-        .map_err(|e| credential_error(e, presented_grant))?;
-    let authorization = raisin_core::authorize_asset_read(&signing_secret, scope, credential)
         .map_err(|e| credential_error(e, presented_grant))?;
 
     // WHERE the node is read from is the security difference between the two
@@ -203,26 +205,56 @@ pub(crate) async fn handle_asset_command_internal(
     //
     // A signature was minted for this one asset after its minter checked access,
     // so the read is unfiltered — that is the historical behaviour and the
-    // machine-to-machine contract.
+    // machine-to-machine contract. It is read BEFORE the signature is checked
+    // because a generated artifact's envelope records its sha256, and then the
+    // signature must be bound to exactly that blob: a rebuild that repoints
+    // the property revokes every URL minted for the old one.
     //
     // A grant is not authority. It names a subject, and the read runs as that
     // subject with row-level security applied, resolved NOW. So the grant can
     // never return a node its subject could not fetch directly, and withdrawing
     // the subject's access stops the grant working without anything having to
     // revoke the token itself.
-    let node = match &authorization {
-        raisin_core::AssetAuthorization::Signature => state
-            .storage()
-            .nodes()
-            .get_by_path(
-                StorageScope::new(tenant_id, repo, branch, ws),
-                &node_path,
-                None,
+    let (node, cache_control) = match credential {
+        raisin_core::AssetCredential::Signature { expires, .. } => {
+            let node = state
+                .storage()
+                .nodes()
+                .get_by_path(
+                    StorageScope::new(tenant_id, repo, branch, ws),
+                    &node_path,
+                    None,
+                )
+                .await?;
+            let content_sha = node
+                .as_ref()
+                .and_then(|n| resource_sha256(n, prop_name))
+                .map(str::to_string);
+            raisin_core::authorize_asset_read_bound(
+                &signing_secret,
+                scope,
+                credential,
+                content_sha.as_deref(),
             )
-            .await?
-            .ok_or_else(|| ApiError::not_found("Node not found"))?,
-        raisin_core::AssetAuthorization::Grant(grant) => {
-            read_as_grant_subject(state, tenant_id, repo, branch, ws, &node_path, grant).await?
+            .map_err(|e| credential_error(e, presented_grant))?;
+            // Verified first, so a missing node cannot be told apart from a bad
+            // signature by anyone without one.
+            let node = node.ok_or_else(|| ApiError::not_found("Node not found"))?;
+            (node, super::blob_serve::signed_cache_control(expires))
+        }
+        raisin_core::AssetCredential::Grant { .. } => {
+            let authorization =
+                raisin_core::authorize_asset_read(&signing_secret, scope, credential)
+                    .map_err(|e| credential_error(e, presented_grant))?;
+            let raisin_core::AssetAuthorization::Grant(grant) = &authorization else {
+                return Err(credential_error(
+                    raisin_core::AssetAuthError::MissingCredential,
+                    presented_grant,
+                ));
+            };
+            let node = read_as_grant_subject(state, tenant_id, repo, branch, ws, &node_path, grant)
+                .await?;
+            (node, PRIVATE_CACHE_CONTROL.to_string())
         }
     };
 
@@ -236,9 +268,20 @@ pub(crate) async fn handle_asset_command_internal(
         prop_name,
         command,
         range_header,
-        PRIVATE_CACHE_CONTROL,
+        if_range_header,
+        cache_control,
     )
     .await
+}
+
+/// The sha256 a node's Resource property records, if any.
+fn resource_sha256<'n>(node: &'n raisin_models::nodes::Node, prop: &str) -> Option<&'n str> {
+    match node.properties.get(prop)? {
+        raisin_models::nodes::properties::PropertyValue::Resource(r) => {
+            raisin_core::content_sha256_of(r)
+        }
+        _ => None,
+    }
 }
 
 /// A signed, granted or signed-in read: the reader's own, never a shared cache.
@@ -262,7 +305,8 @@ async fn serve_asset_property(
     prop_name: &str,
     command: &str,
     range_header: Option<&str>,
-    cache_control: &'static str,
+    if_range_header: Option<&str>,
+    cache_control: String,
 ) -> Result<Response, ApiError> {
     // A mounted file whose bytes are not held right now is NOT a missing
     // property — it is a cache miss on a file that still exists at the provider.
@@ -324,15 +368,6 @@ async fn serve_asset_property(
         })
         .ok_or_else(|| ApiError::not_found("Resource has no storage_key in metadata"))?;
 
-    // Fetch from binary storage
-    let bytes = state.bin.get(&storage_key).await.map_err(|e| {
-        ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "STORAGE_ERROR",
-            format!("Failed to retrieve file: {}", e),
-        )
-    })?;
-
     // Get filename
     let filename = resource
         .name
@@ -358,58 +393,23 @@ async fn serve_asset_property(
         _ => "attachment".to_string(),
     };
 
-    // Range resolution happens HERE, at the end, against the bytes we actually
-    // hold — after the signature check and after the mount hydration above. A
-    // mounted asset whose cache had expired has been fetched by this point, so
-    // a range request over one is served like any other rather than refused,
-    // and the total below is the real entity size either way.
-    //
-    // The bytes are already fully in memory (`BinaryStorage::get` has no ranged
-    // read), so slicing is all a partial response can be today. `Bytes::slice`
-    // is a refcount bump, not a copy — the win here is protocol correctness,
-    // seeking, not reduced IO. A ranged storage read would be the follow-up.
-    let total = bytes.len() as u64;
-    let resolution = super::http_range::resolve(range_header, total);
-
-    // `Accept-Ranges` goes on EVERY outcome, including the plain 200. A browser
-    // decides whether seeking is possible from this header on its first probe;
-    // omit it there and the scrub bar stays dead even though ranges work.
-    let base = Response::builder()
-        .header(header::CONTENT_TYPE, mime_type)
-        .header(header::CONTENT_DISPOSITION, disposition)
-        .header(header::CACHE_CONTROL, cache_control)
-        .header(header::ACCEPT_RANGES, "bytes");
-
-    let response = match resolution {
-        // A well-formed request for bytes that do not exist. 416 carries
-        // `bytes */total` so the client learns the real size and can re-ask,
-        // rather than being told 200 and keeping its wrong belief.
-        super::http_range::RangeResolution::Unsatisfiable => base
-            .status(StatusCode::RANGE_NOT_SATISFIABLE)
-            .header(header::CONTENT_RANGE, format!("bytes */{}", total))
-            .header(header::CONTENT_LENGTH, 0)
-            .body(Body::empty()),
-        super::http_range::RangeResolution::Satisfiable { start, end } => {
-            // Content-Length is the length of the PART, not of the file.
-            // Sending the whole size here makes the browser wait forever for
-            // bytes that are never coming.
-            let part = bytes.slice(start as usize..=end as usize);
-            let len = end - start + 1;
-            base.status(StatusCode::PARTIAL_CONTENT)
-                .header(
-                    header::CONTENT_RANGE,
-                    format!("bytes {}-{}/{}", start, end, total),
-                )
-                .header(header::CONTENT_LENGTH, len)
-                .body(Body::from(part))
-        }
-        super::http_range::RangeResolution::None => base
-            .status(StatusCode::OK)
-            .header(header::CONTENT_LENGTH, total)
-            .body(Body::from(bytes)),
-    };
-
-    Ok(response.expect("valid response with valid headers"))
+    // Streamed from storage with ranges resolved against the stored size —
+    // after the signature check and after the mount hydration above, so a
+    // mounted asset whose cache had expired is served like any other. Memory
+    // is one chunk whatever the file's size.
+    super::blob_serve::serve_blob(
+        state,
+        super::blob_serve::BlobResponse {
+            storage_key: &storage_key,
+            mime_type: &mime_type,
+            disposition: &disposition,
+            cache_control: &cache_control,
+            sha256: raisin_core::content_sha256_of(resource),
+            range: range_header,
+            if_range: if_range_header,
+        },
+    )
+    .await
 }
 
 /// Read a node AS a grant's subject, with row-level security applied.
@@ -520,14 +520,17 @@ async fn read_as_grant_subject(
 pub struct SignAssetRequest {
     /// Command type: "download" or "display"
     pub command: String,
-    /// Expiry time in seconds (default: 300)
-    #[serde(default = "default_expires_in")]
-    pub expires_in: u64,
+    /// Expiry time in seconds. Default 300; for a generated artifact's
+    /// download (an envelope recording its sha256) the artifact lifetime —
+    /// 12 h unless `RAISIN_ARTIFACT_URL_TTL_SECS` says otherwise, never more
+    /// than 24 h — so a multi-gigabyte transfer can finish and resume on the
+    /// same URL.
+    #[serde(default)]
+    pub expires_in: Option<u64>,
 }
 
-fn default_expires_in() -> u64 {
-    300
-}
+/// Default lifetime of an ordinary signed asset URL.
+const DEFAULT_SIGNED_URL_TTL_SECS: u64 = 300;
 
 /// Response containing the signed URL
 #[derive(Debug, serde::Serialize)]
@@ -672,6 +675,7 @@ pub(crate) async fn sign_asset_url_internal(
     ws: &str,
     path: &str,
     request: SignAssetRequest,
+    principal: Option<raisin_models::auth::AuthContext>,
 ) -> Result<Json<SignAssetResponse>, ApiError> {
     // Validate command
     if request.command != "download" && request.command != "display" {
@@ -691,17 +695,13 @@ pub(crate) async fn sign_asset_url_internal(
     // Default to "file" if not specified
     let property_path = ctx.property_path.as_deref().unwrap_or("file");
 
-    // Get node to validate it exists and user has access
-    let node = state
-        .storage()
-        .nodes()
-        .get_by_path(
-            StorageScope::new(tenant_id, repo, branch, ws),
-            &node_path,
-            None,
-        )
-        .await?
-        .ok_or_else(|| ApiError::not_found("Node not found"))?;
+    // The node, read AS THE CALLER, under row-level security. A signature is
+    // authority on its own when it is redeemed (the serve path reads
+    // unfiltered), so this read is the only access check a signed URL ever
+    // gets: minting one for a node the caller cannot read would hand out
+    // exactly what row-level security withholds. Unreadable reads as missing.
+    let node = read_as_request_principal(state, tenant_id, repo, branch, ws, &node_path, principal)
+        .await?;
 
     // Validate node has the requested property.
     //
@@ -735,12 +735,28 @@ pub(crate) async fn sign_asset_url_internal(
         }
     }
 
+    // A generated artifact records its digest; the URL is then bound to that
+    // blob and gets the artifact lifetime.
+    let content_sha = match node.properties.get(property_path) {
+        Some(raisin_models::nodes::properties::PropertyValue::Resource(r)) => {
+            raisin_core::content_sha256_of(r).map(str::to_string)
+        }
+        _ => None,
+    };
+    let lifetime = match (&content_sha, request.command.as_str()) {
+        (Some(_), "download") => request
+            .expires_in
+            .unwrap_or_else(raisin_core::artifact_url_ttl_secs)
+            .min(raisin_core::MAX_ARTIFACT_URL_TTL_SECS),
+        _ => request.expires_in.unwrap_or(DEFAULT_SIGNED_URL_TTL_SECS),
+    };
+
     // Generate expiry timestamp
     let expires = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
-        + request.expires_in;
+        + lifetime;
 
     // One composer for the path grammar, the signature and the URL — shared
     // with the serve handler that verifies and with the
@@ -753,7 +769,7 @@ pub(crate) async fn sign_asset_url_internal(
     // its consumer is another process.
     let signing_secret = state.get_signing_secret()?;
     let base_url = raisin_core::configured_public_base_url();
-    let signed = raisin_core::build_signed_asset_url(
+    let signed = raisin_core::build_signed_asset_url_bound(
         &signing_secret,
         tenant_id,
         repo,
@@ -764,6 +780,7 @@ pub(crate) async fn sign_asset_url_internal(
         &request.command,
         expires,
         base_url.as_deref(),
+        content_sha.as_deref(),
     );
     let url = signed.url;
 

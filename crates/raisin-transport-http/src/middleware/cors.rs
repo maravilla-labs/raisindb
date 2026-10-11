@@ -173,7 +173,7 @@ pub async fn unified_cors_middleware(
             );
             headers.insert(
                 header::ACCESS_CONTROL_ALLOW_HEADERS,
-                "Content-Type, Authorization, Accept, Content-Range, X-Tenant-Id, X-Raisin-Impersonate, Cache-Control"
+                "Content-Type, Authorization, Accept, Content-Range, Range, If-Range, X-Tenant-Id, X-Raisin-Impersonate, Cache-Control"
                     .parse()
                     .expect("hardcoded headers are valid"),
             );
@@ -184,9 +184,7 @@ pub async fn unified_cors_middleware(
                 // only then runs the flow. Without this the header is present on
                 // the wire but invisible to `fetch`, so the 401 is opaque and
                 // lazy auth cannot start.
-                "WWW-Authenticate"
-                    .parse()
-                    .expect("hardcoded header is valid"),
+                EXPOSE_HEADERS.parse().expect("hardcoded header is valid"),
             );
             headers.insert(
                 header::ACCESS_CONTROL_ALLOW_CREDENTIALS,
@@ -217,14 +215,21 @@ pub async fn unified_cors_middleware(
         );
         headers.insert(
             header::ACCESS_CONTROL_EXPOSE_HEADERS,
-            "Content-Range, Accept-Ranges"
-                .parse()
-                .expect("hardcoded headers are valid"),
+            EXPOSE_HEADERS.parse().expect("hardcoded headers are valid"),
         );
     }
 
     Ok(response)
 }
+
+/// Response headers a cross-origin script may read.
+///
+/// `WWW-Authenticate` so a browser MCP host can start OAuth from a 401; the
+/// rest so a ranged, resumable download is usable from another origin: the
+/// exact length, the range served, the validator a resume sends back as
+/// `If-Range`, the file name and the digest to verify the result against.
+const EXPOSE_HEADERS: &str = "WWW-Authenticate, Content-Length, Content-Range, Accept-Ranges, \
+                              ETag, Content-Disposition, Repr-Digest";
 
 // ============================================================================
 // Internal helpers
@@ -249,7 +254,7 @@ fn apply_preflight_cors_headers(headers: &mut axum::http::HeaderMap, origin: &st
     );
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_HEADERS,
-        "Content-Type, Authorization, Accept, Cache-Control"
+        "Content-Type, Authorization, Accept, Range, If-Range, Cache-Control"
             .parse()
             .expect("hardcoded headers are valid"),
     );
@@ -257,9 +262,7 @@ fn apply_preflight_cors_headers(headers: &mut axum::http::HeaderMap, origin: &st
         header::ACCESS_CONTROL_EXPOSE_HEADERS,
         // See the note on the other CORS site: browser hosts must be able to
         // read the 401 challenge to start the OAuth flow.
-        "WWW-Authenticate"
-            .parse()
-            .expect("hardcoded header is valid"),
+        EXPOSE_HEADERS.parse().expect("hardcoded header is valid"),
     );
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_CREDENTIALS,

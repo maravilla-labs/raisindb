@@ -592,10 +592,12 @@ async fn a_signed_link_works_and_a_bad_signature_never_falls_back() {
         String::from_utf8_lossy(&ok.body)
     );
     assert_eq!(ok.body, BYTES);
-    // a signed read stays private to its reader
-    assert_eq!(
-        ok.headers.get("cache-control").unwrap(),
-        "private, max-age=300"
+    // a signed read stays private to its reader, cacheable for no longer
+    // than its signature is valid
+    let cc = ok.headers.get("cache-control").unwrap().to_str().unwrap();
+    assert!(
+        cc.starts_with("private, max-age=") && cc.ends_with("no-transform"),
+        "{cc}"
     );
 
     // a wrong signature on a PUBLIC asset is still refused: presenting a
