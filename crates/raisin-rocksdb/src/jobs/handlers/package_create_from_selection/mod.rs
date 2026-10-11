@@ -11,6 +11,7 @@ mod archive;
 mod estimate;
 mod handler;
 mod inventory;
+pub mod ledger;
 mod manifest_types;
 mod mirror;
 mod progress;

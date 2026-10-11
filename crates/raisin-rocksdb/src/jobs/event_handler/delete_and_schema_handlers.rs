@@ -94,73 +94,43 @@ impl UnifiedJobEventHandler {
         Ok(())
     }
 
-    /// Delete the blobs of every generated-artifact Resource the deleted node
-    /// held (E15 for package builds).
+    /// Delete the artifact blobs a package build recorded for the deleted
+    /// node (E15 for package builds).
     ///
-    /// An artifact is a Resource whose envelope records its `sha256` — only a
-    /// build writes one, from the stream that produced the blob, and a build
-    /// never points two nodes at one blob. Relying on history GC instead
-    /// would keep a multi-gigabyte archive for a day after its run was
-    /// deleted, and forever on object storage, which GC cannot list. An
-    /// ordinary upload (no digest) is left to GC: copies and revisions may
-    /// still reference it. The node is read as of just before the delete.
+    /// Keys come ONLY from the engine's artifact ledger, for this node id on
+    /// this branch — never from the node's properties, which are writable
+    /// content and could name any blob. A node the ledger does not know owns
+    /// nothing, whatever Resources it carries; a blob the same record still
+    /// names on another branch is kept. Relying on history GC instead would
+    /// keep a multi-gigabyte archive for a day, and forever on object storage.
     pub(crate) async fn delete_artifact_blobs(&self, node_event: &NodeEvent) {
-        use raisin_models::nodes::properties::PropertyValue;
-        use raisin_storage::{NodeRepository, StorageScope};
-
+        use crate::jobs::handlers::package_create_from_selection::ledger;
         let Some(store) = self.storage.blob_store() else {
             return;
         };
-        let rev = node_event.revision;
-        let before = if rev.counter > 0 {
-            raisin_hlc::HLC::new(rev.timestamp_ms, rev.counter - 1)
-        } else {
-            raisin_hlc::HLC::new(rev.timestamp_ms.saturating_sub(1), u64::MAX)
-        };
-        let scope = StorageScope::new(
+        match ledger::delete_for(
+            &self.storage,
+            store.as_ref(),
             &node_event.tenant_id,
             &node_event.repository_id,
-            &node_event.branch,
-            &node_event.workspace_id,
-        );
-        let Ok(Some(node)) = self
-            .storage
-            .nodes()
-            .get(scope, &node_event.node_id, Some(&before))
-            .await
-        else {
-            return;
-        };
-        for (name, value) in &node.properties {
-            let PropertyValue::Resource(r) = value else {
-                continue;
-            };
-            let meta = r.metadata.as_ref();
-            let is_artifact = matches!(
-                meta.and_then(|m| m.get("sha256")),
-                Some(PropertyValue::String(s)) if s.len() == 64
-            );
-            let Some(PropertyValue::String(key)) = meta.and_then(|m| m.get("storage_key")) else {
-                continue;
-            };
-            if !is_artifact {
-                continue;
-            }
-            match store.delete(key).await {
-                Ok(()) => tracing::info!(
-                    node_id = %node_event.node_id,
-                    property = %name,
-                    storage_key = %key,
-                    "Deleted the artifact blob of a deleted node"
-                ),
-                Err(e) => tracing::warn!(
-                    node_id = %node_event.node_id,
-                    property = %name,
-                    storage_key = %key,
-                    error = %e,
-                    "Could not delete the artifact blob of a deleted node; GC will"
-                ),
-            }
+            ledger::Owner::Node {
+                branch: &node_event.branch,
+                node_id: &node_event.node_id,
+            },
+        )
+        .await
+        {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(
+                node_id = %node_event.node_id,
+                deleted = n,
+                "Deleted the artifact blobs of a deleted build record"
+            ),
+            Err(e) => tracing::warn!(
+                node_id = %node_event.node_id,
+                error = %e,
+                "Could not delete artifact blobs of a deleted node; GC will"
+            ),
         }
     }
 

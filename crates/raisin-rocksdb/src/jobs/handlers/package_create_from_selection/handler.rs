@@ -137,6 +137,21 @@ impl PackageCreateFromSelectionHandler {
             .await;
         let store = self.storage.blob_store();
 
+        // The engine's own record of what it wrote (see ledger.rs): the only
+        // source of artifact keys for a later delete or ranged read. Written
+        // before the terminal write, so a record that says `completed` always
+        // has its artifacts in the ledger.
+        let outcome = match outcome {
+            Ok(done) => match self
+                .enter_in_ledger(job, context, &mirror, &committed)
+                .await
+            {
+                Ok(()) => Ok(done),
+                Err(e) => Err(Stop::Failed(e)),
+            },
+            Err(stop) => Err(stop),
+        };
+
         match outcome {
             Ok((spec, built, log_resource)) => {
                 let mut extra = HashMap::new();
@@ -208,6 +223,12 @@ impl PackageCreateFromSelectionHandler {
                         let _ = store.delete(key).await;
                     }
                 }
+                super::ledger::forget(
+                    &self.storage,
+                    &context.tenant_id,
+                    &context.repo_id,
+                    &committed.0,
+                );
                 let (status, code, message, detail) = match stop {
                     Stop::Cancelled => ("cancelled", None, "Cancelled".to_string(), None),
                     Stop::Refused {
@@ -255,6 +276,41 @@ impl PackageCreateFromSelectionHandler {
                 })
             }
         }
+    }
+
+    /// Enter every committed artifact in the ledger, owned by the record.
+    async fn enter_in_ledger(
+        &self,
+        job: &JobInfo,
+        context: &JobContext,
+        mirror: &Mirror,
+        committed: &Committed,
+    ) -> Result<()> {
+        let Some(record) = mirror.record() else {
+            return Ok(());
+        };
+        let Some(node_id) = mirror.record_node_id().await else {
+            return Err(Error::storage(
+                "the build record disappeared before it could own its artifacts",
+            ));
+        };
+        let entry = super::ledger::LedgerEntry {
+            job_id: job.id.to_string(),
+            branch: context.branch.clone(),
+            workspace: record.workspace.clone(),
+            node_id,
+            path: record.path.clone(),
+        };
+        for key in &committed.0 {
+            super::ledger::record(
+                &self.storage,
+                &context.tenant_id,
+                &context.repo_id,
+                key,
+                &entry,
+            )?;
+        }
+        Ok(())
     }
 
     /// Cancel `cancel` when the record's status becomes `cancel_requested`.

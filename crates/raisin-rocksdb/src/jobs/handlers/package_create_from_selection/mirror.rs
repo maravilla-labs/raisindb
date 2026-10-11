@@ -376,6 +376,20 @@ impl Mirror {
         self.record.as_ref()
     }
 
+    /// The record node's id, if it exists.
+    pub(super) async fn record_node_id(&self) -> Option<String> {
+        use raisin_storage::{NodeRepository, Storage, StorageScope};
+        let record = self.record.as_ref()?;
+        let scope = StorageScope::new(&self.tenant, &self.repo, &self.branch, &record.workspace);
+        self.storage
+            .nodes()
+            .get_by_path(scope, &record.path, None)
+            .await
+            .ok()
+            .flatten()
+            .map(|n| n.id)
+    }
+
     /// Does the record say THIS job is already running it — i.e. is this a
     /// re-run of an attempt that was interrupted?
     pub(super) async fn was_running_as(&self, job_id: &JobId) -> bool {

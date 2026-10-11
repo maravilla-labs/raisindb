@@ -927,3 +927,176 @@ async fn a_node_pointing_at_another_tenants_blob_is_not_packed() {
     };
     assert_eq!(counters.get("warnings"), Some(&PropertyValue::Integer(2)));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_ledger_recorded_artifacts_of_their_own_record_are_deleted() {
+    use super::ledger::{self, Owner};
+    let f = fixture(3, 16).await;
+    let submitted = submit_package_build(&f.storage, T, R, B, &request("k9"), &requester())
+        .await
+        .unwrap();
+    run(&f, &handler(&f, None), &submitted.job_id)
+        .await
+        .unwrap();
+    let rec = record(&f).await;
+    let (archive_key, _) = resource_key(&rec, "artifact");
+    let record_node = f
+        .storage
+        .nodes()
+        .get_by_path(StorageScope::new(T, R, B, "settings"), RECORD, None)
+        .await
+        .unwrap()
+        .unwrap();
+    let owner = ledger::lookup(&f.storage, T, R, &archive_key)
+        .unwrap()
+        .unwrap();
+    assert_eq!(owner.node_id, record_node.id);
+    assert_eq!(owner.job_id, submitted.job_id);
+
+    // A forger's node names the genuine artifact AND a shared asset blob.
+    create(
+        &f.storage,
+        "settings",
+        "/packages/site/forged/state",
+        vec![
+            (
+                "artifact",
+                file_resource(&archive_key, 1, "application/zip"),
+            ),
+            ("file", file_resource(&f.seeded_blobs[0], 1, "image/png")),
+        ],
+    )
+    .await;
+    let forged = f
+        .storage
+        .nodes()
+        .get_by_path(
+            StorageScope::new(T, R, B, "settings"),
+            "/packages/site/forged/state",
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let store = f.storage.blob_store().unwrap();
+    for owner in [
+        Owner::Node {
+            branch: B,
+            node_id: &forged.id,
+        },
+        Owner::Path {
+            branch: B,
+            workspace: "settings",
+            path: "/packages/site/forged/state",
+        },
+        // The right record id on the wrong branch owns nothing either.
+        Owner::Node {
+            branch: "other",
+            node_id: &record_node.id,
+        },
+    ] {
+        assert_eq!(
+            ledger::delete_for(&f.storage, store.as_ref(), T, R, owner)
+                .await
+                .unwrap(),
+            0
+        );
+    }
+    // Another repository's ledger has nothing to say about this one.
+    let none = ledger::delete_for(
+        &f.storage,
+        store.as_ref(),
+        T,
+        "other-repo",
+        Owner::Node {
+            branch: B,
+            node_id: &record_node.id,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(none, 0);
+    assert!(f.blobs.head(&archive_key).await.unwrap().is_some());
+    assert!(f.blobs.head(&f.seeded_blobs[0]).await.unwrap().is_some());
+
+    // The genuine owner: its four artifacts go, nothing else does.
+    let n = ledger::delete_for(
+        &f.storage,
+        store.as_ref(),
+        T,
+        R,
+        Owner::Node {
+            branch: B,
+            node_id: &record_node.id,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(n, 4);
+    assert!(f.blobs.head(&archive_key).await.unwrap().is_none());
+    assert!(ledger::lookup(&f.storage, T, R, &archive_key)
+        .unwrap()
+        .is_none());
+    assert!(f.blobs.head(&f.seeded_blobs[0]).await.unwrap().is_some());
+    assert!(leftover_blobs(&f).await.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_artifact_a_forked_record_still_names_is_kept() {
+    use super::ledger::{self, Owner};
+    let f = fixture(2, 16).await;
+    let submitted = submit_package_build(&f.storage, T, R, B, &request("k10"), &requester())
+        .await
+        .unwrap();
+    run(&f, &handler(&f, None), &submitted.job_id)
+        .await
+        .unwrap();
+    let scope = StorageScope::new(T, R, B, "settings");
+    let record_node = f
+        .storage
+        .nodes()
+        .get_by_path(scope, RECORD, None)
+        .await
+        .unwrap()
+        .unwrap();
+    let (archive_key, _) = resource_key(&record_node.properties, "artifact");
+
+    // A fork carries the same node (same id) with the same Resources.
+    f.storage
+        .branches()
+        .create_branch(T, R, "fork", "system", None, None, false, false)
+        .await
+        .unwrap();
+    f.storage
+        .nodes()
+        .create(
+            StorageScope::new(T, R, "fork", "settings"),
+            record_node.clone(),
+            CreateNodeOptions {
+                validate_schema: false,
+                validate_parent_allows_child: false,
+                validate_workspace_allows_type: false,
+                operation_meta: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let store = f.storage.blob_store().unwrap();
+    ledger::delete_for(
+        &f.storage,
+        store.as_ref(),
+        T,
+        R,
+        Owner::Node {
+            branch: B,
+            node_id: &record_node.id,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        f.blobs.head(&archive_key).await.unwrap().is_some(),
+        "the fork still names it"
+    );
+}
