@@ -1065,6 +1065,30 @@ async fn a_node_pointing_at_another_tenants_blob_is_not_packed() {
     )
     .await;
 
+    // A legacy, unprefixed key (written before tenant prefixes) is packed:
+    // the same rule as serving the asset.
+    let legacy = f
+        .blobs
+        .put_bytes(
+            b"legacy bytes",
+            Some("application/octet-stream"),
+            Some("bin"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    create(
+        &f.storage,
+        "assets",
+        "/media/legacy.bin",
+        vec![(
+            "file",
+            file_resource(&legacy.key, 12, "application/octet-stream"),
+        )],
+    )
+    .await;
+
     let submitted = submit_package_build(&f.storage, T, R, B, &request("k8"), &requester())
         .await
         .unwrap();
@@ -1082,6 +1106,12 @@ async fn a_node_pointing_at_another_tenants_blob_is_not_packed() {
     let archive = f.blobs.get(&archive_key).await.unwrap();
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive.to_vec())).unwrap();
     assert!(zip.by_name("content/assets/media/stolen.pdf").is_err());
+    let mut legacy_bytes = Vec::new();
+    zip.by_name("content/assets/media/legacy.bin")
+        .unwrap()
+        .read_to_end(&mut legacy_bytes)
+        .unwrap();
+    assert_eq!(legacy_bytes, b"legacy bytes");
     let all: Vec<String> = (0..zip.len())
         .map(|i| zip.by_index(i).unwrap().name().to_string())
         .collect();

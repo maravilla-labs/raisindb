@@ -194,12 +194,15 @@ pub(super) async fn write_content_node<W: AsyncWrite + Unpin + Send>(
             .await
             .map_err(io)?;
         // The key is node content, so it proves nothing by itself: only a
-        // blob under this tenant's own prefix is read (see raisin_core::
-        // blob_scope). Anything else is skipped and reported, never fetched.
+        // blob this tenant may read is packed — its own prefix, or the
+        // legacy unprefixed form the asset-serving path admits too, so an
+        // export never reaches a blob a signed URL of the same node could not
+        // (see raisin_core::blob_scope). Anything else — another tenant's
+        // key — is skipped and reported, never fetched.
         let owned = raisin_core::blob_key_belongs_to(
             tenant,
             &storage_key,
-            raisin_core::BlobKeyPolicy::Strict,
+            raisin_core::BlobKeyPolicy::AllowLegacy,
         );
         let fetched = if owned {
             store.get_stream(&storage_key).await.ok()

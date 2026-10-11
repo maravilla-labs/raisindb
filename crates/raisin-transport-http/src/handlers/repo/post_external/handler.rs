@@ -60,7 +60,7 @@ pub(crate) async fn handle_external_upload<S: Storage + TransactionalStorage + '
                 archetype.as_deref(),
                 ext.as_deref(),
                 file_name.as_deref(),
-                None,
+                Some(tenant_id),
             )
             .await
             .map_err(|e| {
@@ -85,7 +85,15 @@ pub(crate) async fn handle_external_upload<S: Storage + TransactionalStorage + '
                             storage_key,
                         )) = metadata.get("storage_key")
                         {
-                            let _ = state.bin.delete(storage_key).await;
+                            // Only a blob provably this tenant's: the key is
+                            // node content and could name anyone's file.
+                            if raisin_core::blob_key_belongs_to(
+                                tenant_id,
+                                storage_key,
+                                raisin_core::BlobKeyPolicy::Strict,
+                            ) {
+                                let _ = state.bin.delete(storage_key).await;
+                            }
                         }
                     }
                 }
@@ -102,7 +110,7 @@ pub(crate) async fn handle_external_upload<S: Storage + TransactionalStorage + '
                 ext.as_deref(),
                 file_name.as_deref(),
                 None,
-                None,
+                Some(tenant_id),
             )
             .await
             .map_err(|e| {

@@ -17,12 +17,14 @@
 /// How strictly a key must prove it belongs to the tenant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlobKeyPolicy {
-    /// Only `{tenant}/…`. For copying bytes somewhere new (a package export)
-    /// and for anything that deletes.
+    /// Only `{tenant}/…`. For anything that deletes, and for generated
+    /// artifacts (always minted with the prefix).
     Strict,
     /// `{tenant}/…`, or the legacy unprefixed `yyyy/mm/dd/name` form. For
-    /// serving an asset that exists today: unprefixed keys predate tenant
-    /// prefixes and refusing them would break every such asset.
+    /// READING an ordinary asset (serving, signing, packing into an export):
+    /// unprefixed keys predate tenant prefixes, and refusing them would break
+    /// every such asset. A read this admits is one a signed URL of the same
+    /// node admits too, so no path reads more than another.
     AllowLegacy,
 }
 
