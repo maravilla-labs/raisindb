@@ -1630,3 +1630,52 @@ async fn only_the_terminal_record_write_reaches_trigger_evaluation() {
     let data = meta.get("node_data").unwrap();
     assert_eq!(data["properties"]["status"], "completed");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ledger_entries_refuse_separators_and_never_change_owner() {
+    use super::ledger::{self, LedgerEntry};
+    let f = fixture(1, 16).await;
+    let key = format!(
+        "{}/2026/10/11/x.rap",
+        raisin_core::artifact_key_namespace(T, R)
+    );
+    let owner = LedgerEntry {
+        job_id: "j1".into(),
+        branch: B.into(),
+        workspace: "settings".into(),
+        node_id: "n1".into(),
+        path: RECORD.into(),
+    };
+    ledger::record(&f.storage, T, R, &key, &owner).unwrap();
+    // Idempotent for the same owner…
+    ledger::record(&f.storage, T, R, &key, &owner).unwrap();
+    // …refused for another.
+    let mut thief = owner.clone();
+    thief.node_id = "n2".into();
+    assert!(matches!(
+        ledger::record(&f.storage, T, R, &key, &thief),
+        Err(raisin_error::Error::Conflict(_))
+    ));
+    assert_eq!(
+        ledger::lookup(&f.storage, T, R, &key).unwrap(),
+        Some(owner.clone())
+    );
+
+    // A NUL anywhere would let one entry be spelled into another's key space.
+    let nul_key = format!(
+        "{}/2026/10/11/y\0x.rap",
+        raisin_core::artifact_key_namespace(T, R)
+    );
+    assert!(ledger::record(&f.storage, T, R, &nul_key, &owner).is_err());
+    assert!(ledger::record(&f.storage, &format!("{T}\0pkgartifacts"), R, &key, &owner).is_err());
+    let mut nul_owner = owner.clone();
+    nul_owner.path = "/packages/site/b-1/state\0x".into();
+    let other_key = format!(
+        "{}/2026/10/11/z.rap",
+        raisin_core::artifact_key_namespace(T, R)
+    );
+    assert!(ledger::record(&f.storage, T, R, &other_key, &nul_owner).is_err());
+    // And a key outside this tenant/repo artifact namespace is never entered.
+    assert!(ledger::record(&f.storage, T, R, &format!("{T}/2026/10/11/a.jpg"), &owner).is_err());
+    assert!(ledger::record(&f.storage, T, "other-repo", &key, &owner).is_err());
+}

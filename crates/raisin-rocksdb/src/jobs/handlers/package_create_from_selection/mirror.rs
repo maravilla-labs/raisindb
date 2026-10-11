@@ -380,18 +380,23 @@ impl Mirror {
         self.record.as_ref()
     }
 
-    /// The record node's id, if it exists.
-    pub(super) async fn record_node_id(&self) -> Option<String> {
+    /// The record node's id and the job id stamped on it, if it exists.
+    pub(super) async fn record_node_and_job(&self) -> Option<(String, Option<String>)> {
         use raisin_storage::{NodeRepository, Storage, StorageScope};
         let record = self.record.as_ref()?;
         let scope = StorageScope::new(&self.tenant, &self.repo, &self.branch, &record.workspace);
-        self.storage
+        let node = self
+            .storage
             .nodes()
             .get_by_path(scope, &record.path, None)
             .await
             .ok()
-            .flatten()
-            .map(|n| n.id)
+            .flatten()?;
+        let job = match node.properties.get("job_id") {
+            Some(PropertyValue::String(s)) => Some(s.clone()),
+            _ => None,
+        };
+        Some((node.id, job))
     }
 
     /// Does the record say THIS job is already running it — i.e. is this a

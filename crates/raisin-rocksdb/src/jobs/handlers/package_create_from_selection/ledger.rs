@@ -62,10 +62,39 @@ pub fn record(
     storage_key: &str,
     entry: &LedgerEntry,
 ) -> Result<()> {
+    // The key is built by joining segments with `\0`; a value carrying one
+    // could be crafted to land in, or shadow, another tenant's or repo's
+    // entry. Refuse rather than escape.
+    for part in [
+        tenant,
+        repo,
+        storage_key,
+        &entry.job_id,
+        &entry.branch,
+        &entry.workspace,
+        &entry.node_id,
+        &entry.path,
+    ] {
+        if part.is_empty() || part.contains('\0') {
+            return Err(Error::Validation(
+                "artifact ledger: empty or NUL-bearing segment refused".to_string(),
+            ));
+        }
+    }
     if !raisin_core::is_artifact_key_of(tenant, repo, storage_key) {
         return Err(Error::Validation(format!(
             "artifact key '{storage_key}' is outside {tenant}/{repo}"
         )));
+    }
+    // An entry never changes owner: re-recording the same owner is a no-op,
+    // a different owner is refused.
+    if let Some(existing) = lookup(storage, tenant, repo, storage_key)? {
+        if existing != *entry {
+            return Err(Error::Conflict(format!(
+                "artifact '{storage_key}' is already owned by another build record"
+            )));
+        }
+        return Ok(());
     }
     let cf = cf_handle(storage.db(), cf::REGISTRY)?;
     let value = serde_json::to_vec(entry).map_err(storage_err)?;
@@ -163,7 +192,10 @@ async fn referenced_elsewhere(
     false
 }
 
-/// Which record's artifacts to delete.
+/// Which record's artifacts to delete. `Node` is driven only by the engine's
+/// own delete event for that node; `Path` only by `packages_deleteArtifacts`
+/// after the caller is authorized for that build state node. No route takes
+/// a caller-supplied node id.
 pub enum Owner<'a> {
     /// The record node with this id, on this branch.
     Node { branch: &'a str, node_id: &'a str },

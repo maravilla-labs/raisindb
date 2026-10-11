@@ -289,11 +289,28 @@ impl PackageCreateFromSelectionHandler {
         let Some(record) = mirror.record() else {
             return Ok(());
         };
-        let Some(node_id) = mirror.record_node_id().await else {
+        // The owner is bound to the VALIDATED record (shape, scope, type) and
+        // to its resolved node id — and only if that record is this job's
+        // (the mirror stamped this job id on it), never a node the request
+        // merely named.
+        super::scope::validate_record(
+            &self.storage,
+            &context.tenant_id,
+            &context.repo_id,
+            &context.branch,
+            record,
+        )
+        .await?;
+        let Some((node_id, record_job)) = mirror.record_node_and_job().await else {
             return Err(Error::storage(
                 "the build record disappeared before it could own its artifacts",
             ));
         };
+        if record_job.as_deref() != Some(job.id.0.as_str()) {
+            return Err(Error::Conflict(
+                "the build record belongs to another job; artifacts not recorded".to_string(),
+            ));
+        }
         let entry = super::ledger::LedgerEntry {
             job_id: job.id.to_string(),
             branch: context.branch.clone(),
