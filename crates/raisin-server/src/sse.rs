@@ -106,6 +106,22 @@ impl JobMonitor for SseJobMonitor {
     }
 
     async fn on_job_progress(&self, job_id: &raisin_storage::JobId, progress: f32) {
+        // The progress callback carries no tenant. A tenant-bound monitor
+        // looks the job up (as for logs) and stamps the tenant, so the event
+        // passes the stream's tenant filter instead of being dropped by it
+        // for every consumer.
+        let tenant = match (&self.tenant_id, &self.registry) {
+            (Some(tenant), Some(registry)) => {
+                let Ok(job) = registry.get_job_info(job_id).await else {
+                    return;
+                };
+                if job.tenant != *tenant {
+                    return;
+                }
+                job.tenant
+            }
+            _ => String::new(),
+        };
         // Send progress update event for real-time UI updates
         let event = JobEvent {
             job_id: job_id.clone(),
@@ -113,8 +129,7 @@ impl JobMonitor for SseJobMonitor {
                 id: job_id.clone(),
                 job_type: raisin_storage::jobs::JobType::Custom(format!("progress:{}", progress)),
                 status: raisin_storage::jobs::JobStatus::Running,
-                // tenant unknown at progress emit time
-                tenant: String::new(),
+                tenant,
                 started_at: chrono::Utc::now(),
                 completed_at: None,
                 progress: Some(progress),
@@ -636,4 +651,37 @@ where
             .interval(Duration::from_secs(30))
             .text("keep-alive"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use raisin_storage::jobs::JobType;
+
+    #[tokio::test]
+    async fn progress_events_carry_their_tenant_and_stay_in_it() {
+        let registry = Arc::new(JobRegistry::new());
+        let mine = registry
+            .register_job(JobType::IntegrityScan, "t1".into(), None, None, Some(0))
+            .await
+            .unwrap();
+        let theirs = registry
+            .register_job(JobType::IntegrityScan, "t2".into(), None, None, Some(0))
+            .await
+            .unwrap();
+        let (tx, mut rx) = mpsc::channel(8);
+        let monitor = SseJobMonitor::for_tenant(tx, "t1".into(), registry.clone());
+
+        monitor.on_job_progress(&theirs, 0.5).await;
+        monitor.on_job_progress(&mine, 0.25).await;
+        match rx.try_recv().unwrap() {
+            SseEvent::JobUpdate(e) => {
+                assert_eq!(e.job_id, mine);
+                assert_eq!(e.job_info.tenant, "t1");
+                assert_eq!(e.job_info.progress, Some(0.25));
+            }
+            _ => panic!("expected a job update"),
+        }
+        assert!(rx.try_recv().is_err(), "another tenant's progress leaked");
+    }
 }
