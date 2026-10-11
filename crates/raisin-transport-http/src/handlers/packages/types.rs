@@ -303,6 +303,27 @@ pub struct CreateFromSelectionRequest {
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
+    /// The build record to mirror progress and the result onto (E2).
+    #[serde(default)]
+    pub record: Option<BuildRecordRef>,
+    /// Register the archive as `packages:/<name>` (legacy default). A build
+    /// for download only passes `false`, and nothing is written there (E4).
+    #[serde(default = "default_true")]
+    pub register_package: bool,
+    /// A repeated request with the same key returns the same job (E13).
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+}
+
+/// `{workspace, path}` of a build record.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BuildRecordRef {
+    pub workspace: String,
+    pub path: String,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_version() -> String {
@@ -316,4 +337,7 @@ pub struct CreateFromSelectionResponse {
     pub status: String,
     pub download_path: String,
     pub selected_count: usize,
+    /// An earlier request with the same idempotency key created this job.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub existing: bool,
 }

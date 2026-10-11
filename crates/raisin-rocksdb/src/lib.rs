@@ -183,6 +183,13 @@ pub use jobs::handlers::replication_sync::ReplicationSyncHandler;
 /// `[mcp_client]`.
 pub use jobs::handlers::{McpDiscoveryDeps, McpToolDiscoveryHandler};
 pub use jobs::keyed_mutex::{KeyedMutex, KeyedMutexGuard};
+/// Package builds, for the HTTP endpoint and the function binding (E1).
+pub mod package_build {
+    pub use crate::jobs::{
+        cancel_package_build, package_build_status, submit_package_build, BuildStatus,
+        PackageBuildRequest, RecordRefWire, SelectedPath, Submitted,
+    };
+}
 
 // The `jobs` module is private, and the server binary must reach this from
 // outside: `raisin-functions` owns the wasm engine but depends on THIS crate,

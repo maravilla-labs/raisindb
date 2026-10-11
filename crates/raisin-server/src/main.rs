@@ -552,6 +552,9 @@ async fn main() {
     #[cfg(feature = "storage-rocksdb")]
     let _storage_maintenance =
         raisin_rocksdb::management::history_gc::spawn_maintenance(storage.clone(), bin.clone());
+    // Streaming jobs (the package build) write straight into the blob store.
+    #[cfg(feature = "storage-rocksdb")]
+    storage.set_blob_store(raisin_binary::erase(bin.clone()));
 
     // ========================================================================
     // System definitions (built-in NodeTypes / Workspaces / packages)

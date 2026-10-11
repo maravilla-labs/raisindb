@@ -18,6 +18,19 @@ pub fn floor_bytes(total: u64) -> u64 {
     FLOOR_MIN_BYTES.max((total as u128 * FLOOR_PERCENT as u128 / 100) as u64)
 }
 
+/// Free and total space of the volume holding `path` (or its nearest
+/// existing ancestor), `None` if it cannot be read.
+pub fn volume_space(path: &std::path::Path) -> Option<StorageSpace> {
+    let mut probe = path;
+    while !probe.exists() {
+        probe = probe.parent()?;
+    }
+    fs4::statvfs(probe).ok().map(|s| StorageSpace {
+        available: s.available_space(),
+        total: s.total_space(),
+    })
+}
+
 /// Why a write may not go ahead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InsufficientStorage {

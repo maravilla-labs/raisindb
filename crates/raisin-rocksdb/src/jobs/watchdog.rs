@@ -129,7 +129,11 @@ impl TimeoutWatchdog {
                 .last_heartbeat
                 .map(|hb| now.signed_duration_since(hb).num_seconds().max(0) as u64);
 
-            let exceeded_runtime = handler_running && running_secs > job.timeout_seconds;
+            // Heartbeat-only jobs (a streaming package build) have no
+            // runtime cap: only the heartbeat check below can end them.
+            let exceeded_runtime = handler_running
+                && !job.job_type.heartbeat_only()
+                && running_secs > job.timeout_seconds;
             let exceeded_heartbeat = heartbeat_stale_secs
                 .map(|s| s > job.timeout_seconds)
                 .unwrap_or(false);
@@ -280,6 +284,73 @@ mod tests {
         // Job should be marked as failed
         let status = registry.get_status(&job_id).await.unwrap();
         assert!(matches!(status, JobStatus::Failed(_)));
+    }
+
+    async fn running_package_build() -> (Arc<JobRegistry>, raisin_storage::jobs::JobId, i64) {
+        let registry = Arc::new(JobRegistry::new());
+        let job_id = registry
+            .register_job(
+                JobType::PackageCreateFromSelection {
+                    package_name: "p".into(),
+                    package_version: "1.0.0".into(),
+                    include_node_types: false,
+                },
+                "test-tenant".to_string(),
+                None,
+                None,
+                Some(0),
+            )
+            .await
+            .unwrap();
+        registry.mark_running(&job_id).await.unwrap();
+        registry.mark_executing(&job_id).await.unwrap();
+        let timeout = registry
+            .get_job_info(&job_id)
+            .await
+            .unwrap()
+            .timeout_seconds as i64;
+        (registry, job_id, timeout)
+    }
+
+    #[tokio::test]
+    async fn test_watchdog_lets_a_long_package_build_with_a_live_heartbeat_run() {
+        let (registry, job_id, timeout) = running_package_build().await;
+        registry
+            .set_heartbeat_for_test(&job_id, Some(Utc::now()))
+            .await
+            .unwrap();
+        // Three hours of execution: far past any wall clock.
+        registry
+            .set_execution_start_for_test(
+                &job_id,
+                Some(Utc::now() - chrono::Duration::seconds(timeout + 3 * 3600)),
+            )
+            .await
+            .unwrap();
+        let watchdog = TimeoutWatchdog::new(registry.clone(), CancellationToken::new());
+        watchdog.check_timeouts().await.unwrap();
+        assert!(matches!(
+            registry.get_status(&job_id).await.unwrap(),
+            JobStatus::Executing
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_watchdog_kills_a_package_build_whose_heartbeat_stopped() {
+        let (registry, job_id, timeout) = running_package_build().await;
+        registry
+            .set_heartbeat_for_test(
+                &job_id,
+                Some(Utc::now() - chrono::Duration::seconds(timeout + 10)),
+            )
+            .await
+            .unwrap();
+        let watchdog = TimeoutWatchdog::new(registry.clone(), CancellationToken::new());
+        watchdog.check_timeouts().await.unwrap();
+        assert!(matches!(
+            registry.get_status(&job_id).await.unwrap(),
+            JobStatus::Failed(_)
+        ));
     }
 
     #[tokio::test]

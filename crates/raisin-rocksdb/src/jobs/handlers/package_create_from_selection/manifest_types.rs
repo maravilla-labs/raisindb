@@ -1,6 +1,5 @@
 //! Internal manifest types for .rap package format
 
-use super::types::CollectedNode;
 use serde::{Deserialize, Serialize};
 
 /// Package manifest structure
@@ -30,56 +29,44 @@ pub(super) struct PackageManifest {
     pub dependencies: Option<Vec<PackageDependency>>,
 }
 
+/// What the manifest says about a finished walk.
+pub(super) struct ManifestInput<'a> {
+    pub name: &'a str,
+    pub version: &'a str,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub author: Option<String>,
+    /// The selection as requested (`ws:/path`, `ws:/path/*`, `ws:/*`) — not
+    /// every node: that list is the inventory's job, and a manifest holding a
+    /// million paths would be read by every installer in full.
+    pub content: Vec<String>,
+    pub workspaces: Vec<String>,
+    pub node_types: Vec<String>,
+}
+
 impl PackageManifest {
-    /// Build a manifest from collected nodes
-    pub fn build(
-        package_name: &str,
-        package_version: &str,
-        content_nodes: &[CollectedNode],
-        node_type_nodes: &[CollectedNode],
-    ) -> Self {
-        // Group content by workspace
-        let mut workspaces: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut content_paths: Vec<String> = Vec::new();
-
-        for collected in content_nodes {
-            workspaces.insert(collected.workspace.clone());
-            content_paths.push(format!("{}:{}", collected.workspace, collected.node.path));
-        }
-
-        let node_types: Vec<String> = node_type_nodes
-            .iter()
-            .map(|c| c.node.name.clone())
-            .collect();
-
-        let provides = if !workspaces.is_empty() || !node_types.is_empty() {
-            Some(PackageProvides {
-                nodetypes: if node_types.is_empty() {
-                    None
-                } else {
-                    Some(node_types)
-                },
-                workspaces: if workspaces.is_empty() {
-                    None
-                } else {
-                    Some(workspaces.into_iter().collect())
-                },
-                content: if content_paths.is_empty() {
-                    None
-                } else {
-                    Some(content_paths)
-                },
-            })
-        } else {
+    pub fn build(input: ManifestInput<'_>) -> Self {
+        let provides = if input.workspaces.is_empty() && input.node_types.is_empty() {
             None
+        } else {
+            let some = |v: Vec<String>| (!v.is_empty()).then_some(v);
+            Some(PackageProvides {
+                nodetypes: some(input.node_types),
+                workspaces: some(input.workspaces),
+                content: some(input.content),
+            })
         };
 
         PackageManifest {
-            name: package_name.to_string(),
-            version: package_version.to_string(),
-            title: None,
-            description: Some("Package created from selected content".to_string()),
-            author: None,
+            name: input.name.to_string(),
+            version: input.version.to_string(),
+            title: input.title,
+            description: Some(
+                input
+                    .description
+                    .unwrap_or_else(|| "Package created from selected content".to_string()),
+            ),
+            author: input.author,
             license: None,
             icon: None,
             color: None,

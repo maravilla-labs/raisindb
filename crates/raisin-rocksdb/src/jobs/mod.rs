@@ -52,6 +52,10 @@ pub use cleanup::JobCleanupTask;
 pub use data_store::JobDataStore;
 pub use dispatching_monitor::DispatchingMonitor;
 pub use event_handler::UnifiedJobEventHandler;
+pub use handlers::package_create_from_selection::{
+    cancel_package_build, package_build_status, submit_package_build, BuildStatus,
+    PackageBuildRequest, RecordRefWire, SelectedPath, Submitted,
+};
 pub use handlers::{
     AIToolCallExecutionHandler, AIToolResultAggregationHandler, AssetProcessingHandler,
     AuthCreateUserNodeHandler, AuthMagicLinkSendHandler, BinaryDeleteCallback,

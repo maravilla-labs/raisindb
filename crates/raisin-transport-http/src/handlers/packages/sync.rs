@@ -146,7 +146,6 @@ pub async fn create_package_from_selection(
     };
 
     let tenant_id = tenant_info.tenant_id.as_str();
-    let workspace = "packages";
 
     if request.name.is_empty() {
         return Err(ApiError::validation_failed("Package name is required"));
@@ -156,116 +155,75 @@ pub async fn create_package_from_selection(
             "At least one path must be selected",
         ));
     }
-    if !request
-        .name
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-    {
-        return Err(ApiError::validation_failed(
-            "Package name must contain only alphanumeric characters, hyphens, and underscores",
-        ));
-    }
 
     let selected_count = request.selected_paths.len();
 
     #[cfg(feature = "storage-rocksdb")]
     {
+        use raisin_rocksdb::package_build::{
+            PackageBuildRequest, RecordRefWire, SelectedPath as JobPath,
+        };
+
         let rocksdb = state.rocksdb_storage.as_ref().ok_or_else(|| {
             ApiError::storage_error("RocksDB storage not available for job system")
         })?;
 
-        let job_registry = rocksdb.job_registry();
-        let job_data_store = rocksdb.job_data_store();
-
-        let job_type = JobType::PackageCreateFromSelection {
-            package_name: request.name.clone(),
-            package_version: request.version.clone(),
+        let build = PackageBuildRequest {
+            name: request.name.clone(),
+            version: request.version.clone(),
+            selected_paths: request
+                .selected_paths
+                .iter()
+                .map(|p| JobPath {
+                    workspace: p.workspace.clone(),
+                    path: p.path.clone(),
+                })
+                .collect(),
             include_node_types: request.include_node_types,
+            record: request.record.as_ref().map(|r| RecordRefWire {
+                workspace: r.workspace.clone(),
+                path: r.path.clone(),
+            }),
+            register_package: request.register_package,
+            idempotency_key: request.idempotency_key.clone(),
+            title: request.title.clone(),
+            description: request.description.clone(),
+            author: request.author.clone(),
         };
-
-        let mut metadata = HashMap::new();
-        metadata.insert(
-            "selected_paths".to_string(),
-            serde_json::to_value(&request.selected_paths).map_err(|e| {
-                ApiError::storage_error(format!("Failed to serialize paths: {}", e))
-            })?,
-        );
-        metadata.insert(
-            "package_name".to_string(),
-            serde_json::json!(request.name.clone()),
-        );
-        metadata.insert(
-            "package_version".to_string(),
-            serde_json::json!(request.version.clone()),
-        );
-        if let Some(title) = &request.title {
-            metadata.insert("title".to_string(), serde_json::json!(title));
-        }
-        if let Some(description) = &request.description {
-            metadata.insert("description".to_string(), serde_json::json!(description));
-        }
-        if let Some(author) = &request.author {
-            metadata.insert("author".to_string(), serde_json::json!(author));
-        }
-        // The job reads the selection AS the requester (row-level security),
-        // and refuses to run at all without one.
-        metadata
-            .extend(raisin_core::services::package_export_access::requester_metadata(&requester));
-
-        let job_context = raisin_storage::jobs::JobContext {
-            tenant_id: tenant_id.to_string(),
-            repo_id: repo.clone(),
-            branch: branch.clone(),
-            workspace_id: workspace.to_string(),
-            revision: raisin_hlc::HLC::now(),
-            metadata,
-        };
-
-        // Store job context BEFORE registering so dispatch can never
-        // observe the job without its context.
-        let job_id = raisin_storage::jobs::JobId::new();
-        job_data_store
-            .put(&job_id, &job_context)
-            .map_err(|e| ApiError::storage_error(format!("Failed to store job context: {}", e)))?;
-
-        job_registry
-            .register_job_with_id(
-                job_id.clone(),
-                job_type,
-                tenant_id.to_string(),
-                None,
-                None,
-                None,
-            )
-            .await
-            .map_err(|e| {
-                ApiError::storage_error(format!("Failed to register create job: {}", e))
-            })?;
+        // One submit path for HTTP and the function binding: validation, the
+        // reserved-name guard, idempotency, the requester record (E3).
+        let submitted = raisin_rocksdb::package_build::submit_package_build(
+            rocksdb, tenant_id, &repo, &branch, &build, &requester,
+        )
+        .await
+        .map_err(ApiError::from)?;
 
         tracing::info!(
-            job_id = %job_id,
+            job_id = %submitted.job_id,
             package = %request.name,
             version = %request.version,
             paths_count = selected_count,
+            existing = submitted.existing,
             "Created package-from-selection job"
         );
 
         let download_path = format!(
             "/api/packages/{}/{}/head/{}/raisin:download/{}",
-            repo, branch, request.name, job_id
+            repo, branch, request.name, submitted.job_id
         );
 
         Ok(Json(CreateFromSelectionResponse {
-            job_id: job_id.to_string(),
+            job_id: submitted.job_id,
             status: "scheduled".to_string(),
             download_path,
             selected_count,
+            existing: submitted.existing,
         }))
     }
 
     #[cfg(not(feature = "storage-rocksdb"))]
     {
-        let _ = (requester, selected_count, tenant_id, workspace);
+        let _ = (requester, selected_count, tenant_id, state, repo, branch);
         Err(ApiError::storage_error(
             "Package creation requires RocksDB backend with job system",
         ))

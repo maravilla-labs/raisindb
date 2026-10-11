@@ -473,18 +473,9 @@ impl BinaryStorage for FilesystemBinaryStorage {
             tokio::task::spawn_blocking(move || {
                 // The store's directory may not exist yet; its volume is the
                 // nearest existing ancestor's.
-                let mut probe = base.as_path();
-                while !probe.exists() {
-                    match probe.parent() {
-                        Some(p) => probe = p,
-                        None => break,
-                    }
-                }
-                let stats = fs4::statvfs(probe)?;
-                Ok(Some(StorageSpace {
-                    available: stats.available_space(),
-                    total: stats.total_space(),
-                }))
+                space::volume_space(&base).map(Some).ok_or_else(|| {
+                    anyhow::anyhow!("free-space query failed for {}", base.display())
+                })
             })
             .await
             .map_err(|e| anyhow::anyhow!("free-space query failed: {e}"))?

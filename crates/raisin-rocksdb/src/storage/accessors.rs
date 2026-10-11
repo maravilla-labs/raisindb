@@ -163,6 +163,16 @@ impl RocksDBStorage {
         self.virtual_mount_sync.read().unwrap().clone()
     }
 
+    /// Give streaming jobs the blob store. Call before `init_job_system`.
+    pub fn set_blob_store(&self, store: Arc<dyn raisin_binary::DynBinaryStorage>) {
+        *self.blob_store.write().unwrap() = Some(store);
+    }
+
+    /// The blob store, if the server provided one.
+    pub fn blob_store(&self) -> Option<Arc<dyn raisin_binary::DynBinaryStorage>> {
+        self.blob_store.read().unwrap().clone()
+    }
+
     /// Get the underlying RocksDB instance
     pub fn db(&self) -> &Arc<DB> {
         &self.db

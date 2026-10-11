@@ -43,6 +43,19 @@ impl JobRegistry {
         self.monitors.broadcast_log(entry).await;
     }
 
+    /// The job registered under an idempotency `dedup_key`, whatever its
+    /// status, for as long as the registry still holds it.
+    ///
+    /// [`register_job_with_id_idempotent`](Self::register_job_with_id_idempotent)
+    /// only refuses a duplicate while the first job is active; a caller whose
+    /// contract is "the same key returns the same job" asks this first.
+    pub async fn job_for_dedup_key(&self, dedup_key: &str) -> Option<JobId> {
+        // LOCK ORDER: never hold `dedup_keys` while taking `jobs`.
+        let id = self.dedup_keys.read().await.get(dedup_key).cloned()?;
+        let jobs = self.jobs.read().await;
+        jobs.contains_key(&id).then_some(id)
+    }
+
     /// Get job status
     pub async fn get_status(&self, job_id: &JobId) -> Result<JobStatus> {
         let jobs = self.jobs.read().await;

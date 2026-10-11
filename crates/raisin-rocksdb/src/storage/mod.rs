@@ -171,6 +171,12 @@ pub struct RocksDBStorage {
     pub(crate) virtual_mount_sync:
         Arc<std::sync::RwLock<Option<Arc<crate::jobs::VirtualMountSyncHandler>>>>,
 
+    // The blob store, for jobs that stream into or out of it (the package
+    // build). Set by the server before the job system starts; the slot
+    // rather than a constructor argument because the store's concrete type is
+    // the server's choice and this struct is not generic over it.
+    pub(crate) blob_store: Arc<std::sync::RwLock<Option<Arc<dyn raisin_binary::DynBinaryStorage>>>>,
+
     // The secret store, built on first use.
     //
     // Lazy rather than eager because it needs a master keyring, and a

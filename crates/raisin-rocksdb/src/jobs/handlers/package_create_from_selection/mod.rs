@@ -1,14 +1,24 @@
-//! Package create from selection job handler
+//! Package create from selection: a streaming build of a `.rap` archive.
 //!
-//! This module handles background creation of .rap packages from user-selected
-//! content paths. It collects nodes from specified workspaces and paths,
-//! generates a manifest, and creates a downloadable .rap file.
+//! The selection is walked page by page and written straight into the blob
+//! store, with the archive's sha256 and size, a sorted inventory and the
+//! manifest produced in the same pass, and progress mirrored onto a
+//! caller-named build record. See `handler.rs` for the phases, `mirror.rs`
+//! for the record contract and `submit.rs` for the entry points the HTTP
+//! layer and the function binding share.
 
-mod binary_helpers;
+mod archive;
+mod estimate;
 mod handler;
+mod inventory;
 mod manifest_types;
-mod node_loader;
-mod package_builder;
+mod mirror;
+mod progress;
+mod registration;
+mod request;
+mod submit;
+#[cfg(test)]
+mod tests;
 mod types;
 
 use super::package_install::{
@@ -18,6 +28,11 @@ use crate::RocksDBStorage;
 use raisin_storage::jobs::{JobId, JobRegistry};
 use std::sync::Arc;
 
+pub use mirror::RecordRef;
+pub use submit::{
+    cancel_package_build, name_is_reserved, name_is_valid, package_build_status,
+    submit_package_build, BuildStatus, PackageBuildRequest, RecordRefWire, Submitted, CANCEL_GRACE,
+};
 pub use types::{PackageCreateFromSelectionResult, SelectedPath};
 
 /// Handler for package create from selection jobs
@@ -27,6 +42,8 @@ pub struct PackageCreateFromSelectionHandler {
     pub(super) binary_store_callback: Option<BinaryStorageCallback>,
     pub(super) binary_store_from_path_callback: Option<BinaryStorageFromPathCallback>,
     pub(super) binary_retrieval_callback: Option<BinaryRetrievalCallback>,
+    /// Replaces the free-space floor (see `estimate::floor_override`).
+    pub(super) space_floor: Option<u64>,
 }
 
 impl PackageCreateFromSelectionHandler {
@@ -38,7 +55,14 @@ impl PackageCreateFromSelectionHandler {
             binary_store_callback: None,
             binary_store_from_path_callback: None,
             binary_retrieval_callback: None,
+            space_floor: None,
         }
+    }
+
+    /// Replace the free-space safety floor with a fixed number of bytes.
+    pub fn with_space_floor(mut self, floor: Option<u64>) -> Self {
+        self.space_floor = floor;
+        self
     }
 
     /// Set the binary storage callback

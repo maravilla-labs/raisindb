@@ -31,6 +31,53 @@ struct Frame {
 }
 
 impl NodeRepositoryImpl {
+    /// Count a subtree from the ordered-children index alone — no node is
+    /// decoded — calling `visit` with each descendant's id.
+    ///
+    /// This is the estimate a long job writes before it starts: proportional
+    /// to the subtree, key-only, and bounded by `deadline` so a huge subtree
+    /// returns a partial count rather than holding the job up. `root_id` may
+    /// be the workspace root parent (`"/"`) for the whole workspace.
+    ///
+    /// Returns `(descendants, complete)`: entries seen with the root
+    /// excluded, and `false` when the deadline stopped the walk early.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn count_subtree_keys(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        root_id: &str,
+        deadline: std::time::Instant,
+        mut visit: impl FnMut(&str),
+    ) -> Result<(u64, bool)> {
+        let mut pending = vec![root_id.to_string()];
+        let mut descendants = 0u64;
+        while let Some(parent) = pending.pop() {
+            if std::time::Instant::now() >= deadline {
+                return Ok((descendants, false));
+            }
+            let children = self.list_ordered_children_impl(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                &parent,
+                OrderedScanStart::Beginning,
+                None,
+                false,
+                None,
+            )?;
+            for child in children {
+                descendants += 1;
+                visit(&child.child_id);
+                pending.push(child.child_id);
+            }
+        }
+        Ok((descendants, true))
+    }
+
     pub(crate) fn scan_descendants_ordered_impl(
         &self,
         tenant_id: &str,

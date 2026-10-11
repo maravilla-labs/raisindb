@@ -1,6 +1,5 @@
 //! Public types for package create from selection
 
-use raisin_models::nodes::Node;
 use serde::{Deserialize, Serialize};
 
 /// A selected path for package creation (matches the HTTP layer definition)
@@ -29,10 +28,16 @@ pub struct PackageCreateFromSelectionResult {
     pub download_url: String,
     /// Creation timestamp
     pub created_at: String,
-}
-
-/// A collected node with its source workspace
-pub(super) struct CollectedNode {
-    pub workspace: String,
-    pub node: Node,
+    /// Exact archive size, from the stream that wrote it (E23)
+    #[serde(default)]
+    pub size_bytes: u64,
+    /// SHA-256 of the archive, from the same pass (E23)
+    #[serde(default)]
+    pub sha256: String,
+    /// Blob key of the `manifest.yaml` sidecar (E24)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_key: Option<String>,
+    /// Blob key of the sorted `inventory.jsonl` sidecar (E8/E24)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inventory_key: Option<String>,
 }

@@ -437,6 +437,19 @@ impl McpDiscoverySource {
 }
 
 impl JobType {
+    /// Jobs whose liveness is their heartbeat alone, never a wall clock.
+    ///
+    /// A streaming package build's runtime is proportional to the selection
+    /// — hours for a multi-terabyte one — so any fixed cap either kills
+    /// healthy builds or is meaningless. For these the watchdog skips the
+    /// runtime check and kills only on a heartbeat silent for longer than
+    /// [`default_timeout_seconds`](Self::default_timeout_seconds). A handler
+    /// that is alive but stuck is caught by the build record's own
+    /// `heartbeat_at`, which moves only while work does.
+    pub fn heartbeat_only(&self) -> bool {
+        matches!(self, JobType::PackageCreateFromSelection { .. })
+    }
+
     /// Returns an appropriate timeout in seconds based on the job type.
     ///
     /// Quick jobs (triggers, aggregations) get shorter timeouts so the watchdog
@@ -526,6 +539,11 @@ impl JobType {
             // reservations kept that from minting duplicates, but it cost two
             // extra full passes and a failed-looking job. Give it room.
             JobType::PackageInstall { .. } => 1800,
+            // Heartbeat-only (see `heartbeat_only`): this is NOT a runtime
+            // cap — a multi-hour build of a large selection is healthy — but
+            // how long the heartbeat may go silent before the job is dead.
+            // The worker beats every 10 s.
+            JobType::PackageCreateFromSelection { .. } => 120,
             // Default for everything else
             _ => 300,
         }
