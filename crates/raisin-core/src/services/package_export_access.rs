@@ -16,11 +16,13 @@
 //! 1. **Building or downloading an export is an operator operation**
 //!    ([`authorize_package_export`]): the system context (admin console, CLI,
 //!    API keys and the superadmin bearer all resolve to it), an identity user
-//!    holding `system_admin`, or an identity user holding the EXPORT GRANT
-//!    ([`EXPORT_GRANT_WORKSPACE`] / [`EXPORT_GRANT_PATH`], operation
-//!    `create`). The grant must name the `packages` workspace explicitly: a
-//!    wildcard workspace pattern (`**`, `*`) never implies it, so read/write
-//!    access to everything is still not "may export". The engine stays
+//!    holding `system_admin`, or an identity user holding the EXACT export
+//!    grant: workspace `packages`, path `/exports/**`, operation `create`,
+//!    with no condition or node-type/field/branch restriction (see
+//!    [`EXPORT_GRANT_PATH`]). It is compared structurally, never matched:
+//!    `*` workspaces, `/**` paths and conditional grants are not it, so
+//!    read/write access to everything is still not "may export". Missing or
+//!    unrestored permissions deny. The engine stays
 //!    app-agnostic — an application gives the grant to whichever of its roles
 //!    may export. Anonymous and deny-all callers are `Unauthenticated`; any
 //!    other signed-in principal is `Forbidden`.
@@ -92,19 +94,30 @@ pub fn authorize_package_export(auth: Option<&AuthContext>) -> Result<(), Export
     Err(ExportRefusal::Forbidden)
 }
 
-/// The workspace the export grant must name, verbatim (no glob).
+/// The export grant, exactly — a dedicated permission, not a pattern that
+/// happens to match: workspace literally `packages`, path literally
+/// `/exports/**`, operation `create`, and NO restriction (no condition,
+/// node_types, fields, except_fields or branch_pattern). Anything broader
+/// (`workspace: "*"`, a `/**` path, a mid-path glob) or narrower (a
+/// conditional or type/field-restricted grant) is NOT the export right, so
+/// an existing broad editor grant can never turn into one by accident.
 pub const EXPORT_GRANT_WORKSPACE: &str = "packages";
-/// The path the export grant covers; a grant on `/**` covers it too.
+/// See [`EXPORT_GRANT_WORKSPACE`].
 pub const EXPORT_GRANT_PATH: &str = "/exports/**";
 
-/// Does a role grant `create` on `packages:/exports/…`, naming the workspace
-/// explicitly?
+/// Does a role carry the exact export grant? Pure structural equality: no
+/// pattern matching, no condition evaluation, so nothing can fail open.
 fn holds_export_grant(perms: &ResolvedPermissions) -> bool {
-    use raisin_models::permissions::{Operation, PathMatcher};
+    use raisin_models::permissions::Operation;
     perms.permissions.iter().any(|p| {
         p.workspace.as_deref() == Some(EXPORT_GRANT_WORKSPACE)
-            && p.allows_operation(Operation::Create)
-            && PathMatcher::new(&p.path).matches("/exports/build")
+            && p.path == EXPORT_GRANT_PATH
+            && p.operations.contains(&Operation::Create)
+            && p.condition.is_none()
+            && p.node_types.as_ref().is_none_or(|t| t.is_empty())
+            && p.fields.is_none()
+            && p.except_fields.is_none()
+            && p.branch_pattern.is_none()
     })
 }
 
@@ -276,33 +289,97 @@ mod tests {
     }
 
     #[test]
-    fn the_explicit_export_grant_lets_a_person_export() {
-        for path in [EXPORT_GRANT_PATH, "/**", "/exports/*"] {
-            let exporter = user_with(
-                vec![grant(Some("packages"), path, vec![Operation::Create])],
-                false,
-            );
-            assert_eq!(authorize_package_export(Some(&exporter)), Ok(()), "{path}");
-        }
-        // Read on packages, create elsewhere, a wildcard workspace, another
-        // path: none of them is the grant.
-        for p in [
-            grant(Some("packages"), "/**", vec![Operation::Read]),
-            grant(Some("stories"), "/**", vec![Operation::Create]),
-            grant(None, "/**", vec![Operation::Create]),
-            grant(Some("*"), "/**", vec![Operation::Create]),
-            grant(Some("packages"), "/installed/**", vec![Operation::Create]),
+    fn only_the_exact_export_grant_lets_a_person_export() {
+        let exact = grant(Some("packages"), EXPORT_GRANT_PATH, vec![Operation::Create]);
+        assert_eq!(
+            authorize_package_export(Some(&user_with(vec![exact.clone()], false))),
+            Ok(())
+        );
+        let mut conditional = exact.clone();
+        conditional.condition = Some("node.created_by == auth.user_id".into());
+        let mut typed = exact.clone();
+        typed.node_types = Some(vec!["raisin:Package".into()]);
+        let mut fielded = exact.clone();
+        fielded.fields = Some(vec!["title".into()]);
+        let mut excepted = exact.clone();
+        excepted.except_fields = Some(vec!["secret".into()]);
+        let mut branched = exact.clone();
+        branched.branch_pattern = Some("main".into());
+        for (why, p) in [
+            (
+                "editor: * workspace + create",
+                grant(Some("*"), "/**", vec![Operation::Create]),
+            ),
+            (
+                "no workspace + create",
+                grant(None, EXPORT_GRANT_PATH, vec![Operation::Create]),
+            ),
+            (
+                "packages /** (matches, not exact)",
+                grant(Some("packages"), "/**", vec![Operation::Create]),
+            ),
+            (
+                "mid-path glob",
+                grant(Some("packages"), "/**/exports/**", vec![Operation::Create]),
+            ),
+            (
+                "single-star glob",
+                grant(Some("packages"), "/exports/*", vec![Operation::Create]),
+            ),
+            (
+                "read only",
+                grant(Some("packages"), EXPORT_GRANT_PATH, vec![Operation::Read]),
+            ),
+            (
+                "other workspace",
+                grant(Some("stories"), EXPORT_GRANT_PATH, vec![Operation::Create]),
+            ),
+            ("conditional", conditional),
+            ("node-type restricted", typed),
+            ("field restricted", fielded),
+            ("except-fields restricted", excepted),
+            ("branch restricted", branched),
         ] {
-            let not_exporter = user_with(vec![p.clone()], false);
             assert_eq!(
-                authorize_package_export(Some(&not_exporter)),
+                authorize_package_export(Some(&user_with(vec![p], false))),
                 Err(ExportRefusal::Forbidden),
-                "{p:?}"
+                "{why}"
             );
         }
-        // Anonymous with the grant is still refused, and first.
+    }
+
+    #[test]
+    fn every_failure_path_denies() {
+        // Permissions never resolved, or lost in a serde round trip.
+        assert_eq!(
+            authorize_package_export(Some(&AuthContext::for_user("carol"))),
+            Err(ExportRefusal::Forbidden)
+        );
+        let exporter = user_with(
+            vec![grant(
+                Some("packages"),
+                EXPORT_GRANT_PATH,
+                vec![Operation::Create],
+            )],
+            false,
+        );
+        let round_tripped: AuthContext =
+            serde_json::from_value(serde_json::to_value(&exporter).unwrap()).unwrap();
+        assert_eq!(
+            authorize_package_export(Some(&round_tripped)),
+            Err(ExportRefusal::Forbidden)
+        );
+        // No context at all, anonymous holding the grant.
+        assert_eq!(
+            authorize_package_export(None),
+            Err(ExportRefusal::Unauthenticated)
+        );
         let mut resolved = ResolvedPermissions::empty("anonymous");
-        resolved.permissions = vec![grant(Some("packages"), "/**", vec![Operation::Create])];
+        resolved.permissions = vec![grant(
+            Some("packages"),
+            EXPORT_GRANT_PATH,
+            vec![Operation::Create],
+        )];
         let anon = AuthContext::anonymous_user("anonymous").with_permissions(resolved);
         assert_eq!(
             authorize_package_export(Some(&anon)),
