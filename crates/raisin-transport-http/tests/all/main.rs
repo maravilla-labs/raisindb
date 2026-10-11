@@ -32,6 +32,7 @@ mod http_error_handling;
 mod http_index_repairs;
 mod http_localized_path;
 mod http_node_creation;
+mod http_package_browse;
 mod http_package_export_auth;
 mod http_pagination;
 mod http_reorder_copy;

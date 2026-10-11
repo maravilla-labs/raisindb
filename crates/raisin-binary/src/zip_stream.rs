@@ -584,14 +584,12 @@ impl<'a> Cursor<'a> {
     }
 }
 
-/// Locate and parse the central directory of an archive of `len` bytes,
-/// fetching only the ranges it needs through `fetch`. Refuses a central
-/// directory larger than `max_cd_bytes`, which bounds the memory used.
-pub async fn read_central_directory<F, Fut>(
+/// Where the central directory is: `(entries, offset, size)`, from the end
+/// records (one ranged read of the tail, one more for a ZIP64 record).
+async fn locate_central_directory<F, Fut>(
     len: u64,
-    mut fetch: F,
-    max_cd_bytes: u64,
-) -> anyhow::Result<Vec<CentralEntry>>
+    fetch: &mut F,
+) -> anyhow::Result<(u64, u64, u64)>
 where
     F: FnMut(Range<u64>) -> Fut,
     Fut: Future<Output = anyhow::Result<Bytes>>,
@@ -634,7 +632,87 @@ where
         cd_size = r.u64()?;
         cd_offset = r.u64()?;
     }
+    if cd_offset.checked_add(cd_size).map_or(true, |end| end > len) {
+        return Err(bad("central directory out of range"));
+    }
+    Ok((entries, cd_offset, cd_size))
+}
 
+/// Total length of the central-directory record starting at `b[0]`, once
+/// its fixed part is available.
+fn central_record_len(b: &[u8]) -> anyhow::Result<usize> {
+    let mut c = Cursor::new(b);
+    if c.u32()? != CENTRAL_HEADER_SIG {
+        return Err(bad("bad central header signature"));
+    }
+    c.take(24)?;
+    let name_len = c.u16()? as usize;
+    let extra_len = c.u16()? as usize;
+    let comment_len = c.u16()? as usize;
+    Ok(46 + name_len + extra_len + comment_len)
+}
+
+/// Parse one central-directory record (which must be complete).
+fn parse_central_record(c: &mut Cursor<'_>) -> anyhow::Result<CentralEntry> {
+    if c.u32()? != CENTRAL_HEADER_SIG {
+        return Err(bad("bad central header signature"));
+    }
+    c.take(2 + 2 + 2)?;
+    let method = c.u16()?;
+    c.take(4)?;
+    let crc32 = c.u32()?;
+    let mut compressed_size = c.u32()? as u64;
+    let mut size = c.u32()? as u64;
+    let name_len = c.u16()? as usize;
+    let extra_len = c.u16()? as usize;
+    let comment_len = c.u16()? as usize;
+    c.take(2 + 2 + 4)?;
+    let mut local_header_offset = c.u32()? as u64;
+    let name = String::from_utf8_lossy(c.take(name_len)?).into_owned();
+    let extra = c.take(extra_len)?;
+    c.take(comment_len)?;
+
+    let mut e = Cursor::new(extra);
+    while e.at + 4 <= extra.len() {
+        let tag = e.u16()?;
+        let n = e.u16()? as usize;
+        let body = e.take(n)?;
+        if tag == ZIP64_EXTRA_TAG {
+            let mut z = Cursor::new(body);
+            if size == U32_MAX {
+                size = z.u64()?;
+            }
+            if compressed_size == U32_MAX {
+                compressed_size = z.u64()?;
+            }
+            if local_header_offset == U32_MAX {
+                local_header_offset = z.u64()?;
+            }
+        }
+    }
+    Ok(CentralEntry {
+        name,
+        method,
+        crc32,
+        compressed_size,
+        size,
+        local_header_offset,
+    })
+}
+
+/// Locate and parse the central directory of an archive of `len` bytes,
+/// fetching only the ranges it needs through `fetch`. Refuses a central
+/// directory larger than `max_cd_bytes`, which bounds the memory used.
+pub async fn read_central_directory<F, Fut>(
+    len: u64,
+    mut fetch: F,
+    max_cd_bytes: u64,
+) -> anyhow::Result<Vec<CentralEntry>>
+where
+    F: FnMut(Range<u64>) -> Fut,
+    Fut: Future<Output = anyhow::Result<Bytes>>,
+{
+    let (entries, cd_offset, cd_size) = locate_central_directory(len, &mut fetch).await?;
     if cd_size > max_cd_bytes {
         return Err(anyhow::anyhow!(
             "central directory is {} bytes, more than the {} allowed",
@@ -642,59 +720,66 @@ where
             max_cd_bytes
         ));
     }
-    if cd_offset.checked_add(cd_size).map_or(true, |end| end > len) {
-        return Err(bad("central directory out of range"));
-    }
     let cd = fetch(cd_offset..cd_offset + cd_size).await?;
     let mut c = Cursor::new(&cd);
     let mut out = Vec::with_capacity(entries.min(1 << 20) as usize);
     for _ in 0..entries {
-        if c.u32()? != CENTRAL_HEADER_SIG {
-            return Err(bad("bad central header signature"));
-        }
-        c.take(2 + 2 + 2)?;
-        let method = c.u16()?;
-        c.take(4)?;
-        let crc32 = c.u32()?;
-        let mut compressed_size = c.u32()? as u64;
-        let mut size = c.u32()? as u64;
-        let name_len = c.u16()? as usize;
-        let extra_len = c.u16()? as usize;
-        let comment_len = c.u16()? as usize;
-        c.take(2 + 2 + 4)?;
-        let mut local_header_offset = c.u32()? as u64;
-        let name = String::from_utf8_lossy(c.take(name_len)?).into_owned();
-        let extra = c.take(extra_len)?;
-        c.take(comment_len)?;
-
-        let mut e = Cursor::new(extra);
-        while e.at + 4 <= extra.len() {
-            let tag = e.u16()?;
-            let n = e.u16()? as usize;
-            let body = e.take(n)?;
-            if tag == ZIP64_EXTRA_TAG {
-                let mut z = Cursor::new(body);
-                if size == U32_MAX {
-                    size = z.u64()?;
-                }
-                if compressed_size == U32_MAX {
-                    compressed_size = z.u64()?;
-                }
-                if local_header_offset == U32_MAX {
-                    local_header_offset = z.u64()?;
-                }
-            }
-        }
-        out.push(CentralEntry {
-            name,
-            method,
-            crc32,
-            compressed_size,
-            size,
-            local_header_offset,
-        });
+        out.push(parse_central_record(&mut c)?);
     }
     Ok(out)
+}
+
+/// Window used by [`find_entry`] to walk a central directory.
+const FIND_WINDOW: u64 = 256 * 1024;
+
+/// Find one entry by name, walking the central directory in fixed windows:
+/// memory stays one window however many entries the archive has, which is
+/// what lets a manifest be read out of a multi-gigabyte, million-entry
+/// archive cheaply.
+pub async fn find_entry<F, Fut>(
+    len: u64,
+    mut fetch: F,
+    name: &str,
+) -> anyhow::Result<Option<CentralEntry>>
+where
+    F: FnMut(Range<u64>) -> Fut,
+    Fut: Future<Output = anyhow::Result<Bytes>>,
+{
+    let (entries, cd_offset, cd_size) = locate_central_directory(len, &mut fetch).await?;
+    let cd_end = cd_offset + cd_size;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut pos = 0usize;
+    let mut next = cd_offset;
+    for _ in 0..entries {
+        // Make at least `n` bytes available from `pos`.
+        macro_rules! ensure {
+            ($n:expr) => {{
+                let n: usize = $n;
+                while buf.len() - pos < n {
+                    if next >= cd_end {
+                        return Err(bad("central directory truncated"));
+                    }
+                    buf.drain(..pos);
+                    pos = 0;
+                    let want = (n as u64).max(FIND_WINDOW);
+                    let end = (next + want).min(cd_end);
+                    let chunk = fetch(next..end).await?;
+                    next = end;
+                    buf.extend_from_slice(&chunk);
+                }
+            }};
+        }
+        ensure!(46);
+        let rec_len = central_record_len(&buf[pos..])?;
+        ensure!(rec_len);
+        let mut c = Cursor::new(&buf[pos..pos + rec_len]);
+        let entry = parse_central_record(&mut c)?;
+        pos += rec_len;
+        if entry.name == name {
+            return Ok(Some(entry));
+        }
+    }
+    Ok(None)
 }
 
 /// The byte range of `entry`'s (possibly compressed) body, found by reading
@@ -953,6 +1038,47 @@ mod tests {
                 assert_eq!(&got, data, "{name}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn find_entry_walks_a_large_directory_in_small_windows() {
+        let mut zip = ZipStreamWriter::new(Vec::new());
+        for i in 0..5_000 {
+            zip.write_entry(
+                &format!("content/ws/node-{i:05}.yaml"),
+                Compression::Stored,
+                b"x",
+            )
+            .await
+            .unwrap();
+        }
+        zip.write_entry("manifest.yaml", Compression::Deflate(6), b"name: big\n")
+            .await
+            .unwrap();
+        let bytes = Bytes::from(zip.finish().await.unwrap());
+        let largest = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let fetch = |r: Range<u64>| {
+            let b = bytes.clone();
+            let largest = largest.clone();
+            async move {
+                largest.fetch_max(r.end - r.start, std::sync::atomic::Ordering::Relaxed);
+                Ok(b.slice(r.start as usize..r.end as usize))
+            }
+        };
+        let e = find_entry(bytes.len() as u64, fetch, "manifest.yaml")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(e.size, 10);
+        assert!(find_entry(bytes.len() as u64, fetch, "nope")
+            .await
+            .unwrap()
+            .is_none());
+        // The directory is ~400 KB; no single read was larger than a window
+        // (or the tail read).
+        assert!(
+            largest.load(std::sync::atomic::Ordering::Relaxed) <= FIND_WINDOW.max(22 + 65_535 + 20)
+        );
     }
 
     #[tokio::test]

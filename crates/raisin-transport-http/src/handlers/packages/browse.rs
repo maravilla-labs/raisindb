@@ -5,13 +5,17 @@
 //! Browse contents of `.rap` ZIP archives and retrieve individual files,
 //! supporting nested `.rap` files up to a maximum nesting depth.
 
+use axum::body::Bytes;
 use axum::{
+    body::Body,
     extract::{Extension, Path, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
-use raisin_binary::BinaryStorage;
+use futures::StreamExt;
+use raisin_binary::zip_stream::{self, CentralEntry};
+use raisin_binary::{BinaryStorage, ByteReadStream};
 use raisin_models as models;
 use raisin_models::auth::AuthContext;
 use raisin_models::nodes::properties::value::PropertyValue;
@@ -24,6 +28,12 @@ use super::types::{FileType, PackageFile, ZipContentsResponse, ZipEntry};
 
 /// Maximum nesting depth for .rap files within .rap files
 const MAX_NESTING_DEPTH: usize = 3;
+
+/// A listing reads the whole central directory; this bounds what it may hold.
+const MAX_LISTED_CENTRAL_DIRECTORY: u64 = 64 * 1024 * 1024;
+
+/// A nested `.rap` is opened in memory; this bounds how large one may be.
+const MAX_NESTED_ARCHIVE: u64 = 256 * 1024 * 1024;
 
 /// List contents of a package ZIP without extracting.
 ///
@@ -50,27 +60,17 @@ pub async fn list_package_contents(
         .ok_or_else(|| ApiError::not_found(format!("Package '{}' not found", package_name)))?;
 
     let resource_key = extract_resource_key(&node)?;
-    let zip_data = state.bin.get(resource_key).await.map_err(|e| {
-        ApiError::storage_error(format!("Failed to retrieve package binary: {}", e))
-    })?;
-
-    let cursor = Cursor::new(zip_data);
-    let mut archive = ZipArchive::new(cursor)
-        .map_err(|e| ApiError::validation_failed(format!("Invalid ZIP file: {}", e)))?;
-
-    let mut entries = Vec::new();
-    for i in 0..archive.len() {
-        let file = archive
-            .by_index(i)
-            .map_err(|e| ApiError::storage_error(format!("Failed to read ZIP entry: {}", e)))?;
-
-        entries.push(ZipEntry {
-            path: file.name().to_string(),
-            size: file.size(),
-            compressed_size: file.compressed_size(),
-            is_dir: file.is_dir(),
-        });
-    }
+    // The central directory alone, by ranged reads: no entry body is read.
+    let entries: Vec<ZipEntry> = outer_entries(&state, resource_key)
+        .await?
+        .into_iter()
+        .map(|e| ZipEntry {
+            is_dir: e.is_dir(),
+            path: e.name,
+            size: e.size,
+            compressed_size: e.compressed_size,
+        })
+        .collect();
 
     let total = entries.len();
     Ok(Json(ZipContentsResponse { entries, total }))
@@ -101,32 +101,7 @@ pub async fn get_package_file(
         .ok_or_else(|| ApiError::not_found(format!("Package '{}' not found", package_name)))?;
 
     let resource_key = extract_resource_key(&node)?;
-    let zip_data = state.bin.get(resource_key).await.map_err(|e| {
-        ApiError::storage_error(format!("Failed to retrieve package binary: {}", e))
-    })?;
-
-    let cursor = Cursor::new(zip_data);
-    let mut archive = ZipArchive::new(cursor)
-        .map_err(|e| ApiError::validation_failed(format!("Invalid ZIP file: {}", e)))?;
-
-    let mut file = archive
-        .by_name(&file_path)
-        .map_err(|_| ApiError::not_found(format!("File '{}' not found in package", file_path)))?;
-
-    let mut contents = Vec::new();
-    file.read_to_end(&mut contents)
-        .map_err(|e| ApiError::storage_error(format!("Failed to read file: {}", e)))?;
-
-    let content_type = mime_guess::from_path(&file_path)
-        .first_or_octet_stream()
-        .to_string();
-
-    Ok((
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, content_type)],
-        contents,
-    )
-        .into_response())
+    serve_file_at_path(&state, resource_key, &file_path).await
 }
 
 /// Browse package contents at a specific path within the ZIP.
@@ -151,16 +126,17 @@ pub(super) async fn browse_package_impl(
         .ok_or_else(|| ApiError::not_found(format!("Package '{}' not found", package_path)))?;
 
     let resource_key = extract_resource_key(&node)?;
-    let zip_data = state.bin.get(resource_key).await.map_err(|e| {
-        ApiError::storage_error(format!("Failed to retrieve package binary: {}", e))
-    })?;
-
-    let zip_vec = zip_data.to_vec();
-    let cursor = Cursor::new(zip_vec);
-    let mut archive = ZipArchive::new(cursor)
-        .map_err(|e| ApiError::validation_failed(format!("Invalid ZIP file: {}", e)))?;
-
-    browse_archive_at_path(&mut archive, zip_path, 1)
+    if let Some((outer_path, inner_path)) = split_at_rap_boundary(zip_path) {
+        let mut nested = open_nested(state, resource_key, outer_path).await?;
+        return browse_archive_at_path(&mut nested, inner_path, 2);
+    }
+    let entries = outer_entries(state, resource_key).await?;
+    Ok(list_directory_entries(
+        entries
+            .iter()
+            .map(|e| (e.name.as_str(), e.size, e.is_dir())),
+        zip_path,
+    ))
 }
 
 /// Get a specific file from the package ZIP (command endpoint).
@@ -185,28 +161,136 @@ pub(super) async fn get_file_from_package_impl(
         .ok_or_else(|| ApiError::not_found(format!("Package '{}' not found", package_path)))?;
 
     let resource_key = extract_resource_key(&node)?;
-    let zip_data = state.bin.get(resource_key).await.map_err(|e| {
-        ApiError::storage_error(format!("Failed to retrieve package binary: {}", e))
-    })?;
+    serve_file_at_path(state, resource_key, zip_path).await
+}
 
-    let zip_vec = zip_data.to_vec();
-    let cursor = Cursor::new(zip_vec);
-    let mut archive = ZipArchive::new(cursor)
-        .map_err(|e| ApiError::validation_failed(format!("Invalid ZIP file: {}", e)))?;
-
-    let contents = get_file_from_archive_at_path(&mut archive, zip_path, 1)?;
-
+/// Serve one file of a stored archive. A top-level entry is streamed from
+/// a ranged read of its body (inflated on the fly); only an entry of a nested
+/// `.rap` needs that nested archive in memory.
+async fn serve_file_at_path(
+    state: &AppState,
+    resource_key: &str,
+    zip_path: &str,
+) -> Result<Response, ApiError> {
     let final_filename = zip_path.rsplit('/').next().unwrap_or(zip_path);
     let content_type = mime_guess::from_path(final_filename)
         .first_or_octet_stream()
         .to_string();
 
-    Ok((
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, content_type)],
-        contents,
+    if let Some((outer_path, inner_path)) = split_at_rap_boundary(zip_path) {
+        let mut nested = open_nested(state, resource_key, outer_path).await?;
+        let contents = get_file_from_archive_at_path(&mut nested, inner_path, 2)?;
+        return Ok((
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, content_type)],
+            contents,
+        )
+            .into_response());
+    }
+
+    let len = archive_len(state, resource_key).await?;
+    let entry = zip_stream::find_entry(len, |r| fetch_range(state, resource_key, r), zip_path)
+        .await
+        .map_err(|e| ApiError::validation_failed(format!("Invalid ZIP file: {e}")))?
+        .ok_or_else(|| ApiError::not_found(format!("File '{}' not found in package", zip_path)))?;
+    let body = entry_stream(state, resource_key, &entry).await?;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_LENGTH, entry.size)
+        .body(Body::from_stream(body))
+        .map_err(|e| ApiError::storage_error(format!("Failed to build response: {e}")))
+}
+
+// --- Ranged archive access ---
+
+fn storage_error(e: anyhow::Error) -> ApiError {
+    ApiError::storage_error(format!("Failed to read package archive: {e}"))
+}
+
+async fn archive_len(state: &AppState, key: &str) -> Result<u64, ApiError> {
+    state
+        .bin
+        .head(key)
+        .await
+        .map_err(storage_error)?
+        .map(|m| m.size)
+        .ok_or_else(|| ApiError::not_found("Package archive not found in storage"))
+}
+
+/// One ranged read, collected (callers only ask for small ranges).
+async fn fetch_range(
+    state: &AppState,
+    key: &str,
+    r: std::ops::Range<u64>,
+) -> anyhow::Result<Bytes> {
+    let mut stream = state.bin.get_range(key, r).await?;
+    let mut out = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        out.extend_from_slice(&chunk?);
+    }
+    Ok(Bytes::from(out))
+}
+
+async fn outer_entries(state: &AppState, key: &str) -> Result<Vec<CentralEntry>, ApiError> {
+    let len = archive_len(state, key).await?;
+    zip_stream::read_central_directory(
+        len,
+        |r| fetch_range(state, key, r),
+        MAX_LISTED_CENTRAL_DIRECTORY,
     )
-        .into_response())
+    .await
+    .map_err(|e| ApiError::validation_failed(format!("Invalid ZIP file: {e}")))
+}
+
+/// The (uncompressed) body of one top-level entry, streamed.
+async fn entry_stream(
+    state: &AppState,
+    key: &str,
+    entry: &CentralEntry,
+) -> Result<ByteReadStream, ApiError> {
+    let range = zip_stream::entry_data_range(entry, |r| fetch_range(state, key, r))
+        .await
+        .map_err(|e| ApiError::validation_failed(format!("Invalid ZIP file: {e}")))?;
+    let raw = state
+        .bin
+        .get_range(key, range)
+        .await
+        .map_err(storage_error)?;
+    Ok(if entry.is_deflated() {
+        zip_stream::inflate_stream(raw)
+    } else {
+        raw
+    })
+}
+
+/// A nested `.rap`, read into memory (bounded by [`MAX_NESTED_ARCHIVE`]).
+async fn open_nested(
+    state: &AppState,
+    key: &str,
+    outer_path: &str,
+) -> Result<ZipArchive<Cursor<Vec<u8>>>, ApiError> {
+    let len = archive_len(state, key).await?;
+    let entry = zip_stream::find_entry(len, |r| fetch_range(state, key, r), outer_path)
+        .await
+        .map_err(|e| ApiError::validation_failed(format!("Invalid ZIP file: {e}")))?
+        .ok_or_else(|| {
+            ApiError::not_found(format!("File '{}' not found in archive", outer_path))
+        })?;
+    if entry.size > MAX_NESTED_ARCHIVE {
+        return Err(ApiError::validation_failed(format!(
+            "Nested archive '{}' is larger than {} bytes and cannot be browsed",
+            outer_path, MAX_NESTED_ARCHIVE
+        )));
+    }
+    let mut body = entry_stream(state, key, &entry).await?;
+    let mut data = Vec::with_capacity(entry.size as usize);
+    while let Some(chunk) = body.next().await {
+        data.extend_from_slice(&chunk.map_err(|e| storage_error(e.into()))?);
+    }
+    ZipArchive::new(Cursor::new(data)).map_err(|e| {
+        ApiError::validation_failed(format!("Invalid nested ZIP file '{}': {}", outer_path, e))
+    })
 }
 
 // --- Archive helpers ---
@@ -286,14 +370,24 @@ fn browse_archive_at_path(
         return browse_archive_at_path(&mut nested_archive, inner_path, depth + 1);
     }
 
-    list_directory_entries(archive, path)
+    let mut names = Vec::with_capacity(archive.len());
+    for i in 0..archive.len() {
+        let file = archive
+            .by_index(i)
+            .map_err(|e| ApiError::storage_error(format!("Failed to read ZIP entry: {}", e)))?;
+        names.push((file.name().to_string(), file.size(), file.is_dir()));
+    }
+    Ok(list_directory_entries(
+        names.iter().map(|(n, s, d)| (n.as_str(), *s, *d)),
+        path,
+    ))
 }
 
 /// List directory entries at a given path in an archive.
-fn list_directory_entries(
-    archive: &mut ZipArchive<Cursor<Vec<u8>>>,
+fn list_directory_entries<'a>(
+    files: impl Iterator<Item = (&'a str, u64, bool)>,
     path: &str,
-) -> Result<Vec<PackageFile>, ApiError> {
+) -> Vec<PackageFile> {
     let normalized_path = path.trim_matches('/');
     let prefix = if normalized_path.is_empty() {
         String::new()
@@ -304,13 +398,7 @@ fn list_directory_entries(
     let mut entries_map: std::collections::HashMap<String, PackageFile> =
         std::collections::HashMap::new();
 
-    for i in 0..archive.len() {
-        let file = archive
-            .by_index(i)
-            .map_err(|e| ApiError::storage_error(format!("Failed to read ZIP entry: {}", e)))?;
-
-        let file_name = file.name().to_string();
-
+    for (file_name, file_size, file_is_dir) in files {
         if !prefix.is_empty() && !file_name.starts_with(&prefix) {
             continue;
         }
@@ -319,7 +407,7 @@ fn list_directory_entries(
         }
 
         let relative_path = if prefix.is_empty() {
-            &file_name
+            file_name
         } else {
             &file_name[prefix.len()..]
         };
@@ -333,7 +421,7 @@ fn list_directory_entries(
             continue;
         }
 
-        let is_directory = relative_path.contains('/') || file.is_dir();
+        let is_directory = relative_path.contains('/') || file_is_dir;
 
         let entry_key = first_component.to_string();
         if !entries_map.contains_key(&entry_key) {
@@ -353,11 +441,7 @@ fn list_directory_entries(
                     } else {
                         FileType::File
                     },
-                    size: if is_directory {
-                        None
-                    } else {
-                        Some(file.size())
-                    },
+                    size: if is_directory { None } else { Some(file_size) },
                     mime_type: if is_directory {
                         None
                     } else {
@@ -379,7 +463,7 @@ fn list_directory_entries(
         _ => a.name.cmp(&b.name),
     });
 
-    Ok(entries)
+    entries
 }
 
 /// Recursively get a file from archive, supporting nested .rap files.
