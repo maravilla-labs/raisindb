@@ -38,9 +38,19 @@ export interface PullClient {
   sql(query: string, params?: unknown[]): Promise<Array<Record<string, unknown>>>;
   /** Stream a node's binary to `dest`, return its sha256 and size. */
   download(workspace: string, nodePath: string, dest: string): Promise<{ sha256: string; size: number }>;
+  /**
+   * The repositories these credentials can see. Optional: a client without it
+   * skips the repository check.
+   */
+  listRepositories?(): Promise<RepoListing>;
   /** The repository's configured locales. */
   repoLocales(): Promise<{ defaultLanguage: string | null; supported: string[] } | null>;
 }
+
+export type RepoListing =
+  | { status: 'ok'; repos: string[] }
+  | { status: 'denied'; code: number }
+  | { status: 'unavailable' };
 
 export const DEFAULT_PAGE_SIZE = 500;
 
@@ -214,6 +224,19 @@ export function createHttpClient(opts: HttpClientOptions): PullClient {
       return streamToFile(Readable.fromWeb(res.body as never), dest);
     },
 
+    async listRepositories(): Promise<RepoListing> {
+      try {
+        const res = await doFetch(`${base}/api/repositories`, { headers: headers() });
+        if (res.status === 401 || res.status === 403) return { status: 'denied', code: res.status };
+        if (!res.ok) return { status: 'unavailable' };
+        const list = (await res.json()) as Array<{ repo_id?: string }>;
+        if (!Array.isArray(list)) return { status: 'unavailable' };
+        return { status: 'ok', repos: list.map((r) => String(r.repo_id ?? '')).filter(Boolean) };
+      } catch {
+        return { status: 'unavailable' };
+      }
+    },
+
     async repoLocales() {
       const res = await doFetch(`${base}/api/repositories`, { headers: headers() });
       if (!res.ok) return null;
@@ -252,7 +275,8 @@ export async function streamToFile(
     },
   });
   try {
-    await pipeline(source, tap, fs.createWriteStream(dest));
+    // `wx`: never write through something already sitting at `dest`.
+    await pipeline(source, tap, fs.createWriteStream(dest, { flags: 'wx' }));
   } catch (err) {
     fs.rmSync(dest, { force: true });
     throw err;

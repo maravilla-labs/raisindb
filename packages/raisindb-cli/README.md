@@ -124,6 +124,16 @@ raisindb pull ./package --path sponsors:/              # a whole workspace
   empty result, not 401. A pull that reads nothing stops with an error instead
   of reporting success (`--allow-empty` if the server really is empty), and a
   root that reads empty never marks local files as deleted.
+- **Wrong target.** A repository that does not exist fails up front and lists
+  the ones that do (`Repository 'default' not found on … Available: studio`);
+  refused credentials (401/403) and an anonymous empty listing are reported as
+  such. A `remote_path` in `.raisindb-cli.yaml` that matches nothing on the
+  server is warned about (pull does not use it).
+- **Server names are untrusted.** Every file name comes from the server, so
+  each path segment, workspace and locale must be a plain file name (no `..`,
+  separators, encoded dots, control characters or drive letters), the result
+  must resolve inside the package, and nothing is written or deleted through a
+  symlink. Anything else is listed as REFUSED and not written.
 - Node types, archetypes, element types, workspaces and the manifest are not
   pulled: the package is their source.
 

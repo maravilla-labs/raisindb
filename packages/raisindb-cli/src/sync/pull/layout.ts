@@ -20,6 +20,7 @@
  */
 
 import type { RemoteNode } from './remote.js';
+import { isSafeLocale, isSafeWorkspace, safeNodeSegments, segmentProblem, UnsafePathError } from './safe-path.js';
 import type { LocalIndex } from './scope.js';
 import { nodeKey, workspaceDir } from './scope.js';
 import {
@@ -70,6 +71,8 @@ export interface LayoutResult {
   derivedSkipped: number;
   /** Bare folders the installer creates by itself — the directory is enough */
   implicitFolders: number;
+  /** Server entries whose names are not safe file names — never written */
+  refused: Array<{ what: string; reason: string }>;
 }
 
 /**
@@ -155,6 +158,7 @@ export function layoutNodes(
   const files: DesiredFile[] = [];
   let derivedSkipped = 0;
   let implicitFolders = 0;
+  const refused: Array<{ what: string; reason: string }> = [];
 
   const byWs = new Map<string, RemoteNode[]>();
   for (const n of nodes) {
@@ -163,6 +167,10 @@ export function layoutNodes(
   }
 
   for (const [workspace, wsNodes] of byWs) {
+    if (!isSafeWorkspace(workspace) || segmentProblem(workspaceDir(index, workspace))) {
+      refused.push({ what: `workspace ${JSON.stringify(workspace)}`, reason: 'not a safe directory name' });
+      continue;
+    }
     const dir = workspaceDir(index, workspace);
     const assetPaths = new Set(wsNodes.filter(isAssetNode).map((n) => n.path));
     const parents = new Set(wsNodes.map((n) => n.path.slice(0, n.path.lastIndexOf('/'))));
@@ -176,6 +184,18 @@ export function layoutNodes(
     for (const node of wsNodes) {
       if (underAsset(node.path)) {
         derivedSkipped++;
+        continue;
+      }
+      // Every segment of the path, and the name, become file names.
+      try {
+        safeNodeSegments(node.path);
+        const problem = segmentProblem(node.name);
+        if (problem) throw new UnsafePathError(`${problem}: name ${JSON.stringify(node.name)}`);
+        if (node.name !== node.path.slice(node.path.lastIndexOf('/') + 1)) {
+          throw new UnsafePathError(`name ${JSON.stringify(node.name)} does not match its path`);
+        }
+      } catch (err) {
+        refused.push({ what: `${workspace}:${JSON.stringify(node.path)}`, reason: (err as Error).message });
         continue;
       }
       const key = nodeKey(workspace, node.path);
@@ -230,6 +250,10 @@ export function layoutNodes(
       files.push({ ...common, kind, rel: baseRel, value, serverHash: canonicalHash(value) });
 
       for (const [locale, overlay] of overlays.get(key) ?? []) {
+        if (!isSafeLocale(locale)) {
+          refused.push({ what: `${workspace}:${node.path} [${JSON.stringify(locale)}]`, reason: 'not a locale code' });
+          continue;
+        }
         files.push({
           ...common,
           kind: 'translation',
@@ -241,5 +265,5 @@ export function layoutNodes(
       }
     }
   }
-  return { files, derivedSkipped, implicitFolders };
+  return { files, derivedSkipped, implicitFolders, refused };
 }

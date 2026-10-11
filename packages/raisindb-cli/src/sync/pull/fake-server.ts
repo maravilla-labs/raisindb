@@ -6,7 +6,7 @@
 
 import { Readable } from 'stream';
 import type { JsonObject } from './normalize.js';
-import { streamToFile, type PullClient } from './remote.js';
+import { streamToFile, type PullClient, type RepoListing } from './remote.js';
 
 export interface FakeNode {
   workspace: string;
@@ -30,6 +30,9 @@ export class FakeServer implements PullClient {
   /** Answer every read with nothing, as an unauthenticated server does. */
   anonymous = false;
   locales: { defaultLanguage: string | null; supported: string[] } | null = null;
+  repos: string[] = ['site'];
+  /** HTTP status for the repository listing (401/403 to refuse it) */
+  repoListingStatus = 200;
   private ids = new Map<string, string>();
 
   add(node: FakeNode): this {
@@ -92,6 +95,13 @@ export class FakeServer implements PullClient {
     const chunks: Buffer[] = [];
     for (let i = 0; i < node.bytes.length; i += 1024) chunks.push(node.bytes.subarray(i, i + 1024));
     return streamToFile(Readable.from(chunks), dest);
+  }
+
+  async listRepositories(): Promise<RepoListing> {
+    if (this.repoListingStatus === 401 || this.repoListingStatus === 403) {
+      return { status: 'denied', code: this.repoListingStatus };
+    }
+    return { status: 'ok', repos: this.anonymous ? [] : this.repos };
   }
 
   async repoLocales() {

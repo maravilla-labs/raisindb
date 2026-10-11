@@ -474,6 +474,8 @@ async function runPullOnly(
     config,
     client,
     isIgnored: (rel) => shouldIgnoreSync(config, rel) || ignored(prefix + rel),
+    authenticated: !!token,
+    serverLabel: server,
     paths: options.path,
     includeOwned: options.includeOwned,
     delete: options.delete,

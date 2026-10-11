@@ -12,6 +12,7 @@ import { skillMdToNodeYaml } from '../skill-md.js';
 import type { DesiredBinary, DesiredFile, DesiredText } from './layout.js';
 import { equalModuloEnv, overlaysEqual, sha256, sortKeysDeep, type JsonObject } from './normalize.js';
 import type { PullClient } from './remote.js';
+import { resolveInside } from './safe-path.js';
 import type { PullState } from './state.js';
 import { mergeNodeYaml, mergeYaml, nodeFileObject, nodeToSkillMd, renderYaml, type NodeFileValue } from './yaml-merge.js';
 
@@ -92,7 +93,7 @@ function binaryMatches(file: DesiredBinary, bytes: Buffer, localHash: string): b
 
 export function classify(files: DesiredFile[], ctx: PlanContext): PlannedFile[] {
   return files.map((file) => {
-    const local = readLocal(path.join(ctx.contentBase, file.rel));
+    const local = readLocal(resolveInside(ctx.contentBase, file.rel));
     const base = ctx.state.get(file.rel);
     if (!local) return { file, action: base ? 'deleted-locally' : 'create' };
 
@@ -140,10 +141,21 @@ export function findOrphans(
 // Applying
 // ---------------------------------------------------------------------------
 
+/**
+ * A temp path next to `full` that is guaranteed to be a NEW regular file: an
+ * existing entry of that name (a planted symlink included) is removed first,
+ * and the file is then created exclusively.
+ */
+export function freshTemp(full: string): string {
+  const tmp = `${full}.raisindb-partial`;
+  fs.rmSync(tmp, { force: true });
+  return tmp;
+}
+
 function atomicWrite(full: string, data: string | Buffer): void {
   fs.mkdirSync(path.dirname(full), { recursive: true });
-  const tmp = `${full}.raisindb-partial`;
-  fs.writeFileSync(tmp, data);
+  const tmp = freshTemp(full);
+  fs.writeFileSync(tmp, data, { flag: 'wx' });
   fs.renameSync(tmp, full);
 }
 
@@ -167,7 +179,8 @@ async function downloadVerified(
   full: string,
   client: PullClient
 ): Promise<{ tmp: string; sha256: string }> {
-  const tmp = `${full}.raisindb-partial`;
+  fs.mkdirSync(path.dirname(full), { recursive: true });
+  const tmp = freshTemp(full);
   const got = await client.download(file.workspace, file.nodePath, tmp);
   if (file.contentHash && got.sha256 !== file.contentHash) {
     fs.rmSync(tmp, { force: true });
@@ -186,7 +199,7 @@ export async function verifyBinary(
   ctx: PlanContext & { client: PullClient }
 ): Promise<PlannedFile> {
   const file = planned.file as DesiredBinary;
-  const full = path.join(ctx.contentBase, file.rel);
+  const full = resolveInside(ctx.contentBase, file.rel);
   const got = await downloadVerified(file, full, ctx.client);
   if (got.sha256 === planned.localHash) {
     fs.rmSync(got.tmp, { force: true });
@@ -211,8 +224,8 @@ export async function applyFile(
   ctx: PlanContext & { client: PullClient }
 ): Promise<ApplyOutcome> {
   const { file } = planned;
-  const full = path.join(ctx.contentBase, file.rel);
   try {
+    const full = resolveInside(ctx.contentBase, file.rel);
     if (file.kind !== 'binary') {
       const existing = fs.existsSync(full) ? fs.readFileSync(full, 'utf-8') : null;
       const text = renderText(file, existing);
@@ -240,7 +253,7 @@ export async function applyFile(
 
 /** The text a conflict would be resolved to, for `--diff`. */
 export function proposedText(file: DesiredText, contentBase: string): { before: string; after: string } {
-  const full = path.join(contentBase, file.rel);
+  const full = resolveInside(contentBase, file.rel);
   const before = fs.existsSync(full) ? fs.readFileSync(full, 'utf-8') : '';
   return { before, after: renderText(file, before || null) };
 }

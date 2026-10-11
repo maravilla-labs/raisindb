@@ -132,3 +132,28 @@ describe('pull HTTP client', () => {
     expect(calls[2].url).toBe('https://live/api/repository/r/main/head/assets/a%20b/f.bin/raisin:cmd/download');
   });
 });
+
+describe('pull path safety', () => {
+  it('rejects unsafe segments and accepts ordinary names', async () => {
+    const { segmentProblem, isSafeLocale, isSafeWorkspace, resolveInside } = await import('./safe-path.js');
+    for (const bad of ['', '.', '..', 'a/b', 'a\\b', '%2e%2e', '%252E%252E', 'C:x', 'a\u0000b', 'x.', 'x ']) {
+      expect(segmentProblem(bad)).not.toBeNull();
+    }
+    for (const ok of ['home', 'index.js', '.node.yaml', 'Hobbymannschaft-Header.webp', 'ä ü.jpg']) {
+      expect(segmentProblem(ok)).toBeNull();
+    }
+    expect(isSafeLocale('de')).toBe(true);
+    expect(isSafeLocale('pt-BR')).toBe(true);
+    expect(isSafeLocale('../x')).toBe(false);
+    expect(isSafeWorkspace('raisin:access_control')).toBe(true);
+    expect(isSafeWorkspace('../x')).toBe(false);
+
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'raisindb-safe-'));
+    expect(() => resolveInside(base, '/etc/passwd')).toThrow(/absolute/);
+    expect(() => resolveInside(base, 'C:/x')).toThrow(/absolute/);
+    expect(() => resolveInside(base, 'a/../../x')).toThrow(/dot segment/);
+    expect(() => resolveInside(base, 'a\\..\\..\\x')).toThrow(/separator/);
+    expect(resolveInside(base, 'stories/a/.node.yaml')).toBe(path.join(fs.realpathSync(base), 'stories/a/.node.yaml'));
+    fs.rmSync(base, { recursive: true, force: true });
+  });
+});

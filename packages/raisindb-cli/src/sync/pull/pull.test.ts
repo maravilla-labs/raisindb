@@ -332,3 +332,188 @@ describe('raisindb pull', () => {
     expect(exists('content/stories/blueprints/.node.yaml')).toBe(true);
   });
 });
+
+describe('raisindb pull: repository and remote_path checks', () => {
+  let dir: string;
+  let server: FakeServer;
+  let lines: string[];
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'raisindb-pull-repo-'));
+    fs.writeFileSync(path.join(dir, 'manifest.yaml'), 'name: t\nversion: 1.0.0\n');
+    fs.mkdirSync(path.join(dir, 'content/stories/site'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'content/stories/site/.node.yaml'), 'node_type: studio:Story\nproperties: {}\n');
+    server = new FakeServer();
+    server.add({ workspace: 'stories', path: '/site', node_type: 'studio:Story', properties: {} });
+    lines = [];
+  });
+  afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const pull = (cfg: Partial<SyncConfig> = {}, extra: Partial<PullOptions> = {}) =>
+    runPull({
+      packageDir: dir,
+      config: { ...config, ...cfg },
+      client: server,
+      serverLabel: 'http://live.example',
+      log: (s) => lines.push(s),
+      progress: new Progress(false, { write: () => true } as unknown as NodeJS.WriteStream),
+      ...extra,
+    });
+
+  it('names the repositories that exist when the configured one does not', async () => {
+    server.repos = ['studio'];
+    const r = await pull({ repository: 'default' });
+    expect(r.aborted).toBe(
+      "Repository 'default' not found on http://live.example. Available: studio. Pass --repo <name>, or fix `repository:` in .raisindb-cli.yaml."
+    );
+    expect(server.sqlCalls).toBe(0);
+  });
+
+  it('tells refused credentials and an anonymous empty listing apart', async () => {
+    server.repoListingStatus = 401;
+    expect((await pull()).aborted).toMatch(/refused these credentials \(HTTP 401\)/);
+
+    server.repoListingStatus = 200;
+    server.anonymous = true;
+    expect((await pull({}, { authenticated: false })).aborted).toMatch(/No credentials were sent/);
+
+    // With a token, an empty listing is ambiguous: warn, then let the
+    // empty-read guard decide.
+    const r = await pull({}, { authenticated: true });
+    expect(lines.join('\n')).toMatch(/lists no repositories for these credentials/);
+    expect(r.aborted).toMatch(/EMPTY result/);
+  });
+
+  it('warns when remote_path matches nothing, and is quiet when it does', async () => {
+    await pull({ remote_path: '/baden-rhinos' });
+    expect(lines.join('\n')).toMatch(/remote_path '\/baden-rhinos' in .raisindb-cli.yaml matches no node in stories/);
+    lines = [];
+    await pull({ remote_path: '/site' });
+    expect(lines.join('\n')).not.toMatch(/remote_path/);
+  });
+});
+
+describe('raisindb pull: server-controlled names never leave the package', () => {
+  let root: string;
+  let dir: string;
+  let server: FakeServer;
+  let lines: string[];
+  beforeEach(() => {
+    root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'raisindb-pull-sec-')));
+    dir = path.join(root, 'pkg');
+    fs.mkdirSync(path.join(dir, 'content/stories/site'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'manifest.yaml'), 'name: t\nversion: 1.0.0\n');
+    fs.writeFileSync(path.join(dir, 'content/stories/site/.node.yaml'), 'node_type: studio:Story\nproperties: {}\n');
+    server = new FakeServer();
+    server.add({ workspace: 'stories', path: '/site', node_type: 'studio:Story', properties: {} });
+    lines = [];
+  });
+  afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
+  const pull = (extra: Partial<PullOptions> = {}) =>
+    runPull({
+      packageDir: dir,
+      config,
+      client: server,
+      log: (s) => lines.push(s),
+      progress: new Progress(false, { write: () => true } as unknown as NodeJS.WriteStream),
+      ...extra,
+    });
+  /** Every file under `root` outside the package dir. */
+  const outside = () => {
+    const out: string[] = [];
+    const walk = (d: string) => {
+      for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+        const p = path.join(d, e.name);
+        if (p === dir) continue;
+        if (e.isDirectory()) walk(p);
+        else out.push(path.relative(root, p));
+      }
+    };
+    walk(root);
+    return out;
+  };
+
+  const evil = [
+    '/site/../../../escaped',
+    '/site/..',
+    '/site/a/../../../../escaped',
+    '/site/..\\..\\escaped',
+    '/site/%2e%2e',
+    '/site/%252e%252e',
+    '/site/C:evil',
+    '/site/nul\u0000byte',
+    '/site/line\nbreak',
+    '/site//double',
+    '/site/trailing.',
+  ];
+
+  for (const p of evil) {
+    it(`refuses node path ${JSON.stringify(p)}`, async () => {
+      server.add({ workspace: 'stories', path: p, node_type: 'studio:Page', properties: { title: 'x' } });
+      const r = await pull({ force: true, paths: ['stories:/'] });
+      expect(r.counts.refused).toBeGreaterThanOrEqual(1);
+      expect(outside()).toEqual([]);
+      expect(lines.join('\n')).toContain('REFUSED');
+    });
+  }
+
+  it('refuses a binary named with traversal, and an unsafe locale and workspace', async () => {
+    server.locales = { defaultLanguage: 'de', supported: ['de', '../../x'] };
+    server.add({
+      workspace: 'stories', path: '/site/../../evil.bin', node_type: 'raisin:Asset', bytes: Buffer.from('x'),
+      properties: { file: { metadata: { storage_key: 'k' } } },
+    });
+    server.add({
+      workspace: 'stories', path: '/site/page', node_type: 'studio:Page', properties: { title: 'a' },
+      locales: { '../../x': { title: 'b' } },
+    });
+    server.add({ workspace: '../evil', path: '/x', node_type: 'studio:Page', properties: {} });
+    const r = await pull({ force: true, paths: ['stories:/', '../evil:/'] });
+    expect(r.counts.refused).toBeGreaterThanOrEqual(3);
+    expect(server.downloads).toEqual([]);
+    expect(outside()).toEqual([]);
+  });
+
+  it('refuses a node whose name disagrees with its path', async () => {
+    server.nodes.push({ workspace: 'stories', path: '/site/ok', node_type: 'studio:Page', properties: {} });
+    const orig = server.sql.bind(server);
+    server.sql = async (q, p) =>
+      (await orig(q, p)).map((r) => (r.path === '/site/ok' ? { ...r, name: '../../escaped' } : r));
+    const r = await pull({ force: true });
+    expect(r.counts.refused).toBe(1);
+    expect(outside()).toEqual([]);
+  });
+
+  it('does not write through a symlinked directory planted in the package', async () => {
+    const target = path.join(root, 'elsewhere');
+    fs.mkdirSync(target);
+    fs.symlinkSync(target, path.join(dir, 'content/stories/site/linked'));
+    server.add({ workspace: 'stories', path: '/site/linked', node_type: 'studio:Page', properties: { title: 'x' } });
+    server.add({ workspace: 'stories', path: '/site/linked/child', node_type: 'studio:Page', properties: { title: 'y' } });
+    const r = await pull({ force: true });
+    expect(r.counts.refused).toBe(2);
+    expect(fs.readdirSync(target)).toEqual([]);
+  });
+
+  it('does not write through a symlinked file, or a planted temp-file symlink', async () => {
+    const victim = path.join(root, 'victim.txt');
+    fs.writeFileSync(victim, 'original');
+    fs.mkdirSync(path.join(dir, 'content/stories/site/page'));
+    fs.symlinkSync(victim, path.join(dir, 'content/stories/site/page/.node.yaml'));
+    fs.mkdirSync(path.join(dir, 'content/stories/site/other'));
+    fs.symlinkSync(victim, path.join(dir, 'content/stories/site/other/.node.yaml.raisindb-partial'));
+    server.add({ workspace: 'stories', path: '/site/page', node_type: 'studio:Page', properties: { title: 'x' } });
+    server.add({ workspace: 'stories', path: '/site/other', node_type: 'studio:Page', properties: { title: 'y' } });
+    const r = await pull({ force: true });
+    expect(r.counts.refused).toBe(1);
+    expect(fs.readFileSync(victim, 'utf-8')).toBe('original');
+    expect(yaml.parse(fs.readFileSync(path.join(dir, 'content/stories/site/other/.node.yaml'), 'utf-8')).properties.title).toBe('y');
+  });
+
+  it('--delete never deletes through a symlink', async () => {
+    const target = path.join(root, 'keep');
+    fs.mkdirSync(path.join(target, 'gone'), { recursive: true });
+    fs.writeFileSync(path.join(target, 'gone/.node.yaml'), 'node_type: x\n');
+    fs.symlinkSync(target, path.join(dir, 'content/stories/site/linked'));
+    await pull({ delete: true });
+    expect(fs.existsSync(path.join(target, 'gone/.node.yaml'))).toBe(true);
+  });
+});

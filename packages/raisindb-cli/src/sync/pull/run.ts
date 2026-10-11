@@ -38,11 +38,13 @@ import {
   isUnder,
   loadInstallPolicy,
   nodeKey,
+  normalizeNodePath,
   parseRootSpec,
   policyFor,
   type Root,
 } from './scope.js';
 import { PullState } from './state.js';
+import { resolveInside } from './safe-path.js';
 
 /** Above this many roots in one workspace, scan the workspace once and filter. */
 const WHOLE_WORKSPACE_THRESHOLD = 8;
@@ -68,6 +70,10 @@ export interface PullOptions {
   verbose?: boolean;
   translations?: boolean;
   allowEmpty?: boolean;
+  /** Whether credentials are being sent (tells "no access" from "empty") */
+  authenticated?: boolean;
+  /** The server, for messages */
+  serverLabel?: string;
   /** SQL page size (tests use a small one to cross page boundaries) */
   pageSize?: number;
   /** Ask about a conflict (TTY with conflict_strategy: prompt). */
@@ -126,6 +132,32 @@ export async function runPull(opts: PullOptions): Promise<PullReport> {
   log(`Pulling ${roots.length} root(s)${explicit?.length ? '' : ' (what the package contains)'}:`);
   for (const r of roots.slice(0, opts.verbose ? Infinity : 12)) log(`  ${formatRoot(r)}`);
   if (!opts.verbose && roots.length > 12) log(`  … and ${roots.length - 12} more`);
+
+  // ---- the repository must exist ------------------------------------------
+  const where = opts.serverLabel ?? config.server;
+  if (client.listRepositories) {
+    const listing = await client.listRepositories();
+    if (listing.status === 'denied') {
+      report.aborted = `${where} refused these credentials (HTTP ${listing.code}). Log in to it (raisindb login -s ${where}) or set RAISINDB_TOKEN to a valid key.`;
+      return report;
+    }
+    if (listing.status === 'ok' && listing.repos.length > 0 && !listing.repos.includes(config.repository)) {
+      report.aborted =
+        `Repository '${config.repository}' not found on ${where}. Available: ${listing.repos.join(', ')}. ` +
+        'Pass --repo <name>, or fix `repository:` in .raisindb-cli.yaml.';
+      return report;
+    }
+    if (listing.status === 'ok' && listing.repos.length === 0) {
+      if (opts.authenticated === false) {
+        report.aborted = `No credentials were sent to ${where}, and it shows no repositories. Log in to it (raisindb login -s ${where}) or set RAISINDB_TOKEN.`;
+        return report;
+      }
+      log(
+        `! ${where} lists no repositories for these credentials. An empty server and a token that is not valid ` +
+          `there look the same (RaisinDB answers with an empty list, not 401). Continuing with '${config.repository}'.`
+      );
+    }
+  }
 
   // ---- locales ------------------------------------------------------------
   let locales: string[] = [];
@@ -187,6 +219,24 @@ export async function runPull(opts: PullOptions): Promise<PullReport> {
     }
     const what = wsRoots.length === 1 ? formatRoot(wsRoots[0]) : `${workspace} (${wsRoots.length} roots)`;
     progress.done(missing ? `! ${what}: workspace does not exist on the server` : `Read ${what}: ${wsNodes} node(s)`);
+  }
+
+  // ---- remote_path ----------------------------------------------------------
+  // Pull does not use remote_path, but one that matches nothing on this server
+  // is the classic sign of a config aimed at the wrong repository or server.
+  const remotePath = config.remote_path ? normalizeNodePath(config.remote_path) : '/';
+  if (remotePath !== '/') {
+    let matches = 0;
+    for (const ws of byWorkspace.keys()) {
+      matches += await countSubtree(client, ws, remotePath).catch(() => 0);
+      if (matches > 0) break;
+    }
+    if (matches === 0) {
+      log(
+        `\n! remote_path '${remotePath}' in .raisindb-cli.yaml matches no node in ${[...byWorkspace.keys()].join(', ')} on ${where}. ` +
+          'Pull does not use it (what is pulled comes from the package or pull.roots), but check that repository and server are the ones you mean.'
+      );
+    }
   }
 
   // ---- the empty-read guard -----------------------------------------------
@@ -264,9 +314,20 @@ export async function runPull(opts: PullOptions): Promise<PullReport> {
   const layout = layoutNodes(pulled, index, overlays);
   const desired: DesiredFile[] = [];
   let ignored = 0;
+  const refused = [...layout.refused];
   for (const f of layout.files) {
-    if (isIgnored(f.rel)) ignored++;
-    else desired.push(f);
+    if (isIgnored(f.rel)) {
+      ignored++;
+      continue;
+    }
+    // Containment and symlinks, checked against the disk as it is now.
+    try {
+      resolveInside(contentBase, f.rel);
+    } catch (err) {
+      refused.push({ what: f.rel, reason: (err as Error).message });
+      continue;
+    }
+    desired.push(f);
   }
 
   // ---- decide ---------------------------------------------------------------
@@ -341,8 +402,14 @@ export async function runPull(opts: PullOptions): Promise<PullReport> {
   bump('policy', policySkipped.length);
   bump('ignored', ignored);
   bump('derived', layout.derivedSkipped);
+  bump('refused', refused.length);
 
   printPlan(planned, orphans, { verbose: !!opts.verbose, log });
+  if (refused.length) {
+    log(`\nREFUSED (${refused.length}) — server names that are not safe file names, or a path through a symlink. Not written:`);
+    for (const r of refused.slice(0, opts.verbose ? Infinity : 20)) log(`  ✗ ${r.what}: ${r.reason}`);
+    if (!opts.verbose && refused.length > 20) log(`  … and ${refused.length - 20} more`);
+  }
   if (ownedSkipped.length) {
     log(`\n${ownedSkipped.length} node(s) skipped as package-owned (mode: replace in .raisin-sync.yaml — a deploy overwrites them, so the package is their source). --include-owned pulls them too.`);
   }
@@ -385,8 +452,12 @@ export async function runPull(opts: PullOptions): Promise<PullReport> {
 
   if (opts.delete) {
     for (const o of orphans) {
-      fs.rmSync(path.join(contentBase, o.rel), { force: true });
-      state.delete(o.rel);
+      try {
+        fs.rmSync(resolveInside(contentBase, o.rel), { force: true });
+        state.delete(o.rel);
+      } catch (err) {
+        report.errors.push(`${o.rel}: not deleted — ${(err as Error).message}`);
+      }
     }
   }
   state.save();
@@ -412,7 +483,7 @@ function summaryLine(c: Record<string, number>): string {
   const parts = [
     ['new', c.create], ['updated', c.update], ['unchanged', c.unchanged], ['local edits', c['local-edit']],
     ['conflicts taken from the server', c['conflict-server']], ['conflicts left', c.conflict],
-    ['gone from server', c.orphan], ['to compare', c.verify],
+    ['gone from server', c.orphan], ['to compare', c.verify], ['REFUSED', c.refused],
   ].filter(([, n]) => n) as Array<[string, number]>;
   return parts.length ? parts.map(([k, n]) => `${n} ${k}`).join(', ') : 'nothing to do';
 }
