@@ -13,13 +13,17 @@
 //! Three rules close it, and every entry point asks this module rather than
 //! re-deriving them:
 //!
-//! 1. **Building or downloading an export is an administrator operation**
+//! 1. **Building or downloading an export is an operator operation**
 //!    ([`authorize_package_export`]): the system context (admin console, CLI,
-//!    API keys and the superadmin bearer all resolve to it) or an identity user
-//!    holding `system_admin`. Anonymous and deny-all callers are
-//!    `Unauthenticated`; any other signed-in principal is `Forbidden`. There is
-//!    no narrower `packages:export` grant in the engine yet; when one is added,
-//!    it is added HERE and nowhere else.
+//!    API keys and the superadmin bearer all resolve to it), an identity user
+//!    holding `system_admin`, or an identity user holding the EXPORT GRANT
+//!    ([`EXPORT_GRANT_WORKSPACE`] / [`EXPORT_GRANT_PATH`], operation
+//!    `create`). The grant must name the `packages` workspace explicitly: a
+//!    wildcard workspace pattern (`**`, `*`) never implies it, so read/write
+//!    access to everything is still not "may export". The engine stays
+//!    app-agnostic — an application gives the grant to whichever of its roles
+//!    may export. Anonymous and deny-all callers are `Unauthenticated`; any
+//!    other signed-in principal is `Forbidden`.
 //! 2. **The build reads as the requester.** The requester's context is
 //!    recorded on the job at submit time ([`requester_metadata`]) and rebuilt
 //!    by the job ([`requester_from_metadata`]); every node the job collects
@@ -82,7 +86,26 @@ pub fn authorize_package_export(auth: Option<&AuthContext>) -> Result<(), Export
     if auth.is_system || auth.permissions().is_some_and(|p| p.is_system_admin) {
         return Ok(());
     }
+    if auth.permissions().is_some_and(holds_export_grant) {
+        return Ok(());
+    }
     Err(ExportRefusal::Forbidden)
+}
+
+/// The workspace the export grant must name, verbatim (no glob).
+pub const EXPORT_GRANT_WORKSPACE: &str = "packages";
+/// The path the export grant covers; a grant on `/**` covers it too.
+pub const EXPORT_GRANT_PATH: &str = "/exports/**";
+
+/// Does a role grant `create` on `packages:/exports/…`, naming the workspace
+/// explicitly?
+fn holds_export_grant(perms: &ResolvedPermissions) -> bool {
+    use raisin_models::permissions::{Operation, PathMatcher};
+    perms.permissions.iter().any(|p| {
+        p.workspace.as_deref() == Some(EXPORT_GRANT_WORKSPACE)
+            && p.allows_operation(Operation::Create)
+            && PathMatcher::new(&p.path).matches("/exports/build")
+    })
 }
 
 /// The metadata entries that record `auth` as a job's requester.
@@ -242,6 +265,48 @@ mod tests {
         assert_eq!(
             authorize_package_export(Some(&AuthContext::for_user("bob"))),
             Err(ExportRefusal::Forbidden)
+        );
+    }
+
+    fn grant(workspace: Option<&str>, path: &str, ops: Vec<Operation>) -> Permission {
+        let mut p = Permission::full_access(path);
+        p.workspace = workspace.map(str::to_string);
+        p.operations = ops;
+        p
+    }
+
+    #[test]
+    fn the_explicit_export_grant_lets_a_person_export() {
+        for path in [EXPORT_GRANT_PATH, "/**", "/exports/*"] {
+            let exporter = user_with(
+                vec![grant(Some("packages"), path, vec![Operation::Create])],
+                false,
+            );
+            assert_eq!(authorize_package_export(Some(&exporter)), Ok(()), "{path}");
+        }
+        // Read on packages, create elsewhere, a wildcard workspace, another
+        // path: none of them is the grant.
+        for p in [
+            grant(Some("packages"), "/**", vec![Operation::Read]),
+            grant(Some("stories"), "/**", vec![Operation::Create]),
+            grant(None, "/**", vec![Operation::Create]),
+            grant(Some("*"), "/**", vec![Operation::Create]),
+            grant(Some("packages"), "/installed/**", vec![Operation::Create]),
+        ] {
+            let not_exporter = user_with(vec![p.clone()], false);
+            assert_eq!(
+                authorize_package_export(Some(&not_exporter)),
+                Err(ExportRefusal::Forbidden),
+                "{p:?}"
+            );
+        }
+        // Anonymous with the grant is still refused, and first.
+        let mut resolved = ResolvedPermissions::empty("anonymous");
+        resolved.permissions = vec![grant(Some("packages"), "/**", vec![Operation::Create])];
+        let anon = AuthContext::anonymous_user("anonymous").with_permissions(resolved);
+        assert_eq!(
+            authorize_package_export(Some(&anon)),
+            Err(ExportRefusal::Unauthenticated)
         );
     }
 
