@@ -180,7 +180,12 @@ impl<S: Storage + TransactionalStorage> PackageExportHandler<S> {
                 exported_at: chrono::Utc::now().to_rfc3339(),
             };
 
-            return Ok(Some(serde_json::to_value(result).unwrap_or_default()));
+            let mut value = serde_json::to_value(result).unwrap_or_default();
+            raisin_core::services::package_export_access::stamp_result_repo(
+                &mut value,
+                &context.repo_id,
+            );
+            return Ok(Some(value));
         }
 
         // No existing resource - need to rebuild from installed content
@@ -229,7 +234,12 @@ impl<S: Storage + TransactionalStorage> PackageExportHandler<S> {
             "Package export completed"
         );
 
-        Ok(Some(serde_json::to_value(result).unwrap_or_default()))
+        let mut value = serde_json::to_value(result).unwrap_or_default();
+        raisin_core::services::package_export_access::stamp_result_repo(
+            &mut value,
+            &context.repo_id,
+        );
+        Ok(Some(value))
     }
 
     /// Get the resource key from a package node if it exists

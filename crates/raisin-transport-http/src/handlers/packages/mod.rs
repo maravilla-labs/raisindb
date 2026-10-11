@@ -39,6 +39,25 @@ pub use upload::extract_manifest;
 #[allow(deprecated)]
 pub use upload::upload_package;
 
+/// Refuse the request unless the caller may build or download a package
+/// export (401 without a usable credential, 403 for a signed-in non-admin).
+///
+/// The decision lives in `raisin_core::services::package_export_access`; every
+/// export entry point (create-from-selection, `raisin:export`,
+/// `raisin:download`) asks it BEFORE touching the job system or storage.
+pub(crate) fn require_export_access(auth: Option<&AuthContext>) -> Result<(), ApiError> {
+    use raisin_core::services::package_export_access::{authorize_package_export, ExportRefusal};
+    authorize_package_export(auth).map_err(|refusal| {
+        let (status, code) = match refusal {
+            ExportRefusal::Unauthenticated => {
+                (axum::http::StatusCode::UNAUTHORIZED, "UNAUTHORIZED")
+            }
+            ExportRefusal::Forbidden => (axum::http::StatusCode::FORBIDDEN, "FORBIDDEN"),
+        };
+        ApiError::new(status, code, refusal.to_string())
+    })
+}
+
 /// List all packages in the packages workspace.
 ///
 /// GET /api/repos/{repo}/packages

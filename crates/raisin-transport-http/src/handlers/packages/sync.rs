@@ -133,9 +133,18 @@ pub async fn create_package_from_selection(
     State(state): State<AppState>,
     Path((repo, branch)): Path<(String, String)>,
     Extension(tenant_info): Extension<TenantInfo>,
-    _auth: Option<Extension<AuthContext>>,
+    auth: Option<Extension<AuthContext>>,
     Json(request): Json<CreateFromSelectionRequest>,
 ) -> Result<Json<CreateFromSelectionResponse>, ApiError> {
+    // E3: refuse before validating anything, so an unauthorised caller learns
+    // nothing about the request shape or the repository.
+    let auth_context = auth.map(|Extension(ctx)| ctx);
+    super::require_export_access(auth_context.as_ref())?;
+    // Only reachable with a context: the gate refuses `None`.
+    let Some(requester) = auth_context else {
+        return Err(ApiError::unauthorized("package exports require signing in"));
+    };
+
     let tenant_id = tenant_info.tenant_id.as_str();
     let workspace = "packages";
 
@@ -198,6 +207,10 @@ pub async fn create_package_from_selection(
         if let Some(author) = &request.author {
             metadata.insert("author".to_string(), serde_json::json!(author));
         }
+        // The job reads the selection AS the requester (row-level security),
+        // and refuses to run at all without one.
+        metadata
+            .extend(raisin_core::services::package_export_access::requester_metadata(&requester));
 
         let job_context = raisin_storage::jobs::JobContext {
             tenant_id: tenant_id.to_string(),
@@ -252,6 +265,7 @@ pub async fn create_package_from_selection(
 
     #[cfg(not(feature = "storage-rocksdb"))]
     {
+        let _ = (requester, selected_count, tenant_id, workspace);
         Err(ApiError::storage_error(
             "Package creation requires RocksDB backend with job system",
         ))

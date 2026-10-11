@@ -4,6 +4,7 @@ use super::manifest_types::PackageManifest;
 use super::types::{CollectedNode, PackageCreateFromSelectionResult, SelectedPath};
 use super::PackageCreateFromSelectionHandler;
 use raisin_core::package_registration;
+use raisin_core::services::package_export_access;
 use raisin_error::{Error, Result};
 use raisin_models::nodes::properties::value::PropertyValue;
 use raisin_packages::Manifest;
@@ -59,6 +60,18 @@ impl PackageCreateFromSelectionHandler {
             ));
         }
 
+        // E3: the selection is read AS THE REQUESTER. The HTTP layer records
+        // who asked (and only admits exporters); a job without that record is
+        // refused rather than run with the storage layer's unrestricted reads.
+        let requester = package_export_access::requester_from_metadata(&context.metadata)
+            .ok_or_else(|| {
+                Error::Forbidden(
+                    "Package export job carries no requester identity; refusing to read \
+                     content without one"
+                        .to_string(),
+                )
+            })?;
+
         // Require binary storage callback
         let binary_store = self.binary_store_callback.as_ref().ok_or_else(|| {
             Error::Validation("Binary storage callback not configured".to_string())
@@ -101,6 +114,28 @@ impl PackageCreateFromSelectionHandler {
                 )
                 .await?;
 
+            let total = nodes.len();
+            let nodes: Vec<_> = nodes
+                .into_iter()
+                .filter_map(|node| {
+                    package_export_access::readable_by_requester(
+                        node,
+                        &requester,
+                        &selected.workspace,
+                        branch,
+                    )
+                })
+                .collect();
+            if nodes.len() < total {
+                tracing::info!(
+                    job_id = %job.id,
+                    workspace = %selected.workspace,
+                    path = %selected.path,
+                    excluded = total - nodes.len(),
+                    "Package selection: nodes the requester may not read were left out"
+                );
+            }
+
             for node in nodes {
                 if !node.node_type.is_empty() {
                     node_types_used.insert(node.node_type.clone());
@@ -140,6 +175,14 @@ impl PackageCreateFromSelectionHandler {
                     )
                     .await
                 {
+                    let Some(node) = package_export_access::readable_by_requester(
+                        node,
+                        &requester,
+                        "nodetypes",
+                        branch,
+                    ) else {
+                        continue;
+                    };
                     node_type_defs.push(CollectedNode {
                         workspace: "nodetypes".to_string(),
                         node,
@@ -218,7 +261,10 @@ impl PackageCreateFromSelectionHandler {
             "Package creation completed"
         );
 
-        Ok(Some(serde_json::to_value(result).unwrap_or_default()))
+        // The download scopes by repository after the job context is gone.
+        let mut value = serde_json::to_value(result).unwrap_or_default();
+        package_export_access::stamp_result_repo(&mut value, &context.repo_id);
+        Ok(Some(value))
     }
 
     /// Create or update the package node in the packages workspace

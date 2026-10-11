@@ -143,6 +143,7 @@ pub async fn handle_package_command(
             }
             super::export::download_exported_package_impl(
                 &state,
+                tenant_id,
                 &repo,
                 &branch,
                 &package_path,

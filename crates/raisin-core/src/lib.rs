@@ -68,6 +68,7 @@ pub mod services {
     pub mod node_service;
     pub mod node_type_resolver;
     pub mod node_validation;
+    pub mod package_export_access;
     pub mod permission_cache;
     pub mod permission_cache_registry;
     pub mod permission_service;
