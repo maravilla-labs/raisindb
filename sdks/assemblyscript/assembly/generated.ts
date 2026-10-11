@@ -637,18 +637,28 @@ export namespace ocr {
 
 export namespace packages {
   /** `raisin.packages.cancel` — registry method `packages_cancel`. Returns raw JSON. */
-  export function cancel(request: string): string {
-    return call("packages_cancel", argsOf([request]));
+  export function cancel(jobId: string): string {
+    return call("packages_cancel", argsOf([jsonString(jobId)]));
   }
 
-  /** `raisin.packages.createFromSelection` — registry method `packages_create_from_selection`. Returns raw JSON. */
+  /** `raisin.packages.capabilities` — registry method `packages_capabilities`. Returns raw JSON. */
+  export function capabilities(): string {
+    return call("packages_capabilities", "[]");
+  }
+
+  /** `raisin.packages.createFromSelection` — registry method `packages_createFromSelection`. Returns raw JSON. */
   export function createFromSelection(request: string): string {
-    return call("packages_create_from_selection", argsOf([request]));
+    return call("packages_createFromSelection", argsOf([request]));
+  }
+
+  /** `raisin.packages.deleteArtifacts` — registry method `packages_deleteArtifacts`. Returns raw JSON. */
+  export function deleteArtifacts(record: string): string {
+    return call("packages_deleteArtifacts", argsOf([record]));
   }
 
   /** `raisin.packages.status` — registry method `packages_status`. Returns raw JSON. */
-  export function status(request: string): string {
-    return call("packages_status", argsOf([request]));
+  export function status(jobId: string): string {
+    return call("packages_status", argsOf([jsonString(jobId)]));
   }
 
 }
@@ -688,6 +698,11 @@ export namespace resources {
   /** `raisin.resources.getBinary` — registry method `resources_getBinary`. Returns raw JSON. */
   export function getBinary(storageKey: string): string {
     return call("resources_getBinary", argsOf([jsonString(storageKey)]));
+  }
+
+  /** `raisin.resources.readRange` — registry method `resources_readRange`. Returns raw JSON. */
+  export function readRange(storageKey: string, offset: i64, len: i64): string {
+    return call("resources_readRange", argsOf([jsonString(storageKey), offset.toString(), len.toString()]));
   }
 
 }

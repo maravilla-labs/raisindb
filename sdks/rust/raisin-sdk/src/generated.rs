@@ -2186,28 +2186,41 @@ pub mod ocr {
 
 pub mod packages {
     /// `raisin.packages.cancel` — registry method `packages_cancel`.
-    pub fn cancel(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
-        let args = ::serde_json::Value::Array(vec![::serde_json::to_value(request)?]).to_string();
+    pub fn cancel(job_id: &str) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![::serde_json::to_value(job_id)?]).to_string();
         let raw = crate::host::call("packages_cancel", &args)?;
         crate::wire::decode_json(&raw)
     }
 
     /// Typed form of `cancel`. `T` is inferred from the binding site
     /// (turbofish is unavailable when the method takes a JSON argument).
-    pub fn cancel_as<T: ::serde::de::DeserializeOwned>(
-        request: impl ::serde::Serialize,
-    ) -> crate::Result<T> {
-        let args = ::serde_json::Value::Array(vec![::serde_json::to_value(request)?]).to_string();
+    pub fn cancel_as<T: ::serde::de::DeserializeOwned>(job_id: &str) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![::serde_json::to_value(job_id)?]).to_string();
         let raw = crate::host::call("packages_cancel", &args)?;
         crate::wire::decode_json_as(&raw)
     }
 
-    /// `raisin.packages.createFromSelection` — registry method `packages_create_from_selection`.
+    /// `raisin.packages.capabilities` — registry method `packages_capabilities`.
+    pub fn capabilities() -> crate::Result<::serde_json::Value> {
+        let args = "[]".to_string();
+        let raw = crate::host::call("packages_capabilities", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `capabilities`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn capabilities_as<T: ::serde::de::DeserializeOwned>() -> crate::Result<T> {
+        let args = "[]".to_string();
+        let raw = crate::host::call("packages_capabilities", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+    /// `raisin.packages.createFromSelection` — registry method `packages_createFromSelection`.
     pub fn create_from_selection(
         request: impl ::serde::Serialize,
     ) -> crate::Result<::serde_json::Value> {
         let args = ::serde_json::Value::Array(vec![::serde_json::to_value(request)?]).to_string();
-        let raw = crate::host::call("packages_create_from_selection", &args)?;
+        let raw = crate::host::call("packages_createFromSelection", &args)?;
         crate::wire::decode_json(&raw)
     }
 
@@ -2217,23 +2230,38 @@ pub mod packages {
         request: impl ::serde::Serialize,
     ) -> crate::Result<T> {
         let args = ::serde_json::Value::Array(vec![::serde_json::to_value(request)?]).to_string();
-        let raw = crate::host::call("packages_create_from_selection", &args)?;
+        let raw = crate::host::call("packages_createFromSelection", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
+    /// `raisin.packages.deleteArtifacts` — registry method `packages_deleteArtifacts`.
+    pub fn delete_artifacts(record: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![::serde_json::to_value(record)?]).to_string();
+        let raw = crate::host::call("packages_deleteArtifacts", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `delete_artifacts`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn delete_artifacts_as<T: ::serde::de::DeserializeOwned>(
+        record: impl ::serde::Serialize,
+    ) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![::serde_json::to_value(record)?]).to_string();
+        let raw = crate::host::call("packages_deleteArtifacts", &args)?;
         crate::wire::decode_json_as(&raw)
     }
 
     /// `raisin.packages.status` — registry method `packages_status`.
-    pub fn status(request: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
-        let args = ::serde_json::Value::Array(vec![::serde_json::to_value(request)?]).to_string();
+    pub fn status(job_id: &str) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![::serde_json::to_value(job_id)?]).to_string();
         let raw = crate::host::call("packages_status", &args)?;
         crate::wire::decode_json(&raw)
     }
 
     /// Typed form of `status`. `T` is inferred from the binding site
     /// (turbofish is unavailable when the method takes a JSON argument).
-    pub fn status_as<T: ::serde::de::DeserializeOwned>(
-        request: impl ::serde::Serialize,
-    ) -> crate::Result<T> {
-        let args = ::serde_json::Value::Array(vec![::serde_json::to_value(request)?]).to_string();
+    pub fn status_as<T: ::serde::de::DeserializeOwned>(job_id: &str) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![::serde_json::to_value(job_id)?]).to_string();
         let raw = crate::host::call("packages_status", &args)?;
         crate::wire::decode_json_as(&raw)
     }
@@ -2364,6 +2392,39 @@ pub mod resources {
             ::serde_json::Value::Array(vec![::serde_json::to_value(storage_key)?]).to_string();
         let raw = crate::host::call("resources_getBinary", &args)?;
         crate::wire::decode_string(&raw)
+    }
+
+    /// `raisin.resources.readRange` — registry method `resources_readRange`.
+    pub fn read_range(
+        storage_key: &str,
+        offset: i64,
+        len: i64,
+    ) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(storage_key)?,
+            ::serde_json::to_value(offset)?,
+            ::serde_json::to_value(len)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("resources_readRange", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `read_range`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn read_range_as<T: ::serde::de::DeserializeOwned>(
+        storage_key: &str,
+        offset: i64,
+        len: i64,
+    ) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(storage_key)?,
+            ::serde_json::to_value(offset)?,
+            ::serde_json::to_value(len)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("resources_readRange", &args)?;
+        crate::wire::decode_json_as(&raw)
     }
 }
 

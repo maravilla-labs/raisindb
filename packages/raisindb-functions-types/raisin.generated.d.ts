@@ -179,9 +179,11 @@ declare namespace raisin {
   }
 
   namespace packages {
-    function cancel(request: any): Promise<any>;
+    function cancel(jobId: string): Promise<any>;
+    function capabilities(): Promise<any>;
     function createFromSelection(request: any): Promise<any>;
-    function status(request: any): Promise<any>;
+    function deleteArtifacts(record: any): Promise<any>;
+    function status(jobId: string): Promise<any>;
   }
 
   namespace pdf {
@@ -197,6 +199,7 @@ declare namespace raisin {
 
   namespace resources {
     function getBinary(storageKey: string): Promise<string>;
+    function readRange(storageKey: string, offset: number, len: number): Promise<any>;
   }
 
   namespace scheduler {

@@ -762,6 +762,25 @@ async fn an_installed_package_name_is_refused() {
     assert!(err.to_string().contains("name_invalid"), "{err}");
 }
 
+/// Studio's request shape, as its dispatcher sends it.
+fn studio_request(key: &str) -> serde_json::Value {
+    serde_json::json!({
+        "package_name": "export-site",
+        "version": "1.0.2",
+        "title": "Site",
+        "workspace_selections": [
+            {"workspace": "content", "selected_paths": ["/site/*"]},
+            {"workspace": "assets", "selected_paths": ["/*"]}
+        ],
+        "include_node_types": false,
+        "options": {"translations": true},
+        "record": {"workspace": "settings", "path": RECORD},
+        "register_package": false,
+        "idempotency_key": key,
+        "requested_by": "someone-else-entirely"
+    })
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_function_binding_submits_reads_and_cancels() {
     let f = fixture(10, 16).await;
@@ -771,69 +790,135 @@ async fn the_function_binding_submits_reads_and_cancels() {
         repo: R,
         branch: B,
     };
-    let req = serde_json::to_value(request("k6")).unwrap();
-    let out = crate::package_build::call(scope(), &requester(), "createFromSelection", req.clone())
+    let sys = AuthContext::system();
+    let caps = crate::package_build::call(scope(), &sys, "capabilities", serde_json::Value::Null)
         .await
         .unwrap();
+    assert_eq!(caps["streaming_build"], true);
+    assert_eq!(caps["excluded_paths"], false);
+
+    let out =
+        crate::package_build::call(scope(), &sys, "createFromSelection", studio_request("k6"))
+            .await
+            .unwrap();
     let job_id = out["job_id"].as_str().unwrap().to_string();
     assert_eq!(out["existing"], false);
     // Same key, same job (E13).
-    let again = crate::package_build::call(scope(), &requester(), "createFromSelection", req)
-        .await
-        .unwrap();
+    let again =
+        crate::package_build::call(scope(), &sys, "createFromSelection", studio_request("k6"))
+            .await
+            .unwrap();
     assert_eq!(again["job_id"], job_id.as_str());
     assert_eq!(again["existing"], true);
+    // excluded_paths is not a capability yet.
+    let mut excl = studio_request("k6x");
+    excl["workspace_selections"][0]["excluded_paths"] = serde_json::json!(["/site/s1"]);
+    assert!(
+        crate::package_build::call(scope(), &sys, "createFromSelection", excl)
+            .await
+            .is_err()
+    );
 
-    let status = crate::package_build::call(
-        scope(),
-        &requester(),
-        "status",
-        serde_json::json!({ "jobId": job_id }),
-    )
-    .await
-    .unwrap();
+    let status = crate::package_build::call(scope(), &sys, "status", serde_json::json!(job_id))
+        .await
+        .unwrap();
     assert_eq!(status["status"], "scheduled");
 
-    // Never started: cancel takes the hard path and the job ends cancelled.
-    let cancelled = crate::package_build::call(
+    // Run it, then read an artifact back through readRange, ledger-scoped.
+    run(&f, &handler(&f, None), &job_id).await.unwrap();
+    let rec = record(&f).await;
+    let (manifest_key, _) = resource_key(&rec, "manifest");
+    let got = crate::package_build::call(
         scope(),
-        &requester(),
-        "cancel",
-        serde_json::json!({ "jobId": job_id }),
+        &sys,
+        "readRange",
+        serde_json::json!({"storage_key": manifest_key, "offset": 0, "len": 1 << 30}),
     )
     .await
     .unwrap();
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(got["base64"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(bytes, f.blobs.get(&manifest_key).await.unwrap().to_vec());
+    assert_eq!(got["eof"], true);
+    // A key the ledger does not know — an ordinary asset — is not readable.
+    assert!(crate::package_build::call(
+        scope(),
+        &sys,
+        "readRange",
+        serde_json::json!({"storage_key": f.seeded_blobs[0], "offset": 0, "len": 10}),
+    )
+    .await
+    .is_err());
+    // Nor is this repository's artifact from another repository.
+    let other = crate::package_build::CallScope {
+        tenant: T,
+        repo: "other-repo",
+        branch: B,
+    };
+    assert!(crate::package_build::call(
+        other,
+        &sys,
+        "readRange",
+        serde_json::json!({"storage_key": manifest_key, "offset": 0, "len": 10}),
+    )
+    .await
+    .is_err());
+
+    // deleteArtifacts takes the state node and deletes its ledger artifacts.
+    let deleted = crate::package_build::call(
+        scope(),
+        &sys,
+        "deleteArtifacts",
+        serde_json::json!({"workspace": "settings", "path": RECORD}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(deleted["deleted"], 4);
+    assert!(leftover_blobs(&f).await.is_empty());
+    assert!(crate::package_build::call(
+        scope(),
+        &sys,
+        "deleteArtifacts",
+        serde_json::json!({"workspace": "content", "path": "/site"}),
+    )
+    .await
+    .is_err());
+
+    // Cancel by bare job id; unknown job, unknown method, anonymous caller.
+    let second =
+        crate::package_build::call(scope(), &sys, "createFromSelection", studio_request("k6b"))
+            .await
+            .unwrap();
+    let second_id = second["job_id"].as_str().unwrap().to_string();
+    let cancelled =
+        crate::package_build::call(scope(), &sys, "cancel", serde_json::json!(second_id))
+            .await
+            .unwrap();
     assert_eq!(cancelled["cancelled"], true);
     assert_eq!(
         f.storage
             .job_registry()
-            .get_status(&JobId(job_id.clone()))
+            .get_status(&JobId(second_id.clone()))
             .await
             .unwrap(),
         JobStatus::Cancelled
     );
-
-    // Unknown job, unknown method, anonymous caller.
-    let unknown = crate::package_build::call(
-        scope(),
-        &requester(),
-        "status",
-        serde_json::json!({ "jobId": "nope" }),
-    )
-    .await
-    .unwrap();
+    let unknown = crate::package_build::call(scope(), &sys, "status", serde_json::json!("nope"))
+        .await
+        .unwrap();
     assert!(unknown.is_null());
     assert!(
-        crate::package_build::call(scope(), &requester(), "explode", serde_json::json!({}))
+        crate::package_build::call(scope(), &sys, "explode", serde_json::json!({}))
             .await
             .is_err()
     );
-    let anon = AuthContext::anonymous();
     assert!(crate::package_build::call(
         scope(),
-        &anon,
+        &AuthContext::anonymous(),
         "status",
-        serde_json::json!({ "jobId": job_id })
+        serde_json::json!(second_id)
     )
     .await
     .is_err());
@@ -1430,4 +1515,83 @@ async fn a_binding_build_runs_as_the_person_who_requested_it_and_nobody_else() {
     )
     .await
     .is_err());
+}
+
+struct Capture(std::sync::Mutex<Vec<raisin_events::NodeEvent>>);
+
+impl raisin_events::EventHandler for Capture {
+    fn handle<'a>(
+        &'a self,
+        event: &'a raisin_events::Event,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>> {
+        if let raisin_events::Event::Node(e) = event {
+            self.0.lock().unwrap().push(e.clone());
+        }
+        Box::pin(async { Ok(()) })
+    }
+    fn name(&self) -> &str {
+        "capture"
+    }
+}
+
+/// The finalize trigger listens for the terminal write on the state node:
+/// it must be an ordinary (non-bookkeeping) local write, the only kind the
+/// trigger evaluator does not skip, while progress writes stay bookkeeping.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_the_terminal_record_write_reaches_trigger_evaluation() {
+    use raisin_events::EventBus as _;
+    let f = fixture(3, 16).await;
+    let capture = Arc::new(Capture(std::sync::Mutex::new(Vec::new())));
+    f.storage.event_bus().subscribe(capture.clone());
+    let record_id = f
+        .storage
+        .nodes()
+        .get_by_path(StorageScope::new(T, R, B, "settings"), RECORD, None)
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+
+    let submitted = submit_package_build(&f.storage, T, R, B, &request("t1"), &requester())
+        .await
+        .unwrap();
+    run(&f, &handler(&f, None), &submitted.job_id)
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let events: Vec<_> = capture
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| e.node_id == record_id)
+        .cloned()
+        .collect();
+    assert!(
+        events.len() >= 2,
+        "progress and terminal writes emit events"
+    );
+    let triggering: Vec<_> = events
+        .iter()
+        .filter(|e| !crate::jobs::UnifiedJobEventHandler::is_bookkeeping_event(e))
+        .collect();
+    assert_eq!(
+        triggering.len(),
+        1,
+        "exactly the terminal write reaches triggers"
+    );
+    let terminal = triggering[0];
+    assert!(matches!(
+        terminal.kind,
+        raisin_events::NodeEventKind::Updated
+    ));
+    let meta = terminal.metadata.as_ref().unwrap();
+    assert_eq!(meta.get("source").and_then(|v| v.as_str()), Some("local"));
+    assert_eq!(
+        meta.get("actor").and_then(|v| v.as_str()),
+        Some("package-build")
+    );
+    let data = meta.get("node_data").unwrap();
+    assert_eq!(data["properties"]["status"], "completed");
 }

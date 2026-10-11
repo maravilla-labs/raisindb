@@ -772,14 +772,18 @@ globalThis.raisin = {
             usage: (request) => check(__call('agent_runs_usage', [request || {}])),
         };
     })(),
-    // Streaming package builds in this repository, as this function's caller
-    // (an administrator, or the server itself for a trigger).
-    // createFromSelection({ name, version?, selected_paths: [{ workspace, path }],
-    //   include_node_types?, record?: { workspace, path }, register_package?,
-    //   idempotency_key?, title?, description?, author?, branch? })
-    //   -> { job_id, existing, status: "scheduled" }
-    // cancel({ jobId }) -> { job_id, cancelled }   (stops within seconds, no partial object)
-    // status({ jobId }) -> { job_id, status, progress, error, result } | null
+    // Streaming package builds in this repository. createFromSelection's
+    // actor is the person who created the record's request node, never this
+    // function. Registry names are the contract (packages_*).
+    // capabilities() -> { streaming_build, record_mirror, sidecars, ranged_download,
+    //   cancel, idempotency, excluded_paths, version }
+    // createFromSelection({ package_name, version, workspace_selections: [{ workspace,
+    //   selected_paths }], include_node_types, record: { workspace, path },
+    //   register_package, idempotency_key, title?, description?, author? })
+    //   -> { job_id, existing }
+    // cancel(jobId) -> { job_id, cancelled }; status(jobId) -> {...} | null
+    // deleteArtifacts({ workspace, path }) -> { deleted }
+    // readRange(storageKey, offset, len) -> { base64, bytes, offset, size, eof }
     packages: (() => {
         const check = (r) => {
             if (r && r.error) {
@@ -788,9 +792,12 @@ globalThis.raisin = {
             return r;
         };
         return {
-            createFromSelection: (request) => check(__call('packages_create_from_selection', [request || {}])),
-            cancel: (request) => check(__call('packages_cancel', [request || {}])),
-            status: (request) => check(__call('packages_status', [request || {}])),
+            capabilities: () => check(__call('packages_capabilities', [])),
+            createFromSelection: (request) => check(__call('packages_createFromSelection', [request || {}])),
+            cancel: (jobId) => check(__call('packages_cancel', [jobId])),
+            status: (jobId) => check(__call('packages_status', [jobId])),
+            deleteArtifacts: (record) => check(__call('packages_deleteArtifacts', [record || {}])),
+            readRange: (storageKey, offset, len) => check(__call('resources_readRange', [storageKey, offset || 0, len || 0])),
         };
     })(),
     scheduler: {

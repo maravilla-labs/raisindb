@@ -665,18 +665,28 @@ type PackagesAPI struct{}
 var Packages PackagesAPI
 
 // Cancel calls the RaisinDB registry method "packages_cancel".
-func (PackagesAPI) Cancel(request any) (json.RawMessage, error) {
-	return callJSON("packages_cancel", []any{request})
+func (PackagesAPI) Cancel(jobId string) (json.RawMessage, error) {
+	return callJSON("packages_cancel", []any{jobId})
 }
 
-// CreateFromSelection calls the RaisinDB registry method "packages_create_from_selection".
+// Capabilities calls the RaisinDB registry method "packages_capabilities".
+func (PackagesAPI) Capabilities() (json.RawMessage, error) {
+	return callJSON("packages_capabilities", nil)
+}
+
+// CreateFromSelection calls the RaisinDB registry method "packages_createFromSelection".
 func (PackagesAPI) CreateFromSelection(request any) (json.RawMessage, error) {
-	return callJSON("packages_create_from_selection", []any{request})
+	return callJSON("packages_createFromSelection", []any{request})
+}
+
+// DeleteArtifacts calls the RaisinDB registry method "packages_deleteArtifacts".
+func (PackagesAPI) DeleteArtifacts(record any) (json.RawMessage, error) {
+	return callJSON("packages_deleteArtifacts", []any{record})
 }
 
 // Status calls the RaisinDB registry method "packages_status".
-func (PackagesAPI) Status(request any) (json.RawMessage, error) {
-	return callJSON("packages_status", []any{request})
+func (PackagesAPI) Status(jobId string) (json.RawMessage, error) {
+	return callJSON("packages_status", []any{jobId})
 }
 
 // PdfAPI is the `raisin.pdf` namespace.
@@ -725,6 +735,11 @@ var Resources ResourcesAPI
 // GetBinary calls the RaisinDB registry method "resources_getBinary".
 func (ResourcesAPI) GetBinary(storageKey string) (string, error) {
 	return callString("resources_getBinary", []any{storageKey})
+}
+
+// ReadRange calls the RaisinDB registry method "resources_readRange".
+func (ResourcesAPI) ReadRange(storageKey string, offset int64, len_ int64) (json.RawMessage, error) {
+	return callJSON("resources_readRange", []any{storageKey, offset, len_})
 }
 
 // SchedulerAPI is the `raisin.scheduler` namespace.

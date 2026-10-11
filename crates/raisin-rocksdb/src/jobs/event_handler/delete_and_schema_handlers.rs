@@ -356,7 +356,7 @@ impl UnifiedJobEventHandler {
     /// hour were that no-op, and every one still rewrote its rows.
     ///
     /// Content writes never carry the marker, so a real edit is unaffected.
-    pub(super) fn is_bookkeeping_event(node_event: &NodeEvent) -> bool {
+    pub(crate) fn is_bookkeeping_event(node_event: &NodeEvent) -> bool {
         node_event
             .metadata
             .as_ref()
