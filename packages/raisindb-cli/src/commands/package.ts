@@ -79,6 +79,10 @@ export const DEFAULT_IGNORE_PATTERNS = [
   'target',
   'target/**',
 
+  // Local CLI bookkeeping: `raisindb pull` baselines (.raisindb/pull-state.json).
+  '.raisindb',
+  '.raisindb/**',
+
   // Environment files feeding {env:...} substitution. Their VALUES are baked
   // into the YAML at pack time; the files themselves must never ship.
   '.env',

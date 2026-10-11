@@ -154,6 +154,13 @@ packageCmd
   .option('--init', 'Initialize sync configuration')
   .option('-e, --env <profile>', 'Env profile for {env:...} tokens (loads .env.<profile>)')
   .option('--env-file <path...>', 'Additional env file(s) for {env:...} tokens')
+  .option('--path <ws:/path...>', 'Pull: roots to pull instead of what the package contains (ws:/ = whole workspace)')
+  .option('--include-owned', 'Pull: also pull paths .raisin-sync.yaml marks mode: replace (package-owned)')
+  .option('--delete', 'Pull: delete local files whose node is gone from the server')
+  .option('--diff', 'Pull: show a diff for every updated or conflicting file')
+  .option('--no-translations', 'Pull: skip translation overlays')
+  .option('--allow-empty', 'Pull: accept a server that returns no nodes (normally a credentials problem)')
+  .option('-v, --verbose', 'List every file instead of the first 40 per category')
   .action(async (directory, options) => {
     try {
       await syncPackage(directory || process.cwd(), options);
@@ -416,9 +423,42 @@ program
   .option('--init', 'Initialize sync configuration')
   .option('-e, --env <profile>', 'Env profile for {env:...} tokens (loads .env.<profile>)')
   .option('--env-file <path...>', 'Additional env file(s) for {env:...} tokens')
+  .option('--path <ws:/path...>', 'Pull: roots to pull instead of what the package contains (ws:/ = whole workspace)')
+  .option('--include-owned', 'Pull: also pull paths .raisin-sync.yaml marks mode: replace (package-owned)')
+  .option('--delete', 'Pull: delete local files whose node is gone from the server')
+  .option('--diff', 'Pull: show a diff for every updated or conflicting file')
+  .option('--no-translations', 'Pull: skip translation overlays')
+  .option('--allow-empty', 'Pull: accept a server that returns no nodes (normally a credentials problem)')
+  .option('-v, --verbose', 'List every file instead of the first 40 per category')
   .action(async (directory, options) => {
     try {
       await syncPackage(directory || process.cwd(), options);
+      process.exit(0);
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : String(error));
+      process.exit(1);
+    }
+  });
+
+program
+  .command('pull [directory]')
+  .description('Fetch the latest content from a server into a package folder (same as "sync --pull")')
+  .option('-s, --server <url>', 'Server to pull from (overrides .raisindb-cli.yaml)')
+  .option('-r, --repo <name>', 'Repository')
+  .option('-b, --branch <name>', 'Branch (default: "main")')
+  .option('--path <ws:/path...>', 'Roots to pull instead of what the package contains (ws:/ = whole workspace)')
+  .option('-n, --dry-run', 'Report exactly what would change, write nothing')
+  .option('-f, --force', 'Take the server version for every conflict (and restore files deleted locally)')
+  .option('-y, --yes', 'Never prompt (conflicts are kept local and reported)')
+  .option('--include-owned', 'Also pull paths .raisin-sync.yaml marks mode: replace (package-owned)')
+  .option('--delete', 'Delete local files whose node is gone from the server')
+  .option('--diff', 'Show a diff for every updated or conflicting file')
+  .option('--no-translations', 'Skip translation overlays')
+  .option('--allow-empty', 'Accept a server that returns no nodes (normally a credentials problem)')
+  .option('-v, --verbose', 'List every file instead of the first 40 per category')
+  .action(async (directory, options) => {
+    try {
+      await syncPackage(directory || process.cwd(), { ...options, pull: true });
       process.exit(0);
     } catch (error) {
       console.error('Error:', error instanceof Error ? error.message : String(error));

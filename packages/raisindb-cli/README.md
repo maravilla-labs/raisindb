@@ -80,6 +80,65 @@ or pushed. A token with no value and no inline default fails the command
 instead of shipping a literal. The same substitution applies to
 `package validate`, `deploy`, `sync --push/--watch`, and `.raisin-sync.yaml`.
 
+### Pulling content from a server
+
+`raisindb pull` (the same as `raisindb sync --pull`) brings a package folder up
+to date with what a server holds: pages, records, assets and translations that
+editors changed on the live site land as the package files `deploy` installs.
+
+```bash
+raisindb pull ./package --repo website --dry-run       # what would change, nothing written
+raisindb pull ./package --repo website                 # apply
+raisindb pull ./package --repo website --diff          # also show a diff per changed file
+raisindb pull ./package --path stories:/my-site        # only this subtree
+raisindb pull ./package --path sponsors:/              # a whole workspace
+```
+
+- **Scope.** By default a pull refreshes what the package contains: the
+  top-most nodes it defines in each `content/<workspace>/` directory and
+  everything below them, at every depth. Top-level server nodes outside that
+  are named, not pulled. `--path ws:/path` (repeatable) or `pull.roots` in
+  `.raisindb-cli.yaml` replaces the default; `pull.exclude` takes the same specs.
+- **Layout.** Nodes become `.node.yaml` (an existing `{name}.yaml` or
+  `SKILL.md` is updated in place), asset bytes are streamed to disk and checked
+  against the server's `content_hash`, translations become `.node.<locale>.yaml`
+  holding only what the locale changes. References are written in path form;
+  `$`/`__` bookkeeping is dropped. Renditions below an asset are skipped.
+- **Your edits survive.** An existing file is updated value by value: comments,
+  formatting and `{env:...}` tokens stay. A token matches any server value and
+  is never replaced.
+- **Who changed it.** `.raisindb/pull-state.json` records what the last pull
+  wrote, so each file is new, updated (the server changed), a local edit (only
+  you changed it; kept) or a conflict (both changed; also the case on a first
+  pull when the files differ). Conflicts follow `conflict_strategy`
+  (`prompt` asks at a terminal, `server`, `local`, `newest`); `--force` takes the
+  server version; `--yes` never prompts. A second pull with nothing new writes
+  nothing.
+- **`.raisin-sync.yaml`.** Paths with `mode: replace` belong to the package (a
+  deploy overwrites them), so the package is their source and pull skips them
+  unless `--include-owned`. `direction: push_only`/`local_only` and `exclude`
+  patterns are never pulled. The ignore list and `.rapignore` apply.
+- **Deletions** are reported ("gone from server") and applied only with
+  `--delete`.
+- **Empty reads.** RaisinDB answers a read without valid credentials with an
+  empty result, not 401. A pull that reads nothing stops with an error instead
+  of reporting success (`--allow-empty` if the server really is empty), and a
+  root that reads empty never marks local files as deleted.
+- Node types, archetypes, element types, workspaces and the manifest are not
+  pulled: the package is their source.
+
+Pulling from another server, e.g. the live one, with its own credentials:
+
+```bash
+RAISINDB_TOKEN=<api key of the live repository> \
+  raisindb pull ./package -s https://live.example.com --repo website --dry-run
+```
+
+`-s` beats `server:` in `.raisindb-cli.yaml`; `RAISINDB_TOKEN` is sent to
+whatever server the command targets. (`RAISINDB_SERVER` does **not** override a
+`.raisindb-cli.yaml`, and a `.raisinrc` is found by searching upward from the
+current directory — pass `-s` to be certain.)
+
 ### Repositories and languages
 
 A repository's default language is set when it is created. Base content is
@@ -209,8 +268,9 @@ Configuration is automatically updated when you use `/connect`, `/login`, or `us
 
 `--server` applies to **every** request the command makes (for `deploy
 --install`: the upload, the job stream, the install, the status polling and the
-workspace reconcile). A login to another server never redirects it. `sync` uses
-the server from `--server`, else `.raisindb-cli.yaml`, else the list above.
+workspace reconcile). A login to another server never redirects it. `sync` and
+`pull` use the server from `--server`, else `.raisindb-cli.yaml`, else the list
+above.
 
 Every command that writes (`deploy`, `package upload`/`install`, `sync`,
 `repo create`/`delete`, `secret`, `cors`, `ai provider set`, `user register`)

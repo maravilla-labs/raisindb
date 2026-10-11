@@ -19,6 +19,15 @@ export interface SyncConfig {
   remote_path: string;
   conflict_strategy: 'prompt' | 'local' | 'server' | 'newest';
   ignore: string[];
+  /**
+   * What `sync --pull` / `raisindb pull` covers. Without it, a pull refreshes
+   * what the package already contains. Specs are `workspace:/path`;
+   * `workspace:/` is the whole workspace.
+   */
+  pull?: {
+    roots?: string[];
+    exclude?: string[];
+  };
   last_sync?: {
     timestamp: string;
     local_hash: string;
@@ -69,6 +78,8 @@ const DEFAULT_CONFIG: Partial<SyncConfig> = {
     '.raisin-sync.yaml',
     'node_modules/',
     '.git/',
+    // Pull baselines (see sync/pull/state.ts) — local bookkeeping, never content.
+    '.raisindb/',
     // Env files feed {env:...} substitution; their values are pushed, they are not.
     '.env',
     '.env.*',

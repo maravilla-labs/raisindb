@@ -7,13 +7,18 @@ import path from 'path';
 import yaml from 'yaml';
 import React from 'react';
 import { render } from 'ink';
+import readline from 'readline';
 import {
   announceWriteTarget,
+  getDefaultRepo,
   getEffectiveServer,
   getServer,
   loadConfig,
   setServerOverride,
 } from '../config.js';
+import { runPull, type ConflictChoice } from '../sync/pull/run.js';
+import { createHttpClient } from '../sync/pull/remote.js';
+import type { PlannedFile } from '../sync/pull/plan.js';
 import { getToken } from '../auth.js';
 import { getServerFilesForWorkspaces } from '../api.js';
 import {
@@ -22,6 +27,7 @@ import {
   saveSyncConfig,
   createSyncConfig,
   findPackageDirectory,
+  shouldIgnore as shouldIgnoreSync,
   updateLastSync,
 } from '../sync/config.js';
 import {
@@ -67,6 +73,16 @@ export interface SyncOptions {
   env?: string;
   /** Extra env files from --env-file, applied after the conventional ones. */
   envFile?: string[];
+  // --- pull ---
+  /** `ws:/path` roots replacing what the package contains */
+  path?: string[];
+  includeOwned?: boolean;
+  delete?: boolean;
+  diff?: boolean;
+  verbose?: boolean;
+  /** false with --no-translations */
+  translations?: boolean;
+  allowEmpty?: boolean;
 }
 
 /**
@@ -103,6 +119,15 @@ export async function syncPackage(
 
   // Load or create sync config
   let config = loadSyncConfig(packageDir, envOptions);
+  if (!config && options.pull && !options.watch) {
+    // A pull needs no saved config: the target comes from the flags, the env,
+    // or the last `raisindb login`, and nothing is written to the package.
+    const repo = options.repo || getDefaultRepo();
+    if (!repo) {
+      throw new Error('No repository: pass --repo <name> (or set default_repo / RAISINDB_REPO).');
+    }
+    config = createSyncConfig(options.server || getEffectiveServer(), repo, '/', options.branch || 'main');
+  }
   if (!config) {
     if (options.repo) {
       // Non-interactive: build an ephemeral config from flags/env. No
@@ -146,7 +171,7 @@ export async function syncPackage(
   } else if (options.push) {
     await runPushOnly(packageDir, config, options, env);
   } else if (options.pull) {
-    await runPullOnly(packageDir, config, options);
+    await runPullOnly(packageDir, config, options, token);
   } else {
     await runBidirectionalSync(packageDir, config, options);
   }
@@ -424,52 +449,71 @@ async function runPushOnly(
 }
 
 /**
- * Run pull-only sync
+ * Run pull-only sync: bring the package folder up to date with the server.
+ * See sync/pull/run.ts for what is pulled and how conflicts are decided.
  */
 async function runPullOnly(
   packageDir: string,
   config: SyncConfig,
-  options: SyncOptions
+  options: SyncOptions,
+  token: string
 ): Promise<void> {
-  console.log('Pulling changes from server...');
+  const server = toHttpUrl(config.server);
+  const client = createHttpClient({
+    server,
+    repo: config.repository,
+    branch: config.branch,
+    token,
+  });
+  const ignored = rapIgnoreFor(packageDir);
+  const prefix = contentPrefix(packageDir);
 
-  // Get local files first to discover workspaces
-  const localFiles = getLocalFilesRespectingRapignore(packageDir, config);
-  console.log(`Found ${localFiles.size} local files`);
+  const interactive = !options.yes && !!process.stdin.isTTY && !!process.stdout.isTTY;
+  const report = await runPull({
+    packageDir,
+    config,
+    client,
+    isIgnored: (rel) => shouldIgnoreSync(config, rel) || ignored(prefix + rel),
+    paths: options.path,
+    includeOwned: options.includeOwned,
+    delete: options.delete,
+    dryRun: options.dryRun,
+    force: options.force,
+    diff: options.diff,
+    verbose: options.verbose,
+    translations: options.translations,
+    allowEmpty: options.allowEmpty,
+    askConflict: interactive ? askConflict : undefined,
+  });
 
-  // Extract unique workspaces from local file paths
-  const workspaces = new Set<string>();
-  for (const filePath of localFiles.keys()) {
-    const workspace = filePath.split('/')[0];
-    if (workspace) {
-      workspaces.add(workspace);
-    }
+  if (report.aborted) throw new Error(report.aborted);
+  if (report.errors.length > 0) {
+    throw new Error(`${report.errors.length} file(s) could not be pulled (listed above).`);
   }
+}
 
-  // Get server files for discovered workspaces
-  const serverFiles = await getServerFilesForWorkspaces(
-    config.repository,
-    Array.from(workspaces),
-    config.branch
-  );
-  console.log(`Found ${serverFiles.size} server files`);
-
-  if (options.dryRun) {
-    console.log('\n[Dry run - no changes made]');
-    console.log('\nFiles available on server:');
-    for (const [filePath, info] of serverFiles) {
-      const localFile = localFiles.get(filePath);
-      if (!localFile) {
-        console.log(`  + ${filePath} (new)`);
-      } else if (localFile.hash !== info.hash) {
-        console.log(`  ~ ${filePath} (modified)`);
-      }
+/** One conflict, asked on the terminal. */
+async function askConflict(
+  file: PlannedFile,
+  showDiff: () => string
+): Promise<ConflictChoice | 'server-all' | 'local-all'> {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const ask = (q: string) => new Promise<string>((resolve) => rl.question(q, resolve));
+  try {
+    for (;;) {
+      const a = (await ask(
+        `\nConflict: ${file.file.rel} changed locally AND on the server.\n` +
+          '  [s] take server  [l] keep local  [d] show diff  [S] server for all  [L] local for all > '
+      )).trim();
+      if (a === 'd') console.log(showDiff());
+      else if (a === 's') return 'server';
+      else if (a === 'l' || a === '') return 'local';
+      else if (a === 'S') return 'server-all';
+      else if (a === 'L') return 'local-all';
     }
-    return;
+  } finally {
+    rl.close();
   }
-
-  // TODO: Implement actual download
-  console.log('\nPull complete!');
 }
 
 /**
