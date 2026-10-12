@@ -41,6 +41,8 @@
 //! Due to dependency structure, the actual binary retrieval is done via a callback
 //! provided by the transport layer which has access to BinaryStorage.
 
+#[cfg(test)]
+mod binary_skip_install_tests;
 mod content_types;
 mod dry_run;
 #[cfg(test)]

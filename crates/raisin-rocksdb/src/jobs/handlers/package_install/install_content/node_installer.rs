@@ -558,6 +558,24 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         // Check if asset already exists
         let existing = tx.get_node_by_path(workspace, &asset_path).await?;
 
+        // A `skip` path never touches an asset that already exists — the same
+        // rule `.node.yaml` entries and translation overlays follow. This used
+        // to share the hash comparison with `sync`, so any asset whose stored
+        // `content_hash` differed from the package's (an editor replaced the
+        // file, or the package shipped a new version) was rebuilt from scratch,
+        // wiping `alt_text`, `description`, `keywords` and every other
+        // property an editor or trigger had set since the first install.
+        if existing.is_some() && leaves_existing_alone(install_mode) {
+            tracing::debug!(
+                job_id = %job_id,
+                workspace = %workspace,
+                path = %asset_path,
+                "Binary asset already exists at path, skipping (skip mode)"
+            );
+            stats.content_nodes_skipped += 1;
+            return Ok(());
+        }
+
         // Hash-based change detection
         let should_update = match (&existing, install_mode) {
             (None, _) => true,                         // New file, always create
