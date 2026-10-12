@@ -10,6 +10,7 @@ import { getToken } from '../auth.js';
 import { ChangeEvent } from './watcher.js';
 import { mapChangeToNode, parseTranslationLocale, type SchemaKind } from './mapping.js';
 import { skillMdToNodeYaml } from './skill-md.js';
+import { PackagePolicy, describePolicy, policyForPath } from './package-policy.js';
 import {
   EnvContext,
   emptyEnvContext,
@@ -59,6 +60,8 @@ export interface SyncResult {
   error?: string;
   /** Verbose error details (URL, cause chain, etc.) */
   details?: string;
+  /** Not pushed because the package's install policy protects the node. */
+  skipped?: boolean;
   timestamp: number;
 }
 
@@ -80,6 +83,66 @@ export interface SyncOperationOptions {
   force?: boolean;
   /** Environment for {env:...} substitution. Defaults to inline defaults only. */
   env?: EnvContext;
+  /** The package's `.raisin-sync.yaml` install policy, if it ships one. */
+  packagePolicy?: PackagePolicy | null;
+  /** Write over existing nodes the package policy marks `skip`. */
+  ignorePackagePolicy?: boolean;
+}
+
+/** Change kinds that write (or delete) a content node. */
+const POLICY_GUARDED_KINDS = new Set([
+  'node-yaml',
+  'node-file',
+  'code',
+  'asset',
+  'asset-metadata',
+  'translation',
+]);
+
+/**
+ * Would pushing (or deleting) this file touch an EXISTING node on a path the
+ * package's install policy marks `skip`? Returns the reason if so.
+ *
+ * Mirrors the server installer: `skip` protects a node only once it exists, so
+ * a file whose node is not on the server yet is created as usual. The
+ * existence probe is a GET; an inconclusive answer (network error, 5xx) counts
+ * as protected — refusing one push is recoverable, a reverted edit is not.
+ */
+export async function packagePolicyBlock(
+  filePath: string,
+  options: SyncOperationOptions
+): Promise<string | null> {
+  const { packagePolicy, ignorePackagePolicy, config } = options;
+  if (!packagePolicy || ignorePackagePolicy) return null;
+
+  const mapped = mapChangeToNode(filePath);
+  if (!POLICY_GUARDED_KINDS.has(mapped.kind)) return null;
+
+  const { url, workspace, nodePath } = buildServerUrl(config, filePath);
+  const policy = policyForPath(packagePolicy, workspace, nodePath);
+  if (policy.mode !== 'skip') return null;
+
+  const reason = `${describePolicy(policy)} — /${workspace}/${nodePath.replace(/^\/+/, '')} exists on the server`;
+  const token = getToken();
+  if (!token) return reason;
+  try {
+    const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    if (response.status === 404) return null;
+    return reason;
+  } catch {
+    return reason;
+  }
+}
+
+function policySkipResult(filePath: string, reason: string): SyncResult {
+  return {
+    success: false,
+    skipped: true,
+    path: filePath,
+    operation: 'push',
+    error: `skipped: ${reason} (use --ignore-package-policy to overwrite)`,
+    timestamp: Date.now(),
+  };
 }
 
 /**
@@ -994,6 +1057,11 @@ export async function pushFile(
       };
     }
 
+    const blocked = await packagePolicyBlock(filePath, options);
+    if (blocked) {
+      return policySkipResult(filePath, blocked);
+    }
+
     // Remaining kinds are content under the content base — it must exist.
     const fullPath = path.join(contentBase, filePath);
     if (!fs.existsSync(fullPath)) {
@@ -1304,6 +1372,12 @@ export async function deleteFromServer(
   const timestamp = Date.now();
 
   try {
+    // A local delete must not remove a node the package hands to editors.
+    const blocked = await packagePolicyBlock(filePath, options);
+    if (blocked) {
+      return policySkipResult(filePath, blocked);
+    }
+
     if (dryRun) {
       return {
         success: true,

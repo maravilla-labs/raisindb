@@ -457,3 +457,86 @@ describe('sync operations and {env:...} tokens', () => {
     });
   });
 });
+
+describe("pushFile and the package's install policy", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'raisindb-sync-policy-'));
+    const full = path.join(tmpDir, 'stories/site/about/.node.yaml');
+    fs.mkdirSync(path.dirname(full), { recursive: true });
+    fs.writeFileSync(full, 'node_type: raisin:Page\nproperties:\n  title: Old\n', 'utf-8');
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  const options = (extra: Record<string, unknown> = {}) => ({
+    packageDir: tmpDir,
+    contentBase: tmpDir,
+    config,
+    packagePolicy: { defaults: { mode: 'skip' as const }, filters: [] },
+    ...extra,
+  });
+
+  it('does not overwrite a node that exists on a skip path', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await pushFile('stories/site/about/.node.yaml', options());
+
+    expect(result.success).toBe(false);
+    expect(result.skipped).toBe(true);
+    expect(result.error).toContain('package policy: skip (default)');
+    // Only the existence probe: no PUT, no POST.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][1]?.method).toBeUndefined();
+  });
+
+  it('creates a node that does not exist yet, as the installer would', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, status: 404 })
+      .mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await pushFile('stories/site/about/.node.yaml', options());
+
+    expect(result.skipped).toBeUndefined();
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it('overwrites when the policy is explicitly ignored', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await pushFile(
+      'stories/site/about/.node.yaml',
+      options({ ignorePackagePolicy: true })
+    );
+
+    expect(result.success).toBe(true);
+    expect(fetchMock.mock.calls[0][1]?.method).toBe('PUT');
+  });
+
+  it('a replace path is pushed without a probe', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await pushFile(
+      'stories/site/about/.node.yaml',
+      options({
+        packagePolicy: {
+          defaults: { mode: 'skip' },
+          filters: [{ root: '/stories/site', mode: 'replace' }],
+        },
+      })
+    );
+
+    expect(result.success).toBe(true);
+    expect(fetchMock.mock.calls[0][1]?.method).toBe('PUT');
+  });
+});

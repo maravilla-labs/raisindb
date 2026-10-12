@@ -147,6 +147,10 @@ packageCmd
   .option('-l, --pull', 'One-way sync: server to local only')
   .option('-y, --yes', 'Skip interactive confirmations')
   .option('-f, --force', 'Overwrite conflicts without prompting')
+  .option(
+    '--ignore-package-policy',
+    "Push files onto existing nodes even where the package's .raisin-sync.yaml says skip"
+  )
   .option('-n, --dry-run', 'Show what would be synced without making changes')
   .option('-r, --repo <name>', 'Target repository')
   .option('-s, --server <url>', 'Server URL')
@@ -416,6 +420,10 @@ program
   .option('-l, --pull', 'One-way sync: server to local only')
   .option('-y, --yes', 'Skip interactive confirmations')
   .option('-f, --force', 'Overwrite conflicts without prompting')
+  .option(
+    '--ignore-package-policy',
+    "Push files onto existing nodes even where the package's .raisin-sync.yaml says skip"
+  )
   .option('-n, --dry-run', 'Show what would be synced without making changes')
   .option('-r, --repo <name>', 'Target repository')
   .option('-s, --server <url>', 'Server URL')

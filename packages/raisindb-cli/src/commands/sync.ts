@@ -53,6 +53,9 @@ import {
   toHttpUrl,
 } from '../sync/operations.js';
 import { EnvContext } from '../env/substitute.js';
+import readlinePromises from 'readline/promises';
+import { hasSkipPaths, loadPackagePolicy } from '../sync/package-policy.js';
+import { packagePolicyBlock } from '../sync/operations.js';
 import { assertEnvFilesExist, loadEnvContext } from '../env/load.js';
 
 /**
@@ -65,6 +68,8 @@ export interface SyncOptions {
   yes?: boolean;
   force?: boolean;
   dryRun?: boolean;
+  /** Push over existing nodes the package's `.raisin-sync.yaml` marks `skip`. */
+  ignorePackagePolicy?: boolean;
   repo?: string;
   server?: string;
   branch?: string;
@@ -405,15 +410,6 @@ async function runPushOnly(
   const localFiles = getLocalFilesRespectingRapignore(packageDir, config);
   console.log(`Found ${localFiles.size} local files`);
 
-  if (options.dryRun) {
-    console.log('\n[Dry run - no changes made]');
-    console.log('\nFiles to push:');
-    for (const [filePath] of localFiles) {
-      console.log(`  + ${filePath}`);
-    }
-    return;
-  }
-
   const contentDir = path.join(packageDir, 'content');
   const contentBase = fs.existsSync(contentDir) && fs.statSync(contentDir).isDirectory()
     ? contentDir
@@ -426,16 +422,48 @@ async function runPushOnly(
     dryRun: false,
     force: options.force,
     env,
+    packagePolicy: loadPackagePolicy(packageDir),
+    ignorePackagePolicy: options.ignorePackagePolicy,
   };
+
+  // Which files would overwrite a node the package hands to editors?
+  const protectedFiles = new Map<string, string>();
+  if (hasSkipPaths(syncOptions.packagePolicy ?? null) && !options.ignorePackagePolicy) {
+    for (const [filePath] of localFiles) {
+      const reason = await packagePolicyBlock(filePath, syncOptions);
+      if (reason) protectedFiles.set(filePath, reason);
+    }
+  }
+
+  if (options.dryRun) {
+    console.log('\n[Dry run - no changes made]');
+    console.log('\nFiles to push:');
+    for (const [filePath] of localFiles) {
+      const reason = protectedFiles.get(filePath);
+      console.log(reason ? `  ~ ${filePath}  (skipped: ${reason})` : `  + ${filePath}`);
+    }
+    return;
+  }
+
+  if (protectedFiles.size > 0) {
+    syncOptions.ignorePackagePolicy = await confirmPolicyOverride(
+      [...protectedFiles].map(([file, reason]) => `${file}  — ${reason}`),
+      `Overwrite ${protectedFiles.size} existing node(s) the package marks skip?`
+    );
+  }
 
   let successCount = 0;
   let failCount = 0;
+  let policySkipCount = 0;
 
   for (const [filePath] of localFiles) {
     const result = await pushFile(filePath, syncOptions);
     if (result.success) {
       successCount++;
       console.log(`  ✓ ${filePath}`);
+    } else if (result.skipped) {
+      policySkipCount++;
+      console.log(`  ~ ${filePath}  (skipped by package policy)`);
     } else {
       failCount++;
       console.error(`  ✗ ${filePath}: ${result.error}`);
@@ -445,7 +473,12 @@ async function runPushOnly(
     }
   }
 
-  console.log(`\nPush complete! ${successCount} succeeded, ${failCount} failed.`);
+  console.log(
+    `\nPush complete! ${successCount} succeeded, ${failCount} failed` +
+      (policySkipCount > 0
+        ? `, ${policySkipCount} skipped by package policy (--ignore-package-policy to overwrite).`
+        : '.')
+  );
 }
 
 /**
@@ -566,6 +599,8 @@ async function runWatchMode(
     dryRun: options.dryRun,
     force: options.force,
     env,
+    packagePolicy: loadPackagePolicy(packageDir),
+    ignorePackagePolicy: options.ignorePackagePolicy,
   };
 
   // Default conflict strategy
@@ -631,14 +666,38 @@ async function runWatchMode(
   // then only changed files are pushed while watching.
   if (!options.dryRun) {
     const localFiles = getLocalFilesRespectingRapignore(packageDir, config);
+
+    // The initial sync pushes EVERY file, so this is where a watch session
+    // would revert every editor change on a `skip` path. Ask once; the answer
+    // holds for the session, so later edits to those files follow it too.
+    if (hasSkipPaths(syncOptions.packagePolicy ?? null) && !options.ignorePackagePolicy) {
+      const protectedFiles: string[] = [];
+      for (const [filePath] of localFiles) {
+        const reason = await packagePolicyBlock(filePath, syncOptions);
+        if (reason) protectedFiles.push(`${filePath}  — ${reason}`);
+      }
+      if (protectedFiles.length > 0) {
+        syncOptions.ignorePackagePolicy = await confirmPolicyOverride(
+          protectedFiles,
+          `Overwrite ${protectedFiles.length} existing node(s) the package marks skip, for this watch session?`
+        );
+      }
+    }
+
     let ok = 0;
     let fail = 0;
+    let policySkipped = 0;
     for (const [filePath] of localFiles) {
       const result = await pushFile(filePath, syncOptions);
       if (result.success) ok++;
+      else if (result.skipped) policySkipped++;
       else fail++;
     }
-    console.log(`Initial sync: ${ok} pushed, ${fail} failed — now watching for changes.`);
+    console.log(
+      `Initial sync: ${ok} pushed, ${fail} failed` +
+        (policySkipped > 0 ? `, ${policySkipped} skipped by package policy` : '') +
+        ' — now watching for changes.'
+    );
   }
 
   // Non-TTY (CI, logs, piped output): plain line output instead of the Ink UI.
@@ -748,5 +807,39 @@ export function resolveConflict(
     case 'skip':
       console.log(`  Skipping: ${conflict.path}`);
       break;
+  }
+}
+
+/**
+ * The package says these nodes belong to editors once they exist; ask before
+ * overwriting them. Headless runs never prompt: without
+ * `--ignore-package-policy` the files are skipped and listed.
+ */
+async function confirmPolicyOverride(lines: string[], question: string): Promise<boolean> {
+  const shown = lines.slice(0, 20);
+  console.warn(
+    "\n⚠ The package's .raisin-sync.yaml marks these paths `skip` " +
+      '(deploy --install would leave them alone):'
+  );
+  for (const line of shown) console.warn(`  ${line}`);
+  if (lines.length > shown.length) {
+    console.warn(`  … and ${lines.length - shown.length} more`);
+  }
+
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    console.warn(
+      'Not interactive: skipping them. Re-run with --ignore-package-policy to overwrite.\n'
+    );
+    return false;
+  }
+
+  const rl = readlinePromises.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = (await rl.question(`${question} [y/N] `)).trim().toLowerCase();
+    const yes = answer === 'y' || answer === 'yes';
+    console.log(yes ? 'Overwriting them.\n' : 'Skipping them.\n');
+    return yes;
+  } finally {
+    rl.close();
   }
 }
