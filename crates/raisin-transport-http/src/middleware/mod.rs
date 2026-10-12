@@ -18,7 +18,7 @@ pub use auth::require_superadmin_token_middleware;
 pub use parsing::raisin_parsing_middleware;
 pub use scoped_tenant::ScopedTenant;
 pub use tenant::ensure_tenant_middleware;
-pub use types::{RaisinContext, TenantInfo};
+pub use types::{OperatorCredential, RaisinContext, TenantInfo};
 
 #[cfg(feature = "storage-rocksdb")]
 pub use admin_gate::admin_gate;

@@ -54,7 +54,6 @@ pub fn capabilities() -> Value {
         "cancel": true,
         "idempotency": true,
         "excluded_paths": false,
-        "version": env!("CARGO_PKG_VERSION"),
     })
 }
 
@@ -122,6 +121,11 @@ pub struct Invoker {
     /// under a `trigger:` agent marker (written by trigger evaluation, which
     /// also built the run's input), and this is the node whose event fired it.
     pub trigger_event: Option<TriggerEvent>,
+    /// The person who INVOKED this execution over HTTP or WebSocket, as the
+    /// server resolved the invoke's credential (`raisin.context.caller`) —
+    /// set when the function itself runs with another identity (e.g. as the
+    /// system). Never read from input; never an API key, agent or anonymous.
+    pub invoking_person: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,7 +157,21 @@ impl Invoker {
         Self {
             auth,
             trigger_event,
+            invoking_person: None,
         }
+    }
+
+    /// Record the server-resolved invoking caller (see `invoking_person`).
+    /// Ignored when the execution carries an agent marker: an agent's tool
+    /// call (or a trigger run) never acts as the person behind it.
+    pub fn with_invoking_person(mut self, person: Option<String>) -> Self {
+        self.invoking_person = person.filter(|p| {
+            self.auth.agent.is_none()
+                && crate::jobs::handlers::package_create_from_selection::scope::looks_like_a_person(
+                    p,
+                )
+        });
+        self
     }
 
     /// The calling person, if the execution runs as one.
@@ -213,8 +231,8 @@ async fn entitled(
         }
         return Err(forbidden());
     }
-    if invoker.person().is_some() {
-        raisin_core::services::package_export_access::authorize_package_export(Some(&invoker.auth))
+    if let Some(person) = person_auth(storage, scope, invoker).await? {
+        raisin_core::services::package_export_access::authorize_package_export(Some(&person))
             .map_err(|_| forbidden())?;
         let state = storage
             .nodes()
@@ -223,7 +241,7 @@ async fn entitled(
             .ok_or_else(forbidden)?;
         if raisin_core::services::package_export_access::readable_by_requester(
             state,
-            &invoker.auth,
+            &person,
             &record.workspace,
             scope.branch,
         )
@@ -233,6 +251,27 @@ async fn entitled(
         }
     }
     Err(forbidden())
+}
+
+/// The person an execution acts for: its own identity when that is a person,
+/// else the server-resolved invoking caller with their permissions in this
+/// repository resolved NOW. `None` for the bare system, agents, API keys and
+/// trigger runs without an invoking person.
+async fn person_auth(
+    storage: &Arc<RocksDBStorage>,
+    scope: &CallScope<'_>,
+    invoker: &Invoker,
+) -> Result<Option<AuthContext>> {
+    if invoker.person().is_some() {
+        return Ok(Some(invoker.auth.clone()));
+    }
+    let Some(person) = invoker.invoking_person.as_deref() else {
+        return Ok(None);
+    };
+    let perms = raisin_core::PermissionService::new(storage.clone())
+        .resolve_for_identity_id(scope.tenant, scope.repo, scope.branch, person)
+        .await?;
+    Ok(perms.map(|p| AuthContext::for_user(person).with_permissions(p)))
 }
 
 /// The record a job was built for: its context (while it runs) or the stamp
@@ -469,10 +508,9 @@ async fn dispatch_entitled(
         }
         return Err(forbidden());
     }
-    if let Some(person) = invoker.person() {
-        if Some(person) == requester.user_id.as_deref() {
-            return Ok(());
-        }
+    let person = invoker.person().or(invoker.invoking_person.as_deref());
+    if person.is_some() && person == requester.user_id.as_deref() {
+        return Ok(());
     }
     Err(forbidden())
 }

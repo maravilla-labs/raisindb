@@ -251,12 +251,7 @@ async fn refusal_comes_before_any_validation() {
 async fn an_admin_build_records_who_asked() {
     let f = fixture("pkg-create-admin").await;
 
-    for req in [
-        admin(create_request()).body(selection_body()).unwrap(),
-        bearer(create_request(), &f.api_key)
-            .body(selection_body())
-            .unwrap(),
-    ] {
+    for req in [admin(create_request()).body(selection_body()).unwrap()] {
         let (status, body) = send(&f.app, req).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         let response: Value = serde_json::from_str(&body).unwrap();
@@ -354,4 +349,133 @@ async fn export_refuses_anonymous_and_non_admin_callers() {
         .body(Body::empty())
         .unwrap();
     assert_eq!(send(&f.app, req).await.0, StatusCode::FORBIDDEN);
+}
+
+// ---- an API key is not an exporter -----------------------------------------
+
+/// API keys resolve to the system context, and every site frontend holds one
+/// for its SSR reads. "System" alone must not export: a leaked site key would
+/// otherwise download the whole repository.
+#[tokio::test]
+async fn an_api_key_may_neither_build_nor_download_an_export() {
+    let f = fixture("pkg-apikey").await;
+
+    let req = bearer(create_request(), &f.api_key)
+        .body(selection_body())
+        .unwrap();
+    let (status, body) = send(&f.app, req).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+    let job = register_job(&f.storage, TENANT, REPO, package_job()).await;
+    let req = bearer(download_request(&job), &f.api_key)
+        .body(Body::empty())
+        .unwrap();
+    let (status, body) = send(&f.app, req).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+    let uri = format!("/api/packages/{REPO}/main/head/some-package/raisin:export");
+    let req = bearer(Request::builder().method("POST").uri(&uri), &f.api_key)
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(send(&f.app, req).await.0, StatusCode::FORBIDDEN);
+}
+
+// ---- package management: nothing is anonymous --------------------------------
+
+fn admin_only_requests() -> Vec<(&'static str, axum::http::request::Builder)> {
+    vec![
+        (
+            "install",
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/repos/{REPO}/packages/some-package/install")),
+        ),
+        (
+            "uninstall",
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/repos/{REPO}/packages/some-package/uninstall")),
+        ),
+        (
+            "raisin:install",
+            Request::builder().method("POST").uri(format!(
+                "/api/packages/{REPO}/main/head/some-package/raisin:install"
+            )),
+        ),
+        (
+            "raisin:dry-run",
+            Request::builder().uri(format!(
+                "/api/packages/{REPO}/main/head/some-package/raisin:dry-run"
+            )),
+        ),
+        (
+            "raisin:sync-status",
+            Request::builder().uri(format!(
+                "/api/packages/{REPO}/main/head/some-package/raisin:sync-status"
+            )),
+        ),
+    ]
+}
+
+fn reader_requests() -> Vec<(&'static str, axum::http::request::Builder)> {
+    vec![
+        (
+            "list",
+            Request::builder().uri(format!("/api/repos/{REPO}/packages")),
+        ),
+        (
+            "get",
+            Request::builder().uri(format!("/api/repos/{REPO}/packages/some-package")),
+        ),
+        (
+            "contents",
+            Request::builder().uri(format!("/api/repos/{REPO}/packages/some-package/contents")),
+        ),
+        (
+            "raisin:browse",
+            Request::builder().uri(format!(
+                "/api/packages/{REPO}/main/head/some-package/raisin:browse"
+            )),
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn package_endpoints_refuse_anonymous_callers() {
+    let f = fixture("pkg-mgmt-anon").await;
+    for (label, req) in admin_only_requests().into_iter().chain(reader_requests()) {
+        let (status, body) = send(&f.app, req.body(Body::empty()).unwrap()).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{label}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn install_uninstall_and_sync_status_are_for_administrators() {
+    let f = fixture("pkg-mgmt-user").await;
+    for (label, req) in admin_only_requests() {
+        let req = bearer(req, &f.user_token).body(Body::empty()).unwrap();
+        let (status, body) = send(&f.app, req).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{label}: {body}");
+    }
+    // An administrator gets past the gate (the package does not exist).
+    for (label, req) in admin_only_requests() {
+        let (status, body) = send(&f.app, admin(req).body(Body::empty()).unwrap()).await;
+        assert!(
+            ![StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN].contains(&status),
+            "{label}: {status} {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_signed_in_reader_may_list_packages_under_rls() {
+    let f = fixture("pkg-mgmt-reader").await;
+    for (label, req) in reader_requests() {
+        let req = bearer(req, &f.user_token).body(Body::empty()).unwrap();
+        let (status, body) = send(&f.app, req).await;
+        assert!(
+            ![StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN].contains(&status),
+            "{label}: {status} {body}"
+        );
+    }
 }

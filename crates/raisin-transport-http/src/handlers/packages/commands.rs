@@ -34,10 +34,12 @@ pub async fn handle_package_command(
     axum::extract::Query(install_query): axum::extract::Query<InstallQuery>,
     Extension(tenant_info): Extension<TenantInfo>,
     auth: Option<Extension<AuthContext>>,
+    operator: Option<Extension<crate::middleware::OperatorCredential>>,
     method: axum::http::Method,
     body: axum::body::Bytes,
 ) -> Result<Response, ApiError> {
     let auth_context = auth.map(|Extension(ctx)| ctx);
+    let operator = operator.is_some();
     let tenant_id = tenant_info.tenant_id.as_str();
 
     tracing::debug!(
@@ -52,6 +54,7 @@ pub async fn handle_package_command(
 
     match command {
         PackageCommand::Browse { zip_path } => {
+            let auth_context = Some(super::require_package_reader(auth_context)?);
             let result = super::browse::browse_package_impl(
                 &state,
                 tenant_id,
@@ -65,6 +68,7 @@ pub async fn handle_package_command(
             Ok(Json(result).into_response())
         }
         PackageCommand::File { zip_path } => {
+            let auth_context = Some(super::require_package_reader(auth_context)?);
             super::browse::get_file_from_package_impl(
                 &state,
                 tenant_id,
@@ -77,6 +81,7 @@ pub async fn handle_package_command(
             .await
         }
         PackageCommand::Install => {
+            let auth_context = Some(super::require_package_admin(auth_context)?);
             if method != axum::http::Method::POST {
                 return Err(ApiError::validation_failed(
                     "raisin:install requires POST method",
@@ -95,6 +100,7 @@ pub async fn handle_package_command(
             Ok(Json(result).into_response())
         }
         PackageCommand::DryRun { .. } => {
+            let auth_context = Some(super::require_package_admin(auth_context)?);
             let result = super::install::dry_run_impl(
                 &state,
                 tenant_id,
@@ -131,6 +137,7 @@ pub async fn handle_package_command(
                 &package_path,
                 request,
                 auth_context,
+                operator,
             )
             .await?;
             Ok(Json(result).into_response())
@@ -149,10 +156,12 @@ pub async fn handle_package_command(
                 &package_path,
                 &job_id,
                 auth_context,
+                operator,
             )
             .await
         }
         PackageCommand::SyncStatus => {
+            let auth_context = Some(super::require_package_admin(auth_context)?);
             if method != axum::http::Method::GET {
                 return Err(ApiError::validation_failed(
                     "raisin:sync-status requires GET method",

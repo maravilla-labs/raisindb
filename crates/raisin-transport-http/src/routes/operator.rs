@@ -43,6 +43,10 @@ async fn admin_system_auth_context(mut req: Request<Body>, next: Next) -> Respon
             .is_some()
     {
         req.extensions_mut().insert(AuthContext::system());
+        // This door admits only admin JWTs and the superadmin bearer (never an
+        // API key), so the request carries an operator credential.
+        req.extensions_mut()
+            .insert(crate::middleware::OperatorCredential);
     }
     next.run(req).await
 }

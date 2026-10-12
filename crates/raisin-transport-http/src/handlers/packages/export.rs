@@ -30,10 +30,11 @@ pub async fn export_package(
     Path((repo, branch, package_path)): Path<(String, String, String)>,
     Extension(tenant_info): Extension<TenantInfo>,
     auth: Option<Extension<AuthContext>>,
+    operator: Option<Extension<crate::middleware::OperatorCredential>>,
     Json(request): Json<ExportPackageRequest>,
 ) -> Result<Json<ExportResponse>, ApiError> {
     let auth_context = auth.map(|Extension(ctx)| ctx);
-    super::require_export_access(auth_context.as_ref())?;
+    super::require_export_access(auth_context.as_ref(), operator.is_some())?;
     let tenant_id = tenant_info.tenant_id.as_str();
     let workspace = "packages";
 
@@ -71,10 +72,11 @@ pub(super) async fn export_package_impl(
     package_path: &str,
     request: ExportPackageRequest,
     auth_context: Option<AuthContext>,
+    operator: bool,
 ) -> Result<ExportResponse, ApiError> {
     // E3: an export produces a downloadable archive; it is gated exactly like
     // create-from-selection.
-    super::require_export_access(auth_context.as_ref())?;
+    super::require_export_access(auth_context.as_ref(), operator)?;
     let workspace = "packages";
 
     let node_service =
@@ -118,8 +120,9 @@ pub(super) async fn download_exported_package_impl(
     _package_path: &str,
     job_id: &str,
     auth_context: Option<AuthContext>,
+    operator: bool,
 ) -> Result<Response, ApiError> {
-    super::require_export_access(auth_context.as_ref())?;
+    super::require_export_access(auth_context.as_ref(), operator)?;
 
     #[cfg(feature = "storage-rocksdb")]
     {

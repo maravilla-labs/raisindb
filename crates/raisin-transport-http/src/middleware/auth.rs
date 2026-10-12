@@ -94,6 +94,11 @@ pub async fn require_auth_middleware(
     match &principal {
         AuthPrincipal::Admin(admin_claims) => {
             req.extensions_mut().insert(admin_claims.clone());
+            // An admin-console login (not impersonating) is an operator.
+            if auth_context.is_system {
+                req.extensions_mut()
+                    .insert(super::types::OperatorCredential);
+            }
         }
         AuthPrincipal::User(user_claims) => {
             req.extensions_mut().insert(user_claims.as_ref().clone());
@@ -261,6 +266,8 @@ pub async fn optional_auth_middleware(
 
                 req.extensions_mut().insert(admin_claims);
                 req.extensions_mut().insert(AuthContext::system());
+                req.extensions_mut()
+                    .insert(super::types::OperatorCredential);
                 return Ok(next.run(req).await);
             }
         }
@@ -402,6 +409,11 @@ pub async fn optional_auth_middleware(
     match &principal {
         AuthPrincipal::Admin(admin_claims) => {
             req.extensions_mut().insert(admin_claims.clone());
+            // An admin-console login (not impersonating) is an operator.
+            if auth_context.is_system {
+                req.extensions_mut()
+                    .insert(super::types::OperatorCredential);
+            }
         }
         AuthPrincipal::User(user_claims) => {
             req.extensions_mut().insert(user_claims.as_ref().clone());

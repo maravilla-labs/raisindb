@@ -36,7 +36,9 @@ pub async fn get_sync_status(
     Extension(tenant_info): Extension<TenantInfo>,
     auth: Option<Extension<AuthContext>>,
 ) -> Result<Json<SyncStatusResponse>, ApiError> {
-    let auth_context = auth.map(|Extension(ctx)| ctx);
+    let auth_context = Some(super::require_package_admin(
+        auth.map(|Extension(ctx)| ctx),
+    )?);
     let result = get_sync_status_impl(
         &state,
         &tenant_info.tenant_id,
@@ -58,7 +60,9 @@ pub async fn get_package_diff(
     Extension(tenant_info): Extension<TenantInfo>,
     auth: Option<Extension<AuthContext>>,
 ) -> Result<Json<DiffResponse>, ApiError> {
-    let auth_context = auth.map(|Extension(ctx)| ctx);
+    let auth_context = Some(super::require_package_admin(
+        auth.map(|Extension(ctx)| ctx),
+    )?);
     let tenant_id = tenant_info.tenant_id.as_str();
     let workspace = "packages";
 
@@ -134,12 +138,13 @@ pub async fn create_package_from_selection(
     Path((repo, branch)): Path<(String, String)>,
     Extension(tenant_info): Extension<TenantInfo>,
     auth: Option<Extension<AuthContext>>,
+    operator: Option<Extension<crate::middleware::OperatorCredential>>,
     Json(request): Json<CreateFromSelectionRequest>,
 ) -> Result<Json<CreateFromSelectionResponse>, ApiError> {
     // E3: refuse before validating anything, so an unauthorised caller learns
     // nothing about the request shape or the repository.
     let auth_context = auth.map(|Extension(ctx)| ctx);
-    super::require_export_access(auth_context.as_ref())?;
+    super::require_export_access(auth_context.as_ref(), operator.is_some())?;
     // Only reachable with a context: the gate refuses `None`.
     let Some(requester) = auth_context else {
         return Err(ApiError::unauthorized("package exports require signing in"));
@@ -193,7 +198,13 @@ pub async fn create_package_from_selection(
         // One submit path for HTTP and the function binding: validation, the
         // reserved-name guard, idempotency, the requester record (E3).
         let submitted = raisin_rocksdb::package_build::submit_package_build(
-            rocksdb, tenant_id, &repo, &branch, &build, &requester,
+            rocksdb,
+            tenant_id,
+            &repo,
+            &branch,
+            &build,
+            &requester,
+            operator.is_some(),
         )
         .await
         .map_err(ApiError::from)?;

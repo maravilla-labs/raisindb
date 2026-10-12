@@ -13,19 +13,17 @@
 //! Three rules close it, and every entry point asks this module rather than
 //! re-deriving them:
 //!
-//! 1. **Building or downloading an export is an operator operation**
-//!    ([`authorize_package_export`]): the system context (admin console, CLI,
-//!    API keys and the superadmin bearer all resolve to it), an identity user
-//!    holding `system_admin`, or an identity user holding the EXACT export
-//!    grant: workspace `packages`, path `/exports/**`, operation `create`,
-//!    with no condition or node-type/field/branch restriction (see
-//!    [`EXPORT_GRANT_PATH`]). It is compared structurally, never matched:
-//!    `*` workspaces, `/**` paths and conditional grants are not it, so
-//!    read/write access to everything is still not "may export". Missing or
-//!    unrestored permissions deny. The engine stays
-//!    app-agnostic — an application gives the grant to whichever of its roles
-//!    may export. Anonymous and deny-all callers are `Unauthenticated`; any
-//!    other signed-in principal is `Forbidden`.
+//! 1. **Building or downloading an export needs an export right**
+//!    ([`authorize_export_for`]): an identity user holding `system_admin`,
+//!    an identity user holding the EXACT export grant — workspace
+//!    `packages`, path `/exports/**`, operation `create`, with no condition
+//!    or node-type/field/branch restriction (see [`EXPORT_GRANT_PATH`]),
+//!    compared structurally, never matched — or an OPERATOR credential (the
+//!    superadmin bearer or an admin-console login), which the transport
+//!    vouches for explicitly. The bare system context does NOT imply the
+//!    right: API keys resolve to it, and every site frontend holds one for
+//!    its server-side reads, so "system" alone would let a leaked site key
+//!    export the whole repository. Missing or unrestored permissions deny.
 //! 2. **The build reads as the requester.** The requester's context is
 //!    recorded on the job at submit time ([`requester_metadata`]) and rebuilt
 //!    by the job ([`requester_from_metadata`]); every node the job collects
@@ -79,13 +77,31 @@ impl std::fmt::Display for ExportRefusal {
 /// Anonymous is checked FIRST, before any admin test, so that no grant attached
 /// to the anonymous role can ever make an unauthenticated request an exporter.
 pub fn authorize_package_export(auth: Option<&AuthContext>) -> Result<(), ExportRefusal> {
+    authorize_export_for(auth, false)
+}
+
+/// [`authorize_package_export`], with the transport's word on whether the
+/// request carries an OPERATOR credential (the superadmin bearer, an
+/// admin-console login — never an API key). Only then does a system context
+/// count; otherwise the system context is Forbidden like any non-exporter.
+pub fn authorize_export_for(
+    auth: Option<&AuthContext>,
+    operator_credential: bool,
+) -> Result<(), ExportRefusal> {
     let Some(auth) = auth else {
         return Err(ExportRefusal::Unauthenticated);
     };
     if auth.is_anonymous_principal() {
         return Err(ExportRefusal::Unauthenticated);
     }
-    if auth.is_system || auth.permissions().is_some_and(|p| p.is_system_admin) {
+    if auth.is_system {
+        return if operator_credential {
+            Ok(())
+        } else {
+            Err(ExportRefusal::Forbidden)
+        };
+    }
+    if auth.permissions().is_some_and(|p| p.is_system_admin) {
         return Ok(());
     }
     if auth.permissions().is_some_and(holds_export_grant) {
@@ -388,11 +404,34 @@ mod tests {
     }
 
     #[test]
-    fn system_and_system_admin_may_export() {
+    fn the_system_context_alone_is_no_export_right() {
+        // An API key resolves to the system context: not an exporter.
         assert_eq!(
             authorize_package_export(Some(&AuthContext::system())),
+            Err(ExportRefusal::Forbidden)
+        );
+        assert_eq!(
+            authorize_export_for(Some(&AuthContext::system()), false),
+            Err(ExportRefusal::Forbidden)
+        );
+        // Only with the transport's operator credential.
+        assert_eq!(
+            authorize_export_for(Some(&AuthContext::system()), true),
             Ok(())
         );
+        // The operator flag never rescues anonymous or a non-exporter.
+        assert_eq!(
+            authorize_export_for(Some(&AuthContext::anonymous()), true),
+            Err(ExportRefusal::Unauthenticated)
+        );
+        assert_eq!(
+            authorize_export_for(Some(&user_with(vec![], false)), true),
+            Err(ExportRefusal::Forbidden)
+        );
+    }
+
+    #[test]
+    fn system_admin_may_export() {
         assert_eq!(
             authorize_package_export(Some(&user_with(vec![], true))),
             Ok(())

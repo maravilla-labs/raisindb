@@ -43,7 +43,9 @@ pub async fn install_package(
     Extension(tenant_info): Extension<TenantInfo>,
     auth: Option<Extension<AuthContext>>,
 ) -> Result<Json<InstallResponse>, ApiError> {
-    let auth_context = auth.map(|Extension(ctx)| ctx);
+    let auth_context = Some(super::require_package_admin(
+        auth.map(|Extension(ctx)| ctx),
+    )?);
     let tenant_id = tenant_info.tenant_id.as_str();
     let branch = query.branch.as_deref().unwrap_or("main");
 
@@ -70,7 +72,9 @@ pub async fn uninstall_package(
     Extension(tenant_info): Extension<TenantInfo>,
     auth: Option<Extension<AuthContext>>,
 ) -> Result<Json<InstallResponse>, ApiError> {
-    let auth_context = auth.map(|Extension(ctx)| ctx);
+    let auth_context = Some(super::require_package_admin(
+        auth.map(|Extension(ctx)| ctx),
+    )?);
     let tenant_id = tenant_info.tenant_id.as_str();
     let branch = query.branch.as_deref().unwrap_or("main");
     let workspace = "packages";

@@ -59,7 +59,9 @@ pub async fn list_package_contents(
     Extension(tenant_info): Extension<TenantInfo>,
     auth: Option<Extension<AuthContext>>,
 ) -> Result<Json<ZipContentsResponse>, ApiError> {
-    let auth_context = auth.map(|Extension(ctx)| ctx);
+    let auth_context = Some(super::require_package_reader(
+        auth.map(|Extension(ctx)| ctx),
+    )?);
     let tenant_id = tenant_info.tenant_id.as_str();
     let branch = "main";
     let workspace = "packages";
@@ -100,7 +102,9 @@ pub async fn get_package_file(
     Extension(tenant_info): Extension<TenantInfo>,
     auth: Option<Extension<AuthContext>>,
 ) -> Result<Response, ApiError> {
-    let auth_context = auth.map(|Extension(ctx)| ctx);
+    let auth_context = Some(super::require_package_reader(
+        auth.map(|Extension(ctx)| ctx),
+    )?);
     let tenant_id = tenant_info.tenant_id.as_str();
     let branch = "main";
     let workspace = "packages";

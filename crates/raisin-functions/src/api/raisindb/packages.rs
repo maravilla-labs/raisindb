@@ -28,8 +28,18 @@ impl RaisinFunctionApi {
             Some(a) => a.clone(),
             None => AuthContext::system(),
         };
+        // The invoking person, if any: `caller` is set by the server from the
+        // invoke's credential (never from input), and is a person only when
+        // it is neither the system (an API key, an admin credential) nor
+        // anonymous.
+        let invoking_person = ctx
+            .caller
+            .as_ref()
+            .filter(|c| !c.is_system && !c.anonymous)
+            .and_then(|c| c.user_id.clone());
         let invoker =
-            raisin_rocksdb::package_build::Invoker::from_execution(auth, ctx.event_data.as_ref());
+            raisin_rocksdb::package_build::Invoker::from_execution(auth, ctx.event_data.as_ref())
+                .with_invoking_person(invoking_person);
         raisin_rocksdb::package_build::call(
             raisin_rocksdb::package_build::CallScope {
                 tenant: &ctx.tenant_id,

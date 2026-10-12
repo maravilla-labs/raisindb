@@ -448,13 +448,13 @@ fn requester() -> AuthContext {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_build_streams_an_archive_whose_inventory_verifies() {
     let f = fixture(300, 3 * 1024 * 1024 + 17).await;
-    let submitted = submit_package_build(&f.storage, T, R, B, &request("k1"), &requester())
+    let submitted = submit_package_build(&f.storage, T, R, B, &request("k1"), &requester(), true)
         .await
         .unwrap();
     assert!(!submitted.existing);
 
     // E13: the same key returns the same job.
-    let again = submit_package_build(&f.storage, T, R, B, &request("k1"), &requester())
+    let again = submit_package_build(&f.storage, T, R, B, &request("k1"), &requester(), true)
         .await
         .unwrap();
     assert_eq!(again.job_id, submitted.job_id);
@@ -608,7 +608,7 @@ async fn a_build_streams_an_archive_whose_inventory_verifies() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_cancel_requested_on_the_record_leaves_no_object() {
     let f = fixture(50, 1024).await;
-    let submitted = submit_package_build(&f.storage, T, R, B, &request("k2"), &requester())
+    let submitted = submit_package_build(&f.storage, T, R, B, &request("k2"), &requester(), true)
         .await
         .unwrap();
     // The caller asks for a cancel before the job gets going.
@@ -657,7 +657,7 @@ async fn a_cancel_requested_on_the_record_leaves_no_object() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_preflight_refuses_before_writing_anything() {
     let f = fixture(20, 1024).await;
-    let submitted = submit_package_build(&f.storage, T, R, B, &request("k3"), &requester())
+    let submitted = submit_package_build(&f.storage, T, R, B, &request("k3"), &requester(), true)
         .await
         .unwrap();
     // A floor larger than any disk.
@@ -739,7 +739,7 @@ async fn running_out_of_space_mid_build_fails_and_deletes_the_partial() {
         queries: AtomicUsize::new(0),
         after_first: AtomicU64::new(0),
     }));
-    let submitted = submit_package_build(&f.storage, T, R, B, &request("k4"), &requester())
+    let submitted = submit_package_build(&f.storage, T, R, B, &request("k4"), &requester(), true)
         .await
         .unwrap();
     let h = handler(&f, Some(1));
@@ -766,7 +766,7 @@ async fn an_installed_package_name_is_refused() {
         vec![("installed", PropertyValue::Boolean(true))],
     )
     .await;
-    let err = submit_package_build(&f.storage, T, R, B, &request("k5"), &requester())
+    let err = submit_package_build(&f.storage, T, R, B, &request("k5"), &requester(), true)
         .await
         .unwrap_err();
     assert!(err.to_string().contains("name_invalid"), "{err}");
@@ -795,7 +795,7 @@ fn studio_request(key: &str) -> serde_json::Value {
 async fn a_build_interrupted_by_a_restart_reports_lost_and_discards_its_partial() {
     use tokio::io::AsyncWriteExt;
     let f = fixture(5, 16).await;
-    let submitted = submit_package_build(&f.storage, T, R, B, &request("k7"), &requester())
+    let submitted = submit_package_build(&f.storage, T, R, B, &request("k7"), &requester(), true)
         .await
         .unwrap();
     // The first attempt got as far as writing: the record says running for
@@ -891,9 +891,10 @@ async fn rss_bench() {
     .await;
     drop(chunk);
 
-    let submitted = submit_package_build(&f.storage, T, R, B, &request("bench"), &requester())
-        .await
-        .unwrap();
+    let submitted =
+        submit_package_build(&f.storage, T, R, B, &request("bench"), &requester(), true)
+            .await
+            .unwrap();
     let started = std::time::Instant::now();
     let result = run(&f, &handler(&f, None), &submitted.job_id)
         .await
@@ -956,7 +957,7 @@ async fn a_node_pointing_at_another_tenants_blob_is_not_packed() {
     )
     .await;
 
-    let submitted = submit_package_build(&f.storage, T, R, B, &request("k8"), &requester())
+    let submitted = submit_package_build(&f.storage, T, R, B, &request("k8"), &requester(), true)
         .await
         .unwrap();
     run(&f, &handler(&f, None), &submitted.job_id)
@@ -1011,7 +1012,7 @@ async fn a_node_pointing_at_another_tenants_blob_is_not_packed() {
 async fn only_ledger_recorded_artifacts_of_their_own_record_are_deleted() {
     use super::ledger::{self, Owner};
     let f = fixture(3, 16).await;
-    let submitted = submit_package_build(&f.storage, T, R, B, &request("k9"), &requester())
+    let submitted = submit_package_build(&f.storage, T, R, B, &request("k9"), &requester(), true)
         .await
         .unwrap();
     run(&f, &handler(&f, None), &submitted.job_id)
@@ -1124,7 +1125,7 @@ async fn only_ledger_recorded_artifacts_of_their_own_record_are_deleted() {
 async fn an_artifact_a_forked_record_still_names_is_kept() {
     use super::ledger::{self, Owner};
     let f = fixture(2, 16).await;
-    let submitted = submit_package_build(&f.storage, T, R, B, &request("k10"), &requester())
+    let submitted = submit_package_build(&f.storage, T, R, B, &request("k10"), &requester(), true)
         .await
         .unwrap();
     run(&f, &handler(&f, None), &submitted.job_id)
@@ -1192,7 +1193,7 @@ fn request_for(record_path: &str, key: &str) -> PackageBuildRequest {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn builds_records_and_jobs_stay_in_their_own_scope() {
     let f = fixture(2, 16).await;
-    let submitted = submit_package_build(&f.storage, T, R, B, &request("s1"), &requester())
+    let submitted = submit_package_build(&f.storage, T, R, B, &request("s1"), &requester(), true)
         .await
         .unwrap();
     // Another repository cannot see or stop this job.
@@ -1235,9 +1236,17 @@ async fn builds_records_and_jobs_stay_in_their_own_scope() {
         "/packages/site/missing/state", // does not exist
         "/elsewhere/site/b-1/state",    // wrong shape
     ] {
-        let err = submit_package_build(&f.storage, T, R, B, &request_for(path, path), &requester())
-            .await
-            .unwrap_err();
+        let err = submit_package_build(
+            &f.storage,
+            T,
+            R,
+            B,
+            &request_for(path, path),
+            &requester(),
+            true,
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(err, raisin_error::Error::Validation(_)),
             "{path}: {err}"
@@ -1249,16 +1258,22 @@ async fn builds_records_and_jobs_stay_in_their_own_scope() {
         path: RECORD.into(),
     });
     assert!(
-        submit_package_build(&f.storage, T, R, B, &wrong_ws, &requester())
+        submit_package_build(&f.storage, T, R, B, &wrong_ws, &requester(), true)
             .await
             .is_err()
     );
     // The same record path in another repository does not exist there.
-    assert!(
-        submit_package_build(&f.storage, T, "other-repo", B, &request("s3"), &requester())
-            .await
-            .is_err()
-    );
+    assert!(submit_package_build(
+        &f.storage,
+        T,
+        "other-repo",
+        B,
+        &request("s3"),
+        &requester(),
+        true
+    )
+    .await
+    .is_err());
 
     // A denylisted workspace is refused outright.
     let mut secrets = request("s4");
@@ -1266,7 +1281,7 @@ async fn builds_records_and_jobs_stay_in_their_own_scope() {
         workspace: "settings".into(),
         path: "/*".into(),
     }];
-    let err = submit_package_build(&f.storage, T, R, B, &secrets, &requester())
+    let err = submit_package_build(&f.storage, T, R, B, &secrets, &requester(), true)
         .await
         .unwrap_err();
     assert!(matches!(err, raisin_error::Error::Forbidden(_)), "{err}");
@@ -1286,7 +1301,7 @@ async fn a_denylisted_node_type_under_a_selected_subtree_is_never_archived() {
         )],
     )
     .await;
-    let submitted = submit_package_build(&f.storage, T, R, B, &request("d1"), &requester())
+    let submitted = submit_package_build(&f.storage, T, R, B, &request("d1"), &requester(), true)
         .await
         .unwrap();
     run(&f, &handler(&f, None), &submitted.job_id)
@@ -1344,7 +1359,7 @@ async fn only_the_terminal_record_write_reaches_trigger_evaluation() {
         .unwrap()
         .id;
 
-    let submitted = submit_package_build(&f.storage, T, R, B, &request("t1"), &requester())
+    let submitted = submit_package_build(&f.storage, T, R, B, &request("t1"), &requester(), true)
         .await
         .unwrap();
     run(&f, &handler(&f, None), &submitted.job_id)
@@ -1836,4 +1851,108 @@ async fn a_dispatch_runs_as_the_requester_whatever_the_function_is() {
     )
     .await
     .is_err());
+}
+
+/// A function running as the system, invoked over HTTP by `person` (the
+/// server-resolved caller), as Studio's cancel-build is.
+fn invoked_by(person: &str) -> crate::package_build::Invoker {
+    crate::package_build::Invoker::from_execution(AuthContext::system(), None)
+        .with_invoking_person(Some(person.to_string()))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_http_invoked_function_acts_for_the_invoking_person_only() {
+    // The fixture holds alice (system_admin) and bob (no roles).
+    let f = fixture(3, 16).await;
+    let request_id = node_id_at(&f, "/packages/site/b-1").await;
+    let out = call_on(
+        &f,
+        &trigger_on(&request_id, "Created"),
+        "createFromSelection",
+        studio_request("h1"),
+    )
+    .await
+    .unwrap();
+    let job_id = out["job_id"].as_str().unwrap().to_string();
+    run(&f, &handler(&f, None), &job_id).await.unwrap();
+
+    let forbidden = |r: raisin_error::Result<serde_json::Value>| {
+        matches!(r, Err(raisin_error::Error::Forbidden(_)))
+    };
+    let refused: Vec<(&str, crate::package_build::Invoker)> = vec![
+        // A function running as the system with nobody behind it.
+        (
+            "no caller",
+            crate::package_build::Invoker::from_execution(AuthContext::system(), None),
+        ),
+        // The invoker resolves to no exporter, or to no person at all.
+        ("non-admin invoker", invoked_by("bob")),
+        ("unknown invoker", invoked_by("carol")),
+        ("system invoker", invoked_by("system")),
+        ("api key invoker", invoked_by("api_key:raisin_abc")),
+        // An agent's tool call never acts as the person behind it.
+        (
+            "agent with a person behind it",
+            crate::package_build::Invoker::from_execution(
+                AuthContext::system().with_agent("agent:/agents/bot"),
+                None,
+            )
+            .with_invoking_person(Some("alice".into())),
+        ),
+    ];
+    for (who, inv) in &refused {
+        assert!(
+            forbidden(call_on(&f, inv, "status", serde_json::json!(job_id)).await),
+            "{who}: status"
+        );
+        assert!(
+            forbidden(call_on(&f, inv, "cancel", serde_json::json!(job_id)).await),
+            "{who}: cancel"
+        );
+        let state = make_run(&f, &format!("h-{}", who.replace(' ', "-")), "alice").await;
+        assert!(
+            forbidden(
+                call_on(
+                    &f,
+                    inv,
+                    "createFromSelection",
+                    studio_request_for(&state, "hx")
+                )
+                .await
+            ),
+            "{who}: createFromSelection"
+        );
+    }
+
+    // The invoking exporter may read, cancel and dispatch their own run.
+    let alice = invoked_by("alice");
+    assert_eq!(
+        call_on(&f, &alice, "status", serde_json::json!(job_id))
+            .await
+            .unwrap()["status"],
+        "completed"
+    );
+    assert!(call_on(&f, &alice, "cancel", serde_json::json!(job_id))
+        .await
+        .is_ok());
+    let mine = make_run(&f, "h-mine", "alice").await;
+    assert!(call_on(
+        &f,
+        &alice,
+        "createFromSelection",
+        studio_request_for(&mine, "hm")
+    )
+    .await
+    .is_ok());
+    // …but not someone else's.
+    let bobs = make_run(&f, "h-bobs", "bob").await;
+    assert!(forbidden(
+        call_on(
+            &f,
+            &alice,
+            "createFromSelection",
+            studio_request_for(&bobs, "hb")
+        )
+        .await
+    ));
 }

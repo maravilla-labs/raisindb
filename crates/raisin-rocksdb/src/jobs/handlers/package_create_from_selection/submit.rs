@@ -110,6 +110,10 @@ fn dedup_key(tenant: &str, repo: &str, key: &str) -> String {
 
 /// Validate, then register a package build job running as `requester`.
 ///
+/// `operator_credential` is the transport's word that the request carried an
+/// operator credential (superadmin bearer, admin-console login); only then
+/// may a system-context requester build. An API key never may.
+///
 /// The requester must already have passed
 /// [`package_export_access::authorize_package_export`]; the job reads the
 /// selection under the requester's permissions and refuses to run without
@@ -121,8 +125,19 @@ pub async fn submit_package_build(
     branch: &str,
     request: &PackageBuildRequest,
     requester: &AuthContext,
+    operator_credential: bool,
 ) -> Result<Submitted> {
-    submit_inner(storage, tenant, repo, branch, request, requester, None).await
+    submit_inner(
+        storage,
+        tenant,
+        repo,
+        branch,
+        request,
+        requester,
+        operator_credential,
+        None,
+    )
+    .await
 }
 
 /// [`submit_package_build`], recording `digest` (what the dispatch asked for)
@@ -143,6 +158,9 @@ pub async fn submit_with_digest(
         branch,
         request,
         requester,
+        // A function dispatch acts as the run's requester, a person; it is
+        // never an operator credential.
+        false,
         Some(digest),
     )
     .await
@@ -204,14 +222,17 @@ async fn submit_inner(
     branch: &str,
     request: &PackageBuildRequest,
     requester: &AuthContext,
+    operator_credential: bool,
     digest: Option<&str>,
 ) -> Result<Submitted> {
-    package_export_access::authorize_package_export(Some(requester)).map_err(|r| {
-        Error::from(Refusal {
-            code: "forbidden",
-            message: format!("{r:?}"),
-        })
-    })?;
+    package_export_access::authorize_export_for(Some(requester), operator_credential).map_err(
+        |r| {
+            Error::from(Refusal {
+                code: "forbidden",
+                message: format!("{r:?}"),
+            })
+        },
+    )?;
     if !name_is_valid(&request.name) {
         return Err(Refusal {
             code: "name_invalid",

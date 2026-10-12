@@ -73,7 +73,9 @@ pub async fn upload_package(
     >,
     body: axum::body::Bytes,
 ) -> Result<Json<UploadResponse>, ApiError> {
-    let auth_context = auth.map(|Extension(ctx)| ctx);
+    let auth_context = Some(super::require_package_admin(
+        auth.map(|Extension(ctx)| ctx),
+    )?);
     let tenant_id = tenant_info.tenant_id.as_str();
     let branch = "main";
     let workspace = "packages";

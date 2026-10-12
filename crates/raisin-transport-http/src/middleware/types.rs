@@ -12,6 +12,15 @@ pub enum AuthPrincipal {
     User(Box<raisin_models::auth::AuthClaims>),
 }
 
+/// Request extension: the request authenticated with an OPERATOR credential
+/// — the superadmin bearer, or an admin-console login resolving to the
+/// system context. Never set for an API key, although an API key resolves to
+/// the system context too: every site frontend holds one for its SSR reads,
+/// so "system" alone must not unlock operator-only actions such as building
+/// or downloading a full export.
+#[derive(Debug, Clone, Copy)]
+pub struct OperatorCredential;
+
 /// Parsed request context containing repository, branch, workspace, path, and metadata.
 #[derive(Debug, Clone)]
 pub struct RaisinContext {
