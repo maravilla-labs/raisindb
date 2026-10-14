@@ -37,6 +37,7 @@ where
 {
     match state.storage.get_metrics(Some(&tenant)).await {
         Ok(metrics) => Ok(Json(ApiResponse::ok(metrics))),
+        Err(raisin_error::Error::NotFound(_)) => Err(StatusCode::NOT_FOUND),
         Err(e) => {
             tracing::error!("Failed to get metrics for tenant {}: {}", tenant, e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)

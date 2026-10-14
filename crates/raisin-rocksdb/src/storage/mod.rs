@@ -14,8 +14,8 @@ mod jobs;
 pub(crate) use jobs::create_compound_index_handler;
 mod replication;
 pub(crate) mod repo_purge;
-mod tenant_wipe;
-mod tenant_wipe_collision;
+pub(crate) mod tenant_wipe;
+pub(crate) mod tenant_wipe_collision;
 mod types;
 
 pub use repo_purge::RepoPurgeReport;

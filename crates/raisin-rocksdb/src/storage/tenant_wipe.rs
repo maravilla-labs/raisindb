@@ -41,7 +41,7 @@ use crate::RocksDBStorage;
 /// Column families whose keys start with `{tenant}\0...`.
 ///
 /// Order is informational only — every CF is wiped independently.
-const TENANT_PREFIXED_CFS: &[&str] = &[
+pub(crate) const TENANT_PREFIXED_CFS: &[&str] = &[
     // Node + index data
     cf::NODES,
     cf::PATH_INDEX,

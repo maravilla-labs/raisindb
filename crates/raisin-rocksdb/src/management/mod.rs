@@ -25,6 +25,7 @@ mod management_ops;
 // Internal modules
 mod helpers;
 mod metrics;
+mod tenant_usage;
 
 pub use metrics::describe_writes;
 

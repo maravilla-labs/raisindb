@@ -106,41 +106,14 @@ pub fn describe_writes(writes: &crate::write_health::WriteHealthSnapshot) -> Str
     message
 }
 
-/// Get basic metrics
+/// Get storage metrics.
 ///
-/// Collects fundamental metrics about the RocksDB storage instance.
-/// In Week 1, this provides basic configuration info. More detailed
-/// metrics (node counts, storage size, cache statistics) will be
-/// added in Week 2.
-///
-/// # Arguments
-///
-/// * `storage` - The RocksDBStorage instance
-/// * `tenant` - Optional tenant ID for tenant-specific metrics
-///
-/// # Returns
-///
-/// Metrics structure with available statistics
+/// With a tenant: real on-disk usage attributable to that tenant (see
+/// [`super::tenant_usage`]); an unknown tenant is `Error::NotFound`. Without
+/// one: database-wide SST size. Throughput/latency counters are not tracked
+/// and stay 0.
 pub async fn get_metrics(storage: &RocksDBStorage, tenant: Option<&str>) -> Result<Metrics> {
-    // TODO Week 2: Extract actual RocksDB statistics if enabled
-    // This will include:
-    // - Cache hit rates from RocksDB stats
-    // - Compaction stats
-    // - Read/write latencies
-    // - Memory usage
-    // - Actual node counts and disk usage
-
-    Ok(Metrics {
-        tenant: tenant.map(|s| s.to_string()),
-        operations_per_sec: 0.0, // TODO Week 2: Track operations
-        error_rate: 0.0,         // TODO Week 2: Track errors
-        disk_usage_bytes: 0,     // TODO Week 2: Get DB size
-        index_sizes: std::collections::HashMap::new(), // TODO Week 2: Get CF sizes
-        node_count: 0,           // TODO Week 2: Count nodes
-        active_connections: 0,   // N/A for RocksDB (embedded)
-        cache_hit_rate: 0.0,     // TODO Week 2: From RocksDB stats
-        last_compaction: None,   // TODO Week 2: Track compactions
-    })
+    super::tenant_usage::measure(storage, tenant).await
 }
 
 #[cfg(test)]
@@ -168,10 +141,8 @@ mod tests {
         let storage = RocksDBStorage::with_config(config).unwrap();
 
         let metrics = get_metrics(&storage, None).await.unwrap();
-        // Week 1: Metrics are placeholders
-        assert_eq!(metrics.node_count, 0);
-        assert_eq!(metrics.disk_usage_bytes, 0);
         assert_eq!(metrics.tenant, None);
+        assert!(get_metrics(&storage, Some("nobody")).await.is_err());
     }
 
     #[tokio::test]

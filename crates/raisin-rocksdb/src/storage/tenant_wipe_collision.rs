@@ -23,12 +23,12 @@ use crate::storage::repo_purge::INDEX_STATUS_KINDS;
 use crate::{cf, cf_handle, keys};
 
 /// Whether `tenant`'s `{tenant}\0` range would reach kind-first records.
-pub(super) fn collides_with_kind(tenant: &str) -> bool {
+pub(crate) fn collides_with_kind(tenant: &str) -> bool {
     INDEX_STATUS_KINDS.contains(&tenant)
 }
 
 /// `tenant`'s repositories, from the registry's `{tenant}\0repos\0{repo}`.
-pub(super) fn tenant_repos(db: &DB, tenant: &str) -> Result<Vec<String>> {
+pub(crate) fn tenant_repos(db: &DB, tenant: &str) -> Result<Vec<String>> {
     let cf = cf_handle(db, cf::REGISTRY)?;
     let prefix = keys::KeyBuilder::new()
         .push(tenant)
