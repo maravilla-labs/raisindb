@@ -431,4 +431,27 @@ mod tests {
         parent.allowed_children = vec!["app:Product".to_string()];
         assert!(!parent.allows_child(&child));
     }
+
+    #[test]
+    fn timestamp_compound_column_over_a_non_date_property_warns() {
+        let node_type: NodeType = serde_json::from_value(serde_json::json!({
+            "name": "t:doc",
+            "properties": [
+                { "name": "due_at", "type": "String" },
+                { "name": "seen_at", "type": "Date" }
+            ],
+            "compound_indexes": [
+                { "name": "a", "has_order_column": true, "columns": [
+                    { "property": "due_at", "column_type": "Timestamp" } ] },
+                { "name": "b", "has_order_column": true, "columns": [
+                    { "property": "seen_at", "column_type": "Timestamp" } ] },
+                { "name": "c", "has_order_column": true, "columns": [
+                    { "property": "__created_at", "column_type": "Timestamp" } ] }
+            ]
+        }))
+        .unwrap();
+        let warnings = node_type.compound_index_warnings();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("'a'") && warnings[0].contains("due_at"));
+    }
 }

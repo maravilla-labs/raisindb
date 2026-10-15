@@ -297,6 +297,24 @@ impl CompoundIndexDefinition {
     /// `columns` list.
     pub const NORMALIZER_VERSION: u32 = 1;
 
+    /// The normalizer version of a declaration with a `Timestamp` column over an
+    /// ordinary PROPERTY. Before this version such a column was never
+    /// extracted, so every entry built under the old reading is missing (and
+    /// the index was stamped Ready and empty). Folding it into
+    /// [`Self::definition_hash`] for exactly those declarations makes their
+    /// stored state read "stale" and queues the existing `compound_builds`
+    /// repair, without disturbing the hash — and so the data — of any other
+    /// index.
+    pub const PROPERTY_TIMESTAMP_NORMALIZER_VERSION: u32 = 2;
+
+    /// Whether a column is a `Timestamp` over a user property (not the
+    /// engine-owned `__created_at` / `__updated_at`).
+    fn has_property_timestamp_column(&self) -> bool {
+        self.columns.iter().any(|c| {
+            c.column_type == CompoundColumnType::Timestamp && !c.property.starts_with("__")
+        })
+    }
+
     /// Whether `name` is a workspace-owned keyspace (see
     /// [`WORKSPACE_INDEX_PREFIX`]).
     pub fn is_workspace_index_name(name: &str) -> bool {
@@ -349,7 +367,11 @@ impl CompoundIndexDefinition {
     /// in sequence, never as a set.
     pub fn definition_hash(&self) -> u64 {
         let mut h = crate::nodes::properties::spatial_policy::Fnv::new();
-        h.write_u32(Self::NORMALIZER_VERSION);
+        h.write_u32(if self.has_property_timestamp_column() {
+            Self::PROPERTY_TIMESTAMP_NORMALIZER_VERSION
+        } else {
+            Self::NORMALIZER_VERSION
+        });
         h.write_bytes(self.name.as_bytes());
         h.write_u32(u32::from(self.has_order_column));
         h.write_u32(self.columns.len() as u32);
@@ -530,5 +552,34 @@ has_order_column: false
 "#,
         )
         .is_err());
+    }
+
+    fn def_of(property: &str, column_type: &str) -> CompoundIndexDefinition {
+        serde_json::from_value(serde_json::json!({
+            "name": "i",
+            "columns": [
+                { "property": "status", "column_type": "String" },
+                { "property": property, "column_type": column_type }
+            ],
+            "has_order_column": true
+        }))
+        .unwrap()
+    }
+
+    /// A property-backed `Timestamp` column changed meaning (it used to index
+    /// nothing), so its stored hash must read stale and queue a rebuild; every
+    /// other declaration keeps the hash it was built under.
+    #[test]
+    fn only_property_backed_timestamp_declarations_take_the_new_version() {
+        assert!(def_of("due_at", "Timestamp").has_property_timestamp_column());
+        assert!(!def_of("__created_at", "Timestamp").has_property_timestamp_column());
+        assert!(!def_of("__updated_at", "Timestamp").has_property_timestamp_column());
+        assert!(!def_of("label", "String").has_property_timestamp_column());
+        // Same shape, same name: only the column's type differs, and the
+        // property-backed Timestamp hashes under the bumped version.
+        assert_ne!(
+            def_of("due_at", "Timestamp").definition_hash(),
+            def_of("due_at", "String").definition_hash()
+        );
     }
 }

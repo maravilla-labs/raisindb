@@ -133,6 +133,23 @@ impl NodeRepositoryImpl {
                     (CompoundColumnType::String, PropertyValue::Date(d)) => {
                         Some(CompoundColumnValue::date_text(**d))
                     }
+                    // A `Timestamp` column over an ORDINARY property: the same
+                    // `TimestampDesc(micros)` the system columns mint, so one
+                    // scan/ordering convention covers both. A value is a
+                    // `Date` when the property decoder read it back as one
+                    // and an RFC3339 `String` when the in-memory write still
+                    // holds the text (`PropertyValue` is untagged — see
+                    // `CompoundColumnValue::text`); both spellings must
+                    // produce the SAME key or an update could never
+                    // tombstone what the insert wrote.
+                    (CompoundColumnType::Timestamp, PropertyValue::Date(d)) => {
+                        Some(CompoundColumnValue::TimestampDesc(d.timestamp_micros()))
+                    }
+                    (CompoundColumnType::Timestamp, PropertyValue::String(s)) => {
+                        chrono::DateTime::parse_from_rfc3339(s)
+                            .ok()
+                            .map(|dt| CompoundColumnValue::TimestampDesc(dt.timestamp_micros()))
+                    }
                     (CompoundColumnType::Integer, PropertyValue::Integer(i)) => {
                         Some(CompoundColumnValue::Integer(*i))
                     }
@@ -152,5 +169,104 @@ impl NodeRepositoryImpl {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use raisin_models::nodes::properties::schema::CompoundColumnType;
+    use raisin_models::nodes::properties::PropertyValue;
+    use raisin_storage::CompoundColumnValue;
+
+    fn node_with(property: &str, value: PropertyValue) -> Node {
+        let mut node = Node::default();
+        node.properties.insert(property.to_string(), value);
+        node
+    }
+
+    fn extract(node: &Node, property: &str) -> Option<CompoundColumnValue> {
+        NodeRepositoryImpl::extract_compound_column_value(
+            node,
+            property,
+            &CompoundColumnType::Timestamp,
+        )
+    }
+
+    #[test]
+    fn timestamp_column_over_a_date_property_is_indexed_descending() {
+        let dt = chrono::DateTime::parse_from_rfc3339("2026-10-15T21:08:38.119452Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let node = node_with("due_at", PropertyValue::Date(dt.into()));
+        assert_eq!(
+            extract(&node, "due_at"),
+            Some(CompoundColumnValue::TimestampDesc(dt.timestamp_micros()))
+        );
+    }
+
+    #[test]
+    fn timestamp_column_over_an_rfc3339_string_matches_the_date_spelling() {
+        let text = "2026-10-15T21:08:38.119452+00:00";
+        let from_string = extract(
+            &node_with("due_at", PropertyValue::String(text.into())),
+            "due_at",
+        );
+        let dt = chrono::DateTime::parse_from_rfc3339(text)
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let from_date = extract(
+            &node_with("due_at", PropertyValue::Date(dt.into())),
+            "due_at",
+        );
+        assert!(from_string.is_some());
+        assert_eq!(from_string, from_date);
+        // `Z` and `+00:00` are one instant, so one key.
+        let zulu = extract(
+            &node_with(
+                "due_at",
+                PropertyValue::String("2026-10-15T21:08:38.119452Z".into()),
+            ),
+            "due_at",
+        );
+        assert_eq!(zulu, from_date);
+    }
+
+    #[test]
+    fn timestamp_column_that_cannot_be_filled_yields_none() {
+        assert_eq!(
+            extract(
+                &node_with("due_at", PropertyValue::String("soon".into())),
+                "due_at"
+            ),
+            None
+        );
+        assert_eq!(
+            extract(&node_with("due_at", PropertyValue::Boolean(true)), "due_at"),
+            None
+        );
+        assert_eq!(extract(&Node::default(), "due_at"), None);
+    }
+
+    #[test]
+    fn property_timestamps_sort_newest_first_like_the_system_columns() {
+        let at = |s: &str| {
+            let dt = chrono::DateTime::parse_from_rfc3339(s).unwrap();
+            extract(
+                &node_with("due_at", PropertyValue::String(s.into())),
+                "due_at",
+            )
+            .map(|v| (v, dt.timestamp_micros()))
+            .unwrap()
+        };
+        let (older, older_us) = at("2026-01-01T00:00:00Z");
+        let (newer, newer_us) = at("2026-06-01T00:00:00Z");
+        assert!(newer_us > older_us);
+        // The key encodes `!micros` big-endian: a larger instant sorts FIRST.
+        let key = |v: CompoundColumnValue| match v {
+            CompoundColumnValue::TimestampDesc(ts) => (!ts).to_be_bytes(),
+            other => panic!("expected TimestampDesc, got {other:?}"),
+        };
+        assert!(key(newer) < key(older));
     }
 }

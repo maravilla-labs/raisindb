@@ -96,4 +96,44 @@ impl NodeType {
             Ok(())
         })
     }
+
+    /// Advisories for compound-index declarations that index nothing useful.
+    ///
+    /// A `Timestamp` column over an ORDINARY property is keyed from an instant
+    /// (a `Date`, or an RFC3339 string). A property declared as any other type
+    /// can still hold one, but its rows that do not will be left out of the
+    /// index, and a build that meets one never goes Ready. Returned rather than
+    /// raised: existing declarations must keep installing.
+    pub fn compound_index_warnings(&self) -> Vec<String> {
+        use crate::nodes::properties::schema::CompoundColumnType;
+        use crate::nodes::properties::PropertyType;
+
+        let (Some(indexes), Some(properties)) = (&self.compound_indexes, &self.properties) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for index in indexes {
+            for column in &index.columns {
+                if column.column_type != CompoundColumnType::Timestamp
+                    || column.property.starts_with("__")
+                {
+                    continue;
+                }
+                let declared = properties
+                    .iter()
+                    .find(|p| p.name.as_deref() == Some(column.property.as_str()));
+                if let Some(p) = declared {
+                    if p.property_type != PropertyType::Date {
+                        out.push(format!(
+                            "compound index '{}' on '{}': Timestamp column '{}' is over a \
+                             property declared {:?}, not Date; rows whose value is not an \
+                             RFC3339 instant are not indexed",
+                            index.name, self.name, column.property, p.property_type
+                        ));
+                    }
+                }
+            }
+        }
+        out
+    }
 }

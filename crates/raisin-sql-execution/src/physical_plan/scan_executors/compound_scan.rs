@@ -73,17 +73,24 @@ fn encode_equality_value(
                 CompoundColumnValue::String(value.to_string())
             }
         },
-        // The writer only ever mints a Timestamp column from the engine-owned
-        // `__created_at` / `__updated_at`, and encodes it DESCENDING
+        // The writer mints a Timestamp column from `__created_at` /
+        // `__updated_at` or from a property holding an instant, and encodes
+        // it DESCENDING
         // (`TimestampDesc`) — see `extract_compound_column_value`. Mirror that
         // exactly; an equality predicate on a timestamp is unusual but must
         // still address the bytes that were written.
-        CompoundColumnType::Timestamp => match value.parse::<i64>() {
-            Ok(ts) => CompoundColumnValue::TimestampDesc(ts),
-            Err(_) => {
+        CompoundColumnType::Timestamp => match value.parse::<i64>().ok().or_else(|| {
+            // A property-backed column is predicated with an instant, not
+            // microseconds: the writer's key is `TimestampDesc(micros)` of it.
+            chrono::DateTime::parse_from_rfc3339(value)
+                .ok()
+                .map(|dt| dt.timestamp_micros())
+        }) {
+            Some(ts) => CompoundColumnValue::TimestampDesc(ts),
+            None => {
                 tracing::warn!(
-                    "CompoundIndexScan: column '{}' is declared Timestamp but the predicate value '{}' is not \
-                     microseconds-since-epoch; the scan prefix cannot match",
+                    "CompoundIndexScan: column '{}' is declared Timestamp but the predicate value '{}' is neither \
+                     microseconds-since-epoch nor an RFC3339 instant; the scan prefix cannot match",
                     prop_name,
                     value
                 );

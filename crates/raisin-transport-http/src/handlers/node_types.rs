@@ -89,6 +89,10 @@ pub async fn create_node_type(
         return Err(ApiError::validation_failed("Invalid node type definition"));
     }
 
+    for warning in node_type.compound_index_warnings() {
+        tracing::warn!("{warning}");
+    }
+
     // Validate initial_structure if present
     if node_type.initial_structure.is_some() {
         let tenant_id_owned = tenant_id.to_string();
@@ -365,6 +369,10 @@ pub async fn update_node_type(
     node_type
         .validate()
         .map_err(|_| ApiError::validation_failed("Invalid node type definition"))?;
+
+    for warning in node_type.compound_index_warnings() {
+        tracing::warn!("{warning}");
+    }
 
     if node_type.initial_structure.is_some() {
         let tenant_id_owned = tenant_id.to_string();
