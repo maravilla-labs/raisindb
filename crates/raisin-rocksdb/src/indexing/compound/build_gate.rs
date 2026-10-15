@@ -120,10 +120,13 @@ pub fn precheck_build(
 pub fn missing_order_values_message(ctx: &IndexCtx<'_>, nodes: usize) -> String {
     format!(
         "refusing to build compound indexes for {}/{}/{}/{}: {nodes} node(s) have no value for \
-         an index's order column (a version written before created_at/updated_at were \
-         stamped); the index could not list them, so it stays unusable (scan) until they \
-         are rewritten — the `timestamp_backfill` repair does that (automatic unless \
-         RAISIN_TIMESTAMP_BACKFILL=0; POST /api/management/{{repo}}/repairs/timestamp_backfill)",
+         an index's order column, so the index could not list them and stays unusable (scan) \
+         until they can. For a system timestamp (__created_at/__updated_at: a version written \
+         before they were stamped) the `timestamp_backfill` repair rewrites them (automatic \
+         unless RAISIN_TIMESTAMP_BACKFILL=0; POST /api/management/{{repo}}/repairs/timestamp_backfill). \
+         For an order column over a property, that repair does nothing: write the property on \
+         those nodes (the build logs each one with its index and node id), or declare the index \
+         without that column, then rebuild",
         ctx.tenant_id, ctx.repo_id, ctx.branch, ctx.workspace
     )
 }

@@ -247,11 +247,18 @@ impl Pass<'_, '_> {
                 .defs_for(&node.node_type)
                 .find(|def| unrepresentable(def, node))
         }) {
+            let order_column = index
+                .columns
+                .last()
+                .map(|c| c.property.as_str())
+                .unwrap_or_default();
             tracing::warn!(
                 node_id = %id,
                 index = %index.name,
+                order_column = %order_column,
                 "compound build: node has no value for the index's order column \
-                 (a legacy version without the system timestamp); the index cannot list it"
+                 (a system timestamp the version lacks, or the property is absent or holds \
+                 no instant); the index cannot list it"
             );
             self.out.unindexable += 1;
             return Ok(());

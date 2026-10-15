@@ -4,6 +4,7 @@ use super::*;
 use crate::indexing::{Baseline, IndexCtx};
 use crate::repositories::compound_index::newest_per_tuple;
 use raisin_hlc::HLC;
+use raisin_models::nodes::properties::schema::CompoundIndexDefinition;
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
 use rocksdb::{WriteBatch, DB};
@@ -239,4 +240,108 @@ fn date_like_string_and_its_stored_date_derive_one_entry() {
         raisin_storage::CompoundColumnValue::text("2026-01-01T00:00:00.000Z"),
         raisin_storage::CompoundColumnValue::String("2026-01-01T00:00:00Z".into())
     );
+}
+
+/// `t:Doc` with `by_due (status String, due_at Timestamp)` — an order column
+/// over an ordinary property, which an optional property cannot always fill.
+fn due_defs() -> (DefsSet, CompoundIndexDefinition) {
+    let def: CompoundIndexDefinition = serde_json::from_value(serde_json::json!({
+        "name": "by_due",
+        "columns": [
+            { "property": "status", "column_type": "String" },
+            { "property": "due_at", "column_type": "Timestamp" }
+        ],
+        "has_order_column": true
+    }))
+    .unwrap();
+    let set = DefsSet::from_pairs([(
+        "t:Doc".to_string(),
+        Arc::new(TypeIndexDefs {
+            compound: vec![def.clone()],
+            unique: vec![],
+        }),
+    )]);
+    (set, def)
+}
+
+fn put_ready(db: &DB, def: &CompoundIndexDefinition) {
+    let state = raisin_storage::compound::CompoundIndexState::ready(def, HLC::new(1, 0));
+    let cf = crate::cf_handle(db, crate::cf::INDEX_STATUS).unwrap();
+    let key = crate::compound_state::compound_state_key("t", "r", "main", "ws", &def.name);
+    db.put_cf(cf, key, rmp_serde::to_vec(&state).unwrap())
+        .unwrap();
+}
+
+fn state_of(db: &DB) -> raisin_storage::compound::CompoundIndexState {
+    crate::compound_state::read_state(db, "t", "r", "main", "ws", "by_due")
+        .unwrap()
+        .expect("state record")
+}
+
+#[test]
+fn a_write_that_cannot_fill_the_order_column_marks_the_index_stale_once() {
+    use raisin_storage::compound::CompoundBuildPhase;
+    let (_dir, db) = open();
+    let (defs, def) = due_defs();
+    put_ready(&db, &def);
+    let write_due = |node: &Node, rev: u64| {
+        let mut batch = WriteBatch::default();
+        write_compound_delta(
+            &mut batch,
+            &db,
+            &CTX,
+            &defs,
+            Baseline::NoPrior,
+            node,
+            &HLC::new(rev, 0),
+        )
+        .unwrap();
+        db.write(batch).unwrap();
+    };
+    let with_due = |id: &str, due: Option<&str>| {
+        let mut n = doc("open", 1);
+        n.id = id.into();
+        n.path = format!("/{id}");
+        if let Some(d) = due {
+            n.properties
+                .insert("due_at".into(), PropertyValue::String(d.into()));
+        }
+        n
+    };
+
+    // A node the index CAN list leaves it Ready.
+    write_due(&with_due("a", Some("2026-10-15T09:00:00Z")), 10);
+    assert_eq!(state_of(&db).phase, CompoundBuildPhase::Ready);
+
+    // A node it cannot (no value, and an unparseable one) marks it, once.
+    write_due(&with_due("b", None), 20);
+    let marked = state_of(&db);
+    assert_eq!(marked.phase, CompoundBuildPhase::NotBuilt);
+    assert_eq!(marked.stale_generation, 1);
+    assert!(!marked.availability_for(&def).is_ready());
+    write_due(&with_due("c", Some("soon")), 30);
+    assert_eq!(state_of(&db).stale_generation, 1);
+}
+
+#[test]
+fn a_missing_leading_column_does_not_mark_the_index() {
+    use raisin_storage::compound::CompoundBuildPhase;
+    let (_dir, db) = open();
+    let (defs, def) = due_defs();
+    put_ready(&db, &def);
+    let mut n = doc("open", 1);
+    n.properties.remove("status");
+    let mut batch = WriteBatch::default();
+    write_compound_delta(
+        &mut batch,
+        &db,
+        &CTX,
+        &defs,
+        Baseline::NoPrior,
+        &n,
+        &HLC::new(10, 0),
+    )
+    .unwrap();
+    db.write(batch).unwrap();
+    assert_eq!(state_of(&db).phase, CompoundBuildPhase::Ready);
 }

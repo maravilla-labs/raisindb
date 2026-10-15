@@ -16,7 +16,7 @@
 //! commit's re-check (`StagedDeltaCheck`) corrects the compound write too.
 
 use super::defs::DefsSet;
-use super::entries::{compound_entries, entry_key, CompoundGroup};
+use super::entries::{compound_entries, entry_key, unrepresentable, CompoundGroup};
 use super::group::tombstone_revision as landing_revision;
 use crate::indexing::{Baseline, IndexCtx};
 use crate::keys::TOMBSTONE_VALUE as TOMBSTONE;
@@ -99,6 +99,22 @@ pub fn write_compound_delta(
         .map(|old| entries_of(defs, ws, ctx, old))
         .unwrap_or_default();
     let new_entries = entries_of(defs, ws, ctx, new);
+    // A version the index cannot list (no value for its order column) must
+    // not leave the index `Ready`: the planner would answer short with no
+    // residual left to notice. Mark it in the same batch.
+    for def in defs.compound(&new.node_type).iter().chain(ws) {
+        if unrepresentable(def, new) {
+            crate::compound_state::stage_stale_for_unfillable(
+                batch,
+                db,
+                ctx.tenant_id,
+                ctx.repo_id,
+                ctx.branch,
+                ctx.workspace,
+                &def.name,
+            )?;
+        }
+    }
     let skip = matches!(baseline, Baseline::Predecessor(_));
     let mut counts = CompoundCounts::default();
 

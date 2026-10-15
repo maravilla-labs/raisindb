@@ -14,6 +14,7 @@ mod store;
 mod workspace_reconcile;
 
 pub use fork::ForkInheritance;
+pub(crate) use marker::stage_stale_for_unfillable;
 pub use marker::StaleScope;
 pub use store::{compound_state_key, read_state, CompoundStateStore};
 pub use workspace_reconcile::{

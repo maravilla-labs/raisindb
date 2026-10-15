@@ -282,3 +282,48 @@ impl CompoundStateStore {
         Ok(marked)
     }
 }
+
+/// Stage into `batch` the mark of one index whose entries a write is about to
+/// leave incomplete: the write is a node the index cannot list (its ORDER
+/// column has no value, see `indexing::compound::entries::unrepresentable`).
+/// Skipping the node while the record stays `Ready` is exactly the silent
+/// short answer the build refuses to stamp; the write path must say so too.
+///
+/// A record that is already not `Ready` (absent, `NotBuilt`, `Building`
+/// carries its own ticket and is invalidated here too) needs nothing more
+/// when it is `NotBuilt` already, so only the transition is staged — a stream
+/// of such writes marks once. Returns whether a mark was staged.
+///
+/// Staged under the transition lock but written by the caller with its batch:
+/// a build that stamps `Ready` between the two is overwritten by this mark
+/// (its generation is higher), which is the fail-closed direction.
+pub(crate) fn stage_stale_for_unfillable(
+    batch: &mut WriteBatch,
+    db: &rocksdb::DB,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    workspace: &str,
+    index_name: &str,
+) -> Result<bool> {
+    let _guard = transitions();
+    let Some(mut state) = read_state(db, tenant_id, repo_id, branch, workspace, index_name)? else {
+        return Ok(false);
+    };
+    if state.phase == CompoundBuildPhase::NotBuilt {
+        return Ok(false);
+    }
+    mark(&mut state);
+    let cf = cf_handle(db, cf::INDEX_STATUS)?;
+    let key = super::store::compound_state_key(tenant_id, repo_id, branch, workspace, index_name);
+    let bytes = rmp_serde::to_vec(&state)
+        .map_err(|e| Error::storage(format!("Failed to serialize compound index state: {e}")))?;
+    batch.put_cf(cf, key, bytes);
+    tracing::warn!(
+        index = index_name,
+        workspace,
+        "compound index marked stale: a write left a node the index cannot list \
+         (no value for its order column); queries scan until it is rebuilt"
+    );
+    Ok(true)
+}
