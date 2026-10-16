@@ -83,7 +83,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         // Authorization check -- enforce before any mutations
         self.acl_check_authorization(stmt)?;
 
-        match stmt {
+        let result = match stmt {
             AclStatement::CreateRole(s) => self.acl_create_role(s).await,
             AclStatement::AlterRole(s) => self.acl_alter_role(s).await,
             AclStatement::DropRole(s) => self.acl_drop_role(s).await,
@@ -110,7 +110,16 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
 
             AclStatement::ShowPermissionsFor(s) => self.acl_show_permissions_for(s).await,
             AclStatement::ShowEffectiveRolesFor(s) => self.acl_show_effective_roles_for(s).await,
+        };
+
+        // These statements write straight to the node repository, which publishes no
+        // node event, so the WebSocket handler's invalidation never runs for them and a
+        // GRANT or REVOKE waited for the cache TTL. Every mutating statement here writes
+        // before it returns, so on success the access-control workspace has changed.
+        if result.is_ok() && !stmt.is_read_only() {
+            raisin_core::invalidate_all_permission_caches();
         }
+        result
     }
 
     // =========================================================================
