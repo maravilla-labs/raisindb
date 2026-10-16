@@ -345,3 +345,47 @@ fn a_missing_leading_column_does_not_mark_the_index() {
     db.write(batch).unwrap();
     assert_eq!(state_of(&db).phase, CompoundBuildPhase::Ready);
 }
+
+/// #159: 30% of a status's rows lack the order value. The index holds only the
+/// other 70%, so a `status = x` prefix query or a status + range query served
+/// by it would answer short. The first such write must take the index out of
+/// service (the planner scans), however many rows follow.
+#[test]
+fn thirty_percent_of_rows_missing_the_order_value_takes_the_index_out_of_service() {
+    use raisin_storage::compound::CompoundBuildPhase;
+    let (_dir, db) = open();
+    let (defs, def) = due_defs();
+    put_ready(&db, &def);
+    let mut listed = 0;
+    for i in 0..10u64 {
+        let mut n = doc("signed", 1);
+        n.id = format!("n{i}");
+        n.path = format!("/n{i}");
+        if i % 10 >= 3 {
+            n.properties.insert(
+                "due_at".into(),
+                PropertyValue::String(format!("2026-10-{:02}T10:00:00Z", 10 + i)),
+            );
+        }
+        let mut batch = WriteBatch::default();
+        let counts = write_compound_delta(
+            &mut batch,
+            &db,
+            &CTX,
+            &defs,
+            Baseline::NoPrior,
+            &n,
+            &HLC::new(10 + i, 0),
+        )
+        .unwrap();
+        db.write(batch).unwrap();
+        listed += counts.puts;
+    }
+    // The writer lists only the rows it can; the state is what keeps the
+    // planner from answering a prefix or range query from them.
+    assert_eq!(listed, 7);
+    let state = state_of(&db);
+    assert_eq!(state.phase, CompoundBuildPhase::NotBuilt);
+    assert_eq!(state.stale_generation, 1);
+    assert!(!state.availability_for(&def).is_ready());
+}

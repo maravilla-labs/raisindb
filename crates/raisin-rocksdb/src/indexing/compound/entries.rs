@@ -11,7 +11,7 @@
 use crate::indexing::IndexCtx;
 use crate::keys;
 use raisin_hlc::HLC;
-use raisin_models::nodes::properties::schema::{CompoundColumnType, CompoundIndexDefinition};
+use raisin_models::nodes::properties::schema::CompoundIndexDefinition;
 use raisin_models::nodes::Node;
 use std::collections::BTreeSet;
 
@@ -63,36 +63,26 @@ pub fn compound_entries<'d>(
     out
 }
 
-/// The system timestamps the write layer stamps on every node version
-/// (`Node::ensure_write_timestamps`). A version WITHOUT one is legacy data
-/// (written before the stamping fix), not a modeling choice.
-const SYSTEM_ORDER_COLUMNS: [&str; 2] = ["__created_at", "__updated_at"];
-
-/// Whether `node` belongs in `def` but has no entry there: every leading
-/// (equality) column derives, yet the trailing ORDER column is a timestamp the
-/// version cannot fill — a system timestamp it lacks, or a `Timestamp` column
-/// over a property that is absent or holds no instant (the property-backed
-/// case used to be indexed as nothing AND stamped Ready, so the planner
-/// answered every such query from an empty index).
+/// Whether `node` belongs in `def` but is omitted from it in a way a query
+/// can observe: its FIRST column derives (so a query binding it would reach
+/// this node) yet a later column — a middle one, or the trailing ORDER column
+/// — has no value (an absent property, a value of the wrong type, a system
+/// timestamp a legacy version lacks).
 ///
-/// [`compound_entries`] skips such a node, which is right for a leading
-/// column (a node with no value cannot match the equality the planner seeks)
-/// and WRONG for the order column: `CHILD_OF(p) ORDER BY created_at` must
-/// return a child with a NULL `created_at` — the row scan does — and an
-/// index without it answers short, with no residual left to notice. A build
-/// that meets one counts it ([`super::build::BuildOutcome::unindexable`]) and
-/// never stamps `Ready`, so the planner keeps scanning (fail closed).
+/// [`compound_entries`] skips such a node, which is only right for a query
+/// that binds every column: a null never equals anything. The planner also
+/// serves a PREFIX (`status = x`, or `status = x ORDER BY due`) and a range
+/// on the order column from the same index, and those must return the node —
+/// the row scan does — so an index without it answers short, with no residual
+/// left to notice. A build that meets one counts it
+/// ([`super::build::BuildOutcome::unindexable`]) and never stamps `Ready`, and
+/// the live writer marks a `Ready` index stale (`stage_stale_for_unfillable`),
+/// so the planner keeps scanning (fail closed). A node whose FIRST column is
+/// missing cannot be reached by any query that uses the index, and stays out.
 pub fn unrepresentable(def: &CompoundIndexDefinition, node: &Node) -> bool {
-    if !def.has_order_column {
-        return false;
-    }
-    let Some((order, leading)) = def.columns.split_last() else {
+    let Some((first, rest)) = def.columns.split_first() else {
         return false;
     };
-    let timestamp_column = matches!(order.column_type, CompoundColumnType::Timestamp);
-    if !timestamp_column && !SYSTEM_ORDER_COLUMNS.contains(&order.property.as_str()) {
-        return false;
-    }
     let value = |column: &raisin_models::nodes::properties::schema::CompoundIndexColumn| {
         crate::repositories::NodeRepositoryImpl::extract_compound_column_value(
             node,
@@ -100,7 +90,7 @@ pub fn unrepresentable(def: &CompoundIndexDefinition, node: &Node) -> bool {
             &column.column_type,
         )
     };
-    leading.iter().all(|column| value(column).is_some()) && value(order).is_none()
+    value(first).is_some() && rest.iter().any(|column| value(column).is_none())
 }
 
 /// The key of `group`'s entry for `node_id` at `revision`.
@@ -227,9 +217,29 @@ mod tests {
     }
 
     #[test]
-    fn non_timestamp_property_order_columns_keep_their_behaviour() {
-        let d = def("String", "label");
-        assert!(!unrepresentable(&d, &node(None)));
+    fn any_column_type_that_cannot_be_filled_after_the_first_is_unrepresentable() {
+        // A String order column (or a middle column) behaves the same: a
+        // prefix query served by the index would miss the node.
+        assert!(unrepresentable(&def("String", "label"), &node(None)));
+        let three: CompoundIndexDefinition = serde_json::from_value(serde_json::json!({
+            "name": "abc",
+            "columns": [
+                { "property": "status", "column_type": "String" },
+                { "property": "mid", "column_type": "String" },
+                { "property": "last", "column_type": "String" }
+            ],
+            "has_order_column": false
+        }))
+        .unwrap();
+        let only_last = node(Some(("last", PropertyValue::String("x".into()))));
+        assert!(unrepresentable(&three, &only_last));
+        let all = {
+            let mut n = only_last.clone();
+            n.properties
+                .insert("mid".into(), PropertyValue::String("y".into()));
+            n
+        };
+        assert!(!unrepresentable(&three, &all));
     }
 
     #[test]
