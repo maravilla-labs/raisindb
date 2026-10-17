@@ -171,13 +171,17 @@ fn engine(sql: &str, params: &[Value]) -> raisin_error::Result<Value> {
     if sql.contains("HYBRID_SEARCH") {
         return Ok(Value::Array(hybrid_rows(window_of(sql))));
     }
+    // `ask` reads node text once per assembly: for the first retrieval (before the
+    // expansion leg exists, so without the news item) and again after the
+    // expansion added it. The news body is answered whenever it is asked for; the
+    // tests prove it was asked for by its text reaching the citation.
     if sql.contains("WHERE path IN") {
-        assert!(
-            params
-                .iter()
-                .any(|p| p == "/bap/news/neuer-geschaeftsfuehrer"),
-            "{params:?}"
-        );
+        if !params
+            .iter()
+            .any(|p| p == "/bap/news/neuer-geschaeftsfuehrer")
+        {
+            return Ok(json!([]));
+        }
         return Ok(
             json!([{ "path": "/bap/news/neuer-geschaeftsfuehrer", "properties": {
                 "title": "Neuer Geschäftsführer",
@@ -313,7 +317,16 @@ async fn ask_answers_with_linkable_citations() {
     assert_eq!(out["grounded"], true);
     assert_eq!(out["model"], "stub:model");
     assert_eq!(out["attempts"][0]["expansions"], json!(["Geschäftsführer"]));
+    // the lexical-only expansion hit leads, with text only the node read supplies
     let c = &out["citations"][0];
+    assert_eq!(c["path"], "/bap/news/neuer-geschaeftsfuehrer", "{c}");
+    assert!(
+        c["snippet"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Max Muster übernimmt"),
+        "{c}"
+    );
     for field in [
         "marker",
         "path",

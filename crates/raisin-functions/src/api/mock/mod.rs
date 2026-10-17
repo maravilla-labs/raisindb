@@ -43,6 +43,8 @@ pub struct MockFunctionApi {
     /// is what lets a test assert the exact URL, headers and body a function
     /// produced rather than just its return value.
     http_calls: std::sync::Mutex<Vec<Value>>,
+    /// Plugin binding calls the guest made, as `(method, args array)`.
+    plugin_calls: std::sync::Mutex<Vec<(String, Value)>>,
     /// Every `sql_query` made, as `{ sql, params }`, in order. The query used
     /// to be echoed back inside the RESULT as a `_debug` key, which was only
     /// possible because the mock returned an object where production returns
@@ -93,6 +95,7 @@ impl MockFunctionApi {
             http_responses: std::sync::Mutex::new(std::collections::VecDeque::new()),
             sql_queries: std::sync::Mutex::new(Vec::new()),
             http_calls: std::sync::Mutex::new(Vec::new()),
+            plugin_calls: std::sync::Mutex::new(Vec::new()),
             secrets: std::sync::Mutex::new(std::collections::HashMap::new()),
             emails_sent: std::sync::Mutex::new(Vec::new()),
             responders: Responders::default(),
@@ -143,6 +146,10 @@ impl MockFunctionApi {
     /// Every `sql_query` this mock served, as `{ sql, params }`, in order.
     pub fn sql_queries(&self) -> Vec<Value> {
         self.sql_queries.lock().unwrap().clone()
+    }
+
+    pub fn plugin_calls(&self) -> Vec<(String, Value)> {
+        self.plugin_calls.lock().unwrap().clone()
     }
 
     pub fn http_calls(&self) -> Vec<Value> {
@@ -339,6 +346,14 @@ impl FunctionApi for MockFunctionApi {
     }
 
     // ========== HTTP / Event Operations ==========
+
+    async fn plugin_call(&self, method: &str, args: Value) -> Result<Value> {
+        self.plugin_calls
+            .lock()
+            .unwrap()
+            .push((method.to_string(), args.clone()));
+        Ok(serde_json::json!({ "method": method, "args": args }))
+    }
 
     async fn http_request(&self, method: &str, url: &str, options: Value) -> Result<Value> {
         self.http_calls.lock().unwrap().push(serde_json::json!({

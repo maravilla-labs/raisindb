@@ -67,6 +67,8 @@ mod error;
 mod handler;
 pub mod host;
 pub mod log;
+/// Plugin bindings (`raisin.media.*`, `raisin.capabilities`): same surface as JavaScript.
+pub mod plugins;
 pub mod transaction;
 pub mod wire;
 
@@ -100,6 +102,7 @@ pub use error::{Error, Result};
 pub use generated::*;
 pub use handler::{dispatch, registered_names, Handler};
 pub use host::LogLevel;
+pub use plugins::media;
 pub use raisin_sdk_macros::{export, handler};
 pub use transaction::Transaction;
 
