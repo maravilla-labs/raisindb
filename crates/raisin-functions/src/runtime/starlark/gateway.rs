@@ -10,7 +10,9 @@ use starlark::starlark_module;
 use starlark::values::{none::NoneType, tuple::UnpackTuple, Heap, Value};
 
 use super::conversions::{json_to_starlark, starlark_value_to_json};
-use super::thread_local::{push_log, CURRENT_API, CURRENT_HANDLE, CURRENT_POLICY};
+use super::thread_local::{
+    push_log, CURRENT_API, CURRENT_DEADLINE, CURRENT_HANDLE, CURRENT_POLICY,
+};
 use crate::runtime::bindings::methods::registry;
 use crate::types::LogEntry;
 
@@ -62,8 +64,28 @@ pub(super) fn raisin_gateway_module(builder: &mut GlobalsBuilder) {
         // This is needed because StarlarkRuntime::execute() is async, and the Starlark evaluator is sync.
         // block_in_place tells tokio to park the current task while we block.
         let invoker = method_desc.invoker;
+        //
+        // The call carries the function's remaining wall-clock time: a host call
+        // that never returns (a silent SMTP server) would otherwise block the
+        // evaluator for ever.
+        let deadline = CURRENT_DEADLINE.with(|cell| cell.get());
         let result = tokio::task::block_in_place(|| {
-            handle.block_on(async move { (invoker)(api, json_args).await })
+            handle.block_on(async move {
+                let call = (invoker)(api, json_args);
+                match deadline {
+                    Some(deadline) => tokio::time::timeout(
+                        deadline.saturating_duration_since(std::time::Instant::now()),
+                        call,
+                    )
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(raisin_error::Error::Internal(
+                            "function timed out during host call".to_string(),
+                        ))
+                    }),
+                    None => call.await,
+                }
+            })
         });
 
         match result {

@@ -22,6 +22,16 @@ thread_local! {
     /// The execution policy of the call on this thread (host calls allowed?).
     pub(super) static CURRENT_POLICY: std::cell::Cell<crate::types::ExecutionPolicy> =
         const { std::cell::Cell::new(crate::types::ExecutionPolicy::Standard) };
+    /// Wall-clock deadline of the call on this thread. A host call is awaited
+    /// inside the (synchronous) evaluator, so nothing else can cut one that
+    /// never returns.
+    pub(super) static CURRENT_DEADLINE: std::cell::Cell<Option<std::time::Instant>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Set the wall-clock deadline for host calls made on this thread.
+pub(super) fn set_thread_deadline(deadline: std::time::Instant) {
+    CURRENT_DEADLINE.with(|cell| cell.set(Some(deadline)));
 }
 
 /// Set the execution policy for the call on this thread.
@@ -49,6 +59,7 @@ pub(super) fn set_thread_api(
 /// Clear the current API for the thread
 pub(super) fn clear_thread_api() {
     CURRENT_POLICY.with(|cell| cell.set(crate::types::ExecutionPolicy::Standard));
+    CURRENT_DEADLINE.with(|cell| cell.set(None));
     CURRENT_API.with(|cell| {
         *cell.borrow_mut() = None;
     });

@@ -19,7 +19,7 @@ use super::conversions::{json_to_starlark, starlark_value_to_json};
 use super::gateway::raisin_gateway_module;
 use super::setup_code::generate_setup_code;
 use super::thread_local::{
-    clear_logs, clear_thread_api, set_thread_api, set_thread_policy, take_logs,
+    clear_logs, clear_thread_api, set_thread_api, set_thread_deadline, set_thread_policy, take_logs,
 };
 use crate::api::FunctionApi;
 use crate::runtime::FunctionRuntime;
@@ -281,6 +281,10 @@ impl FunctionRuntime for StarlarkRuntime {
         // Set thread-local API, handle, and log emitter for the gateway function
         set_thread_api(api.clone(), handle.clone(), context.log_emitter.clone());
         set_thread_policy(context.policy);
+        set_thread_deadline(
+            std::time::Instant::now()
+                + std::time::Duration::from_millis(metadata.resource_limits.timeout_ms.max(1)),
+        );
 
         // Clear any stale logs from previous executions
         clear_logs();
@@ -417,5 +421,42 @@ impl FunctionRuntime for StarlarkRuntime {
 
     fn name(&self) -> &'static str {
         "Starlark"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::MockFunctionApi;
+    use crate::types::{ExecutionContext, FunctionMetadata, ResourceLimits};
+
+    /// A host call that never returns (a silent SMTP server) must be cut at the
+    /// function's deadline; the evaluator is synchronous, so nothing else can.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_hung_host_call_is_cut_at_the_function_deadline() {
+        let runtime = StarlarkRuntime::new();
+        let code = "def handler(input):\n    raisin.email.send({\"to\": \"u@example.com\", \"subject\": \"s\", \"text\": \"t\"})\n    return {\"reached\": True}\n";
+        let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+            .with_input(serde_json::json!({}));
+        let metadata = FunctionMetadata::starlark("hung_host_call")
+            .with_resource_limits(ResourceLimits::default().with_timeout_ms(500));
+        let api = Arc::new(MockFunctionApi::new(serde_json::json!({})).with_email_hang());
+
+        let started = std::time::Instant::now();
+        let _ = runtime
+            .execute(
+                &FunctionCode::from(code),
+                "handler",
+                context,
+                &metadata,
+                api,
+                HashMap::new(),
+            )
+            .await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "the host call must be cut near the 500ms deadline, took {:?}",
+            started.elapsed()
+        );
     }
 }
