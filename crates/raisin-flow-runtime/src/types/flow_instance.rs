@@ -427,6 +427,11 @@ pub struct FlowCheckpoint {
 /// Execution metrics for monitoring and observability
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FlowMetrics {
+    /// Handler attempts across the complete instance lifetime, including
+    /// failed calls and result consumption after async waits.
+    #[serde(default)]
+    pub execution_attempts: u64,
+
     /// Total execution duration in milliseconds
     #[serde(default)]
     pub total_duration_ms: u64,

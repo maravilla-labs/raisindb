@@ -13,8 +13,8 @@
 //! - Manages compensation stack for rollback
 
 use crate::types::{
-    FlowCallbacks, FlowDefinition, FlowError, FlowExecutionEvent, FlowResult, FlowStatus,
-    StepResult,
+    FlowCallbacks, FlowDefinition, FlowError, FlowExecutionEvent, FlowExecutionLimits, FlowResult,
+    FlowStatus, StepResult,
 };
 use chrono::Utc;
 use serde_json::Value;
@@ -110,6 +110,24 @@ pub(super) async fn execute_flow_with_retry(
     // Track flow start time for duration calculation
     let flow_start = Instant::now();
 
+    let limits = match FlowExecutionLimits::parse(flow_def.metadata.custom.get("execution_limits"))
+    {
+        Ok(limits) => limits,
+        Err(error) => {
+            let step_id = instance.current_node_id.clone();
+            fail_flow_terminally(
+                instance_id,
+                &mut instance,
+                &step_id,
+                error,
+                &flow_start,
+                callbacks,
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+
     // Opt-in per flow; 0 (the default) means no history is kept.
     let checkpoint_limit =
         crate::types::FlowInstance::checkpoint_limit(&instance.flow_definition_snapshot);
@@ -154,6 +172,20 @@ pub(super) async fn execute_flow_with_retry(
             "Executing step {} of type {:?}",
             current_step.id, current_step.step_type
         );
+
+        if let Err(error) = limits.charge_attempt(&mut instance, Utc::now()) {
+            let step_id = current_step.id.clone();
+            fail_flow_terminally(
+                instance_id,
+                &mut instance,
+                &step_id,
+                error,
+                &flow_start,
+                callbacks,
+            )
+            .await?;
+            return Ok(());
+        }
 
         steps_this_execution += 1;
         if steps_this_execution > MAX_STEPS_PER_EXECUTION {
@@ -774,6 +806,100 @@ mod tests {
         // The greeting output should be in the final variables
         let output = saved.output.as_ref().unwrap();
         assert_eq!(output.get("greeting"), Some(&json!("hello")));
+    }
+
+    #[tokio::test]
+    async fn a_wait_without_its_own_deadline_gets_no_lifetime_wake_up() {
+        // The lifetime limit clips a step's deadline; it does not invent one. A
+        // wake-up per wait would be a job per wait, and the limit is charged on resume.
+        let mut definition = function_step_flow("/functions/greet");
+        definition["metadata"] =
+            json!({ "custom": { "execution_limits": { "max_elapsed_ms": 60000 } } });
+        let callbacks = MockLoopCallbacks::new(make_instance(definition));
+        super::execute_flow("test-instance-1", &callbacks)
+            .await
+            .unwrap();
+        let saved = callbacks.saved_instance();
+        assert_eq!(saved.status, FlowStatus::Waiting);
+        assert_eq!(saved.wait_info.and_then(|w| w.timeout_at), None);
+    }
+
+    #[tokio::test]
+    async fn lifetime_attempt_budget_survives_multiple_async_boundaries() {
+        let mut definition = function_step_flow("/functions/greet");
+        definition["nodes"][1]["next_node"] = json!("step1");
+        definition["metadata"] =
+            json!({ "custom": { "execution_limits": { "max_step_attempts": 4 } } });
+        let callbacks = MockLoopCallbacks::new(make_instance(definition));
+        super::execute_flow("test-instance-1", &callbacks)
+            .await
+            .unwrap();
+        assert_eq!(callbacks.saved_instance().status, FlowStatus::Waiting);
+        assert_eq!(callbacks.saved_instance().metrics.execution_attempts, 2);
+
+        for _ in 0..2 {
+            let mut resumed = callbacks.saved_instance();
+            resumed.status = FlowStatus::Running;
+            resumed.variables["__function_result"] =
+                json!({ "success": true, "result": { "greeting": "hello" } });
+            resumed.variables[crate::runtime::executor::RESUME_REENTRY_KEY] = json!(true);
+            *callbacks.instance.lock().unwrap() = resumed;
+            let outcome = super::execute_flow("test-instance-1", &callbacks).await;
+            if callbacks.saved_instance().status == FlowStatus::Failed {
+                assert!(matches!(
+                    outcome,
+                    Err(crate::types::FlowError::MaxIterationsExceeded { limit: 4 })
+                ));
+            } else {
+                outcome.unwrap();
+            }
+        }
+        let saved = callbacks.saved_instance();
+        assert_eq!(saved.status, FlowStatus::Failed);
+        assert_eq!(saved.metrics.execution_attempts, 4);
+        assert!(saved
+            .error
+            .unwrap()
+            .contains("Maximum iterations exceeded: 4"));
+        assert_eq!(
+            callbacks
+                .emitted_events()
+                .iter()
+                .filter(|event| matches!(event, FlowExecutionEvent::StepStarted { .. }))
+                .count(),
+            4
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_lifetime_prevents_another_handler_dispatch() {
+        let mut instance = make_instance(start_end_flow());
+        instance.status = FlowStatus::Running;
+        instance.started_at = chrono::Utc::now() - chrono::Duration::days(31);
+        let callbacks = MockLoopCallbacks::new(instance);
+        assert!(matches!(
+            super::execute_flow("test-instance-1", &callbacks).await,
+            Err(crate::types::FlowError::TimeoutExceeded { .. })
+        ));
+        let saved = callbacks.saved_instance();
+        assert_eq!(saved.status, FlowStatus::Failed);
+        assert_eq!(saved.metrics.execution_attempts, 0);
+        assert_eq!(saved.metrics.step_count, 0);
+        assert!(saved.error.unwrap().contains("Timeout exceeded"));
+    }
+
+    #[tokio::test]
+    async fn legacy_persisted_steps_are_a_lower_bound_on_attempts() {
+        let mut instance = make_instance(start_end_flow());
+        instance.status = FlowStatus::Running;
+        instance.metrics.step_count = 10_000;
+        let callbacks = MockLoopCallbacks::new(instance);
+        assert!(matches!(
+            super::execute_flow("test-instance-1", &callbacks).await,
+            Err(crate::types::FlowError::MaxIterationsExceeded { limit: 10_000 })
+        ));
+        assert_eq!(callbacks.saved_instance().status, FlowStatus::Failed);
+        assert_eq!(callbacks.saved_instance().metrics.step_count, 10_000);
     }
 
     /// Already-completed flows are skipped (idempotency).

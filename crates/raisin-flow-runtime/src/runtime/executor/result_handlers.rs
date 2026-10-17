@@ -44,6 +44,16 @@ pub(super) async fn handle_wait_result(
         )
         .await;
 
+    let policy = instance
+        .flow_definition_snapshot
+        .pointer("/metadata/custom/execution_limits");
+    let limits = crate::types::FlowExecutionLimits::parse(policy)?;
+    let deadline =
+        instance.started_at + chrono::Duration::milliseconds(limits.max_elapsed_ms as i64);
+    // A step's own deadline is clipped to the lifetime deadline; a wait WITHOUT one
+    // gets no wake-up job (it consumes nothing while waiting, and the lifetime
+    // limit is charged again when it resumes - see FlowExecutionLimits::charge_attempt).
+    let timeout_at = calculate_timeout(metadata).map(|step_deadline| step_deadline.min(deadline));
     instance.status = FlowStatus::Waiting;
     instance.wait_info = Some(WaitInfo {
         subscription_id: generate_subscription_id(),
@@ -54,7 +64,7 @@ pub(super) async fn handle_wait_result(
         expected_event: metadata
             .get("expected_event")
             .and_then(|v| v.as_str().map(String::from)),
-        timeout_at: calculate_timeout(metadata),
+        timeout_at,
     });
 
     // Schedule a timeout-check wake-up job at the deadline if one is
@@ -252,7 +262,14 @@ async fn schedule_retry(
         instance_id, instance.retry_count, backoff
     );
 
-    let retry_at = Utc::now() + backoff;
+    let limits = crate::types::FlowExecutionLimits::parse(
+        instance
+            .flow_definition_snapshot
+            .pointer("/metadata/custom/execution_limits"),
+    )?;
+    let deadline =
+        instance.started_at + chrono::Duration::milliseconds(limits.max_elapsed_ms as i64);
+    let retry_at = (Utc::now() + backoff).min(deadline);
     instance.status = FlowStatus::Waiting;
     instance.wait_info = Some(WaitInfo {
         subscription_id: generate_subscription_id(),

@@ -10,6 +10,7 @@ pub mod compensation;
 pub mod context;
 pub mod designer_format;
 pub mod events;
+pub mod execution_limits;
 pub mod flow_definition;
 pub mod flow_instance;
 pub mod parallel;
@@ -24,6 +25,7 @@ pub use context::{
     ContextFrame, FlowContext, FlowContextError, FrameType, TriggerEventType, TriggerInfo,
 };
 pub use events::{FlowExecutionEvent, StepUsage};
+pub use execution_limits::FlowExecutionLimits;
 pub use flow_definition::{
     is_valid_task_type_slug, AIContainerConfig, AiExecutionConfig, DecisionConfig, FlowDefinition,
     FlowEdge, FlowMetadata, FlowNode, FunctionStepConfig, HumanTaskConfig, StepType, TaskOption,

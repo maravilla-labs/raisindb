@@ -102,6 +102,7 @@ impl FlowDefinition {
     /// Returns every dangling reference at once rather than the first, so a
     /// mis-wired graph takes one pass to fix.
     pub fn validate(&self) -> Result<(), FlowError> {
+        crate::types::FlowExecutionLimits::parse(self.metadata.custom.get("execution_limits"))?;
         let mut problems: Vec<String> = Vec::new();
 
         if self.nodes.is_empty() {
