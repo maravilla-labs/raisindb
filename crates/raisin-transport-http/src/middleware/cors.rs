@@ -173,7 +173,7 @@ pub async fn unified_cors_middleware(
             );
             headers.insert(
                 header::ACCESS_CONTROL_ALLOW_HEADERS,
-                "Content-Type, Authorization, Accept, Content-Range, Range, If-Range, X-Tenant-Id, X-Raisin-Impersonate, Cache-Control"
+                "Content-Type, Authorization, Accept, Content-Range, Range, If-Range, X-Tenant-Id, X-Raisin-Impersonate, Cache-Control, X-Maravilla-Internal-Render, X-Maravilla-Render-Host"
                     .parse()
                     .expect("hardcoded headers are valid"),
             );
@@ -254,7 +254,7 @@ fn apply_preflight_cors_headers(headers: &mut axum::http::HeaderMap, origin: &st
     );
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_HEADERS,
-        "Content-Type, Authorization, Accept, Range, If-Range, Cache-Control"
+        "Content-Type, Authorization, Accept, Range, If-Range, Cache-Control, X-Maravilla-Internal-Render, X-Maravilla-Render-Host"
             .parse()
             .expect("hardcoded headers are valid"),
     );
