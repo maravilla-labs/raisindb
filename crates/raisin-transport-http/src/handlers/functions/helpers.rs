@@ -13,7 +13,8 @@ use chrono::Utc;
 use raisin_binary::BinaryStorage;
 use raisin_functions::execution::code_loader::{
     extract_code_bytes_from_asset, extract_code_from_asset, extract_email_policy,
-    extract_identity_policy, extract_network_policy, extract_secret_policy,
+    extract_execution_context, extract_identity_policy, extract_network_policy,
+    extract_secret_policy,
 };
 use raisin_functions::{
     ExecutionMode, FunctionCode, FunctionLanguage, FunctionMetadata, LoadedFunction, ResourceLimits,
@@ -439,6 +440,12 @@ pub(super) fn build_metadata(node: &Node) -> Result<FunctionMetadata, ApiError> 
     metadata.secret_policy = extract_secret_policy(node);
     metadata.email_policy = extract_email_policy(node);
     metadata.identity_policy = extract_identity_policy(node);
+    // `execution_context` likewise: `invoke.rs` strips the caller's identity
+    // for a `system` function by branching on this field, and without it every
+    // HTTP invoke of a system-context function ran AS THE CALLER (an identity
+    // with a narrow role read nothing), while the same function invoked over
+    // the WebSocket, by a trigger or a flow ran as the system.
+    metadata.execution_context = extract_execution_context(node);
 
     if let Some(json) = property_as_json(node.properties.get("triggers")) {
         metadata.triggers = serde_json::from_value(json).unwrap_or_default();
@@ -813,6 +820,32 @@ mod policy_tests {
             vec!["https://api.example.com/*".to_string()],
             "the one policy that always worked must keep working"
         );
+    }
+
+    /// The second regression of the same shape: `execution_context` was not
+    /// read either, so `invoke.rs` saw the default (`User`) and a function
+    /// declaring `system` ran with the HTTP caller's rights.
+    #[test]
+    fn a_declared_system_context_reaches_the_metadata() {
+        use raisin_functions::types::FunctionExecutionContext;
+        let mut node = node_with_policies();
+        node.properties.insert(
+            "execution_context".to_string(),
+            PropertyValue::String("system".to_string()),
+        );
+        let metadata = build_metadata(&node).expect("builds");
+        assert_eq!(metadata.execution_context, FunctionExecutionContext::System);
+
+        // absent or unparsable stays the LEAST privileged: the caller
+        node.properties.remove("execution_context");
+        let metadata = build_metadata(&node).expect("builds");
+        assert_eq!(metadata.execution_context, FunctionExecutionContext::User);
+        node.properties.insert(
+            "execution_context".to_string(),
+            PropertyValue::String("root".to_string()),
+        );
+        let metadata = build_metadata(&node).expect("builds");
+        assert_eq!(metadata.execution_context, FunctionExecutionContext::User);
     }
 
     /// A node declaring nothing still denies everything. The fix must widen
