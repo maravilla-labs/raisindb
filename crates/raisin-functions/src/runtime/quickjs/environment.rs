@@ -45,6 +45,7 @@ pub(super) fn setup_js_environment<'js>(
     api: Arc<dyn FunctionApi>,
     log_emitter: Option<raisin_storage::LogEmitter>,
     policy: ExecutionPolicy,
+    deadline: std::time::Instant,
 ) -> std::result::Result<(), rquickjs::Error> {
     let globals = ctx.globals();
 
@@ -85,6 +86,7 @@ pub(super) fn setup_js_environment<'js>(
             abort_registry.clone(),
             stream_registry.clone(),
             policy,
+            deadline,
         ),
     )?;
 
@@ -192,18 +194,19 @@ fn setup_raisin_api<'js>(
     abort_registry: Arc<AbortRegistry>,
     stream_registry: Arc<StreamRegistry>,
     policy: ExecutionPolicy,
+    deadline: std::time::Instant,
 ) -> std::result::Result<(), rquickjs::Error> {
     let globals = ctx.globals();
     let allow = policy.allows_host_calls();
 
     // The single dispatch point for all raisin.* API methods: looks the
     // method up in the shared bindings registry and runs its invoker.
-    register_registry_gateway(ctx, api.clone(), allow)?;
+    register_registry_gateway(ctx, api.clone(), allow, deadline)?;
 
     // Gateway for function-binding plugin methods (raisin.<ns>.*). Routes to
     // FunctionApi::plugin_call, bypassing the registry. A no-op at the JS level
     // when no plugins are registered (nothing calls it).
-    register_plugin_gateway(ctx, api.clone(), allow)?;
+    register_plugin_gateway(ctx, api.clone(), allow, deadline)?;
 
     // Internal namespace for the runtime-local host functions that cannot be
     // expressed as registry invokers (they bind per-execution state, not

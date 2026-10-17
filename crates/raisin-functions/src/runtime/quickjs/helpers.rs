@@ -48,3 +48,34 @@ where
         })
     })
 }
+
+/// Run an async host call in a blocking context, bounded by the execution's
+/// wall-clock `deadline`.
+///
+/// A host call is awaited INSIDE the interpreter's poll, so neither the tokio
+/// timeout around the whole execution (it only fires between polls) nor the
+/// interrupt handler (it only runs while bytecode executes) can cut a call
+/// that never returns — a silent SMTP server, a stuck provider. The call
+/// itself therefore carries the remaining execution time; when it elapses the
+/// future is dropped (cancelling the I/O) and the function gets a timeout
+/// error. The interrupt handler, whose deadline has passed by then, ends the
+/// execution as a timeout at the next bytecode.
+pub(super) fn run_async_blocking_until<F, T>(
+    future: F,
+    deadline: std::time::Instant,
+    what: &str,
+) -> std::result::Result<T, raisin_error::Error>
+where
+    F: std::future::Future<Output = T>,
+{
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(async {
+            tokio::time::timeout(remaining, future).await.map_err(|_| {
+                raisin_error::Error::Internal(format!(
+                    "function timed out during host call `{what}`"
+                ))
+            })
+        })
+    })
+}

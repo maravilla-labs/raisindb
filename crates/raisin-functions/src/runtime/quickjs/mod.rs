@@ -269,6 +269,7 @@ impl FunctionRuntime for QuickJsRuntime {
                     api_clone.clone(),
                     log_emitter,
                     policy,
+                    interrupt_deadline,
                 ) {
                     // Extract the ACTUAL exception, exactly as the handler path
                     // does. `rquickjs` renders `Error::Exception` as the fixed

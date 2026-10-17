@@ -997,6 +997,47 @@ async fn test_busy_loop_is_interrupted_at_deadline() {
     );
 }
 
+/// A host call that never returns (a silent SMTP server) must not outlive the
+/// function's deadline: the synchronous `raisin.email.send` runs inside the
+/// interpreter's poll, so only a deadline carried by the call itself can cut it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_hung_host_call_is_cut_at_the_function_deadline() {
+    let runtime = QuickJsRuntime::new();
+
+    let code = r#"
+        function handler(input) {
+            raisin.email.send({ to: 'user@example.com', subject: 's', text: 't' });
+            return { reached: true };
+        }
+    "#;
+
+    let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+        .with_input(serde_json::json!({}));
+    let metadata = FunctionMetadata::javascript("hung_host_call_test")
+        .with_resource_limits(crate::types::ResourceLimits::default().with_timeout_ms(500));
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})).with_email_hang());
+
+    let started = Instant::now();
+    let result = runtime
+        .execute(
+            &FunctionCode::from(code),
+            "handler",
+            context,
+            &metadata,
+            api,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+
+    assert!(!result.success, "a hung host call must not succeed");
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "the host call must be cut near the 500ms deadline, took {elapsed:?}"
+    );
+}
+
 /// A later execution on the same runtime must not be killed by the previous
 /// execution's (already expired) interrupt deadline.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

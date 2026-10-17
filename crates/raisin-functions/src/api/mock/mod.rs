@@ -29,6 +29,10 @@ pub struct MockFunctionApi {
     /// When set, reads/queries/sql/events fail with this message too — used to
     /// test the runtimes' swallowed-error conventions (null / [] / sentinels).
     all_errors: Option<String>,
+    /// When set, `email_send` never completes — a provider that accepted the
+    /// connection and went silent. Used to test that the function deadline
+    /// cuts a blocked host call.
+    email_hangs: bool,
     /// Scripted `http_request` responses, consumed in order. Empty means "echo
     /// the request back as a 200", the historical behaviour every existing test
     /// relies on. Scripting exists so a function under test can be driven
@@ -85,6 +89,7 @@ impl MockFunctionApi {
             locks: raisin_locks::InProcessLockManager::new(),
             node_write_error: None,
             all_errors: None,
+            email_hangs: false,
             http_responses: std::sync::Mutex::new(std::collections::VecDeque::new()),
             sql_queries: std::sync::Mutex::new(Vec::new()),
             http_calls: std::sync::Mutex::new(Vec::new()),
@@ -155,6 +160,12 @@ impl MockFunctionApi {
     pub fn with_all_errors(mut self, message: impl Into<String>) -> Self {
         self.node_write_error = Some(message.into());
         self.all_errors = self.node_write_error.clone();
+        self
+    }
+
+    /// Make `email_send` hang forever (a silent provider).
+    pub fn with_email_hang(mut self) -> Self {
+        self.email_hangs = true;
         self
     }
 
@@ -1060,6 +1071,9 @@ impl FunctionApi for MockFunctionApi {
 
     async fn email_send(&self, message: Value) -> Result<Value> {
         self.check_all_errors()?;
+        if self.email_hangs {
+            std::future::pending::<()>().await;
+        }
         let mut sent = self.emails_sent.lock().unwrap();
         let named = message
             .get("provider")

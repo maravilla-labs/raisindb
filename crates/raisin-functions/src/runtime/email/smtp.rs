@@ -59,18 +59,43 @@ pub(super) async fn send(
         ))
     })?;
 
-    guard_host(&smtp.host).await?;
+    let limit = Duration::from_secs(SESSION_TIMEOUT_SECS);
+    tokio::time::timeout(limit, guard_host(&smtp.host))
+        .await
+        .map_err(|_| EmailError::Timeout)??;
 
     let email = build_message(sender, message)?;
     let transport = build_transport(smtp, credential)?;
 
-    let response = transport.send(email).await.map_err(map_smtp_err)?;
+    let response = deliver(&transport, email, limit).await?;
 
     Ok(SendReceipt {
         message_id: queue_id(&response),
         provider: EmailProvider::Smtp,
         sender: String::new(),
     })
+}
+
+/// Upper bound on one SMTP session: connect, STARTTLS, AUTH and DATA together.
+///
+/// lettre's async transport applies its `timeout` to the connection only; a
+/// server that accepts and then never speaks left `send` pending for ever, and
+/// with it the function that called it. lettre cannot report which phase is
+/// slow, so this is one wall for the whole session, sized for DATA (the
+/// longest phase: attachments over a slow relay) rather than for the greeting.
+const SESSION_TIMEOUT_SECS: u64 = 120;
+
+/// Send over `transport`, giving up after `limit` with [`EmailError::Timeout`].
+/// Dropping the future closes the socket.
+async fn deliver(
+    transport: &AsyncSmtpTransport<Tokio1Executor>,
+    email: Message,
+    limit: Duration,
+) -> Result<Response> {
+    match tokio::time::timeout(limit, transport.send(email)).await {
+        Ok(sent) => sent.map_err(map_smtp_err),
+        Err(_) => Err(EmailError::Timeout),
+    }
 }
 
 /// Refuse a relay host that resolves to an address the server must not dial.
@@ -687,5 +712,43 @@ mod tests {
             .await
             .expect_err("no settings, no send");
         assert_eq!(err.code(), "config");
+    }
+
+    /// A relay that accepts the connection and never says a word (the greeting
+    /// is the server's to send) must end in a timeout, not a hung future.
+    #[tokio::test]
+    async fn a_silent_relay_ends_in_a_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Accept and hold the sockets open; never write.
+        let hold = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+
+        let transport = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous("127.0.0.1")
+            .port(port)
+            .build();
+        let email = Message::builder()
+            .from("noreply@example.com".parse().unwrap())
+            .to("user@example.com".parse().unwrap())
+            .subject("hello")
+            .body("hello".to_string())
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        let outcome = deliver(&transport, email, Duration::from_millis(300)).await;
+        assert!(
+            matches!(outcome, Err(EmailError::Timeout)),
+            "a silent relay must time out, got {outcome:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the deadline must bound the send, took {:?}",
+            started.elapsed()
+        );
+        hold.abort();
     }
 }

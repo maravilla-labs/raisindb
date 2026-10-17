@@ -28,7 +28,7 @@
 use rquickjs::{Ctx, Function};
 use std::sync::Arc;
 
-use super::helpers::run_async_blocking;
+use super::helpers::run_async_blocking_until;
 use crate::api::FunctionApi;
 use crate::runtime::bindings::methods::registry;
 
@@ -46,6 +46,7 @@ pub(super) fn register_registry_gateway<'js>(
     ctx: &Ctx<'js>,
     api: Arc<dyn FunctionApi>,
     allow: bool,
+    deadline: std::time::Instant,
 ) -> std::result::Result<(), rquickjs::Error> {
     let call_fn = Function::new(
         ctx.clone(),
@@ -73,7 +74,12 @@ pub(super) fn register_registry_gateway<'js>(
             };
 
             let invoker = descriptor.invoker;
-            let result = run_async_blocking(async move { (invoker)(api, args).await });
+            let result = run_async_blocking_until(
+                async move { (invoker)(api, args).await },
+                deadline,
+                &method,
+            )
+            .and_then(|r| r);
 
             match result {
                 Ok(invoke_result) => invoke_result.to_json_string(),
@@ -99,6 +105,7 @@ pub(super) fn register_plugin_gateway<'js>(
     ctx: &Ctx<'js>,
     api: Arc<dyn FunctionApi>,
     allow: bool,
+    deadline: std::time::Instant,
 ) -> std::result::Result<(), rquickjs::Error> {
     let call_fn = Function::new(
         ctx.clone(),
@@ -119,7 +126,13 @@ pub(super) fn register_plugin_gateway<'js>(
                 }
             };
 
-            let result = run_async_blocking(async move { api.plugin_call(&method, args).await });
+            let what = method.clone();
+            let result = run_async_blocking_until(
+                async move { api.plugin_call(&method, args).await },
+                deadline,
+                &what,
+            )
+            .and_then(|r| r);
 
             match result {
                 Ok(value) => serde_json::to_string(&value).unwrap_or_else(|e| {
