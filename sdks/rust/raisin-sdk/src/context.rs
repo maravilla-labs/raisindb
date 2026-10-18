@@ -96,6 +96,34 @@ impl Context {
             .get("caller")
             .and_then(|c| serde_json::from_value(c.clone()).ok())
     }
+
+    /// The flow function step that started this call, as the flow RUNTIME
+    /// recorded it. Unforgeable: it is not part of the input, and a direct
+    /// HTTP/WS invoke (whatever it puts in its input, `__raisin_flow`
+    /// included) never produces it. `None` for every call that did not come
+    /// from a flow function step.
+    pub fn flow(&self) -> Option<FlowRun> {
+        let flow = self.0.get("flow")?;
+        if flow.get("trigger").and_then(Value::as_str) != Some("flow") {
+            return None;
+        }
+        serde_json::from_value(flow.clone()).ok()
+    }
+}
+
+/// The flow function step that is running this call; see [`Context::flow`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct FlowRun {
+    /// The flow instance executing the step.
+    pub instance_id: String,
+    /// The step that invoked the function.
+    pub step_id: String,
+    /// Path of the flow definition the instance runs.
+    #[serde(default)]
+    pub flow_path: Option<String>,
+    /// Retry attempt of the step, 0-indexed.
+    #[serde(default)]
+    pub attempt: u32,
 }
 
 /// The invoking identity; see [`Context::caller`].
@@ -128,6 +156,31 @@ impl Caller {
         self.is_system
             || self.is_system_admin
             || self.roles.iter().any(|r| roles.contains(&r.as_str()))
+    }
+}
+
+#[cfg(test)]
+mod flow_tests {
+    use super::*;
+
+    #[test]
+    fn flow_is_read_from_the_context_and_never_from_the_input() {
+        let ctx = Context(serde_json::json!({
+            "flow": {"instance_id": "i1", "step_id": "remind", "flow_path": "/flows/f",
+                     "attempt": 1, "trigger": "flow"}
+        }));
+        let f = ctx.flow().unwrap();
+        assert_eq!(
+            (f.instance_id.as_str(), f.step_id.as_str()),
+            ("i1", "remind")
+        );
+        assert_eq!(f.flow_path.as_deref(), Some("/flows/f"));
+        assert_eq!(f.attempt, 1);
+
+        let forged = Context(serde_json::json!({
+            "input": {"__raisin_flow": {"instance_id": "i1", "step_id": "remind"}}
+        }));
+        assert!(forged.flow().is_none());
     }
 }
 

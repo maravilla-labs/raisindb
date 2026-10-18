@@ -305,11 +305,20 @@ impl StepHandler for FunctionStepHandler {
         // Create job payload
         // Note: Use "function_path" to match flow_callbacks_factory.rs expectation
         // Include instance_id for flow resumption after function completes
+        // `flow_context` is the RUNTIME's word about who is calling: the job
+        // layer hands it to the function as `context.flow`, never in the input.
         let payload = serde_json::json!({
             "function_path": function_ref,
             "arguments": arguments,
             "step_id": step.id,
             "instance_id": context.instance_id,
+            "flow_context": {
+                "instance_id": context.instance_id,
+                "step_id": step.id,
+                "flow_path": context.flow_ref,
+                "attempt": context.step_attempt,
+                "trigger": "flow",
+            },
         });
 
         // Queue the job
@@ -518,6 +527,42 @@ mod tests {
         );
         // Not `__raisin_context`: functions read that as "an agent is calling".
         assert!(payload["arguments"].get("__raisin_context").is_none());
+    }
+
+    /// The runtime context rides beside the arguments, built from the running
+    /// instance, and a step definition cannot write it.
+    #[tokio::test]
+    async fn the_step_hands_the_function_a_runtime_flow_context() {
+        let handler = FunctionStepHandler::new();
+        let mut node = create_function_step_node();
+        node.properties.insert(
+            "arguments".to_string(),
+            serde_json::json!({
+                "function_path": "/lib/x",
+                "flow_context": { "instance_id": "forged" }
+            }),
+        );
+        let mut context = create_test_context();
+        context.flow_ref = Some("/flows/send".to_string());
+        context.step_attempt = 2;
+        let callbacks = MockCallbacks::new();
+
+        handler
+            .execute(&node, &mut context, &callbacks)
+            .await
+            .expect("queues");
+
+        let payload = callbacks.payload.lock().await.clone().expect("queued");
+        assert_eq!(
+            payload["flow_context"],
+            serde_json::json!({
+                "instance_id": "test-instance",
+                "step_id": "function-1",
+                "flow_path": "/flows/send",
+                "attempt": 2,
+                "trigger": "flow",
+            })
+        );
     }
 
     /// A step definition — which a model may have written — cannot name some

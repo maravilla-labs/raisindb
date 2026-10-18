@@ -123,6 +123,7 @@ pub use jobs::{
     DryRunLogEntry,
     DryRunResult,
     DryRunSummary,
+    FlowRunContext,
     FunctionEnabledChecker,
     FunctionExecutionResult,
     // Function execution callback types
@@ -153,6 +154,8 @@ pub use jobs::{
     UploadSessionCleanupHandler,
     // Job-context metadata keys carrying provenance (see `jobs/mod.rs`)
     AUTH_CONTEXT_KEY,
+    FLOW_CONTEXT_KEY,
+    FLOW_RUN,
     ORIGIN_AGENT_KEY,
 };
 pub use lazy_indexing::{BuildResult, LazyIndexManager};

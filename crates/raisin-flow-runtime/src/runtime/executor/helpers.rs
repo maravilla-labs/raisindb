@@ -419,6 +419,8 @@ pub(crate) fn build_context_from_instance(instance: &FlowInstance) -> FlowContex
         error: None,
         context_stack: Vec::new(),
         compensation_stack: instance.compensation_stack.clone(),
+        flow_ref: Some(instance.flow_ref.clone()),
+        step_attempt: instance.retry_count,
     }
 }
 

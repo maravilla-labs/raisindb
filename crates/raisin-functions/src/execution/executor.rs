@@ -141,6 +141,54 @@ where
     S: Storage + TransactionalStorage + 'static,
     B: BinaryStorage + 'static,
 {
+    // The flow step that started THIS call, if any: installed only by the
+    // function-execution job handler (see `raisin_rocksdb::FLOW_RUN`). Taken
+    // here and the scope reset, so a function this one calls in turn (same
+    // task) does not inherit it. Nothing in `input` or `auth_context` can set it.
+    let flow = raisin_rocksdb::FLOW_RUN
+        .try_with(|f| f.clone())
+        .ok()
+        .flatten();
+    raisin_rocksdb::FLOW_RUN
+        .scope(
+            None,
+            execute_function_in_scope(
+                deps,
+                config,
+                function_path,
+                execution_id,
+                input,
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                auth_context,
+                log_emitter,
+                flow,
+            ),
+        )
+        .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_function_in_scope<S, B>(
+    deps: &ExecutionDependencies<S, B>,
+    config: &FunctionExecutionConfig,
+    function_path: &str,
+    execution_id: &str,
+    input: serde_json::Value,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    workspace: &str,
+    auth_context: Option<AuthContext>,
+    log_emitter: Option<raisin_storage::LogEmitter>,
+    flow: Option<raisin_rocksdb::FlowRunContext>,
+) -> Result<FunctionExecutionResult>
+where
+    S: Storage + TransactionalStorage + 'static,
+    B: BinaryStorage + 'static,
+{
     let start_time = std::time::Instant::now();
 
     // 1. Load function node
@@ -332,7 +380,13 @@ where
         .with_workspace(workspace)
         .with_input(input)
         .with_admin_escalation(requires_admin)
-        .with_caller(Some(caller));
+        .with_caller(Some(caller))
+        .with_flow(flow.map(|f| crate::types::FlowRun {
+            instance_id: f.instance_id,
+            step_id: f.step_id,
+            flow_path: f.flow_path,
+            attempt: f.attempt,
+        }));
 
     // Set log emitter for real-time log streaming
     if let Some(emitter) = log_emitter {
@@ -623,5 +677,43 @@ mod usage_tracking_tests {
         wrapped(serde_json::json!({"model": "m"})).await.unwrap();
         assert_eq!(mine.take().total_tokens(), 240);
         assert_eq!(other.take().total_tokens(), 0);
+    }
+}
+
+#[cfg(test)]
+mod flow_scope_tests {
+    use raisin_rocksdb::{FlowRunContext, FLOW_RUN};
+
+    fn run() -> FlowRunContext {
+        FlowRunContext {
+            instance_id: "i".into(),
+            step_id: "s".into(),
+            flow_path: None,
+            attempt: 0,
+        }
+    }
+
+    fn observed() -> Option<FlowRunContext> {
+        FLOW_RUN.try_with(|f| f.clone()).ok().flatten()
+    }
+
+    /// Outside the job handler's scope (a direct HTTP/WS invoke) there is none.
+    #[tokio::test]
+    async fn a_call_outside_the_job_handler_has_no_flow_run() {
+        assert!(observed().is_none());
+    }
+
+    /// `execute_function` re-scopes to `None`, so a function the flow function
+    /// calls (same task) does not inherit the flow context.
+    #[tokio::test]
+    async fn a_nested_scope_of_none_hides_the_flow_run() {
+        FLOW_RUN
+            .scope(Some(run()), async {
+                assert_eq!(observed(), Some(run()));
+                FLOW_RUN
+                    .scope(None, async { assert!(observed().is_none()) })
+                    .await;
+            })
+            .await;
     }
 }

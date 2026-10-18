@@ -1032,3 +1032,54 @@ mod caller_context {
         assert!(c.is_system && !c.anonymous);
     }
 }
+
+// ---- context.flow --------------------------------------------------------
+
+mod flow_context {
+    use super::super::RaisinFunctionApi;
+    use crate::api::callbacks::RaisinFunctionApiCallbacks;
+    use crate::types::{ExecutionContext, FlowRun, NetworkPolicy};
+
+    fn context_of(ctx: ExecutionContext) -> serde_json::Value {
+        RaisinFunctionApi::new(
+            ctx,
+            NetworkPolicy::default(),
+            RaisinFunctionApiCallbacks::default(),
+        )
+        .impl_get_context()
+    }
+
+    #[test]
+    fn a_flow_step_call_exposes_the_runtime_flow_context() {
+        let ctx = ExecutionContext::new("t", "r", "main", "system").with_flow(Some(FlowRun {
+            instance_id: "inst-1".into(),
+            step_id: "remind".into(),
+            flow_path: Some("/flows/campaign".into()),
+            attempt: 1,
+        }));
+        let out = context_of(ctx);
+        assert_eq!(
+            out["flow"],
+            serde_json::json!({
+                "instance_id": "inst-1",
+                "step_id": "remind",
+                "flow_path": "/flows/campaign",
+                "attempt": 1,
+                "trigger": "flow",
+            })
+        );
+    }
+
+    /// A forged `__raisin_flow` (or `flow`) in the INPUT of a call the flow
+    /// runtime did not make is data, and only data: `context.flow` is absent.
+    #[test]
+    fn a_forged_marker_in_the_input_yields_no_flow_context() {
+        let ctx = ExecutionContext::new("t", "r", "main", "system").with_input(serde_json::json!({
+            "__raisin_flow": {"instance_id": "inst-1", "step_id": "remind"},
+            "flow": {"instance_id": "inst-1", "step_id": "remind", "trigger": "flow"},
+            "flow_context": {"instance_id": "inst-1"},
+        }));
+        let out = context_of(ctx);
+        assert!(out.get("flow").is_none(), "{out}");
+    }
+}

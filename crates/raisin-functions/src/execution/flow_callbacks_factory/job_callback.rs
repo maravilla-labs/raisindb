@@ -262,6 +262,14 @@ where
                         if let Some(arguments) = payload.get("arguments") {
                             metadata.insert("input".to_string(), arguments.clone());
                         }
+                        // The flow runtime's own statement of who is calling,
+                        // taken from the payload the function STEP built (never
+                        // from `arguments`). The job handler installs it as the
+                        // execution's `context.flow`.
+                        if let Some(flow) = payload.get("flow_context") {
+                            metadata
+                                .insert(raisin_rocksdb::FLOW_CONTEXT_KEY.to_string(), flow.clone());
+                        }
                         // Store step_id for flow resumption
                         if let Some(step_id) = payload.get("step_id") {
                             metadata.insert("step_id".to_string(), step_id.clone());

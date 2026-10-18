@@ -247,6 +247,8 @@ mod tests {
             error: None,
             context_stack: Vec::new(),
             compensation_stack: Vec::new(),
+            flow_ref: None,
+            step_attempt: 0,
         }
     }
 

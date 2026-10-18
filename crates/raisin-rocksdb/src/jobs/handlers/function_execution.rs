@@ -329,19 +329,30 @@ impl FunctionExecutionHandler {
                 }
             }
         }
+        // The flow runtime's context, if a flow step queued this job. A job
+        // with no such key (trigger, HTTP/WS async invoke) runs in a `None`
+        // scope: nothing the caller supplied can produce a flow context.
+        let flow_run: Option<crate::jobs::FlowRunContext> = context
+            .metadata
+            .get(crate::jobs::FLOW_CONTEXT_KEY)
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
         let start = std::time::Instant::now();
-        let result = executor(
-            function_path.clone(),
-            execution_id.clone(),
-            input,
-            context.tenant_id.clone(),
-            context.repo_id.clone(),
-            context.branch.clone(),
-            FUNCTIONS_WORKSPACE.to_string(),
-            auth_context,
-            log_emitter,
-        )
-        .await?;
+        let result = crate::jobs::FLOW_RUN
+            .scope(
+                flow_run,
+                executor(
+                    function_path.clone(),
+                    execution_id.clone(),
+                    input,
+                    context.tenant_id.clone(),
+                    context.repo_id.clone(),
+                    context.branch.clone(),
+                    FUNCTIONS_WORKSPACE.to_string(),
+                    auth_context,
+                    log_emitter,
+                ),
+            )
+            .await?;
 
         let elapsed = start.elapsed();
 
@@ -483,5 +494,112 @@ impl FunctionExecutionHandler {
 impl Default for FunctionExecutionHandler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::jobs::{FlowRunContext, FLOW_CONTEXT_KEY, FLOW_RUN};
+    use raisin_hlc::HLC;
+    use raisin_storage::jobs::{JobId, JobStatus};
+    use std::collections::HashMap;
+
+    fn job() -> JobInfo {
+        JobInfo {
+            id: JobId::new(),
+            job_type: JobType::FunctionExecution {
+                function_path: "/lib/f".into(),
+                trigger_name: None,
+                execution_id: "e1".into(),
+            },
+            status: JobStatus::Running,
+            tenant: "t".into(),
+            started_at: chrono::Utc::now(),
+            completed_at: None,
+            progress: None,
+            error: None,
+            result: None,
+            retry_count: 0,
+            max_retries: 3,
+            last_heartbeat: None,
+            timeout_seconds: 300,
+            next_retry_at: None,
+            executing_since: None,
+        }
+    }
+
+    fn context(metadata: HashMap<String, serde_json::Value>) -> JobContext {
+        JobContext {
+            tenant_id: "t".into(),
+            repo_id: "r".into(),
+            branch: "main".into(),
+            workspace_id: "functions".into(),
+            revision: HLC::new(0, 0),
+            metadata,
+        }
+    }
+
+    /// An executor that reports the flow context the call observed, as `result`.
+    fn handler() -> FunctionExecutionHandler {
+        FunctionExecutionHandler::new().with_executor(Arc::new(
+            |_path, id, _input, _t, _r, _b, _w, _auth, _log| {
+                Box::pin(async move {
+                    let seen = FLOW_RUN.try_with(|f| f.clone()).ok().flatten();
+                    Ok(FunctionExecutionResult {
+                        execution_id: id,
+                        success: true,
+                        result: Some(serde_json::to_value(seen).unwrap()),
+                        error: None,
+                        duration_ms: 0,
+                        logs: vec![],
+                    })
+                })
+            },
+        ))
+    }
+
+    /// The flow runtime's `flow_context` (written by the flow `queue_job`
+    /// callback) reaches the executor as the call's flow run.
+    #[tokio::test]
+    async fn a_flow_step_job_runs_in_the_flow_scope() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            FLOW_CONTEXT_KEY.to_string(),
+            serde_json::json!({
+                "instance_id": "inst-1", "step_id": "remind",
+                "flow_path": "/flows/f", "attempt": 1, "trigger": "flow"
+            }),
+        );
+        let out = handler()
+            .handle(&job(), &context(metadata))
+            .await
+            .unwrap()
+            .unwrap();
+        let seen: FlowRunContext = serde_json::from_value(out["result"].clone()).unwrap();
+        assert_eq!(seen.instance_id, "inst-1");
+        assert_eq!(seen.step_id, "remind");
+        assert_eq!(seen.flow_path.as_deref(), Some("/flows/f"));
+        assert_eq!(seen.attempt, 1);
+    }
+
+    /// A job queued any other way (HTTP/WS async invoke, trigger) -- even one
+    /// whose INPUT claims a flow -- runs with no flow context.
+    #[tokio::test]
+    async fn a_job_without_the_runtime_key_has_no_flow_scope_whatever_its_input_says() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "input".to_string(),
+            serde_json::json!({
+                "__raisin_flow": {"instance_id": "inst-1", "step_id": "remind"},
+                "flow_context": {"instance_id": "inst-1", "step_id": "remind"},
+            }),
+        );
+        let out = handler()
+            .handle(&job(), &context(metadata))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(out["result"].is_null(), "{out}");
     }
 }

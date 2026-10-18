@@ -49,6 +49,20 @@ impl FunctionCaller {
     }
 }
 
+/// The flow step that is running this function, as the flow RUNTIME recorded
+/// it: exposed to the function as `context.flow` (`raisin.context.get().flow`
+/// in JavaScript). Present only when a flow function step's job started the
+/// call; never derived from the input, so a direct invoke cannot carry it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowRun {
+    pub instance_id: String,
+    pub step_id: String,
+    /// Path of the flow definition the instance runs.
+    pub flow_path: Option<String>,
+    /// Retry attempt of the step, 0-indexed.
+    pub attempt: u32,
+}
+
 /// Context provided to function execution
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ExecutionContext {
@@ -115,6 +129,11 @@ pub struct ExecutionContext {
     /// with no invoking caller (triggers, schedules, flows).
     #[serde(default)]
     pub caller: Option<FunctionCaller>,
+
+    /// The flow step that started this call (see [`FlowRun`]); `None` for
+    /// every call that did not come from a flow function step.
+    #[serde(default)]
+    pub flow: Option<FlowRun>,
 
     /// What the execution may touch beyond its input. Every runtime honours it
     /// (see [`ExecutionPolicy`]); it is never read from the function's input.
@@ -202,6 +221,7 @@ impl ExecutionContext {
             auth_context: None,
             allows_admin_escalation: false,
             caller: None,
+            flow: None,
             log_emitter: None,
             policy: ExecutionPolicy::Standard,
         }
@@ -272,6 +292,12 @@ impl ExecutionContext {
     /// Record who invoked this function (see [`ExecutionContext::caller`]).
     pub fn with_caller(mut self, caller: Option<FunctionCaller>) -> Self {
         self.caller = caller;
+        self
+    }
+
+    /// Record the flow step that started this function (see [`FlowRun`]).
+    pub fn with_flow(mut self, flow: Option<FlowRun>) -> Self {
+        self.flow = flow;
         self
     }
 

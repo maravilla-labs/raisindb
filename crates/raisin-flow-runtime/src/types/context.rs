@@ -135,6 +135,16 @@ pub struct FlowContext {
     /// Compensation stack for saga pattern rollback
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub compensation_stack: Vec<CompensationEntry>,
+
+    /// Path of the flow definition this instance runs (`FlowInstance::flow_ref`).
+    /// Runtime-set; part of the execution context a function step hands its
+    /// function, never of the function's input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_ref: Option<String>,
+
+    /// Retry attempt of the current step (`FlowInstance::retry_count`), 0-indexed.
+    #[serde(default)]
+    pub step_attempt: u32,
 }
 
 impl FlowContext {
@@ -150,6 +160,8 @@ impl FlowContext {
             error: None,
             context_stack: Vec::new(),
             compensation_stack: Vec::new(),
+            flow_ref: None,
+            step_attempt: 0,
         }
     }
 
@@ -165,6 +177,8 @@ impl FlowContext {
             error: None,
             context_stack: Vec::new(),
             compensation_stack: Vec::new(),
+            flow_ref: None,
+            step_attempt: 0,
         }
     }
 

@@ -3533,3 +3533,52 @@ async fn test_raisin_date_zone_bindings_work_across_dst() {
         output["unknownZoneError"]
     );
 }
+
+/// JS parity with `Context::flow()` in the Rust SDK: `raisin.context.flow` is
+/// what the host put there, and the input's `__raisin_flow` is only input.
+#[tokio::test]
+async fn test_context_flow_is_the_hosts_not_the_inputs() {
+    let runtime = QuickJsRuntime::new();
+    let code = r#"
+        function handler(input) {
+            const f = raisin.context.flow;
+            return {
+                flow: f ? [f.instance_id, f.step_id, f.flow_path, f.attempt, f.trigger] : null,
+                forged: input.__raisin_flow ? input.__raisin_flow.instance_id : null,
+            };
+        }
+    "#;
+    let metadata = FunctionMetadata::javascript("flow_ctx");
+    let input = serde_json::json!({"__raisin_flow": {"instance_id": "forged", "step_id": "x"}});
+
+    let with_flow = Arc::new(MockFunctionApi::new(serde_json::json!({
+        "tenant_id": "t",
+        "flow": {"instance_id": "i1", "step_id": "remind", "flow_path": "/flows/f", "attempt": 2, "trigger": "flow"}
+    })));
+    let without = Arc::new(MockFunctionApi::new(serde_json::json!({"tenant_id": "t"})));
+
+    for (api, expected) in [
+        (
+            with_flow,
+            serde_json::json!(["i1", "remind", "/flows/f", 2, "flow"]),
+        ),
+        (without, serde_json::Value::Null),
+    ] {
+        let context = ExecutionContext::new("t", "r", "main", "u").with_input(input.clone());
+        let result = runtime
+            .execute(
+                &FunctionCode::from(code),
+                "handler",
+                context,
+                &metadata,
+                api,
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        assert!(result.success, "{:?}", result.error);
+        let out = result.output.unwrap();
+        assert_eq!(out["flow"], expected);
+        assert_eq!(out["forged"], "forged");
+    }
+}

@@ -154,6 +154,18 @@ impl RaisinFunctionApi {
             ctx["caller"] = serde_json::to_value(caller).unwrap_or(serde_json::Value::Null);
         }
 
+        // The flow step that started this call, as the flow runtime recorded
+        // it. Absent unless a flow function step's job ran this execution.
+        if let Some(flow) = &self.context.flow {
+            ctx["flow"] = serde_json::json!({
+                "instance_id": flow.instance_id,
+                "step_id": flow.step_id,
+                "flow_path": flow.flow_path,
+                "attempt": flow.attempt,
+                "trigger": "flow",
+            });
+        }
+
         // Include trigger name if available
         if let Some(trigger_name) = &self.context.trigger_name {
             ctx["trigger_name"] = serde_json::json!(trigger_name);

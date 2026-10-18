@@ -24,6 +24,33 @@ pub const AUTH_CONTEXT_KEY: &str = "auth_context";
 /// write's actor resolved to `"anonymous"`/`"system"`.
 pub const TRIGGERING_ACTOR_KEY: &str = "triggering_actor";
 
+/// `JobContext.metadata` key holding the flow runtime's statement of which flow
+/// step queued a `function_execution` job (`{instance_id, step_id, flow_path,
+/// attempt, trigger}`). Written ONLY by the flow `queue_job` callback, from the
+/// payload a function step built; read by `handlers/function_execution.rs`,
+/// which installs it as [`FLOW_RUN`] for the duration of the call.
+pub const FLOW_CONTEXT_KEY: &str = "flow_context";
+
+/// The flow step that is executing the current function call.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FlowRunContext {
+    pub instance_id: String,
+    pub step_id: String,
+    #[serde(default)]
+    pub flow_path: Option<String>,
+    #[serde(default)]
+    pub attempt: u32,
+}
+
+tokio::task_local! {
+    /// Set by the function-execution job handler around the executor call and
+    /// nowhere else, so the only way a function ever observes a flow context is
+    /// to have been started by a flow step's job. Direct HTTP/WS invokes never
+    /// enter that scope. `execute_function` takes the value and re-scopes to
+    /// `None`, so a function a flow function calls does not inherit it.
+    pub static FLOW_RUN: Option<FlowRunContext>;
+}
+
 pub mod activity;
 pub mod batch_aggregator;
 pub mod circuit_breaker;
