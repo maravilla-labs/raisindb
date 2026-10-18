@@ -376,6 +376,15 @@ impl RocksDBStorage {
 
         worker_pool.start().await?;
 
+        // Second path for delayed jobs: re-queue any that are past their due
+        // time and were never claimed (see `jobs::overdue_sweeper`).
+        let overdue_sweeper = crate::jobs::OverdueDispatchSweeper::new(
+            self.job_registry.clone(),
+            dispatcher.clone(),
+            CancellationToken::new(),
+        );
+        tokio::spawn(overdue_sweeper.run());
+
         // Publish the pool so the operator health endpoint can read per-category
         // saturation. Weak inside, so this does not keep the pool alive.
         self.set_worker_pool(&worker_pool);

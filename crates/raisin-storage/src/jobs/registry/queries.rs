@@ -105,6 +105,31 @@ impl JobRegistry {
             .collect()
     }
 
+    /// Jobs still `Scheduled` whose due time (`next_retry_at`) passed at least
+    /// `grace` before `now`.
+    ///
+    /// A delayed job is dispatched by a task that sleeps until it is due, and
+    /// a worker that pops it BEFORE the registry's own clock agrees refuses
+    /// the claim and drops the id. Either way the job stays `Scheduled` with
+    /// nothing left to queue it, and no other path looks for it. This is the
+    /// question that finds those: the overdue sweeper asks it and re-queues
+    /// the answer. The filter runs before the `JobInfo` conversion so a
+    /// registry full of finished jobs is not cloned every pass.
+    pub async fn overdue_scheduled(
+        &self,
+        now: DateTime<Utc>,
+        grace: chrono::Duration,
+    ) -> Vec<JobInfo> {
+        let jobs = self.jobs.read().await;
+        jobs.values()
+            .filter(|job| {
+                matches!(job.status, JobStatus::Scheduled)
+                    && job.next_retry_at.is_some_and(|due| now - due >= grace)
+            })
+            .map(|job| job.to_job_info())
+            .collect()
+    }
+
     /// Check if a job is still running
     pub async fn is_running(&self, job_id: &JobId) -> bool {
         let jobs = self.jobs.read().await;

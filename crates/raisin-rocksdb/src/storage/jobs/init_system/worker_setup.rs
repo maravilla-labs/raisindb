@@ -158,13 +158,14 @@ pub async fn restore_and_dispatch_jobs(
                     let dispatcher = dispatcher.clone();
                     let job_id = job.id.clone();
                     let tenant = tenant.clone();
-                    let delay = (scheduled_at - now).to_std().unwrap_or_default();
-                    tokio::spawn(async move {
-                        tokio::time::sleep(delay).await;
-                        dispatcher
-                            .dispatch_categorized(job_id, priority, category, &tenant)
-                            .await;
-                    });
+                    tokio::spawn(crate::jobs::dispatching_monitor::dispatch_when_due(
+                        dispatcher,
+                        job_id,
+                        priority,
+                        category,
+                        tenant,
+                        scheduled_at,
+                    ));
                     dispatched_count += 1;
                     continue;
                 }

@@ -15,10 +15,55 @@
 //! Automatically dispatches newly registered jobs to the correct category pool.
 
 use async_trait::async_trait;
-use raisin_storage::jobs::{JobEvent, JobId, JobInfo, JobMonitor, JobStatus};
+use chrono::{DateTime, Utc};
+use raisin_storage::jobs::{
+    JobCategory, JobEvent, JobId, JobInfo, JobMonitor, JobPriority, JobStatus,
+};
 use std::sync::Arc;
 
 use super::dispatcher::JobDispatcher;
+
+/// Sleep until `now()` reaches `due`.
+///
+/// `tokio::time::sleep` measures a monotonic clock, while a job's due time and
+/// the claim that checks it (`JobRegistry::try_claim_job`) read the wall
+/// clock. The two disagree by whatever the wall clock was slewed or stepped by
+/// while the timer ran, so a sleep of exactly `due - now` can wake a hair
+/// BEFORE the wall clock says the job is due, and the claim then refuses it —
+/// consuming the only queue entry the job had. Re-checking the wall clock after
+/// each sleep makes an early wake a short extra sleep instead.
+async fn sleep_until_due_with(due: DateTime<Utc>, now: impl Fn() -> DateTime<Utc>) {
+    loop {
+        let remaining = due - now();
+        if remaining <= chrono::Duration::zero() {
+            return;
+        }
+        // At least a millisecond, or a sub-millisecond remainder would spin.
+        let wait = remaining
+            .to_std()
+            .unwrap_or_default()
+            .max(std::time::Duration::from_millis(1));
+        tokio::time::sleep(wait).await;
+    }
+}
+
+/// Queue `job_id` for its category pool once the wall clock reaches `due`.
+///
+/// The one place a delayed job is held back, used for a new job, a requeued
+/// one and a job restored at boot, so none of them can reach a worker early.
+pub(crate) async fn dispatch_when_due(
+    dispatcher: Arc<JobDispatcher>,
+    job_id: JobId,
+    priority: JobPriority,
+    category: JobCategory,
+    tenant: String,
+    due: DateTime<Utc>,
+) {
+    sleep_until_due_with(due, Utc::now).await;
+    dispatcher
+        .dispatch_categorized(job_id, priority, category, &tenant)
+        .await;
+}
 
 /// Monitor that automatically dispatches newly created jobs to worker queues
 ///
@@ -59,12 +104,14 @@ impl JobMonitor for DispatchingMonitor {
                     "Scheduled delayed dispatch for new job"
                 );
 
-                tokio::spawn(async move {
-                    tokio::time::sleep(delay).await;
-                    dispatcher
-                        .dispatch_categorized(job_id, priority, category, &tenant)
-                        .await;
-                });
+                tokio::spawn(dispatch_when_due(
+                    dispatcher,
+                    job_id,
+                    priority,
+                    category,
+                    tenant,
+                    scheduled_at,
+                ));
                 return;
             }
         }
@@ -118,12 +165,14 @@ impl JobMonitor for DispatchingMonitor {
                 let now = chrono::Utc::now();
                 if next_retry_at > now {
                     let delay = (next_retry_at - now).to_std().unwrap_or_default();
-                    tokio::spawn(async move {
-                        tokio::time::sleep(delay).await;
-                        dispatcher
-                            .dispatch_categorized(job_id, priority, category, &tenant)
-                            .await;
-                    });
+                    tokio::spawn(dispatch_when_due(
+                        dispatcher,
+                        job_id,
+                        priority,
+                        category,
+                        tenant,
+                        next_retry_at,
+                    ));
 
                     tracing::debug!(
                         job_id = %event.job_info.id,
@@ -227,6 +276,46 @@ mod tests {
         let receiver = receivers
             .get(&JobType::IntegrityScan.category())
             .expect("category receiver");
+        assert_eq!(receiver.try_recv(), Some(job_id));
+    }
+
+    /// The wall clock can disagree with the timer that is waiting on it. A
+    /// clock running 30 ms behind the one `sleep` measures must not release the
+    /// job 30 ms before it is due: the claim reads the wall clock and would
+    /// refuse it, dropping the job's only queue entry.
+    #[tokio::test]
+    async fn waiting_for_a_due_time_outlasts_a_lagging_clock() {
+        let lag = chrono::Duration::milliseconds(30);
+        let lagging_wall_clock = move || Utc::now() - lag;
+        let due = Utc::now() + chrono::Duration::milliseconds(10);
+
+        sleep_until_due_with(due, lagging_wall_clock).await;
+
+        assert!(
+            Utc::now() >= due + lag,
+            "released at {:?}, before the lagging clock reached {:?}",
+            Utc::now(),
+            due
+        );
+    }
+
+    /// A delayed job reaches the queue once its time arrives, not before.
+    #[tokio::test]
+    async fn delayed_job_is_queued_only_when_due() {
+        let (dispatcher, receivers) = JobDispatcher::new();
+        let monitor = DispatchingMonitor::new(Arc::new(dispatcher));
+
+        let mut info = job_info(0);
+        let job_id = info.id.clone();
+        info.next_retry_at = Some(Utc::now() + chrono::Duration::milliseconds(300));
+        monitor.on_job_created(&info).await;
+
+        let receiver = receivers
+            .get(&JobType::IntegrityScan.category())
+            .expect("category receiver");
+        assert_eq!(receiver.try_recv(), None, "queued before it was due");
+
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
         assert_eq!(receiver.try_recv(), Some(job_id));
     }
 

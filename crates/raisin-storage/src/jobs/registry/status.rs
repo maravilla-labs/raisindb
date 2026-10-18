@@ -171,7 +171,21 @@ impl JobRegistry {
 
                 // Check retry delay - don't claim if not ready yet
                 if let Some(next_retry) = job.next_retry_at {
-                    if chrono::Utc::now() < next_retry {
+                    let now = chrono::Utc::now();
+                    if now < next_retry {
+                        // The id is consumed by this refusal; whatever queued
+                        // it too early is not coming back. Say so when it was
+                        // only a hair early (a timer waking against a clock
+                        // that disagrees with it), since that is the case
+                        // that used to strand the job silently.
+                        let early_ms = (next_retry - now).num_milliseconds();
+                        if early_ms < 5_000 {
+                            tracing::warn!(
+                                job_id = %job_id,
+                                early_ms,
+                                "Claim refused: job dispatched before its due time"
+                            );
+                        }
                         return Ok(false); // Not ready for retry yet
                     }
                 }

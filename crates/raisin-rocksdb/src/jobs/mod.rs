@@ -39,6 +39,7 @@ pub mod handlers;
 pub mod index_lock;
 pub mod keyed_mutex;
 pub mod metadata_store;
+pub mod overdue_sweeper;
 pub mod pool;
 pub mod trigger_registry;
 pub mod wasm_validator;
@@ -77,6 +78,7 @@ pub use handlers::{
     TriggerBreaker, TriggerBreakerStats, TriggerEvaluationHandler, TriggerSafetyConfig,
     UploadSessionCleanupHandler, VirtualMountSyncHandler,
 };
+pub use overdue_sweeper::OverdueDispatchSweeper;
 // Additional exports for external use (transport layer callbacks)
 pub use flow_instance_lock::{FlowInstanceBusy, FlowInstanceLease, FlowInstanceLockManager};
 pub use handlers::{
