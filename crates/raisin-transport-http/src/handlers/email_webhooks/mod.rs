@@ -74,20 +74,21 @@ pub(super) fn system_service(
 }
 
 /// The sender entry called `name` from `/config/email`: `(provider kind, entry)`.
+/// `None` when there is no config or no such sender; the caller decides how that
+/// is reported (the public receiver must not distinguish it from a bad token).
 pub(super) async fn sender_entry(
     state: &AppState,
     tenant_id: &str,
     repo: &str,
     branch: &str,
     name: &str,
-) -> Result<(String, Value), ApiError> {
+) -> Result<Option<(String, Value)>, ApiError> {
     let svc = system_service(state, tenant_id, repo, branch);
-    let node = svc
-        .get_by_path(EMAIL_CONFIG_PATH)
-        .await?
-        .ok_or_else(|| ApiError::not_found("outbound email is not configured"))?;
+    let Some(node) = svc.get_by_path(EMAIL_CONFIG_PATH).await? else {
+        return Ok(None);
+    };
     let props = serde_json::to_value(&node.properties).unwrap_or(Value::Null);
-    let entry = props
+    let Some(entry) = props
         .get("providers")
         .and_then(Value::as_array)
         .and_then(|a| {
@@ -95,13 +96,15 @@ pub(super) async fn sender_entry(
                 .find(|e| e.get("name").and_then(Value::as_str) == Some(name))
         })
         .cloned()
-        .ok_or_else(|| ApiError::not_found(format!("no email sender named `{name}`")))?;
+    else {
+        return Ok(None);
+    };
     let kind = entry
         .get("provider")
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    Ok((kind, entry))
+    Ok(Some((kind, entry)))
 }
 
 /// Constant-time byte equality (no `subtle` dependency in this crate).

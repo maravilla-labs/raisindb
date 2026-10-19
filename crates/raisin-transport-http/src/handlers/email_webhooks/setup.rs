@@ -100,7 +100,9 @@ pub async fn status(
 ) -> Result<Json<Value>, ApiError> {
     require_admin(auth.as_deref())?;
     let branch = config_branch(&state, &tenant.tenant_id, &repo).await;
-    let (kind, _) = sender_entry(&state, &tenant.tenant_id, &repo, &branch, &name).await?;
+    let (kind, _) = sender_entry(&state, &tenant.tenant_id, &repo, &branch, &name)
+        .await?
+        .ok_or_else(|| ApiError::not_found(format!("no email sender named `{name}`")))?;
     let secrets = store(&state)?;
     let scope = SecretScope::new(&tenant.tenant_id, &repo, &branch);
     let token = read_secret(&secrets, &scope, &secret_name(&name, "token"))?;
@@ -124,7 +126,9 @@ pub async fn setup(
 ) -> Result<Json<Value>, ApiError> {
     require_admin(auth.as_deref())?;
     let branch = config_branch(&state, &tenant.tenant_id, &repo).await;
-    let (kind, entry) = sender_entry(&state, &tenant.tenant_id, &repo, &branch, &name).await?;
+    let (kind, entry) = sender_entry(&state, &tenant.tenant_id, &repo, &branch, &name)
+        .await?
+        .ok_or_else(|| ApiError::not_found(format!("no email sender named `{name}`")))?;
     if kind != "resend" && kind != "brevo" {
         return Err(ApiError::new(
             axum::http::StatusCode::UNPROCESSABLE_ENTITY,

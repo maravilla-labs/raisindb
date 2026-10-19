@@ -36,7 +36,13 @@ pub async fn receive(
     body: Bytes,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let branch = config_branch(&state, &tenant.tenant_id, &repo).await;
-    let (kind, _entry) = sender_entry(&state, &tenant.tenant_id, &repo, &branch, &name).await?;
+    // An unknown sender answers exactly like a wrong token: this route is public,
+    // and a different status would let anyone enumerate the tenant's senders.
+    let Some((kind, _entry)) =
+        sender_entry(&state, &tenant.tenant_id, &repo, &branch, &name).await?
+    else {
+        return Err(ApiError::unauthorized("invalid webhook token"));
+    };
 
     // 1. The unguessable path token. Same answer whether the sender has no token
     //    or the wrong one, so the route does not reveal which senders exist.
@@ -84,7 +90,7 @@ pub async fn receive(
     ensure_folders(&svc).await;
     let mut stored_events = 0usize;
     for ev in &events {
-        if record(&svc, &kind, ev).await? {
+        if record(&svc, &kind, &name, ev).await? {
             stored_events += 1;
         }
     }
@@ -117,6 +123,7 @@ async fn ensure_folders(svc: &raisin_core::NodeService<crate::state::Store>) {
 async fn record(
     svc: &raisin_core::NodeService<crate::state::Store>,
     provider: &str,
+    sender: &str,
     ev: &FeedbackEvent,
 ) -> Result<bool, ApiError> {
     let event_path = format!("{}/{}", feedback::EVENTS_PATH, ev.dedupe_key);
@@ -130,6 +137,15 @@ async fn record(
         feedback::message_node_name(&ev.message_id)
     );
     let message = svc.get_by_path(&msg_path).await?;
+    // A token proves the caller speaks for THIS sender and no other. A message
+    // that was sent through a different sender is not theirs to report on: skip
+    // the event outright rather than let one sender's token move another's mail.
+    if let Some(m) = &message {
+        let owned = |k: &str, want: &str| matches!(m.properties.get(k), Some(PropertyValue::String(v)) if v == want);
+        if !owned("provider", provider) || !owned("sender", sender) {
+            return Ok(false);
+        }
+    }
     let now = chrono::Utc::now().to_rfc3339();
 
     let mut event = Node {

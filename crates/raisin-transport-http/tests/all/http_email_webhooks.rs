@@ -87,7 +87,7 @@ async fn fixture() -> Fixture {
         (
             "/email/messages/_m1_brevo_",
             "raisin:EmailMessage",
-            json!({"provider": "brevo", "message_id": "<m1@brevo>", "status": "accepted"}),
+            json!({"provider": "brevo", "sender": "news", "message_id": "<m1@brevo>", "status": "accepted"}),
         ),
     ] {
         nodes
@@ -206,4 +206,77 @@ async fn wrong_token_and_non_admin_setup_are_refused() {
         code == 401 || code == 403,
         "setup must be admin-only, got {code}"
     );
+}
+
+#[tokio::test]
+async fn unknown_sender_looks_like_a_bad_token_and_senders_cannot_cross() {
+    let f = fixture().await;
+    let (code, _) = send(
+        &f.raw,
+        post(
+            &format!("/api/email/{REPO}/webhooks/nope/whatever"),
+            brevo("delivered", 1),
+            false,
+        ),
+    )
+    .await;
+    assert_eq!(
+        code, 401,
+        "an unknown sender must not be distinguishable from a bad token"
+    );
+
+    // The message was sent through `news`; a different sender with its own valid
+    // token must not be able to move it.
+    let scope = StorageScope::new(TENANT, REPO, "main", WS);
+    let mut cfg = f
+        .storage
+        .nodes()
+        .get_by_path(scope.clone(), "/config/email", None)
+        .await
+        .unwrap()
+        .unwrap();
+    cfg.properties = serde_json::from_value(json!({"enabled": true, "providers": [
+        {"name": "news", "provider": "brevo", "credential_ref": "secret://email/k"},
+        {"name": "other", "provider": "brevo", "credential_ref": "secret://email/k2"}
+    ]}))
+    .unwrap();
+    f.storage
+        .nodes()
+        .update(scope.clone(), cfg, Default::default())
+        .await
+        .unwrap();
+    // The fixture's message predates `sender`; stamp it as the news sender's.
+    let mut m = f
+        .storage
+        .nodes()
+        .get_by_path(scope.clone(), "/email/messages/_m1_brevo_", None)
+        .await
+        .unwrap()
+        .unwrap();
+    m.properties
+        .insert("sender".into(), PropertyValue::String("news".into()));
+    f.storage
+        .nodes()
+        .update(scope, m, Default::default())
+        .await
+        .unwrap();
+
+    let (_, body) = send(
+        &f.raw,
+        post(
+            &format!("/api/email/{REPO}/webhook-setup/other"),
+            json!({"public_base": "https://x"}),
+            true,
+        ),
+    )
+    .await;
+    let url = serde_json::from_str::<Value>(&body).unwrap()["url"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let path = url.strip_prefix("https://x").unwrap().to_string();
+    let (code, body) = send(&f.raw, post(&path, brevo("hard_bounce", 9), false)).await;
+    assert_eq!(code, 200, "{body}");
+    assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["stored"], 0);
+    assert_eq!(status_of(&f).await, "accepted");
 }
