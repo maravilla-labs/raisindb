@@ -344,7 +344,7 @@ mod tests {
         // first use produced is there, so the replay is refused.
         let c = claims("jti-replay", 1, now_unix_secs() + 60);
         assert_eq!(consume_use(&c), Some(0));
-        TOKEN_USES.lock().unwrap().clear(); // restart / other node
+        TOKEN_USES.lock().unwrap().remove("jti-replay"); // restart / other node
         assert_eq!(consume_use(&c), Some(0));
         assert!(ensure_destination_free(true, false).is_err());
         // a use still in flight in this process is refused too
