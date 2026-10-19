@@ -53,6 +53,9 @@ pub struct UploadSession {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+    /// Identity that opened the session (`system` or a user id). Only this
+    /// identity may add chunks, complete or cancel.
+    pub owner: String,
 }
 
 /// In-memory upload session store

@@ -9,7 +9,11 @@ use axum::{
 };
 use chrono::{Duration, Utc};
 
+use raisin_models::auth::AuthContext;
+
 use crate::{error::ApiError, middleware::TenantInfo, state::AppState};
+
+use super::authorize::{authorize_session_write, owner_of, require_auth, validate_path};
 
 use super::types::{
     CreateUploadRequest, CreateUploadResponse, UploadSession, UploadSessionStatus,
@@ -20,9 +24,12 @@ use super::types::{
 pub async fn create_upload(
     State(state): State<AppState>,
     Extension(tenant_info): Extension<TenantInfo>,
+    auth: Option<Extension<AuthContext>>,
     Json(req): Json<CreateUploadRequest>,
 ) -> Result<(StatusCode, Json<CreateUploadResponse>), ApiError> {
     let tenant_id = &tenant_info.tenant_id;
+    let auth = require_auth(auth)?;
+    validate_path(&req.path)?;
 
     // Validate inputs
     if req.file_size == 0 {
@@ -71,7 +78,11 @@ pub async fn create_upload(
         created_at: now,
         updated_at: now,
         expires_at,
+        owner: owner_of(&auth),
     };
+
+    // The completion job runs as system, so the write is authorized here.
+    authorize_session_write(&state, &auth, &session).await?;
 
     // Store session
     UPLOAD_STORE.put(session.clone()).await;

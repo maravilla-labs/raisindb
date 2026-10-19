@@ -11,6 +11,7 @@
 //! Upload sessions are stored in-memory (RocksDB storage will be added later).
 //! Chunks are written to temporary files and reassembled on completion.
 
+mod authorize;
 mod chunks;
 mod completion;
 mod create;

@@ -4,14 +4,18 @@
 
 use axum::{
     body::Body,
-    extract::{Path, State},
+    extract::{Extension, Path, State},
     http::{HeaderMap, StatusCode},
     Json,
 };
 use chrono::Utc;
 use futures_util::StreamExt;
 
+use raisin_models::auth::AuthContext;
+
 use crate::{error::ApiError, state::AppState};
+
+use super::authorize::{require_auth, require_owner};
 
 use super::types::{ChunkUploadResponse, UploadSessionStatus, UPLOAD_STORE};
 
@@ -19,6 +23,7 @@ use super::types::{ChunkUploadResponse, UploadSessionStatus, UPLOAD_STORE};
 pub async fn upload_chunk(
     State(state): State<AppState>,
     Path(upload_id): Path<String>,
+    auth: Option<Extension<AuthContext>>,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Json<ChunkUploadResponse>, ApiError> {
@@ -27,6 +32,7 @@ pub async fn upload_chunk(
         .get(&upload_id)
         .await
         .ok_or_else(|| ApiError::not_found("Upload session not found"))?;
+    require_owner(&require_auth(auth)?, &session)?;
 
     // Check if session is expired
     if Utc::now() > session.expires_at {

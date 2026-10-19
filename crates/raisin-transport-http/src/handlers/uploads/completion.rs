@@ -10,7 +10,11 @@ use axum::{
 use chrono::Utc;
 use std::collections::HashMap;
 
+use raisin_models::auth::AuthContext;
+
 use crate::{error::ApiError, middleware::TenantInfo, state::AppState};
+
+use super::authorize::{authorize_session_write, require_auth, require_owner};
 
 use super::types::{
     CompleteUploadRequest, CompleteUploadResponse, UploadSessionStatus, UPLOAD_STORE,
@@ -21,6 +25,7 @@ pub async fn complete_upload(
     State(state): State<AppState>,
     Path(upload_id): Path<String>,
     Extension(tenant_info): Extension<TenantInfo>,
+    auth: Option<Extension<AuthContext>>,
     Json(req): Json<CompleteUploadRequest>,
 ) -> Result<Json<CompleteUploadResponse>, ApiError> {
     // Get session
@@ -28,6 +33,11 @@ pub async fn complete_upload(
         .get(&upload_id)
         .await
         .ok_or_else(|| ApiError::not_found("Upload session not found"))?;
+    let auth = require_auth(auth)?;
+    require_owner(&auth, &session)?;
+    // Re-checked: the grant, or the node at the path, may have changed since
+    // the session opened.
+    authorize_session_write(&state, &auth, &session).await?;
 
     // Check if all chunks have been received
     if session.bytes_received != session.file_size {
@@ -155,12 +165,16 @@ pub async fn complete_upload(
 }
 
 /// DELETE /api/uploads/{id} - Cancel upload
-pub async fn cancel_upload(Path(upload_id): Path<String>) -> Result<StatusCode, ApiError> {
+pub async fn cancel_upload(
+    Path(upload_id): Path<String>,
+    auth: Option<Extension<AuthContext>>,
+) -> Result<StatusCode, ApiError> {
     // Get session
     let mut session = UPLOAD_STORE
         .get(&upload_id)
         .await
         .ok_or_else(|| ApiError::not_found("Upload session not found"))?;
+    require_owner(&require_auth(auth)?, &session)?;
 
     // Mark as cancelled
     session.status = UploadSessionStatus::Cancelled;
