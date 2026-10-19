@@ -26,6 +26,11 @@ pub struct RaisinFunctionApiCallbacks {
     pub node_get_by_id: Option<NodeGetByIdCallback>,
     pub node_history: Option<NodeHistoryCallback>,
     pub node_create: Option<NodeCreateCallback>,
+    /// Node create that runs as the SYSTEM actor, bypassing the calling
+    /// function's RLS. Internal only: for platform bookkeeping the function
+    /// must not be able to refuse or forge (e.g. outbound email records).
+    /// Never exposed as a `raisin.*` method.
+    pub system_node_create: Option<NodeCreateCallback>,
     pub node_update: Option<NodeUpdateCallback>,
     pub node_delete: Option<NodeDeleteCallback>,
     pub node_update_property: Option<NodeUpdatePropertyCallback>,

@@ -1,0 +1,90 @@
+name: raisin:EmailMessage
+description: >-
+  One record per message a provider ACCEPTED through raisin.email.send. It is
+  the correlation anchor for later provider feedback (delivered, bounced,
+  blocked, complained): `message_id` is what a webhook payload names.
+  `status` starts at `accepted` and only ever advances.
+icon: mail
+version: 1
+strict: false
+indexable: true
+index_types: [Property]
+# Written on every send; history would triple the cost for no benefit.
+versionable: false
+publishable: false
+auditable: false
+properties:
+  - name: provider
+    type: String
+    required: true
+    index: [Property]
+    meta:
+      label: Provider
+      description: "resend | brevo | smtp"
+
+  - name: sender
+    type: String
+    required: false
+    meta:
+      label: Sender name
+      description: The configured sender entry this was sent through.
+
+  - name: message_id
+    type: String
+    required: true
+    index: [Property]
+    meta:
+      label: Provider message id
+      description: >-
+        The id the provider returned. Provider webhooks correlate on this.
+
+  - name: to
+    type: Array
+    required: false
+    meta:
+      label: Recipients
+      description: To addresses only; cc and bcc are deliberately not stored.
+
+  - name: subject
+    type: String
+    required: false
+
+  - name: status
+    type: String
+    required: true
+    default: accepted
+    index: [Property]
+    meta:
+      label: Status
+      description: >-
+        accepted | deferred | delivered | soft_bounce | hard_bounce | blocked |
+        complained. Advances monotonically; terminal states are never
+        overwritten by an earlier-stage event.
+
+  - name: correlation_kind
+    type: String
+    required: false
+    index: [Property]
+    meta:
+      label: Correlation kind
+      description: Caller-defined, e.g. "message-delivery".
+
+  - name: correlation_id
+    type: String
+    required: false
+    index: [Property]
+    meta:
+      label: Correlation id
+      description: Caller-defined id, e.g. the delivery node id.
+
+  - name: accepted_at
+    type: String
+    required: false
+
+  - name: last_event_at
+    type: String
+    required: false
+
+  - name: last_error
+    type: String
+    required: false

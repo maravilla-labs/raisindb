@@ -37,6 +37,17 @@ use crate::runtime::email::{EmailConfig, EmailError, EmailMessage, EmailProvider
 const CONFIG_WORKSPACE: &str = "raisin:system";
 /// Path of the tenant's `raisin:EmailConfig` node.
 const EMAIL_CONFIG_PATH: &str = "/config/email";
+/// Parent of the `raisin:EmailMessage` records written for accepted sends.
+const EMAIL_MESSAGES_PATH: &str = "/email/messages";
+
+/// Read the optional `correlation: { kind, id }` the caller attached, before
+/// `parse_message` consumes the value. Absent or malformed means "none".
+fn take_correlation(message: &Value) -> Option<(String, String)> {
+    let c = message.get("correlation")?;
+    let kind = c.get("kind")?.as_str()?.to_string();
+    let id = c.get("id")?.as_str()?.to_string();
+    Some((kind, id))
+}
 
 impl RaisinFunctionApi {
     /// The policy gate for one send's recipient list.
@@ -150,6 +161,7 @@ impl RaisinFunctionApi {
         // node reads and blob fetches — happens last, so a function that may
         // not send never causes megabytes to be read on its way to being
         // denied.
+        let correlation = take_correlation(&message);
         let (mut message, requested_provider, specs) = parse_message(message)?;
         self.authorize_recipients(&message)?;
         let (sender, credential) = self.authorize_email(requested_provider.as_deref()).await?;
@@ -194,8 +206,80 @@ impl RaisinFunctionApi {
             "email sent"
         );
 
+        self.record_accepted(&message, &sender, &receipt, correlation)
+            .await;
+
         serde_json::to_value(receipt)
             .map_err(|e| raisin_error::Error::Internal(format!("email serialize failed: {e}")))
+    }
+
+    /// Persist a `raisin:EmailMessage` for an accepted send, so a later
+    /// provider event has something to correlate against.
+    ///
+    /// Best-effort by design: the mail has ALREADY left, so a failure to write
+    /// the record must never turn a successful send into an error the caller
+    /// would retry (and double-send). It is logged instead.
+    async fn record_accepted(
+        &self,
+        message: &EmailMessage,
+        sender: &EmailSender,
+        receipt: &crate::runtime::email::SendReceipt,
+        correlation: Option<(String, String)>,
+    ) {
+        let now = chrono::Utc::now().to_rfc3339();
+        // Node names cannot carry `/`, and SMTP/Brevo ids are `<..@..>`-shaped.
+        let name: String = receipt
+            .message_id
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let mut properties = serde_json::json!({
+            "provider": sender.provider.as_str(),
+            "sender": sender.name,
+            "message_id": receipt.message_id,
+            // To only: a stored bcc list defeats the point of bcc.
+            "to": message.to,
+            "subject": message.subject,
+            "status": "accepted",
+            "accepted_at": now,
+        });
+        if let Some((kind, id)) = correlation {
+            properties["correlation_kind"] = Value::String(kind);
+            properties["correlation_id"] = Value::String(id);
+        }
+        let data = serde_json::json!({
+            "name": name,
+            "node_type": "raisin:EmailMessage",
+            "properties": properties,
+        });
+        // System path, not `impl_node_create`: the record is platform
+        // bookkeeping, so the function's RLS must neither block nor shape it.
+        let created = match self.callbacks.system_node_create.as_ref() {
+            Some(cb) => {
+                cb(
+                    CONFIG_WORKSPACE.to_string(),
+                    EMAIL_MESSAGES_PATH.to_string(),
+                    data,
+                )
+                .await
+            }
+            None => Err(raisin_error::Error::Validation(
+                "System node create callback not configured".to_string(),
+            )),
+        };
+        if let Err(e) = created {
+            tracing::warn!(
+                message_id = %receipt.message_id,
+                error = %e,
+                "email accepted but its EmailMessage record could not be written"
+            );
+        }
     }
 
     /// Back `raisin.email.providers()`.

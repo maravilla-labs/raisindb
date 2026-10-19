@@ -96,6 +96,18 @@ where
         node_get_children: Some(nodes::create_node_get_children(query_ctx.clone())),
         node_query: Some(nodes::create_node_query(query_ctx.clone())),
         node_create: Some(nodes::create_node_create(query_ctx.clone())),
+        // Same engine, but no auth context: `create_engine` then falls back to
+        // `AuthContext::system()`, so platform bookkeeping is not subject to
+        // the calling function's row-level security.
+        system_node_create: Some(nodes::create_node_create(Arc::new(
+            query_context::QueryContext::new(
+                deps.clone(),
+                tenant_id.clone(),
+                repo_id.clone(),
+                branch.clone(),
+                None,
+            ),
+        ))),
         node_update: Some(nodes::create_node_update(query_ctx.clone())),
         node_delete: Some(nodes::create_node_delete(query_ctx.clone())),
         node_update_property: Some(nodes::create_node_update_property(query_ctx.clone())),

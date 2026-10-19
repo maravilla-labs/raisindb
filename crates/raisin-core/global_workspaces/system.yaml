@@ -15,6 +15,7 @@ allowed_node_types:
   - raisin:Node
   - raisin:Integration
   - raisin:VirtualMount
+  - raisin:EmailMessage
 allowed_root_node_types:
   - raisin:AuthConfig
   - raisin:ProviderConfig
@@ -125,6 +126,20 @@ initial_structure:
         icon: "plug"
         color: "#0ea5e9"
         title: "Integrations"
+    # Outbound email records: one raisin:EmailMessage per accepted send
+    - node_type: raisin:Folder
+      name: email
+      properties:
+        icon: "mail"
+        color: "#f97316"
+        title: "Outbound Email"
+      children:
+        - node_type: raisin:Folder
+          name: messages
+          properties:
+            icon: "send"
+            color: "#f97316"
+            title: "Accepted Messages"
     # Virtual mounts of external subtrees
     - node_type: raisin:Folder
       name: mounts
