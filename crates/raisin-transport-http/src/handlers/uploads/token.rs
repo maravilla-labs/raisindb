@@ -141,6 +141,21 @@ pub(super) fn consume_use(claims: &UploadTokenClaims) -> Option<u32> {
     Some(seq)
 }
 
+/// A token's destination must be fresh: nothing at the path yet, and no
+/// session of this token already heading there. This is what stops a replayed
+/// use (after a restart, or on another node, where the counter starts over)
+/// from writing a second time, and what keeps an exact-path token create-only.
+pub(super) fn ensure_destination_free(exists: bool, in_flight: bool) -> Result<(), ApiError> {
+    if exists || in_flight {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "TOKEN_DESTINATION_TAKEN",
+            "the upload token's destination is already taken",
+        ));
+    }
+    Ok(())
+}
+
 /// Mint request.
 #[derive(Debug, Deserialize)]
 pub struct MintUploadTokenRequest {
@@ -321,6 +336,22 @@ mod tests {
         assert_eq!(consume_use(&c), Some(1));
         assert_eq!(consume_use(&c), None);
         assert_eq!(consume_use(&c), None);
+    }
+
+    #[test]
+    fn a_taken_destination_refuses_even_after_the_counter_reset() {
+        // Fresh process: the counter hands out use 0 again, but the file the
+        // first use produced is there, so the replay is refused.
+        let c = claims("jti-replay", 1, now_unix_secs() + 60);
+        assert_eq!(consume_use(&c), Some(0));
+        TOKEN_USES.lock().unwrap().clear(); // restart / other node
+        assert_eq!(consume_use(&c), Some(0));
+        assert!(ensure_destination_free(true, false).is_err());
+        // a use still in flight in this process is refused too
+        assert!(ensure_destination_free(false, true).is_err());
+        assert!(ensure_destination_free(false, false).is_ok());
+        let e = ensure_destination_free(true, false).unwrap_err();
+        assert_eq!(e.status, StatusCode::CONFLICT);
     }
 
     #[test]

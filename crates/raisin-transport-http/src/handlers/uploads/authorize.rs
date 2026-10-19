@@ -203,6 +203,26 @@ pub(super) async fn authorize_session_write(
     Ok(())
 }
 
+/// Is there already a node at the path the session targets?
+pub(super) async fn target_exists(
+    state: &AppState,
+    session: &UploadSession,
+) -> Result<bool, ApiError> {
+    let scope = StorageScope::new(
+        &session.tenant_id,
+        &session.repository,
+        &session.branch,
+        &session.workspace,
+    );
+    state
+        .storage
+        .nodes()
+        .get_by_path(scope, &session.path, None)
+        .await
+        .map(|n| n.is_some())
+        .map_err(|e| ApiError::internal(format!("Failed to look up upload target: {e}")))
+}
+
 /// A session belongs to the tenant and the identity that opened it. Anyone
 /// else holding the id (it travels in URLs and logs) is refused.
 pub(super) fn require_owner(

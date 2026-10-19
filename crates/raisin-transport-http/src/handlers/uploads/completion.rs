@@ -14,7 +14,7 @@ use raisin_models::auth::AuthContext;
 
 use crate::{error::ApiError, middleware::TenantInfo, state::AppState};
 
-use super::authorize::{authorize_session_write, validate_path};
+use super::authorize::{authorize_session_write, target_exists, validate_path};
 use super::token::{principal, require_session_access, Principal};
 
 use super::types::{
@@ -46,6 +46,15 @@ pub async fn complete_upload(
             // Authorized when the token was minted. A token completes once, and
             // does not choose who the commit is attributed to.
             validate_path(&session.path)?;
+            // Create-only: something that appeared at the path since the
+            // session opened must not be overwritten.
+            if target_exists(&state, &session).await? {
+                return Err(ApiError::new(
+                    StatusCode::CONFLICT,
+                    "TOKEN_DESTINATION_TAKEN",
+                    "the upload token's destination is already taken",
+                ));
+            }
             if !matches!(
                 session.status,
                 UploadSessionStatus::Pending | UploadSessionStatus::InProgress

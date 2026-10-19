@@ -82,6 +82,22 @@ impl UploadSessionStore {
         sessions.insert(session.id.clone(), session);
     }
 
+    /// Is a session by `owner` for `path` still able to finish?
+    pub async fn has_active(&self, owner: &str, path: &str) -> bool {
+        let sessions = self.sessions.read().await;
+        sessions.values().any(|s| {
+            s.owner == owner
+                && s.path == path
+                && matches!(
+                    s.status,
+                    UploadSessionStatus::Pending
+                        | UploadSessionStatus::InProgress
+                        | UploadSessionStatus::Completing
+                        | UploadSessionStatus::Completed
+                )
+        })
+    }
+
     pub async fn delete(&self, upload_id: &str) {
         let mut sessions = self.sessions.write().await;
         sessions.remove(upload_id);

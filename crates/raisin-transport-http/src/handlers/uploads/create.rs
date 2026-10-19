@@ -14,8 +14,9 @@ use raisin_models::auth::AuthContext;
 
 use crate::{error::ApiError, middleware::TenantInfo, state::AppState};
 
+use super::authorize::target_exists;
 use super::authorize::{authorize_session_write, owner_of, validate_path};
-use super::token::{consume_use, principal, token_owner, Principal};
+use super::token::{consume_use, ensure_destination_free, principal, token_owner, Principal};
 
 use super::types::{
     CreateUploadRequest, CreateUploadResponse, UploadSession, UploadSessionStatus,
@@ -199,7 +200,7 @@ pub async fn create_upload(
             let path = claims.destination(seq);
             validate_path(&path)?;
             let filename = path.rsplit('/').next().unwrap_or_default().to_string();
-            build_session(
+            let session = build_session(
                 upload_id.clone(),
                 tenant_id,
                 &claims.repo,
@@ -215,7 +216,12 @@ pub async fn create_upload(
                 token_owner(claims),
                 now,
                 now + Duration::minutes(TOKEN_SESSION_MINUTES),
-            )
+            );
+            // Create-only, and one writer per use.
+            let exists = target_exists(&state, &session).await?;
+            let in_flight = UPLOAD_STORE.has_active(&session.owner, &session.path).await;
+            ensure_destination_free(exists, in_flight)?;
+            session
         }
     };
 

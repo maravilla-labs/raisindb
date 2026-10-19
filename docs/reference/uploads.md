@@ -112,9 +112,16 @@ id answers 404.
 - The commit is attributed to `upload-token`; a token cannot choose the commit actor or
   message.
 - Neither the token nor its signature is logged (only the token id).
-- The use counter is held in the server process, like the upload sessions themselves. In a
-  multi-node cluster a replayed token can open at most `uses` sessions per node, always at
-  its fixed destination and within its limits.
+- A token is create-only. Opening a session and completing it both refuse (`409
+  TOKEN_DESTINATION_TAKEN`) when a node already exists at the destination, so a node that
+  appeared after the token was minted is never overwritten, and a use that has completed
+  cannot be replayed. A session of the same token already heading to that destination also
+  blocks a second one.
+- The use counter is held in the server process, like the upload sessions themselves. After a
+  restart, or on another cluster node, it starts over. The remaining window is exactly this:
+  a replay of a use that has NOT yet completed can open one more session for the same fixed
+  destination, within the token's limits; whichever completes second is refused because the
+  destination then exists.
 
 Browsers: the Studio phone page reads the token from the URL fragment and sends it in the
 `Authorization` header; a cross-origin page needs the usual CORS allowance for
