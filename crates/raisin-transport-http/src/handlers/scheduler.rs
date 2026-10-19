@@ -135,10 +135,27 @@ mod inner {
     ) -> Vec<(JobInfo, JobContext)> {
         // Merge persisted + live jobs so fired/completed invocations remain
         // listable after the in-memory registry evicts them or a restart.
-        let jobs = rocksdb
+        let mut jobs = rocksdb
             .list_tenant_jobs_merged(tenant_id)
             .await
             .unwrap_or_default();
+        // The merged listing is the tenant's NEWEST jobs of every type, capped.
+        // A delayed invocation is old by the time it is due, so on a busy
+        // tenant it falls off that page while still pending (per-id GET kept
+        // finding it, the list and the external-key dedup did not). The live
+        // registry holds every unfinished job: add the invocations among them
+        // that the page left out.
+        let listed: std::collections::HashSet<JobId> = jobs.iter().map(|j| j.id.clone()).collect();
+        jobs.extend(
+            rocksdb
+                .job_registry()
+                .list_jobs_by_tenant_where(tenant_id, |t| {
+                    matches!(t, JobType::ScheduledInvocation { .. })
+                })
+                .await
+                .into_iter()
+                .filter(|j| !listed.contains(&j.id)),
+        );
         let mut out = Vec::new();
         for job in jobs {
             if !matches!(job.job_type, JobType::ScheduledInvocation { .. }) {
@@ -620,6 +637,48 @@ mod tests {
             pending_invocation_with_key(&storage, TENANT, REPO, "no-such-key")
                 .await
                 .is_none(),
+        );
+    }
+
+    /// Issue #228: the merged listing is capped to the newest jobs of every
+    /// type, so a pending invocation older than that page vanished from the
+    /// list (and from the key dedup) while per-id GET still found it.
+    #[tokio::test]
+    async fn a_pending_invocation_outside_the_newest_page_is_still_listed() {
+        use super::inner::list_repo_invocations;
+
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(RocksDBStorage::new(temp.path()).unwrap());
+        let data_store = storage.job_data_store();
+
+        let job_id = schedule(&storage, data_store, "old-and-pending").await;
+        // Newer jobs of other kinds, more than one page of them.
+        for _ in 0..1_100 {
+            storage
+                .job_registry()
+                .register_job(
+                    JobType::ScheduledInvocation {
+                        invocation_id: nanoid::nanoid!(),
+                        target_kind: "function".to_string(),
+                    },
+                    TENANT.to_string(),
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+
+        let listed = list_repo_invocations(&storage, TENANT, REPO).await;
+        assert!(
+            listed.iter().any(|(info, _)| info.id == job_id),
+            "the pending invocation must be listed however many newer jobs exist",
+        );
+        assert!(
+            pending_invocation_with_key(&storage, TENANT, REPO, "old-and-pending")
+                .await
+                .is_some()
         );
     }
 
