@@ -34,7 +34,7 @@ pub async fn complete_upload(
         .await
         .ok_or_else(|| ApiError::not_found("Upload session not found"))?;
     let auth = require_auth(auth)?;
-    require_owner(&auth, &session)?;
+    require_owner(&auth, &tenant_info, &session)?;
     // Re-checked: the grant, or the node at the path, may have changed since
     // the session opened.
     authorize_session_write(&state, &auth, &session).await?;
@@ -167,6 +167,7 @@ pub async fn complete_upload(
 /// DELETE /api/uploads/{id} - Cancel upload
 pub async fn cancel_upload(
     Path(upload_id): Path<String>,
+    Extension(tenant_info): Extension<TenantInfo>,
     auth: Option<Extension<AuthContext>>,
 ) -> Result<StatusCode, ApiError> {
     // Get session
@@ -174,7 +175,7 @@ pub async fn cancel_upload(
         .get(&upload_id)
         .await
         .ok_or_else(|| ApiError::not_found("Upload session not found"))?;
-    require_owner(&require_auth(auth)?, &session)?;
+    require_owner(&require_auth(auth)?, &tenant_info, &session)?;
 
     // Mark as cancelled
     session.status = UploadSessionStatus::Cancelled;
