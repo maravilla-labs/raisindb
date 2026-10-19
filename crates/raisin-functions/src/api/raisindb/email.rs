@@ -31,14 +31,14 @@ use serde_json::Value;
 
 use super::email_attachments::{take_attachment_specs, AttachmentSpec};
 use super::RaisinFunctionApi;
-use crate::runtime::email::{EmailConfig, EmailError, EmailMessage, EmailProvider, EmailSender};
+use crate::runtime::email::{
+    feedback, EmailConfig, EmailError, EmailMessage, EmailProvider, EmailSender,
+};
 
 /// Workspace holding per-tenant operator configuration.
 const CONFIG_WORKSPACE: &str = "raisin:system";
 /// Path of the tenant's `raisin:EmailConfig` node.
 const EMAIL_CONFIG_PATH: &str = "/config/email";
-/// Parent of the `raisin:EmailMessage` records written for accepted sends.
-const EMAIL_MESSAGES_PATH: &str = "/email/messages";
 
 /// Read the optional `correlation: { kind, id }` the caller attached, before
 /// `parse_message` consumes the value. Absent or malformed means "none".
@@ -227,18 +227,7 @@ impl RaisinFunctionApi {
         correlation: Option<(String, String)>,
     ) {
         let now = chrono::Utc::now().to_rfc3339();
-        // Node names cannot carry `/`, and SMTP/Brevo ids are `<..@..>`-shaped.
-        let name: String = receipt
-            .message_id
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
+        let name = feedback::message_node_name(&receipt.message_id);
         let mut properties = serde_json::json!({
             "provider": sender.provider.as_str(),
             "sender": sender.name,
@@ -260,19 +249,30 @@ impl RaisinFunctionApi {
         });
         // System path, not `impl_node_create`: the record is platform
         // bookkeeping, so the function's RLS must neither block nor shape it.
-        let created = match self.callbacks.system_node_create.as_ref() {
-            Some(cb) => {
-                cb(
-                    CONFIG_WORKSPACE.to_string(),
-                    EMAIL_MESSAGES_PATH.to_string(),
-                    data,
-                )
-                .await
-            }
-            None => Err(raisin_error::Error::Validation(
-                "System node create callback not configured".to_string(),
-            )),
+        let Some(cb) = self.callbacks.system_node_create.as_ref() else {
+            tracing::warn!("email accepted but no system node-create callback is configured");
+            return;
         };
+        let mut created = cb(
+            CONFIG_WORKSPACE.to_string(),
+            feedback::MESSAGES_PATH.to_string(),
+            data.clone(),
+        )
+        .await;
+        if created.is_err() {
+            // Tenants created before this feature have no `/email/messages`.
+            // Make the folders and retry once; a real failure fails again.
+            for (parent, name) in [("/", "email"), ("/email", "messages"), ("/email", "events")] {
+                let folder = serde_json::json!({ "name": name, "node_type": "raisin:Folder" });
+                let _ = cb(CONFIG_WORKSPACE.to_string(), parent.to_string(), folder).await;
+            }
+            created = cb(
+                CONFIG_WORKSPACE.to_string(),
+                feedback::MESSAGES_PATH.to_string(),
+                data,
+            )
+            .await;
+        }
         if let Err(e) = created {
             tracing::warn!(
                 message_id = %receipt.message_id,

@@ -278,3 +278,17 @@ service with `fetch` and attach the response bytes.
   unless the operator has enabled private egress server-wide. `starttls`
   *requires* the upgrade rather than attempting it, so a relay that lost TLS
   support fails instead of sending the password in the clear.
+
+## Delivery tracking (Brevo and Resend)
+
+`raisin.email.send` returns once the provider has **accepted** the message. That is not delivery. To learn what happened next, enable delivery tracking per sender in the admin console (Email settings, the sender's card, "Delivery tracking"). One click creates a webhook at Brevo or Resend using the sender's own API key; if that is not possible, the panel shows the URL to paste by hand. Resend also needs its `whsec_…` signing secret stored, and the panel has a field for it.
+
+What you get:
+
+- Every accepted send is stored as a `raisin:EmailMessage` under `/email/messages` in `raisin:system` (provider, provider message id, recipients, status, and your `correlation: { kind, id }` if you passed one to `send`).
+- Every provider event is stored once as a `raisin:EmailEvent` under `/email/events`: `delivered`, `deferred`, `soft_bounce`, `hard_bounce`, `blocked`, `complained`, `failed`, plus `opened`, `clicked`, `unsubscribed`. Redelivered webhooks are recognised and not stored twice.
+- `EmailMessage.status` only moves forward (`accepted` < `deferred` < `soft_bounce` < `delivered` < `hard_bounce`/`blocked`/`complained`/`failed`), so a late event cannot overwrite a better one. Create a node-event trigger on `raisin:EmailEvent` to react to bounces and complaints.
+
+The endpoint is `POST /api/email/{repo}/webhooks/{sender}/{token}`. Brevo does not sign its payloads, so the unguessable token is the guard. Resend payloads are additionally verified against their Svix signature over the raw body, and are refused if no signing secret is stored. The token and secret live in the secret store under `email/webhook/{sender}/…`.
+
+**SMTP** has no feedback channel: it can only confirm that the relay accepted the message. Use Brevo or Resend where proof of delivery matters.

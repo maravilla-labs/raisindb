@@ -37,6 +37,7 @@
 
 mod attachment;
 mod brevo;
+pub mod feedback;
 mod provider;
 mod resend;
 mod smtp;

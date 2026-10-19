@@ -19,6 +19,7 @@
  * secret store, which has no route that returns one. See the Secrets page.
  */
 
+import { api } from './client'
 import { nodesApi, type Node } from './nodes'
 import { invokeFunction } from './functions'
 
@@ -462,4 +463,53 @@ export function isValid(result: ValidationResult): boolean {
     !result.default_provider &&
     Object.keys(result.providers).length === 0
   )
+}
+
+/** State of one sender's delivery-feedback webhook. */
+export interface WebhookStatus {
+  provider: string
+  /** A token exists, so the URL below is live. */
+  configured: boolean
+  /** The URL to give the provider. Carries the token: show to admins only. */
+  url: string | null
+  signing_secret_set: boolean
+  /** The webhook was created at the provider by the server. */
+  registered: boolean
+  /** Resend signs payloads; its secret must be stored for events to be accepted. */
+  needs_signing_secret: boolean
+  warning?: string | null
+}
+
+export interface WebhookSetupResult extends Omit<WebhookStatus, 'configured'> {
+  url: string
+  registration_error?: string | null
+}
+
+/** Senders that report delivery events. SMTP has no such channel. */
+export const FEEDBACK_PROVIDERS: EmailProviderKind[] = ['resend', 'brevo']
+
+const webhookBase = (repo: string, name: string) =>
+  `/api/email/${encodeURIComponent(repo)}/webhook-setup/${encodeURIComponent(name)}`
+
+export const emailWebhookApi = {
+  status: (repo: string, name: string): Promise<WebhookStatus> =>
+    api.get<WebhookStatus>(
+      `${webhookBase(repo, name)}?base=${encodeURIComponent(window.location.origin)}`
+    ),
+
+  /**
+   * Mint the webhook URL and, with `register`, create the webhook at the
+   * provider using the sender's own API key.
+   */
+  setup: (
+    repo: string,
+    name: string,
+    opts: { register?: boolean; rotate?: boolean; signing_secret?: string } = {}
+  ): Promise<WebhookSetupResult> =>
+    api.post<WebhookSetupResult>(webhookBase(repo, name), {
+      public_base: window.location.origin,
+      register: !!opts.register,
+      rotate: !!opts.rotate,
+      ...(opts.signing_secret ? { signing_secret: opts.signing_secret } : {}),
+    }),
 }

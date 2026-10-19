@@ -43,6 +43,12 @@ pub(crate) fn integration_routes(state: &AppState) -> Router<AppState> {
             .route(
                 "/api/integrations/{repo}/notifications/{mount_token}",
                 get(integrations::notify).post(integrations::notify),
+            )
+            // Email delivery feedback from Brevo / Resend. Guarded by the
+            // unguessable token (and, for Resend, a Svix signature).
+            .route(
+                "/api/email/{repo}/webhooks/{name}/{token}",
+                post(crate::handlers::email_webhooks::receive),
             );
 
         // Admin-gated: require a valid principal AND admin authorization.
@@ -181,7 +187,21 @@ pub(crate) fn integration_routes(state: &AppState) -> Router<AppState> {
             )
             .layer(from_fn_with_state(state.clone(), require_auth_middleware));
 
-        public.merge(guarded)
+        // Console self-service for delivery tracking. Same auth layer as the
+        // secrets surface it sits beside (both are operator-only and both are
+        // admin-gated inside the handler), so a superadmin token works here too.
+        let email_admin = Router::new()
+            .route(
+                "/api/email/{repo}/webhook-setup/{name}",
+                get(crate::handlers::email_webhooks::status)
+                    .post(crate::handlers::email_webhooks::setup),
+            )
+            .layer(from_fn_with_state(
+                state.clone(),
+                crate::middleware::optional_auth_middleware,
+            ));
+
+        public.merge(guarded).merge(email_admin)
     }
 
     #[cfg(not(feature = "storage-rocksdb"))]

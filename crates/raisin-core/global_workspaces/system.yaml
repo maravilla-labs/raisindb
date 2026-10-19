@@ -16,6 +16,7 @@ allowed_node_types:
   - raisin:Integration
   - raisin:VirtualMount
   - raisin:EmailMessage
+  - raisin:EmailEvent
 allowed_root_node_types:
   - raisin:AuthConfig
   - raisin:ProviderConfig
@@ -140,6 +141,12 @@ initial_structure:
             icon: "send"
             color: "#f97316"
             title: "Accepted Messages"
+        - node_type: raisin:Folder
+          name: events
+          properties:
+            icon: "mail-check"
+            color: "#f97316"
+            title: "Delivery Events"
     # Virtual mounts of external subtrees
     - node_type: raisin:Folder
       name: mounts

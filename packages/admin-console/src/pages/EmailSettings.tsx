@@ -35,6 +35,7 @@ import {
   EMAIL_CONFIG_DEFAULTS,
   EMAIL_CONFIG_PATH,
   EMAIL_PROVIDERS,
+  FEEDBACK_PROVIDERS,
   SMTP_DEFAULTS,
   SMTP_SECURITY,
   emailConfigApi,
@@ -50,6 +51,7 @@ import {
   type ValidationResult,
 } from '../api/email-config'
 import { secretsApi } from '../api/secrets'
+import EmailDeliveryTracking from '../components/EmailDeliveryTracking'
 
 /**
  * Where each provider's credential actually comes from. The Brevo line is the
@@ -712,6 +714,17 @@ function ProviderCard({
           .
         </Hint>
       </Field>
+
+      {provider.provider === 'smtp' && (
+        <p className="text-xs text-white/40 border-t border-white/10 pt-3">
+          SMTP can only confirm that the relay accepted a message; it has no delivery feedback
+          channel. For proof of delivery and bounces, send through Brevo or Resend.
+        </p>
+      )}
+
+      {FEEDBACK_PROVIDERS.includes(provider.provider) && provider.name.trim() && (
+        <EmailDeliveryTracking repo={repo} name={provider.name.trim()} kind={provider.provider} />
+      )}
     </GlassCard>
   )
 }

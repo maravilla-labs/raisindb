@@ -1,0 +1,62 @@
+name: raisin:EmailEvent
+description: >-
+  One provider delivery event (delivered, deferred, bounced, blocked,
+  complained, opened, clicked...) received by the email webhook. Append-only:
+  the node name is a hash of the provider event, so a redelivered webhook is
+  recognised and stored once. Create a node-event trigger on this type to react
+  to bounces and complaints.
+icon: mail-check
+version: 1
+strict: false
+indexable: true
+index_types: [Property]
+versionable: false
+publishable: false
+auditable: false
+properties:
+  - name: provider
+    type: String
+    required: true
+    index: [Property]
+  - name: message_id
+    type: String
+    required: true
+    index: [Property]
+    meta:
+      label: Provider message id
+      description: Matches raisin:EmailMessage.message_id.
+  - name: event
+    type: String
+    required: true
+    index: [Property]
+    meta:
+      label: Event
+      description: >-
+        accepted | deferred | delivered | soft_bounce | hard_bounce | blocked |
+        complained | failed | opened | clicked | unsubscribed
+  - name: email
+    type: String
+    required: false
+    index: [Property]
+    meta:
+      label: Recipient
+  - name: occurred_at
+    type: String
+    required: false
+  - name: received_at
+    type: String
+    required: false
+  - name: detail
+    type: String
+    required: false
+    meta:
+      label: Reason
+      description: The provider's own explanation, e.g. a bounce reason.
+  - name: correlation_kind
+    type: String
+    required: false
+    index: [Property]
+  - name: correlation_id
+    type: String
+    required: false
+    index: [Property]

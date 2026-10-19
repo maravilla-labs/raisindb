@@ -49,6 +49,8 @@ mod handlers {
     pub mod conversations;
     pub mod element_types;
     #[cfg(feature = "storage-rocksdb")]
+    pub mod email_webhooks;
+    #[cfg(feature = "storage-rocksdb")]
     pub mod embeddings;
     pub mod functions;
     pub mod history;
