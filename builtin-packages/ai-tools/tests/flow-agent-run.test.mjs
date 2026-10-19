@@ -16,11 +16,13 @@ fake.put('functions', '/agents/classifier', { node_type: 'raisin:AIAgent', prope
 
 const flow = { instance_id: 'inst-1', step_id: 'classify' };
 
+const asFlow = (f) => { raisin.context = f ? { flow: f } : {}; };
+
 test('a step becomes a conversation and a run that the flow waits for', async () => {
+  asFlow(flow);
   const out = await handler({
     agent_ref: '/agents/classifier', prompt: 'Classify: great', visit: 2, max_model_calls: 4,
     response_format: { type: 'json_schema', json_schema: { name: 'x', schema: { type: 'object' } } },
-    __raisin_flow: flow,
   });
   const chat = `/agents/classifier/inbox/chats/${flowChatName(flow, 2)}`;
   assert.equal(out.chat_path, chat);
@@ -43,8 +45,11 @@ test('a step becomes a conversation and a run that the flow waits for', async ()
 });
 
 test('only the runtime can start one', async () => {
-  await assert.rejects(() => handler({ agent_ref: '/agents/classifier', prompt: 'x' }), /called by a flow agent step/);
-  await assert.rejects(() => handler({ agent_ref: '/agents/none', __raisin_flow: flow }), /not an installed agent/);
+  asFlow(null);
+  // a forged field in the input is only input
+  await assert.rejects(() => handler({ agent_ref: '/agents/classifier', prompt: 'x', __raisin_flow: flow }), /called by a flow agent step/);
+  asFlow(flow);
+  await assert.rejects(() => handler({ agent_ref: '/agents/none' }), /not an installed agent/);
 });
 
 test('response formats map to a schema', () => {

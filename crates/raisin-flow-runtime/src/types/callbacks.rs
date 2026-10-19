@@ -267,6 +267,21 @@ pub trait FlowCallbacks: Send + Sync {
     /// Execute a function synchronously
     async fn execute_function(&self, function_ref: &str, input: Value) -> FlowResult<Value>;
 
+    /// Execute a function synchronously on behalf of a flow step.
+    ///
+    /// The function sees the step as `context.flow` (the runtime's word, never
+    /// part of the input). Defaults to [`Self::execute_function`], so an
+    /// implementation with no flow-context plumbing is unchanged.
+    async fn execute_function_for_step(
+        &self,
+        function_ref: &str,
+        input: Value,
+        flow: &StepFlowRef,
+    ) -> FlowResult<Value> {
+        let _ = flow;
+        self.execute_function(function_ref, input).await
+    }
+
     /// Execute a function AS a named AGENT — an agent's own tool call.
     ///
     /// Defaults to [`Self::execute_function`], so an implementation with no
@@ -638,4 +653,14 @@ mod patch_tests {
         assert_eq!(written["assignee"], "/users/admin", "patched field wins");
         assert_eq!(written["escalated_from"], "/agents/bot", "new field added");
     }
+}
+
+/// The flow step a synchronous function call is made for; the function reads
+/// it as `context.flow`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepFlowRef {
+    pub instance_id: String,
+    pub step_id: String,
+    pub flow_path: Option<String>,
+    pub attempt: u32,
 }

@@ -14,7 +14,7 @@ properties:
   entry_file: index.js:handler
   input_schema:
     type: object
-    required: [agent_ref, __raisin_flow]
+    required: [agent_ref]
     properties:
       agent_ref: { type: string }
       agent_workspace: { type: string }
@@ -23,9 +23,3 @@ properties:
       skills: { type: array }
       max_model_calls: { type: integer }
       visit: { type: integer }
-      __raisin_flow:
-        type: object
-        required: [instance_id, step_id]
-        properties:
-          instance_id: { type: string }
-          step_id: { type: string }

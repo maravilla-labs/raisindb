@@ -5,7 +5,7 @@
  * model itself. Here the step becomes what every conversation already is: a
  * conversation holding the step's prompt, and an AgentRun of the agent over it
  * — the agent's own tools, budgets, stop/steer, leases and resume. The run
- * carries a WAITER naming the flow instance (the runtime's own `__raisin_flow`
+ * carries a WAITER naming the flow instance (the runtime's own `context.flow`
  * stamp, never the step definition's), so when it ends core resumes the step
  * with its result through the job queue.
  *
@@ -52,7 +52,8 @@ async function ensureNode(workspace, parent, name, nodeType, properties) {
 }
 
 export async function handler(input = {}) {
-  const flow = input.__raisin_flow;
+  // The runtime's word about the calling step, never part of the input.
+  const flow = raisin.context && raisin.context.flow;
   if (!flow || typeof flow.instance_id !== 'string' || typeof flow.step_id !== 'string') {
     throw fail('flow-agent-run is called by a flow agent step');
   }

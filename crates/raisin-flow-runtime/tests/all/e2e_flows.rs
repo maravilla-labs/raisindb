@@ -23,6 +23,7 @@ use serde_json::{json, Value};
 
 use raisin_flow_runtime::handlers::agent_step::FLOW_AGENT_RUN_FUNCTION;
 use raisin_flow_runtime::runtime::{check_flow_timeout, execute_flow, resume_flow};
+use raisin_flow_runtime::types::callbacks::StepFlowRef;
 use raisin_flow_runtime::types::{
     FlowCallbacks, FlowError, FlowExecutionEvent, FlowInstance, FlowResult, FlowStatus, WaitType,
 };
@@ -45,6 +46,7 @@ struct Harness {
     function_invocations: Mutex<Vec<(String, Value)>>,
     /// functions executed synchronously (compensations): (ref, input)
     sync_executions: Mutex<Vec<(String, Value)>>,
+    step_flows: Mutex<Vec<StepFlowRef>>,
     /// scripted AI responses (FIFO)
     ai_responses: Mutex<VecDeque<Value>>,
     /// recorded AI calls: (workspace, agent_ref, messages, response_format)
@@ -448,6 +450,16 @@ impl FlowCallbacks for Harness {
             .unwrap()
             .pop_front()
             .ok_or_else(|| FlowError::AIProvider("no scripted AI response".to_string()))
+    }
+
+    async fn execute_function_for_step(
+        &self,
+        function_ref: &str,
+        input: Value,
+        flow: &StepFlowRef,
+    ) -> FlowResult<Value> {
+        self.step_flows.lock().unwrap().push(flow.clone());
+        self.execute_function(function_ref, input).await
     }
 
     async fn execute_function(&self, function_ref: &str, input: Value) -> FlowResult<Value> {
@@ -1492,9 +1504,14 @@ async fn agent_step_runs_the_agent_as_a_durable_run() {
         starts[0]["prompt"],
         json!("Classify the sentiment of: great product")
     );
-    // The runtime, not the definition, names the waiting flow.
-    assert_eq!(starts[0]["__raisin_flow"]["instance_id"], json!(id));
-    assert_eq!(starts[0]["__raisin_flow"]["step_id"], json!("classify"));
+    // The runtime, not the definition, names the waiting flow: as the step's
+    // `context.flow`, never as a field of the input.
+    assert!(starts[0].get("__raisin_flow").is_none());
+    let flows = harness.step_flows.lock().unwrap();
+    assert_eq!(flows.len(), 1);
+    assert_eq!(flows[0].instance_id, id);
+    assert_eq!(flows[0].step_id, "classify");
+    drop(flows);
 
     // The run ends: its result resumes the step.
     resume_flow(&id, run_result("run-1", "completed", "Positive"), &harness)

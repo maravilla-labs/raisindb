@@ -160,6 +160,55 @@ mod agent_provenance {
         }
     }
 
+    /// A synchronous call made for a step (the agent step's run start) reaches
+    /// the function under the runtime's flow context, which `execute_function`
+    /// turns into `context.flow`; a plain `execute_function` carries none.
+    #[tokio::test]
+    async fn a_step_call_runs_under_the_flow_context() {
+        use raisin_flow_runtime::types::callbacks::StepFlowRef;
+        let seen: Arc<Mutex<Vec<Option<crate::jobs::FlowRunContext>>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let executor: FunctionExecutorCallback =
+            Arc::new(move |_f, _input, _t, _r, _b, _w, _agent, _user| {
+                let run = crate::jobs::FLOW_RUN.try_with(|f| f.clone()).ok().flatten();
+                sink.lock().unwrap().push(run);
+                Box::pin(async { Ok(serde_json::json!(null)) })
+            });
+        let callbacks = RocksDBFlowCallbacks::new("t".into(), "r".into(), "main".into())
+            .with_function_executor(executor);
+
+        callbacks
+            .execute_function_for_step(
+                "/lib/x",
+                serde_json::json!({}),
+                &StepFlowRef {
+                    instance_id: "inst-1".into(),
+                    step_id: "classify".into(),
+                    flow_path: Some("/flows/f".into()),
+                    attempt: 1,
+                },
+            )
+            .await
+            .expect("step call");
+        callbacks
+            .execute_function("/lib/x", serde_json::json!({}))
+            .await
+            .expect("plain call");
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen[0],
+            Some(crate::jobs::FlowRunContext {
+                instance_id: "inst-1".into(),
+                step_id: "classify".into(),
+                flow_path: Some("/flows/f".into()),
+                attempt: 1,
+            })
+        );
+        assert_eq!(seen[1], None);
+    }
+
     /// A flow with no marker must behave exactly as before: `None` everywhere,
     /// so nothing acquires an agent it did not have.
     #[tokio::test]

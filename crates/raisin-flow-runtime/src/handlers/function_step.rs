@@ -98,9 +98,9 @@ impl FunctionStepHandler {
             } else {
                 self.build_arguments(step, context)?
             };
-        // The compensation runs through `execute_function`, never through
-        // `with_flow_context`, so a `__raisin_flow` here could only be one the
-        // step definition wrote — a forged flow stamp. Drop it.
+        // The compensation runs through `execute_function`, with no flow
+        // context, so a `__raisin_flow` here could only be one the step
+        // definition wrote — a forged flow stamp. Drop it.
         let compensation_input = without_flow_context(compensation_input);
 
         let entry = CompensationEntry {
@@ -115,32 +115,6 @@ impl FunctionStepHandler {
         context.push_compensation(entry);
         Ok(())
     }
-}
-
-/// A function step's arguments with the flow that ran it attached as
-/// `__raisin_flow = { instance_id, step_id }` ([`FLOW_CONTEXT_KEY`]).
-///
-/// Whatever the step definition put under that key is REPLACED — the only
-/// value that can reach the function is the runtime's. A function reads it to
-/// tie its work to its own flow instance (the arming step comparing the
-/// approval's recorded instance with the one that is running it).
-///
-/// Deliberately NOT `__raisin_context`: functions read that key's mere
-/// presence as "an agent tool is calling me" (update-node softens its errors,
-/// arm-generated-function refuses outright), and a flow step is not an agent.
-///
-/// A non-object argument value is left alone — there is nowhere to put the
-/// stamp without changing what the function receives.
-///
-/// [`FLOW_CONTEXT_KEY`]: crate::handlers::ai_tool_loop::FLOW_CONTEXT_KEY
-pub(crate) fn with_flow_context(mut arguments: Value, instance_id: &str, step_id: &str) -> Value {
-    if let Some(obj) = arguments.as_object_mut() {
-        obj.insert(
-            crate::handlers::ai_tool_loop::FLOW_CONTEXT_KEY.to_string(),
-            serde_json::json!({ "instance_id": instance_id, "step_id": step_id }),
-        );
-    }
-    arguments
 }
 
 /// Arguments with any `__raisin_flow` removed — for inputs that do not get
@@ -292,14 +266,10 @@ impl StepHandler for FunctionStepHandler {
             )
             .await;
 
-        // Build arguments, then stamp the flow that runs them. The stamp is
-        // set HERE, over whatever the step definition wrote, so a flow (which
-        // a model may have authored) cannot name another instance.
-        let arguments = with_flow_context(
-            self.build_arguments(step, context)?,
-            &context.instance_id,
-            &step.id,
-        );
+        // The flow that runs the step reaches the function as `context.flow`
+        // (see `flow_context` below), never in the input. A `__raisin_flow`
+        // the step definition wrote is dropped so it cannot pose as it.
+        let arguments = without_flow_context(self.build_arguments(step, context)?);
         debug!("Function arguments: {}", arguments);
 
         // Create job payload
@@ -503,10 +473,10 @@ mod tests {
         assert!(*job_queued.lock().await);
     }
 
-    /// The function learns which flow instance and step ran it — gap 10: the
-    /// arming step could not tie an approval to its own instance.
+    /// The flow instance and step are NOT stamped into the input: the function
+    /// learns them from `context.flow` (see the `flow_context` test below).
     #[tokio::test]
-    async fn the_function_receives_its_flow_instance_and_step() {
+    async fn no_flow_stamp_is_written_into_the_input() {
         let handler = FunctionStepHandler::new();
         let node = create_function_step_node();
         let mut context = create_test_context();
@@ -518,13 +488,7 @@ mod tests {
             .expect("queues");
 
         let payload = callbacks.payload.lock().await.clone().expect("queued");
-        assert_eq!(
-            payload["arguments"],
-            serde_json::json!({
-                "input": "test",
-                "__raisin_flow": { "instance_id": "test-instance", "step_id": "function-1" }
-            })
-        );
+        assert_eq!(payload["arguments"], serde_json::json!({ "input": "test" }));
         // Not `__raisin_context`: functions read that as "an agent is calling".
         assert!(payload["arguments"].get("__raisin_context").is_none());
     }
@@ -566,7 +530,7 @@ mod tests {
     }
 
     /// A step definition — which a model may have written — cannot name some
-    /// other instance: the runtime's stamp replaces whatever it put there.
+    /// other instance: a `__raisin_flow` it wrote is dropped from the input.
     #[tokio::test]
     async fn a_flow_definition_cannot_forge_the_flow_instance() {
         let handler = FunctionStepHandler::new();
@@ -587,15 +551,12 @@ mod tests {
             .expect("queues");
 
         let payload = callbacks.payload.lock().await.clone().expect("queued");
-        assert_eq!(
-            payload["arguments"]["__raisin_flow"],
-            serde_json::json!({ "instance_id": "test-instance", "step_id": "function-1" })
-        );
+        assert!(payload["arguments"].get("__raisin_flow").is_none());
         assert_eq!(payload["arguments"]["function_path"], "/lib/x");
     }
 
     /// Compensation input is built from the same step definition but never
-    /// stamped, so a forged `__raisin_flow` there must not survive either.
+    /// given a flow context, so a forged `__raisin_flow` there must not survive either.
     #[tokio::test]
     async fn a_compensation_input_cannot_carry_a_forged_flow_instance() {
         let handler = FunctionStepHandler::new();
@@ -621,14 +582,6 @@ mod tests {
         assert_eq!(
             context.compensation_stack[0].compensation_input,
             serde_json::json!({ "charge_id": "ch_1" })
-        );
-    }
-
-    #[test]
-    fn a_non_object_argument_is_left_alone() {
-        assert_eq!(
-            with_flow_context(serde_json::json!("raw"), "i", "s"),
-            serde_json::json!("raw")
         );
     }
 

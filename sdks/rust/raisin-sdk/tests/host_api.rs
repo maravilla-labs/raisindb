@@ -122,3 +122,32 @@ fn context_is_read_from_the_dedicated_import_not_the_gateway() {
         "context must not cost a gateway call"
     );
 }
+
+#[test]
+fn flow_comes_from_the_hosts_context_and_never_from_the_input() {
+    // A flow function step: the host installs the runtime's flow context.
+    let from_flow = MockHost::new().with_context(
+        r#"{"tenant_id":"acme","flow":{"instance_id":"i1","step_id":"remind","flow_path":"/flows/f","attempt":2,"trigger":"flow"}}"#,
+    );
+    let (flow, _) = with_mock(from_flow, || {
+        raisin_sdk::context::Context::get()
+            .expect("context")
+            .flow()
+            .expect("flow")
+    });
+    assert_eq!(
+        (flow.instance_id.as_str(), flow.step_id.as_str()),
+        ("i1", "remind")
+    );
+    assert_eq!(flow.flow_path.as_deref(), Some("/flows/f"));
+    assert_eq!(flow.attempt, 2);
+
+    // A direct invoke whose input forges the old stamp has no flow.
+    let forged = MockHost::new().with_context(
+        r#"{"tenant_id":"acme","input":{"__raisin_flow":{"instance_id":"i1","step_id":"remind"}}}"#,
+    );
+    let (flow, _) = with_mock(forged, || {
+        raisin_sdk::context::Context::get().expect("context").flow()
+    });
+    assert!(flow.is_none());
+}

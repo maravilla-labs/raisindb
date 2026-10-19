@@ -503,6 +503,23 @@ impl FlowCallbacks for RocksDBFlowCallbacks {
         .map_err(|e| FlowError::FunctionExecution(format!("Function execution failed: {}", e)))
     }
 
+    async fn execute_function_for_step(
+        &self,
+        function_ref: &str,
+        input: Value,
+        flow: &raisin_flow_runtime::types::callbacks::StepFlowRef,
+    ) -> FlowResult<Value> {
+        let run = crate::jobs::FlowRunContext {
+            instance_id: flow.instance_id.clone(),
+            step_id: flow.step_id.clone(),
+            flow_path: flow.flow_path.clone(),
+            attempt: flow.attempt,
+        };
+        crate::jobs::FLOW_RUN
+            .scope(Some(run), self.execute_function(function_ref, input))
+            .await
+    }
+
     /// A tool call made BY AN AGENT inside a flow.
     ///
     /// The marker composes the agent onto whatever set the flow off

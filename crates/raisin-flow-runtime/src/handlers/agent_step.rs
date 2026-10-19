@@ -224,22 +224,26 @@ impl StepHandler for AgentStepHandler {
             .get_u32_property("max_model_calls")
             .or_else(|| step.get_u32_property("max_tool_iterations").map(|n| n + 1))
             .unwrap_or(MAX_MODEL_CALLS_DEFAULT);
-        let request = super::function_step::with_flow_context(
-            json!({
-                "agent_ref": agent_ref,
-                "agent_workspace": agent_workspace,
-                "prompt": prompt_of(step, context)?,
-                "response_format": step.get_property("response_format").cloned(),
-                "skills": super::ai_tool_loop::step_skills(step),
-                "max_model_calls": max_model_calls,
-                "visit": visit_of(step, context),
-            }),
-            &context.instance_id,
-            &step.id,
-        );
+        let request = json!({
+            "agent_ref": agent_ref,
+            "agent_workspace": agent_workspace,
+            "prompt": prompt_of(step, context)?,
+            "response_format": step.get_property("response_format").cloned(),
+            "skills": super::ai_tool_loop::step_skills(step),
+            "max_model_calls": max_model_calls,
+            "visit": visit_of(step, context),
+        });
+        // The flow that runs the step reaches the function as `context.flow`,
+        // set by the runtime; nothing about it travels in the input.
+        let flow = crate::types::callbacks::StepFlowRef {
+            instance_id: context.instance_id.clone(),
+            step_id: step.id.clone(),
+            flow_path: context.flow_ref.clone(),
+            attempt: context.step_attempt,
+        };
         debug!(agent = %agent_ref, "Starting the agent step's run");
         let started = callbacks
-            .execute_function(FLOW_AGENT_RUN_FUNCTION, request)
+            .execute_function_for_step(FLOW_AGENT_RUN_FUNCTION, request, &flow)
             .await
             .map_err(|e| FlowError::AIProvider(format!("could not start the agent run: {e}")))?;
         let run_id = started
