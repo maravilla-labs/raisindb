@@ -1,7 +1,7 @@
 name: raisin:AclFolder
 description: Access control folder for organizing users, roles, and groups
 icon: shield
-version: 2
+version: 3
 extends: raisin:Folder
 indexable: true
 index_types: [Fulltext]
@@ -47,6 +47,19 @@ allowed_children:
   # although it extends raisin:Folder: the update path checks the list by
   # the child's own type.
   - raisin:VisitorSession
+  # raisin:system initial_structure (system.yaml): /config holds the auth and
+  # email config and /config/repos the per-repo RepoAuthConfig nodes;
+  # /providers, /identities, /sessions, /tokens and /access hold the rest.
+  # Without these the structure fails validation and /config/repos is never
+  # created, so provisioning cannot write RepoAuthConfig for a new tenant.
+  - raisin:AuthConfig
+  - raisin:RepoAuthConfig
+  - raisin:EmailConfig
+  - raisin:ProviderConfig
+  - raisin:Identity
+  - raisin:Session
+  - raisin:OneTimeToken
+  - raisin:WorkspaceAccess
 versionable: true
 publishable: true
 auditable: true
