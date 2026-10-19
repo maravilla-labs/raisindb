@@ -62,6 +62,7 @@ pub use asset_grants::{
 pub mod connection;
 pub mod replication;
 pub mod traits;
+pub mod upload_tokens;
 pub mod services {
     pub mod agent_auth;
     pub mod archetype_resolver;

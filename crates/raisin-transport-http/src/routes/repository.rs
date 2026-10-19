@@ -30,6 +30,10 @@ pub(crate) fn repository_routes(state: &AppState) -> Router<AppState> {
             post(crate::handlers::uploads::create_upload),
         )
         .route(
+            "/api/uploads/tokens",
+            post(crate::handlers::uploads::mint_token),
+        )
+        .route(
             "/api/uploads/{upload_id}",
             patch(crate::handlers::uploads::upload_chunk)
                 .head(crate::handlers::uploads::get_upload_progress)

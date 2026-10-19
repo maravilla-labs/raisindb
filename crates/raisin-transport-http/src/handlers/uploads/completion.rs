@@ -4,7 +4,7 @@
 
 use axum::{
     extract::{Extension, Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     Json,
 };
 use chrono::Utc;
@@ -14,7 +14,8 @@ use raisin_models::auth::AuthContext;
 
 use crate::{error::ApiError, middleware::TenantInfo, state::AppState};
 
-use super::authorize::{authorize_session_write, require_auth, require_owner};
+use super::authorize::{authorize_session_write, validate_path};
+use super::token::{principal, require_session_access, Principal};
 
 use super::types::{
     CompleteUploadRequest, CompleteUploadResponse, UploadSessionStatus, UPLOAD_STORE,
@@ -26,6 +27,7 @@ pub async fn complete_upload(
     Path(upload_id): Path<String>,
     Extension(tenant_info): Extension<TenantInfo>,
     auth: Option<Extension<AuthContext>>,
+    headers: HeaderMap,
     Json(req): Json<CompleteUploadRequest>,
 ) -> Result<Json<CompleteUploadResponse>, ApiError> {
     // Get session
@@ -33,11 +35,31 @@ pub async fn complete_upload(
         .get(&upload_id)
         .await
         .ok_or_else(|| ApiError::not_found("Upload session not found"))?;
-    let auth = require_auth(auth)?;
-    require_owner(&auth, &tenant_info, &session)?;
-    // Re-checked: the grant, or the node at the path, may have changed since
-    // the session opened.
-    authorize_session_write(&state, &auth, &session).await?;
+    let principal = principal(&state, &headers, &tenant_info, auth)?;
+    require_session_access(&principal, &tenant_info, &session)?;
+    let mut req = req;
+    match &principal {
+        // Re-checked: the grant, or the node at the path, may have changed
+        // since the session opened.
+        Principal::User(auth) => authorize_session_write(&state, auth, &session).await?,
+        Principal::Token(_) => {
+            // Authorized when the token was minted. A token completes once, and
+            // does not choose who the commit is attributed to.
+            validate_path(&session.path)?;
+            if !matches!(
+                session.status,
+                UploadSessionStatus::Pending | UploadSessionStatus::InProgress
+            ) {
+                return Err(ApiError::new(
+                    StatusCode::CONFLICT,
+                    "ALREADY_COMPLETED",
+                    "Upload already completed",
+                ));
+            }
+            req.commit_actor = Some("upload-token".to_string());
+            req.commit_message = None;
+        }
+    }
 
     // Check if all chunks have been received
     if session.bytes_received != session.file_size {
@@ -166,16 +188,19 @@ pub async fn complete_upload(
 
 /// DELETE /api/uploads/{id} - Cancel upload
 pub async fn cancel_upload(
+    State(state): State<AppState>,
     Path(upload_id): Path<String>,
     Extension(tenant_info): Extension<TenantInfo>,
     auth: Option<Extension<AuthContext>>,
+    headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
     // Get session
     let mut session = UPLOAD_STORE
         .get(&upload_id)
         .await
         .ok_or_else(|| ApiError::not_found("Upload session not found"))?;
-    require_owner(&require_auth(auth)?, &tenant_info, &session)?;
+    let principal = principal(&state, &headers, &tenant_info, auth)?;
+    require_session_access(&principal, &tenant_info, &session)?;
 
     // Mark as cancelled
     session.status = UploadSessionStatus::Cancelled;

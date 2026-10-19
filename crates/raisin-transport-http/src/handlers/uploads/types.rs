@@ -115,11 +115,18 @@ pub(super) static UPLOAD_STORE: once_cell::sync::Lazy<UploadSessionStore> =
 /// Create upload session request
 #[derive(Debug, Deserialize)]
 pub struct CreateUploadRequest {
+    // repository, workspace, path and filename are required for a user; an
+    // upload token fixes them itself, so the body may leave them out.
+    #[serde(default)]
     pub repository: String,
-    #[serde(default = "default_branch")]
+    /// Empty means `main` for a user, and "whatever the token says" for a token.
+    #[serde(default)]
     pub branch: String,
+    #[serde(default)]
     pub workspace: String,
+    #[serde(default)]
     pub path: String,
+    #[serde(default)]
     pub filename: String,
     pub file_size: u64,
     pub content_type: Option<String>,
@@ -129,10 +136,6 @@ pub struct CreateUploadRequest {
     pub chunk_size: u64,
     #[serde(default)]
     pub metadata: serde_json::Value,
-}
-
-fn default_branch() -> String {
-    "main".to_string()
 }
 
 fn default_node_type() -> String {

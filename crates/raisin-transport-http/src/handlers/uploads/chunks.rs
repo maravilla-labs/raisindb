@@ -15,7 +15,7 @@ use raisin_models::auth::AuthContext;
 
 use crate::{error::ApiError, middleware::TenantInfo, state::AppState};
 
-use super::authorize::{require_auth, require_owner};
+use super::token::{principal, require_session_access};
 
 use super::types::{ChunkUploadResponse, UploadSessionStatus, UPLOAD_STORE};
 
@@ -33,7 +33,8 @@ pub async fn upload_chunk(
         .get(&upload_id)
         .await
         .ok_or_else(|| ApiError::not_found("Upload session not found"))?;
-    require_owner(&require_auth(auth)?, &tenant_info, &session)?;
+    let principal = principal(&state, &headers, &tenant_info, auth)?;
+    require_session_access(&principal, &tenant_info, &session)?;
 
     // Check if session is expired
     if Utc::now() > session.expires_at {
@@ -85,6 +86,13 @@ pub async fn upload_chunk(
         ));
     }
 
+    // A range that runs past the declared size would let a caller store more
+    // than the session (and any token limit) allows.
+    if end < start || end >= total {
+        return Err(ApiError::validation_failed(
+            "Content-Range end must lie within the declared file size",
+        ));
+    }
     let chunk_size = end - start + 1;
 
     // Create temp directory if it doesn't exist
@@ -112,6 +120,16 @@ pub async fn upload_chunk(
             .map_err(|e| ApiError::internal(format!("Failed to write chunk: {}", e)))?;
 
         bytes_written += chunk.len() as u64;
+        // Enforced while streaming, not after: never store more than declared.
+        if bytes_written > chunk_size {
+            drop(file);
+            let _ = tokio::fs::remove_file(&chunk_file).await;
+            return Err(ApiError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "CHUNK_TOO_LARGE",
+                "Chunk is larger than its Content-Range",
+            ));
+        }
     }
 
     // Verify chunk size
