@@ -66,6 +66,33 @@ pub fn client_ip(headers: &axum::http::HeaderMap) -> Option<String> {
         .map(|v| v.chars().take(64).collect())
 }
 
+/// The connection's client address as a function may rely on it
+/// (`context.caller.client_ip`): only when this deployment sits behind a proxy
+/// it trusts to set `X-Forwarded-For` (`RAISINDB_TRUST_FORWARDED_HEADERS`),
+/// and only a syntactically valid IP address. Without the switch the header is
+/// whatever the client typed, so nothing is exposed.
+pub fn trusted_client_ip(raw: Option<&str>) -> Option<String> {
+    let on = std::env::var("RAISINDB_TRUST_FORWARDED_HEADERS")
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false);
+    accept_client_ip(raw, on)
+}
+
+fn accept_client_ip(raw: Option<&str>, forwarded_headers_trusted: bool) -> Option<String> {
+    if !forwarded_headers_trusted {
+        return None;
+    }
+    raw?.trim()
+        .parse::<std::net::IpAddr>()
+        .ok()
+        .map(|ip| ip.to_string())
+}
+
 /// The `Origin` of an upgrade request.
 pub fn origin(headers: &axum::http::HeaderMap) -> Option<String> {
     headers
@@ -91,5 +118,23 @@ mod tests {
         h.insert("x-real-ip", HeaderValue::from_static("2.2.2.2"));
         assert_eq!(client_ip(&h).as_deref(), Some("2.2.2.2"));
         assert_eq!(client_ip(&HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn a_function_sees_the_address_only_from_a_trusted_proxy_and_only_if_it_is_an_ip() {
+        assert_eq!(
+            accept_client_ip(Some("203.0.113.7"), true).as_deref(),
+            Some("203.0.113.7")
+        );
+        assert_eq!(
+            accept_client_ip(Some(" 2001:db8::1 "), true).as_deref(),
+            Some("2001:db8::1")
+        );
+        // the switch is off: the header is the client's own typing
+        assert_eq!(accept_client_ip(Some("203.0.113.7"), false), None);
+        // not an address: never reaches evidence
+        assert_eq!(accept_client_ip(Some("1.2.3.4, evil"), true), None);
+        assert_eq!(accept_client_ip(Some("<script>"), true), None);
+        assert_eq!(accept_client_ip(None, true), None);
     }
 }

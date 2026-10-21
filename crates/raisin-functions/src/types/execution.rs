@@ -24,6 +24,12 @@ pub struct FunctionCaller {
     pub is_system_admin: bool,
     /// Not signed in.
     pub anonymous: bool,
+    /// The address the request came from, as the TRUSTED proxy in front of
+    /// the server reported it. Never taken from the request's own input, and
+    /// absent when no trusted proxy is configured, for every call that did not
+    /// arrive over a client connection, and for transports that do not set it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_ip: Option<String>,
 }
 
 impl FunctionCaller {
@@ -45,6 +51,7 @@ impl FunctionCaller {
             is_system: auth.is_system,
             is_system_admin: auth.permissions().is_some_and(|p| p.is_system_admin),
             anonymous: auth.is_anonymous_principal(),
+            client_ip: None,
         }
     }
 }

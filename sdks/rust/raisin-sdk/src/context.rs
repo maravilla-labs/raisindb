@@ -144,6 +144,12 @@ pub struct Caller {
     /// Not signed in.
     #[serde(default)]
     pub anonymous: bool,
+    /// The client address as the server's TRUSTED proxy reported it for a
+    /// client connection (WebSocket invoke). `None` when the deployment has no
+    /// trusted proxy, or the call did not come from a client. Unlike anything
+    /// in the input, the caller cannot choose it.
+    #[serde(default)]
+    pub client_ip: Option<String>,
 }
 
 impl Caller {
@@ -206,5 +212,18 @@ mod caller_tests {
             ..Caller::default()
         };
         assert!(!anon.has_any_role(&["studio_admin"]));
+    }
+
+    #[test]
+    fn client_ip_is_optional_on_the_caller() {
+        let with = Context(
+            serde_json::json!({"caller": {"anonymous": false, "client_ip": "203.0.113.7"}}),
+        );
+        assert_eq!(
+            with.caller().unwrap().client_ip.as_deref(),
+            Some("203.0.113.7")
+        );
+        let without = Context(serde_json::json!({"caller": {"anonymous": false}}));
+        assert_eq!(without.caller().unwrap().client_ip, None);
     }
 }

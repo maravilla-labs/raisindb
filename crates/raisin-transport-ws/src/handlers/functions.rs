@@ -524,9 +524,11 @@ mod inner {
         // runs as the WS connection's own resolved identity, or as nobody if
         // the connection never authenticated — never silently as "system".
         // Who asked, before "system" replaces the identity the function runs as.
-        let caller = raisin_functions::types::FunctionCaller::from_auth(
+        let mut caller = raisin_functions::types::FunctionCaller::from_auth(
             connection_state.read().auth_context(),
         );
+        // The address the trusted proxy saw for this connection (never input).
+        caller.client_ip = crate::visitor::trusted_client_ip(connection_state.read().client_ip());
         let auth_context = match metadata.execution_context {
             raisin_functions::types::FunctionExecutionContext::System => {
                 let system = raisin_models::auth::AuthContext::system();

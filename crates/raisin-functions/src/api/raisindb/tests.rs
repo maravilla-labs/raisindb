@@ -993,6 +993,16 @@ mod caller_context {
     }
 
     #[test]
+    fn the_client_ip_reaches_the_function_only_when_the_transport_set_it() {
+        let mut c = FunctionCaller::from_auth(None);
+        assert!(context_of(Some(c.clone()))["caller"]
+            .get("client_ip")
+            .is_none());
+        c.client_ip = Some("203.0.113.7".into());
+        assert_eq!(context_of(Some(c))["caller"]["client_ip"], "203.0.113.7");
+    }
+
+    #[test]
     fn a_system_function_sees_the_user_who_invoked_it() {
         let mut perms = ResolvedPermissions::empty("editor-1");
         perms.effective_roles = vec!["studio_editor".into(), "authenticated_user".into()];
