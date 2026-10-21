@@ -1844,6 +1844,7 @@ async fn main() {
     #[cfg(not(feature = "storage-rocksdb"))]
     let batch_token: Option<tokio_util::sync::CancellationToken> = None;
 
+    raisin_transport_ws::visitor::TrustedProxies::warn_if_misconfigured();
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),

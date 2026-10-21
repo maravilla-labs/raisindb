@@ -70,7 +70,7 @@ pub fn client_ip(headers: &axum::http::HeaderMap) -> Option<String> {
 /// addresses or CIDR blocks from `RAISINDB_TRUSTED_PROXIES` (comma separated,
 /// e.g. `127.0.0.1,::1`). Empty (the default) trusts no header at all.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct TrustedProxies(Vec<(std::net::IpAddr, u8)>);
+pub struct TrustedProxies(Vec<(std::net::IpAddr, u8)>, bool);
 
 impl TrustedProxies {
     pub fn parse(list: &str) -> Self {
@@ -90,11 +90,48 @@ impl TrustedProxies {
                 v.push((ip, len));
             }
         }
-        Self(v)
+        Self(v, false)
+    }
+
+    /// Also report a non-public direct peer (a LAN or container-network client
+    /// with no proxy in between). Off by default: without it such a peer is
+    /// far more likely an unconfigured proxy than a person.
+    pub fn allow_non_public_peers(mut self, yes: bool) -> Self {
+        self.1 = yes;
+        self
     }
 
     pub fn from_env() -> Self {
+        let on = |k: &str| {
+            std::env::var(k)
+                .map(|v| {
+                    matches!(
+                        v.trim().to_ascii_lowercase().as_str(),
+                        "1" | "true" | "yes" | "on"
+                    )
+                })
+                .unwrap_or(false)
+        };
         Self::parse(&std::env::var("RAISINDB_TRUSTED_PROXIES").unwrap_or_default())
+            .allow_non_public_peers(on("RAISINDB_CLIENT_IP_ALLOW_NON_PUBLIC"))
+    }
+
+    /// Log loudly when the legacy forwarded-headers switch is on but no
+    /// trusted proxy list is: functions then see no client address at all.
+    pub fn warn_if_misconfigured() {
+        let legacy = std::env::var("RAISINDB_TRUST_FORWARDED_HEADERS").is_ok_and(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        });
+        if legacy && Self::from_env().0.is_empty() {
+            tracing::error!(
+                "RAISINDB_TRUST_FORWARDED_HEADERS is set but RAISINDB_TRUSTED_PROXIES is not: \
+                 functions receive NO client address (context.caller.client_ip) behind a proxy. \
+                 Set RAISINDB_TRUSTED_PROXIES to the proxy's address(es), e.g. 127.0.0.1,::1"
+            );
+        }
     }
 
     fn contains(&self, ip: std::net::IpAddr) -> bool {
@@ -123,8 +160,10 @@ fn prefix_eq(a: &[u8], b: &[u8], bits: u8) -> bool {
 /// the TCP peer is the starting point and is the answer unless it is a
 /// trusted proxy. Only then are the `X-Forwarded-For` entries read, from the
 /// right, skipping further trusted proxies; the first address that is not one
-/// is the client. An entry that is not an IP address ends the walk with
-/// nothing (never a guess). `X-Real-IP` and a client-sent `X-Forwarded-For`
+/// is the client. No header, a chain of only trusted proxies, or an entry that
+/// is not an IP address gives nothing (never a guess). A direct peer that is
+/// not a public address (LAN, link-local, container network) is not reported
+/// unless the operator opts in (`RAISINDB_CLIENT_IP_ALLOW_NON_PUBLIC`). `X-Real-IP` and a client-sent `X-Forwarded-For`
 /// from an untrusted peer are ignored. Loopback is never reported: it names
 /// the proxy, not a person.
 pub fn verified_client_ip(
@@ -133,26 +172,63 @@ pub fn verified_client_ip(
     proxies: &TrustedProxies,
 ) -> Option<String> {
     let peer = peer?.to_canonical();
-    let mut client = peer;
-    if proxies.contains(peer) {
+    let client = if proxies.contains(peer) {
         let joined = headers
             .get_all("x-forwarded-for")
             .iter()
             .filter_map(|v| v.to_str().ok())
             .collect::<Vec<_>>()
             .join(",");
+        let mut found = None;
         for hop in joined.rsplit(',').map(str::trim).filter(|h| !h.is_empty()) {
             let ip = hop.parse::<std::net::IpAddr>().ok()?.to_canonical();
-            client = ip;
             if !proxies.contains(ip) {
+                found = Some(ip);
                 break;
             }
         }
-    }
-    if client.is_loopback() || client.is_unspecified() {
+        // No header, or a chain of nothing but proxies: nobody was observed.
+        found?
+    } else if is_public(peer) || proxies.1 {
+        peer
+    } else {
+        return None;
+    };
+    if client.is_loopback() || client.is_unspecified() || client.is_multicast() {
         return None;
     }
     Some(client.to_string())
+}
+
+/// A globally routable unicast address (std's `is_global` is unstable).
+fn is_public(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr::{V4, V6};
+    match ip.to_canonical() {
+        V4(a) => {
+            let o = a.octets();
+            !(a.is_private()
+                || a.is_loopback()
+                || a.is_link_local()
+                || a.is_unspecified()
+                || a.is_broadcast()
+                || a.is_multicast()
+                || a.is_documentation()
+                || o[0] == 0
+                || (o[0] == 100 && (o[1] & 0xC0) == 64) // 100.64/10 shared (CGNAT)
+                || (o[0] == 192 && o[1] == 0 && o[2] == 0) // 192.0.0.0/24
+                || (o[0] == 198 && (o[1] & 0xFE) == 18) // 198.18/15 benchmarking
+                || o[0] >= 240)
+        }
+        V6(a) => {
+            let s = a.segments();
+            !(a.is_loopback()
+                || a.is_unspecified()
+                || a.is_multicast()
+                || (s[0] & 0xFE00) == 0xFC00 // fc00::/7 unique local
+                || (s[0] & 0xFFC0) == 0xFE80 // fe80::/10 link local
+                || (s[0] == 0x2001 && s[1] == 0x0DB8)) // documentation
+        }
+    }
 }
 
 /// The `Origin` of an upgrade request.
@@ -203,8 +279,8 @@ mod tests {
         let forged = hdr(&["6.6.6.6"], Some("7.7.7.7"));
         // direct client: its own socket address, headers ignored
         assert_eq!(
-            verified_client_ip(ip("203.0.113.7"), &forged, &proxies).as_deref(),
-            Some("203.0.113.7")
+            verified_client_ip(ip("8.8.4.4"), &forged, &proxies).as_deref(),
+            Some("8.8.4.4")
         );
         // no proxy list configured at all: headers are never read
         assert_eq!(
@@ -216,8 +292,8 @@ mod tests {
             None
         );
         assert_eq!(
-            verified_client_ip(ip("198.51.100.4"), &forged, &TrustedProxies::default()).as_deref(),
-            Some("198.51.100.4")
+            verified_client_ip(ip("8.8.8.8"), &forged, &TrustedProxies::default()).as_deref(),
+            Some("8.8.8.8")
         );
     }
 
@@ -286,5 +362,55 @@ mod tests {
         assert!(!p.contains("11.0.0.1".parse().unwrap()));
         assert!(!p.contains("192.168.1.1".parse().unwrap()));
         assert!(p.contains("::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn an_unconfigured_non_public_peer_is_never_recorded_as_the_client() {
+        let none = TrustedProxies::default();
+        let h = hdr(&["8.8.8.8"], Some("8.8.8.8"));
+        for p in [
+            "10.1.2.3",
+            "172.17.0.2",
+            "192.168.1.5",
+            "169.254.1.1",
+            "100.64.0.9",
+            "fd00::5",
+            "fe80::1",
+            "127.0.0.1",
+            "::1",
+        ] {
+            assert_eq!(verified_client_ip(ip(p), &h, &none), None, "{p}");
+        }
+        // explicit opt-in reports a LAN client, but still never loopback
+        let lan = TrustedProxies::default().allow_non_public_peers(true);
+        assert_eq!(
+            verified_client_ip(ip("192.168.1.5"), &h, &lan).as_deref(),
+            Some("192.168.1.5")
+        );
+        assert_eq!(verified_client_ip(ip("127.0.0.1"), &h, &lan), None);
+    }
+
+    #[test]
+    fn a_trusted_peer_that_names_nobody_gives_nothing() {
+        let proxies = TrustedProxies::parse("127.0.0.1, 10.0.0.0/8");
+        // no header at all
+        assert_eq!(
+            verified_client_ip(ip("127.0.0.1"), &hdr(&[], None), &proxies),
+            None
+        );
+        // a chain made only of trusted proxies
+        assert_eq!(
+            verified_client_ip(
+                ip("127.0.0.1"),
+                &hdr(&["10.0.0.4, 10.0.0.5"], None),
+                &proxies
+            ),
+            None
+        );
+        // a trusted proxy that is itself non-public still passes a public client through
+        assert_eq!(
+            verified_client_ip(ip("10.0.0.4"), &hdr(&["8.8.8.8"], None), &proxies).as_deref(),
+            Some("8.8.8.8")
+        );
     }
 }
