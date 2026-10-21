@@ -73,6 +73,11 @@ pub struct ConnectionState {
     /// The client IP of the upgrade request, best effort (rate-limit key).
     client_ip: Option<String>,
 
+    /// The client address established from the socket peer and the configured
+    /// trusted proxies only (see `visitor::verified_client_ip`). Safe to hand
+    /// to functions; `client_ip` above is not.
+    verified_client_ip: Option<String>,
+
     /// The visitor chat session this (anonymous) connection is bound to.
     visitor: Option<VisitorBinding>,
 
@@ -106,6 +111,7 @@ impl ConnectionState {
             anonymous: false,
             origin: None,
             client_ip: None,
+            verified_client_ip: None,
             visitor: None,
             visitor_cancel: CancellationToken::new(),
         }
@@ -140,6 +146,16 @@ impl ConnectionState {
     pub fn set_request_origin(&mut self, origin: Option<String>, client_ip: Option<String>) {
         self.origin = origin;
         self.client_ip = client_ip;
+    }
+
+    /// Record the evidence-grade client address.
+    pub fn set_verified_client_ip(&mut self, ip: Option<String>) {
+        self.verified_client_ip = ip;
+    }
+
+    /// The evidence-grade client address, if one could be established.
+    pub fn verified_client_ip(&self) -> Option<&str> {
+        self.verified_client_ip.as_deref()
     }
 
     /// The page origin of the upgrade request.

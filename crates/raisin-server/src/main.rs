@@ -1844,10 +1844,13 @@ async fn main() {
     #[cfg(not(feature = "storage-rocksdb"))]
     let batch_token: Option<tokio_util::sync::CancellationToken> = None;
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(batch_token, conn_shutdown))
-        .await
-        .expect("Failed to serve HTTP application");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal(batch_token, conn_shutdown))
+    .await
+    .expect("Failed to serve HTTP application");
 
     // Wait for the MCP listener to release its leases before the DB closes.
     //

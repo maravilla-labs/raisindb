@@ -3,7 +3,7 @@
 //! WebSocket shared state and upgrade handler.
 
 use axum::{
-    extract::{ws::WebSocketUpgrade, State},
+    extract::{ws::WebSocketUpgrade, ConnectInfo, State},
     http::HeaderMap,
     response::IntoResponse,
 };
@@ -30,6 +30,10 @@ pub async fn websocket_handler<S, B>(
     axum::extract::Path(params): axum::extract::Path<WsPathParams>,
     State(state): State<Arc<WsState<S, B>>>,
     ws: WebSocketUpgrade,
+    peer: Result<
+        axum::extract::Extension<ConnectInfo<std::net::SocketAddr>>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
     headers: HeaderMap,
 ) -> impl IntoResponse
 where
@@ -73,6 +77,13 @@ where
     let token = JwtAuthService::extract_token_from_headers(&headers);
     let origin = crate::visitor::origin(&headers);
     let client_ip = crate::visitor::client_ip(&headers);
+    // Evidence-grade address: socket peer + configured trusted proxies only.
+    let verified_ip = crate::visitor::verified_client_ip(
+        peer.ok()
+            .map(|axum::extract::Extension(ConnectInfo(a))| a.ip()),
+        &headers,
+        &crate::visitor::TrustedProxies::from_env(),
+    );
 
     // Upgrade the connection
     ws.on_upgrade(move |socket| {
@@ -82,7 +93,7 @@ where
             token,
             tenant_id,
             repository,
-            (origin, client_ip),
+            (origin, client_ip, verified_ip),
         )
     })
 }
@@ -103,6 +114,10 @@ pub async fn websocket_handler_tenantless<S, B>(
     repository: Option<axum::extract::Path<String>>,
     State(state): State<Arc<WsState<S, B>>>,
     ws: WebSocketUpgrade,
+    peer: Result<
+        axum::extract::Extension<ConnectInfo<std::net::SocketAddr>>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
     headers: HeaderMap,
 ) -> impl IntoResponse
 where
@@ -126,6 +141,13 @@ where
     let token = JwtAuthService::extract_token_from_headers(&headers);
     let origin = crate::visitor::origin(&headers);
     let client_ip = crate::visitor::client_ip(&headers);
+    // Evidence-grade address: socket peer + configured trusted proxies only.
+    let verified_ip = crate::visitor::verified_client_ip(
+        peer.ok()
+            .map(|axum::extract::Extension(ConnectInfo(a))| a.ip()),
+        &headers,
+        &crate::visitor::TrustedProxies::from_env(),
+    );
 
     // Upgrade the connection
     ws.on_upgrade(move |socket| {
@@ -135,7 +157,7 @@ where
             token,
             tenant_id,
             repository,
-            (origin, client_ip),
+            (origin, client_ip, verified_ip),
         )
     })
 }

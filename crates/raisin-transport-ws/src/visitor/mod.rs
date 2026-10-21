@@ -66,31 +66,93 @@ pub fn client_ip(headers: &axum::http::HeaderMap) -> Option<String> {
         .map(|v| v.chars().take(64).collect())
 }
 
-/// The connection's client address as a function may rely on it
-/// (`context.caller.client_ip`): only when this deployment sits behind a proxy
-/// it trusts to set `X-Forwarded-For` (`RAISINDB_TRUST_FORWARDED_HEADERS`),
-/// and only a syntactically valid IP address. Without the switch the header is
-/// whatever the client typed, so nothing is exposed.
-pub fn trusted_client_ip(raw: Option<&str>) -> Option<String> {
-    let on = std::env::var("RAISINDB_TRUST_FORWARDED_HEADERS")
-        .map(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
+/// The proxies whose `X-Forwarded-For` entries this server believes: IP
+/// addresses or CIDR blocks from `RAISINDB_TRUSTED_PROXIES` (comma separated,
+/// e.g. `127.0.0.1,::1`). Empty (the default) trusts no header at all.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TrustedProxies(Vec<(std::net::IpAddr, u8)>);
+
+impl TrustedProxies {
+    pub fn parse(list: &str) -> Self {
+        let mut v = Vec::new();
+        for item in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            let (addr, len) = match item.split_once('/') {
+                Some((a, l)) => (a, l.parse::<u8>().ok()),
+                None => (item, None),
+            };
+            let Ok(ip) = addr.parse::<std::net::IpAddr>() else {
+                continue;
+            };
+            let ip = ip.to_canonical();
+            let max = if ip.is_ipv4() { 32 } else { 128 };
+            let len = len.unwrap_or(max);
+            if len <= max {
+                v.push((ip, len));
+            }
+        }
+        Self(v)
+    }
+
+    pub fn from_env() -> Self {
+        Self::parse(&std::env::var("RAISINDB_TRUSTED_PROXIES").unwrap_or_default())
+    }
+
+    fn contains(&self, ip: std::net::IpAddr) -> bool {
+        use std::net::IpAddr::{V4, V6};
+        let ip = ip.to_canonical();
+        self.0.iter().any(|(net, len)| match (net, ip) {
+            (V4(n), V4(i)) => prefix_eq(&n.octets(), &i.octets(), *len),
+            (V6(n), V6(i)) => prefix_eq(&n.octets(), &i.octets(), *len),
+            _ => false,
         })
-        .unwrap_or(false);
-    accept_client_ip(raw, on)
+    }
 }
 
-fn accept_client_ip(raw: Option<&str>, forwarded_headers_trusted: bool) -> Option<String> {
-    if !forwarded_headers_trusted {
+fn prefix_eq(a: &[u8], b: &[u8], bits: u8) -> bool {
+    let full = (bits / 8) as usize;
+    if a[..full] != b[..full] {
+        return false;
+    }
+    let rem = bits % 8;
+    rem == 0 || (a[full] ^ b[full]) >> (8 - rem) == 0
+}
+
+/// The client address a function may rely on (`context.caller.client_ip`).
+///
+/// Evidence-grade, so headers are believed only through a configured chain:
+/// the TCP peer is the starting point and is the answer unless it is a
+/// trusted proxy. Only then are the `X-Forwarded-For` entries read, from the
+/// right, skipping further trusted proxies; the first address that is not one
+/// is the client. An entry that is not an IP address ends the walk with
+/// nothing (never a guess). `X-Real-IP` and a client-sent `X-Forwarded-For`
+/// from an untrusted peer are ignored. Loopback is never reported: it names
+/// the proxy, not a person.
+pub fn verified_client_ip(
+    peer: Option<std::net::IpAddr>,
+    headers: &axum::http::HeaderMap,
+    proxies: &TrustedProxies,
+) -> Option<String> {
+    let peer = peer?.to_canonical();
+    let mut client = peer;
+    if proxies.contains(peer) {
+        let joined = headers
+            .get_all("x-forwarded-for")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .collect::<Vec<_>>()
+            .join(",");
+        for hop in joined.rsplit(',').map(str::trim).filter(|h| !h.is_empty()) {
+            let ip = hop.parse::<std::net::IpAddr>().ok()?.to_canonical();
+            client = ip;
+            if !proxies.contains(ip) {
+                break;
+            }
+        }
+    }
+    if client.is_loopback() || client.is_unspecified() {
         return None;
     }
-    raw?.trim()
-        .parse::<std::net::IpAddr>()
-        .ok()
-        .map(|ip| ip.to_string())
+    Some(client.to_string())
 }
 
 /// The `Origin` of an upgrade request.
@@ -120,21 +182,109 @@ mod tests {
         assert_eq!(client_ip(&HeaderMap::new()), None);
     }
 
+    fn hdr(xff: &[&str], real: Option<&str>) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for v in xff {
+            h.append("x-forwarded-for", HeaderValue::from_str(v).unwrap());
+        }
+        if let Some(r) = real {
+            h.insert("x-real-ip", HeaderValue::from_str(r).unwrap());
+        }
+        h
+    }
+
+    fn ip(s: &str) -> Option<std::net::IpAddr> {
+        s.parse().ok()
+    }
+
     #[test]
-    fn a_function_sees_the_address_only_from_a_trusted_proxy_and_only_if_it_is_an_ip() {
+    fn a_peer_that_is_not_a_trusted_proxy_cannot_choose_its_address() {
+        let proxies = TrustedProxies::parse("127.0.0.1,::1");
+        let forged = hdr(&["6.6.6.6"], Some("7.7.7.7"));
+        // direct client: its own socket address, headers ignored
         assert_eq!(
-            accept_client_ip(Some("203.0.113.7"), true).as_deref(),
+            verified_client_ip(ip("203.0.113.7"), &forged, &proxies).as_deref(),
+            Some("203.0.113.7")
+        );
+        // no proxy list configured at all: headers are never read
+        assert_eq!(
+            verified_client_ip(
+                ip("127.0.0.1"),
+                &hdr(&["203.0.113.7"], None),
+                &TrustedProxies::default()
+            ),
+            None
+        );
+        assert_eq!(
+            verified_client_ip(ip("198.51.100.4"), &forged, &TrustedProxies::default()).as_deref(),
+            Some("198.51.100.4")
+        );
+    }
+
+    #[test]
+    fn behind_a_trusted_proxy_the_forwarded_chain_is_walked_from_the_right() {
+        let proxies = TrustedProxies::parse("127.0.0.1, 10.0.0.0/8");
+        // proxy overwrote the header: one entry
+        assert_eq!(
+            verified_client_ip(ip("127.0.0.1"), &hdr(&["203.0.113.7"], None), &proxies).as_deref(),
+            Some("203.0.113.7")
+        );
+        // a client-typed leading entry is left of what the proxy observed
+        assert_eq!(
+            verified_client_ip(
+                ip("127.0.0.1"),
+                &hdr(&["6.6.6.6, 203.0.113.7"], None),
+                &proxies
+            )
+            .as_deref(),
+            Some("203.0.113.7")
+        );
+        // trusted hops are skipped, repeated header lines are joined in order
+        assert_eq!(
+            verified_client_ip(
+                ip("127.0.0.1"),
+                &hdr(&["6.6.6.6", "203.0.113.7, 10.1.2.3"], Some("7.7.7.7")),
+                &proxies
+            )
+            .as_deref(),
+            Some("203.0.113.7")
+        );
+        // garbage where an address must be: nothing, never a guess
+        assert_eq!(
+            verified_client_ip(
+                ip("127.0.0.1"),
+                &hdr(&["203.0.113.7, <script>"], None),
+                &proxies
+            ),
+            None
+        );
+        // X-Real-IP alone is not enough, and a loopback client is not reported
+        assert_eq!(
+            verified_client_ip(ip("127.0.0.1"), &hdr(&[], Some("7.7.7.7")), &proxies),
+            None
+        );
+        // v4-mapped peer still matches the list
+        assert_eq!(
+            verified_client_ip(
+                ip("::ffff:127.0.0.1"),
+                &hdr(&["203.0.113.7"], None),
+                &proxies
+            )
+            .as_deref(),
             Some("203.0.113.7")
         );
         assert_eq!(
-            accept_client_ip(Some(" 2001:db8::1 "), true).as_deref(),
-            Some("2001:db8::1")
+            verified_client_ip(None, &hdr(&["203.0.113.7"], None), &proxies),
+            None
         );
-        // the switch is off: the header is the client's own typing
-        assert_eq!(accept_client_ip(Some("203.0.113.7"), false), None);
-        // not an address: never reaches evidence
-        assert_eq!(accept_client_ip(Some("1.2.3.4, evil"), true), None);
-        assert_eq!(accept_client_ip(Some("<script>"), true), None);
-        assert_eq!(accept_client_ip(None, true), None);
+    }
+
+    #[test]
+    fn trusted_proxy_lists_parse_cidr_and_skip_junk() {
+        let p = TrustedProxies::parse("10.0.0.0/8, nonsense, 192.168.1.1/40, ::1");
+        assert!(p.contains("10.9.9.9".parse().unwrap()));
+        assert!(!p.contains("11.0.0.1".parse().unwrap()));
+        assert!(!p.contains("192.168.1.1".parse().unwrap()));
+        assert!(p.contains("::1".parse().unwrap()));
     }
 }

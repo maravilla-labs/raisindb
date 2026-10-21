@@ -527,8 +527,11 @@ mod inner {
         let mut caller = raisin_functions::types::FunctionCaller::from_auth(
             connection_state.read().auth_context(),
         );
-        // The address the trusted proxy saw for this connection (never input).
-        caller.client_ip = crate::visitor::trusted_client_ip(connection_state.read().client_ip());
+        // The verified address of this connection (socket peer + trusted proxies; never input).
+        caller.client_ip = connection_state
+            .read()
+            .verified_client_ip()
+            .map(str::to_string);
         let auth_context = match metadata.execution_context {
             raisin_functions::types::FunctionExecutionContext::System => {
                 let system = raisin_models::auth::AuthContext::system();
