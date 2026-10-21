@@ -181,16 +181,13 @@ where
                         .to_string(),
                 )
             })?;
-            // A fixed `RAISINDB_BASE_URL` wins (single-origin deployments);
-            // otherwise this tenant's own public origin from operator config
-            // (`RAISINDB_PUBLIC_ORIGIN_TEMPLATE` + tenant handle map), so a
-            // multi-tenant engine mints per-tenant URLs. Never a header.
-            let base_url = match raisin_core::configured_public_base_url() {
-                Some(b) => b,
-                None => raisin_core::public_origin_for_tenant(&ctx.tenant_id).map_err(|e| {
-                    Error::Validation(format!("signedUrl cannot mint an absolute URL: {e}"))
-                })?,
-            };
+            // One precedence rule, inside `public_origin_for_tenant`: the
+            // per-tenant template + handle map when configured, a global
+            // `RAISINDB_BASE_URL` only when no template is (single-tenant/dev).
+            // Never a header.
+            let base_url = raisin_core::public_origin_for_tenant(&ctx.tenant_id).map_err(|e| {
+                Error::Validation(format!("signedUrl cannot mint an absolute URL: {e}"))
+            })?;
 
             let expires = now_secs() + expires_in;
             let signed = raisin_core::build_signed_asset_url(

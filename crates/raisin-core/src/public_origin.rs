@@ -371,6 +371,19 @@ mod tests {
     }
 
     #[test]
+    fn a_global_base_url_never_overrides_the_per_tenant_template() {
+        for (t, want) in [
+            (T_A, "https://acme.rdb.example.com"),
+            (T_B, "https://solutas.rdb.example.com"),
+        ] {
+            assert_eq!(
+                resolve_public_origin(Some(TPL), Some("https://global.test"), t, &lookup).unwrap(),
+                want
+            );
+        }
+    }
+
+    #[test]
     fn origin_must_be_plain() {
         for bad in [
             "ftp://a.test",
