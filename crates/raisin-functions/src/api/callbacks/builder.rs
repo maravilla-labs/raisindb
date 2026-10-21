@@ -58,6 +58,8 @@ pub struct RaisinFunctionApiCallbacks {
     pub asset_ensure_content: Option<AssetEnsureContentCallback>,
     /// Mint a signed, absolute URL for an asset's bytes.
     pub asset_signed_url: Option<AssetSignedUrlCallback>,
+    /// Build the anonymous published address of an asset.
+    pub asset_public_url: Option<AssetPublicUrlCallback>,
     pub task_create: Option<TaskCreateCallback>,
     pub task_update: Option<TaskUpdateCallback>,
     pub task_complete: Option<TaskCompleteCallback>,
@@ -260,6 +262,12 @@ impl RaisinFunctionApiCallbacks {
     /// Set the mount-content fetch callback.
     pub fn with_asset_ensure_content(mut self, callback: AssetEnsureContentCallback) -> Self {
         self.asset_ensure_content = Some(callback);
+        self
+    }
+
+    /// Set the public-asset-URL callback.
+    pub fn with_asset_public_url(mut self, callback: AssetPublicUrlCallback) -> Self {
+        self.asset_public_url = Some(callback);
         self
     }
 

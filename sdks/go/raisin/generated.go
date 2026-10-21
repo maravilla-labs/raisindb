@@ -196,6 +196,11 @@ func (AssetsAPI) EnsureContent(workspace string, nodeRef string) (json.RawMessag
 	return callJSON("asset_ensure_content", []any{workspace, nodeRef})
 }
 
+// PublicUrl calls the RaisinDB registry method "asset_public_url".
+func (AssetsAPI) PublicUrl(workspace string, path string, options any) (json.RawMessage, error) {
+	return callJSON("asset_public_url", []any{workspace, path, options})
+}
+
 // Reextract calls the RaisinDB registry method "asset_reextract".
 func (AssetsAPI) Reextract(workspace string, nodeRef string) (json.RawMessage, error) {
 	return callJSON("asset_reextract", []any{workspace, nodeRef})

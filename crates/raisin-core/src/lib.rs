@@ -43,6 +43,7 @@ pub use utils::{
 };
 pub mod asset_urls;
 pub mod blob_scope;
+pub mod public_origin;
 pub use asset_urls::{
     artifact_url_ttl_secs, build_signed_asset_url, build_signed_asset_url_bound,
     configured_public_base_url, content_sha256_of, is_valid_asset_command, signature_property,
@@ -52,6 +53,10 @@ pub use asset_urls::{
 pub use blob_scope::{
     artifact_key_namespace, blob_key_belongs_to, blob_key_belongs_to_with, is_artifact_key_of,
     is_legacy_key, legacy_keys_allowed, BlobKeyPolicy,
+};
+pub use public_origin::{
+    build_public_asset_url, public_asset_branch_allowed, public_origin_for_tenant,
+    validate_public_asset_path, PublicOriginError,
 };
 pub mod asset_grants;
 pub use asset_grants::{

@@ -17,6 +17,7 @@
 //! into its own submodule for maintainability.
 
 pub mod ai;
+pub mod asset_public_url;
 pub mod asset_signing;
 pub mod assets;
 pub mod branches;
@@ -369,6 +370,10 @@ where
         // passing through the isolate as base64. RLS-gated through the shared
         // QueryContext, so it grants no more than this caller can read.
         asset_signed_url: Some(asset_signing::create_asset_signed_url(query_ctx.clone())),
+
+        // Public URL - the anonymous address of a PUBLISHED asset, on this
+        // tenant's own public origin (operator config, never a header).
+        asset_public_url: Some(asset_public_url::create_asset_public_url(query_ctx.clone())),
 
         // Mount content - what makes `getBinary()` work on a mounted asset whose
         // cached bytes have expired.

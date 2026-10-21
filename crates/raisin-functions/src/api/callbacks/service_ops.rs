@@ -237,6 +237,21 @@ pub type AssetSignedUrlCallback = Arc<
         + Sync,
 >;
 
+/// Build the anonymous, published address of an asset.
+///
+/// - `workspace`
+/// - `path`: workspace-relative absolute path
+/// - `options`: `{ branch?: string }` (default and only allowed: `publish`)
+pub type AssetPublicUrlCallback = Arc<
+    dyn Fn(
+            String, // workspace
+            String, // path
+            Value,  // options
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// Fetch a mount-owned asset's bytes so a function can read them.
 ///
 /// - `workspace`

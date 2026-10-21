@@ -680,6 +680,31 @@ pub mod assets {
         crate::wire::decode_json_as(&raw)
     }
 
+    /// `raisin.assets.publicUrl` — registry method `asset_public_url`.
+    pub fn public_url(workspace: &str, path: &str, options: impl ::serde::Serialize) -> crate::Result<::serde_json::Value> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(workspace)?,
+            ::serde_json::to_value(path)?,
+            ::serde_json::to_value(options)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("asset_public_url", &args)?;
+        crate::wire::decode_json(&raw)
+    }
+
+    /// Typed form of `public_url`. `T` is inferred from the binding site
+    /// (turbofish is unavailable when the method takes a JSON argument).
+    pub fn public_url_as<T: ::serde::de::DeserializeOwned>(workspace: &str, path: &str, options: impl ::serde::Serialize) -> crate::Result<T> {
+        let args = ::serde_json::Value::Array(vec![
+            ::serde_json::to_value(workspace)?,
+            ::serde_json::to_value(path)?,
+            ::serde_json::to_value(options)?,
+        ])
+        .to_string();
+        let raw = crate::host::call("asset_public_url", &args)?;
+        crate::wire::decode_json_as(&raw)
+    }
+
     /// `raisin.assets.reextract` — registry method `asset_reextract`.
     pub fn reextract(workspace: &str, node_ref: &str) -> crate::Result<::serde_json::Value> {
         let args = ::serde_json::Value::Array(vec![

@@ -385,6 +385,10 @@ impl FunctionApi for RaisinFunctionApi {
         self.impl_asset_reextract(workspace, node_ref).await
     }
 
+    async fn asset_public_url(&self, workspace: &str, path: &str, options: Value) -> Result<Value> {
+        self.impl_asset_public_url(workspace, path, options).await
+    }
+
     async fn asset_ensure_content(&self, workspace: &str, node_ref: &str) -> Result<Value> {
         self.impl_asset_ensure_content(workspace, node_ref).await
     }

@@ -222,6 +222,11 @@ export namespace assets {
     return call("asset_ensure_content", argsOf([jsonString(workspace), jsonString(nodeRef)]));
   }
 
+  /** `raisin.assets.publicUrl` — registry method `asset_public_url`. Returns raw JSON. */
+  export function publicUrl(workspace: string, path: string, options: string): string {
+    return call("asset_public_url", argsOf([jsonString(workspace), jsonString(path), options]));
+  }
+
   /** `raisin.assets.reextract` — registry method `asset_reextract`. Returns raw JSON. */
   export function reextract(workspace: string, nodeRef: string): string {
     return call("asset_reextract", argsOf([jsonString(workspace), jsonString(nodeRef)]));

@@ -315,6 +315,24 @@ pub trait FunctionApi: Send + Sync {
         ))
     }
 
+    /// The anonymous address of a PUBLISHED asset on this tenant's public
+    /// origin: `{ url, origin, repo, branch, workspace, path }`.
+    ///
+    /// The origin is operator configuration keyed by the tenant (never a
+    /// request header or caller input), the branch is `publish` unless the
+    /// operator widens it, and the answer is identical for every caller.
+    /// Fails closed when the server has no public origin configured.
+    async fn asset_public_url(
+        &self,
+        _workspace: &str,
+        _path: &str,
+        _options: Value,
+    ) -> Result<Value> {
+        Err(raisin_error::Error::Validation(
+            "Public asset URLs are not configured on this server".to_string(),
+        ))
+    }
+
     /// Ensure a mount-owned asset's bytes are held locally, fetching if not.
     ///
     /// A virtual mount syncs metadata only and a cached copy expires once

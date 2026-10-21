@@ -483,6 +483,22 @@ impl FunctionApi for MockFunctionApi {
         Ok(serde_json::json!({ "status": "already_present" }))
     }
 
+    async fn asset_public_url(
+        &self,
+        workspace: &str,
+        path: &str,
+        _options: Value,
+    ) -> Result<Value> {
+        Ok(serde_json::json!({
+            "url": format!("https://mock.invalid/api/repository/repo/publish/head/{workspace}{path}/raisin:display"),
+            "origin": "https://mock.invalid",
+            "repo": "repo",
+            "branch": "publish",
+            "workspace": workspace,
+            "path": path,
+        }))
+    }
+
     async fn asset_signed_url(
         &self,
         workspace: &str,

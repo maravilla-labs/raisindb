@@ -55,6 +55,7 @@ declare namespace raisin {
 
   namespace assets {
     function ensureContent(workspace: string, nodeRef: string): Promise<any>;
+    function publicUrl(workspace: string, path: string, options: any): Promise<any>;
     function reextract(workspace: string, nodeRef: string): Promise<any>;
     function setExtractedText(workspace: string, nodeRef: string, text: string, options: any): Promise<any>;
     function signedUrl(workspace: string, nodeRef: string, options: any): Promise<any>;

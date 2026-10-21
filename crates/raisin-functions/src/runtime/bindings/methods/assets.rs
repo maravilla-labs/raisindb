@@ -112,6 +112,36 @@ pub fn methods() -> Vec<ApiMethodDescriptor> {
                 })
             },
         },
+        // assets.publicUrl(workspace, path, options)
+        //   -> { url, origin, repo, branch, workspace, path }
+        //
+        // The anonymous, query-less address of a PUBLISHED asset on this
+        // tenant's public origin. Origin comes from operator config, never from
+        // the caller or a request header. options: { branch?: "publish" }.
+        ApiMethodDescriptor {
+            internal_name: "asset_public_url",
+            js_name: "publicUrl",
+            py_name: "public_url",
+            category: "assets",
+            args: vec![
+                ArgSpec::new("workspace", ArgType::String),
+                ArgSpec::new("path", ArgType::String),
+                ArgSpec::new("options", ArgType::Json),
+            ],
+            return_type: ReturnType::Json,
+            invoker: |api: Arc<dyn FunctionApi>,
+                      args: Vec<Value>|
+             -> BoxFuture<'static, Result<InvokeResult>> {
+                Box::pin(async move {
+                    let mut parser = ArgParser::new(&args);
+                    let workspace = parser.string()?;
+                    let path = parser.string()?;
+                    let options = parser.json()?;
+                    let result = api.asset_public_url(&workspace, &path, options).await?;
+                    Ok(InvokeResult::Json(result))
+                })
+            },
+        },
         // assets.ensureContent(workspace, nodeRef)
         //
         // Called by the Resource wrapper, not by function authors: it is what

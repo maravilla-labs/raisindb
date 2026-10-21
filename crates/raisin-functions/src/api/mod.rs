@@ -35,6 +35,7 @@ pub use callbacks::{
     AIListModelsCallback,
     AIListProvidersCallback,
     AssetEnsureContentCallback,
+    AssetPublicUrlCallback,
     AssetReextractCallback,
     AssetSetExtractionCallback,
     AssetSignedUrlCallback,

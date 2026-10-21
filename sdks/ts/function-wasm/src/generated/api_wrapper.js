@@ -1361,6 +1361,17 @@ globalThis.raisin = {
         // Throws if the asset is not readable by you, has no such Resource
         // property, or the server has no RAISINDB_BASE_URL / signing secret
         // configured — never a relative or unsigned URL.
+        // publicUrl(workspace, path, options?) -> { url, origin, repo, branch, workspace, path }
+        // The anonymous, query-less address of a PUBLISHED asset on this tenant's
+        // public origin (operator config; never from input). Throws if the server
+        // has no public origin configured or the asset is not on 'publish'.
+        publicUrl: async (workspace, path, options) => {
+            const r = __call('asset_public_url', [workspace, path, options || {}]);
+            if (r && r.error) {
+                throw new Error('Public URL failed: ' + (r.message || r.error));
+            }
+            return r;
+        },
         signedUrl: async (workspace, nodeRef, options) => {
             const r = __call('asset_signed_url', [workspace, nodeRef, options || {}]);
             if (r && r.error) {
