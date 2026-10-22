@@ -134,6 +134,18 @@ const EMAIL_RATE_WINDOW: std::time::Duration =
 #[cfg(feature = "storage-rocksdb")]
 const UNATTRIBUTED_RATE_LIMIT: usize = 30;
 
+/// Most link requests for ONE address across ALL of a tenant's repos per 15
+/// minutes. Fixed and well above any repo's per-address figure: it only stops a
+/// recipient being multiplied across repos, and must not be a lockout.
+#[cfg(feature = "storage-rocksdb")]
+const TENANT_ADDRESS_CEILING: usize = 25;
+
+/// Most link requests a whole TENANT may serve per hour across all repos — the
+/// backstop on what its sending domain can be made to send. Fixed; each repo's
+/// own `rate_limit_per_tenant` governs the repo.
+#[cfg(feature = "storage-rocksdb")]
+const TENANT_TOTAL_CEILING: usize = 20_000;
+
 /// Window for [`IP_RATE_LIMIT`].
 #[cfg(feature = "storage-rocksdb")]
 const IP_RATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(3600);
@@ -250,15 +262,19 @@ async fn check_rate_limits(
         return Err(too_many(EMAIL_RATE_WINDOW));
     };
 
-    // Each limit is enforced at TWO scopes, and a request must fit in both.
+    // Two kinds of bucket, with different owners.
     //
-    // The limits are the repo's own (`/config/email` is per repo), so the repo
-    // scope keeps one repo's allowance from being eaten by another's traffic.
-    // The tenant scope is shared by all of a tenant's repos, so asking through a
-    // second repo cannot multiply what one recipient, one client or the sender
-    // domain is sent — a repo with looser limits can raise what ITS callers get,
-    // but never beyond its own figure on the shared counter.
-    let scopes = [format!("{tenant_id}:{repo}"), format!("{tenant_id}:*")];
+    // REPO buckets use the repo's own limits (`/config/email` is per repo), and
+    // are keyed by repo, so one repo's traffic can never spend or trip another
+    // repo's allowance.
+    //
+    // TENANT buckets are shared by all of a tenant's repos and use FIXED, generous
+    // ceilings that no repo's config can move. They exist only so that asking
+    // through a second repo cannot multiply what one recipient, or the sender
+    // domain, is sent — and they are set high enough that they are never a way to
+    // lock someone out: a repo's configured figure is never compared with a
+    // counter other repos also feed.
+    let repo_scope = format!("{tenant_id}:{repo}");
 
     // Lowercased: mail domains are case-insensitive, and the bucket must not be
     // resettable by retyping the same address with different capitals.
@@ -289,41 +305,49 @@ async fn check_rate_limits(
         ),
     };
 
-    // (what it bounds, bucket id, limit, window). The tenant-wide one is the
-    // ceiling on everything the sender domain can be made to send, whoever asks.
+    // (what it bounds, bucket key, limit, window).
     let checks = [
         (
             "per-address",
-            format!("email:{{scope}}:{address}"),
+            format!("magic-link:email:{repo_scope}:{address}"),
             limits.per_address,
             EMAIL_RATE_WINDOW,
         ),
         (
             "per-client",
-            format!("ip:{{scope}}:{client_id}"),
+            format!("magic-link:ip:{repo_scope}:{client_id}"),
             client_limit,
             IP_RATE_WINDOW,
         ),
         (
-            "tenant-wide",
-            "tenant:{scope}".to_string(),
+            "repo-wide",
+            format!("magic-link:tenant:{repo_scope}"),
             limits.per_tenant,
             IP_RATE_WINDOW,
         ),
+        (
+            "tenant-wide per-address",
+            format!("magic-link:email:{tenant_id}:*:{address}"),
+            TENANT_ADDRESS_CEILING,
+            EMAIL_RATE_WINDOW,
+        ),
+        (
+            "tenant-wide",
+            format!("magic-link:tenant:{tenant_id}:*"),
+            TENANT_TOTAL_CEILING,
+            IP_RATE_WINDOW,
+        ),
     ];
-    for (what, template, limit, window) in checks {
-        for scope in &scopes {
-            let key = format!("magic-link:{}", template.replace("{scope}", scope));
-            let info = limiter.check_rate(&key, limit, window).await;
-            if !info.allowed {
-                tracing::warn!(
-                    tenant_id = %tenant_id,
-                    repo = %repo,
-                    attributed = client_ip.is_some(),
-                    "Magic link request refused: {what} rate limit"
-                );
-                return Err(too_many(info.reset_after));
-            }
+    for (what, key, limit, window) in checks {
+        let info = limiter.check_rate(&key, limit, window).await;
+        if !info.allowed {
+            tracing::warn!(
+                tenant_id = %tenant_id,
+                repo = %repo,
+                attributed = client_ip.is_some(),
+                "Magic link request refused: {what} rate limit"
+            );
+            return Err(too_many(info.reset_after));
         }
     }
 
