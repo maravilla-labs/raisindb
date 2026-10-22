@@ -27,6 +27,10 @@ use super::policy::load_auth_policy;
 /// on every refresh).
 const RESET_WINDOW_SECS: i64 = 15 * 60;
 
+/// What a reset session is relabelled once it has set the password, so it
+/// cannot authorize a second change without the old one.
+const RESET_SPENT_STRATEGY: &str = "password_reset_used";
+
 #[derive(Debug, Deserialize)]
 pub struct ChangePasswordRequest {
     /// Required, except on a session minted by a password-reset link — whose
@@ -95,6 +99,12 @@ pub async fn change_password(
         rocksdb_storage.operation_capture().clone(),
     );
 
+    // Set only on the reset path: the session to retire and sweep around.
+    let mut reset_session: Option<(
+        raisin_rocksdb::repositories::SessionRepository,
+        raisin_models::auth::Session,
+    )> = None;
+
     match req.old_password.as_deref() {
         Some(old) => {
             let matches = identity_repo
@@ -134,13 +144,26 @@ pub async fn change_password(
                         && s.identity_id == claims.sub
                         && (0..=RESET_WINDOW_SECS).contains(&age)
             );
-            if !allowed {
+            let Some(live) = session.filter(|_| allowed) else {
                 return Err(ApiError::new(
                     StatusCode::UNAUTHORIZED,
                     "OLD_PASSWORD_REQUIRED",
                     "The current password is required, or request a password reset link",
                 ));
-            }
+            };
+
+            // Spend the reset session BEFORE changing anything: from here it is
+            // an ordinary session, so a second request (or a racing one that
+            // read it a moment ago) can no longer pass the check above. If the
+            // write below then fails, the user asks for a fresh link — the
+            // failure that costs a click, not the one that leaves it reusable.
+            let mut spent = live.clone();
+            spent.strategy_id = RESET_SPENT_STRATEGY.to_string();
+            session_repo
+                .update(&claims.tenant_id, &spent)
+                .await
+                .map_err(ApiError::from)?;
+            reset_session = Some((session_repo, spent));
         }
     }
 
@@ -154,6 +177,31 @@ pub async fn change_password(
         )
         .await
         .map_err(ApiError::from)?;
+
+    // The point of a reset is that whoever held the old password no longer
+    // does, so every OTHER session of the account goes with it — a stolen one
+    // would otherwise outlive the very reset meant to evict it. The session
+    // that did the reset stays, so the user is not signed out of their own page.
+    if let Some((session_repo, current)) = reset_session {
+        let sessions = session_repo
+            .list_for_identity(&claims.tenant_id, &claims.sub)
+            .await
+            .map_err(ApiError::from)?;
+        for other in sessions
+            .iter()
+            .filter(|s| s.session_id != current.session_id)
+        {
+            session_repo
+                .revoke(
+                    &claims.tenant_id,
+                    &other.session_id,
+                    "password reset",
+                    "self:password-reset",
+                )
+                .await
+                .map_err(ApiError::from)?;
+        }
+    }
 
     tracing::info!(
         tenant_id = %claims.tenant_id,
