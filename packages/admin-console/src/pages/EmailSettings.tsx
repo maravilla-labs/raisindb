@@ -331,6 +331,38 @@ export default function EmailSettings() {
 
         <div className="space-y-4 border-t border-white/10 pt-5">
           <div>
+            <h3 className="text-white font-medium">Request limits</h3>
+            <p className="text-xs text-white/50">
+              How many sign-in and password-reset links may be requested. Leave a field empty for
+              the default. Raise the per-client figure for an office or school where many people
+              share one address.
+            </p>
+          </div>
+          {(
+            [
+              ['rate_limit_per_address', 'Per email address, per 15 minutes', '5', 'Protects a recipient from mail they did not ask for — keep this low.'],
+              ['rate_limit_per_client', 'Per client address, per hour', '300', 'One office or network counts as one client.'],
+              ['rate_limit_per_tenant', 'Whole tenant, per hour', '5000', 'A backstop on the mail this sender can be made to send.'],
+            ] as const
+          ).map(([key, label, placeholder, hint]) => (
+            <Field key={key} label={label}>
+              <input
+                type="number"
+                min={1}
+                className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white"
+                value={config[key] ?? ''}
+                placeholder={`Default: ${placeholder}`}
+                onChange={(e) =>
+                  setField(key, e.target.value === '' ? null : Math.max(1, Number(e.target.value)))
+                }
+              />
+              <Hint>{hint}</Hint>
+            </Field>
+          ))}
+        </div>
+
+        <div className="space-y-4 border-t border-white/10 pt-5">
+          <div>
             <h3 className="text-white font-medium">Email wording</h3>
             <p className="text-xs text-white/50">
               Leave blank to use the built-in text. In a body, <code>{'{magic_link_url}'}</code>{' '}

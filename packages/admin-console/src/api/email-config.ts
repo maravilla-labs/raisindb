@@ -108,6 +108,14 @@ export interface EmailConfig {
    * property set, so leaving it out would silently wipe the operator's list.
    */
   redirect_allowlist: string[]
+  /**
+   * Request limits for sign-in and password-reset links. `null` = the server's
+   * default (5 per address per 15 min, 300 per client address per hour, 5000
+   * per tenant per hour). Must round-trip like everything else on this node.
+   */
+  rate_limit_per_address: number | null
+  rate_limit_per_client: number | null
+  rate_limit_per_tenant: number | null
   /** Operator wording for the sign-in and password-reset mails. Blank = built-in. */
   magic_link_subject: string
   magic_link_text: string
@@ -131,6 +139,9 @@ export const EMAIL_CONFIG_DEFAULTS: EmailConfig = {
   enabled: false,
   base_url: '',
   redirect_allowlist: [],
+  rate_limit_per_address: null,
+  rate_limit_per_client: null,
+  rate_limit_per_tenant: null,
   magic_link_subject: '',
   magic_link_text: '',
   password_reset_subject: '',
@@ -218,6 +229,12 @@ function providerFrom(raw: unknown): EmailProviderConfig | null {
   }
 }
 
+/** A positive number property, or null when absent or not a number. */
+function num(p: Record<string, unknown>, key: string): number | null {
+  const v = p[key]
+  return typeof v === 'number' && Number.isFinite(v) && v >= 1 ? v : null
+}
+
 function fromNode(node: Node): EmailConfig {
   const p = (node.properties ?? {}) as Record<string, unknown>
   const providers = Array.isArray(p.providers)
@@ -242,6 +259,9 @@ function fromNode(node: Node): EmailConfig {
     redirect_allowlist: Array.isArray(p.redirect_allowlist)
       ? (p.redirect_allowlist as unknown[]).filter((x): x is string => typeof x === 'string')
       : [],
+    rate_limit_per_address: num(p, 'rate_limit_per_address'),
+    rate_limit_per_client: num(p, 'rate_limit_per_client'),
+    rate_limit_per_tenant: num(p, 'rate_limit_per_tenant'),
     magic_link_subject: str(p, 'magic_link_subject'),
     magic_link_text: str(p, 'magic_link_text'),
     password_reset_subject: str(p, 'password_reset_subject'),
@@ -299,6 +319,15 @@ function toProperties(config: EmailConfig): Record<string, unknown> {
   }
   const allowlist = config.redirect_allowlist.map((u) => u.trim()).filter(Boolean)
   if (allowlist.length > 0) properties.redirect_allowlist = allowlist
+  // Unset = absent: the server then applies its defaults.
+  for (const key of [
+    'rate_limit_per_address',
+    'rate_limit_per_client',
+    'rate_limit_per_tenant',
+  ] as const) {
+    const value = config[key]
+    if (value !== null && Number.isFinite(value) && value >= 1) properties[key] = Math.floor(value)
+  }
   // Blank wording is ABSENT, not empty: absent means "use the built-in text".
   for (const key of [
     'magic_link_subject',

@@ -121,32 +121,11 @@ pub(super) const RESET_STRATEGY: &str = "password_reset";
 
 const SENT_MESSAGE: &str = "If that address has an account, a sign-in link is on its way.";
 
-/// How many links one ADDRESS may ask for per [`EMAIL_RATE_WINDOW`].
-///
-/// Low, because every one of these is an email delivered to a third party who
-/// did not ask for it: without this, the endpoint is a free mail bomb aimed at
-/// anyone whose address the caller knows, sent from the tenant's own verified
-/// sending domain.
-#[cfg(feature = "storage-rocksdb")]
-const EMAIL_RATE_LIMIT: usize = 5;
-
 /// Window for [`EMAIL_RATE_LIMIT`] — matched to the link's own lifetime, so a
 /// user who genuinely lost a link can ask again as soon as the last one dies.
 #[cfg(feature = "storage-rocksdb")]
 const EMAIL_RATE_WINDOW: std::time::Duration =
     std::time::Duration::from_secs(EXPIRES_IN_MINUTES as u64 * 60);
-
-/// How many links one CLIENT may ask for per [`IP_RATE_WINDOW`].
-///
-/// The per-address limit alone stops nothing: a caller walking a list of
-/// addresses never hits it twice. This is the one that bounds the walk.
-///
-/// Generous on purpose: an office, a school or a carrier NAT puts many real
-/// people behind ONE address, and each of them signing in by link is a request.
-/// The per-address limit is what protects a recipient from being mail-bombed;
-/// this one only has to make walking an address list slow, not be tight.
-#[cfg(feature = "storage-rocksdb")]
-const IP_RATE_LIMIT: usize = 300;
 
 /// Requests with NO identifiable client share one bucket, and it is small.
 /// Behind the proxy every request carries an address, so this is only reached
@@ -154,12 +133,6 @@ const IP_RATE_LIMIT: usize = 300;
 /// allowance a real office does.
 #[cfg(feature = "storage-rocksdb")]
 const UNATTRIBUTED_RATE_LIMIT: usize = 30;
-
-/// Total link requests one TENANT may serve per [`IP_RATE_WINDOW`], across every
-/// address and client. Bounds the mail the tenant's sending domain can be driven
-/// to send even if per-client limits are generous.
-#[cfg(feature = "storage-rocksdb")]
-const TENANT_RATE_LIMIT: usize = 600;
 
 /// Window for [`IP_RATE_LIMIT`].
 #[cfg(feature = "storage-rocksdb")]
@@ -248,6 +221,7 @@ async fn check_rate_limits(
     tenant_id: &str,
     email: &str,
     client_ip: Option<&str>,
+    limits: &RateLimits,
 ) -> Result<(), ApiError> {
     use raisin_context::RateLimiter;
 
@@ -283,7 +257,7 @@ async fn check_rate_limits(
     // recipient can be sent; the cap is on the recipient, not on the feature.
     let email_key = format!("magic-link:email:{tenant_id}:{}", email.to_lowercase());
     let info = limiter
-        .check_rate(&email_key, EMAIL_RATE_LIMIT, EMAIL_RATE_WINDOW)
+        .check_rate(&email_key, limits.per_address, EMAIL_RATE_WINDOW)
         .await;
     if !info.allowed {
         tracing::warn!(tenant_id = %tenant_id, "Magic link request refused: per-address rate limit");
@@ -304,10 +278,11 @@ async fn check_rate_limits(
     // endpoint that sends mail to third parties, and behind a correctly
     // configured proxy this branch is never taken.
     let (ip_key, limit) = match client_ip {
-        Some(ip) => (format!("magic-link:ip:{tenant_id}:{ip}"), IP_RATE_LIMIT),
+        Some(ip) => (format!("magic-link:ip:{tenant_id}:{ip}"), limits.per_client),
         None => (
             format!("magic-link:ip:{tenant_id}:unattributed"),
-            UNATTRIBUTED_RATE_LIMIT,
+            // Never above the tenant's own per-client figure, but small whatever it is.
+            limits.per_client.min(UNATTRIBUTED_RATE_LIMIT),
         ),
     };
     let info = limiter.check_rate(&ip_key, limit, IP_RATE_WINDOW).await;
@@ -328,7 +303,7 @@ async fn check_rate_limits(
     let info = limiter
         .check_rate(
             &format!("magic-link:tenant:{tenant_id}"),
-            TENANT_RATE_LIMIT,
+            limits.per_tenant,
             IP_RATE_WINDOW,
         )
         .await;
@@ -344,6 +319,34 @@ async fn check_rate_limits(
 // Configuration
 // ============================================================================
 
+/// How many link requests the tenant allows, from its `/config/email` node.
+///
+/// The operator's to set: an office behind one address, a launch day or a
+/// quiet internal tool each want different numbers, and a limit nobody can move
+/// is a limit people route around. The defaults are for a tenant that has said
+/// nothing — strict per RECIPIENT (that is what protects a third party from
+/// mail they never asked for), loose per CLIENT (shared addresses are normal),
+/// and a backstop per TENANT well above any ordinary day.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct RateLimits {
+    /// Requests for ONE address per 15 minutes.
+    pub per_address: usize,
+    /// Requests from ONE client address per hour.
+    pub per_client: usize,
+    /// Requests for the WHOLE tenant per hour.
+    pub per_tenant: usize,
+}
+
+impl Default for RateLimits {
+    fn default() -> Self {
+        Self {
+            per_address: 5,
+            per_client: 300,
+            per_tenant: 5000,
+        }
+    }
+}
+
 /// The link-building half of `/config/email`.
 #[cfg(feature = "storage-rocksdb")]
 struct LinkConfig {
@@ -353,6 +356,8 @@ struct LinkConfig {
     redirect_allowlist: Vec<String>,
     /// Operator wording for the sign-in mail: `(subject, body)`.
     magic_link_wording: (Option<String>, Option<String>),
+    /// The tenant's request limits (defaults where it set none).
+    rate_limits: RateLimits,
     /// Operator wording for the password-reset mail: `(subject, body)`.
     password_reset_wording: (Option<String>, Option<String>),
 }
@@ -420,7 +425,21 @@ async fn load_link_config(
         _ => None,
     };
 
+    // A figure below 1 would lock everyone out or mean nothing, so it counts as
+    // unset. To relax a limit, raise it.
+    let limit_prop = |key: &str, default: usize| match node.properties.get(key) {
+        Some(PropertyValue::Integer(n)) if *n >= 1 => *n as usize,
+        Some(PropertyValue::Float(f)) if *f >= 1.0 => *f as usize,
+        _ => default,
+    };
+    let defaults = RateLimits::default();
+
     Ok(LinkConfig {
+        rate_limits: RateLimits {
+            per_address: limit_prop("rate_limit_per_address", defaults.per_address),
+            per_client: limit_prop("rate_limit_per_client", defaults.per_client),
+            per_tenant: limit_prop("rate_limit_per_tenant", defaults.per_tenant),
+        },
         base_url,
         redirect_allowlist,
         magic_link_wording: (
@@ -542,13 +561,24 @@ async fn request_magic_link_core(
     validate_email(&req.email)?;
 
     let repos = extract_repos(state)?;
-    check_rate_limits(&repos.storage, tenant_id, &req.email, client_ip).await?;
+
+    // The limits are the tenant's own (`/config/email`), so the config is read
+    // first. A tenant with no email setup is refused here exactly as before —
+    // that answer does not depend on who is asking.
+    let link_config = load_link_config(state, tenant_id, repo).await?;
+    check_rate_limits(
+        &repos.storage,
+        tenant_id,
+        &req.email,
+        client_ip,
+        &link_config.rate_limits,
+    )
+    .await?;
 
     // Both of these can refuse the request, and both refuse for reasons that
     // have nothing to do with WHICH address was submitted — so running them
     // ahead of the identity lookup keeps the enumeration-safe path below free
     // of early returns.
-    let link_config = load_link_config(state, tenant_id, repo).await?;
     let redirect_url = resolve_redirect(&link_config, req.redirect_url.as_deref())?;
 
     // WHERE THE EMAILED LINK POINTS — this server, not the tenant's app.
