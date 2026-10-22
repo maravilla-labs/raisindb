@@ -27,6 +27,10 @@ pub struct IdentityUserResponse {
     /// Whether the identity must change its password on next login.
     /// False when the identity has no local credentials (e.g. OIDC-only).
     pub must_change_password: bool,
+    /// Set while the account is locked out after too many failed logins
+    /// (RFC 3339); absent once the lock has expired or been cleared.
+    pub locked_until: Option<String>,
+    pub failed_attempts: u32,
     pub linked_providers: Vec<String>,
     pub created_at: String,
     pub updated_at: Option<String>,
@@ -40,6 +44,17 @@ impl From<raisin_models::auth::Identity> for IdentityUserResponse {
             .as_ref()
             .map(|c| c.must_change_password)
             .unwrap_or(false);
+        let locked_until = identity
+            .local_credentials
+            .as_ref()
+            .filter(|c| c.is_locked())
+            .and_then(|c| c.locked_until.as_ref())
+            .map(|t| t.to_rfc3339());
+        let failed_attempts = identity
+            .local_credentials
+            .as_ref()
+            .map(|c| c.failed_attempts)
+            .unwrap_or(0);
         Self {
             id: identity.identity_id,
             email: identity.email,
@@ -48,6 +63,8 @@ impl From<raisin_models::auth::Identity> for IdentityUserResponse {
             email_verified: identity.email_verified,
             is_active: identity.is_active,
             must_change_password,
+            locked_until,
+            failed_attempts,
             linked_providers: identity
                 .linked_providers
                 .iter()
@@ -103,6 +120,12 @@ pub struct UpdateIdentityUserRequest {
     pub display_name: Option<String>,
     pub is_active: Option<bool>,
     pub email_verified: Option<bool>,
+    /// Clear the failed-login counter and any active lockout.
+    pub unlock: Option<bool>,
+    /// Replace the password (operator reset). Setting one also clears the lockout.
+    pub password: Option<String>,
+    /// With `password`: force the user to choose their own on next login.
+    pub must_change_password: Option<bool>,
 }
 
 /// List all identity users for a tenant
@@ -329,6 +352,28 @@ pub async fn update_identity_user(
     }
     if let Some(email_verified) = req.email_verified {
         identity.email_verified = email_verified;
+    }
+
+    if let Some(password) = req.password.as_deref() {
+        crate::handlers::identity_auth::helpers::validate_password(password)?;
+        let hash = raisin_rocksdb::repositories::IdentityRepository::hash_password(password)
+            .map_err(|e| {
+                ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "PASSWORD_HASH_ERROR",
+                    format!("Failed to hash password: {}", e),
+                )
+            })?;
+        // A fresh credentials record also zeroes the lockout counters.
+        identity.local_credentials = Some(if req.must_change_password.unwrap_or(false) {
+            raisin_models::auth::LocalCredentials::new_with_change_required(hash)
+        } else {
+            raisin_models::auth::LocalCredentials::new(hash)
+        });
+    } else if req.unlock.unwrap_or(false) {
+        if let Some(credentials) = identity.local_credentials.as_mut() {
+            credentials.reset_failed_attempts();
+        }
     }
 
     // Update the updated_at timestamp

@@ -111,6 +111,14 @@ const EXPIRES_IN_MINUTES: u32 = 15;
 /// The single confirmation body. A constant, so no branch of
 /// [`request_magic_link_core`] can accidentally word it differently.
 #[cfg(feature = "storage-rocksdb")]
+/// Email template name the send function switches on for a reset link.
+#[cfg(feature = "storage-rocksdb")]
+pub(super) const RESET_TEMPLATE: &str = "password_reset";
+
+/// Session strategy minted by a redeemed reset link. `change_password` keys on it.
+#[cfg(feature = "storage-rocksdb")]
+pub(super) const RESET_STRATEGY: &str = "password_reset";
+
 const SENT_MESSAGE: &str = "If that address has an account, a sign-in link is on its way.";
 
 /// How many links one ADDRESS may ask for per [`EMAIL_RATE_WINDOW`].
@@ -299,6 +307,10 @@ struct LinkConfig {
     base_url: String,
     /// Extra redirect targets permitted beyond `base_url` itself.
     redirect_allowlist: Vec<String>,
+    /// Operator wording for the sign-in mail: `(subject, body)`.
+    magic_link_wording: (Option<String>, Option<String>),
+    /// Operator wording for the password-reset mail: `(subject, body)`.
+    password_reset_wording: (Option<String>, Option<String>),
 }
 
 /// Read `base_url` / `redirect_allowlist` from the tenant's email config.
@@ -359,10 +371,57 @@ async fn load_link_config(
         _ => Vec::new(),
     };
 
+    let text_prop = |key: &str| match node.properties.get(key) {
+        Some(PropertyValue::String(v)) if !v.trim().is_empty() => Some(v.clone()),
+        _ => None,
+    };
+
     Ok(LinkConfig {
         base_url,
         redirect_allowlist,
+        magic_link_wording: (
+            text_prop("magic_link_subject"),
+            text_prop("magic_link_text"),
+        ),
+        password_reset_wording: (
+            text_prop("password_reset_subject"),
+            text_prop("password_reset_text"),
+        ),
     })
+}
+
+/// A caller-chosen `state` nonce, if it is a sane one. Anything else is dropped
+/// rather than refused: the nonce is the client's own protection, so a malformed
+/// one must not become a way to make the request fail.
+fn valid_state(state: Option<&str>) -> Option<&str> {
+    state.filter(|s| {
+        (8..=128).contains(&s.len())
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    })
+}
+
+/// Whether this tenant can actually send a sign-in email: `/config/email`
+/// exists and names a `base_url`.
+///
+/// What the providers endpoint reports, so a login page offers the magic-link
+/// and password-reset options exactly when the request would not 503 with
+/// `EMAIL_NOT_CONFIGURED`. With no repo named, the tenant's single repo is used;
+/// an ambiguous tenant answers `false` rather than guessing.
+#[cfg(feature = "storage-rocksdb")]
+pub(super) async fn email_configured(
+    state: &AppState,
+    tenant_id: &str,
+    repo: Option<&str>,
+) -> bool {
+    let repo = match repo {
+        Some(r) => r.to_string(),
+        None => match resolve_tenant_repo(state, tenant_id).await {
+            Ok(r) => r,
+            Err(_) => return false,
+        },
+    };
+    load_link_config(state, tenant_id, &repo).await.is_ok()
 }
 
 /// Resolve where verification should land the browser.
@@ -426,6 +485,7 @@ async fn request_magic_link_core(
     client_ip: Option<&str>,
     headers: &HeaderMap,
     req: &MagicLinkRequest,
+    reset: bool,
 ) -> Result<Json<MagicLinkSentResponse>, ApiError> {
     use super::helpers::extract_repos;
     use raisin_auth::jobs::MagicLinkJobData;
@@ -490,7 +550,9 @@ async fn request_magic_link_core(
     // SAME response at the bottom.
     let registration_open = allow_registration(state, tenant_id, repo).await;
 
-    if identity.is_some() || registration_open {
+    // A password reset never creates an account: it is for someone who already
+    // has one, so an unknown address falls through to the same masked answer.
+    if identity.is_some() || (registration_open && !reset) {
         let (token, token_hash, token_prefix) = MagicLinkStrategy::generate_token()
             .map_err(|e| ApiError::internal(format!("Failed to generate token: {e}")))?;
 
@@ -506,7 +568,11 @@ async fn request_magic_link_core(
             tenant_id.to_string(),
             token_hash,
             token_prefix,
-            TokenPurpose::MagicLink,
+            if reset {
+                TokenPurpose::PasswordReset
+            } else {
+                TokenPurpose::MagicLink
+            },
             req.email.clone(),
             expires_at,
         );
@@ -517,6 +583,13 @@ async fn request_magic_link_core(
         one_time_token
             .context
             .insert("redirect_url".to_string(), serde_json::json!(redirect_url));
+        // Echoed back in the redirect fragment so the browser that asked for the
+        // link can tell it from one an attacker requested for THEIR account.
+        if let Some(state) = valid_state(req.state.as_deref()) {
+            one_time_token
+                .context
+                .insert("state".to_string(), serde_json::json!(state));
+        }
 
         let store = OneTimeTokenStore::new(repos.storage.clone(), tenant_id, repo);
         store
@@ -540,6 +613,17 @@ async fn request_magic_link_core(
             EXPIRES_IN_MINUTES,
         )
         .with_verify_path(format!("/auth/{repo}/magic-link/verify"));
+        let job_data = if reset {
+            job_data.with_template(RESET_TEMPLATE)
+        } else {
+            job_data
+        };
+        let (subject, body_text) = if reset {
+            link_config.password_reset_wording.clone()
+        } else {
+            link_config.magic_link_wording.clone()
+        };
+        let job_data = job_data.with_wording(subject, body_text);
 
         let job_context = JobContext {
             tenant_id: tenant_id.to_string(),
@@ -652,9 +736,14 @@ async fn verify_magic_link_core(
         .map_err(|e| ApiError::internal(format!("Failed to look up magic link token: {e}")))?
         .ok_or_else(rejected)?;
 
-    if stored.purpose != TokenPurpose::MagicLink || !stored.is_valid() {
+    if !matches!(
+        stored.purpose,
+        TokenPurpose::MagicLink | TokenPurpose::PasswordReset
+    ) || !stored.is_valid()
+    {
         return Err(rejected());
     }
+    let is_reset = stored.purpose == TokenPurpose::PasswordReset;
 
     // Consume BEFORE issuing anything. If this write fails there is no way left
     // to stop the link being replayed, so the only safe answer is to refuse the
@@ -716,7 +805,13 @@ async fn verify_magic_link_core(
         &repos.session,
         tenant_id,
         &identity.identity_id,
-        "magic_link",
+        // A reset session is the one `change-password` accepts without the old
+        // password, so it must be distinguishable from an ordinary sign-in.
+        if is_reset {
+            RESET_STRATEGY
+        } else {
+            "magic_link"
+        },
         false,
         "system:magic-link",
     )
@@ -776,13 +871,16 @@ async fn verify_magic_link_core(
         .and_then(|v| v.as_str())
         .unwrap_or("/");
 
-    let target = format!(
+    let mut target = format!(
         "{}#access_token={}&refresh_token={}&expires_at={}",
         redirect_base,
         urlencoding::encode(&response.access_token),
         urlencoding::encode(&response.refresh_token),
         response.expires_at
     );
+    if let Some(state) = stored.context.get("state").and_then(|v| v.as_str()) {
+        target.push_str(&format!("&state={}", urlencoding::encode(state)));
+    }
 
     Ok(Redirect::to(&target).into_response())
 }
@@ -818,6 +916,7 @@ pub async fn request_magic_link(
         client_ip(&headers).as_deref(),
         &headers,
         &req,
+        false,
     )
     .await
 }
@@ -841,6 +940,60 @@ pub async fn request_magic_link_for_repo(
         client_ip(&headers).as_deref(),
         &headers,
         &req,
+        false,
+    )
+    .await
+}
+
+/// Request a password-reset link for the tenant's single repository.
+///
+/// # Endpoint
+/// POST /auth/password-reset
+#[cfg(feature = "storage-rocksdb")]
+pub async fn request_password_reset(
+    State(state): State<AppState>,
+    Extension(tenant_info): Extension<crate::middleware::TenantInfo>,
+    headers: HeaderMap,
+    Json(req): Json<MagicLinkRequest>,
+) -> Result<Json<MagicLinkSentResponse>, ApiError> {
+    let repo = resolve_tenant_repo(&state, &tenant_info.tenant_id).await?;
+    request_magic_link_core(
+        &state,
+        &tenant_info.tenant_id,
+        &repo,
+        client_ip(&headers).as_deref(),
+        &headers,
+        &req,
+        true,
+    )
+    .await
+}
+
+/// Request a password-reset link for a specific repository.
+///
+/// # Endpoint
+/// POST /auth/{repo}/password-reset
+///
+/// Same machinery, token store, rate limits and masked answer as the magic
+/// link; the differences are that it only ever sends to an EXISTING account and
+/// that the session the link yields may set a new password without knowing the
+/// old one (see `change_password`).
+#[cfg(feature = "storage-rocksdb")]
+pub async fn request_password_reset_for_repo(
+    State(state): State<AppState>,
+    Extension(tenant_info): Extension<crate::middleware::TenantInfo>,
+    Path(repo): Path<String>,
+    headers: HeaderMap,
+    Json(req): Json<MagicLinkRequest>,
+) -> Result<Json<MagicLinkSentResponse>, ApiError> {
+    request_magic_link_core(
+        &state,
+        &tenant_info.tenant_id,
+        &repo,
+        client_ip(&headers).as_deref(),
+        &headers,
+        &req,
+        true,
     )
     .await
 }

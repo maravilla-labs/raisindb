@@ -66,12 +66,21 @@ impl MagicLinkEmailSender for FunctionMagicLinkEmailSender {
         // The link is built here rather than in JS so the URL the user clicks
         // is assembled from the same `base_url` that the request handler
         // allow-listed against — see the module docs on `MagicLinkJobData`.
-        let input = json!({
+        let mut input = json!({
             "email": data.email,
             "magic_link_url": data.build_link(),
             "expires_in_minutes": data.expires_in_minutes,
             "template": data.template,
         });
+        // The tenant's own wording, already rendered. Absent keys leave the
+        // function on its built-in text, so an unconfigured tenant is unchanged.
+        if let Some((text, html)) = data.render_body() {
+            input["text"] = json!(text);
+            input["html"] = json!(html);
+        }
+        if let Some(subject) = data.subject.as_deref().filter(|s| !s.trim().is_empty()) {
+            input["subject"] = json!(subject);
+        }
 
         let execution_id = format!("magic-link-{}", nanoid::nanoid!());
         let result = (self.executor)(

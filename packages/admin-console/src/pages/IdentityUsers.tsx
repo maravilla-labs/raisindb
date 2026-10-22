@@ -17,9 +17,13 @@ import {
   UserX,
   UserCheck,
   Plus,
+  Lock,
+  Unlock,
+  KeyRound,
   X,
 } from 'lucide-react'
 import ConfirmDialog from '../components/ConfirmDialog'
+import SetPasswordModal from '../components/SetPasswordModal'
 import { useToast, ToastContainer } from '../components/Toast'
 
 function CreateUserModal({
@@ -203,6 +207,7 @@ export default function IdentityUsers() {
   const [error, setError] = useState<string | null>(null)
   const [searchEmail, setSearchEmail] = useState('')
   const [showCreateModal, setShowCreateModal] = useState(false)
+  const [passwordFor, setPasswordFor] = useState<IdentityUser | null>(null)
   const [deleteConfirm, setDeleteConfirm] = useState<{
     message: string
     onConfirm: () => void
@@ -249,6 +254,16 @@ export default function IdentityUsers() {
       } else {
         showError('Error', 'Failed to update user')
       }
+    }
+  }
+
+  const handleUnlock = async (user: IdentityUser) => {
+    try {
+      await identityUsersApi.update(tenantId, user.id, { unlock: true })
+      showSuccess('Success', `${user.email} unlocked`)
+      loadUsers()
+    } catch (err) {
+      showError('Error', err instanceof ApiError ? `Failed to unlock: ${err.message}` : 'Failed to unlock')
     }
   }
 
@@ -432,6 +447,15 @@ export default function IdentityUsers() {
                           </>
                         )}
                       </button>
+                      {user.locked_until && (
+                        <span
+                          title={`Locked until ${new Date(user.locked_until).toLocaleString()}`}
+                          className="ml-2 inline-flex items-center gap-1 rounded-full bg-amber-500/10 border border-amber-500/20 px-2 py-1 text-xs font-medium text-amber-300"
+                        >
+                          <Lock className="w-3 h-3" />
+                          Locked
+                        </span>
+                      )}
                     </td>
                     <td className="whitespace-nowrap px-3 py-4 text-sm text-zinc-400">
                       {user.last_login_at ? (
@@ -448,6 +472,22 @@ export default function IdentityUsers() {
                     </td>
                     <td className="relative whitespace-nowrap py-4 pl-3 pr-6 text-right text-sm">
                       <div className="flex items-center justify-end gap-2">
+                        {user.locked_until && (
+                          <button
+                            onClick={() => handleUnlock(user)}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-amber-400 hover:text-amber-300 hover:bg-amber-500/10 border border-transparent hover:border-amber-500/20 transition-all duration-200"
+                          >
+                            <Unlock className="w-4 h-4" />
+                            Unlock
+                          </button>
+                        )}
+                        <button
+                          onClick={() => setPasswordFor(user)}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-zinc-300 hover:text-white hover:bg-zinc-500/10 border border-transparent hover:border-zinc-500/20 transition-all duration-200"
+                        >
+                          <KeyRound className="w-4 h-4" />
+                          Set password
+                        </button>
                         <button
                           onClick={() => handleToggleActive(user)}
                           className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all duration-200 border border-transparent ${
@@ -493,6 +533,18 @@ export default function IdentityUsers() {
             loadUsers()
           }}
           onClose={() => setShowCreateModal(false)}
+        />
+      )}
+
+      {passwordFor && (
+        <SetPasswordModal
+          tenantId={tenantId}
+          user={passwordFor}
+          onDone={() => {
+            showSuccess('Success', `Password set for ${passwordFor.email}`)
+            loadUsers()
+          }}
+          onClose={() => setPasswordFor(null)}
         />
       )}
 

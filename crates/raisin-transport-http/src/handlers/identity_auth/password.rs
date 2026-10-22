@@ -21,9 +21,18 @@ use crate::state::AppState;
 
 use super::policy::load_auth_policy;
 
+/// How long after redeeming a reset link the session may set a password without
+/// the old one. The refresh token can outlive this, so it is measured from the
+/// SESSION's creation, not from the access token (whose `auth_time` is re-stamped
+/// on every refresh).
+const RESET_WINDOW_SECS: i64 = 15 * 60;
+
 #[derive(Debug, Deserialize)]
 pub struct ChangePasswordRequest {
-    pub old_password: String,
+    /// Required, except on a session minted by a password-reset link — whose
+    /// whole point is that the user no longer knows it.
+    #[serde(default)]
+    pub old_password: Option<String>,
     pub new_password: String,
 }
 
@@ -36,7 +45,8 @@ pub struct ChangePasswordRequest {
 /// # Headers
 /// Authorization: Bearer {access_token}
 ///
-/// Verifies `old_password`, then replaces the stored credentials — which
+/// Verifies `old_password` (omitted only on a fresh password-reset session, see
+/// [`RESET_WINDOW_SECS`]), then replaces the stored credentials — which
 /// clears `must_change_password` and any lockout counters. Returns 204.
 ///
 /// The tenant and identity both come from the token, never the request body,
@@ -64,7 +74,7 @@ pub async fn change_password(
         .await
         .validate_password(&req.new_password)?;
 
-    if req.new_password == req.old_password {
+    if req.old_password.as_deref() == Some(req.new_password.as_str()) {
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
             "PASSWORD_UNCHANGED",
@@ -85,17 +95,53 @@ pub async fn change_password(
         rocksdb_storage.operation_capture().clone(),
     );
 
-    let matches = identity_repo
-        .verify_password(&claims.tenant_id, &claims.sub, &req.old_password)
-        .await
-        .map_err(ApiError::from)?;
-
-    if !matches {
-        return Err(ApiError::new(
-            StatusCode::UNAUTHORIZED,
-            "INVALID_CREDENTIALS",
-            "Current password is incorrect",
-        ));
+    match req.old_password.as_deref() {
+        Some(old) => {
+            let matches = identity_repo
+                .verify_password(&claims.tenant_id, &claims.sub, old)
+                .await
+                .map_err(ApiError::from)?;
+            if !matches {
+                return Err(ApiError::new(
+                    StatusCode::UNAUTHORIZED,
+                    "INVALID_CREDENTIALS",
+                    "Current password is incorrect",
+                ));
+            }
+        }
+        None => {
+            // No old password: only a live, recent password-reset session may
+            // do this. Read from the stored session, never from the token — a
+            // claim is a copy and this is the authority.
+            let session_repo = raisin_rocksdb::repositories::SessionRepository::new(
+                rocksdb_storage.db().clone(),
+                rocksdb_storage.operation_capture().clone(),
+            );
+            let session = session_repo
+                .get(&claims.tenant_id, &claims.sid)
+                .await
+                .map_err(ApiError::from)?;
+            let age_secs = session.as_ref().map(|s| {
+                (raisin_models::timestamp::StorageTimestamp::now().timestamp_nanos()
+                    - s.created_at.timestamp_nanos())
+                    / 1_000_000_000
+            });
+            let allowed = matches!(
+                (&session, age_secs),
+                (Some(s), Some(age))
+                    if !s.revoked
+                        && s.strategy_id == super::magic_link::RESET_STRATEGY
+                        && s.identity_id == claims.sub
+                        && (0..=RESET_WINDOW_SECS).contains(&age)
+            );
+            if !allowed {
+                return Err(ApiError::new(
+                    StatusCode::UNAUTHORIZED,
+                    "OLD_PASSWORD_REQUIRED",
+                    "The current password is required, or request a password reset link",
+                ));
+            }
+        }
     }
 
     identity_repo

@@ -44,6 +44,10 @@ pub struct MagicLinkRequest {
     pub email: String,
     /// Optional redirect URL after authentication
     pub redirect_url: Option<String>,
+    /// Random value the client keeps; it comes back in the redirect fragment so
+    /// the client can reject a link it did not ask for (login CSRF).
+    #[serde(default)]
+    pub state: Option<String>,
 }
 
 /// Query parameters for magic link verification
@@ -184,6 +188,9 @@ pub struct AuthProvidersResponse {
     pub local_enabled: bool,
     /// Whether magic link authentication is enabled
     pub magic_link_enabled: bool,
+    /// Whether "forgot password" can be offered: outbound email is configured
+    /// and password sign-in is on
+    pub password_reset_enabled: bool,
 }
 
 /// Information about an auth provider

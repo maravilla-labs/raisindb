@@ -102,6 +102,17 @@ export interface EmailConfig {
    * this, so a wrong value produces working links pointing at the wrong host.
    */
   base_url: string
+  /**
+   * Extra places a sign-in or reset link may land, beyond `base_url` itself
+   * (e.g. a Studio on another host). Must round-trip: a save rewrites the whole
+   * property set, so leaving it out would silently wipe the operator's list.
+   */
+  redirect_allowlist: string[]
+  /** Operator wording for the sign-in and password-reset mails. Blank = built-in. */
+  magic_link_subject: string
+  magic_link_text: string
+  password_reset_subject: string
+  password_reset_text: string
   providers: EmailProviderConfig[]
   /** Name of the provider system mail goes through. */
   default_provider: string
@@ -119,6 +130,11 @@ export const EMAIL_CONFIG_DEFAULTS: EmailConfig = {
   // node but not finished verifying its sending domain must not send.
   enabled: false,
   base_url: '',
+  redirect_allowlist: [],
+  magic_link_subject: '',
+  magic_link_text: '',
+  password_reset_subject: '',
+  password_reset_text: '',
   providers: [],
   default_provider: '',
 }
@@ -223,6 +239,13 @@ function fromNode(node: Node): EmailConfig {
     // server, which checks `!= Some(true)` rather than truthiness.
     enabled: p.enabled === true,
     base_url: str(p, 'base_url'),
+    redirect_allowlist: Array.isArray(p.redirect_allowlist)
+      ? (p.redirect_allowlist as unknown[]).filter((x): x is string => typeof x === 'string')
+      : [],
+    magic_link_subject: str(p, 'magic_link_subject'),
+    magic_link_text: str(p, 'magic_link_text'),
+    password_reset_subject: str(p, 'password_reset_subject'),
+    password_reset_text: str(p, 'password_reset_text'),
     providers,
     default_provider: defaultName,
   }
@@ -268,12 +291,24 @@ function toProperties(config: EmailConfig): Record<string, unknown> {
     return entry
   })
 
-  return {
+  const properties: Record<string, unknown> = {
     enabled: config.enabled,
     base_url: config.base_url.trim(),
     providers,
     default_provider: config.default_provider.trim(),
   }
+  const allowlist = config.redirect_allowlist.map((u) => u.trim()).filter(Boolean)
+  if (allowlist.length > 0) properties.redirect_allowlist = allowlist
+  // Blank wording is ABSENT, not empty: absent means "use the built-in text".
+  for (const key of [
+    'magic_link_subject',
+    'magic_link_text',
+    'password_reset_subject',
+    'password_reset_text',
+  ] as const) {
+    if (config[key].trim()) properties[key] = config[key]
+  }
+  return properties
 }
 
 export const emailConfigApi = {

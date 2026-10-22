@@ -69,7 +69,8 @@ pub use local::{login, login_for_repo, register, register_for_repo};
 
 #[cfg(feature = "storage-rocksdb")]
 pub use magic_link::{
-    request_magic_link, request_magic_link_for_repo, verify_magic_link, verify_magic_link_for_repo,
+    request_magic_link, request_magic_link_for_repo, request_password_reset,
+    request_password_reset_for_repo, verify_magic_link, verify_magic_link_for_repo,
 };
 
 #[cfg(feature = "storage-rocksdb")]

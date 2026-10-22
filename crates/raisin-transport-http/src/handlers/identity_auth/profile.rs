@@ -39,7 +39,13 @@ async fn providers_response(
         .map_err(|e| ApiError::internal(format!("Failed to load auth config: {e}")))?
         .unwrap_or_else(|| TenantAuthConfig::new(tenant_id.to_string()));
 
-    Ok(providers_from_config(&config, repo))
+    let mut response = providers_from_config(&config, repo);
+    // Both email-borne options need an outbound mailer. Offering them without
+    // one is a button that can only fail, so they follow the mail config.
+    let email = super::magic_link::email_configured(state, tenant_id, repo).await;
+    response.magic_link_enabled &= email;
+    response.password_reset_enabled = email && response.local_enabled;
+    Ok(response)
 }
 
 /// The pure half of [`providers_response`], separated so it can be tested
@@ -76,6 +82,8 @@ pub(super) fn providers_from_config(
         providers,
         local_enabled: enabled_or_default("local"),
         magic_link_enabled: enabled_or_default("magic_link"),
+        // Needs the mail config, which this pure half cannot see.
+        password_reset_enabled: false,
     }
 }
 

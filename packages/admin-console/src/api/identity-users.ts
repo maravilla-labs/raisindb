@@ -7,6 +7,10 @@ export interface IdentityUser {
   avatar_url: string | null
   email_verified: boolean
   is_active: boolean
+  must_change_password: boolean
+  /** Present while locked out after too many failed logins */
+  locked_until: string | null
+  failed_attempts: number
   linked_providers: string[]
   created_at: string
   updated_at: string | null
@@ -26,6 +30,11 @@ export interface UpdateIdentityUserRequest {
   display_name?: string
   is_active?: boolean
   email_verified?: boolean
+  /** Clear the failed-login counter and any lockout */
+  unlock?: boolean
+  /** Operator password reset; also clears the lockout */
+  password?: string
+  must_change_password?: boolean
 }
 
 export interface ListIdentityUsersParams {

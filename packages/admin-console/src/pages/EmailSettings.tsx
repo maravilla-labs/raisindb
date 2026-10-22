@@ -314,6 +314,56 @@ export default function EmailSettings() {
           </Hint>
         </Field>
 
+        <Field label="Allowed redirect targets">
+          <textarea
+            className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white font-mono text-sm"
+            rows={3}
+            value={config.redirect_allowlist.join('\n')}
+            onChange={(e) => setField('redirect_allowlist', e.target.value.split('\n'))}
+            placeholder="https://studio.example.com"
+          />
+          <Hint>
+            One URL per line. Sign-in and password-reset links may land on{' '}
+            <code>base_url</code> or any address listed here — add the address of an app on a
+            different host, such as Studio.
+          </Hint>
+        </Field>
+
+        <div className="space-y-4 border-t border-white/10 pt-5">
+          <div>
+            <h3 className="text-white font-medium">Email wording</h3>
+            <p className="text-xs text-white/50">
+              Leave blank to use the built-in text. In a body, <code>{'{magic_link_url}'}</code>{' '}
+              becomes the link and <code>{'{expires_in_minutes}'}</code> its lifetime.
+            </p>
+          </div>
+          {(
+            [
+              ['Sign-in link', 'magic_link_subject', 'magic_link_text'],
+              ['Password reset', 'password_reset_subject', 'password_reset_text'],
+            ] as const
+          ).map(([label, subjectKey, textKey]) => (
+            <div key={subjectKey} className="space-y-2">
+              <Field label={`${label} — subject`}>
+                <Input
+                  value={config[subjectKey]}
+                  onChange={(v) => setField(subjectKey, v)}
+                  placeholder={label === 'Sign-in link' ? 'Your sign-in link' : 'Reset your password'}
+                />
+              </Field>
+              <Field label={`${label} — message`}>
+                <textarea
+                  className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm"
+                  rows={6}
+                  value={config[textKey]}
+                  onChange={(e) => setField(textKey, e.target.value)}
+                  placeholder={'Hello,\n\nClick here:\n{magic_link_url}\n\nThis link expires in {expires_in_minutes} minutes.'}
+                />
+              </Field>
+            </div>
+          ))}
+        </div>
+
         <Field label="Default provider" error={errors.default_provider}>
           <select
             className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white"

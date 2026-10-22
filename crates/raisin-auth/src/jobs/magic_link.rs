@@ -54,6 +54,14 @@ pub struct MagicLinkJobData {
     /// and a verify request carrying no repo has nowhere to look it up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify_path: Option<String>,
+    /// Operator-written subject line from the tenant's `/config/email`. `None`
+    /// leaves the wording to the send function's built-in text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    /// Operator-written plain-text body (`{magic_link_url}` and
+    /// `{expires_in_minutes}` are substituted). `None` as for `subject`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_text: Option<String>,
 }
 
 /// The origin the verify link is built on — THIS server, never the tenant's app.
@@ -90,7 +98,43 @@ impl MagicLinkJobData {
             expires_in_minutes,
             template: None,
             verify_path: None,
+            subject: None,
+            body_text: None,
         }
+    }
+
+    /// Use the tenant's own subject and body instead of the built-in wording.
+    pub fn with_wording(mut self, subject: Option<String>, body_text: Option<String>) -> Self {
+        self.subject = subject;
+        self.body_text = body_text;
+        self
+    }
+
+    /// The operator's body with its placeholders filled in, as `(text, html)`.
+    ///
+    /// The HTML is derived rather than authored: the text is escaped, line
+    /// breaks become `<br>`, and the link becomes an anchor. An operator writing
+    /// prose should not have to write — or be able to break — markup, and
+    /// escaping means a stray `<` in their wording cannot inject any.
+    pub fn render_body(&self) -> Option<(String, String)> {
+        let template = self.body_text.as_deref().filter(|t| !t.trim().is_empty())?;
+        let url = self.build_link();
+        let minutes = self.expires_in_minutes.to_string();
+        let text = template
+            .replace("{magic_link_url}", &url)
+            .replace("{expires_in_minutes}", &minutes);
+        let escaped_url = escape_html(&url);
+        let html_body = escape_html(&text)
+            .replace(
+                &escaped_url,
+                &format!("<a href=\"{escaped_url}\">{escaped_url}</a>"),
+            )
+            .replace('\n', "<br>\n");
+        let html = format!(
+            "<!DOCTYPE html><html><body style=\"font-family: Arial, sans-serif; line-height: 1.6; color: #333;\">\
+             <div style=\"max-width: 600px; margin: 0 auto; padding: 20px;\">{html_body}</div></body></html>"
+        );
+        Some((text, html))
     }
 
     /// Set custom email template
@@ -142,6 +186,12 @@ impl MagicLinkJobData {
         if let Some(verify_path) = &self.verify_path {
             map.insert("verify_path".to_string(), serde_json::json!(verify_path));
         }
+        if let Some(subject) = &self.subject {
+            map.insert("subject".to_string(), serde_json::json!(subject));
+        }
+        if let Some(body_text) = &self.body_text {
+            map.insert("body_text".to_string(), serde_json::json!(body_text));
+        }
         map
     }
 
@@ -162,8 +212,23 @@ impl MagicLinkJobData {
                 .get("verify_path")
                 .and_then(|v| v.as_str())
                 .map(String::from),
+            subject: metadata
+                .get("subject")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            body_text: metadata
+                .get("body_text")
+                .and_then(|v| v.as_str())
+                .map(String::from),
         })
     }
+}
+
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 /// Default email template for magic links (plain text)
@@ -279,5 +344,44 @@ mod tests {
             data.build_link(),
             "https://rdb.example.com/auth/docs/magic-link/verify?token=abc123"
         );
+    }
+
+    #[test]
+    fn operator_wording_is_filled_in_and_escaped() {
+        let data = MagicLinkJobData::new(
+            "id",
+            "user@example.com",
+            "tid",
+            "abc",
+            VerifyOrigin("https://rdb.example.com".to_string()),
+            15,
+        )
+        .with_wording(
+            None,
+            Some("Hi <b>\nGo: {magic_link_url}\n{expires_in_minutes} min".to_string()),
+        );
+
+        let (text, html) = data.render_body().expect("wording set");
+        assert!(text.contains("Go: https://rdb.example.com/auth/magic-link/verify?token=abc"));
+        assert!(text.contains("15 min"));
+        // A stray `<` in the operator's prose is text, not markup.
+        assert!(html.contains("Hi &lt;b&gt;<br>"));
+        assert!(
+            html.contains("<a href=\"https://rdb.example.com/auth/magic-link/verify?token=abc\">")
+        );
+    }
+
+    #[test]
+    fn blank_wording_falls_back_to_the_built_in_text() {
+        let data = MagicLinkJobData::new(
+            "id",
+            "u@e.com",
+            "t",
+            "abc",
+            VerifyOrigin("https://x".to_string()),
+            15,
+        )
+        .with_wording(None, Some("   ".to_string()));
+        assert!(data.render_body().is_none());
     }
 }

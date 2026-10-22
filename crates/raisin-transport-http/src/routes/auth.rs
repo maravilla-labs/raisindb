@@ -54,6 +54,14 @@ pub(crate) fn auth_routes(state: &AppState) -> Router<AppState> {
         .route("/auth/login", post(crate::handlers::identity_auth::login))
         // Magic link (passwordless)
         .route(
+            "/auth/password-reset",
+            post(crate::handlers::identity_auth::request_password_reset),
+        )
+        .route(
+            "/auth/{repo}/password-reset",
+            post(crate::handlers::identity_auth::request_password_reset_for_repo),
+        )
+        .route(
             "/auth/magic-link",
             post(crate::handlers::identity_auth::request_magic_link),
         )
