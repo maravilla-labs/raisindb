@@ -128,7 +128,7 @@ const SENT_MESSAGE: &str = "If that address has an account, a sign-in link is on
 /// anyone whose address the caller knows, sent from the tenant's own verified
 /// sending domain.
 #[cfg(feature = "storage-rocksdb")]
-const EMAIL_RATE_LIMIT: usize = 5;
+const EMAIL_RATE_LIMIT: usize = 8;
 
 /// Window for [`EMAIL_RATE_LIMIT`] — matched to the link's own lifetime, so a
 /// user who genuinely lost a link can ask again as soon as the last one dies.
@@ -140,8 +140,13 @@ const EMAIL_RATE_WINDOW: std::time::Duration =
 ///
 /// The per-address limit alone stops nothing: a caller walking a list of
 /// addresses never hits it twice. This is the one that bounds the walk.
+///
+/// Generous on purpose: an office, a school or a carrier NAT puts many real
+/// people behind ONE address, and each of them signing in by link is a request.
+/// The per-address limit is what protects a recipient from being mail-bombed;
+/// this one only has to make walking an address list slow, not be tight.
 #[cfg(feature = "storage-rocksdb")]
-const IP_RATE_LIMIT: usize = 20;
+const IP_RATE_LIMIT: usize = 300;
 
 /// Window for [`IP_RATE_LIMIT`].
 #[cfg(feature = "storage-rocksdb")]
@@ -230,34 +235,46 @@ async fn check_rate_limits(
     tenant_id: &str,
     email: &str,
     client_ip: Option<&str>,
+    purpose: &str,
 ) -> Result<(), ApiError> {
     use raisin_context::RateLimiter;
 
-    let too_many = || {
+    // Says WHEN to come back. `details` carries the seconds so a client can
+    // show "try again in 9 minutes" instead of making the person guess; the
+    // error type has no header slot, so this is where it rides.
+    let too_many = |reset_after: std::time::Duration| {
+        let secs = reset_after.as_secs().max(1);
+        let minutes = secs.div_ceil(60);
         ApiError::new(
             StatusCode::TOO_MANY_REQUESTS,
             "RATE_LIMITED",
-            "Too many sign-in link requests. Please wait before trying again.",
+            format!(
+                "Too many requests. Please try again in {minutes} minute{}.",
+                if minutes == 1 { "" } else { "s" }
+            ),
         )
+        .with_details(secs.to_string())
     };
 
     // Fail CLOSED. A broken limiter on an endpoint that sends mail to arbitrary
     // third parties is not something to shrug off and continue through — the
     // error above already told the operator why.
     let Some(limiter) = rate_limiter(storage) else {
-        return Err(too_many());
+        return Err(too_many(EMAIL_RATE_WINDOW));
     };
 
     // Lowercased: mail domains are case-insensitive, and the bucket must not be
     // resettable by retyping the same address with different capitals.
-    let email_key = format!("magic-link:email:{tenant_id}:{}", email.to_lowercase());
-    if !limiter
+    //
+    // Keyed by PURPOSE too: asking for a sign-in link and asking for a password
+    // reset are different requests, and one should not use up the other's turns.
+    let email_key = format!("{purpose}:email:{tenant_id}:{}", email.to_lowercase());
+    let info = limiter
         .check_rate(&email_key, EMAIL_RATE_LIMIT, EMAIL_RATE_WINDOW)
-        .await
-        .allowed
-    {
+        .await;
+    if !info.allowed {
         tracing::warn!(tenant_id = %tenant_id, "Magic link request refused: per-address rate limit");
-        return Err(too_many());
+        return Err(too_many(info.reset_after));
     }
 
     // No identifiable client still gets a bucket — a SHARED one.
@@ -280,17 +297,14 @@ async fn check_rate_limits(
             IP_RATE_LIMIT,
         ),
     };
-    if !limiter
-        .check_rate(&ip_key, limit, IP_RATE_WINDOW)
-        .await
-        .allowed
-    {
+    let info = limiter.check_rate(&ip_key, limit, IP_RATE_WINDOW).await;
+    if !info.allowed {
         tracing::warn!(
             tenant_id = %tenant_id,
             attributed = client_ip.is_some(),
             "Magic link request refused: per-IP rate limit"
         );
-        return Err(too_many());
+        return Err(too_many(info.reset_after));
     }
 
     Ok(())
@@ -498,7 +512,18 @@ async fn request_magic_link_core(
     validate_email(&req.email)?;
 
     let repos = extract_repos(state)?;
-    check_rate_limits(&repos.storage, tenant_id, &req.email, client_ip).await?;
+    check_rate_limits(
+        &repos.storage,
+        tenant_id,
+        &req.email,
+        client_ip,
+        if reset {
+            "password-reset"
+        } else {
+            "magic-link"
+        },
+    )
+    .await?;
 
     // Both of these can refuse the request, and both refuse for reasons that
     // have nothing to do with WHICH address was submitted — so running them
