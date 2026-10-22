@@ -224,11 +224,6 @@ async fn check_rate_limits(
     client_ip: Option<&str>,
     limits: &RateLimits,
 ) -> Result<(), ApiError> {
-    // Every bucket is keyed by REPO as well as tenant: the limits come from that
-    // repo's own `/config/email`, and a counter shared across repos with
-    // different limits would let a caller pick the loosest repo to spend or dodge
-    // a stricter one's allowance for the same recipient.
-    let scope = format!("{tenant_id}:{repo}");
     use raisin_context::RateLimiter;
 
     // Says WHEN to come back. `details` carries the seconds so a client can
@@ -255,67 +250,81 @@ async fn check_rate_limits(
         return Err(too_many(EMAIL_RATE_WINDOW));
     };
 
+    // Each limit is enforced at TWO scopes, and a request must fit in both.
+    //
+    // The limits are the repo's own (`/config/email` is per repo), so the repo
+    // scope keeps one repo's allowance from being eaten by another's traffic.
+    // The tenant scope is shared by all of a tenant's repos, so asking through a
+    // second repo cannot multiply what one recipient, one client or the sender
+    // domain is sent — a repo with looser limits can raise what ITS callers get,
+    // but never beyond its own figure on the shared counter.
+    let scopes = [format!("{tenant_id}:{repo}"), format!("{tenant_id}:*")];
+
     // Lowercased: mail domains are case-insensitive, and the bucket must not be
     // resettable by retyping the same address with different capitals.
     //
     // ONE bucket for every purpose. Sign-in links and password resets both put
     // mail in the same inbox, so splitting them would multiply what one
     // recipient can be sent; the cap is on the recipient, not on the feature.
-    let email_key = format!("magic-link:email:{scope}:{}", email.to_lowercase());
-    let info = limiter
-        .check_rate(&email_key, limits.per_address, EMAIL_RATE_WINDOW)
-        .await;
-    if !info.allowed {
-        tracing::warn!(tenant_id = %tenant_id, "Magic link request refused: per-address rate limit");
-        return Err(too_many(info.reset_after));
-    }
+    let address = email.to_lowercase();
 
     // No identifiable client still gets a bucket — a SHARED one.
     //
-    // Skipping the check when no proxy header is present, which is what this did
-    // originally, removes the only limit that bounds an address-list walk: the
-    // per-address bucket is never hit twice by a caller working through a list.
-    // Anything reaching this server without a forwarded-for header is either
-    // misconfigured or bypassing the proxy, and neither deserves an unmetered
-    // path to sending mail.
+    // Skipping the check when no proxy header is present removes the only limit
+    // that bounds an address-list walk: the per-address bucket is never hit
+    // twice by a caller working through a list. Anything reaching this server
+    // without a forwarded-for header is either misconfigured or bypassing the
+    // proxy, and neither deserves an unmetered path to sending mail.
     //
     // Deliberately coarse: every header-less caller shares one bucket, so enough
     // of them at once will refuse each other. That is the correct trade for an
     // endpoint that sends mail to third parties, and behind a correctly
     // configured proxy this branch is never taken.
-    let (ip_key, limit) = match client_ip {
-        Some(ip) => (format!("magic-link:ip:{scope}:{ip}"), limits.per_client),
+    let (client_id, client_limit) = match client_ip {
+        Some(ip) => (ip.to_string(), limits.per_client),
+        // Never above the tenant's own per-client figure, but small whatever it is.
         None => (
-            format!("magic-link:ip:{scope}:unattributed"),
-            // Never above the tenant's own per-client figure, but small whatever it is.
+            "unattributed".to_string(),
             limits.per_client.min(UNATTRIBUTED_RATE_LIMIT),
         ),
     };
-    let info = limiter.check_rate(&ip_key, limit, IP_RATE_WINDOW).await;
-    if !info.allowed {
-        tracing::warn!(
-            tenant_id = %tenant_id,
-            attributed = client_ip.is_some(),
-            "Magic link request refused: per-IP rate limit"
-        );
-        return Err(too_many(info.reset_after));
-    }
 
-    // The ceiling on everything this tenant's sending domain can be made to
-    // send through these endpoints, whoever asks. The per-address and per-client
-    // buckets bound one recipient and one caller; this bounds the sum, so a
-    // generous per-client limit (offices share one address) cannot be turned
-    // into an unbounded relay by many callers.
-    let info = limiter
-        .check_rate(
-            &format!("magic-link:tenant:{scope}"),
+    // (what it bounds, bucket id, limit, window). The tenant-wide one is the
+    // ceiling on everything the sender domain can be made to send, whoever asks.
+    let checks = [
+        (
+            "per-address",
+            format!("email:{{scope}}:{address}"),
+            limits.per_address,
+            EMAIL_RATE_WINDOW,
+        ),
+        (
+            "per-client",
+            format!("ip:{{scope}}:{client_id}"),
+            client_limit,
+            IP_RATE_WINDOW,
+        ),
+        (
+            "tenant-wide",
+            "tenant:{scope}".to_string(),
             limits.per_tenant,
             IP_RATE_WINDOW,
-        )
-        .await;
-    if !info.allowed {
-        tracing::warn!(tenant_id = %tenant_id, "Magic link request refused: tenant-wide rate limit");
-        return Err(too_many(info.reset_after));
+        ),
+    ];
+    for (what, template, limit, window) in checks {
+        for scope in &scopes {
+            let key = format!("magic-link:{}", template.replace("{scope}", scope));
+            let info = limiter.check_rate(&key, limit, window).await;
+            if !info.allowed {
+                tracing::warn!(
+                    tenant_id = %tenant_id,
+                    repo = %repo,
+                    attributed = client_ip.is_some(),
+                    "Magic link request refused: {what} rate limit"
+                );
+                return Err(too_many(info.reset_after));
+            }
+        }
     }
 
     Ok(())
