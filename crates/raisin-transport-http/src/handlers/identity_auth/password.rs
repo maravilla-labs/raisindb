@@ -153,7 +153,7 @@ pub async fn change_password(
             };
 
             // Spend the reset session BEFORE changing anything: from here it is
-            // an ordinary session, so a second request (or a racing one that
+            // an ordinary session (on this node; the revoke below covers the rest), so a second request (or a racing one that
             // read it a moment ago) can no longer pass the check above. If the
             // write below then fails, the user asks for a fresh link — the
             // failure that costs a click, not the one that leaves it reusable.
@@ -179,22 +179,22 @@ pub async fn change_password(
         .map_err(ApiError::from)?;
 
     // The point of a reset is that whoever held the old password no longer
-    // does, so every OTHER session of the account goes with it — a stolen one
-    // would otherwise outlive the very reset meant to evict it. The session
-    // that did the reset stays, so the user is not signed out of their own page.
-    if let Some((session_repo, current)) = reset_session {
+    // does, so EVERY session of the account goes with it — a stolen one would
+    // otherwise outlive the very reset meant to evict it. That includes the
+    // reset session itself: the relabelling above is a local write only (session
+    // `update` is not replicated), while `revoke` is, so revoking is what makes
+    // the spend hold on every node. The client signs in again with the new
+    // password to get an ordinary session.
+    if let Some((session_repo, _)) = reset_session {
         let sessions = session_repo
             .list_for_identity(&claims.tenant_id, &claims.sub)
             .await
             .map_err(ApiError::from)?;
-        for other in sessions
-            .iter()
-            .filter(|s| s.session_id != current.session_id)
-        {
+        for session in &sessions {
             session_repo
                 .revoke(
                     &claims.tenant_id,
-                    &other.session_id,
+                    &session.session_id,
                     "password reset",
                     "self:password-reset",
                 )
