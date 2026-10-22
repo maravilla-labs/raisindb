@@ -219,10 +219,16 @@ fn client_ip(headers: &HeaderMap) -> Option<String> {
 async fn check_rate_limits(
     storage: &raisin_rocksdb::RocksDBStorage,
     tenant_id: &str,
+    repo: &str,
     email: &str,
     client_ip: Option<&str>,
     limits: &RateLimits,
 ) -> Result<(), ApiError> {
+    // Every bucket is keyed by REPO as well as tenant: the limits come from that
+    // repo's own `/config/email`, and a counter shared across repos with
+    // different limits would let a caller pick the loosest repo to spend or dodge
+    // a stricter one's allowance for the same recipient.
+    let scope = format!("{tenant_id}:{repo}");
     use raisin_context::RateLimiter;
 
     // Says WHEN to come back. `details` carries the seconds so a client can
@@ -255,7 +261,7 @@ async fn check_rate_limits(
     // ONE bucket for every purpose. Sign-in links and password resets both put
     // mail in the same inbox, so splitting them would multiply what one
     // recipient can be sent; the cap is on the recipient, not on the feature.
-    let email_key = format!("magic-link:email:{tenant_id}:{}", email.to_lowercase());
+    let email_key = format!("magic-link:email:{scope}:{}", email.to_lowercase());
     let info = limiter
         .check_rate(&email_key, limits.per_address, EMAIL_RATE_WINDOW)
         .await;
@@ -278,9 +284,9 @@ async fn check_rate_limits(
     // endpoint that sends mail to third parties, and behind a correctly
     // configured proxy this branch is never taken.
     let (ip_key, limit) = match client_ip {
-        Some(ip) => (format!("magic-link:ip:{tenant_id}:{ip}"), limits.per_client),
+        Some(ip) => (format!("magic-link:ip:{scope}:{ip}"), limits.per_client),
         None => (
-            format!("magic-link:ip:{tenant_id}:unattributed"),
+            format!("magic-link:ip:{scope}:unattributed"),
             // Never above the tenant's own per-client figure, but small whatever it is.
             limits.per_client.min(UNATTRIBUTED_RATE_LIMIT),
         ),
@@ -302,7 +308,7 @@ async fn check_rate_limits(
     // into an unbounded relay by many callers.
     let info = limiter
         .check_rate(
-            &format!("magic-link:tenant:{tenant_id}"),
+            &format!("magic-link:tenant:{scope}"),
             limits.per_tenant,
             IP_RATE_WINDOW,
         )
@@ -569,6 +575,7 @@ async fn request_magic_link_core(
     check_rate_limits(
         &repos.storage,
         tenant_id,
+        repo,
         &req.email,
         client_ip,
         &link_config.rate_limits,
