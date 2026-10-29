@@ -63,21 +63,66 @@ pub(super) async fn create_initial_structure_children<S: Storage>(
     };
 
     for child_def in children {
-        let child_node = build_initial_child_node(child_def, parent_node, workspace)?;
-
-        txn_ctx.add_node(workspace, &child_node).await?;
-
-        // Recursively create initial_structure for the child
-        Box::pin(create_initial_structure_children(
+        Box::pin(create_initial_child(
             txn_ctx,
             storage,
             tenant_id,
             repo_id,
             branch,
             workspace,
-            &child_node,
+            parent_node,
+            child_def,
         ))
         .await?;
+    }
+
+    Ok(())
+}
+
+/// Creates one initial child, then the initial_structure of its own NodeType, then the
+/// `children` the definition itself declares (a folder holding header, footer, policies).
+#[allow(clippy::too_many_arguments)]
+async fn create_initial_child<S: Storage>(
+    txn_ctx: &dyn TransactionalContext,
+    storage: &S,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    workspace: &str,
+    parent_node: &raisin_models::nodes::Node,
+    child_def: &raisin_models::nodes::types::initial_structure::InitialChild,
+) -> Result<(), Error> {
+    let child_node = build_initial_child_node(child_def, parent_node, workspace)?;
+
+    txn_ctx.add_node(workspace, &child_node).await?;
+
+    // Recursively create initial_structure for the child
+    create_initial_structure_children(
+        txn_ctx,
+        storage,
+        tenant_id,
+        repo_id,
+        branch,
+        workspace,
+        &child_node,
+    )
+    .await?;
+
+    // Nested children declared on the definition itself
+    if let Some(nested) = &child_def.children {
+        for nested_def in nested {
+            Box::pin(create_initial_child(
+                txn_ctx,
+                storage,
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                &child_node,
+                nested_def,
+            ))
+            .await?;
+        }
     }
 
     Ok(())

@@ -93,11 +93,27 @@ where
         {
             if let Some(initial_structure) = &node_type.initial_structure {
                 if let Some(children_defs) = &initial_structure.children {
-                    for child_def in children_defs {
-                        let child = self.create_node_from_initial_child(&node.path, child_def)?;
+                    // Depth-first with an explicit stack: a child may itself declare
+                    // `children` (e.g. a `site` folder holding header, footer, policies).
+                    let mut pending: Vec<(
+                        String,
+                        &models::nodes::types::initial_structure::InitialChild,
+                    )> = children_defs
+                        .iter()
+                        .rev()
+                        .map(|d| (node.path.clone(), d))
+                        .collect();
+                    while let Some((parent_path, child_def)) = pending.pop() {
+                        let child = self.create_node_from_initial_child(&parent_path, child_def)?;
 
                         // Save child in transaction
                         ctx.put_node(&self.workspace_id, &child).await?;
+
+                        if let Some(nested) = &child_def.children {
+                            for d in nested.iter().rev() {
+                                pending.push((child.path.clone(), d));
+                            }
+                        }
                     }
                 }
             }

@@ -13,6 +13,17 @@ use crate::state::AppState;
 use super::helpers::{extract_repos, get_auth_service};
 use super::types::{AuthTokensResponse, IdentityInfo, RefreshTokenRequest};
 
+#[cfg(feature = "storage-rocksdb")]
+/// How long after a rotation the previous refresh token is still answered (concurrent requests of
+/// one browser carry the same cookie).
+const REFRESH_GRACE_SECONDS: i64 = 30;
+
+fn refresh_grace_open(session: &raisin_models::auth::Session) -> bool {
+    let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(i64::MAX);
+    let then = session.last_activity_at.timestamp_nanos();
+    now >= then && now - then <= REFRESH_GRACE_SECONDS * 1_000_000_000
+}
+
 /// Refresh authentication tokens.
 ///
 /// # Endpoint
@@ -102,7 +113,17 @@ pub async fn refresh_token(
         ));
     }
 
-    if session.token_generation != refresh_claims.generation {
+    // A refresh token is single-use, but a browser session is not serial: a page and
+    // the fragments it fetches carry the SAME cookie and can all find the access token
+    // expired at once. The first refresh rotates; the others then present the previous
+    // generation. Within a short grace window after a rotation that is a race, not a
+    // replay: answer it with tokens of the CURRENT generation (no further rotation), so
+    // whichever response the browser keeps still works. Outside the window, or more than
+    // one generation behind, it is reuse and the session is revoked.
+    let in_grace = session.token_generation > 0
+        && refresh_claims.generation + 1 == session.token_generation
+        && refresh_grace_open(&session);
+    if session.token_generation != refresh_claims.generation && !in_grace {
         tracing::warn!(
             "Token generation mismatch for session {} (expected {}, got {}) - possible token reuse",
             session_id,
@@ -150,13 +171,21 @@ pub async fn refresh_token(
         ));
     }
 
-    // 6. Generate new tokens with incremented generation (preserves home from refresh token)
+    // 6. Generate new tokens with incremented generation (preserves home from refresh token).
+    // In the grace case the service is shown the session one generation back, so the tokens
+    // it mints carry the generation the session already has and nothing is rotated.
+    let mut service_session = session.clone();
+    let mut service_claims = refresh_claims.clone();
+    if in_grace {
+        service_session.token_generation = refresh_claims.generation;
+        service_claims.generation = refresh_claims.generation;
+    }
     let policy = super::policy::load_auth_policy(&state, tenant_id).await;
     let (tokens, new_generation) = auth_service
         .refresh_user_tokens_with_lifetimes(
             &identity,
-            &session,
-            &refresh_claims,
+            &service_session,
+            &service_claims,
             refresh_claims.home.clone(),
             policy.token_lifetimes(),
         )
@@ -168,24 +197,26 @@ pub async fn refresh_token(
             )
         })?;
 
-    // 7. Rotate refresh token in storage (with cluster replication)
-    repos
-        .session
-        .rotate_refresh_token(
-            tenant_id,
-            session_id,
-            new_generation,
-            "system:token_refresh",
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to rotate refresh token: {}", e);
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "DATABASE_ERROR",
-                "Failed to update session",
+    // 7. Rotate refresh token in storage (with cluster replication); a grace answer rotates nothing
+    if !in_grace {
+        repos
+            .session
+            .rotate_refresh_token(
+                tenant_id,
+                session_id,
+                new_generation,
+                "system:token_refresh",
             )
-        })?;
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to rotate refresh token: {}", e);
+                ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DATABASE_ERROR",
+                    "Failed to update session",
+                )
+            })?;
+    }
 
     tracing::info!(
         identity_id = %identity.identity_id,

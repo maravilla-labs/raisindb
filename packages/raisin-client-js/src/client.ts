@@ -131,6 +131,18 @@ export interface ClientOptions {
   logLevel?: LogLevel;
   /** HTTP base URL for identity auth (derived from WS URL if not provided) */
   httpBaseUrl?: string;
+  /**
+   * Renew the access token somewhere other than the engine's refresh endpoint.
+   *
+   * For pages whose session lives in an HttpOnly cookie on the site's own server: the
+   * page never sees a refresh token, so when it needs a new access token (the stored one
+   * expired, the socket refused it, the auto-refresh timer fired) it asks the site, which
+   * renews the session. Resolve to the new access token (and optionally its `expiresAt`,
+   * seconds or milliseconds since the epoch), or null when the session is over. When set,
+   * `refreshToken()` calls this instead of POSTing a refresh token, and works without any
+   * refresh token in storage. Concurrent callers share one call.
+   */
+  tokenRefresher?: () => Promise<{ accessToken: string; expiresAt?: number } | string | null>;
 }
 
 /**
@@ -172,12 +184,13 @@ export class RaisinClient extends EventEmitter {
   private authManager: AuthManager;
   private eventHandler: EventHandler;
   private _context: RequestContext;
-  private options: Required<Omit<ClientOptions, 'connection' | 'tokenStorage' | 'mode' | 'logLevel' | 'httpBaseUrl' | 'repository'>>;
+  private options: Required<Omit<ClientOptions, 'connection' | 'tokenStorage' | 'mode' | 'logLevel' | 'httpBaseUrl' | 'repository' | 'tokenRefresher'>>;
   private _currentUser: CurrentUser | null = null;
   /** In-flight role re-resolve, used to coalesce concurrent refreshCurrentUser() calls. */
   #refreshingUser: Promise<void> | null = null;
   private _httpBaseUrl: string;
   private _repository: string;
+  private _tokenRefresher: ClientOptions['tokenRefresher'];
 
   // Auth state change listeners (Firebase/Supabase pattern)
   private _authListeners: Set<AuthStateChangeCallback> = new Set();
@@ -225,6 +238,8 @@ export class RaisinClient extends EventEmitter {
       tenantId: options.tenantId ?? this.extractTenantFromUrl(connectionUrl),
       defaultBranch: options.defaultBranch ?? 'main',
     };
+
+    this._tokenRefresher = options.tokenRefresher;
 
     // Derive HTTP base URL from WebSocket URL if not provided
     this._httpBaseUrl = options.httpBaseUrl ?? this.deriveHttpUrl(connectionUrl);
@@ -1254,6 +1269,7 @@ export class RaisinClient extends EventEmitter {
   private _refreshInFlight: Promise<IdentityUser | null> | null = null;
 
   private async _refreshToken(): Promise<IdentityUser | null> {
+    if (this._tokenRefresher) return this._refreshViaHook(this._tokenRefresher);
     const refreshToken = this.authManager.storage.getRefreshToken();
     if (!refreshToken) {
       logger.warn('[refreshToken] No refresh token available');
@@ -1327,6 +1343,36 @@ export class RaisinClient extends EventEmitter {
       return user;
     } catch (err) {
       logger.error('[refreshToken] Error during token refresh:', err);
+      return null;
+    }
+  }
+
+  /** `refreshToken()` through `ClientOptions.tokenRefresher` (the session is not the page's to renew). */
+  private async _refreshViaHook(hook: NonNullable<ClientOptions['tokenRefresher']>): Promise<IdentityUser | null> {
+    try {
+      const res = await hook();
+      const accessToken = typeof res === 'string' ? res : res?.accessToken;
+      if (!accessToken) {
+        this.authManager.clear();
+        this._currentUser = null;
+        this.emit('auth_error', new Error('Token refresh failed - session expired'));
+        return null;
+      }
+      this.authManager.storage.setAccessToken(accessToken);
+      this.authManager.adoptToken(accessToken);
+      const exp = typeof res === 'object' && res?.expiresAt
+        ? RaisinClient.expiresAtToMs(res.expiresAt)
+        : ((AuthManager.parseToken(accessToken)?.exp as number | undefined) ?? 0) * 1000;
+      const inMs = exp - Date.now() - 60_000;
+      if (exp && inMs > 0) this.scheduleAutoRefresh(inMs);
+      const user: IdentityUser = this._currentUser
+        ? { id: this._currentUser.userId, email: '', displayName: null, avatarUrl: null, emailVerified: false, home: null }
+        : { id: '', email: '', displayName: null, avatarUrl: null, emailVerified: false, home: null };
+      this._emitAuthEvent('TOKEN_REFRESHED');
+      this.emit('token_refreshed', user);
+      return user;
+    } catch (err) {
+      logger.error('[refreshToken] tokenRefresher failed:', err);
       return null;
     }
   }
