@@ -56,6 +56,12 @@ impl TenantAuthConfigResponse {
                     .session_settings
                     .refresh_token_duration_seconds
                     / (24 * 3600)) as u32,
+                refresh_token_session_hours: Some(
+                    (config
+                        .session_settings
+                        .refresh_token_session_duration_seconds
+                        / 3600) as u32,
+                ),
                 max_sessions_per_user: config.session_settings.max_sessions_per_user,
                 single_session_mode: config.session_settings.max_sessions_per_user == 1,
             },
@@ -100,7 +106,12 @@ pub struct PasswordPolicyConfig {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SessionSettingsConfig {
     pub duration_hours: u32,
+    /// Refresh token / session lifetime for a sign-in WITH "remember me".
     pub refresh_token_duration_days: u32,
+    /// Refresh token / session lifetime, in hours, for a sign-in without "remember me".
+    /// Absent on update means "leave it as it is".
+    #[serde(default)]
+    pub refresh_token_session_hours: Option<u32>,
     pub max_sessions_per_user: u32,
     pub single_session_mode: bool,
 }

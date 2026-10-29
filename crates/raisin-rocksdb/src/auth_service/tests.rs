@@ -153,7 +153,11 @@ fn user_token_lifetimes_follow_the_supplied_settings() {
         "id-1".into(),
         "local".into(),
         "fam".into(),
-        StorageTimestamp::now(),
+        // A session that outlives every lifetime used below.
+        StorageTimestamp::from_nanos(
+            StorageTimestamp::now().timestamp_nanos() + 365 * 24 * 3600 * 1_000_000_000,
+        )
+        .unwrap(),
     );
 
     // Default path: unchanged one hour / thirty days.
@@ -199,4 +203,60 @@ fn user_token_lifetimes_follow_the_supplied_settings() {
         .unwrap();
     assert_eq!(generation, session.token_generation + 1);
     assert_eq!(refreshed.expires_in, 600);
+}
+
+#[test]
+fn a_refresh_token_never_outlives_its_session() {
+    use raisin_models::auth::{Identity, Session};
+    use raisin_models::timestamp::StorageTimestamp;
+
+    let (_dir, service) = create_test_service();
+    let identity = Identity::new("id-1".into(), "t".into(), "a@example.com".into());
+    let mk = |secs: i64| {
+        Session::new(
+            "sid-1".into(),
+            "t".into(),
+            "id-1".into(),
+            "local".into(),
+            "fam".into(),
+            StorageTimestamp::from_nanos(
+                StorageTimestamp::now().timestamp_nanos() + secs * 1_000_000_000,
+            )
+            .unwrap(),
+        )
+    };
+
+    // Policy says thirty days; the session (a sign-in without "remember me") is a day.
+    let day = mk(24 * 3600);
+    let tokens = service
+        .generate_user_tokens(&identity, &day, None, None)
+        .unwrap();
+    let refresh = service
+        .validate_refresh_token(&tokens.refresh_token)
+        .unwrap();
+    assert!(
+        (refresh.exp - refresh.iat - 24 * 3600).abs() <= 2,
+        "{}",
+        refresh.exp - refresh.iat
+    );
+    assert!(tokens.refresh_expires_in.unwrap().abs_diff(24 * 3600) <= 2);
+
+    // The same holds when the token is rotated: a refresh does not buy a longer session.
+    let (rotated, _) = service
+        .refresh_user_tokens_with_lifetimes(
+            &identity,
+            &day,
+            &refresh,
+            None,
+            TokenLifetimes::default(),
+        )
+        .unwrap();
+    assert!(rotated.refresh_expires_in.unwrap() <= 24 * 3600);
+
+    // A remembered session (thirty days) keeps the policy's full lifetime.
+    let month = mk(30 * 24 * 3600);
+    let tokens = service
+        .generate_user_tokens(&identity, &month, None, None)
+        .unwrap();
+    assert!(tokens.refresh_expires_in.unwrap().abs_diff(30 * 24 * 3600) <= 2);
 }

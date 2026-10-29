@@ -88,7 +88,10 @@ export interface PasswordPolicy {
 
 export interface SessionSettings {
   duration_hours: number
+  /** Refresh token / session lifetime for a sign-in WITH "remember me". */
   refresh_token_duration_days: number
+  /** Lifetime in hours of a sign-in WITHOUT "remember me" (default 24); omit on update to keep it. */
+  refresh_token_session_hours?: number
   max_sessions_per_user: number
   single_session_mode: boolean
 }

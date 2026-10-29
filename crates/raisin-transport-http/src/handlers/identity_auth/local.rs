@@ -108,7 +108,7 @@ async fn create_identity_and_session(
         tenant_id,
         &identity_id,
         "local",
-        false, // Default: no remember_me for registration
+        policy.session_seconds(false), // Default: no remember_me for registration
         "system:registration",
     )
     .await?;
@@ -220,7 +220,7 @@ async fn verify_credentials_and_create_session(
         tenant_id,
         &identity.identity_id,
         "local",
-        remember_me,
+        policy.session_seconds(remember_me),
         "system:login",
     )
     .await?;

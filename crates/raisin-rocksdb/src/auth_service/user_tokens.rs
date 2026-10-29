@@ -58,6 +58,15 @@ impl Default for TokenLifetimes {
     }
 }
 
+/// `expiry`, or the session's own expiry when that comes first.
+fn cap_at_session_expiry(
+    expiry: chrono::DateTime<Utc>,
+    session: &Session,
+) -> chrono::DateTime<Utc> {
+    let end = chrono::DateTime::<Utc>::from_timestamp_nanos(session.expires_at.timestamp_nanos());
+    end.min(expiry)
+}
+
 impl AuthService {
     /// Generate user JWT tokens (access + refresh) for an authenticated identity.
     ///
@@ -100,6 +109,9 @@ impl AuthService {
         let now = Utc::now();
         let access_expiry = now + Duration::seconds(lifetimes.access_seconds as i64);
         let refresh_expiry = now + Duration::seconds(lifetimes.refresh_seconds as i64);
+        // A refresh token never outlives its session: a sign-in without
+        // "remember me" has a short session, and its refresh token must say so.
+        let refresh_expiry = cap_at_session_expiry(refresh_expiry, session);
 
         // Generate access token
         let access_claims = AuthClaims {
@@ -166,7 +178,7 @@ impl AuthService {
             refresh_token,
             token_type: "Bearer".to_string(),
             expires_in: lifetimes.access_seconds,
-            refresh_expires_in: Some(lifetimes.refresh_seconds),
+            refresh_expires_in: Some((refresh_expiry - now).num_seconds().max(0) as u64),
         })
     }
 
@@ -275,6 +287,9 @@ impl AuthService {
         let now = Utc::now();
         let access_expiry = now + Duration::seconds(lifetimes.access_seconds as i64);
         let refresh_expiry = now + Duration::seconds(lifetimes.refresh_seconds as i64);
+        // A refresh token never outlives its session: a sign-in without
+        // "remember me" has a short session, and its refresh token must say so.
+        let refresh_expiry = cap_at_session_expiry(refresh_expiry, session);
 
         // Verify the refresh token belongs to this session family
         if old_refresh_claims.family != session.token_family {
@@ -359,7 +374,7 @@ impl AuthService {
                 refresh_token,
                 token_type: "Bearer".to_string(),
                 expires_in: lifetimes.access_seconds,
-                refresh_expires_in: Some(lifetimes.refresh_seconds),
+                refresh_expires_in: Some((refresh_expiry - now).num_seconds().max(0) as u64),
             },
             new_generation,
         ))

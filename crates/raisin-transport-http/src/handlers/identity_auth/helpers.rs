@@ -20,7 +20,6 @@ use raisin_rocksdb::repositories::{IdentityRepository, SessionRepository};
 #[cfg(feature = "storage-rocksdb")]
 use raisin_rocksdb::{AuthService, RocksDBStorage};
 
-use super::constants::session_duration_nanos;
 use super::policy::{load_auth_policy, EffectiveAuthPolicy};
 use super::types::{AuthTokensResponse, IdentityInfo};
 
@@ -80,7 +79,7 @@ pub async fn create_session(
     tenant_id: &str,
     identity_id: &str,
     auth_strategy: &str,
-    remember_me: bool,
+    session_seconds: u64,
     actor: &str,
 ) -> Result<(Session, StorageTimestamp), ApiError> {
     use uuid::Uuid;
@@ -88,7 +87,12 @@ pub async fn create_session(
     let session_id = Uuid::new_v4().to_string();
     let token_family = Uuid::new_v4().to_string();
 
-    let duration_nanos = session_duration_nanos(remember_me);
+    // Seconds from `EffectiveAuthPolicy::session_seconds(remember_me)`: the
+    // session lives that long, and so does no refresh token minted for it.
+    let duration_nanos = i64::try_from(session_seconds)
+        .ok()
+        .and_then(|s| s.checked_mul(1_000_000_000))
+        .unwrap_or(i64::MAX / 4);
     let expires_at =
         StorageTimestamp::from_nanos(StorageTimestamp::now().timestamp_nanos() + duration_nanos)
             .ok_or_else(|| {

@@ -184,6 +184,11 @@ pub async fn update_auth_config(
             (session.duration_hours as u64) * 3600;
         config.session_settings.refresh_token_duration_seconds =
             (session.refresh_token_duration_days as u64) * 24 * 3600;
+        if let Some(hours) = session.refresh_token_session_hours {
+            config
+                .session_settings
+                .refresh_token_session_duration_seconds = u64::from(hours) * 3600;
+        }
         config.session_settings.max_sessions_per_user = if session.single_session_mode {
             1
         } else {

@@ -650,6 +650,23 @@ properties:
 
 ---
 
+## Session Lifetime and "Remember Me"
+
+`POST /auth/{repo}/login` (and `/auth/login`) take `remember_me`. It chooses how long the sign-in lives:
+
+| `remember_me` | session expiry and refresh-token expiry | tenant setting |
+|---|---|---|
+| `true` | 30 days | `session_settings.refresh_token_duration_seconds` |
+| `false` / absent | 24 hours | `session_settings.refresh_token_session_duration_seconds` (never above the first) |
+
+The session's `expires_at` is set from that choice, and **no refresh token outlives its session**: both token mints
+(login and refresh) cap the refresh token's `exp` and `refresh_expires_in` at the session expiry. A refresh rotates the
+token but never extends the session, so a 24 hour sign-in is over after 24 hours however often it refreshes. Clients
+that size their cookie from `refresh_expires_in` (the Studio buyer session does) get 24 hours or 30 days without any
+further logic. Registration, magic-link and OpenID Connect sign-ins have no "remember me" and use the short lifetime.
+The tenant API (`PUT /api/tenants/{tenant}/auth/config`) exposes the short lifetime as
+`session_settings.refresh_token_session_hours` (optional on update; absent keeps the stored value).
+
 ## Implementation Phases
 
 ### Phase 1: Foundation

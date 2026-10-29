@@ -200,7 +200,9 @@ pub async fn oidc_callback(
         tenant_id,
         &identity.identity_id,
         &strategy_id,
-        false,
+        super::policy::load_auth_policy(&state, tenant_id)
+            .await
+            .session_seconds(false),
         "system:oidc_login",
     )
     .await?;

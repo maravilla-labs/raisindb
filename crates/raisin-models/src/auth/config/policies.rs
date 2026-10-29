@@ -29,6 +29,12 @@ pub struct SessionSettings {
     #[serde(default = "default_refresh_token_duration")]
     pub refresh_token_duration_seconds: u64,
 
+    /// Refresh token / session duration in seconds for a sign-in WITHOUT
+    /// "remember me". `refresh_token_duration_seconds` applies when the user
+    /// asked to be remembered. Never longer than `refresh_token_duration_seconds`.
+    #[serde(default = "default_refresh_token_session_duration")]
+    pub refresh_token_session_duration_seconds: u64,
+
     /// Maximum concurrent sessions per user
     #[serde(default = "default_max_sessions")]
     pub max_sessions_per_user: u32,
@@ -54,6 +60,10 @@ fn default_refresh_token_duration() -> u64 {
     30 * 24 * 3600 // 30 days
 }
 
+fn default_refresh_token_session_duration() -> u64 {
+    24 * 3600 // 24 hours
+}
+
 fn default_max_sessions() -> u32 {
     10
 }
@@ -67,6 +77,7 @@ impl Default for SessionSettings {
         Self {
             access_token_duration_seconds: default_access_token_duration(),
             refresh_token_duration_seconds: default_refresh_token_duration(),
+            refresh_token_session_duration_seconds: default_refresh_token_session_duration(),
             max_sessions_per_user: default_max_sessions(),
             sudo_threshold_seconds: default_sudo_threshold(),
             rotate_refresh_tokens: true,

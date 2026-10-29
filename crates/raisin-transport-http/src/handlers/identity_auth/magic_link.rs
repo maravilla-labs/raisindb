@@ -926,7 +926,9 @@ async fn verify_magic_link_core(
         } else {
             "magic_link"
         },
-        false,
+        super::policy::load_auth_policy(state, tenant_id)
+            .await
+            .session_seconds(false),
         "system:magic-link",
     )
     .await?;

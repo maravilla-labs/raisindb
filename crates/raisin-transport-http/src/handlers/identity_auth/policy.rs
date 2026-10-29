@@ -39,8 +39,11 @@ pub struct EffectiveAuthPolicy {
     pub lockout_duration_minutes: u64,
     /// Access token lifetime in seconds.
     pub access_token_seconds: u64,
-    /// Refresh token lifetime in seconds.
+    /// Refresh token lifetime in seconds when the user asked to be remembered.
     pub refresh_token_seconds: u64,
+    /// Refresh token / session lifetime in seconds for a sign-in without
+    /// "remember me" (never longer than `refresh_token_seconds`).
+    pub refresh_token_session_seconds: u64,
 }
 
 impl Default for EffectiveAuthPolicy {
@@ -51,6 +54,7 @@ impl Default for EffectiveAuthPolicy {
             lockout_duration_minutes: LEGACY_LOCKOUT_MINUTES,
             access_token_seconds: 3600,
             refresh_token_seconds: 30 * 24 * 3600,
+            refresh_token_session_seconds: 24 * 3600,
         }
     }
 }
@@ -62,6 +66,9 @@ impl EffectiveAuthPolicy {
         let minutes = u64::from(config.rate_limiting.lockout_duration_minutes);
         let access = config.session_settings.access_token_duration_seconds;
         let refresh = config.session_settings.refresh_token_duration_seconds;
+        let short = config
+            .session_settings
+            .refresh_token_session_duration_seconds;
         let defaults = Self::default();
         Self {
             password_policy: Some(config.password_policy.clone()),
@@ -87,6 +94,23 @@ impl EffectiveAuthPolicy {
             } else {
                 refresh
             },
+            refresh_token_session_seconds: if short == 0 {
+                defaults.refresh_token_session_seconds
+            } else {
+                short
+            },
+        }
+    }
+
+    /// How long a sign-in lives: the full refresh lifetime when the user asked
+    /// to be remembered, the (shorter) session lifetime otherwise. This is the
+    /// session's expiry AND the ceiling of every refresh token minted for it.
+    pub fn session_seconds(&self, remember_me: bool) -> u64 {
+        if remember_me {
+            self.refresh_token_seconds
+        } else {
+            self.refresh_token_session_seconds
+                .min(self.refresh_token_seconds)
         }
     }
 
@@ -161,6 +185,8 @@ mod tests {
         assert_eq!(p.lockout_duration_minutes, 15);
         assert_eq!(p.access_token_seconds, 3600);
         assert_eq!(p.refresh_token_seconds, 30 * 24 * 3600);
+        assert_eq!(p.session_seconds(true), 30 * 24 * 3600);
+        assert_eq!(p.session_seconds(false), 24 * 3600);
         // Legacy rule: 8 characters, nothing else.
         assert!(p.validate_password("short").is_err());
         assert!(p.validate_password("alllowercaseletters").is_ok());

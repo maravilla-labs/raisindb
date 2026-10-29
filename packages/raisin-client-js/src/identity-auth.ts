@@ -139,7 +139,14 @@ export class IdentityAuthApi {
     });
   }
 
-  /** Sign in with email and password, where the repository enables it. */
+  /**
+   * Sign in with email and password, where the repository enables it.
+   *
+   * `rememberMe` chooses the lifetime of the sign-in: the session AND its refresh
+   * token last 30 days with it and 24 hours without (both configurable per tenant:
+   * `refresh_token_duration_days`, `refresh_token_session_hours`). Refreshing never
+   * extends a session past that.
+   */
   async login(
     email: string,
     password: string,

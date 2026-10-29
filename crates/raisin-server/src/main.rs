@@ -60,8 +60,61 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-#[tokio::main]
-async fn main() {
+/// Stack size, in MiB, of every thread the server's runtimes start (async
+/// workers and blocking-pool threads).
+///
+/// tokio's default is 2 MiB. That is enough for the optimised server but not
+/// for a debug build: an unoptimised async poll frame is large, a SQL plan is a
+/// chain of them, and the engine aborted with "thread 'tokio-rt-worker' has
+/// overflowed its stack" on an ordinary Sort > Project > Filter query and on a
+/// SQL UPDATE. Address space is reserved lazily, so a roomier stack costs
+/// nothing until it is used. Override with `RAISIN_THREAD_STACK_MB` (clamped to
+/// 2..=1024).
+const DEFAULT_THREAD_STACK_MB: usize = 16;
+
+fn thread_stack_bytes() -> usize {
+    stack_bytes_from(std::env::var("RAISIN_THREAD_STACK_MB").ok().as_deref())
+}
+
+fn stack_bytes_from(setting: Option<&str>) -> usize {
+    setting
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(DEFAULT_THREAD_STACK_MB)
+        .clamp(2, 1024)
+        * 1024
+        * 1024
+}
+
+#[cfg(test)]
+mod thread_stack_tests {
+    use super::*;
+
+    #[test]
+    fn the_default_is_roomier_than_tokios_two_mebibytes() {
+        assert_eq!(stack_bytes_from(None), 16 * 1024 * 1024);
+        assert!(stack_bytes_from(None) > 2 * 1024 * 1024);
+    }
+
+    #[test]
+    fn the_setting_is_clamped_and_garbage_falls_back() {
+        assert_eq!(stack_bytes_from(Some("32")), 32 * 1024 * 1024);
+        assert_eq!(stack_bytes_from(Some(" 8 ")), 8 * 1024 * 1024);
+        assert_eq!(stack_bytes_from(Some("0")), 2 * 1024 * 1024);
+        assert_eq!(stack_bytes_from(Some("999999")), 1024 * 1024 * 1024);
+        assert_eq!(stack_bytes_from(Some("lots")), 16 * 1024 * 1024);
+    }
+}
+
+fn main() {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(thread_stack_bytes())
+        .build()
+        .expect("Failed to create the tokio runtime")
+        .block_on(async_main());
+}
+
+async fn async_main() {
     // Parse command-line arguments and merge configuration sources
     let cli_config = startup::ServerConfig::parse();
     let mut server_config = cli_config.merge().expect("Failed to load configuration");
@@ -697,18 +750,21 @@ async fn main() {
             let rt_runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(pools_config.realtime.runtime_threads)
                 .thread_name("raisin-realtime")
+                .thread_stack_size(thread_stack_bytes())
                 .enable_all()
                 .build()
                 .expect("Failed to create realtime runtime");
             let bg_runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(pools_config.background.runtime_threads)
                 .thread_name("raisin-background")
+                .thread_stack_size(thread_stack_bytes())
                 .enable_all()
                 .build()
                 .expect("Failed to create background runtime");
             let sys_runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(pools_config.system.runtime_threads)
                 .thread_name("raisin-system")
+                .thread_stack_size(thread_stack_bytes())
                 .enable_all()
                 .build()
                 .expect("Failed to create system runtime");

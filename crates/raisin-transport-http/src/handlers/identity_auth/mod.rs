@@ -32,7 +32,6 @@
 mod config;
 mod config_oidc;
 mod config_types;
-mod constants;
 pub mod helpers;
 mod local;
 mod magic_link;

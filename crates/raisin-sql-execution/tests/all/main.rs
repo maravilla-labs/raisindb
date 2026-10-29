@@ -76,6 +76,7 @@ mod rocksdb_integration_tests;
 mod scalar_select_clauses;
 mod search_table_function_rls;
 mod spatial_pushdown_tests;
+mod stack_budget_tests;
 mod system_workspace_rls;
 mod throughput_sql;
 mod translation_blocks;
