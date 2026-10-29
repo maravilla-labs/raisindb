@@ -1174,6 +1174,9 @@ mod tests {
         LinkConfig {
             base_url: "https://app.example.com".to_string(),
             redirect_allowlist: vec!["https://admin.example.com".to_string()],
+            magic_link_wording: (None, None),
+            rate_limits: RateLimits::default(),
+            password_reset_wording: (None, None),
         }
     }
 
