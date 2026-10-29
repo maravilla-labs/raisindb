@@ -525,6 +525,12 @@ where
     if ctx.is_resolved() || ctx.is_anonymous || ctx.is_anonymous_principal() {
         return Some(ctx);
     }
+    // A steward acting for a ward holds the ward's rights through the stewardship
+    // resolver, not the steward's own roles. Resolving by the carried user id would
+    // hand such a run the steward's full permission set; it keeps running restricted.
+    if ctx.acting_as_ward.is_some() || ctx.active_stewardship_source.is_some() {
+        return Some(ctx);
+    }
     let service = raisin_core::PermissionService::new(deps.storage.clone());
     let resolved = if let Some(node_id) = ctx.local_user_id.as_deref() {
         service
