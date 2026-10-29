@@ -1017,6 +1017,71 @@ mod caller_context {
     }
 
     #[test]
+    fn the_callers_home_and_identity_reach_the_function() {
+        let mut user = AuthContext::for_user("identity-1");
+        user.home = Some("/users/internal/buyer-1".into());
+        user.local_user_id = Some("node-1".into());
+        user.email = Some("buyer@example.com".into());
+        let ctx = context_of(Some(FunctionCaller::from_auth(Some(&user))));
+        assert_eq!(ctx["caller"]["home"], "/users/internal/buyer-1");
+        assert_eq!(ctx["caller"]["local_user_id"], "node-1");
+        assert_eq!(ctx["caller"]["email"], "buyer@example.com");
+        // Not a nested run.
+        assert!(ctx["caller"].get("nested").is_none());
+    }
+
+    #[test]
+    fn a_caller_without_a_home_carries_no_home_key() {
+        let ctx = context_of(Some(FunctionCaller::from_auth(
+            Some(&AuthContext::system()),
+        )));
+        assert!(ctx["caller"].get("home").is_none());
+        assert!(ctx["caller"].get("email").is_none());
+    }
+
+    #[test]
+    fn a_nested_callee_sees_the_originating_caller_marked_nested() {
+        let mut user = AuthContext::for_user("identity-1");
+        user.home = Some("/users/internal/buyer-1".into());
+        let mut parent = FunctionCaller::from_auth(Some(&user));
+        parent.client_ip = Some("203.0.113.7".into());
+        let nested = FunctionCaller::for_nested_call(Some(&parent));
+        let ctx = context_of(Some(nested.clone()));
+        assert_eq!(ctx["caller"]["user_id"], "identity-1");
+        assert_eq!(ctx["caller"]["home"], "/users/internal/buyer-1");
+        assert_eq!(ctx["caller"]["anonymous"], false);
+        assert_eq!(ctx["caller"]["nested"], true);
+        // The client address belongs to the connection, not to the job.
+        assert!(ctx["caller"].get("client_ip").is_none());
+        // Handed on again, it stays nested and keeps the same identity.
+        let again = FunctionCaller::for_nested_call(Some(&nested));
+        assert_eq!(again, nested);
+    }
+
+    #[test]
+    fn a_nested_call_from_a_run_with_no_caller_is_anonymous_but_nested() {
+        let nested = FunctionCaller::for_nested_call(None);
+        assert!(nested.nested && nested.anonymous && nested.user_id.is_none());
+    }
+
+    #[test]
+    fn a_nested_caller_survives_the_job_metadata_round_trip() {
+        let mut user = AuthContext::for_user("identity-1");
+        user.home = Some("/users/internal/buyer-1".into());
+        let nested = FunctionCaller::for_nested_call(Some(&FunctionCaller::from_auth(Some(&user))));
+        let wire = serde_json::to_value(&nested).unwrap();
+        let back: FunctionCaller = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, nested);
+        // A caller serialized before these fields existed still deserializes.
+        let old: FunctionCaller = serde_json::from_value(serde_json::json!({
+            "user_id": "u", "roles": [], "is_system": false,
+            "is_system_admin": false, "anonymous": false
+        }))
+        .unwrap();
+        assert!(old.home.is_none() && !old.nested);
+    }
+
+    #[test]
     fn anonymous_and_missing_callers_are_marked_anonymous() {
         let anon = AuthContext::anonymous_user("anon")
             .with_permissions(ResolvedPermissions::anonymous(vec![]));

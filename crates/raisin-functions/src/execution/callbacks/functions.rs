@@ -83,6 +83,7 @@ where
                 &tenant,
                 &repo,
                 &branch,
+                None,
             )
             .await;
 
@@ -173,7 +174,7 @@ pub fn create_function_call(
     repo_id: String,
     branch: String,
 ) -> FunctionCallCallback {
-    Arc::new(move |function_path, arguments| {
+    Arc::new(move |function_path, arguments, parent_caller| {
         let job_registry = job_registry.clone();
         let job_data_store = job_data_store.clone();
         let tenant = tenant_id.clone();
@@ -199,6 +200,9 @@ pub fn create_function_call(
                 &tenant,
                 &repo,
                 &branch,
+                Some(&crate::types::FunctionCaller::for_nested_call(
+                    parent_caller.as_ref(),
+                )),
             )
             .await
         })
@@ -320,6 +324,7 @@ async fn execute_function_job(
     tenant_id: &str,
     repo_id: &str,
     branch: &str,
+    nested_caller: Option<&crate::types::FunctionCaller>,
 ) -> Result<Value> {
     // Normalize function path: ensure leading slash for storage lookup
     let function_path = if function_path.starts_with('/') {
@@ -332,6 +337,13 @@ async fn execute_function_job(
     // Create job context with function input
     let mut metadata = HashMap::new();
     metadata.insert("input".to_string(), arguments.clone());
+    // Who the parent run was acting for, so the callee does not read as
+    // anonymous. Written here (server side) and nowhere a client can reach.
+    if let Some(caller) = nested_caller {
+        if let Ok(v) = serde_json::to_value(caller) {
+            metadata.insert(raisin_rocksdb::NESTED_CALLER_KEY.to_string(), v);
+        }
+    }
 
     let context = JobContext {
         tenant_id: tenant_id.to_string(),

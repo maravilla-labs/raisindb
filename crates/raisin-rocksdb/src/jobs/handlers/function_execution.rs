@@ -336,20 +336,30 @@ impl FunctionExecutionHandler {
             .metadata
             .get(crate::jobs::FLOW_CONTEXT_KEY)
             .and_then(|v| serde_json::from_value(v.clone()).ok());
+        // The originating caller, if a function queued this job through
+        // `raisin.functions.call`. Same rule as the flow context: only the
+        // server-written metadata key can produce it.
+        let nested_caller: Option<serde_json::Value> = context
+            .metadata
+            .get(crate::jobs::NESTED_CALLER_KEY)
+            .cloned();
         let start = std::time::Instant::now();
-        let result = crate::jobs::FLOW_RUN
+        let result = crate::jobs::NESTED_CALLER
             .scope(
-                flow_run,
-                executor(
-                    function_path.clone(),
-                    execution_id.clone(),
-                    input,
-                    context.tenant_id.clone(),
-                    context.repo_id.clone(),
-                    context.branch.clone(),
-                    FUNCTIONS_WORKSPACE.to_string(),
-                    auth_context,
-                    log_emitter,
+                nested_caller,
+                crate::jobs::FLOW_RUN.scope(
+                    flow_run,
+                    executor(
+                        function_path.clone(),
+                        execution_id.clone(),
+                        input,
+                        context.tenant_id.clone(),
+                        context.repo_id.clone(),
+                        context.branch.clone(),
+                        FUNCTIONS_WORKSPACE.to_string(),
+                        auth_context,
+                        log_emitter,
+                    ),
                 ),
             )
             .await?;

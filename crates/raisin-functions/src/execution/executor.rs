@@ -109,7 +109,7 @@ where
 }
 use crate::api::{FunctionApi, RaisinFunctionApi};
 use crate::executor::FunctionExecutor;
-use crate::types::{ExecutionContext, FunctionLanguage, LoadedFunction};
+use crate::types::{ExecutionContext, FunctionCaller, FunctionLanguage, LoadedFunction};
 
 /// Execute a function given its path and context.
 ///
@@ -149,22 +149,36 @@ where
         .try_with(|f| f.clone())
         .ok()
         .flatten();
-    raisin_rocksdb::FLOW_RUN
+    // Same for the originating caller of a nested `raisin.functions.call`.
+    let nested_caller: Option<FunctionCaller> = raisin_rocksdb::NESTED_CALLER
+        .try_with(|c| c.clone())
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_value::<FunctionCaller>(v).ok())
+        .map(|mut c| {
+            c.nested = true;
+            c
+        });
+    raisin_rocksdb::NESTED_CALLER
         .scope(
             None,
-            execute_function_in_scope(
-                deps,
-                config,
-                function_path,
-                execution_id,
-                input,
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                auth_context,
-                log_emitter,
-                flow,
+            raisin_rocksdb::FLOW_RUN.scope(
+                None,
+                execute_function_in_scope(
+                    deps,
+                    config,
+                    function_path,
+                    execution_id,
+                    input,
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    auth_context,
+                    log_emitter,
+                    flow,
+                    nested_caller,
+                ),
             ),
         )
         .await
@@ -184,12 +198,20 @@ async fn execute_function_in_scope<S, B>(
     auth_context: Option<AuthContext>,
     log_emitter: Option<raisin_storage::LogEmitter>,
     flow: Option<raisin_rocksdb::FlowRunContext>,
+    nested_caller: Option<FunctionCaller>,
 ) -> Result<FunctionExecutionResult>
 where
     S: Storage + TransactionalStorage + 'static,
     B: BinaryStorage + 'static,
 {
     let start_time = std::time::Instant::now();
+
+    // A caller whose AuthContext came through a job (an invoke that waits for
+    // completion, a scheduled run) arrives with its roles but WITHOUT its
+    // resolved permissions: they are `#[serde(skip)]`. Row-level security
+    // treats such a context as holding no grants, so a signed-in non-superadmin
+    // read rows over SQL fine and then found none of them inside the function.
+    let auth_context = rehydrate_permissions(deps, tenant_id, repo_id, auth_context).await;
 
     // 1. Load function node
     let func_node = code_loader::load_function_node(
@@ -253,7 +275,10 @@ where
     // RLS then narrows to whatever that identity (or lack of one) can see,
     // rather than silently promoting to System.
     // Who asked, before "system" replaces the identity the function runs as.
-    let caller = crate::types::FunctionCaller::from_auth(auth_context.as_ref());
+    // A nested `raisin.functions.call` carries its parent's caller instead
+    // (marked `nested`), so the callee does not read as anonymous.
+    let caller = nested_caller
+        .unwrap_or_else(|| crate::types::FunctionCaller::from_auth(auth_context.as_ref()));
     let auth_context = match metadata.execution_context {
         crate::types::FunctionExecutionContext::System => {
             let system = AuthContext::system();
@@ -475,6 +500,53 @@ where
                 duration_ms,
                 logs: vec![format!("[error] {}", e)],
             })
+        }
+    }
+}
+
+/// Re-resolve the permissions of a user context that lost them in transit.
+///
+/// Only a signed-in user context with no resolved permissions is touched; the
+/// system, anonymous and already-resolved contexts pass through unchanged. The
+/// local `raisin:User` node id (carried across the job boundary) is the exact
+/// key; the identity id is the fallback. When nothing resolves the context is
+/// returned as it was: it stays as restricted as before, never wider.
+async fn rehydrate_permissions<S, B>(
+    deps: &ExecutionDependencies<S, B>,
+    tenant_id: &str,
+    repo_id: &str,
+    auth: Option<AuthContext>,
+) -> Option<AuthContext>
+where
+    S: Storage + TransactionalStorage + 'static,
+    B: BinaryStorage + 'static,
+{
+    let Some(ctx) = auth else { return None };
+    if ctx.is_resolved() || ctx.is_anonymous || ctx.is_anonymous_principal() {
+        return Some(ctx);
+    }
+    let service = raisin_core::PermissionService::new(deps.storage.clone());
+    let resolved = if let Some(node_id) = ctx.local_user_id.as_deref() {
+        service
+            .resolve_for_user_id(tenant_id, repo_id, "main", node_id)
+            .await
+    } else if let Some(identity) = ctx.user_id.as_deref() {
+        service
+            .resolve_for_identity_id(tenant_id, repo_id, "main", identity)
+            .await
+    } else {
+        return Some(ctx);
+    };
+    match resolved {
+        Ok(Some(perms)) => {
+            // Keep what the context already knew (home, agent, impersonation);
+            // `with_permissions` refreshes roles, groups and email.
+            Some(ctx.with_permissions(perms))
+        }
+        Ok(None) => Some(ctx),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not re-resolve caller permissions; running restricted");
+            Some(ctx)
         }
     }
 }

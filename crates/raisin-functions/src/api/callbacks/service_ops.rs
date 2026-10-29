@@ -404,8 +404,9 @@ pub type FunctionExecuteCallback = Arc<
 /// - Create AIToolResult nodes
 pub type FunctionCallCallback = Arc<
     dyn Fn(
-            String, // function_path (e.g., "/lib/stewardship/is-steward-of")
-            Value,  // arguments
+            String,                               // function_path (e.g., "/lib/stewardship/is-steward-of")
+            Value,                                // arguments
+            Option<crate::types::FunctionCaller>, // the calling run's `context.caller`, handed on to the callee
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send>>
         + Send
         + Sync,

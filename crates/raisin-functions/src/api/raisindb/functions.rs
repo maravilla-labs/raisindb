@@ -34,7 +34,12 @@ impl RaisinFunctionApi {
             raisin_error::Error::Validation("Function call callback not configured".to_string())
         })?;
 
-        callback(function_path.to_string(), arguments).await
+        callback(
+            function_path.to_string(),
+            arguments,
+            self.context.caller.clone(),
+        )
+        .await
     }
 
     pub(crate) async fn impl_flow_run(&self, flow_path: &str, input: Value) -> Result<Value> {

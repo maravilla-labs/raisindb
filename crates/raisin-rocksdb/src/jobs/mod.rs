@@ -31,6 +31,13 @@ pub const TRIGGERING_ACTOR_KEY: &str = "triggering_actor";
 /// which installs it as [`FLOW_RUN`] for the duration of the call.
 pub const FLOW_CONTEXT_KEY: &str = "flow_context";
 
+/// `JobContext.metadata` key holding the serialized `context.caller` of the
+/// function run that queued this job through `raisin.functions.call`. Written
+/// ONLY by that callback; read by `handlers/function_execution.rs`, which
+/// installs it as [`NESTED_CALLER`] so the callee's `context.caller` is the
+/// originating caller (marked `nested`) instead of an anonymous one.
+pub const NESTED_CALLER_KEY: &str = "nested_caller";
+
 /// The flow step that is executing the current function call.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FlowRunContext {
@@ -49,6 +56,14 @@ tokio::task_local! {
     /// enter that scope. `execute_function` takes the value and re-scopes to
     /// `None`, so a function a flow function calls does not inherit it.
     pub static FLOW_RUN: Option<FlowRunContext>;
+}
+
+tokio::task_local! {
+    /// The originating caller of a nested `raisin.functions.call`, installed by
+    /// the function-execution job handler around the executor call and nowhere
+    /// else. `execute_function` takes it and re-scopes to `None`, so it never
+    /// reaches a callee's own nested children except through the callback.
+    pub static NESTED_CALLER: Option<serde_json::Value>;
 }
 
 pub mod activity;

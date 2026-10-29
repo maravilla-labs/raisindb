@@ -144,6 +144,21 @@ pub struct Caller {
     /// Not signed in.
     #[serde(default)]
     pub anonymous: bool,
+    /// The caller's home path (its `raisin:User` node path), as the server
+    /// resolved it from the credential. `None` for callers with no home
+    /// (system, API keys, anonymous).
+    #[serde(default)]
+    pub home: Option<String>,
+    /// The caller's local `raisin:User` node id.
+    #[serde(default)]
+    pub local_user_id: Option<String>,
+    /// The caller's email address.
+    #[serde(default)]
+    pub email: Option<String>,
+    /// A NESTED call (`raisin.functions.call`): every other field is the
+    /// originating caller, handed on by the server from the parent run.
+    #[serde(default)]
+    pub nested: bool,
     /// The client address as the server's TRUSTED proxy reported it for a
     /// client connection (WebSocket invoke). `None` when the deployment has no
     /// trusted proxy, or the call did not come from a client. Unlike anything
@@ -212,6 +227,21 @@ mod caller_tests {
             ..Caller::default()
         };
         assert!(!anon.has_any_role(&["studio_admin"]));
+    }
+
+    #[test]
+    fn home_and_nested_are_read_from_the_caller() {
+        let ctx = Context(serde_json::json!({"caller": {
+            "user_id": "u1", "anonymous": false, "home": "/users/internal/u1",
+            "local_user_id": "n1", "email": "a@b.c", "nested": true}}));
+        let c = ctx.caller().unwrap();
+        assert_eq!(c.home.as_deref(), Some("/users/internal/u1"));
+        assert_eq!(c.local_user_id.as_deref(), Some("n1"));
+        assert_eq!(c.email.as_deref(), Some("a@b.c"));
+        assert!(c.nested);
+        let plain = Context(serde_json::json!({"caller": {"anonymous": false}}));
+        let c = plain.caller().unwrap();
+        assert!(c.home.is_none() && !c.nested);
     }
 
     #[test]

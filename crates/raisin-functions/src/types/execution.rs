@@ -24,6 +24,29 @@ pub struct FunctionCaller {
     pub is_system_admin: bool,
     /// Not signed in.
     pub anonymous: bool,
+    /// The caller's home path (the `raisin:User` node's path in
+    /// `raisin:access_control`), as the server resolved it from the credential.
+    /// Lets a function decide "is this MY caller's own subtree" without a
+    /// lookup that row-level security would hide from the caller itself.
+    /// Absent for callers that have none (system, API keys, anonymous).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home: Option<String>,
+    /// The caller's local `raisin:User` node id (workspace-specific; the
+    /// stable key `created_by`-style ownership checks do not use).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_user_id: Option<String>,
+    /// The caller's email address, as the identity records it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// True when this run is a NESTED call (`raisin.functions.call` from
+    /// another function) and every other field describes the ORIGINATING
+    /// caller, propagated by the server from the parent run. The parent has
+    /// already made its decision about that caller; a callee that guards its
+    /// own entry point can use this to tell "my parent function composing me"
+    /// apart from "a client invoking me directly". Server-set, never read
+    /// from input.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub nested: bool,
     /// The address the request came from, as the TRUSTED proxy in front of
     /// the server reported it. Never taken from the request's own input, and
     /// absent when no trusted proxy is configured, for every call that did not
@@ -51,8 +74,23 @@ impl FunctionCaller {
             is_system: auth.is_system,
             is_system_admin: auth.permissions().is_some_and(|p| p.is_system_admin),
             anonymous: auth.is_anonymous_principal(),
+            home: auth.home.clone(),
+            local_user_id: auth.local_user_id.clone(),
+            email: auth.email.clone(),
+            nested: false,
             client_ip: None,
         }
+    }
+
+    /// The caller a function reached through `raisin.functions.call` sees: the
+    /// parent run's caller, unchanged, marked [`nested`](Self::nested). A parent
+    /// with no caller (a trigger or schedule) hands on an anonymous one.
+    pub fn for_nested_call(parent: Option<&FunctionCaller>) -> Self {
+        let mut caller = parent.cloned().unwrap_or_else(|| Self::from_auth(None));
+        caller.nested = true;
+        // The address belongs to the client connection, not to the job.
+        caller.client_ip = None;
+        caller
     }
 }
 

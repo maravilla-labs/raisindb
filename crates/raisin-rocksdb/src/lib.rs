@@ -156,6 +156,8 @@ pub use jobs::{
     AUTH_CONTEXT_KEY,
     FLOW_CONTEXT_KEY,
     FLOW_RUN,
+    NESTED_CALLER,
+    NESTED_CALLER_KEY,
     ORIGIN_AGENT_KEY,
 };
 pub use lazy_indexing::{BuildResult, LazyIndexManager};
