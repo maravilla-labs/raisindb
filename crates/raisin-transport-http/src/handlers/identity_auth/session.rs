@@ -18,6 +18,10 @@ use super::types::{AuthTokensResponse, IdentityInfo, RefreshTokenRequest};
 /// one browser carry the same cookie).
 const REFRESH_GRACE_SECONDS: i64 = 30;
 
+/// How many grace answers one rotation may produce (a page and its parallel fragment requests).
+#[cfg(feature = "storage-rocksdb")]
+const REFRESH_GRACE_MAX_ANSWERS: u32 = 5;
+
 fn refresh_grace_open(session: &raisin_models::auth::Session) -> bool {
     let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(i64::MAX);
     let then = session.last_activity_at.timestamp_nanos();
@@ -113,33 +117,43 @@ pub async fn refresh_token(
         ));
     }
 
-    // A refresh token is single-use, but a browser session is not serial: a page and
-    // the fragments it fetches carry the SAME cookie and can all find the access token
-    // expired at once. The first refresh rotates; the others then present the previous
-    // generation. Within a short grace window after a rotation that is a race, not a
-    // replay: answer it with tokens of the CURRENT generation (no further rotation), so
-    // whichever response the browser keeps still works. Outside the window, or more than
-    // one generation behind, it is reuse and the session is revoked.
-    let in_grace = session.token_generation > 0
-        && refresh_claims.generation + 1 == session.token_generation
-        && refresh_grace_open(&session);
-    if session.token_generation != refresh_claims.generation && !in_grace {
-        tracing::warn!(
-            "Token generation mismatch for session {} (expected {}, got {}) - possible token reuse",
-            session_id,
-            session.token_generation,
-            refresh_claims.generation
-        );
-        // Revoke the session - this is a potential token reuse attack
-        let _ = repos
-            .session
-            .revoke(tenant_id, session_id, "token_reuse_detected", "system")
-            .await;
-        return Err(ApiError::new(
-            StatusCode::UNAUTHORIZED,
-            "TOKEN_REUSE_DETECTED",
-            "Token reuse detected - session has been revoked for security",
-        ));
+    // A refresh token is single-use, but a browser session is not serial: a page and the fragments
+    // it fetches carry the SAME cookie and can all find the access token expired at once. The first
+    // refresh rotates; the others then present the previous generation. Within a short window after
+    // the rotation, and a bounded number of times, that is a race and not a replay. Such a late
+    // duplicate is answered with a NEW ACCESS TOKEN ONLY: the refresh token in the answer is the one
+    // presented (`grace: true`), so a stolen old token used in the window yields an access token
+    // (valid for its normal lifetime) and never a refresh credential. Outside the window, past the
+    // bound, or more than one generation behind it is reuse and the session is revoked.
+    let mut grace = false;
+    if session.token_generation != refresh_claims.generation {
+        grace = session.token_generation > 0
+            && refresh_claims.generation + 1 == session.token_generation
+            && refresh_grace_open(&session)
+            && repos.session.try_consume_refresh_grace(
+                tenant_id,
+                session_id,
+                session.token_generation,
+                REFRESH_GRACE_MAX_ANSWERS,
+            );
+        if !grace {
+            tracing::warn!(
+                "Token generation mismatch for session {} (expected {}, got {}) - possible token reuse",
+                session_id,
+                session.token_generation,
+                refresh_claims.generation
+            );
+            // Revoke the session - this is a potential token reuse attack
+            let _ = repos
+                .session
+                .revoke(tenant_id, session_id, "token_reuse_detected", "system")
+                .await;
+            return Err(ApiError::new(
+                StatusCode::UNAUTHORIZED,
+                "TOKEN_REUSE_DETECTED",
+                "Token reuse detected - session has been revoked for security",
+            ));
+        }
     }
 
     // 5. Get identity
@@ -172,11 +186,11 @@ pub async fn refresh_token(
     }
 
     // 6. Generate new tokens with incremented generation (preserves home from refresh token).
-    // In the grace case the service is shown the session one generation back, so the tokens
-    // it mints carry the generation the session already has and nothing is rotated.
+    // In the grace case the service is shown the session one generation back; the refresh token it
+    // mints is thrown away below (a grace answer carries the presented one).
     let mut service_session = session.clone();
     let mut service_claims = refresh_claims.clone();
-    if in_grace {
+    if grace {
         service_session.token_generation = refresh_claims.generation;
         service_claims.generation = refresh_claims.generation;
     }
@@ -197,13 +211,16 @@ pub async fn refresh_token(
             )
         })?;
 
-    // 7. Rotate refresh token in storage (with cluster replication); a grace answer rotates nothing
-    if !in_grace {
-        repos
+    // 7. Rotate refresh token in storage (with cluster replication) as a compare-and-swap on the
+    // generation the caller presented: of two refreshes of the same token exactly one rotates; the
+    // other is a late duplicate and is answered like a grace request (bounded, access token only).
+    if !grace {
+        let rotated = repos
             .session
-            .rotate_refresh_token(
+            .rotate_refresh_token_if(
                 tenant_id,
                 session_id,
+                refresh_claims.generation,
                 new_generation,
                 "system:token_refresh",
             )
@@ -216,6 +233,21 @@ pub async fn refresh_token(
                     "Failed to update session",
                 )
             })?;
+        if !rotated {
+            if !repos.session.try_consume_refresh_grace(
+                tenant_id,
+                session_id,
+                refresh_claims.generation + 1,
+                REFRESH_GRACE_MAX_ANSWERS,
+            ) {
+                return Err(ApiError::new(
+                    StatusCode::UNAUTHORIZED,
+                    "TOKEN_ROTATED",
+                    "This refresh token was already used",
+                ));
+            }
+            grace = true;
+        }
     }
 
     tracing::info!(
@@ -229,9 +261,14 @@ pub async fn refresh_token(
     let expires_at = super::helpers::access_token_expires_at(&tokens);
     Ok(Json(AuthTokensResponse {
         access_token: tokens.access_token,
-        refresh_token: tokens.refresh_token,
+        refresh_token: if grace {
+            req.refresh_token.clone()
+        } else {
+            tokens.refresh_token
+        },
         token_type: "Bearer".to_string(),
         expires_at,
         identity: IdentityInfo::from_identity(&identity, refresh_claims.home),
+        grace,
     }))
 }

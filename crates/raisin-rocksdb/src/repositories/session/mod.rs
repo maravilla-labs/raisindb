@@ -14,6 +14,7 @@
 
 mod crud;
 mod replication;
+mod rotation;
 #[cfg(test)]
 mod tests;
 

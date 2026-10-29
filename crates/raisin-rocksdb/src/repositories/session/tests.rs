@@ -98,3 +98,100 @@ async fn test_revoke_all_for_identity() {
     let sessions = repo.list_for_identity("tenant-1", "id-123").await.unwrap();
     assert!(sessions.iter().all(|s| s.revoked));
 }
+
+#[tokio::test]
+async fn rotation_is_a_compare_and_swap_on_the_generation() {
+    let (_temp_dir, db, op_capture) = setup_test();
+    let repo = SessionRepository::new(db, op_capture);
+    repo.create("tenant-1", &create_test_session("s-cas", "id-1"), "test")
+        .await
+        .unwrap();
+
+    // the first refresh of generation 0 rotates, the second presents the same generation and loses
+    assert!(repo
+        .rotate_refresh_token_if("tenant-1", "s-cas", 0, 1, "test")
+        .await
+        .unwrap());
+    assert!(!repo
+        .rotate_refresh_token_if("tenant-1", "s-cas", 0, 1, "test")
+        .await
+        .unwrap());
+    assert_eq!(
+        repo.get("tenant-1", "s-cas")
+            .await
+            .unwrap()
+            .unwrap()
+            .token_generation,
+        1
+    );
+    // a revoked or missing session never rotates
+    assert!(!repo
+        .rotate_refresh_token_if("tenant-1", "s-cas-none", 0, 1, "test")
+        .await
+        .unwrap());
+    repo.revoke("tenant-1", "s-cas", "x", "test").await.unwrap();
+    assert!(!repo
+        .rotate_refresh_token_if("tenant-1", "s-cas", 1, 2, "test")
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn concurrent_refreshes_of_one_token_rotate_exactly_once() {
+    let (_temp_dir, db, op_capture) = setup_test();
+    let repo = Arc::new(SessionRepository::new(db, op_capture));
+    repo.create("tenant-1", &create_test_session("s-conc", "id-1"), "test")
+        .await
+        .unwrap();
+
+    let mut tasks = Vec::new();
+    for _ in 0..16 {
+        let repo = repo.clone();
+        tasks.push(tokio::spawn(async move {
+            repo.rotate_refresh_token_if("tenant-1", "s-conc", 0, 1, "test")
+                .await
+                .unwrap()
+        }));
+    }
+    let mut winners = 0;
+    for t in tasks {
+        if t.await.unwrap() {
+            winners += 1;
+        }
+    }
+    assert_eq!(winners, 1, "exactly one concurrent refresh rotates");
+    assert_eq!(
+        repo.get("tenant-1", "s-conc")
+            .await
+            .unwrap()
+            .unwrap()
+            .token_generation,
+        1
+    );
+}
+
+#[tokio::test]
+async fn grace_answers_are_bounded_per_generation_and_reset_by_a_rotation() {
+    let (_temp_dir, db, op_capture) = setup_test();
+    let repo = SessionRepository::new(db, op_capture);
+    repo.create("tenant-1", &create_test_session("s-grace", "id-1"), "test")
+        .await
+        .unwrap();
+
+    for _ in 0..3 {
+        assert!(repo.try_consume_refresh_grace("tenant-1", "s-grace", 1, 3));
+    }
+    assert!(
+        !repo.try_consume_refresh_grace("tenant-1", "s-grace", 1, 3),
+        "a stolen old token cannot be replayed beyond the bound"
+    );
+    // another generation / session counts separately
+    assert!(repo.try_consume_refresh_grace("tenant-1", "s-grace", 2, 3));
+    assert!(repo.try_consume_refresh_grace("tenant-1", "s-grace-b", 1, 3));
+    // a rotation clears the count of the session
+    assert!(repo
+        .rotate_refresh_token_if("tenant-1", "s-grace", 0, 1, "test")
+        .await
+        .unwrap());
+    assert!(repo.try_consume_refresh_grace("tenant-1", "s-grace", 1, 3));
+}

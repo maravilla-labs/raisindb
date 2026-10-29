@@ -196,6 +196,7 @@ pub fn build_auth_response(
         token_type: "Bearer".to_string(),
         expires_at,
         identity: IdentityInfo::from_identity(identity, home),
+        grace: false,
     }
 }
 

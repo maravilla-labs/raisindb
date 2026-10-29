@@ -101,6 +101,13 @@ pub struct AuthTokensResponse {
     pub expires_at: i64,
     /// Identity information
     pub identity: IdentityInfo,
+    /// Set when this answer is a refresh GRACE answer: a late duplicate of a refresh that was
+    /// already rotated. `access_token` is new; `refresh_token` is the token that was presented,
+    /// NOT a new credential, and the caller must keep the refresh token it already got from the
+    /// rotation (a client that stores this answer's `refresh_token` over the rotated one would
+    /// present a stale token once the grace window closes).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub grace: bool,
 }
 
 /// Identity information in auth responses
