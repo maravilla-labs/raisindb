@@ -17,6 +17,7 @@
 // Helpers are shared per-module, so unused ones in a given module are expected.
 #![allow(dead_code)]
 
+mod acl_permission_cache;
 mod batched_fetch_tests;
 mod bulk_sql_rls;
 mod compound_builtin_listing;
